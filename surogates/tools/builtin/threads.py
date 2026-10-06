@@ -25,6 +25,9 @@ from surogates.workstreams.derive import GROUPS, derive_thread, question_of
 _MAX_TITLE = 256
 # The statuses the message route lets a message into; an archived thread was deleted.
 _ACCEPTS_MESSAGES = ("active", "idle", "failed", "paused", "completed")
+# What a stopped thread's interrupt says.  Never the model's words: the
+# dispatcher reads some reasons as commands (``_SESSION_GONE_REASONS``).
+_STOP_REASON = "stopped by the coordinator"
 
 _START_THREAD_SCHEMA = ToolSchema(
     name="start_thread",
@@ -135,6 +138,22 @@ _READ_THREAD_SCHEMA = ToolSchema(
 )
 
 
+_RESOLVE_THREAD_SCHEMA = ToolSchema(
+    name="resolve_thread",
+    description=(
+        "Resolve a thread whose work is done: it moves to Resolved in the "
+        "project's overview. A thread still working is stopped first. A "
+        "follow-up with message_thread reopens it."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"thread_id": _THREAD_ID},
+        "required": ["thread_id"],
+        "additionalProperties": False,
+    },
+)
+
+
 def register(registry: ToolRegistry) -> None:
     for name, schema, handler in (
         ("start_thread", _START_THREAD_SCHEMA, _start_thread_handler),
@@ -142,6 +161,7 @@ def register(registry: ToolRegistry) -> None:
         ("stop_thread", _STOP_THREAD_SCHEMA, _stop_thread_handler),
         ("list_threads", _LIST_THREADS_SCHEMA, _list_threads_handler),
         ("read_thread", _READ_THREAD_SCHEMA, _read_thread_handler),
+        ("resolve_thread", _RESOLVE_THREAD_SCHEMA, _resolve_thread_handler),
     ):
         registry.register(name=name, schema=schema, handler=handler, toolset="core")
 
@@ -236,23 +256,31 @@ async def _message_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     return json.dumps({"status": "sent", "thread_id": str(thread.id)})
 
 
+async def _stop(thread: Any, reason: str, **kwargs: Any) -> bool:
+    """Stop *thread* as the pause route stops a chat; whether it was working.
+
+    The status first, so the thread reads as stopped, then the interrupt
+    that ends its turn.  A thread already paused is interrupted again: its
+    turn may not have heard the first time.
+    """
+    from surogates.workstreams.store import WorkstreamStore
+
+    stopped = await WorkstreamStore(kwargs["session_factory"]).pause_thread(thread.id)
+    if stopped:
+        await kwargs["session_store"].emit_event(thread.id, EventType.SESSION_PAUSE, {"reason": reason})
+    redis = kwargs.get("redis")
+    if redis is not None and (stopped or thread.status == "paused"):
+        await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{thread.id}", json.dumps({"reason": _STOP_REASON}))
+    return stopped
+
+
 async def _stop_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     thread_id = _text(arguments, "thread_id")
-    reason = _text(arguments, "reason") or "stopped by the coordinator"
     thread = await _own_thread(thread_id, **kwargs)
     if thread is None:
         return _error(f"No thread {thread_id} in this project.")
-    if thread.status != "active":
-        return json.dumps({"status": "not_running", "thread_id": str(thread.id)})
-    # As the pause route stops a chat: the status first, so the thread
-    # reads as stopped, then the interrupt that ends its turn.
-    store = kwargs["session_store"]
-    await store.update_session_status(thread.id, "paused")
-    await store.emit_event(thread.id, EventType.SESSION_PAUSE, {"reason": reason})
-    redis = kwargs.get("redis")
-    if redis is not None:
-        await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{thread.id}", json.dumps({"reason": reason}))
-    return json.dumps({"status": "stopped", "thread_id": str(thread.id)})
+    stopped = await _stop(thread, _text(arguments, "reason") or _STOP_REASON, **kwargs)
+    return json.dumps({"status": "stopped" if stopped else "not_running", "thread_id": str(thread.id)})
 
 
 async def _list_threads_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
@@ -299,3 +327,18 @@ async def _read_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         "report": worker_note(report.type, report.data)["content"] if report is not None else None,
         "question": asked.payload.get("questions") if asked is not None else None,
     }, ensure_ascii=False)
+
+
+async def _resolve_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    from surogates.workstreams.store import WorkstreamStore
+
+    thread_id = _text(arguments, "thread_id")
+    thread = await _own_thread(thread_id, **kwargs)
+    if thread is None:
+        return _error(f"No thread {thread_id} in this project.")
+    if thread.status not in _ACCEPTS_MESSAGES:
+        return _error(f"Thread {thread_id} was deleted.")
+    # A resolved thread's work is done, so one still working stops first.
+    await _stop(thread, "resolved by the coordinator", **kwargs)
+    await WorkstreamStore(kwargs["session_factory"]).resolve_thread(thread.id)
+    return json.dumps({"status": "resolved", "thread_id": str(thread.id)})

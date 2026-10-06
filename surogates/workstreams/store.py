@@ -94,6 +94,30 @@ class WorkstreamStore:
             )
             await db.commit()
 
+    async def pause_thread(self, session_id: UUID) -> bool:
+        """Pause *session_id* if it is working; whether it was.
+
+        Conditional, so a stop that lands as the thread's turn ends leaves
+        the thread as its turn left it.
+        """
+        async with self._sf() as db:
+            result = await db.execute(
+                update(SessionRow).where(SessionRow.id == session_id, SessionRow.status == "active")
+                .values(status="paused", updated_at=func.now())
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def resolve_thread(self, session_id: UUID) -> None:
+        """Move the thread to Resolved; one already there keeps the moment it got there."""
+        async with self._sf() as db:
+            await db.execute(
+                update(WorkstreamThread)
+                .where(WorkstreamThread.session_id == session_id, WorkstreamThread.resolved_at.is_(None))
+                .values(resolved_at=func.now())
+            )
+            await db.commit()
+
     async def thread_facts(self, workstream_id: UUID, *, thread_id: UUID | None = None) -> list[ThreadFacts]:
         """What the rows of the project's threads are derived from, or only
         *thread_id*'s.  A deleted thread is left out."""

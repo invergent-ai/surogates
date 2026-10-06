@@ -109,6 +109,7 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "stop_thread": ToolLocation.HARNESS,
     "list_threads": ToolLocation.HARNESS,
     "read_thread": ToolLocation.HARNESS,
+    "resolve_thread": ToolLocation.HARNESS,
     # Subagent task layer — handlers need the worker's DB session
     # factory, redis client, and session store. They cannot run in a
     # sandbox pod (no DB connectivity); the default ``SANDBOX`` fallback

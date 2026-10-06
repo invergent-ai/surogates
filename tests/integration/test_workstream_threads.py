@@ -235,7 +235,7 @@ async def test_deleting_the_user_deletes_their_threads(api, session_factory):
         assert await db.get(WorkstreamThread, thread.id) is None
 
 
-THREAD_TOOLS = {"start_thread", "message_thread", "stop_thread", "list_threads", "read_thread"}
+THREAD_TOOLS = {"start_thread", "message_thread", "stop_thread", "list_threads", "read_thread", "resolve_thread"}
 
 
 async def test_only_a_master_is_sent_the_thread_tools(api, monkeypatch, session_factory):
@@ -414,7 +414,8 @@ async def not_this_projects_threads(api, master) -> dict[str, str]:
 @pytest.mark.parametrize("tool, arguments", [
     ("message_thread", {"message": "Use the 2025 figures."}),
     ("stop_thread", {}),
-], ids=["message", "stop"])
+    ("resolve_thread", {}),
+], ids=["message", "stop", "resolve"])
 async def test_a_master_reaches_only_its_own_threads(api, tool, arguments):
     master = await master_of(api, await create(api))
     store = api.app.state.session_store
@@ -458,15 +459,43 @@ async def test_stopping_a_working_thread_pauses_it(api):
     try:
         result = await call_tool(api, master, "stop_thread", thread_id=str(thread.id), reason="The brief changed.")
         assert result == {"status": "stopped", "thread_id": str(thread.id)}
-        assert json.loads(await next_control(listener)) == {"reason": "The brief changed."}
+        # The interrupt carries the harness's reason: the dispatcher reads some reasons as commands.
+        assert json.loads(await next_control(listener)) == {"reason": "stopped by the coordinator"}
+        # A stopped thread whose turn did not hear the first interrupt hears the next.
+        again = await call_tool(api, master, "stop_thread", thread_id=str(thread.id), reason="session deleted")
+        assert again == {"status": "not_running", "thread_id": str(thread.id)}
+        assert json.loads(await next_control(listener)) == {"reason": "stopped by the coordinator"}
     finally:
         await listener.aclose()
     assert (await api.app.state.session_store.get_session(thread.id)).status == "paused"
     [paused] = await events_of(api, thread.id, EventType.SESSION_PAUSE)
     assert paused.data == {"reason": "The brief changed."}
 
-    again = await call_tool(api, master, "stop_thread", thread_id=str(thread.id))
-    assert again == {"status": "not_running", "thread_id": str(thread.id)}
+
+async def its_turn_ends_once_it_is_read(api, monkeypatch, thread) -> None:
+    """*thread*'s turn ends right after a tool reads it, before the tool acts on what it read."""
+    get = SessionStore.get_session
+    ended = False
+
+    async def read_then_end(self, session_id):
+        nonlocal ended
+        found = await get(self, session_id)
+        if session_id == thread.id and not ended:
+            ended = True
+            await self.update_session_status(thread.id, "completed")
+        return found
+
+    monkeypatch.setattr(SessionStore, "get_session", read_then_end)
+
+
+@pytest.mark.parametrize("tool", ["stop_thread", "resolve_thread"])
+async def test_a_stop_that_lands_as_the_turn_ends_leaves_the_thread_as_it_ended(api, monkeypatch, tool):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await its_turn_ends_once_it_is_read(api, monkeypatch, thread)
+    await call_tool(api, master, tool, thread_id=str(thread.id))
+    assert (await api.app.state.session_store.get_session(thread.id)).status == "completed"
+    assert await events_of(api, thread.id, EventType.SESSION_PAUSE) == []
 
 
 async def test_a_threads_prompt_keeps_it_to_its_goal(api):
@@ -1269,3 +1298,58 @@ async def test_read_thread_reaches_only_this_projects_threads(api):
     assert await call_tool(api, master, "read_thread", thread_id=str(deleted.id)) == {
         "error": f"Thread {deleted.id} was deleted.",
     }
+
+
+async def resolved_at(api, thread):
+    async with api.app.state.session_factory() as db:
+        return (await db.get(WorkstreamThread, thread.id)).resolved_at
+
+
+async def test_resolving_a_working_thread_stops_it_first(api):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    listener = api.app.state.redis.pubsub()
+    await listener.subscribe(f"surogates:interrupt:{thread.id}")
+    try:
+        result = await call_tool(api, master, "resolve_thread", thread_id=str(thread.id))
+        assert result == {"status": "resolved", "thread_id": str(thread.id)}
+        assert json.loads(await next_control(listener)) == {"reason": "stopped by the coordinator"}
+    finally:
+        await listener.aclose()
+    assert (await api.app.state.session_store.get_session(thread.id)).status == "paused"
+    [paused] = await events_of(api, thread.id, EventType.SESSION_PAUSE)
+    assert paused.data == {"reason": "resolved by the coordinator"}
+    [listed] = (await call_tool(api, master, "list_threads"))["threads"]
+    assert listed["group"] == "resolved"
+
+
+async def test_resolving_a_finished_thread_keeps_its_turn_and_its_first_resolve(api):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    await call_tool(api, master, "resolve_thread", thread_id=str(thread.id))
+    first = await resolved_at(api, thread)
+    await call_tool(api, master, "resolve_thread", thread_id=str(thread.id))
+    assert first is not None and await resolved_at(api, thread) == first
+    assert (await api.app.state.session_store.get_session(thread.id)).status == "completed"
+    assert await events_of(api, thread.id, EventType.SESSION_PAUSE) == []
+
+
+async def test_a_follow_up_takes_a_thread_out_of_resolved(api):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await call_tool(api, master, "resolve_thread", thread_id=str(thread.id))
+    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Add a chart.")
+    [listed] = (await call_tool(api, master, "list_threads"))["threads"]
+    assert (listed["group"], await resolved_at(api, thread)) == ("working", None)
+
+
+async def test_a_deleted_thread_cannot_be_resolved(api):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await api.app.state.session_store.update_session_status(thread.id, "archived")
+    assert await call_tool(api, master, "resolve_thread", thread_id=str(thread.id)) == {
+        "error": f"Thread {thread.id} was deleted.",
+    }
+    assert await resolved_at(api, thread) is None
