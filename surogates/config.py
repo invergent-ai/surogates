@@ -216,13 +216,15 @@ async def enqueue_session(
     ``(org_id, agent_id, session_id)`` tuple so the dispatcher can
     extract the tenant for the per-tenant concurrency-gate check
     without a DB round-trip per dequeue.  Lower *priority* values
-    are popped first.
+    are popped first.  A session already queued keeps the better of
+    its two places (``LT``): a plain wake must never push a phone
+    call's turn (priority -1) back behind ordinary work.
     """
     member = encode_queue_member(
         org_id=str(org_id), agent_id=str(agent_id),
         session_id=str(session_id),
     )
-    await redis.zadd(SHARED_WORK_QUEUE_KEY, {member: priority})
+    await redis.zadd(SHARED_WORK_QUEUE_KEY, {member: priority}, lt=True)
 
 
 # Default Redis channel prefix for session interrupts.

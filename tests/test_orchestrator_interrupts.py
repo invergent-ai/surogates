@@ -114,6 +114,7 @@ async def test_lease_held_wake_is_requeued(
                 session_id=str(session_id),
             ): 0,
         },
+        lt=True,
     )
 
 
@@ -222,6 +223,7 @@ async def test_deferred_rewake_enqueues_once_after_wake_exits(
                 session_id=str(session_id),
             ): 0,
         },
+        lt=True,
     )
 
 
@@ -321,3 +323,25 @@ async def test_interrupt_listener_resubscribes_after_redis_error(
 
     assert received == [(session_id, "session deleted")]
     assert first.closed and second.closed
+
+
+async def test_a_busy_session_keeps_its_place_in_the_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A phone caller's turn (priority -1) re-queued because the session is still leased must go back
+    at -1, not at 0 behind ordinary work; and a re-queue never pushes an earlier, better place back."""
+    session_id, org_id = uuid4(), uuid4()
+    redis = AsyncMock()
+    redis.zadd = AsyncMock()
+    session_store = SimpleNamespace(
+        has_live_lease=AsyncMock(return_value=True),
+        get_session=AsyncMock(return_value=SimpleNamespace(org_id=org_id, agent_id="support-bot")),
+    )
+    monkeypatch.setattr("surogates.orchestrator.dispatcher._LEASE_BUSY_REQUEUE_DELAY", 0, raising=False)
+    orchestrator = Orchestrator(
+        redis_client=redis, session_store=session_store, harness_factory=lambda _sid: None,
+        agent_id="support-bot", queue_key="surogates:work_queue:support-bot", max_concurrent=1,
+    )
+
+    await orchestrator._process(session_id, priority=-1)
+
+    member = encode_queue_member(org_id=str(org_id), agent_id="support-bot", session_id=str(session_id))
+    redis.zadd.assert_called_once_with(SHARED_WORK_QUEUE_KEY, {member: -1}, lt=True)
