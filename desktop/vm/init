@@ -6,11 +6,27 @@
 set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
-# The sessions disk holds each root's home and temp folder, which can be lost:
-# checked at each boot and repaired, and made again, empty, only when the repair
-# fails too or it was never made (exit codes 4 and up).
-e2fsck -p /dev/vdc || [ $? -lt 4 ] || e2fsck -y /dev/vdc || [ $? -lt 4 ] \
-  || mke2fs -q -F -t ext4 -E nodiscard -L sessions /dev/vdc
+# The sessions disk holds each root's home and temp folder, which can be lost.
+# It is made, empty, when it holds no ext4 superblock yet: its first boot. At
+# every later boot it is checked and repaired, and made again only when the
+# repair leaves errors (e2fsck's exit code 4, without 8 or more). Any other
+# failure, such as a feature this e2fsck does not know, stops the boot and
+# leaves the homes on the disk as they are.
+if [ "$(od -An -tx2 -j1080 -N2 /dev/vdc)" != " ef53" ]; then
+  mke2fs -q -F -t ext4 -E nodiscard -L sessions /dev/vdc
+else
+  checked=0
+  e2fsck -p /dev/vdc || checked=$?
+  if [ "$checked" -ge 4 ]; then
+    checked=0
+    e2fsck -y /dev/vdc || checked=$?
+  fi
+  if [ "$checked" -ge 8 ]; then
+    echo "surogate: e2fsck could not check the sessions disk (exit code $checked), so the guest stops and leaves it as it is" >&2
+    exit 1
+  fi
+  [ "$checked" -lt 4 ] || mke2fs -q -F -t ext4 -E nodiscard -L sessions /dev/vdc
+fi
 mkdir -p /run/surogate/sessions
 mount -t ext4 -o nodev,nosuid,discard /dev/vdc /run/surogate/sessions
 mkdir -p -m 0711 /run/surogate/sessions/roots

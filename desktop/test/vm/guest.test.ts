@@ -2,7 +2,7 @@
 // agent disk built from this package. Behind SUROGATE_VM_TESTS=1.
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, openSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,6 +24,19 @@ const SOCKETS = [
   "try: socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_SCTP).close()",
   "except OSError: pass",
 ].join("\n");
+// Empty files in /var/tmp and in /dev/shm until the next is refused: each holds
+// guest memory that a tmpfs's size= does not count.
+const FILES = [
+  "import errno, os",
+  'for folder in ("/var/tmp/many", "/dev/shm/many"):',
+  "    os.mkdir(folder)",
+  "    try:",
+  '        for n in range(10 ** 6): open(folder + "/" + str(n), "x").close()',
+  '    except OSError as error: print(errno.errorcode[error.errno], end=" ")',
+  "print()",
+].join("\n");
+// s_feature_incompat, in the superblock at 1024.
+const INCOMPAT = 1024 + 0x60;
 
 describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 60_000 }, () => {
   let dir: string;
@@ -154,6 +167,17 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     });
   });
 
+  it("gives a command the cloud's environment and the user's names, and nothing of how its root was made", async () => {
+    expect(await run("env | cut -d= -f1 | sort | tr '\\n' ' '")).toEqual({
+      ok: {
+        output: "HOME LANG LOGNAME NPM_CONFIG_PREFIX PATH PIP_USER PWD PYTHONDONTWRITEBYTECODE PYTHONUNBUFFERED PYTHONUSERBASE SHLVL " +
+          "SUROGATE_PROCESS USER UV_CACHE_DIR XDG_CACHE_HOME _ ",
+        returncode: 0,
+        timed_out: false,
+      },
+    });
+  });
+
   it("loads no kernel module for a command, and keeps the hardening a host's sysctl files would set", async () => {
     const outcome = await run([
       "before=$(wc -l < /proc/modules)",
@@ -175,20 +199,25 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     });
   });
 
-  it("keeps two roots apart, and one that fills its memory leaves the other room", async () => {
+  it("keeps two roots apart, and one that fills its memory, with bytes or with files, leaves the other room", async () => {
     expect(await guest.request({ type: "setup", root: OTHER, folder, tag: "r1" })).toMatchObject({ type: "done" });
-    const filled = await run("head -c 900M /dev/zero > /var/tmp/fill 2>/dev/null; head -c 900M /dev/zero > /dev/shm/fill 2>/dev/null; du -m /var/tmp/fill /dev/shm/fill | cut -f1");
+    const filled = await run([
+      "head -c 900M /dev/zero > /var/tmp/fill 2>/dev/null; head -c 900M /dev/zero > /dev/shm/fill 2>/dev/null; du -m /var/tmp/fill /dev/shm/fill | cut -f1",
+      `python3 -c '${FILES}'`,
+      "df --output=itotal,iavail /var/tmp /dev/shm | tail -n +2 | tr -s ' '",
+    ].join("; "));
     expect(await run([
       "python3 -c 'b = bytearray(300 * 1024 * 1024); print(len(b) >> 20)'",
       "id -u",
       "find ~ /var/tmp /dev/shm -mindepth 1 | wc -l",
       "ps -e -o comm= | sort | tr '\\n' ' '; echo",
       "(echo more >> made-in-guest) 2>&1 | sed 's/.*: //'",
+      "touch /var/tmp/own /dev/shm/own && echo files of its own",
     ].join("; "), OTHER)).toEqual({
-      ok: { output: `300\n${FIRST_UID + 1}\n0\nbash node ps sort tini tr \nPermission denied\n`, returncode: 0, timed_out: false },
+      ok: { output: `300\n${FIRST_UID + 1}\n0\nbash node ps sort tini tr \nPermission denied\nfiles of its own\n`, returncode: 0, timed_out: false },
     });
-    expect(filled).toEqual({ ok: { output: "256\n64\n", returncode: 0, timed_out: false } });
-    await run("rm /var/tmp/fill /dev/shm/fill");
+    expect(filled).toEqual({ ok: { output: "256\n64\nENOSPC ENOSPC \n 32768 0\n 8192 0\n", returncode: 0, timed_out: false } });
+    await run("rm -rf /var/tmp/fill /dev/shm/fill /var/tmp/many /dev/shm/many");
   });
 
   it("repairs a sessions disk the quick check cannot, and keeps the homes on it", async () => {
@@ -202,6 +231,37 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     ]) {
       expect(spawnSync(argv[0] as string, argv.slice(1), { stdio: "ignore" }).status).toBe(0);
     }
+    guest = await boot(disks);
+    expect(await guest.request({ type: "setup", root: ROOT, folder, tag: "r1" })).toMatchObject({ type: "done" });
+    expect(await run("cat ~/kept")).toEqual({ ok: { output: "kept\n", returncode: 0, timed_out: false } });
+  });
+
+  it("stops the boot, and keeps the homes, on a sessions disk e2fsck cannot check", async () => {
+    await guest.stop();
+    const incompat = () => {
+      const fd = openSync(disks.sessions, "r");
+      try {
+        const field = Buffer.alloc(4);
+        readSync(fd, field, 0, 4, INCOMPAT);
+        return field.readUInt32LE(0);
+      } finally {
+        closeSync(fd);
+      }
+    };
+    expect(spawnSync("e2fsck", ["-p", "-E", "journal_only", disks.sessions], { stdio: "ignore" }).status).toBe(0);
+    // A feature this e2fsck does not know, as a newer mke2fs could set: e2fsck exits 8, though the disk was made.
+    const known = incompat();
+    expect(spawnSync("debugfs", ["-w", "-R", `ssv feature_incompat ${(known | 0x8000_0000) >>> 0}`, disks.sessions], { stdio: "ignore" }).status).toBe(0);
+    const failed = await boot(disks).then(async (booted) => {
+      await booted.stop();
+      return null;
+    }, (error: Error) => error);
+    expect(failed?.message ?? "booted").toContain("surogate: e2fsck could not check the sessions disk (exit code 8), so the guest stops and leaves it as it is");
+    // debugfs opens a disk with a feature it does not know only when forced.
+    const restored = spawnSync("debugfs", ["-f", "-"], {
+      input: `open -w -f ${disks.sessions}\nssv feature_incompat ${known}\nclose\n`, stdio: ["pipe", "ignore", "ignore"],
+    });
+    expect([restored.status, incompat()]).toEqual([0, known]);
     guest = await boot(disks);
     expect(await guest.request({ type: "setup", root: ROOT, folder, tag: "r1" })).toMatchObject({ type: "done" });
     expect(await run("cat ~/kept")).toEqual({ ok: { output: "kept\n", returncode: 0, timed_out: false } });

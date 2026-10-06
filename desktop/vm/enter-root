@@ -20,8 +20,13 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 layers=/run/surogate/layers
 mkdir -p "$layers"
 # Bounded, as /dev/shm is below: a tmpfs belongs to no process, so one root
-# filling the guest's memory would stall every other.
-mount -t tmpfs -o mode=0755,size=256m layers "$layers"
+# filling the guest's memory would stall every other. size= bounds its data,
+# and nr_inodes its files, links and directories, which size= does not count:
+# each holds about 1 KiB the kernel cannot reclaim, and through the overlay
+# about as much again that it can. The two mounts hold at most about 400 MiB of
+# the guest's memory, 320 MiB of data and 80 MiB of files, and still far more
+# files than /var/tmp or /dev/shm hold in use.
+mount -t tmpfs -o mode=0755,size=256m,nr_inodes=32768 layers "$layers"
 mkdir "$layers/upper" "$layers/work" "$layers/root"
 mount -t overlay overlay -o "lowerdir=/,upperdir=$layers/upper,workdir=$layers/work" "$layers/root"
 new=$layers/root
@@ -35,7 +40,7 @@ for device in null zero full random urandom tty; do
 done
 mkdir "$new/dev/pts" "$new/dev/shm"
 mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts "$new/dev/pts"
-mount -t tmpfs -o mode=1777,nosuid,nodev,size=64m shm "$new/dev/shm"
+mount -t tmpfs -o mode=1777,nosuid,nodev,size=64m,nr_inodes=8192 shm "$new/dev/shm"
 ln -s pts/ptmx "$new/dev/ptmx"
 ln -s /proc/self/fd "$new/dev/fd"
 ln -s /proc/self/fd/0 "$new/dev/stdin"
@@ -56,11 +61,10 @@ mkdir -p "$new$folder"
 mount --bind "$share" "$new$folder"
 
 # The root's user, under the host user's name, which reaches awk and printf as
-# it is: through the environment, and as an argument.
-export name
-{ awk -F: '$1 != ENVIRON["name"]' /etc/passwd; printf '%s:x:%s:%s::%s:/bin/bash\n' "$name" "$uid" "$uid" "$home"; } > "$new/etc/passwd.new"
+# it is: through awk's environment alone, so no command sees it, and as an argument.
+{ name=$name awk -F: '$1 != ENVIRON["name"]' /etc/passwd; printf '%s:x:%s:%s::%s:/bin/bash\n' "$name" "$uid" "$uid" "$home"; } > "$new/etc/passwd.new"
 mv "$new/etc/passwd.new" "$new/etc/passwd"
-{ awk -F: '$1 != ENVIRON["name"]' /etc/group; printf '%s:x:%s:\n' "$name" "$uid"; } > "$new/etc/group.new"
+{ name=$name awk -F: '$1 != ENVIRON["name"]' /etc/group; printf '%s:x:%s:\n' "$name" "$uid"; } > "$new/etc/group.new"
 mv "$new/etc/group.new" "$new/etc/group"
 
 # A hostname of its own, which resolves.
