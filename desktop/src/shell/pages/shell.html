@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'" />
+    <title>Surogate</title>
+    <link rel="stylesheet" href="shell.css" />
+    <script type="module" src="shell.js"></script>
+  </head>
+  <body class="main">
+    <section class="first-run" id="first-run" hidden>
+      <div class="top"></div>
+      <div class="first-run-card">
+        <span class="logo" data-icon="bot"></span>
+        <h1>Connect to your agent</h1>
+        <p class="desc">Paste your agent's address. You sign in to it next, and this computer joins it, so the agent can work on folders of this computer that you choose.</p>
+        <form class="connect" id="connect">
+          <fieldset id="connecting">
+            <input id="address" type="text" placeholder="https://agent.example.com" aria-label="Agent address" autocomplete="off" spellcheck="false" />
+            <button class="btn primary" type="submit">Connect</button>
+          </fieldset>
+        </form>
+        <p class="error" id="error" role="alert"></p>
+      </div>
+    </section>
+    <nav class="sidebar" id="sidebar" aria-label="Projects">
+      <div class="top">
+        <button class="icon" id="menu" type="button" title="Menu" data-icon="menu"></button>
+        <button class="icon" id="hide-sidebar" type="button" title="Hide the sidebar" data-icon="panel-left"></button>
+        <button class="icon" id="back" type="button" title="Back" data-icon="arrow-left"></button>
+        <button class="icon" id="forward" type="button" title="Forward" data-icon="arrow-right"></button>
+        <span class="spacer"></span>
+        <button class="icon device" id="device" type="button" data-icon="laptop"></button>
+      </div>
+      <label class="search" data-icon="search">
+        <input id="search" type="search" placeholder="Search" aria-label="Search projects and threads" autocomplete="off" spellcheck="false" />
+      </label>
+      <ul class="nav">
+        <li><button class="item" type="button" id="new" data-icon="square-pen">New</button></li>
+        <li><button class="item" type="button" id="open-projects" data-icon="layout-grid">Projects</button></li>
+        <li><button class="item" type="button" data-path="/inbox" data-icon="inbox">Inbox</button></li>
+        <li><button class="item" type="button" data-path="/missions" data-icon="target">Missions</button></li>
+        <li><button class="item" type="button" data-path="/skills" data-icon="sparkles">Skills</button></li>
+      </ul>
+      <div class="group-head" id="projects-head"><span>Projects</span></div>
+      <div class="projects" id="projects"></div>
+      <p class="warn" id="failure" role="alert" hidden></p>
+      <p class="warn" id="notice" hidden></p>
+      <div class="user">
+        <button class="user-row" id="user" type="button" aria-haspopup="menu" aria-expanded="false">
+          <span class="avatar" id="avatar"></span><span class="who" id="user-name"></span><span data-icon="chevron-up"></span>
+        </button>
+        <button class="icon" id="open-settings" type="button" title="Settings" data-icon="settings"></button>
+      </div>
+      <div class="popover" id="user-menu" role="menu" hidden>
+        <p class="menu-head" id="user-email"></p>
+        <button class="menu-item" type="button" role="menuitem" data-action="settings" data-icon="settings">Settings<span class="shortcut">Ctrl+Shift+,</span></button>
+        <button class="menu-item" type="button" role="menuitem" data-action="usage" data-icon="gauge">Usage</button>
+        <button class="menu-item" type="button" role="menuitem" data-action="language" data-icon="languages" disabled title="Comes in a later version">Language</button>
+        <button class="menu-item" type="button" role="menuitem" data-action="help" data-icon="circle-help">Get help</button>
+        <hr />
+        <button class="menu-item" type="button" role="menuitem" data-action="billing" data-icon="credit-card">Plans and billing</button>
+        <hr />
+        <button class="menu-item" type="button" role="menuitem" data-action="logout" data-icon="log-out" disabled title="Signing out comes with sign-in in the system browser">Log out</button>
+      </div>
+    </nav>
+    <main class="centre" id="centre">
+      <div class="top">
+        <button class="icon" id="show-sidebar" type="button" title="Show the sidebar" data-icon="panel-left" hidden></button>
+      </div>
+      <header class="head">
+        <span class="project-icon" data-icon="folder"></span>
+        <button class="crumb" id="to-project" type="button" title="Back to the project's conversation" hidden></button>
+        <h1 id="title"></h1>
+        <span class="spacer"></span>
+        <button class="btn overview" id="overview" type="button" aria-pressed="true" data-icon="panel-right">Overview<span class="dot" id="overview-dot" hidden></span></button>
+        <button class="icon" id="project-settings" type="button" title="Project settings come with the agent's own projects" data-icon="settings" disabled></button>
+        <button class="icon" id="project-menu" type="button" title="More" data-icon="ellipsis-vertical"></button>
+      </header>
+      <div class="hole" id="hole">
+        <section class="projects-page" id="projects-page" hidden>
+          <div class="page-head">
+            <h2>Projects</h2>
+            <span class="spacer"></span>
+            <label class="sort">Sort by
+              <select id="sort"><option value="activity">Activity</option><option value="created">Created</option><option value="name">Name</option></select>
+            </label>
+            <button class="btn primary" id="new-project" type="button">New project</button>
+          </div>
+          <label class="search wide" data-icon="search">
+            <input id="project-search" type="search" placeholder="Search projects…" aria-label="Search projects" autocomplete="off" spellcheck="false" />
+          </label>
+          <div class="cards" id="cards"></div>
+          <p class="desc" id="no-projects">No projects yet. Start one with New project: its conversation coordinates the threads that do the work.</p>
+          <p class="desc" id="no-match" hidden>No projects match.</p>
+        </section>
+        <div class="empty" id="unreachable" hidden>
+          <h2 id="headline"></h2>
+          <p class="desc" id="why"></p>
+          <button class="btn" id="refresh" type="button" data-icon="refresh-cw">Refresh</button>
+        </div>
+      </div>
+    </main>
+    <aside class="panel" id="panel" aria-label="Overview">
+      <div class="top"></div>
+      <header class="head">
+        <div class="tabs" role="tablist">
+          <button class="tab" type="button" role="tab" data-tab="threads" aria-selected="true" data-icon="messages-square">Threads<span class="count" id="thread-count">0</span></button>
+          <button class="tab" type="button" role="tab" data-tab="library" aria-selected="false" title="Library" data-icon="library"></button>
+          <button class="tab" type="button" role="tab" data-tab="routines" aria-selected="false" title="Routines" data-icon="clock" hidden></button>
+        </div>
+        <span class="spacer"></span>
+        <button class="icon" id="close-panel" type="button" title="Close" data-icon="x"></button>
+      </header>
+      <div class="threads" id="threads">
+        <h2 class="greeting" id="greeting">Welcome back.</h2>
+        <p class="desc" id="greeting-line"></p>
+        <details class="section" data-group="waiting" open><summary data-icon="chevron-down">Waiting on you <span class="count">0</span></summary><p class="desc">Threads that need your reply or approval, or that failed.</p><ul></ul></details>
+        <details class="section" data-group="working" open><summary data-icon="chevron-down">Working <span class="count">0</span></summary><ul></ul></details>
+        <details class="section" data-group="idle" open><summary data-icon="chevron-down">Idle <span class="count">0</span></summary><ul></ul></details>
+        <details class="section" data-group="resolved"><summary data-icon="chevron-down">Resolved <span class="count">0</span></summary><ul></ul></details>
+      </div>
+      <div class="library" id="library" hidden>
+        <ul id="files"></ul>
+        <p class="desc" id="no-files">The files you add to this project and the files its threads produce appear here.</p>
+      </div>
+      <div class="library" id="routines" hidden>
+        <ul id="routine-list"></ul>
+      </div>
+    </aside>
+  </body>
+</html>
