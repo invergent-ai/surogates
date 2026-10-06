@@ -166,8 +166,7 @@ async def agent_asks(call: Call, r: Result) -> None:
 async def barge_in(call: Call, r: Result) -> None:
     await call.listen(call.dialed_at)
     asked = await call.speak("Povestește-mi pe larg istoria orașului București, în cel puțin zece propoziții.")
-    while (started := call.first_loud_after(asked)) is None and time.monotonic() - asked < 30:
-        await asyncio.sleep(0.05)
+    started = await call.wait_loud_after(asked)
     if not r.check("agent started the story", started is not None):
         return
     await asyncio.sleep(2.0)
@@ -189,8 +188,7 @@ async def barge_in(call: Call, r: Result) -> None:
 async def backchannel(call: Call, r: Result) -> None:
     await call.listen(call.dialed_at)
     asked = await call.speak("Spune-mi trei lucruri interesante despre Cluj.")
-    while (started := call.first_loud_after(asked)) is None and time.monotonic() - asked < 30:
-        await asyncio.sleep(0.05)
+    started = await call.wait_loud_after(asked)
     if not r.check("agent started answering", started is not None):
         return
     await asyncio.sleep(1.5)

@@ -79,7 +79,6 @@ class Call:
         self.room_name = f"call-qa-{uuid.uuid4().hex[:8]}"
         self.heard: list[tuple[float, np.ndarray, bool]] = []  # (when, frame, loud) of the agent's voice
         self.busy_at: list[float] = []  # when the agent's background track was typing
-        self.background: list[tuple[float, np.ndarray]] = []  # (when, frame) of the background track
         self.ended = asyncio.Event()
         self._room = rtc.Room()
         self._outbox: asyncio.Queue[np.ndarray] = asyncio.Queue()
@@ -141,9 +140,7 @@ class Call:
 
     async def _typing(self, track: rtc.Track) -> None:
         async for ev in rtc.AudioStream(track, sample_rate=RATE, num_channels=1):
-            pcm = np.frombuffer(ev.frame.data, "<i2")
-            self.background.append((time.monotonic(), pcm))
-            x = pcm.astype(np.float32)
+            x = np.frombuffer(ev.frame.data, "<i2").astype(np.float32)
             if float(np.sqrt(np.mean(x ** 2))) > BUSY:
                 self.busy_at.append(time.monotonic())
 
@@ -156,6 +153,12 @@ class Call:
 
     def first_loud_after(self, t: float) -> float | None:
         return next((w for w, _, loud in self.heard if loud and w > t), None)
+
+    async def wait_loud_after(self, t: float, timeout: float = 30.0) -> float | None:
+        """When the agent first spoke after ``t``; ``None`` if it said nothing within ``timeout``."""
+        while (started := self.first_loud_after(t)) is None and time.monotonic() - t < timeout:
+            await asyncio.sleep(0.05)
+        return started
 
     def quiet_from(self, t: float, window: float = 0.3) -> float | None:
         """The first moment after ``t`` from which the agent stayed silent for ``window`` seconds."""
