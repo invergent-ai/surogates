@@ -39,6 +39,7 @@ JITTER = 3.0  # ± dB on every one-shot: the same sound is never exactly the sam
 ROOM_ATTACK, ROOM_RELEASE = 0.12, 0.45  # seconds: how fast the room follows the voice
 PICKUP, HANGUP, CUT = 0.6, 0.8, 0.06  # fade in, fade out, and the fade of a cut sound
 CHECK_AFTER = 0.8  # thinking this long before checking sounds start: quick replies stay clean
+LOOKUP_AFTER = 2.5  # a lookup announced aloud ("O clipă, verific."): typing starts once the filler is said
 HOLD_AFTER = 8.0  # checking this long before hold music, when the agent has it
 WRITE_AFTER = 0.8  # the caller starts answering; the pen follows
 ONSET_GUARD = 0.6  # no distant event in the first moments of a phrase
@@ -219,6 +220,7 @@ class Soundscape:
         self._speaking = self._caller = False
         self._spoke_at: int | None = None
         self._thinking_since: int | None = None
+        self._lookup_since: int | None = None  # a tool runs mid-reply (the session says so, not LiveKit)
         self._next_action = 0
         self._first_step = False
         self._holding = False
@@ -251,12 +253,26 @@ class Soundscape:
             self._holding = False
             self._cut("action", "hold")
 
+    def lookup(self, on: bool) -> None:
+        """A tool runs between the filler and the answer. LiveKit keeps the agent "speaking" all that
+        time, so the agent's state cannot say it is working; the call session does."""
+        if on and self._lookup_since is None:
+            self._lookup_since = self.t
+            self._next_action = self.t + int(LOOKUP_AFTER * self.rate)
+            self._first_step = True
+        elif not on:
+            self._lookup_since = None
+            self._holding = False
+            self._cut("action", "hold")
+
     def caller_speaking(self, on: bool) -> None:
         if on:
             self._cut("action", "hold")
             self._holding = False
             if self._thinking_since is not None:  # they talk over the checking: it resumes after them
                 self._thinking_since = self.t
+            if self._lookup_since is not None:
+                self._lookup_since = self.t
         else:
             self._next_action = max(self._next_action, self.t + int(CHECK_AFTER * self.rate))
         self._caller = on
@@ -290,13 +306,17 @@ class Soundscape:
         if self._pen_at is not None and t >= self._pen_at:
             self._pen_at = None
             self._play("action", self._pick("pen"), PEN)
-        thinking = self._thinking_since is not None and not self._speaking and not self._caller
-        if thinking and self.settings.hold in self.pack.hold and not self._holding \
-                and t - self._thinking_since >= int((CHECK_AFTER + HOLD_AFTER) * self.rate):
+        # working: thinking before the reply (LiveKit's state), or a lookup inside it (the session's word)
+        thinking = self._thinking_since is not None and not self._speaking
+        since = self._thinking_since if thinking else self._lookup_since
+        start = CHECK_AFTER if thinking else LOOKUP_AFTER
+        working = since is not None and not self._caller
+        if working and self.settings.hold in self.pack.hold and not self._holding \
+                and t - since >= int((start + HOLD_AFTER) * self.rate):
             self._holding = True
             self._cut("action")
             self._play("hold", self.pack.hold[self.settings.hold], HOLD, loop=True, fade=1.5, jitter=False)
-        if thinking and not self._holding and self.settings.actions and self.pack.actions \
+        if working and not self._holding and self.settings.actions and self.pack.actions \
                 and t >= self._next_action and not any(v.kind == "action" and v.stop_left is None for v in self._voices):
             clip, level = self._next_step()
             self._play("action", clip, level)

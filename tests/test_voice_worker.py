@@ -44,7 +44,7 @@ def test_the_soundscape_follows_who_speaks_and_the_agent_thinking():
     from types import SimpleNamespace
     from surogates.voice.worker import follow_call
     session, scape, agent = _Session(), _Scape(), SimpleNamespace(last_said="")
-    follow_call(session, agent, scape)
+    follow_call(session, agent, scape, SimpleNamespace(on_lookup=None))
     session.emit("agent_state_changed", "thinking")
     assert scape.calls[-2:] == [("agent_speaking", False), ("agent_thinking", True)]
     session.emit("agent_state_changed", "speaking")
@@ -60,7 +60,7 @@ def test_the_pen_writes_once_when_the_caller_answers_a_question_for_details():
     from surogates.voice.worker import follow_call
     session, scape = _Session(), _Scape()
     agent = SimpleNamespace(last_said="Pe ce nume fac programarea?")
-    follow_call(session, agent, scape)
+    follow_call(session, agent, scape, SimpleNamespace(on_lookup=None))
     session.emit("user_state_changed", "speaking")
     session.emit("user_state_changed", "listening")
     session.emit("user_state_changed", "speaking")  # a second breath of the same answer
@@ -82,3 +82,13 @@ async def test_call_cleanup_runs_every_step_even_when_one_fails(caplog):
                   ("release the line", ok("release")))
     assert done == ["end", "release"]
     assert "background" in caplog.text
+
+
+def test_the_background_hears_about_lookups_from_the_call():
+    from types import SimpleNamespace
+    from surogates.voice.worker import follow_call
+    session, scape, call = _Session(), _Scape(), SimpleNamespace(on_lookup=None)
+    follow_call(session, SimpleNamespace(last_said=""), scape, call)
+    call.on_lookup(True)
+    call.on_lookup(False)
+    assert scape.calls[-2:] == [("lookup", True), ("lookup", False)]

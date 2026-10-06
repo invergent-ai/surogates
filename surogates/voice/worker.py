@@ -119,8 +119,10 @@ async def run_all(*steps: tuple[str, Any]) -> None:
             log.warning("call cleanup: %s failed", name, exc_info=True)
 
 
-def follow_call(session: AgentSession, agent: Any, scape: Any) -> None:
-    """The background follows the call: who speaks, the agent thinking, the caller giving details."""
+def follow_call(session: AgentSession, agent: Any, scape: Any, call: Any) -> None:
+    """The background follows the call: who speaks, the agent thinking or looking something up, the
+    caller giving details."""
+    call.on_lookup = scape.lookup
     pen_for = None  # the question the pen last wrote for
 
     @session.on("agent_state_changed")
@@ -139,7 +141,7 @@ def follow_call(session: AgentSession, agent: Any, scape: Any) -> None:
         scape.caller_speaking(speaking)
 
 
-async def start_background(ctx: JobContext, session: AgentSession, agent: Any, config: CallConfig,
+async def start_background(ctx: JobContext, session: AgentSession, agent: Any, call: Any, config: CallConfig,
                            client: Any, cache: str) -> SoundscapePlayer | None:
     """The call's background sound, if the agent has one. Never fails the call: no pack, no background."""
     if config.sound.silent:
@@ -150,7 +152,7 @@ async def start_background(ctx: JobContext, session: AgentSession, agent: Any, c
             return None
         pack = await asyncio.to_thread(Pack.load, directory, config.sound)
         scape = Soundscape(pack, config.sound)
-        follow_call(session, agent, scape)
+        follow_call(session, agent, scape, call)
         player = SoundscapePlayer(scape)
         await player.start(ctx.room)
         return player
@@ -280,7 +282,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def _background() -> None:  # alongside the greeting: a slow download never delays the call
         nonlocal background
-        background = await start_background(ctx, session, agent, config, rt.client, vs.sounds_cache)
+        background = await start_background(ctx, session, agent, call, config, rt.client, vs.sounds_cache)
 
     spawn(_background())
     spawn(time_limit())

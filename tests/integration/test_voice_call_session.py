@@ -175,3 +175,19 @@ async def test_a_callers_turn_goes_ahead_of_ordinary_work(call):
     await call.send("Alo?")
     member = encode_queue_member(org_id=str(call.org_id), agent_id=call.agent_id, session_id=str(call.session_id))
     assert await call.redis.zscore(SHARED_WORK_QUEUE_KEY, member) < 0
+
+
+async def test_the_session_says_when_a_lookup_starts_and_when_the_answer_resumes(call):
+    """What the background needs to type through a lookup: LiveKit's agent state cannot tell it."""
+    seen = []
+    call.on_lookup = seen.append
+    emit = call.store.emit_event
+    after = await call.send("Ce știri sunt azi?")
+    await emit(call.session_id, EventType.LLM_REQUEST, {})
+    await emit(call.session_id, EventType.TOOL_CALL, {"name": "mcp__piata__stiri", "arguments": "{}"})
+    await emit(call.session_id, EventType.LLM_DELTA, {"content": "Azi, la Digi24: "})
+    await emit(call.session_id, EventType.LLM_DELTA, {"content": "ceva important."})
+    await emit(call.session_id, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "Azi…"}})
+    text = "".join([t async for t in call.stream(after)])
+    assert "Digi24" in text
+    assert seen == [True, False]

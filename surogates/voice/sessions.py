@@ -12,6 +12,7 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -112,6 +113,9 @@ class CallSession:
     caller: str
     note: str = ""  # said to the agent before the caller's next words (greeting, what a barge-in cut)
     ending: bool = False  # the agent called end_call: hang up once its goodbye is spoken
+    # told True when a tool starts and False when the answer resumes: LiveKit keeps the agent "speaking"
+    # from "O clipă, verific." to the answer, so only the session knows the agent is working (the typing)
+    on_lookup: Callable[[bool], None] | None = None
     _user_event: int = 0
 
     async def send(self, text: str) -> int:
@@ -152,7 +156,7 @@ class CallSession:
         await pubsub.subscribe(f"surogates:session:{self.session_id}")
         loop = asyncio.get_running_loop()
         began = loop.time()
-        cursor, started, said, announced = after, False, "", False
+        cursor, started, said, announced, looking = after, False, "", False, False
         try:
             while True:
                 for e in await self.store.get_events(self.session_id, after=cursor):
@@ -165,6 +169,9 @@ class CallSession:
                         started = e.type == EventType.LLM_REQUEST.value
                         continue
                     if e.type == EventType.LLM_DELTA.value and data.get("content"):
+                        if looking:  # the answer resumes: the lookup is over
+                            looking = False
+                            self._lookup(False)
                         said += data["content"]
                         yield data["content"]
                     elif e.type == EventType.TOOL_CALL.value and data.get("name") == "ask_user_question":
@@ -173,10 +180,14 @@ class CallSession:
                         return
                     elif e.type == EventType.TOOL_CALL.value and data.get("name") == "end_call":
                         self.ending = True  # its goodbye follows; nothing to announce
-                    elif e.type == EventType.TOOL_CALL.value and not said and not announced:
-                        # a tool started in silence: the caller would hear only typing until it returns
-                        announced = True
-                        yield FILLER + " "  # the space releases it from the sentence splitter now
+                    elif e.type == EventType.TOOL_CALL.value:
+                        if not looking:
+                            looking = True
+                            self._lookup(True)
+                        if not said and not announced:
+                            # a tool started in silence: the caller would hear only typing until it returns
+                            announced = True
+                            yield FILLER + " "  # the space releases it from the sentence splitter now
                     elif _final_answer(e):
                         # an answer written without deltas (non-streaming fallback, budget summary) is still the answer
                         if not said and (content := str((data.get("message") or {}).get("content") or "").strip()):
@@ -196,7 +207,16 @@ class CallSession:
                 except Exception:
                     await asyncio.sleep(POLL_SECONDS)
         finally:
+            if looking:
+                self._lookup(False)
             await pubsub.aclose()
+
+    def _lookup(self, on: bool) -> None:
+        if self.on_lookup is not None:
+            try:
+                self.on_lookup(on)
+            except Exception:  # the background is never worth a turn
+                log.debug("lookup signal failed", exc_info=True)
 
     async def _stop(self, reason: str) -> None:
         await self.redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{self.session_id}", json.dumps({"reason": reason}))

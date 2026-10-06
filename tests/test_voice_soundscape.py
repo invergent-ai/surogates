@@ -313,3 +313,27 @@ def test_a_clip_is_decoded_once_per_pod_not_once_per_call(tmp_path, monkeypatch)
     second = sc.decode_cached(clip, RATE)  # the next call, in another process: from the cache
     assert decoded == ["room-clinic-1a2b.ogg"]
     assert np.array_equal(first, second)
+
+
+def test_a_lookup_after_the_filler_types_though_the_reply_is_still_speaking():
+    """LiveKit keeps the agent "speaking" from "O clipă, verific." to the answer, so the agent's state never
+    says it is working: the session says so instead (lookup on/off)."""
+    from surogates.voice.soundscape import LOOKUP_AFTER
+    s = scape(room="off", events="off")
+    s.agent_speaking(True)  # the filler, and the whole reply as LiveKit sees it
+    s.lookup(True)
+    assert not run(s, LOOKUP_AFTER - 0.2).any()  # the filler is still being said
+    assert run(s, 2).any()  # then the agent is heard working
+    s.lookup(False)  # the answer's first words
+    run(s, 0.1)
+    assert not run(s, 2).any()
+
+
+def test_a_caller_talking_over_a_lookup_cuts_its_typing():
+    s = scape(room="off", events="off")
+    s.agent_speaking(True)
+    s.lookup(True)
+    run(s, 3)
+    s.caller_speaking(True)
+    run(s, 0.1)
+    assert not run(s, 1).any()
