@@ -42,8 +42,9 @@
         <li><button class="item" type="button" data-path="/missions" data-icon="target">Missions</button></li>
         <li><button class="item" type="button" data-path="/skills" data-icon="sparkles">Skills</button></li>
       </ul>
-      <div class="group-head"><span>Projects</span></div>
+      <div class="group-head" id="projects-head"><span>Projects</span></div>
       <div class="projects" id="projects"></div>
+      <p class="warn" id="failure" role="alert" hidden></p>
       <p class="warn" id="notice" hidden></p>
       <div class="user">
         <button class="user-row" id="user" type="button" aria-haspopup="menu" aria-expanded="false">
@@ -92,6 +93,7 @@
           </label>
           <div class="cards" id="cards"></div>
           <p class="desc" id="no-projects">No projects yet. Start one with New project: its conversation coordinates the threads that do the work.</p>
+          <p class="desc" id="no-match" hidden>No projects match.</p>
         </section>
         <div class="empty" id="unreachable" hidden>
           <h2 id="headline"></h2>

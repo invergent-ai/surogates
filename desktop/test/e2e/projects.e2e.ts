@@ -3,11 +3,30 @@ import { rmSync } from "node:fs";
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { FIXTURE_IDS, projectFixtures } from "../../../web/src/lib/projects.js";
+import { FIXTURE_IDS, type Project, type ProjectFixtures, projectFixtures } from "../../../web/src/lib/projects.js";
 import { connect, FakeAgent, webClient } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
 const { report: REPORT, budget: BUDGET } = FIXTURE_IDS;
+const HIRING = "9f0a1b2c-3d4e-4f50-8a61-7b8c9d0e1f20";
+// Each project's conversation: a master session of its own, never the project's id.
+const MASTERS: Record<string, string> = {
+  [REPORT]: "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+  [BUDGET]: "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
+  [HIRING]: "c3d4e5f6-a7b8-4c9d-8e0f-2a3b4c5d6e7f",
+};
+
+// The fixtures' two projects and a third, listed neither last active first nor newest first, so
+// the shell orders them itself. Last active: Report (17 minutes), Hiring (9 hours), Budget (2 days).
+// Newest: Hiring (a day old), Report (3 days), Budget (10 days).
+function fixtures(): ProjectFixtures {
+  const data = projectFixtures();
+  const [report, budget] = data.projects as [Project, Project];
+  const hours = (count: number) => new Date(Date.now() - count * 3_600_000).toISOString();
+  const hiring: Project = { ...budget, id: HIRING, name: "Hiring plan", createdAt: hours(24), updatedAt: hours(9) };
+  data.projects = [budget, report, hiring].map((project) => ({ ...project, masterSessionId: MASTERS[project.id]! }));
+  return data;
+}
 
 let home: string;
 let agent: FakeAgent;
@@ -17,7 +36,7 @@ let app: ElectronApplication | undefined;
 beforeEach(async () => {
   home = dataHome();
   agent = new FakeAgent();
-  agent.projects = projectFixtures();
+  agent.projects = fixtures();
   origin = await agent.start();
 });
 
@@ -41,55 +60,179 @@ async function signedIn(): Promise<{ shell: ElectronApplication; page: Page; cli
   return { shell, page, client };
 }
 
+// *project*'s conversation, open in the centre.
+async function opened(page: Page, client: Page, project: string): Promise<void> {
+  await page.click(`#projects [data-project="${project}"] .project`);
+  await expect.poll(() => client.url()).toBe(`${origin}/chat/${MASTERS[project]}`);
+}
+
+const row = (project: string) => `#projects [data-project="${project}"] .project`;
 const texts = (page: Page, selector: string) => page.$$eval(selector, (found) => found.map((element) => element.textContent));
 const webShown = (shell: ElectronApplication) => shell.evaluate(({ BrowserWindow }) =>
   (BrowserWindow.getAllWindows()[0]!.contentView.children[0] as Electron.WebContentsView).getVisible());
+// Two clicks in one frame: the second comes before the page has answered the first.
+const clickBoth = (page: Page, first: string, second: string) => page.evaluate(([one, two]) => {
+  document.querySelector<HTMLElement>(one!)!.click();
+  document.querySelector<HTMLElement>(two!)!.click();
+}, [first, second]);
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("the sidebar's projects", () => {
   it("are the agent's, last active first, marked when a thread waits on the user, and searched by name", async () => {
     const { page } = await signedIn();
-    expect(await texts(page, "#projects .project .name")).toEqual(["Quarterly report", "Budget"]);
+    expect(await texts(page, "#projects .project .name")).toEqual(["Quarterly report", "Hiring plan", "Budget"]);
     expect(await page.isVisible(`#projects [data-project="${REPORT}"] .waiting`)).toBe(true);
+    expect(await page.getAttribute(row(REPORT), "aria-label")).toBe("Quarterly report, waiting on you");
     expect(await page.isVisible(`#projects [data-project="${BUDGET}"] .waiting`)).toBe(false);
+    expect(await page.getAttribute(row(BUDGET), "aria-label")).toBe(null);
+    expect(await page.isVisible("#projects-head")).toBe(true);
     await page.fill("#search", "budg");
     expect(await page.isVisible(`#projects [data-project="${REPORT}"]`)).toBe(false);
     expect(await page.isVisible(`#projects [data-project="${BUDGET}"]`)).toBe(true);
+    // No row left: no heading over nothing.
+    await page.fill("#search", "nothing like it");
+    expect(await page.isVisible("#projects-head")).toBe(false);
   });
 
   it("open a project's conversation, its master session, in the centre under the project's header", async () => {
     const { shell, page, client } = await signedIn();
-    await page.click(`#projects [data-project="${REPORT}"] .project`);
-    await expect.poll(() => client.url()).toBe(`${origin}/chat/${REPORT}`);
+    await opened(page, client, REPORT);
     expect(await page.textContent("#title")).toBe("Quarterly report");
     expect(await webShown(shell)).toBe(true);
+    expect(await page.getAttribute(row(REPORT), "aria-current")).toBe("page");
     // A thread waits on the user: the Overview button says so.
     expect(await page.isVisible("#overview-dot")).toBe(true);
-    await page.click(`#projects [data-project="${BUDGET}"] .project`);
+    await opened(page, client, BUDGET);
     await expect.poll(() => page.textContent("#title")).toBe("Budget");
     expect(await page.isVisible("#overview-dot")).toBe(false);
+    expect(await page.getAttribute(row(REPORT), "aria-current")).toBe(null);
     await page.click("#new");
     await expect.poll(() => client.url()).toBe(`${origin}/chat`);
+  });
+
+  it("follow the web client: Back from a second project is the first again, and a page of its own is no project", async () => {
+    const { page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await opened(page, client, BUDGET);
+    await page.click("#back");
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${MASTERS[REPORT]}`);
+    await expect.poll(() => page.textContent("#title")).toBe("Quarterly report");
+    expect(await page.getAttribute(row(REPORT), "aria-current")).toBe("page");
+    await page.click("#forward");
+    await expect.poll(() => page.textContent("#title")).toBe("Budget");
+    await client.evaluate(() => history.pushState(null, "", "/inbox"));
+    await expect.poll(() => page.textContent("#title")).toBe(new URL(origin).host);
+    expect(await page.$$eval('#projects [aria-current="page"]', (found) => found.length)).toBe(0);
+  });
+
+  it("keep the header in step with a project that is renamed", async () => {
+    const { page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    // The page tells the change once it serves again after the load; it is told until the header follows.
+    await expect.poll(async () => {
+      await client.evaluate((id) => {
+        const fake = (window as unknown as { fakeProjects?: { data: ProjectFixtures; changed(id: string, threadId: null): void } }).fakeProjects;
+        const found = fake?.data.projects.find((project) => project.id === id);
+        if (!found) return;
+        found.name = "Q3 report";
+        fake!.changed(id, null);
+      }, REPORT).catch(() => {});
+      return page.textContent("#title");
+    }).toBe("Q3 report");
+  });
+
+  it("are gone, with the open project, once the user signs out", async () => {
+    const { page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await client.waitForLoadState();
+    await client.evaluate(() => window.surogateDesktop!.registerProjects(null));
+    await expect.poll(() => page.textContent("#title")).toBe(new URL(origin).host);
+    expect(await page.$$eval("#projects .project", (found) => found.length)).toBe(0);
+    expect(await page.isVisible("#projects-head")).toBe(false);
+  });
+
+  it("open the project clicked while the web client reloads", async () => {
+    agent.registerAfterMs = 1_500;
+    const { page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    // Report's page is loading, and serves no projects yet.
+    await page.click(row(BUDGET));
+    await expect.poll(() => client.url(), { timeout: 8_000 }).toBe(`${origin}/chat/${MASTERS[BUDGET]}`);
+    await expect.poll(() => page.textContent("#title")).toBe("Budget");
+  });
+
+  it("apply only the latest choice of what the centre shows", async () => {
+    const { page, client } = await signedIn();
+    await clickBoth(page, row(REPORT), row(BUDGET));
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${MASTERS[BUDGET]}`);
+    await expect.poll(() => page.textContent("#title")).toBe("Budget");
+    await client.waitForLoadState();
+    await pause(500);
+    await clickBoth(page, row(REPORT), "#open-projects");
+    // Report's answer comes after the Projects page was chosen: it opens nothing.
+    await pause(1_000);
+    expect(await page.isVisible("#projects-page")).toBe(true);
+    expect(client.url()).toBe(`${origin}/chat/${MASTERS[BUDGET]}`);
+  });
+
+  it("say why a project did not open", async () => {
+    agent.projects!.projects.find((project) => project.id === BUDGET)!.masterSessionId = "not-a-chat";
+    const { page, client } = await signedIn();
+    await page.click(row(BUDGET));
+    await expect.poll(() => page.textContent("#failure")).toBe("This project's conversation is not a chat");
+    expect(await page.isVisible("#failure")).toBe(true);
+    await opened(page, client, REPORT);
+    await expect.poll(() => page.isVisible("#failure")).toBe(false);
   });
 });
 
 describe("the Projects page", () => {
-  it("shows the projects as cards, sorted and searched, in place of the web client", async () => {
+  it("shows the projects as cards, sorted and searched, in place of the web client and the Overview", async () => {
     const { shell, page } = await signedIn();
     await page.click("#open-projects");
     await expect.poll(() => page.isVisible("#projects-page")).toBe(true);
     expect(await webShown(shell)).toBe(false);
-    expect(await page.textContent("#title")).toBe("Projects");
-    expect(await texts(page, "#cards .card .name")).toEqual(["Quarterly report", "Budget"]);
-    expect(await texts(page, "#cards .card .age")).toEqual(["17 minutes ago", "2 days ago"]);
+    expect(await page.getAttribute("#open-projects", "aria-current")).toBe("page");
+    // The page fills the window right of the sidebar: no project header over it, no Overview beside it.
+    expect(await page.isVisible("#title")).toBe(false);
+    expect(await page.isVisible("#overview")).toBe(false);
+    expect(await page.isVisible("#panel")).toBe(false);
+    expect(await page.isVisible("#centre .head")).toBe(true);
+    const [right, width] = await page.evaluate(() => [
+      Math.round(document.querySelector("#projects-page")!.getBoundingClientRect().right), window.innerWidth,
+    ]);
+    expect(right).toBe(width);
+    expect(await texts(page, "#cards .card .name")).toEqual(["Quarterly report", "Hiring plan", "Budget"]);
+    expect(await texts(page, "#cards .card .age")).toEqual(["17 minutes ago", "9 hours ago", "2 days ago"]);
     await page.selectOption("#sort", "name");
-    expect(await texts(page, "#cards .card .name")).toEqual(["Budget", "Quarterly report"]);
+    expect(await texts(page, "#cards .card .name")).toEqual(["Budget", "Hiring plan", "Quarterly report"]);
     await page.selectOption("#sort", "created");
-    expect(await texts(page, "#cards .card .name")).toEqual(["Quarterly report", "Budget"]);
+    expect(await texts(page, "#cards .card .name")).toEqual(["Hiring plan", "Quarterly report", "Budget"]);
+    await page.fill("#project-search", "nothing like it");
+    expect(await texts(page, "#cards .card .name")).toEqual([]);
+    expect(await page.isVisible("#no-match")).toBe(true);
+    expect(await page.isVisible("#no-projects")).toBe(false);
     await page.fill("#project-search", "quart");
     expect(await texts(page, "#cards .card .name")).toEqual(["Quarterly report"]);
+    expect(await page.isVisible("#no-match")).toBe(false);
     await page.click("#cards .card");
     await expect.poll(() => webShown(shell)).toBe(true);
     expect(await page.isVisible("#projects-page")).toBe(false);
+    await expect.poll(() => page.textContent("#title")).toBe("Quarterly report");
+    expect(await page.isVisible("#title")).toBe(true);
+    expect(await page.isVisible("#panel")).toBe(true);
+    expect(await page.getAttribute("#open-projects", "aria-current")).toBe(null);
+  });
+
+  it("is left by Back, for the web client where it was", async () => {
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click("#open-projects");
+    await expect.poll(() => page.isVisible("#projects-page")).toBe(true);
+    await page.click("#back");
+    await expect.poll(() => page.isVisible("#projects-page")).toBe(false);
+    expect(await webShown(shell)).toBe(true);
+    expect(client.url()).toBe(`${origin}/chat/${MASTERS[REPORT]}`);
     await expect.poll(() => page.textContent("#title")).toBe("Quarterly report");
   });
 });

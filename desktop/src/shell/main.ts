@@ -25,7 +25,7 @@ import { bridgeHandlers } from "./bridge.js";
 import { type Credential, CredentialStore } from "./credentials.js";
 import { type DeviceStack, startDevice } from "./device-stack.js";
 import { letWindowClose, MainWindow, onSettingsKey } from "./main-window.js";
-import { PageProjects } from "./projects.js";
+import { ANSWER_TIMEOUT_MS, PageProjects } from "./projects.js";
 import { folderPrompts, refusingApprovals } from "./prompts.js";
 import { sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
@@ -61,14 +61,23 @@ let connecting = false;
 let account: DesktopAccount | null = null;
 const projects = new PageProjects((message) => main?.webContents()?.send("desktop:projects", message));
 let served = false;
+// Settled once the page serves its projects: a project chosen while it loads waits for this.
+let serving = Promise.withResolvers<void>();
 let listed: ProjectSummary[] = [];
 // What the centre shows: a page of the web client, the Projects page, or a project's conversation,
 // or one of its threads, with the project as the way back (Section 12, View thread).
+type Opened = { id: string; name: string; masterSessionId: string };
 type View =
   | { kind: "web" }
   | { kind: "projects" }
-  | { kind: "project"; id: string; name: string; thread: { id: string; title: string } | null };
+  | ({ kind: "project"; thread: { id: string; title: string } | null } & Opened);
 let view: View = { kind: "web" };
+// The projects the page named, by their master session: the web client arriving at one shows that project.
+const masters = new Map<string, Opened>();
+// Each choice of what the centre shows takes a number: an answer that comes after a later choice applies nothing.
+let choice = 0;
+// Why the project last chosen did not open.
+let failure: string | null = null;
 // The open project, for the Overview pane, and what stops following it.
 let overview: { project: Project; threads: ThreadRow[]; library: LibraryEntry[]; routines: Routine[] } | null = null;
 let unfollow = (): void => {};
@@ -138,6 +147,7 @@ async function refreshOverview(): Promise<void> {
   const [project, threads, library, routines] = await Promise.all([
     projects.get(open.id), projects.threads(open.id), projects.library(open.id), projects.routines(open.id),
   ]);
+  remember(project);
   if (view !== open) return;
   overview = { project, threads, library, routines };
   if (open.thread && !threads.some((thread) => thread.id === open.thread?.id)) {
@@ -152,12 +162,74 @@ function follow(): void {
   unfollow = view.kind === "project" ? projects.subscribe(view.id, () => void refreshProjects()) : () => {};
 }
 
-// The page withdrew its projects (signed out), or went: nothing is asked of it until it registers again.
+// The page withdrew its projects (signed out), or went: nothing is asked of it until it registers
+// again. Signed out, the open project goes too.
 function withdrawProjects(signedOut: boolean): void {
+  if (served) serving = Promise.withResolvers();
   served = false;
   projects.withdrawn();
-  if (signedOut) listed = [];
+  if (signedOut) {
+    listed = [];
+    masters.clear();
+    if (view.kind === "project") show({ kind: "web" });
+  }
   changed();
+}
+
+function remember(project: Project): void {
+  masters.set(project.masterSessionId, { id: project.id, name: project.name, masterSessionId: project.masterSessionId });
+}
+
+function show(next: View): void {
+  view = next;
+  follow();
+  changed();
+}
+
+// A new choice of what the centre shows: what was chosen before, and its failure, are done with.
+function choose(): number {
+  failure = null;
+  return ++choice;
+}
+
+/** Ask the page's projects once it serves them; a call cut off by the page going away is asked once more. */
+async function askServed<T>(ask: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    if (!served) {
+      const { promise, resolve, reject } = Promise.withResolvers<void>();
+      const timer = setTimeout(() => reject(new Error("The agent's page did not serve its projects in time")), ANSWER_TIMEOUT_MS);
+      void serving.promise.then(resolve);
+      await promise.finally(() => clearTimeout(timer));
+    }
+    try {
+      return await ask();
+    } catch (error) {
+      if (served || attempt === 2) throw error;
+    }
+  }
+}
+
+/**
+ * The web client moved, by Back, Forward, a link or a chat of its own: the view follows it. A project
+ * stays open while the client shows its master session or one of its threads; a master session the
+ * page named opens its project; anything else is a page of the web client's own.
+ */
+function navigated(url: string): void {
+  if (view.kind === "projects") return;
+  const chat = /^\/chat\/([^/]+)$/.exec(new URL(url).pathname)?.[1];
+  if (view.kind === "project") {
+    if (chat === view.masterSessionId) {
+      if (view.thread) show({ ...view, thread: null });
+      return;
+    }
+    if (view.thread && chat === view.thread.id) return;
+    const thread = overview?.project.id === view.id ? overview.threads.find((found) => found.id === chat) : undefined;
+    if (thread) return show({ ...view, thread: { id: thread.id, title: thread.title } });
+  }
+  const known = chat === undefined ? undefined : masters.get(chat);
+  if (!known && view.kind === "web") return;
+  show(known ? { kind: "project", ...known, thread: null } : { kind: "web" });
+  void refreshProjects();
 }
 
 /**
@@ -270,6 +342,7 @@ function bridge(contents: WebContents, agent: Agent): void {
     registerProjects: (registered) => {
       if (!registered) return withdrawProjects(true);
       served = true;
+      serving.resolve();
       follow();
       void refreshProjects();
     },
@@ -291,7 +364,12 @@ function bridge(contents: WebContents, agent: Agent): void {
 }
 
 function open(window: MainWindow, agent: Agent): void {
-  bridge(window.attach(agent, BRIDGE_PRELOAD), agent);
+  const contents = window.attach(agent, BRIDGE_PRELOAD);
+  bridge(contents, agent);
+  contents.on("did-navigate", (_event, url) => navigated(url));
+  contents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
+    if (isMainFrame) navigated(url);
+  });
 }
 
 async function confirmAgent(agent: Agent, typed: string): Promise<boolean> {
@@ -322,6 +400,7 @@ function state() {
     view,
     overview: view.kind === "project" && overview?.project.id === view.id ? overview : null,
     projects: listed,
+    failure,
     links: Object.keys(links()),
     unreachable: main?.unreachable ?? null,
     notice: credentials.unencrypted() ? "Credentials on this computer are not encrypted: Linux has no secret store here" : null,
@@ -415,41 +494,58 @@ function wire(window: MainWindow, page: string): void {
   });
   handle("shell:go", (path) => {
     if (typeof path !== "string" || !webClientPath(path)) throw new Error("Not a page of the web client");
-    view = { kind: "web" };
-    follow();
+    choose();
+    show({ kind: "web" });
     window.showWeb(true);
     window.go(path);
-    changed();
   });
   handle("shell:projects", () => {
-    view = { kind: "projects" };
-    follow();
+    choose();
+    show({ kind: "projects" });
     window.showWeb(false);
-    changed();
   });
   // A project opens on its conversation: the page's answer names it, and is checked as a chat's path.
+  // A project chosen while the page loads waits for it to serve; a failure is said in the sidebar.
   handle("shell:project", async (id) => {
-    if (typeof id !== "string") throw new Error("No such project");
-    const project = await projects.get(id);
-    const path = `/chat/${project.masterSessionId}`;
-    if (!webClientPath(path)) throw new Error("This project's conversation is not a chat");
-    view = { kind: "project", id: project.id, name: project.name, thread: null };
-    follow();
-    window.showWeb(true);
-    window.go(path);
-    void refreshProjects();
+    const mine = choose();
+    changed();
+    try {
+      if (typeof id !== "string") throw new Error("No such project");
+      const project = await askServed(() => projects.get(id));
+      const path = `/chat/${project.masterSessionId}`;
+      if (!webClientPath(path)) throw new Error("This project's conversation is not a chat");
+      remember(project);
+      if (mine !== choice) return;
+      show({ kind: "project", id: project.id, name: project.name, masterSessionId: project.masterSessionId, thread: null });
+      window.showWeb(true);
+      window.go(path);
+    } catch (error) {
+      if (mine !== choice) return;
+      failure = error instanceof Error ? error.message : String(error);
+      changed();
+    }
   });
   // A thread of the open project, in the centre.
   handle("shell:thread", (id) => {
     const thread = view.kind === "project" ? overview?.threads.find((found) => found.id === id) : undefined;
     const path = `/chat/${String(id)}`;
     if (view.kind !== "project" || !thread || !webClientPath(path)) throw new Error("No such thread in the open project");
+    choose();
     view = { ...view, thread: { id: thread.id, title: thread.title } };
     window.go(path);
     changed();
   });
-  handle("shell:back", () => window.back());
-  handle("shell:forward", () => window.forward());
+  // Back and Forward move the web client; on the Projects page they leave it, for the client where it is.
+  const move = (step: () => void) => {
+    choose();
+    if (view.kind !== "projects") return step();
+    show({ kind: "web" });
+    window.showWeb(true);
+    const url = window.webContents()?.getURL();
+    if (url) navigated(url);
+  };
+  handle("shell:back", () => move(() => window.back()));
+  handle("shell:forward", () => move(() => window.forward()));
   handle("shell:reload", () => window.reload());
   handle("shell:place", (hole) => window.place(bounds(hole)));
   handle("shell:menu", popup);

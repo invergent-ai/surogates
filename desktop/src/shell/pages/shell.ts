@@ -31,7 +31,8 @@ interface State {
   first: boolean; // no agent yet: the first run fills the window
   agent: { name: string } | null;
   view: { kind: "web" } | { kind: "projects" } | { kind: "project"; id: string; name: string; thread: { id: string; title: string } | null };
-  projects: ProjectRow[]; // last active first
+  projects: ProjectRow[]; // as the page listed them
+  failure: string | null; // why the project last chosen did not open
   overview: {
     threads: ThreadRow[]; // last active first
     library: Array<{ path: string; origin: "added" | "produced"; threadId: string | null; size: number | null; updatedAt: string | null }>;
@@ -90,7 +91,11 @@ function group(project: ProjectRow, selected: boolean): HTMLElement {
   wrapper.dataset.project = project.id;
   const open = button(selected ? "item project selected" : "item project", "", () => void shell.project(project.id));
   open.append(icon("folder"), element("span", "name", project.name));
-  if (project.waiting > 0) open.append(element("span", "waiting"));
+  if (project.waiting > 0) {
+    open.append(element("span", "waiting"));
+    open.setAttribute("aria-label", `${project.name}, waiting on you`);
+  }
+  if (selected) open.setAttribute("aria-current", "page");
   wrapper.append(open);
   return wrapper;
 }
@@ -104,15 +109,22 @@ function card(project: ProjectRow): HTMLElement {
   return made;
 }
 
+// The sidebar's projects that match its search; its heading only over some.
 function filterSidebar(): void {
   const query = byId<HTMLInputElement>("search").value.trim().toLowerCase();
+  let shown = 0;
   for (const found of document.querySelectorAll<HTMLElement>("#projects .group")) {
     found.hidden = query !== "" && !(found.querySelector(".name")?.textContent ?? "").toLowerCase().includes(query);
+    if (!found.hidden) shown++;
   }
+  byId("projects-head").hidden = shown === 0;
 }
 
+// Last active first: the sidebar's order, and the Projects page's Activity.
+const byActivity = (a: ProjectRow, b: ProjectRow) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+
 const SORTS: Record<string, (a: ProjectRow, b: ProjectRow) => number> = {
-  activity: () => 0, // as listed: last active first
+  activity: byActivity,
   created: (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt),
   name: (a, b) => a.name.localeCompare(b.name),
 };
@@ -124,6 +136,7 @@ function renderCards(): void {
     .sort(SORTS[byId<HTMLSelectElement>("sort").value]);
   byId("cards").replaceChildren(...shown.map(card));
   byId("no-projects").hidden = last.projects.length > 0;
+  byId("no-match").hidden = last.projects.length === 0 || shown.length > 0;
 }
 
 const plural = (count: number, one: string, many: string): string => `${count} ${count === 1 ? one : many}`;
@@ -203,20 +216,30 @@ function showTab(): void {
 
 async function render(): Promise<void> {
   const state = await shell.state();
+  state.projects.sort(byActivity);
   last = state;
   renderOverview(state);
   document.body.classList.toggle("first", state.first);
   byId("first-run").hidden = !state.first;
   const open = state.view.kind === "project" ? state.view : null;
-  byId("title").textContent = open?.thread?.title ?? open?.name ?? (state.view.kind === "projects" ? "Projects" : state.agent?.name ?? "");
+  // The open project as last listed: a rename shows in the header too.
+  const name = state.projects.find((project) => project.id === open?.id)?.name ?? open?.name;
+  byId("title").textContent = open?.thread?.title ?? name ?? (state.view.kind === "projects" ? "Projects" : state.agent?.name ?? "");
   // A thread open in the centre: its project, as the way back.
   byId("to-project").hidden = !open?.thread;
-  byId("to-project").textContent = open?.thread ? open.name : "";
+  byId("to-project").textContent = open?.thread ? (name ?? "") : "";
   byId("overview-dot").hidden = !state.projects.some((project) => project.id === open?.id && project.waiting > 0);
   byId("projects").replaceChildren(...state.projects.map((project) => group(project, project.id === open?.id)));
   filterSidebar();
-  byId("open-projects").classList.toggle("selected", state.view.kind === "projects");
-  byId("projects-page").hidden = state.view.kind !== "projects";
+  byId("failure").hidden = state.failure === null;
+  byId("failure").textContent = state.failure ?? "";
+  // The Projects page fills the centre and the Overview's column, under the header's bare strip.
+  const onPage = state.view.kind === "projects";
+  document.body.classList.toggle("projects-view", onPage);
+  byId("open-projects").classList.toggle("selected", onPage);
+  if (onPage) byId("open-projects").setAttribute("aria-current", "page");
+  else byId("open-projects").removeAttribute("aria-current");
+  byId("projects-page").hidden = !onPage;
   renderCards();
   byId("user-name").textContent = state.account?.name ?? "Not signed in";
   byId("avatar").textContent = (state.account?.name ?? "").split(/\s+/).map((word) => word[0] ?? "").join("").slice(0, 2).toUpperCase();

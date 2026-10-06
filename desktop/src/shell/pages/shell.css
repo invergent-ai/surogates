@@ -132,12 +132,17 @@ body.main.no-sidebar {
   --sidebar-width: 0px;
 }
 
-body.main.no-panel {
+/* The Projects page fills the window right of the sidebar: no Overview beside it, and of the
+   project's header only the strip the window is dragged by. */
+body.main.no-panel,
+body.main.projects-view {
   --panel-width: 0px;
 }
 
 .no-sidebar .sidebar,
-.no-panel .panel {
+.no-panel .panel,
+.projects-view .panel,
+.projects-view .centre .head > * {
   visibility: hidden;
 }
 

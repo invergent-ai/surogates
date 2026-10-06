@@ -20,6 +20,8 @@ export class FakeAgent {
   config: Record<string, unknown> = { agent_id: "a", desktop_sessions: true, multi_session: true };
   // The projects the page serves: a fake ProjectsSource built on these, or none.
   projects: ProjectFixtures | null = null;
+  // How long each load of the page takes to register them, as the web client waits for its bundle and /auth/me.
+  registerAfterMs = 0;
   readonly link = new FakeLinkServer({ token: TOKEN });
   readonly registered: unknown[] = [];
   readonly server: Server = createServer((request, response) => {
@@ -39,7 +41,7 @@ export class FakeAgent {
       });
       return;
     }
-    const served = this.projects === null ? "" : `<script>(${serveProjects.toString()})(${JSON.stringify(this.projects).replace(/</g, "\\u003c")})</script>`;
+    const served = this.projects === null ? "" : `<script>(${serveProjects.toString()})(${JSON.stringify(this.projects).replace(/</g, "\\u003c")}, ${this.registerAfterMs})</script>`;
     response.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><title>Fake agent</title><p>The web client</p>${served}`);
   });
   private linked = false;
@@ -92,9 +94,9 @@ export const register = (client: Page, account = ACCOUNT) => client.evaluate(asy
   return { before, device: await desktop.registerDevice(issued.token) };
 }, account);
 
-// Run in the fake agent's page: a ProjectsSource on *data*, registered with the desktop. The
-// page keeps it as window.fakeProjects, whose changed() tells the source's subscribers.
-function serveProjects(data: ProjectFixtures): void {
+// Run in the fake agent's page: a ProjectsSource on *data*, registered with the desktop after
+// *delay* ms. The page keeps it as window.fakeProjects, whose changed() tells the source's subscribers.
+function serveProjects(data: ProjectFixtures, delay: number): void {
   const listeners = new Map<string, Set<(threadId: string | null) => void>>();
   const one = (id: string) => {
     const found = data.projects.find((project) => project.id === id);
@@ -125,5 +127,5 @@ function serveProjects(data: ProjectFixtures): void {
     for (const listener of listeners.get(id) ?? []) listener(threadId);
   };
   Object.assign(window, { fakeProjects: { data, changed } });
-  void window.surogateDesktop?.registerProjects(source);
+  setTimeout(() => void window.surogateDesktop?.registerProjects(source), delay);
 }
