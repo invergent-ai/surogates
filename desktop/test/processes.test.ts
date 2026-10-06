@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Failure, OUTPUT_CAP_CHARS, pyJsonLength, sandboxError } from "../src/files/answers.js";
 import type { Outcome } from "../src/link/protocol.js";
 import {
-  APP_QUIT, MAX_PROCESSES, type ProcessHandle, Processes, type ProcessesOptions, RESTARTED, RUNNER_GONE, type Spawner, TOO_MANY,
+  APP_QUIT, MAX_PROCESSES, OUT_OF_MEMORY, type ProcessHandle, Processes, type ProcessesOptions, RESTARTED, RUNNER_GONE, type Spawner, TOO_MANY,
   restartNotice,
 } from "../src/guest/processes.js";
 import { CANCELLED, type CommandEnd, unenterable, workdir } from "../src/guest/command.js";
@@ -361,6 +361,14 @@ describe("background processes", { timeout: 20_000 }, () => {
     } finally {
       spawnSync("pkill", ["-KILL", "-f", "^sleep 666$"]);
     }
+  });
+
+  it("notes a process the kernel ended for memory, with the exit code a shell gives its signal", async () => {
+    const { runner: driven, spawned } = fake();
+    processes({ runner: driven });
+    const id = await start("x");
+    spawned[0]?.end({ code: null, signal: "SIGKILL", oom: true });
+    expect((await ask("poll", { session_id: id })).ok).toMatchObject({ status: "exited", exit_code: 137, note: OUT_OF_MEMORY });
   });
 
   it("reads carriage returns as newlines without a pty, as the cloud's universal newlines do", async () => {

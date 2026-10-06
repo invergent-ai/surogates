@@ -66,7 +66,8 @@ export type FromRunner =
   | { type: "data"; id: string; data: string; err?: true } // base64; err: from its stderr
   // A stdin message was taken.
   | { type: "written"; id: string }
-  | { type: "exit"; id: string; code: number | null; signal: NodeJS.Signals | null }
+  // oom: the kernel ended one of its processes for memory.
+  | { type: "exit"; id: string; code: number | null; signal: NodeJS.Signals | null; oom?: true }
   // It could not be started; with stdin, a stdin message was refused and it goes on.
   | { type: "error"; id: string; message: string; stdin?: true }
   // The answers to place: the folder a command would run in, and why it cannot be entered (an errno name), or the refusal.

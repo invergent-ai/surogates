@@ -66,7 +66,7 @@ export class RunnerChild implements CommandChild {
     } else if (message.type === "data" && typeof message.data === "string") {
       this.output(Buffer.from(message.data, "base64"), message.err === true);
     } else if (message.type === "exit") {
-      this.finish({ code: message.code, signal: message.signal });
+      this.finish({ code: message.code, signal: message.signal, ...(message.oom ? { oom: true as const } : {}) });
     } else if (message.type === "written") {
       this.writes.shift()?.(null);
     } else if (message.type === "error" && message.stdin) {

@@ -27,7 +27,8 @@ export const SANDBOX_STOPPED = {
 } satisfies Outcome;
 
 // How a command ended: it exited, it never started, or the sandbox it ran in went first.
-export type CommandEnd = { code: number | null; signal: NodeJS.Signals | null } | { failed: string } | { lost: true };
+// oom: the kernel ended one of its processes for memory, in the guest.
+export type CommandEnd = { code: number | null; signal: NodeJS.Signals | null; oom?: true } | { failed: string } | { lost: true };
 
 // What run needs of a running command, in a sandbox of its own or in a runner.
 export interface CommandChild {

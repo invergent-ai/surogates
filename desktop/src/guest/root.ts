@@ -6,7 +6,7 @@
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { chmodSync, chownSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, chown, mkdir, readdir, readFile, rmdir, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
 
@@ -25,6 +25,12 @@ const SHARES = "/run/surogate/shares";
 const CGROUPS = "/sys/fs/cgroup/roots";
 // How many processes one root may have of the guest's 32 768.
 const PIDS_MAX = 4096;
+// How many cgroups one root may have below its own: its runner's, its runs' and its
+// background processes', each holding at least one of its PIDS_MAX processes, and a
+// cgroup per run or background process, 64 of them at most. Each costs guest kernel
+// memory that no memory.max counts, and one a command made and left empty holds no
+// process, which only this bounds.
+const CGROUPS_MAX = 256;
 // How long a root's processes have to end once its cgroup is killed. One stuck in
 // a stat of a stalled share cannot end until the share answers.
 const EMPTY_MS = 3_000;
@@ -151,7 +157,18 @@ export async function enter(root: string, place: Place, share: Share, user: Host
   await killRoot(root).catch(() => {
     throw new Error("what this chat ran before has not ended yet");
   });
+  // Then its cgroup is made again empty: the cgroups its runner and commands had go too.
+  // In it: init for the runner, run for each run's cgroup, proc for each background process's.
+  await removeCgroup(cgroup);
+  for (const leaf of ["init", "run", "proc"]) await mkdir(join(cgroup, leaf), { recursive: true });
   await writeFile(join(cgroup, "pids.max"), String(PIDS_MAX));
+  // No cgroup deeper than a command's, and at most CGROUPS_MAX.
+  await writeFile(join(cgroup, "cgroup.max.descendants"), String(CGROUPS_MAX));
+  await writeFile(join(cgroup, "cgroup.max.depth"), "2");
+  // Delegated to the root's user, so its runner can give each command a cgroup of its
+  // own in run or proc and move its processes between them; it sets none of the root's
+  // own limits, and makes no cgroup beside init, run and proc.
+  for (const path of [join(cgroup, "cgroup.procs"), join(cgroup, "run"), join(cgroup, "proc")]) await chown(path, uid, uid);
   // In the root's cgroup before unshare runs, so it and everything it starts are
   // there, and the cgroup namespace it makes is rooted there. Each by its path:
   // never through the PATH made for the commands.
@@ -164,6 +181,24 @@ export async function enter(root: string, place: Place, share: Share, user: Host
     ],
     { env: rootEnvironment(readFileSync(LAYOUT, "utf8"), user), stdio: ["pipe", "pipe", "pipe"] },
   );
+}
+
+// A cgroup with every cgroup below it, each empty: a directory of cgroupfs goes by rmdir alone.
+async function removeCgroup(path: string): Promise<void> {
+  for (const entry of await readdir(path, { withFileTypes: true })) if (entry.isDirectory()) await removeCgroup(join(path, entry.name));
+  await rmdir(path);
+}
+
+// Once *root*'s runner is up: unshare, its one process outside its namespaces, joins
+// the runner's cgroup, so the root's own holds no process. Then each background
+// process's memory is counted in its own cgroup, where an out-of-memory kill shows. A
+// run's is not: its answer has no note, and a memory cgroup outlives its rmdir while
+// pages it charged remain, as a file a run left in /tmp.
+export async function contain(root: string, pid: number | undefined): Promise<void> {
+  const cgroup = join(CGROUPS, root);
+  await writeFile(join(cgroup, "init", "cgroup.procs"), String(pid));
+  await writeFile(join(cgroup, "cgroup.subtree_control"), "+memory");
+  await writeFile(join(cgroup, "proc", "cgroup.subtree_control"), "+memory");
 }
 
 // Everything of *root* ends at once, its runner and the namespaces' PID 1 among it,
@@ -274,6 +309,8 @@ export interface RootsOptions {
   uid(root: string): number;
   // Ends every process of the root; resolves once they have all ended, or rejects.
   kill(root: string): void | Promise<void>;
+  // Once the root's runner is up, the cgroup per command: *pid* is the process start gave.
+  contain?(root: string, pid: number | undefined): Promise<void>;
   // Told of a root that was set up and has lost its runner: the host sets it up again.
   lost?(root: string): void;
   // Told a root's process handles to keep, and how many of its processes live, each time they change.
@@ -328,9 +365,11 @@ export class Roots {
         this.options.lost?.(root);
       }
     })());
-    const runner = new SessionRunner(await this.options.start(root, place, share, user), () => void lose(), RUNNER_READY_MS);
+    const child = await this.options.start(root, place, share, user);
+    const runner = new SessionRunner(child, () => void lose(), RUNNER_READY_MS);
     try {
       await runner.ready;
+      await this.options.contain?.(root, child.pid);
     } catch (error) {
       await runner.stop();
       throw error;

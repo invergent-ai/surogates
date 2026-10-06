@@ -3,11 +3,15 @@
 // starts is reachable from the next (spec, Section 11). The agent speaks
 // ToRunner on stdin and reads FromRunner on stdout, after a first
 // {"ready":true}; it ends the runner by ending its stdin, and the namespaces go
-// with it. Until commands move into the VM, a tool host runs it the same way,
-// wrapped once in srt, as the root's session runner.
+// with it. In the guest, enter-root gives it the root's cgroup, delegated to it
+// (--cgroups <folder>): each command gets a cgroup of its own there, which ends it
+// with everything it started. Until commands move into the VM, a tool host runs it
+// the same way, wrapped once in srt, as the root's session runner, and finds a
+// command's processes by its marker.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 
@@ -18,6 +22,11 @@ import type { FromRunner, SpawnRequest, ToRunner } from "./protocol.js";
 
 // Every process a command starts inherits it, setsid or not: how the runner finds them all.
 export const MARKER = "SUROGATE_PROCESS";
+// The root's cgroup in the guest, or null under srt. A run's cgroup is in its run
+// folder, a background process's in its proc folder, where its memory is counted.
+const CGROUPS = process.argv[2] === "--cgroups" ? (process.argv[3] ?? null) : null;
+// The cgroups of commands that have ended, each removed once nothing of it runs.
+const ended = new Set<string>();
 // A process can fork while a sweep goes by: a SIGKILL sweeps again until it finds none.
 const SWEEPS = 10;
 // What waits for a process that does not read its input stays in the runner's memory: this much, at most.
@@ -25,6 +34,8 @@ const MAX_STDIN_BYTES = 1024 * 1024;
 
 interface Child {
   proc: ChildProcess;
+  // Its cgroup in the guest; null under srt.
+  cgroup: string | null;
   // A command with no stdin is a foreground run: what it leaves running ends with it.
   foreground: boolean;
   killed: boolean;
@@ -67,6 +78,46 @@ function argv(request: SpawnRequest, env: NodeJS.ProcessEnv): [string, string[]]
   return ["bash", ["-c", request.command]];
 }
 
+// Every process of the command: in the guest, each in its cgroup, which a SIGKILL
+// ends at once, whatever left the command's session or cleared its environment;
+// under srt, its group and its marker's.
+function signalAll(id: string, child: Child, signal: NodeJS.Signals): void {
+  if (!child.cgroup) return sweep(id, child.proc.pid, signal);
+  try {
+    if (signal === "SIGKILL") return writeFileSync(join(child.cgroup, "cgroup.kill"), "1");
+    for (const member of readFileSync(join(child.cgroup, "cgroup.procs"), "utf8").split("\n").filter(Boolean)) {
+      try {
+        process.kill(Number(member), signal);
+      } catch {
+        // Gone since.
+      }
+    }
+  } catch {
+    // Its cgroup has gone, and everything in it.
+  }
+}
+
+// What the kernel noted in a background process's cgroup: that it ended one of its processes for memory.
+function outOfMemory(cgroup: string | null): boolean {
+  try {
+    return cgroup !== null && /^oom_kill [1-9]/m.test(readFileSync(join(cgroup, "memory.events"), "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+// Each ended command's cgroup, once nothing of it runs: at its end, and at each start after.
+function tidy(): void {
+  for (const cgroup of ended) {
+    try {
+      rmdirSync(cgroup);
+      ended.delete(cgroup);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") ended.delete(cgroup);
+    }
+  }
+}
+
 // The command's process group, then every process in the sandbox that carries its
 // marker: one that called setsid or double-forked has left the group, not the
 // marker. The sandbox has its own pid namespace, so /proc lists only its processes.
@@ -101,7 +152,11 @@ function finish(id: string): void {
   // Killed: what it left may hold its output open, and nothing more is read.
   child.proc.stdout?.destroy();
   child.proc.stderr?.destroy();
-  say({ type: "exit", id, code: child.proc.exitCode, signal: child.proc.signalCode as NodeJS.Signals | null });
+  const oom = outOfMemory(child.cgroup);
+  say({ type: "exit", id, code: child.proc.exitCode, signal: child.proc.signalCode as NodeJS.Signals | null, ...(oom ? { oom } : {}) });
+  if (!child.cgroup) return;
+  ended.add(child.cgroup);
+  tidy();
 }
 
 function start(request: SpawnRequest): void {
@@ -110,17 +165,24 @@ function start(request: SpawnRequest): void {
     say({ type: "error", id, message: "a process with this id is already running" });
     return;
   }
-  const env = { ...base, ...request.env, [MARKER]: id };
-  const [file, args] = argv(request, env);
+  const env = CGROUPS ? { ...base, ...request.env } : { ...base, ...request.env, [MARKER]: id };
+  let [file, args] = argv(request, env);
+  const cgroup = CGROUPS && join(CGROUPS, request.stdin ? "proc" : "run", id);
   let proc: ChildProcess;
   try {
+    if (cgroup) {
+      tidy();
+      mkdirSync(cgroup);
+      // Its shell enters the command's cgroup before it runs the command, so all the command starts is there.
+      [file, args] = ["/bin/sh", ["-c", 'echo $$ > "$0" && exec "$@"', join(cgroup, "cgroup.procs"), file, ...args]];
+    }
     // Its own process group, so one signal reaches what it started too.
     proc = spawn(file, args, { cwd: request.cwd, env, detached: true, stdio: [request.stdin ? "pipe" : "ignore", "pipe", "pipe"] });
   } catch (error) {
     say({ type: "error", id, message: error instanceof Error ? error.message : String(error) });
     return;
   }
-  const child: Child = { proc, foreground: !request.stdin, killed: false, exited: false, done: false };
+  const child: Child = { proc, cgroup, foreground: !request.stdin, killed: false, exited: false, done: false };
   children.set(id, child);
   let started = false;
   // A command that stops reading its stdin is not an error of the runner's.
@@ -140,7 +202,7 @@ function start(request: SpawnRequest): void {
   proc.on("exit", () => {
     child.exited = true;
     // As in a sandbox of its own: a run's leftovers end when its shell does.
-    if (child.foreground) sweep(id, proc.pid, "SIGKILL");
+    if (child.foreground) signalAll(id, child, "SIGKILL");
     if (child.killed) finish(id);
   });
   proc.on("close", () => finish(id));
@@ -150,7 +212,7 @@ function signal(id: string, name: NodeJS.Signals): void {
   const child = children.get(id);
   if (!child) return;
   if (name === "SIGKILL") child.killed = true;
-  sweep(id, child.proc.pid, name);
+  signalAll(id, child, name);
   if (child.killed && child.exited) finish(id);
 }
 
@@ -196,7 +258,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 // The host is done with this sandbox. Everything in the runner's pid namespace
 // ends with it; outside a sandbox, as in the tests, so does each command.
 process.stdin.on("end", () => {
-  for (const [id, child] of children) sweep(id, child.proc.pid, "SIGKILL");
+  for (const [id, child] of children) signalAll(id, child, "SIGKILL");
   process.exit(0);
 });
 process.stdout.write('{"ready":true}\n');

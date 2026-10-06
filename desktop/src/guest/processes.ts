@@ -27,6 +27,7 @@ export const HANDLE_CHARS = 2_000;
 export const APP_QUIT = "The process ended when the app quit";
 export const RUNNER_GONE = "The process ended because the computer's sandbox stopped";
 export const RESTARTED = "The process was stopped because the computer restarted its sandbox; start it again if you still need it";
+export const OUT_OF_MEMORY = "The computer's sandbox ran out of memory and ended this process, or one it started";
 export const restartNotice = (reason: string) =>
   `The computer restarted its sandbox because ${reason}, and stopped your background processes; start them again if you still need them.`;
 export const TOO_MANY = `This computer is already running ${MAX_PROCESSES} background processes for this chat; stop one before starting another.`;
@@ -441,7 +442,10 @@ export class Processes {
     if (record.restarted !== null) record.note = RESTARTED;
     else if (record.killed) record.exitCode = -15;
     else if ("lost" in end) record.note = RUNNER_GONE;
-    else if ("code" in end) record.exitCode = end.code ?? 128 + (end.signal ? osConstants.signals[end.signal] : 0);
+    else if ("code" in end) {
+      record.exitCode = end.code ?? 128 + (end.signal ? osConstants.signals[end.signal] : 0);
+      if (end.oom) record.note = OUT_OF_MEMORY;
+    }
     if (record.pid !== null) this.noticed(record);
     this.running.delete(record.handle.id);
     this.finished.set(record.handle.id, record);
