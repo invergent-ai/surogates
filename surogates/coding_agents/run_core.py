@@ -31,6 +31,7 @@ from surogates.coding_agents.run_progress import (
     summarize_progress_activity,
 )
 from surogates.coding_agents.runner import run_code_agent
+from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.events import EventType
 
 
@@ -41,6 +42,20 @@ class CodingRunOutcome:
     result_event_id: int | None = None
     branch: str | None = None
     checkout_dir: str | None = None
+
+
+def _checkout_root(session: Any) -> str:
+    """The folder a repository is cloned under, for *session*.
+
+    A project's sessions share one ``/workspace`` across their pods, and a
+    clone starts by deleting its folder, so each pod clones under a folder
+    of its own: two threads on one repository keep both checkouts.  It is
+    hidden, so a clone is never taken for a deliverable.
+    """
+    config = getattr(session, "config", None) or {}
+    if not str(config.get("workspace_boundary") or "").startswith("workstream:"):
+        return "/workspace"
+    return f"/workspace/.threads/{sandbox_session_key(session)}"
 
 
 def credential_env(bundle: CredentialBundle) -> tuple[dict[str, str], str | None]:
@@ -133,7 +148,7 @@ async def execute_coding_run(
         # Honor a caller-computed branch (so the tool can augment the prompt
         # with the same name); otherwise derive it from the prompt.
         branch = branch or fix_branch_name(prompt, now=run_now)
-        checkout_dir = f"/workspace/{repo_dir_name(repo['url'])}"
+        checkout_dir = f"{_checkout_root(session)}/{repo_dir_name(repo['url'])}"
         git_env = git_auth_env(git_pat)
         checkout_payload = {
             "action": "checkout",

@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import delete, select, update
 
+from surogates.coding_agents.run_core import execute_coding_run
 from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.db.agent_users import purge_user_account
 from surogates.db.models import Event, Session, SessionCursor, WorkstreamThread
@@ -24,6 +25,7 @@ from surogates.session.store import SessionStore
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from surogates.workstreams.store import WorkstreamStore
+from tests.test_execute_coding_run_repo import _PAT, _FakeStore, _anthropic_creds, _done_poll, _noop_ensure, _sbx
 from tests.test_harness_resilience import _make_harness
 
 from .test_devices import api, next_control  # noqa: F401  (api is a fixture)
@@ -562,3 +564,34 @@ async def test_reports_and_the_users_message_stay_apart(api):
     assert typed == {"role": "user", "content": "Also, cancel the B summary."}
     assert report_a["content"].startswith(f'[Thread "Draft A" ({first.id}) reported]')
     assert report_b["content"].startswith(f'[Thread "Summarise B" ({second.id}) reported]')
+
+
+async def clone_folder_of(session) -> str:
+    """The folder the coding tool deletes and clones into, for *session*."""
+    execute, calls = _sbx(_done_poll())
+    await execute_coding_run(
+        store=_FakeStore(), tenant=SimpleNamespace(org_id=session.org_id, user_id=session.user_id),
+        session=session, credentials=_anthropic_creds(), agent="claude", provider="anthropic",
+        prompt="fix the totals macro", model=None, effort=None, read_only=False,
+        ensure_sandbox=_noop_ensure, execute=execute, should_cancel=lambda: False,
+        repo={"url": "https://github.com/acme/reports", "default_branch": "main"},
+        git_pat=_PAT, now=1_700_000_000.0,
+    )
+    [checkout] = [payload for action, payload in calls if action == "checkout"]
+    return checkout["command"].split("rm -rf -- ", 1)[1].split(";", 1)[0]
+
+
+async def test_two_threads_clone_one_repository_into_two_folders(api):
+    master = await master_of(api, await create(api))
+    first = await start(api, master, title="Fix totals")
+    second = await start(api, master, title="Fix dates", goal="Fix the date macro.")
+    helper = await create_child_session(store=api.app.state.session_store, parent=first, channel="delegation")
+    chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    plain = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
+    assert [await clone_folder_of(s) for s in (first, second, helper, plain)] == [
+        f"/workspace/.threads/{first.id}/reports",
+        f"/workspace/.threads/{second.id}/reports",
+        # A thread's own helper works in the thread's pod and folder.
+        f"/workspace/.threads/{first.id}/reports",
+        "/workspace/reports",
+    ]
