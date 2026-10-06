@@ -33,6 +33,7 @@ from surogates.harness.loop_messages import (
 from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
 from surogates.session.inbox_payload import raises_completion_inbox_item
+from surogates.workstreams import is_project_master
 
 logger = logging.getLogger(__name__)
 
@@ -889,11 +890,13 @@ class ArtifactCompletionMixin:
         # going. ``active_mission_id`` marks a live mission; an Arbor
         # research coordinator also carries ``active_research_run_id`` (and
         # keeps running report turns even after the mission id is cleared at
-        # a terminal verdict), so suppress on either key.
+        # a terminal verdict), so suppress on either key.  A project's master
+        # ends a turn at every exchange while its threads work on.
         config = session.config or {}
         is_orchestrated_session = bool(
             config.get("active_mission_id")
             or config.get("active_research_run_id")
+            or is_project_master(config)
         )
         # Not gated on the summarizer: deciding what was delivered is
         # bookkeeping now, so the download card survives with recaps

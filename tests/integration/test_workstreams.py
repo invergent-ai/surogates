@@ -14,8 +14,10 @@ import surogates.harness.loop as loop_module
 from surogates.db.agent_users import purge_user_account
 from surogates.db.models import Session, SessionCursor, Workstream
 from surogates.harness.prompt import PromptBuilder
+from surogates.harness.turn_summarizer import TurnSummary
 from surogates.runtime import agent_runtime_context_dep, build_agent_runtime_context
 from surogates.runtime.rate_limiter import PerTenantRateLimiter
+from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_service_account_session_token
 from surogates.tenant.context import TenantContext
@@ -512,3 +514,38 @@ async def test_a_coordinator_chat_keeps_its_delegation_prompt(api):
     assert "# Worker Delegation" in prompt
     assert "# Available Sub-Agents" in prompt
     assert "# Running a project" not in prompt
+
+
+class Recap:
+    """A turn summarizer that always has something to say."""
+
+    async def pick_deliverables(self, *, artifacts, **_):
+        return artifacts
+
+    async def summarize_turn(self, **_):
+        return TurnSummary(recap="Answered the question.", artifacts=[])
+
+
+async def turn_summaries(api, session) -> list:
+    store = api.app.state.session_store
+    lease = await store.try_acquire_lease(session.id, "worker-projects", ttl_seconds=60)
+    harness = _make_harness(session_store=store, sandbox_pool=None)
+    harness._turn_summarizer = Recap()
+    await harness._complete_session(
+        session, [{"role": "assistant", "content": "Q3 revenue was 4.2M."}], lease,
+        reason="completed", turn_id="turn-1", user_message="What was Q3 revenue?",
+    )
+    return await store.get_events(session.id, types=[EventType.TURN_SUMMARY])
+
+
+async def test_a_masters_turn_ends_without_a_recap(api):
+    master = await master_of(api, await create(api))
+    assert await turn_summaries(api, master) == []
+    assert (await api.app.state.session_store.get_session(master.id)).status == "completed"
+
+
+async def test_a_chats_turn_ends_with_a_recap(api):
+    chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    session = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
+    [summary] = await turn_summaries(api, session)
+    assert summary.data["recap"] == "Answered the question."
