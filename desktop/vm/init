@@ -38,9 +38,11 @@ modprobe overlay
 echo 1 > /proc/sys/kernel/modules_disabled
 # No user namespaces in the guest: the agent makes the roots' namespaces as root.
 echo 0 > /proc/sys/user/max_user_namespaces
-# What systemd's sysctl files set on a host, which the guest has none of.
+# What systemd's sysctl files set on a host, which the guest has none of, and no
+# io_uring, a large interface every root would share.
 sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 kernel.kexec_load_disabled=1 \
   kernel.unprivileged_bpf_disabled=1 net.core.bpf_jit_harden=2 \
-  fs.protected_symlinks=1 fs.protected_hardlinks=1 fs.protected_fifos=1 fs.protected_regular=2
+  fs.protected_symlinks=1 fs.protected_hardlinks=1 fs.protected_fifos=1 fs.protected_regular=2 \
+  kernel.io_uring_disabled=2
 
 exec /usr/bin/tini -- /usr/bin/node /run/surogate/agent/guest/agent.js

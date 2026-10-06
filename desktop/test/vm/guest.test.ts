@@ -176,7 +176,10 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     const outcome = await run([
       "ip -o link | cut -d' ' -f2",
       "cat /proc/1/comm",
-      "grep -E '^(CapEff|NoNewPrivs):' /proc/self/status | tr -s '\\t' ' '",
+      "grep -E '^(Cap(Prm|Eff|Bnd|Amb)|NoNewPrivs):' /proc/self/status | tr -s '\\t' ' '",
+      // The image's and the folder's mounts: a setuid program or a device node on either counts for nothing.
+      "for at in / .; do findmnt -no OPTIONS -T $at | tr , '\\n' | grep -cE '^no(suid|dev)$'; done",
+      "cat /proc/sys/kernel/io_uring_disabled",
       "ls /run/surogate",
       "touch /usr/bin/x 2>&1 | sed 's/.*: //'",
       "touch /run/surogate/agent/x 2>&1 | sed 's/.*: //'",
@@ -187,7 +190,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     expect(outcome).toEqual({
       ok: {
         output: [
-          "lo:", "tini", "CapEff: 0000000000000000", "NoNewPrivs: 1", "agent", "Permission denied", "Read-only file system",
+          "lo:", "tini", "CapPrm: 0000000000000000", "CapEff: 0000000000000000", "CapBnd: 0000000000000000", "CapAmb: 0000000000000000",
+          "NoNewPrivs: 1", "2", "2", "2", "agent", "Permission denied", "Read-only file system",
           "No space left on device", "no sessions disk", "home and tmp writable", "",
         ].join("\n"),
         returncode: 0,
@@ -310,6 +314,37 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     guest = await Guest.boot(bootLinux, options);
     expect(await setUp(ROOT, folder)).toMatchObject({ type: "done" });
     expect(await run("cat ~/kept")).toEqual({ ok: { output: "kept\n", returncode: 0, timed_out: false } });
+  });
+
+  it("works in a folder under the home, and follows no link a command left on the way to it when the root is set up again", async () => {
+    const home = join(dir, "home", "ana");
+    const thesis = join(home, "My Projects", "Ana's thesis");
+    const ANA = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
+    mkdirSync(thesis, { recursive: true });
+    await guest.stop();
+    guest = await Guest.boot(bootLinux, { ...options, user: { ...USER, home } });
+    expect(await setUp(ANA, thesis)).toMatchObject({ type: "done" });
+    expect(await run("pwd; echo $HOME", ANA)).toEqual({ ok: { output: `${thesis}\n${home}\n`, returncode: 0, timed_out: false } });
+    // The way to the folder, in the root's own home, swapped for a link into the sessions disk; kept through the stop.
+    expect(await run('mv ~/"My Projects" ~/moved && ln -s /run/surogate/sessions/roots ~/"My Projects" && sync && echo planted', ANA))
+      .toMatchObject({ ok: { output: "planted\n" } });
+    await guest.stop();
+    guest = await Guest.boot(bootLinux, { ...options, user: { ...USER, home } });
+    expect(await setUp(ANA, thesis)).toEqual(expect.objectContaining({
+      type: "failed", message: expect.stringContaining("leads elsewhere, so this chat's sandbox is not set up"),
+    }));
+  });
+
+  it("gives no uid for a root whose folder on the sessions disk this guest did not make", async () => {
+    const MADE = "2d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f6a";
+    await guest.stop();
+    for (const argv of [["e2fsck", "-p", "-E", "journal_only", options.sessions], ["debugfs", "-w", "-R", `mkdir /roots/${MADE}`, options.sessions]]) {
+      expect(spawnSync(argv[0] as string, argv.slice(1), { stdio: "ignore" }).status).toBe(0);
+    }
+    guest = await Guest.boot(bootLinux, options);
+    expect(await guest.request({ type: "uid", root: MADE })).toEqual(expect.objectContaining({
+      type: "failed", message: `the folder of ${MADE} on the sessions disk is not one this guest made`,
+    }));
   });
 
   it("gives the root the host user's name, an image account's or a directory's too, and refuses one a passwd line cannot hold", async () => {

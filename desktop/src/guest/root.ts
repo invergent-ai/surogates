@@ -62,7 +62,10 @@ export function uidOf(root: string, sessions = SESSIONS): number {
   if (!ROOT_ID.test(root)) throw new Error(`not a root session id: ${root}`);
   const folder = join(sessions, root);
   try {
-    return statSync(folder).uid;
+    const { uid } = statSync(folder);
+    // Only this agent makes these folders, each owned from FIRST_UID up: any other owner was never given here.
+    if (uid < FIRST_UID) throw new Error(`the folder of ${root} on the sessions disk is not one this guest made`);
+    return uid;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
