@@ -192,9 +192,15 @@ async def backchannel(call: Call, r: Result) -> None:
     if not r.check("agent started answering", started is not None):
         return
     await asyncio.sleep(1.5)
-    said = await call.speak("Da.")
+    await call.speak("Da.")
     await asyncio.sleep(1.5)
-    r.check("a short 'da' does not stop the agent", call.first_loud_after(said + 0.5) is not None)
+    # Sound alone cannot tell: between a lookup's "O clipă…" and its typing the agent is silent and
+    # working. What matters is in the session: the "Da" became no turn and cut no reply.
+    ev = await DB().events(call.room_name)
+    users = [data(e).get("content", "") for e in ev if e["type"] == "user.message"]
+    cut = any(data(e).get("synthetic") == "voice_heard" for e in ev) or any("te-a întrerupt" in u for u in users)
+    r.check("a short 'da' does not stop the agent", len(users) == 1 and not cut,
+            f"{len(users)} caller turns, {'a reply was cut' if cut else 'nothing cut'}")
 
 
 async def goodbye(call: Call, r: Result) -> None:
