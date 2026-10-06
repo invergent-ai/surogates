@@ -1157,6 +1157,10 @@ class Orchestrator:
         )
         await self.session_store.release_stale_lease(session.id)
         await self._release_dead_owner_gate_slot(session)
+        # Every runtime worker sweeps and nothing claims a session, so two can
+        # give up on one at once: only the one that fails it says so.
+        if not await self.session_store.fail_if_active(session.id):
+            return
         await self.session_store.emit_event(
             session.id,
             EventType.SESSION_FAIL,
@@ -1167,7 +1171,6 @@ class Orchestrator:
                 "retryable": False,
             },
         )
-        await self.session_store.update_session_status(session.id, "failed")
         await self._report_failure_to_parent(session.id, "recovery_loop")
         # Nothing will resume it: what it left waiting on a computer must not run later.
         if self._session_factory is not None:

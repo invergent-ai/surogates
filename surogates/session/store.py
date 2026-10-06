@@ -490,6 +490,17 @@ class SessionStore:
                 raise SessionNotFoundError(f"session {session_id} not found")
             await db.commit()
 
+    async def fail_if_active(self, session_id: UUID) -> bool:
+        """Fail *session_id* if it is still active; whether it was."""
+        async with self._sf() as db:
+            result = await db.execute(
+                update(SessionRow)
+                .where(SessionRow.id == session_id, SessionRow.status == "active")
+                .values(status="failed", updated_at=func.now())
+            )
+            await db.commit()
+            return result.rowcount == 1
+
     async def resume_session(self, session_id: UUID, *, source: str = "") -> None:
         """Re-activate an idle (completed/paused) session and record the resume.
 

@@ -1564,48 +1564,53 @@ async def test_a_follow_up_that_cannot_reopen_its_thread_writes_nothing(api, mon
     assert len(await events_of(api, thread.id, EventType.USER_MESSAGE)) == 1
 
 
-def dispatcher(api, harness=None) -> Orchestrator:
+def dispatcher(api, harness=None, **options) -> Orchestrator:
     state = api.app.state
     return Orchestrator(
         state.redis, state.session_store, lambda _session_id: harness,
-        queue_key=SHARED_WORK_QUEUE_KEY, max_concurrent=1, session_factory=state.session_factory,
+        queue_key=SHARED_WORK_QUEUE_KEY, max_concurrent=1, session_factory=state.session_factory, **options,
     )
 
 
 @pytest.mark.parametrize("worker", ["thread", "plain"])
-@pytest.mark.parametrize("recovers", [True, False], ids=["recovers", "gives-up"])
-async def test_a_crashed_worker_reports_once_when_it_fails_for_good(api, monkeypatch, recovers, worker):
+@pytest.mark.parametrize("ending", ["recovers", "gives-up", "gives-up-retries"])
+async def test_a_crashed_worker_reports_once_when_it_fails_for_good(api, monkeypatch, ending, worker):
     # A wake that crashes is retried; only the dispatcher knows when it stops trying.
     monkeypatch.setattr("surogates.orchestrator.dispatcher._BASE_RETRY_DELAY", 0)
     store = api.app.state.session_store
     if worker == "thread":
         parent = await master_of(api, await create(api))
         child = await start(api, parent)
-        crash, reported = RuntimeError("the hub timed out"), {"error": "crash_loop_detected: the hub timed out", "title": "Draft A"}
+        crash, named, titled = RuntimeError("the hub timed out"), "the hub timed out", {"title": "Draft A"}
     else:
         chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
         parent = await store.get_session(UUID(chat.json()["id"]))
         child = await create_child_session(store=store, parent=parent, channel="worker")
         await store.emit_event(child.id, EventType.USER_MESSAGE, {"content": "Check the figures."})
         # A timeout prints as nothing, so the report names its type.
-        crash, reported = asyncio.TimeoutError(), {"error": "crash_loop_detected: TimeoutError"}
+        crash, named, titled = asyncio.TimeoutError(), "TimeoutError", {}
+    # Crashes that differ each time never trip the crash-loop breaker: the retries run out.
+    differing = [ConnectionResetError("the hub reset the connection"), ValueError("the hub sent no agent"), crash]
     harness, _ = waking(api, monkeypatch)
     crashes = 0
 
     async def turn(session, messages, system_prompt, lease, **_):
         nonlocal crashes
         crashes += 1
-        if not recovers or crashes == 1:
+        if ending == "gives-up-retries":
+            raise differing[crashes - 1]
+        if ending == "gives-up" or crashes == 1:
             raise crash
 
     harness._run_loop = turn
     await dispatcher(api, harness)._process(child.id)
     failed = await events_of(api, parent.id, EventType.WORKER_FAILED)
-    if recovers:
+    if ending == "recovers":
         assert (crashes, failed) == (2, [])
     else:
+        reason = "max_retries_exhausted" if ending == "gives-up-retries" else "crash_loop_detected"
         [report] = failed
-        assert (crashes, report.data) == (3, {"worker_id": str(child.id), **reported})
+        assert (crashes, report.data) == (3, {"worker_id": str(child.id), "error": f"{reason}: {named}", **titled})
 
 
 @pytest.mark.parametrize("creator", ["master", "none"])
@@ -1641,15 +1646,48 @@ async def test_a_routine_that_crashes_for_good_says_so_where_its_results_go(api,
         }
 
 
+async def given_up_on(api, thread) -> None:
+    """*thread*'s worker kept dying: the sweeper recovered it three times, and it went quiet."""
+    for _ in range(3):
+        await api.app.state.session_store.emit_event(
+            thread.id, EventType.HARNESS_RECOVERED, {"recovered_by": "orchestrator_sweeper"},
+        )
+    await quiet_for(api, thread, 1)
+
+
+async def sweep(api, thread) -> None:
+    sweeper = dispatcher(api, agent_id=thread.agent_id)
+    await sweeper._sweep_orphans_once(stale_seconds=3600, reason="orchestrator_sweeper")
+
+
 async def test_a_thread_the_orphan_sweeper_gives_up_on_reports_once(api):
     # A worker that keeps dying (out of memory, evicted) never raises in a wake:
     # the sweeper's recovery ceiling is where it ends.
     master = await master_of(api, await create(api))
     thread = await start(api, master)
-    await dispatcher(api)._abandon_unrecoverable_session(thread, attempts=3, reason="orphan_sweep")
+    await given_up_on(api, thread)
+    await sweep(api, thread)
     [failed] = await events_of(api, master.id, EventType.WORKER_FAILED)
     assert failed.data == {"worker_id": str(thread.id), "error": "recovery_loop", "title": "Draft A"}
     assert (await api.app.state.session_store.get_session(thread.id)).status == "failed"
+
+
+async def test_two_sweepers_that_give_up_on_one_thread_report_it_once(api, monkeypatch):
+    # Every runtime worker sweeps, and nothing claims a session.
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await given_up_on(api, thread)
+    find, both_listed = SessionStore.find_orphaned_sessions, asyncio.Barrier(2)
+
+    async def listed_by_both(self, **kwargs):
+        orphans = await find(self, **kwargs)
+        await both_listed.wait()
+        return orphans
+
+    monkeypatch.setattr(SessionStore, "find_orphaned_sessions", listed_by_both)
+    await asyncio.gather(sweep(api, thread), sweep(api, thread))
+    assert len(await events_of(api, thread.id, EventType.SESSION_FAIL)) == 1
+    assert len(await events_of(api, master.id, EventType.WORKER_FAILED)) == 1
 
 
 async def test_a_malformed_files_entry_does_not_break_the_masters_conversation(api):

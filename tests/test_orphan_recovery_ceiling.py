@@ -39,7 +39,8 @@ def _make_store(*, orphans: list, streak: int) -> AsyncMock:
     store.find_orphaned_sessions = AsyncMock(return_value=orphans)
     store.emit_event = AsyncMock()
     store.release_stale_lease = AsyncMock(return_value=True)
-    store.update_session_status = AsyncMock()
+    store.fail_if_active = AsyncMock(return_value=True)
+    store.get_session = AsyncMock(return_value=SimpleNamespace(parent_id=None, channel="web", config={}))
     store.count_recoveries_since_progress = AsyncMock(return_value=streak)
     return store
 
@@ -116,7 +117,7 @@ async def test_sweep_fails_the_session_at_the_ceiling(
     assert fails[0]["reason"] == "recovery_loop"
     assert fails[0]["attempts"] == _MAX_RECOVERY_ATTEMPTS + 2
     assert fails[0]["retryable"] is False
-    store.update_session_status.assert_awaited_once_with(orphan.id, "failed")
+    store.fail_if_active.assert_awaited_once_with(orphan.id)
 
 
 @pytest.mark.asyncio
