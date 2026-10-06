@@ -11,7 +11,7 @@ import { OperationJournal } from "../src/journal/journal.js";
 import type { LinkStatus } from "../src/link/client.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
 import { APP_CLOSED } from "../src/operations/runner.js";
-import { type DeviceStackOptions, startDevice, type ToolLayer } from "../src/shell/device-stack.js";
+import { type DeviceStack, type DeviceStackOptions, startDevice, stopDevice, type ToolLayer } from "../src/shell/device-stack.js";
 import { FakeLinkServer } from "./fake-server.js";
 
 const ROOT = "66666666-6666-4666-8666-666666666666";
@@ -238,5 +238,57 @@ describe("one agent's device", () => {
     } finally {
       journal.close();
     }
+  });
+});
+
+describe("a device that cannot start or stop", () => {
+  const journalPath = () => join(base, "data", "devices", "d", "journal.sqlite");
+  // The journal's lock is free: another can open it.
+  const free = () => {
+    const journal = new OperationJournal(journalPath());
+    journal.close();
+  };
+
+  it("lets its journal go and stops its tools when its start throws, and says why", async () => {
+    tools.guards = () => {
+      throw new Error("the app's environment has no HOME");
+    };
+    await expect(start()).rejects.toThrow("the app's environment has no HOME");
+    expect(order).toEqual(["tools"]);
+    free();
+  });
+
+  it("closes its journal when its tools' stop throws, and says why", async () => {
+    tools.stop = () => {
+      order.push("tools");
+      return Promise.reject(new Error("a host would not stop"));
+    };
+    const device = await start();
+    stops.pop();
+    await server.until(() => statuses.includes("connected"));
+    await expect(device.stop()).rejects.toThrow("a host would not stop");
+    free();
+  });
+});
+
+describe("the app's stop", () => {
+  const vm = () => {
+    const stopped: string[] = [];
+    return { stopped, shared: { stop: async () => void stopped.push("vm") } };
+  };
+
+  it("stops what every device shares after the device, when the device's stop throws too", async () => {
+    const { stopped, shared } = vm();
+    const failing = { stop: () => Promise.reject(new Error("a host would not stop")) } as unknown as DeviceStack;
+    await expect(stopDevice(Promise.resolve(failing), shared)).rejects.toThrow("a host would not stop");
+    expect(stopped).toEqual(["vm"]);
+  });
+
+  it("stops what every device shares when the device never started, or there is none", async () => {
+    const { stopped, shared } = vm();
+    await stopDevice(Promise.reject(new Error("no start")), shared);
+    await stopDevice(undefined, shared);
+    await stopDevice(undefined, null);
+    expect(stopped).toEqual(["vm", "vm"]);
   });
 });

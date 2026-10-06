@@ -1,4 +1,6 @@
-import { spawnSync } from "node:child_process";
+// The demo's thread runs its commands in the VM, as the app does: behind
+// SUROGATE_VM_TESTS=1, with KVM, the image and npm run agent-disk.
+
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
@@ -35,8 +37,7 @@ afterEach(async () => {
   rmSync(folder, { recursive: true, force: true });
 });
 
-// How many of a test's own sleeps run: each test sleeps for a length of its own.
-const sleeping = (seconds: number) => Number(spawnSync("pgrep", ["-fc", `^sleep ${seconds}$`], { encoding: "utf8" }).stdout.trim() || 0);
+let counted = 0;
 const asked = (shell: ElectronApplication) =>
   shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string; detail: string }> }).asked);
 const answer = (shell: ElectronApplication, button: number) => shell.evaluate((_electron, chosen) => {
@@ -49,6 +50,16 @@ const op = (id: string, kind: string, args: Record<string, unknown>, bind = fals
   type: "op", id, session_id: THREAD, calling_session_id: THREAD, invocation_id: bind ? "bind" : "1:c",
   ordinal: bind ? 0 : 1, kind, args, digest: `digest-${id}`,
 });
+
+// How many of a test's own sleeps run in the thread's root, in the guest, as a command
+// of the thread's there counts them: each test sleeps for a length of its own.
+async function sleeping(seconds: number): Promise<number> {
+  const id = `pgrep-${(counted += 1)}`;
+  agent.link.send(op(id, "run", { command: `pgrep -fc '^sleep ${seconds}$' || true`, workdir: null, timeout: 30 }));
+  await agent.link.until(() => results(id).length === 1, 30_000);
+  agent.link.send({ type: "op_ack", id });
+  return Number((results(id)[0]?.outcome as { ok?: { output?: string } }).ok?.output?.trim() || 0);
+}
 
 // The app registered with the fake agent, and a thread bound to *folder*, as the web client binds it.
 async function bound(): Promise<{ shell: ElectronApplication; page: Page; client: Page }> {
@@ -73,7 +84,7 @@ async function bound(): Promise<{ shell: ElectronApplication; page: Page; client
   return { shell, page, client };
 }
 
-describe("the demo", () => {
+describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the demo", () => {
   it("runs a local thread's command in the folder its user confirmed", async () => {
     await bound();
     const asked = await app!.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string }> }).asked);
@@ -95,7 +106,7 @@ describe("the demo", () => {
       message: "Surogate is still working", detail: "1 thread is working on this computer. Quitting now will interrupt that work.",
     });
     await new Promise((resolve) => setTimeout(resolve, 1_000));
-    expect(sleeping(600)).toBe(1);
+    expect(await sleeping(600)).toBe(1);
     expect(await page.getAttribute("#device", "title")).toBe("Connected as Laptop");
     expect(results("run-2")).toEqual([]);
     // Quit anyway: the link closes, the command is recorded cut off by the app, and the app exits.
@@ -113,7 +124,7 @@ describe("the demo", () => {
   });
 });
 
-describe("quitting", () => {
+describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("quitting", () => {
   it("waits for the threads when told to, and quits once they finish", async () => {
     const { shell } = await bound();
     agent.link.send(op("run-3", "run", { command: "sleep 601", workdir: null, timeout: 900 }));
@@ -149,7 +160,7 @@ describe("quitting", () => {
       message: "Quit now?", detail: "Surogate is waiting for 1 thread working on this computer. Quitting now will interrupt that work.",
     });
     await new Promise((resolve) => setTimeout(resolve, 500));
-    expect(sleeping(602)).toBe(1);
+    expect(await sleeping(602)).toBe(1);
     // "Quit now": the app quits, and records the command cut off by the app.
     await answer(shell, 0);
     const closed = shell.waitForEvent("close");

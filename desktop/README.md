@@ -12,7 +12,7 @@ The device-link protocol is the module docstring of `surogates/devices/link.py`.
 
 The shell, in development:
 
-    npm start                  # builds, then runs Electron with ELECTRON_RUN_AS_NODE cleared
+    npm start                  # builds, makes the agent disk, then runs Electron with ELECTRON_RUN_AS_NODE cleared
     npm run test:e2e           # the shell end to end, under xvfb-run, with its sandbox on
 
 Its state lives under `$XDG_DATA_HOME/surogate` (`~/.local/share/surogate`):
@@ -31,4 +31,12 @@ The VM tests boot it under QEMU and KVM (`/dev/kvm`, `qemu-system-x86`,
 `SUROGATE_VM_IMAGE` names another image folder.
 
     npm run build
-    SUROGATE_VM_TESTS=1 npx vitest run test/vm
+    SUROGATE_VM_TESTS=1 npx vitest run test/vm/guest.test.ts
+
+The app runs a chat's commands in that VM, its manager in a utility process of its
+own, with the VM's sockets in a folder of `$XDG_RUNTIME_DIR/surogate` that is its
+state's own. Until the image is delivered, the app boots the image built here (or
+`SUROGATE_VM_IMAGE`'s) with the agent disk `npm run agent-disk` makes from `dist/`.
+The shell's tests that run a command boot it too:
+
+    SUROGATE_VM_TESTS=1 npm run test:e2e
