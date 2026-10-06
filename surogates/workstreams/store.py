@@ -75,12 +75,26 @@ class WorkstreamStore:
             await db.commit()
             return row
 
-    async def add_thread(self, session_id: UUID, workstream_id: UUID, title: str) -> None:
-        """Record *session_id* as a thread of the project, and title its chat."""
+    async def add_thread(self, session_id: UUID, workstream_id: UUID, title: str) -> bool:
+        """Record *session_id* as a thread of the project, and title its chat;
+        False, writing nothing, when the project has been archived.
+
+        The project's row is held while the thread is added, and an archive
+        takes it before it reads the tree it archives, so a thread is either
+        in that tree or refused here.
+        """
         async with self._sf() as db:
+            live = await db.scalar(
+                select(Workstream.id)
+                .where(Workstream.id == workstream_id, Workstream.status == "active")
+                .with_for_update(read=True)
+            )
+            if live is None:
+                return False
             db.add(WorkstreamThread(session_id=session_id, workstream_id=workstream_id, title=title))
             await db.execute(update(SessionRow).where(SessionRow.id == session_id).values(title=title))
             await db.commit()
+            return True
 
     async def get_thread(self, session_id: UUID) -> WorkstreamThread | None:
         async with self._sf() as db:

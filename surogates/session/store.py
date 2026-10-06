@@ -535,6 +535,12 @@ class SessionStore:
         ``INTERRUPT_CHANNEL_PREFIX:<id>`` for every archived session).
         """
         async with self._sf() as db:
+            # A project's row before its tree: a thread being added holds it
+            # (``WorkstreamStore.add_thread``), so the tree read below has
+            # every thread, and a project's change takes it first too.
+            await db.execute(
+                select(WorkstreamRow.id).where(WorkstreamRow.master_session_id == session_id).with_for_update()
+            )
             result = await db.execute(
                 text(
                     """

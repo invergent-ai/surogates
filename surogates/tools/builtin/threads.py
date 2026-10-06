@@ -25,6 +25,9 @@ from surogates.workstreams.derive import GROUPS, derive_thread, question_of
 _MAX_TITLE = 256
 # The statuses the message route lets a message into; an archived thread was deleted.
 _ACCEPTS_MESSAGES = ("active", "idle", "failed", "paused", "completed")
+# The first line of a follow-up, so the thread, and the user reading it, can
+# tell the coordinator's words from the user's own.
+_FROM_COORDINATOR = "[From the project's coordinator]"
 # What a stopped thread's interrupt says.  Never the model's words: the
 # dispatcher reads some reasons as commands (``_SESSION_GONE_REASONS``).
 _STOP_REASON = "stopped by the coordinator"
@@ -286,13 +289,13 @@ async def _message_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     if thread.status not in _ACCEPTS_MESSAGES:
         return _error(f"Thread {thread_id} was deleted.")
     store = kwargs["session_store"]
+    # Out of Resolved first, so a follow-up that is written is also queued.
+    await WorkstreamStore(kwargs["session_factory"]).reopen_thread(thread.id)
     # As a message typed into the thread: a finished turn, a failed one or
     # a stopped one runs again, and its viewers see it resume.
     if thread.status in ("completed", "failed", "paused"):
-        await store.update_session_status(thread.id, "active")
-        await store.emit_event(thread.id, EventType.SESSION_RESUME, {})
-    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": message})
-    await WorkstreamStore(kwargs["session_factory"]).reopen_thread(thread.id)
+        await store.resume_session(thread.id)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": f"{_FROM_COORDINATOR}\n{message}"})
     redis = kwargs.get("redis")
     if redis is not None:
         await enqueue_session(

@@ -51,7 +51,10 @@ async def start_thread(
     thread = await create_thread_session(store=session_store, master=master, config=config)
     content = f"{goal}\n\n## Context\n{context}" if context else goal
     try:
-        await projects.add_thread(thread.id, project.id, title)
+        if not await projects.add_thread(thread.id, project.id, title):
+            # Archived since it was read: the thread goes with the project.
+            await session_store.update_session_status(thread.id, "archived")
+            return None
         await session_store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": content})
         spawned = {"worker_id": str(thread.id), "title": title, "goal": goal[:500]}
         if proposal is not None:

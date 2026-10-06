@@ -781,8 +781,8 @@ class AgentHarness(
         after_event_id: int,
         before: int | None = None,
     ) -> tuple[list[dict], int]:
-        """Thread reports that reached a project's master past *after_event_id*,
-        and below *before* when given.
+        """Thread reports, and news of threads the user started, that reached
+        a project's master past *after_event_id*, and below *before* when given.
 
         Read for each model request, and at the end of a reply, one message
         per report, as replay renders them.  Only a master reads them live:
