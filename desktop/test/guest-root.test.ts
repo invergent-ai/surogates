@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import type { HostUser } from "../src/guest/protocol.js";
-import { NOT_SET_UP, rootEnvironment, Roots } from "../src/guest/root.js";
+import { enter, NOT_SET_UP, rootEnvironment, Roots } from "../src/guest/root.js";
 
 const RUNNER = fileURLToPath(new URL("../dist/guest/runner.js", import.meta.url));
 
@@ -153,19 +153,28 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     const both = await Promise.allSettled([roots.setup("root-2", base, "r1", user), roots.setup("root-2", base, "r1", user)]);
     expect(both.map((settled) => settled.status).sort()).toEqual(["fulfilled", "rejected"]);
     expect(children).toHaveLength(2);
-    // Nothing is given before the root's inputs are checked: not even its uid.
-    const unchecked = new Roots({
-      start: () => {
-        throw new Error("not a share tag: ../r1");
-      },
-      uid: () => {
-        throw new Error("asked for a uid");
-      },
-    });
-    await expect(unchecked.setup("root-6", base, "../r1", user)).rejects.toThrow("not a share tag: ../r1");
     const broken = new Roots({ start: () => spawn("sh", ["-c", "echo no namespaces >&2; exit 1"], { stdio: ["pipe", "pipe", "pipe"] }), uid: () => 10_000 });
     await expect(broken.setup("root-3", base, "r1", user)).rejects.toThrow("no namespaces");
     expect(await broken.perform("root-3", "which", { name: "sh" }, new AbortController().signal, "op-4")).toEqual(NOT_SET_UP);
+  });
+});
+
+describe("a root's inputs", () => {
+  const place = { folder: "/home/ana/project", home: "/home/ana" };
+  const ana: HostUser = { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" };
+
+  // Each is refused before anything is made: here, where the guest's sessions disk is not, giving a uid would fail with ENOENT.
+  it.each([
+    ["../etc", place, "r1", ana, "not a root session id: ../etc"],
+    ["root-1", place, "../r1", ana, "not a share tag: ../r1"],
+    ["root-1", place, "r1", { ...ana, name: "ana:x" }, "not a user name: ana:x"],
+    ["root-1", { ...place, folder: "project" }, "r1", ana, "not a folder: project"],
+    ["root-1", { ...place, folder: "/home/ana/project/" }, "r1", ana, "not a folder: /home/ana/project/"],
+    ["root-1", { ...place, folder: "/home/ana/a\nb" }, "r1", ana, "not a folder: /home/ana/a\nb"],
+    ["root-1", { ...place, home: "/home/a:na" }, "r1", ana, "not a home folder: /home/a:na"],
+    ["root-1", { ...place, home: "/home/ana/" }, "r1", ana, "not a home folder: /home/ana/"],
+  ])("refuses %s %j %s %j before anything is given", async (root, at, tag, user, message) => {
+    await expect(enter(root, at, tag, user)).rejects.toThrow(message);
   });
 });
 

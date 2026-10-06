@@ -38,7 +38,8 @@ describe("the root runner's answers about its own view", { timeout: 20_000 }, ()
     const started = await runner();
     expect(await started.ask({ type: "place", id: "p1", folder: base, home: base, workdir: null }))
       .toEqual({ type: "placed", id: "p1", cwd: base, unenterable: null });
-    expect(await started.ask({ type: "place", id: "p2", folder: base, home: base, workdir: "~" }))
+    // An alias is the folder, whatever the home.
+    expect(await started.ask({ type: "place", id: "p2", folder: base, home: join(base, "sub"), workdir: "~" }))
       .toEqual({ type: "placed", id: "p2", cwd: base, unenterable: null });
     symlinkSync("/etc", join(base, "out"));
     expect(await started.ask({ type: "place", id: "p3", folder: base, home: base, workdir: "out" })).toMatchObject({
@@ -64,7 +65,33 @@ describe("the root runner's answers about its own view", { timeout: 20_000 }, ()
     expect(await found("bin/tool", "w5")).toEqual({ type: "found", id: "w5", found: true });
   });
 
-  it("answers null once the runner has gone", async () => {
+  it.skipIf(process.getuid?.() === 0)("says a folder the root's user cannot enter cannot be entered", async () => {
+    const started = await runner();
+    mkdirSync(join(base, "locked"));
+    chmodSync(join(base, "locked"), 0o000);
+    expect(await started.ask({ type: "place", id: "p5", folder: base, home: base, workdir: "locked" }))
+      .toEqual({ type: "placed", id: "p5", cwd: join(base, "locked"), unenterable: "EACCES" });
+    chmodSync(join(base, "locked"), 0o755);
+  });
+
+  it("answers a which it cannot take, and keeps answering", async () => {
+    const started = await runner();
+    expect(await started.ask({ type: "which", id: "w7", name: 7 as unknown as string, cwd: base }))
+      .toMatchObject({ type: "refused", id: "w7", refusal: { type: "other" } });
+    expect(await started.ask({ type: "which", id: "w8", name: "sh", cwd: base })).toEqual({ type: "found", id: "w8", found: true });
+  });
+
+  it("refuses a question whose id is already waiting, and answers null once the runner has gone, or goes first", async () => {
+    // Ready, then gone at the first question it reads.
+    const child = spawn(process.execPath, ["-e", `process.stdout.write('{"ready":true}\\n'); process.stdin.once("data", () => process.exit(0));`], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const leaving = new SessionRunner(child);
+    runners.push(leaving);
+    await leaving.ready;
+    const asked = leaving.ask({ type: "which", id: "w9", name: "sh", cwd: base });
+    expect(await leaving.ask({ type: "which", id: "w9", name: "sh", cwd: base })).toMatchObject({ type: "refused", id: "w9" });
+    expect(await asked).toBeNull();
     const started = await runner();
     await started.stop();
     expect(await started.ask({ type: "which", id: "w6", name: "sh", cwd: base })).toBeNull();

@@ -3,9 +3,11 @@
 // Section 11, "Sessions in the guest"). Every command of a root runs in its
 // runner, so a server one command starts is reachable from the next.
 
-import { type ChildProcess, execFileSync, spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { chmodSync, chownSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { chmod, mkdir } from "node:fs/promises";
 import { join, posix } from "node:path";
+import { promisify } from "node:util";
 
 import type { Outcome } from "../link/protocol.js";
 import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STOPPED, supervise, timedOut } from "./command.js";
@@ -31,6 +33,12 @@ const ALREADY = "This chat's sandbox is already set up";
 // The cloud sandbox's HOME, under which /etc/surogate/environment names the layout:
 // at the start of a path, in a value or a list of them.
 const CLOUD_HOME = /(?<=^|:)\/home\/sandbox(?=\/|:|$)/g;
+// A share the host has just added is there once the guest's kernel has found its
+// device, within about 50 ms: until then its mount fails, and is tried again.
+const MOUNT_MS = 5_000;
+const MOUNT_RETRY_MS = 25;
+// A root's runner starts in about 50 ms. The host gives a setup 15 s, past this and MOUNT_MS.
+const RUNNER_READY_MS = 5_000;
 // How long past its timeout a run waits for its runner to report the command's
 // end. A runner that answers nothing, its loop blocked on a stalled stat or the
 // runner stopped by a command, holds no run longer than its timeout and this.
@@ -72,10 +80,35 @@ export function uidOf(root: string, sessions = SESSIONS): number {
   return uid;
 }
 
-function checkPath(path: string, what: string): void {
-  if (!path.startsWith("/") || path === "/" || path.includes("\0") || posix.normalize(path) !== path) {
+// A trailing '/' would keep every key out of the folder; a newline would split the
+// shell's and passwd's lines, as a ':' in the home would split its passwd line.
+function checkPath(path: string, what: string, forbidden: RegExp): void {
+  if (!path.startsWith("/") || path === "/" || path.endsWith("/") || forbidden.test(path) || posix.normalize(path) !== path) {
     throw new Error(`not a ${what}: ${path}`);
   }
+}
+
+const execute = promisify(execFile);
+// The shares mounted in this guest, by tag. A share is mounted once and never
+// looked at from here again: a stat on a stalled one would stall every root.
+const mounted = new Set<string>();
+
+async function mountShare(tag: string): Promise<string> {
+  const share = join(SHARES, tag);
+  if (mounted.has(tag)) return share;
+  await mkdir(share, { recursive: true });
+  await chmod(SHARES, 0o700);
+  for (const deadline = Date.now() + MOUNT_MS; ;) {
+    try {
+      await execute("/usr/bin/mount", ["-t", "virtiofs", "-o", "nosuid,nodev", tag, share]);
+      break;
+    } catch (error) {
+      if (Date.now() > deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, MOUNT_RETRY_MS));
+    }
+  }
+  mounted.add(tag);
+  return share;
 }
 
 // The root's runner in its own namespaces: mount, PID, IPC, UTS, network and
@@ -83,20 +116,18 @@ function checkPath(path: string, what: string): void {
 // the runner's stdin ends the runner, then tini, the namespaces' PID 1, and
 // everything in them with it. Killing unshare reaches them only while enter-root
 // builds them: the kernel drops the parent-death signal when the runner takes on
-// the root's user. Nothing is made or mounted until every input has passed.
-export function enter(root: string, place: Place, tag: string, user: HostUser): ChildProcess {
+// the root's user. Nothing is made, mounted or given until every input has passed.
+export async function enter(root: string, place: Place, tag: string, user: HostUser): Promise<ChildProcess> {
   if (!ROOT_ID.test(root)) throw new Error(`not a root session id: ${root}`);
   if (!TAG.test(tag)) throw new Error(`not a share tag: ${tag}`);
   if (!NAME.test(user.name)) throw new Error(`not a user name: ${user.name}`);
-  checkPath(place.folder, "folder");
-  checkPath(place.home, "home folder");
+  checkPath(place.folder, "folder", /[\0\n]/);
+  checkPath(place.home, "home folder", /[\0\n:]/);
   const uid = uidOf(root);
-  const share = join(SHARES, tag);
-  mkdirSync(share, { recursive: true });
-  chmodSync(SHARES, 0o700);
-  if (spawnSync("mountpoint", ["-q", share]).status !== 0) execFileSync("mount", ["-t", "virtiofs", tag, share]);
+  const share = await mountShare(tag);
+  // By its path: never through the PATH made for the commands.
   return spawn(
-    "unshare",
+    "/usr/bin/unshare",
     [
       "--mount", "--pid", "--fork", "--kill-child", "--ipc", "--uts", "--net", "--cgroup", "--propagation", "private", "--",
       ENTER_ROOT, join(SESSIONS, root), place.folder, share, place.home, String(uid), user.name,
@@ -156,13 +187,15 @@ export class Root {
     if (typeof name !== "string") return { error: { type: "value", message: "'name' must be a string" } };
     const found = await first(this.runner.ask({ type: "which", id, name, cwd: this.place.folder }), signal);
     if (found === "cancelled") return CANCELLED;
-    return found !== "timeout" && found?.type === "found" ? { ok: found.found } : SANDBOX_STOPPED;
+    if (found !== "timeout" && found?.type === "found") return { ok: found.found };
+    if (found !== "timeout" && found?.type === "refused") return { error: found.refusal };
+    return SANDBOX_STOPPED;
   }
 }
 
 export interface RootsOptions {
   // The root's runner, started in its namespaces as its own guest user; it checks what it is given first.
-  start(root: string, place: Place, tag: string, user: HostUser): ChildProcess;
+  start(root: string, place: Place, tag: string, user: HostUser): ChildProcess | Promise<ChildProcess>;
   // The root's guest uid.
   uid(root: string): number;
 }
@@ -184,7 +217,7 @@ export class Roots {
     this.starting.add(root);
     try {
       const place = { folder, home: user.home };
-      const runner = new SessionRunner(this.options.start(root, place, tag, user), () => this.roots.delete(root));
+      const runner = new SessionRunner(await this.options.start(root, place, tag, user), () => this.roots.delete(root), RUNNER_READY_MS);
       try {
         await runner.ready;
       } catch (error) {

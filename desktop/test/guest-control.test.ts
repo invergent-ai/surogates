@@ -49,7 +49,7 @@ describe("the agent's control port", () => {
 
   it("ignores lines that are not its messages", () => {
     const { agent, sent } = control();
-    for (const line of ["", "{", "null", "42", '"ping"', '{"type":"bogus","id":1}', '{"type":"ping"}']) agent.receive(line);
+    for (const line of ["", "{", "null", "42", '"ping"', '{"type":"ping"}', '{"type":"ping","id":"1"}']) agent.receive(line);
     expect(sent).toEqual([]);
   });
 
@@ -100,5 +100,60 @@ describe("the agent's control port", () => {
       ["perform", "root-1", "which", { name: "pandoc" }, "op-1"],
       ["perform", "root-1", "run", { command: "sleep 30" }, "op-2"],
     ]);
+  });
+
+  it("answers a request whose fields are not what its type names, and one of a type it does not know", async () => {
+    const { agent, sent, calls, tell, settle } = control();
+    tell({ type: "uid", id: 1 });
+    tell({ type: "setup", id: 2, root: "root-1", folder: 7, tag: "r1" });
+    tell({ type: "op", id: 3, root: "root-1", args: {} });
+    tell({ type: "bogus", id: 4 });
+    await settle();
+    expect(sent).toEqual([
+      { type: "failed", id: 1, message: "The agent cannot take this uid request" },
+      { type: "failed", id: 2, message: "The agent cannot take this setup request" },
+      { type: "result", id: 3, outcome: { error: { type: "value", message: "The agent cannot take this op request" } } },
+      { type: "failed", id: 4, message: "The agent does not know the request bogus" },
+    ]);
+    expect(calls).toEqual([]);
+    agent.hello();
+  });
+
+  it("takes the host's user from hello's answer only, once, and in its shape", async () => {
+    const { agent, sent, calls, tell, settle } = control();
+    agent.hello();
+    tell({ type: "done", id: 0, user: { uid: "1000", gid: 1000, name: "someone", home: "/home/someone" } });
+    tell({ type: "setup", id: 1, root: "root-1", folder: "/home/someone/project", tag: "r1" });
+    tell({ type: "done", id: 0, user: USER });
+    tell({ type: "done", id: 0, user: { ...USER, name: "other" } });
+    tell({ type: "setup", id: 2, root: "root-1", folder: "/home/someone/project", tag: "r1" });
+    await settle();
+    expect(sent.slice(1)).toEqual([{ type: "failed", id: 1, message: NO_HELLO }, { type: "done", id: 2 }]);
+    expect(calls).toEqual([["setup", "root-1", "/home/someone/project", "r1", USER]]);
+  });
+
+  it("answers an operation whose id is still running, and keeps the first one cancellable", async () => {
+    const { sent, tell, settle } = control();
+    tell({ type: "op", id: 1, root: "root-1", kind: "run", args: { command: "sleep 30" } });
+    tell({ type: "op", id: 1, root: "root-1", kind: "which", args: { name: "sh" } });
+    await settle();
+    expect(sent).toEqual([
+      { type: "result", id: 1, outcome: { error: { type: "other", message: "An operation with this id is already running" } } },
+    ]);
+    tell({ type: "cancel", id: 1 });
+    await settle();
+    expect(sent.at(-1)).toEqual({ type: "result", id: 1, outcome: CANCELLED });
+  });
+
+  it("answers an operation the roots could not, rather than end the agent", async () => {
+    const sent: FromAgent[] = [];
+    const roots: ControlRoots = {
+      uid: () => 10_000,
+      setup: async () => {},
+      perform: () => Promise.reject(new Error("broken")),
+    };
+    new Control((message) => sent.push(message), roots).receive(JSON.stringify({ type: "op", id: 1, root: "r", kind: "run", args: {} }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent).toEqual([{ type: "result", id: 1, outcome: { error: { type: "other", message: "Error: broken" } } }]);
   });
 });
