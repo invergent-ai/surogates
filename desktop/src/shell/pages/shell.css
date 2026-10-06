@@ -835,12 +835,17 @@ body.main.first {
 }
 
 .chip {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   margin-top: 4px;
   padding: 1px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--fg-2);
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .thread .side {

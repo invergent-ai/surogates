@@ -95,9 +95,17 @@ export const register = (client: Page, account = ACCOUNT) => client.evaluate(asy
 }, account);
 
 // Run in the fake agent's page: a ProjectsSource on *data*, registered with the desktop after
-// *delay* ms. The page keeps it as window.fakeProjects, whose changed() tells the source's subscribers.
+// *delay* ms. The page keeps it as window.fakeProjects, whose changed() tells the source's subscribers,
+// and whose lists counts the times the projects were listed.
 function serveProjects(data: ProjectFixtures, delay: number): void {
   const listeners = new Map<string, Set<(threadId: string | null) => void>>();
+  const fake = {
+    data,
+    lists: 0,
+    changed: (id: string, threadId: string | null) => {
+      for (const listener of listeners.get(id) ?? []) listener(threadId);
+    },
+  };
   const one = (id: string) => {
     const found = data.projects.find((project) => project.id === id);
     if (!found) throw new Error("No such project");
@@ -105,8 +113,11 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
   };
   const refuse = () => Promise.reject(new Error("The fake source changes nothing"));
   const source: ProjectsSource = {
-    list: async () => data.projects.map(({ id, name, icon, createdAt, updatedAt, waiting, working }) =>
-      ({ id, name, icon, createdAt, updatedAt, waiting, working })),
+    list: async () => {
+      fake.lists++;
+      return data.projects.map(({ id, name, icon, createdAt, updatedAt, waiting, working }) =>
+        ({ id, name, icon, createdAt, updatedAt, waiting, working }));
+    },
     get: async (id) => one(id),
     threads: async (id) => data.threads[one(id).id] ?? [],
     library: async (id) => data.library[one(id).id] ?? [],
@@ -123,9 +134,6 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
       return () => heard.delete(onChange);
     },
   };
-  const changed = (id: string, threadId: string | null) => {
-    for (const listener of listeners.get(id) ?? []) listener(threadId);
-  };
-  Object.assign(window, { fakeProjects: { data, changed } });
+  Object.assign(window, { fakeProjects: fake });
   setTimeout(() => void window.surogateDesktop?.registerProjects(source), delay);
 }

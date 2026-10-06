@@ -183,12 +183,19 @@ function renderOverview(state: State): void {
   const overview = state.overview;
   const threads = overview?.threads ?? [];
   const waiting = threads.filter((found) => found.group === "waiting").length;
-  byId("greeting").textContent = state.account ? `Welcome back, ${state.account.name.split(" ")[0]}.` : "Welcome back.";
-  byId("greeting-line").textContent = !overview ? "Open a project to see its threads."
-    : waiting === 0 ? "Nothing is waiting on you." : `${plural(waiting, "thread is", "threads are")} waiting on you.`;
+  const first = state.account?.name.trim().split(/\s+/)[0];
+  byId("greeting").textContent = first ? `Welcome back, ${first}.` : "Welcome back.";
+  byId("greeting-line").textContent = overview
+    ? (waiting === 0 ? "Nothing is waiting on you." : `${plural(waiting, "thread is", "threads are")} waiting on you.`)
+    : state.view.kind === "project" ? "Loading the project's threads…" : "Open a project to see its threads.";
   byId("thread-count").textContent = String(waiting);
+  byId("thread-count").hidden = waiting === 0;
+  // Waiting on you always shows, and says what it holds while it holds nothing; the other groups show only with threads.
   for (const section of document.querySelectorAll<HTMLElement>(".section")) {
     const rows = threads.filter((found) => found.group === section.dataset.group);
+    section.hidden = rows.length === 0 && section.dataset.group !== "waiting";
+    const desc = section.querySelector<HTMLElement>(":scope > .desc");
+    if (desc) desc.hidden = rows.length > 0;
     section.querySelector(".count")!.textContent = String(rows.length);
     section.querySelector("ul")!.replaceChildren(...rows.map(threadRow));
   }
@@ -222,9 +229,10 @@ async function render(): Promise<void> {
   document.body.classList.toggle("first", state.first);
   byId("first-run").hidden = !state.first;
   const open = state.view.kind === "project" ? state.view : null;
-  // The open project as last listed: a rename shows in the header too.
+  // The open project and thread as last listed: a rename shows in the header too.
   const name = state.projects.find((project) => project.id === open?.id)?.name ?? open?.name;
-  byId("title").textContent = open?.thread?.title ?? name ?? (state.view.kind === "projects" ? "Projects" : state.agent?.name ?? "");
+  const thread = open?.thread ? (state.overview?.threads.find((found) => found.id === open.thread?.id)?.title ?? open.thread.title) : undefined;
+  byId("title").textContent = thread ?? name ?? (state.view.kind === "projects" ? "Projects" : state.agent?.name ?? "");
   // A thread open in the centre: its project, as the way back.
   byId("to-project").hidden = !open?.thread;
   byId("to-project").textContent = open?.thread ? (name ?? "") : "";

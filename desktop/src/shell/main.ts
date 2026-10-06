@@ -126,17 +126,39 @@ function openLink(which: unknown): void {
   void shell.openExternal(url);
 }
 
+let refreshing = false;
+let again = false;
+
 // The projects the page serves, asked again: when it registers its source, when the open
-// project changes, and when the window comes to the front.
+// project changes, and when the window comes to the front. One refresh runs at a time, and
+// asks once more for whatever changed meanwhile, so an older answer never lands last. The
+// open project, once the page lists it no more, is left.
 async function refreshProjects(): Promise<void> {
   if (!served) return;
-  try {
-    listed = await projects.list();
-    await refreshOverview();
-  } catch (error) {
-    report(error);
+  if (refreshing) {
+    again = true;
+    return;
   }
-  changed();
+  refreshing = true;
+  try {
+    do {
+      again = false;
+      try {
+        listed = await projects.list();
+        const open = view.kind === "project" ? view : null;
+        if (open && !listed.some((project) => project.id === open.id)) {
+          overview = null;
+          show({ kind: "web" });
+        }
+        await refreshOverview();
+      } catch (error) {
+        report(error);
+      }
+      changed();
+    } while (again && served);
+  } finally {
+    refreshing = false;
+  }
 }
 
 // The open project's threads, library and routines. A thread open in the centre that has left the
@@ -150,9 +172,10 @@ async function refreshOverview(): Promise<void> {
   remember(project);
   if (view !== open) return;
   overview = { project, threads, library, routines };
-  if (open.thread && !threads.some((thread) => thread.id === open.thread?.id)) {
+  const path = `/chat/${project.masterSessionId}`;
+  if (open.thread && !threads.some((thread) => thread.id === open.thread?.id) && webClientPath(path)) {
     view = { ...open, thread: null };
-    main?.go(`/chat/${project.masterSessionId}`);
+    main?.go(path);
   }
 }
 
@@ -171,6 +194,7 @@ function withdrawProjects(signedOut: boolean): void {
   if (signedOut) {
     listed = [];
     masters.clear();
+    overview = null;
     if (view.kind === "project") show({ kind: "web" });
   }
   changed();
@@ -336,6 +360,8 @@ function bridge(contents: WebContents, agent: Agent): void {
     },
     getAppearance: appearanceNow,
     setAccount: (reported) => {
+      // Another account, or none: the open project's threads are not theirs.
+      if (reported?.userId !== account?.userId) overview = null;
       account = reported;
       changed();
     },
@@ -527,7 +553,8 @@ function wire(window: MainWindow, page: string): void {
   });
   // A thread of the open project, in the centre.
   handle("shell:thread", (id) => {
-    const thread = view.kind === "project" ? overview?.threads.find((found) => found.id === id) : undefined;
+    const thread = view.kind === "project" && overview?.project.id === view.id
+      ? overview.threads.find((found) => found.id === id) : undefined;
     const path = `/chat/${String(id)}`;
     if (view.kind !== "project" || !thread || !webClientPath(path)) throw new Error("No such thread in the open project");
     choose();
