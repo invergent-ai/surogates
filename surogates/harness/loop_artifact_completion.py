@@ -1039,6 +1039,8 @@ class ArtifactCompletionMixin:
                     redis=self._redis,
                     task_id=getattr(session, "task_id", None),
                     session_factory=self._session_factory,
+                    # Only a turn that ended well has a summary of its files.
+                    turn_id=turn_id if wants_turn_summary(session, turn_id=turn_id, reason=reason) else None,
                 )
             except Exception:
                 logger.warning(
@@ -1158,6 +1160,7 @@ class ArtifactCompletionMixin:
                     error=error,
                     redis=self._redis,
                     task_id=getattr(session, "task_id", None),
+                    session_factory=self._session_factory,
                 )
             except Exception:
                 logger.warning(

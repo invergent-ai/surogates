@@ -107,6 +107,34 @@ def build_user_message_dict(
     return {"role": "user", "content": content}
 
 
+#: The events that carry a worker's report to the session that started it.
+WORKER_REPORT_TYPES = frozenset({EventType.WORKER_COMPLETE.value, EventType.WORKER_FAILED.value})
+
+
+def worker_note(event_type: str, data: dict) -> dict:
+    """The user-role message a worker's report is read as, built from its
+    payload alone, so the live loop and replay produce the same bytes.  A
+    project's thread is named by its title, and lists the files of the turn
+    it reports."""
+    worker_id = data.get("worker_id", "?")
+    title = data.get("title")
+    failed = event_type == EventType.WORKER_FAILED.value
+    if title is None and failed:
+        content = f"[Worker {worker_id} failed: {data.get('error', 'unknown error')}]"
+    elif title is None:
+        content = f"[Worker {worker_id} completed]\n{data.get('result', '')}"
+    elif failed:
+        content = f'[Thread "{title}" ({worker_id}) failed: {data.get("error", "unknown error")}]'
+    else:
+        files = data.get("files")
+        if files is None:
+            listed = "not listed (the turn ended early)"
+        else:
+            listed = ", ".join(f["label"] for f in files) or "none"
+        content = f'[Thread "{title}" ({worker_id}) reported]\n{data.get("result", "")}\nFiles: {listed}'
+    return {"role": "user", "content": content}
+
+
 def coalesce_user_messages(messages: list[dict]) -> dict:
     """Merge one or more rendered user-message dicts into a single user turn.
 
@@ -237,6 +265,9 @@ class ContextReplayMixin:
         awaiting_tool_ids: set[str] = set()
         deferred_users: list[dict] = []
         deferred_advisors: list[dict] = []
+        # Worker reports wait for the next model request, which is where the
+        # live loop reads them: after the user's messages, one message each.
+        held_reports: list[dict] = []
 
         def _flush_deferred() -> None:
             nonlocal deferred_users, deferred_advisors
@@ -254,6 +285,8 @@ class ContextReplayMixin:
             etype = event.type
 
             if etype == EventType.LLM_REQUEST.value:
+                messages.extend(held_reports)
+                held_reports = []
                 iteration_open = True
                 awaiting_tool_ids = set()
 
@@ -317,14 +350,14 @@ class ContextReplayMixin:
                     awaiting_tool_ids = set()
 
             # Worker coordination events — injected as synthetic user
-            # messages so the coordinator LLM sees worker results.
-            elif etype == EventType.WORKER_COMPLETE.value:
-                worker_id = event.data.get("worker_id", "?")
-                result = event.data.get("result", "")
-                messages.append({
-                    "role": "user",
-                    "content": f"[Worker {worker_id} completed]\n{result}",
-                })
+            # messages so the coordinator LLM sees worker results.  A worker
+            # reports whenever it finishes, even between the coordinator's
+            # tool call and its result, where a user-role message is refused
+            # by the provider; and merged into a user's message it would
+            # carry the user's words as a report.  So each waits for the
+            # next request, on its own.
+            elif etype in WORKER_REPORT_TYPES:
+                held_reports.append(worker_note(etype, event.data))
 
             elif etype == EventType.BROWSER_DESTROYED.value:
                 # Without this the close is a UI-only event: the model keeps
@@ -349,14 +382,6 @@ class ContextReplayMixin:
                     deferred_users.append(note)
                 else:
                     messages.append(note)
-
-            elif etype == EventType.WORKER_FAILED.value:
-                worker_id = event.data.get("worker_id", "?")
-                error = event.data.get("error", "unknown error")
-                messages.append({
-                    "role": "user",
-                    "content": f"[Worker {worker_id} failed: {error}]",
-                })
 
             # Task-layer terminal signals.  Same synthetic-user-message
             # shape as the worker events above: without a branch here a
@@ -406,6 +431,8 @@ class ContextReplayMixin:
         # Flush any users deferred by an iteration that never closed (the
         # log ends mid-tool-execution because this is an in-progress wake).
         _flush_deferred()
+        # Reports no request has read yet are the newest thing in the log.
+        messages.extend(held_reports)
 
         # Strip stale budget warnings from replayed tool results.
         strip_budget_warnings(messages)

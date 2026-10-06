@@ -30,6 +30,35 @@ logger = logging.getLogger(__name__)
 _MAX_RESULT_CHARS: int = 10_000
 
 
+async def _thread_title(session_factory: Any | None, worker_session_id: UUID) -> str | None:
+    """The title of the project's thread *worker_session_id*; None for any other worker."""
+    if session_factory is None:
+        return None
+    from surogates.workstreams.store import WorkstreamStore
+
+    # A failed lookup reports the thread as a plain worker rather than
+    # losing its report.
+    try:
+        row = await WorkstreamStore(session_factory).get_thread(worker_session_id)
+    except Exception:
+        logger.warning(
+            "Failed to read thread %s; reporting it as a plain worker",
+            worker_session_id, exc_info=True,
+        )
+        return None
+    return row.title if row is not None else None
+
+
+def _turn_files(events: list[Any], turn_id: str) -> list[dict[str, Any]]:
+    """The deliverables the turn's ``turn.summary`` named, as its card shows them."""
+    return [
+        artifact
+        for event in events
+        if event.type == EventType.TURN_SUMMARY.value and (event.data or {}).get("turn_id") == turn_id
+        for artifact in event.data.get("artifacts") or []
+    ]
+
+
 async def notify_parent_of_task_event(
     *,
     session_store: SessionStore,
@@ -90,6 +119,7 @@ async def notify_parent_on_completion(
     redis: Redis | None = None,
     task_id: UUID | None = None,
     session_factory: Any | None = None,
+    turn_id: str | None = None,
 ) -> None:
     """Emit a ``WORKER_COMPLETE`` event into the parent session and re-enqueue it.
 
@@ -114,6 +144,11 @@ async def notify_parent_on_completion(
     text, which may differ from the explicit summary).  When the worker
     completed naturally without ``worker_complete``, ``task.result`` is
     typically ``None`` and we fall back to the extracted LLM response.
+
+    A project's thread also reports its ``title``, and the ``files`` of
+    turn *turn_id*'s summary, which the turn end emits before this.  A turn
+    that ended early has no summary and no *turn_id*, so its report lists
+    no files rather than claiming none.
     """
     try:
         from surogates.harness.message_utils import extract_final_response
@@ -153,6 +188,12 @@ async def notify_parent_on_completion(
                         task_id, exc_info=True,
                     )
 
+        title = await _thread_title(session_factory, worker_session_id)
+        if title is not None:
+            payload["title"] = title
+            if turn_id is not None:
+                payload["files"] = _turn_files(events, turn_id)
+
         await session_store.emit_event(
             parent_session_id,
             EventType.WORKER_COMPLETE,
@@ -186,6 +227,7 @@ async def notify_parent_on_failure(
     error: str,
     redis: Redis | None = None,
     task_id: UUID | None = None,
+    session_factory: Any | None = None,
 ) -> None:
     """Emit a ``WORKER_FAILED`` event into the parent session and re-enqueue it.
 
@@ -202,6 +244,9 @@ async def notify_parent_on_failure(
         }
         if task_id is not None:
             payload["task_id"] = str(task_id)
+        title = await _thread_title(session_factory, worker_session_id)
+        if title is not None:
+            payload["title"] = title
 
         await session_store.emit_event(
             parent_session_id,
