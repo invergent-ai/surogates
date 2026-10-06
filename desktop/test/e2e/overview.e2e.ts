@@ -254,3 +254,61 @@ describe("the Overview pane, at its edges", () => {
     await expect.poll(() => page.textContent("#greeting")).toBe("Welcome back.");
   });
 });
+
+describe("an account's projects", () => {
+  const OTHER = { name: "Bea Other", email: "bea@example.com", userId: "b", orgId: "o" };
+  const others = (): ProjectFixtures => {
+    const data = projectFixtures();
+    data.projects = data.projects.filter((project) => project.id !== REPORT);
+    return data;
+  };
+
+  it("are gone, with the account, once its session expires, and come back for no one else", async () => {
+    const { page, client } = await opened();
+    await expect.poll(() => page.textContent("#user-name")).toBe(ACCOUNT.name);
+    // The session expires: the web client goes to its sign-in page, which serves nothing and,
+    // having no sign-in, tells the desktop that nobody is signed in (leaveDesktop).
+    agent.projects = null;
+    await client.evaluate(() => {
+      location.href = "/login";
+    }).catch(() => {});
+    await expect.poll(() => client.url()).toBe(`${origin}/login`);
+    await client.waitForLoadState();
+    await client.evaluate(async () => {
+      await window.surogateDesktop!.setAccount(null);
+      await window.surogateDesktop!.registerProjects(null);
+    });
+    await expect.poll(() => page.textContent("#user-name")).toBe("Not signed in");
+    expect(await page.textContent("#user-email")).toBe("Sign in to the agent in the window");
+    expect(await page.textContent("#title")).toBe(new URL(origin).host);
+    expect(await page.$$eval("#projects .project", (found) => found.length)).toBe(0);
+    expect(await rows(page)).toBe(0);
+    // Another account signs in, and the web client goes back to the chat the first had open.
+    agent.projects = others();
+    await client.evaluate((path) => {
+      location.href = path;
+    }, `/chat/${REPORT}`).catch(() => {});
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${REPORT}`);
+    await client.waitForLoadState();
+    await client.evaluate((account) => window.surogateDesktop!.setAccount(account), OTHER);
+    await page.waitForSelector(`#projects [data-project="${BUDGET}"]`);
+    expect(await page.textContent("#title")).toBe(new URL(origin).host);
+    expect(await page.isVisible(`#projects [data-project="${REPORT}"]`)).toBe(false);
+    expect(await rows(page)).toBe(0);
+    expect(await page.textContent("#user-name")).toBe(OTHER.name);
+  });
+
+  it("are forgotten, the open one with them, when another account signs in on the same page", async () => {
+    const { page, client } = await opened();
+    await client.evaluate(([project, account]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      fake.data.projects = fake.data.projects.filter((found) => found.id !== project);
+      return window.surogateDesktop!.setAccount(account);
+    }, [REPORT, OTHER] as const);
+    await expect.poll(() => page.textContent("#title")).toBe(new URL(origin).host);
+    expect(await page.$$eval('[aria-current="page"]', (found) => found.length)).toBe(0);
+    expect(await rows(page)).toBe(0);
+    await expect.poll(() => page.isVisible(`#projects [data-project="${REPORT}"]`)).toBe(false);
+    await page.waitForSelector(`#projects [data-project="${BUDGET}"]`);
+  });
+});

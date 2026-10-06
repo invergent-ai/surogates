@@ -141,7 +141,12 @@ export function joinDesktop(desktop: DesktopBridge, api: JoinApi): () => void {
   })().catch((error: unknown) => console.warn("Surogate Desktop could not join this account", error));
   return () => {
     stopped = true;
-    void desktop.setAccount(null);
-    void desktop.registerProjects(null);
+    leaveDesktop(desktop);
   };
+}
+
+/** Nobody is signed in on this page, as on the sign-in page an expired session ends on: the desktop forgets the account and its projects. */
+export function leaveDesktop(desktop: DesktopBridge): void {
+  void desktop.setAccount(null);
+  void desktop.registerProjects(null);
 }

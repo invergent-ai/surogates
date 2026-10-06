@@ -8,7 +8,7 @@ import { authFetch, fetchCurrentUser } from "@/api/auth";
 import { listSessions } from "@/api/sessions";
 import { hasAuthToken } from "@/features/auth";
 import { useVisualViewport } from "@/hooks/use-visual-viewport";
-import { getDesktop, joinDesktop } from "@/lib/desktop-bridge";
+import { getDesktop, joinDesktop, leaveDesktop } from "@/lib/desktop-bridge";
 
 import { AppProvider } from "../provider";
 
@@ -41,11 +41,17 @@ function RootLayout() {
 }
 
 // In Surogate Desktop, once signed in: tell the desktop who is signed in, serve it their
-// projects for its sidebar and Overview pane, and register this computer.
+// projects for its sidebar and Overview pane, and register this computer. A page with no
+// sign-in, such as the sign-in page an expired session lands on, tells it nobody is.
 function useDesktop(signedInRoute: boolean): void {
   useEffect(() => {
     const desktop = getDesktop();
-    if (!desktop || !signedInRoute || !hasAuthToken()) return;
+    if (!desktop) return;
+    if (!hasAuthToken()) {
+      leaveDesktop(desktop);
+      return;
+    }
+    if (!signedInRoute) return;
     return joinDesktop(desktop, {
       register: async (name) => {
         const response = await authFetch("/api/v1/devices", {

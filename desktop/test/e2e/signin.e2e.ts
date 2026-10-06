@@ -200,7 +200,7 @@ describe("the agent's web client", () => {
     await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
     const listeners = () => shell.evaluate(({ BrowserWindow }) => {
       const view = (BrowserWindow.getAllWindows()[0]!.contentView.children[0] as Electron.WebContentsView).webContents;
-      return [view.listenerCount("did-start-navigation"), view.listenerCount("destroyed")];
+      return ["did-navigate", "did-fail-load", "destroyed"].map((name) => view.listenerCount(name));
     });
     const before = await listeners();
     // The folder dialog is cancelled each time.
@@ -208,6 +208,22 @@ describe("the agent's web client", () => {
       expect(await client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"))).toBeNull();
     }
     expect(await listeners()).toEqual(before);
+  });
+
+  it("answers only the account it was registered for", async () => {
+    const { page, client } = await connected();
+    await register(client);
+    await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    await client.evaluate((other) => window.surogateDesktop!.setAccount(other), { ...ACCOUNT, userId: "b", email: "b@example.com" });
+    expect(await client.evaluate(() => window.surogateDesktop!.getDevice())).toMatchObject({ device: null, localFolders: false });
+    await expect(client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"))).rejects.toThrow("another account");
+    await expect(client.evaluate(() => window.surogateDesktop!.bindSession("0b6f3c1e-8a2d-4c5e-9f10-1a2b3c4d5e6f", "a".repeat(43))))
+      .rejects.toThrow("another account");
+    // Its own account again: the computer is theirs.
+    await client.evaluate((account) => window.surogateDesktop!.setAccount(account), ACCOUNT);
+    expect(await client.evaluate(() => window.surogateDesktop!.getDevice())).toMatchObject({
+      device: { deviceId: "d", name: "Laptop" }, localFolders: true,
+    });
   });
 
   it("refuses a token for another agent, and keeps nothing", async () => {

@@ -189,13 +189,30 @@ function withdrawProjects(signedOut: boolean): void {
   if (served) serving = Promise.withResolvers();
   served = false;
   projects.withdrawn();
-  if (signedOut) {
-    listed = [];
-    masters.clear();
-    overview = null;
-    if (view.kind === "project") show({ kind: "web" });
-  }
+  if (signedOut) forgetAccount();
   changed();
+}
+
+// The account's own: its projects, the masters its page named, the open project and its pane.
+function forgetAccount(): void {
+  listed = [];
+  masters.clear();
+  overview = null;
+  if (view.kind === "project") show({ kind: "web" });
+}
+
+/** Run *replaced* whenever *contents* replaces its page: a load that commits, or one that fails and draws its error page. A load the shell cancels replaces nothing. */
+function onReplaced(contents: WebContents, replaced: () => void): () => void {
+  const failed = (_event: unknown, code: number, _description: string, _url: string, isMainFrame: boolean) => {
+    // -3 is a load another replaced, or one that was cancelled.
+    if (isMainFrame && code !== -3) replaced();
+  };
+  contents.on("did-navigate", replaced);
+  contents.on("did-fail-load", failed);
+  return () => {
+    contents.off("did-navigate", replaced);
+    contents.off("did-fail-load", failed);
+  };
 }
 
 function remember(project: Project): void {
@@ -325,36 +342,36 @@ async function registerDevice(agent: Agent, token: string): Promise<DesktopDevic
   }
 }
 
-// A folder is prepared for the window that asked: its prompts go once that window goes or navigates away.
+// A folder is prepared for the window that asked: its prompts go once that window goes or its page is replaced.
 async function preparing<T>(window: string, prepare: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const contents = webContents.fromId(Number(window));
   const controller = new AbortController();
   const gone = () => controller.abort();
-  const navigated = (details: { isMainFrame: boolean; isSameDocument: boolean }) => {
-    if (details.isMainFrame && !details.isSameDocument) controller.abort();
-  };
   if (!contents) controller.abort();
   contents?.once("destroyed", gone);
-  contents?.on("did-start-navigation", navigated);
+  const stop = contents ? onReplaced(contents, gone) : () => {};
   try {
     return await prepare(controller.signal);
   } finally {
     contents?.off("destroyed", gone);
-    contents?.off("did-start-navigation", navigated);
+    stop();
   }
 }
 
 // The bridge, on a view of the agent's web client: its calls answer for this agent only.
 function bridge(contents: WebContents, agent: Agent): void {
+  // The device is the account's it was registered for: a page signed in as anyone else sees none.
+  const anotherAccount = () => kept !== null && (account?.orgId !== kept.orgId || account.userId !== kept.userId);
   const registered = (): DeviceStack => {
+    if (anotherAccount()) throw new Error("This computer is registered with the agent for another account");
     if (!device?.stack) throw new Error("This computer is not registered with the agent");
     return device.stack;
   };
   const handlers = bridgeHandlers(agent.origin, {
     getDevice: () => ({
-      device: kept && { deviceId: kept.deviceId, name: kept.name },
+      device: kept && !anotherAccount() ? { deviceId: kept.deviceId, name: kept.name } : null,
       computerName: hostname(),
-      localFolders: agent.desktopSessions && agent.multiSession,
+      localFolders: !anotherAccount() && agent.desktopSessions && agent.multiSession,
     }),
     registerDevice: (token) => registerDevice(agent, token),
     prepareFolder: (choice, window) => preparing(window, (signal) => registered().binder.prepareFolder(choice, window, signal)),
@@ -363,9 +380,14 @@ function bridge(contents: WebContents, agent: Agent): void {
     },
     getAppearance: appearanceNow,
     setAccount: (reported) => {
-      // Another account, or none: the open project's threads are not theirs.
-      if (reported?.userId !== account?.userId) overview = null;
+      // Another account, or none, or the first: nothing listed before is theirs. A page that
+      // still serves its source answers for whoever is signed in now.
+      const another = reported?.userId !== account?.userId;
       account = reported;
+      if (another) {
+        forgetAccount();
+        void refreshProjects();
+      }
       changed();
     },
     registerProjects: (registered) => {
@@ -386,9 +408,10 @@ function bridge(contents: WebContents, agent: Agent): void {
   contents.ipc.on("desktop:projects-changed", (event, id: unknown, threadId: unknown) => {
     if (fromView(event)) projects.changed(id, threadId);
   });
-  // A page that loads again starts with no source, until it registers one.
-  contents.on("did-start-navigation", (details) => {
-    if (details.isMainFrame && !details.isSameDocument && served) withdrawProjects(false);
+  // A page that loads again starts with no source, until it registers one. Until its load commits,
+  // the page there still serves: a load the shell cancels, as to an address outside the agent's, changes nothing.
+  onReplaced(contents, () => {
+    if (served) withdrawProjects(false);
   });
 }
 

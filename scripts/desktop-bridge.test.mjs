@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { joinDesktop, sessionProjects } from "../web/src/lib/desktop-bridge.ts";
+import { joinDesktop, leaveDesktop, sessionProjects } from "../web/src/lib/desktop-bridge.ts";
 import { projectFixtures } from "../web/src/lib/projects.ts";
 
 const ACCOUNT = { name: "Flavius", email: "f@example.com", userId: "u", orgId: "o" };
@@ -70,6 +70,13 @@ test("serves nothing, and registers nothing, once stopped while the desktop is s
   await settle();
   assert.deepEqual(desktop.calls, [["setAccount", ACCOUNT], ["setAccount", null], ["registerProjects", null]]);
   assert.deepEqual(server.asked, []);
+});
+
+test("tells the desktop that nobody is signed in on a page with no sign-in, as after an expired session", async () => {
+  const desktop = bridge();
+  leaveDesktop(desktop);
+  await settle();
+  assert.deepEqual(desktop.calls, [["setAccount", null], ["registerProjects", null]]);
 });
 
 test("registers nothing for a computer already registered, or an agent without local folders", async () => {

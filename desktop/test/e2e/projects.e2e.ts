@@ -175,6 +175,22 @@ describe("the sidebar's projects", () => {
     expect(client.url()).toBe(`${origin}/chat/${MASTERS[BUDGET]}`);
   });
 
+  it("keep serving when the web client is sent to an address outside the agent's, which opens in the browser", async () => {
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    // Report's page serves its projects again: its threads are in the pane.
+    await page.waitForSelector(".section .thread");
+    // As the web client's upgrade sends the user to the payment page.
+    await client.evaluate(() => {
+      location.href = "https://checkout.example.com/pay";
+    });
+    await expect.poll(() => shell.evaluate(() => (globalThis as unknown as { opened: string[] }).opened))
+      .toEqual(["https://checkout.example.com/pay"]);
+    await page.click(row(BUDGET));
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${MASTERS[BUDGET]}`);
+    expect(await page.isVisible("#failure")).toBe(false);
+  });
+
   it("say why a project did not open", async () => {
     agent.projects!.projects.find((project) => project.id === BUDGET)!.masterSessionId = "not-a-chat";
     const { page, client } = await signedIn();
