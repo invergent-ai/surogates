@@ -2367,34 +2367,33 @@ class SessionStore:
         # sees the most recent harness-driven event.  Used to distinguish
         # idle-between-turns sessions from genuinely abandoned mid-turn
         # sessions.
-        latest_event_type = (
-            select(EventRow.type)
-            .where(
-                EventRow.session_id == SessionRow.id,
-                EventRow.type.notin_(trailing_async_event_types),
+        def latest_event(column):
+            return (
+                select(column)
+                .where(
+                    EventRow.session_id == SessionRow.id,
+                    EventRow.type.notin_(trailing_async_event_types),
+                )
+                .order_by(EventRow.id.desc())
+                .limit(1)
+                .correlate(SessionRow)
+                .scalar_subquery()
             )
-            .order_by(EventRow.id.desc())
-            .limit(1)
-            .correlate(SessionRow)
-            .scalar_subquery()
-        )
-        latest_event_data = (
-            select(EventRow.data)
-            .where(
-                EventRow.session_id == SessionRow.id,
-                EventRow.type.notin_(trailing_async_event_types),
-            )
-            .order_by(EventRow.id.desc())
-            .limit(1)
-            .correlate(SessionRow)
-            .scalar_subquery()
-        )
-        # ``harness.crash`` is not an end: the dispatcher retries it seconds
-        # later, and a worker killed before that leaves nothing else to wake it.
+
+        latest_event_type = latest_event(EventRow.type)
+        latest_event_data = latest_event(EventRow.data)
+        # A ``harness.crash`` under one hour old is no end: the dispatcher
+        # retries it seconds later, and a worker killed before that leaves
+        # nothing else to wake the session.  An older one is left alone, so a
+        # deploy never re-runs a turn its user asked for long ago.
         session_end_event_types = (
             "session.done",
             "session.complete",
             "session.fail",
+        )
+        latest_event_is_an_old_crash = and_(
+            latest_event_type == "harness.crash",
+            latest_event(EventRow.created_at) < func.now() - text("interval '1 hour'"),
         )
         latest_llm_response_is_clean = and_(
             latest_event_type == "llm.response",
@@ -2407,6 +2406,7 @@ class SessionStore:
         )
         latest_event_ended_work = or_(
             latest_event_type.in_(session_end_event_types),
+            latest_event_is_an_old_crash,
             latest_llm_response_is_clean,
         )
         stmt = (

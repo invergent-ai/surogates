@@ -205,23 +205,45 @@ async def test_an_abandoned_session_cancels_what_it_left_on_its_computer(
     assert cancelled == [{session.id}]
 
 
-async def test_a_session_whose_worker_died_after_a_crash_is_recovered(session_store, session_factory, redis_client):
-    # The dispatcher retries a crash a second or two later. A worker killed in
-    # between leaves the crash as the last event, and nothing else to wake it.
-    agent_id = "sweeper-crash-agent"
-    org_id = await create_org(session_factory)
-    user_id = await create_user(session_factory, org_id)
-    session = await session_store.create_session(user_id=user_id, org_id=org_id, agent_id=agent_id)
-    await session_store.emit_event(session.id, EventType.USER_MESSAGE, {"content": "Check the figures."})
-    await session_store.emit_event(session.id, EventType.HARNESS_CRASH, {"error": "the hub timed out"})
-    await _backdate(session_factory, session.id, seconds=120)
-    orchestrator = Orchestrator(
+def _sweeper(session_store, redis_client, agent_id: str) -> Orchestrator:
+    return Orchestrator(
         redis_client=redis_client,
         session_store=session_store,
         harness_factory=lambda _sid: None,
         agent_id=agent_id,
         queue_key=SHARED_WORK_QUEUE_KEY,
     )
-    assert await orchestrator._sweep_orphans_once(stale_seconds=60, reason="orchestrator_sweeper") == 1
-    member = encode_queue_member(org_id=str(org_id), agent_id=agent_id, session_id=str(session.id))
-    assert await redis_client.zrem(SHARED_WORK_QUEUE_KEY, member) == 1
+
+
+async def _stuck(session_store, session_factory, agent_id: str, *events) -> object:
+    """An active, leaseless session of *agent_id* whose last events are *events*."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(user_id=user_id, org_id=org_id, agent_id=agent_id)
+    await session_store.emit_event(session.id, EventType.USER_MESSAGE, {"content": "Check the figures."})
+    for event_type, data in events:
+        await session_store.emit_event(session.id, event_type, data)
+    return session
+
+
+@pytest.mark.parametrize("age, recovered", [(120, 1), (7200, 0)], ids=["2-minutes", "2-hours"])
+async def test_a_session_whose_worker_died_after_a_recent_crash_is_recovered(
+    session_store, session_factory, redis_client, age, recovered,
+):
+    # The dispatcher retries a crash a second or two later. A worker killed in
+    # between leaves the crash as the last event, and nothing else to wake it.
+    # A crash older than an hour is left alone: its turn is long past.
+    agent_id = f"sweeper-crash-agent-{age}"
+    session = await _stuck(session_store, session_factory, agent_id, (EventType.HARNESS_CRASH, {"error": "the hub timed out"}))
+    async with session_factory() as db:
+        await db.execute(
+            text("UPDATE events SET created_at = now() - make_interval(secs => :s) WHERE session_id = :sid"),
+            {"s": age, "sid": session.id},
+        )
+        await db.commit()
+    await _backdate(session_factory, session.id, seconds=age)
+    sweeper = _sweeper(session_store, redis_client, agent_id)
+    assert await sweeper._sweep_orphans_once(stale_seconds=60, reason="orchestrator_sweeper") == recovered
+    member = encode_queue_member(org_id=str(session.org_id), agent_id=agent_id, session_id=str(session.id))
+    assert await redis_client.zrem(SHARED_WORK_QUEUE_KEY, member) == recovered
+
