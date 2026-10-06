@@ -17,6 +17,7 @@ from surogates.coding_agents.run_core import execute_coding_run
 from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.db.agent_users import purge_user_account
 from surogates.db.models import BoardNote, Event, Session, SessionCursor, WorkstreamThread
+from surogates.harness.budget import IterationBudget
 from surogates.harness.loop_context_replay import unread_reports
 from surogates.harness.slash_skill import build_deep_research_message
 from surogates.harness.tool_exec import _build_session_sandbox_spec, execute_single_tool
@@ -880,8 +881,11 @@ TODO_CALL = (
 )
 
 
-async def live_turn(api, monkeypatch, master, replies, *, during_tool=None, during_reply=None) -> list[list[dict]]:
-    """One real turn of *master* against a model that gives *replies* in order.
+async def live_turn(
+    api, monkeypatch, master, replies, *, during_tool=None, during_reply=None, budget=6,
+) -> list[list[dict]]:
+    """One real turn of *master*, of at most *budget* iterations, against a
+    model that gives *replies* in order.
 
     *during_tool* runs while the model's ``todo`` call runs, and
     *during_reply* while the model writes its first reply.  Returns the
@@ -892,11 +896,12 @@ async def live_turn(api, monkeypatch, master, replies, *, during_tool=None, duri
     ToolRuntime(registry).register_builtins()
 
     async def todo(name, arguments, **_):
-        await during_tool()
+        if during_tool is not None:
+            await during_tool()
         return '{"ok": true}'
 
     monkeypatch.setattr(registry, "dispatch", todo)
-    harness = _make_loop_harness(session_store=store)
+    harness = _make_loop_harness(session_store=store, budget=IterationBudget(max_total=budget))
     harness._tools = registry
     harness._tenant = SimpleNamespace(org_id=master.org_id, user_id=master.user_id, asset_root="/tmp/test")
     harness._session_factory = api.app.state.session_factory
@@ -909,7 +914,8 @@ async def live_turn(api, monkeypatch, master, replies, *, during_tool=None, duri
         if during_reply is not None and len(requests) == 1:
             await during_reply()
         message, usage = next(replies)
-        if kwargs["on_tool_call_complete"] is not None:
+        # The final summary's request takes no tool callback.
+        if kwargs.get("on_tool_call_complete") is not None:
             for call in message.get("tool_calls") or []:
                 kwargs["on_tool_call_complete"](call)
         return message, usage
@@ -970,3 +976,60 @@ async def test_a_report_during_the_masters_reply_is_read_before_its_turn_ends(ap
     *_, answer, report = requests[1]
     assert (answer["role"], answer["content"]) == ("assistant", "A is still being drafted.")
     assert report["content"].startswith(f'[Thread "Draft A" ({thread.id}) reported]')
+
+
+@pytest.mark.parametrize("lands", ["after_its_read", "after_its_request"])
+async def test_a_report_that_lands_as_a_request_is_written_is_read_once(api, monkeypatch, lands):
+    # A thread reports just as the master's second request is made: right
+    # after the reports were read for it, or right after the request was
+    # written.  The turn then ends on its budget, which reads no more.
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    store = api.app.state.session_store
+    await store.emit_event(master.id, EventType.USER_MESSAGE, {"content": "Draft A, then tell me."})
+    seen = 0
+
+    async def second_then_report(step, *args, **kwargs):
+        nonlocal seen
+        done = await step(*args, **kwargs)
+        seen += 1
+        if seen == 2:
+            await answered(api, thread, "Drafted the memo.")
+            await turn_ends(api, thread)
+        return done
+
+    if lands == "after_its_read":
+        collect = loop_module.AgentHarness._collect_reports
+        monkeypatch.setattr(
+            loop_module.AgentHarness, "_collect_reports",
+            lambda self, *args, **kwargs: second_then_report(collect, self, *args, **kwargs),
+        )
+    else:
+        emit = store.emit_event
+
+        async def emit_then_report(session_id, event_type, *args, **kwargs):
+            if session_id == master.id and event_type == EventType.LLM_REQUEST:
+                return await second_then_report(emit, session_id, event_type, *args, **kwargs)
+            return await emit(session_id, event_type, *args, **kwargs)
+
+        monkeypatch.setattr(store, "emit_event", emit_then_report)
+    requests = await live_turn(
+        api, monkeypatch, master, [TODO_CALL, TODO_CALL, _final_response("A is under way.")], budget=2,
+    )
+    header = f'[Thread "Draft A" ({thread.id}) reported]'
+
+    def reads_of_the_report(conversation) -> int:
+        return sum(str(m.get("content")).startswith(header) for m in conversation)
+
+    # The log rebuilt up to the second request is what that request sent.
+    events = await store.get_events(master.id)
+    second = [i for i, e in enumerate(events) if e.type == EventType.LLM_REQUEST.value][1]
+    assert [(m["role"], m.get("content")) for m in harness_of(api)._rebuild_messages(events[: second + 1])] == [
+        (m["role"], m.get("content")) for m in requests[1][1:]
+    ]
+    # No request of the turn read it, so once the turn ends it wakes the master.
+    assert [reads_of_the_report(r) for r in requests] == [0, 0, 0]
+    await turn_ends(api, master)
+    sent = await woken(api, monkeypatch, master)
+    assert reads_of_the_report(sent) == 1
+    assert sent[-1]["content"].startswith(header)

@@ -779,14 +779,16 @@ class AgentHarness(
         self,
         session: Session,
         after_event_id: int,
+        before: int | None = None,
     ) -> tuple[list[dict], int]:
-        """Thread reports that reached a project's master past *after_event_id*.
+        """Thread reports that reached a project's master past *after_event_id*,
+        and below *before* when given.
 
-        Read right before each model request, and at the end of a reply,
-        one message per report, as replay renders them.  Only a master
-        reads them live: its only reporting children are its threads.  A
-        ``delegate_task`` parent, which a master never is, already has its
-        child's result as the tool's result.
+        Read for each model request, and at the end of a reply, one message
+        per report, as replay renders them.  Only a master reads them live:
+        its only reporting children are its threads.  A ``delegate_task``
+        parent, which a master never is, already has its child's result as
+        the tool's result.
         """
         if not is_project_master(session.config):
             return [], after_event_id
@@ -795,6 +797,8 @@ class AgentHarness(
             after=after_event_id,
             types=[EventType.WORKER_COMPLETE, EventType.WORKER_FAILED],
         )
+        if before is not None:
+            events = [event for event in events if event.id < before]
         if not events:
             return [], after_event_id
         return (
@@ -2020,17 +2024,9 @@ class AgentHarness(
                 )
                 return
 
-            # Worker reports go right before the request, after the steered
-            # messages, the board update and the harvest: where replay puts
-            # them, so the request it rebuilds is the one sent.  A master's
-            # threads also report during its turn, while a tool runs.
-            arrived, report_cursor = await self._collect_reports(session, report_cursor)
-            messages.extend(reports + arrived)
-            reports = []
-
             # 1. Emit LLM_REQUEST event.
             model_id = self._current_model or session.model or self._default_model
-            await self._store.emit_event(
+            request_id = await self._store.emit_event(
                 session.id,
                 EventType.LLM_REQUEST,
                 {
@@ -2040,6 +2036,17 @@ class AgentHarness(
                     "iteration_index": turn_iteration_index,
                 },
             )
+
+            # Worker reports go last, after the steered messages, the board
+            # update and the harvest: where replay puts them, so the request
+            # it rebuilds is the one sent.  A master's threads also report
+            # during its turn; this request reads those written before it,
+            # and one that lands after it waits for the next request.
+            arrived, report_cursor = await self._collect_reports(
+                session, report_cursor, before=request_id,
+            )
+            messages.extend(reports + arrived)
+            reports = []
 
             # 2. Call the LLM with retry (streaming or non-streaming).
             # Build the message list: system → prefill → memory → conversation.
