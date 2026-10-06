@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import json
 import time
 import uuid
@@ -26,7 +27,10 @@ from websockets.asyncio.client import connect
 
 URL, KEY, SECRET = "ws://127.0.0.1:7880", "devkey", "secret"  # local LiveKit's dev keys
 TTS, STT = "http://127.0.0.1:18080/v1/audio/speech", "ws://127.0.0.1:18001/v1/audio/streams"
-DID, CALLER = "+40300000001", "+40722000111"
+# the number to dial: set VOICE_QA_DID to the test line routed in your local stack (a placeholder here: this
+# repo is public)
+DID = os.environ.get("VOICE_QA_DID", "+40300000001")
+CALLER = "+40722000111"
 RATE = 24000
 FRAME = RATE // 50  # 20 ms
 QUIET_END = 1.5  # seconds of agent silence that end its reply

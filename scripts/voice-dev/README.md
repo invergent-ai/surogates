@@ -27,6 +27,8 @@ an SSH tunnel. Nothing here changes prod.
    ```
 6. **Call it.**
    - Scripted: `.venv/bin/python scripts/voice-dev/caller.py "Bună ziua. Ce poți face pentru mine?" "Mulțumesc, atât."`
+     (the test line is a placeholder in this repo: set `VOICE_DEV_DID` for `livekit-up.sh` and
+     `VOICE_QA_DID` for `caller.py`/`scenarios.py` to the number routed in your local stack)
      It joins as the SIP caller would, speaks each line with our TTS, and prints how long the agent
      took to start answering and what it said (through our STT).
    - By hand: call `sip:+40300000001@127.0.0.1:5060` from a softphone (Linphone, UDP, no account;
