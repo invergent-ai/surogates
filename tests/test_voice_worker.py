@@ -66,3 +66,18 @@ def test_the_pen_writes_once_when_the_caller_answers_a_question_for_details():
     session.emit("user_state_changed", "speaking")  # a second breath of the same answer
     assert scape.calls.count(("writing",)) == 1
     assert scape.calls[-1] == ("caller_speaking", True)
+
+
+async def test_call_cleanup_runs_every_step_even_when_one_fails(caplog):
+    from surogates.voice.worker import run_all
+    done = []
+
+    async def ok(name):
+        done.append(name)
+
+    async def boom():
+        raise ValueError("background crashed")
+
+    await run_all(("end the session", ok("end")), ("background", boom()), ("release the line", ok("release")))
+    assert done == ["end", "release"]
+    assert "background" in caplog.text

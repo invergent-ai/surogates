@@ -173,8 +173,8 @@ async def barge_in(call: Call, r: Result) -> None:
     if not r.check("agent started the story", started is not None):
         return
     await asyncio.sleep(2.0)
-    cut_at = time.monotonic()
     stopped = await call.speak("Stop. Spune-mi doar în ce an a devenit Bucureștiul capitală.")
+    cut_at = call.started_at  # the caller's first word, not the start of synthesising it (~2 s over the tunnel)
     quiet = call.quiet_from(cut_at)
     r.check("agent stopped within 1.5 s of being talked over", quiet is not None and quiet - cut_at <= 1.5,
             f"{None if quiet is None else round(quiet - cut_at, 2)} s")
@@ -233,7 +233,11 @@ async def silence(call: Call, r: Result) -> None:
 async def time_limit(call: Call, r: Result) -> None:
     await call.listen(call.dialed_at)
     await call.speak("Povestește-mi pe larg istoria României, de la daci până azi, cât mai detaliat.")
-    r.check("the call ends at the limit", await call.wait_hung_up(60),
+    ended = await call.wait_hung_up(60)
+    ev = await DB().events(call.room_name)
+    # a refused call ("all lines busy") also hangs up: the limit only counts after a real conversation
+    r.check("the call got a conversation", any(e["type"] == "user.message" for e in ev), f"{len(ev)} events")
+    r.check("the call ends at the limit", ended,
             f"{round(time.monotonic() - call.dialed_at, 1)} s after dialling (limit 30 s)")
 
 

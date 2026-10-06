@@ -249,3 +249,32 @@ def test_pack_load_reads_only_the_chosen_scene(tmp_path):
     assert set(p.beds) == {"clinic"} and len(p.events["clinic"]) == 1 and len(p.events["clinic"][0]) == 2
     assert set(p.actions) == {"keys", "pen"} and set(p.hold) == {"piano"}
     assert "bed-bank.ogg" not in loaded
+
+
+# --- cleanup (found by voice-qa: a crash here left every call's line taken) ----------------------
+
+def test_overlapping_sounds_of_different_lengths_finish_without_error():
+    s = scape(room="off", events="off")
+    s._play("event", tone(2.0, 200), -30)
+    s._play("action", tone(0.3, 300), -19)  # finishes first and is removed while the longer one plays
+    run(s, 3)
+    assert s._voices == []
+
+
+@pytest.mark.asyncio
+async def test_closing_the_player_never_hangs_on_a_room_that_is_gone():
+    import asyncio
+    from types import SimpleNamespace
+    from surogates.voice.soundscape import SoundscapePlayer
+
+    async def forever(_sid):
+        await asyncio.Event().wait()
+
+    player = SoundscapePlayer(scape())
+    player._task = asyncio.ensure_future(asyncio.Event().wait())
+    player._track = SimpleNamespace(sid="TR_1")
+    player._room = SimpleNamespace(isconnected=lambda: True, local_participant=SimpleNamespace(unpublish_track=forever))
+    await asyncio.wait_for(player.aclose(), timeout=4)  # raises TimeoutError if it hangs
+    player._task = asyncio.ensure_future(asyncio.Event().wait())
+    player._room = SimpleNamespace(isconnected=lambda: False, local_participant=None)  # gone: nothing to unpublish
+    await asyncio.wait_for(player.aclose(), timeout=4)

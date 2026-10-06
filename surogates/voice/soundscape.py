@@ -165,7 +165,7 @@ async def fetch_pack(get: Callable[[str], Any], cache: Path, settings: SoundSett
         return None
 
 
-@dataclass
+@dataclass(eq=False)  # removed by identity: a field-wise == would compare numpy clips and raise
 class _Voice:
     clip: np.ndarray
     gain: float
@@ -415,17 +415,23 @@ class SoundscapePlayer:
                                                             num_channels=1, samples_per_channel=n))
 
     async def aclose(self) -> None:
+        """Fade out and take the track down. Never raises and never waits long: it runs in the call's
+        cleanup, often after the room is gone, and nothing after it may be held up."""
         if self._task is None:
             return
-        self.scape.end()
-        await asyncio.sleep(HANGUP)
+        live = self._room is not None and self._room.isconnected()
+        if live:
+            self.scape.end()
+            await asyncio.sleep(HANGUP)
         self._task.cancel()
         try:
             await self._task
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, Exception):  # a mixer that crashed must not fail the cleanup
             pass
         self._task = None
+        if not live:
+            return
         try:
-            await self._room.local_participant.unpublish_track(self._track.sid)
-        except Exception:  # the room is usually gone by now
+            await asyncio.wait_for(self._room.local_participant.unpublish_track(self._track.sid), timeout=2)
+        except Exception:  # the room went away meanwhile: nothing to take down
             log.debug("could not unpublish the background track", exc_info=True)
