@@ -140,6 +140,19 @@ STREAM_CHUNK_POLL_INTERVAL: float = 1.0
 # silently reasoning" from "stream is dead".  Picked to be short
 # enough that users see motion within ~15s of silence.
 STREAM_HEARTBEAT_INTERVAL: float = 15.0
+# How often a non-streaming call in flight checks whether its turn was stopped.
+NON_STREAMING_INTERRUPT_POLL: float = 0.2
+
+
+class _TurnStopped(Exception):
+    """The turn was stopped while a non-streaming call was in flight."""
+
+
+def _interrupted_result(model: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """What an interrupted call returns: the same shape as an interrupted stream, nothing said."""
+    return ({"role": "assistant", "content": ""},
+            {"model": model, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
+             "finish_reason": "interrupted"})
 
 # Maximum reasoning_content characters allowed before any visible
 # content or tool-call delta has arrived.  Above this, the stream is
@@ -605,6 +618,9 @@ async def call_llm_with_retry(
     rate_limit_fallback_active = False
 
     for attempt in range(1, MAX_LLM_RETRIES + 1):
+        # A stopped turn never starts another full call (a retry after a backoff used to).
+        if callable(interrupt_check) and interrupt_check():
+            return _interrupted_result(create_kwargs.get("model", ""))
         if rate_limit_guard is not None and not rate_limit_fallback_active:
             remaining = await rate_limit_guard.remaining_seconds()
             if remaining is not None:
@@ -649,6 +665,7 @@ async def call_llm_with_retry(
                     iteration=iteration,
                     llm_client=llm_client,
                     store=store,
+                    interrupt_check=interrupt_check,
                     turn_id=turn_id,
                     iteration_index=iteration_index,
                 )
@@ -1178,6 +1195,7 @@ async def call_llm_streaming(
                 iteration=iteration,
                 llm_client=llm_client,
                 store=store,
+                interrupt_check=interrupt_check,
                 turn_id=turn_id,
                 iteration_index=iteration_index,
             )
@@ -1712,8 +1730,13 @@ async def _await_with_heartbeats(
     iteration: int,
     turn_id: str | None,
     iteration_index: int | None,
+    interrupt_check: Callable[[], bool] | None = None,
 ) -> Any:
     """Await *coro*, emitting ``LLM_HEARTBEAT`` while it is in flight.
+
+    With *interrupt_check*, the wait also looks for a stopped turn every
+    ``NON_STREAMING_INTERRUPT_POLL`` seconds and raises ``_TurnStopped``
+    (cancelling the request) as soon as it sees one.
 
     A non-streaming call produces no ``llm.delta`` events, so without this
     the session emits nothing for the whole (potentially minute-scale)
@@ -1723,14 +1746,19 @@ async def _await_with_heartbeats(
     LLM result or error, which ``task.result()`` re-raises faithfully.
     """
     task = asyncio.ensure_future(coro)
-    start = time.monotonic()
+    start = last_beat = time.monotonic()
+    poll = STREAM_HEARTBEAT_INTERVAL if interrupt_check is None else min(
+        NON_STREAMING_INTERRUPT_POLL, STREAM_HEARTBEAT_INTERVAL)
     try:
         while True:
-            done, _ = await asyncio.wait(
-                {task}, timeout=STREAM_HEARTBEAT_INTERVAL,
-            )
+            done, _ = await asyncio.wait({task}, timeout=poll)
             if task in done:
                 return task.result()
+            if interrupt_check is not None and interrupt_check():
+                raise _TurnStopped()
+            if time.monotonic() - last_beat < STREAM_HEARTBEAT_INTERVAL:
+                continue
+            last_beat = time.monotonic()
             try:
                 await store.emit_event(
                     session.id,
@@ -1765,8 +1793,12 @@ async def call_llm_non_streaming(
     store: SessionStore | None = None,
     turn_id: str | None = None,
     iteration_index: int | None = None,
+    interrupt_check: Callable[[], bool] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Call the LLM without streaming. Returns (message_dict, usage_dict).
+
+    A stop seen by *interrupt_check* while the call is in flight returns an
+    empty ``finish_reason="interrupted"`` result at once.
 
     When ``store`` is provided, ``LLM_HEARTBEAT`` events are emitted while
     the (otherwise event-silent) request is in flight, so the UI shows the
@@ -1797,14 +1829,18 @@ async def call_llm_non_streaming(
     if store is None:
         response = await create_call
     else:
-        response = await _await_with_heartbeats(
-            create_call,
-            session=session,
-            store=store,
-            iteration=iteration,
-            turn_id=turn_id,
-            iteration_index=iteration_index,
-        )
+        try:
+            response = await _await_with_heartbeats(
+                create_call,
+                session=session,
+                store=store,
+                iteration=iteration,
+                turn_id=turn_id,
+                iteration_index=iteration_index,
+                interrupt_check=interrupt_check,
+            )
+        except _TurnStopped:
+            return _interrupted_result(model_id)
 
     # Response shape validation.
     if response is None or not getattr(response, "choices", None):

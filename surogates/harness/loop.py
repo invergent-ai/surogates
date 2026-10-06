@@ -27,7 +27,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
-from surogates.channels.constants import END_USER_CHANNELS, STUDIO_CHANNEL
+from surogates.channels.constants import END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
 from surogates.devices.sandbox import enter_device_session, leave_device_session
@@ -76,8 +76,8 @@ from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
 from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
-from surogates.channels.memory_boundary import MANAGED_CHANNELS
 from surogates.harness.tool_schemas import (
+    channel_tool_flags,
     drop_unusable_tools,
     filter_schemas_for_tenant,
 )
@@ -1824,7 +1824,7 @@ class AgentHarness(
             # Default to "has it" when the attribute is absent: an
             # unknown resource must never cause a tool to vanish.
             has_kbs=getattr(self._prompt, "has_kbs", True),
-            has_channel=getattr(session, "channel", None) in MANAGED_CHANNELS,
+            **channel_tool_flags(getattr(session, "channel", None)),
             is_scheduled=bool(
                 (getattr(session, "config", None) or {}).get(
                     "scheduled_session_id")
@@ -3534,6 +3534,11 @@ class AgentHarness(
             and session.channel != STUDIO_CHANNEL
         ):
             return None
+        # A phone caller has already heard the answer: there is no widget to
+        # rescue it into, and the judge's blocking calls would hold their next
+        # turn.  The voice channel speaks questions itself.
+        if session.channel in REALTIME_CHANNELS:
+            return None
 
         decision = await self._judge_final_response_user_action(
             messages=messages,
@@ -4772,7 +4777,9 @@ class AgentHarness(
         list refresh.  Messages are snapshotted so the chat thread can keep
         mutating the live list without racing the background reader.
         """
-        if (session.title or "").strip():
+        # A phone call is titled when it opens ("Apel de la …"); an LLM title would be one more
+        # background call the session waits on before the caller's next turn.
+        if (session.title or "").strip() or getattr(session, "channel", None) in REALTIME_CHANNELS:
             return
         task = asyncio.create_task(
             self._run_title_generation(

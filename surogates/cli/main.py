@@ -151,6 +151,19 @@ def cmd_channels(args: argparse.Namespace) -> None:
     asyncio.run(run_channels(settings, kind=kind))
 
 
+def cmd_voice(args: argparse.Namespace) -> None:
+    """Answer phone calls through LiveKit SIP (needs the ``voice`` extra)."""
+    from surogates.config import load_settings
+    from surogates.voice.worker import run_voice
+
+    settings = load_settings()
+    _configure_logging(settings.log_level)
+    logging.getLogger("surogates.voice").info(
+        "Starting voice worker %r against %s", settings.voice.agent_name, settings.voice.livekit_url,
+    )
+    asyncio.run(run_voice(settings))
+
+
 def cmd_migrate(args: argparse.Namespace) -> None:
     """Run database migrations."""
     from surogates.config import load_settings
@@ -240,6 +253,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional platform kind to restrict delivery loops (e.g. 'slack')",
     )
 
+    # surogate voice
+    sub.add_parser("voice", help="Answer phone calls through LiveKit SIP")
+
     return parser
 
 
@@ -250,6 +266,7 @@ COMMANDS = {
     "migrate": cmd_migrate,
     "doctor": cmd_doctor,
     "channels": cmd_channels,
+    "voice": cmd_voice,
 }
 
 

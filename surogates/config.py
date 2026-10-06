@@ -216,13 +216,15 @@ async def enqueue_session(
     ``(org_id, agent_id, session_id)`` tuple so the dispatcher can
     extract the tenant for the per-tenant concurrency-gate check
     without a DB round-trip per dequeue.  Lower *priority* values
-    are popped first.
+    are popped first.  A session already queued keeps the better of
+    its two places (``LT``): a plain wake must never push a phone
+    call's turn (priority -1) back behind ordinary work.
     """
     member = encode_queue_member(
         org_id=str(org_id), agent_id=str(agent_id),
         session_id=str(session_id),
     )
-    await redis.zadd(SHARED_WORK_QUEUE_KEY, {member: priority})
+    await redis.zadd(SHARED_WORK_QUEUE_KEY, {member: priority}, lt=True)
 
 
 # Default Redis channel prefix for session interrupts.
@@ -765,6 +767,30 @@ class HubSettings(BaseSettings):
     password: str = ""
 
 
+class VoiceSettings(BaseSettings):
+    """Phone calls through LiveKit SIP (``surogates voice``).
+
+    ``stt_url`` / ``tts_url`` are our Romanian speech services; in development
+    they are the prod ones through an SSH tunnel. ``max_calls`` is per process:
+    LiveKit sends no more jobs once it is reached.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_VOICE_"}
+
+    livekit_url: str = "ws://127.0.0.1:7880"
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+    agent_name: str = "surogate-voice"
+    stt_url: str = "ws://127.0.0.1:18001/v1/audio/streams"
+    tts_url: str = "http://127.0.0.1:18080/v1/audio/speech"
+    sounds_cache: str = "~/.cache/surogates/voice-sounds"  # the soundscape pack, downloaded from ops
+    max_calls: int = 8
+    max_concurrent_calls: int = 8  # across all voice workers: one STT pod carries 8 streams
+    idle_processes: int = 2  # prewarmed job processes; LiveKit's default is one per CPU core
+    process_init_timeout: float = 30.0  # importing surogates + loading Silero; LiveKit's 10 s is too tight
+    health_port: int = 8003
+
+
 class Settings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_"}
 
@@ -790,6 +816,7 @@ class Settings(BaseSettings):
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     website: WebsiteSettings = Field(default_factory=WebsiteSettings)
     channels: ChannelsSettings = Field(default_factory=ChannelsSettings)
+    voice: VoiceSettings = Field(default_factory=VoiceSettings)
 
     # Tenant asset root.  Used by the per-session sandbox pods to mount
     # workspace volumes; the platform itself no longer reads filesystem

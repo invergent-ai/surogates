@@ -12,6 +12,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from surogates.channels.constants import ADAPTER_CHANNELS, VOICE_TOOLS
+
 _AGENT_TYPE_GATED_TOOLS: frozenset[str] = frozenset({
     "delegate_task",
     "spawn_worker",
@@ -71,6 +73,12 @@ _WHITEBOARD_TOOLS: frozenset[str] = frozenset({
 })
 
 
+def channel_tool_flags(channel: str | None) -> dict[str, bool]:
+    """Which channel-bound tools a session on ``channel`` can use: the text channels' tools (read the
+    channel's messages or files, post into it) need a text channel adapter; a phone call has its own."""
+    return {"has_channel": channel in ADAPTER_CHANNELS, "is_voice": channel == "voice"}
+
+
 def drop_unusable_tools(
     schemas: list[dict[str, Any]],
     *,
@@ -78,6 +86,7 @@ def drop_unusable_tools(
     has_channel: bool,
     is_scheduled: bool,
     is_whiteboard: bool = False,
+    is_voice: bool = False,
 ) -> list[dict[str, Any]]:
     """Drop tools whose backing resource this agent does not have.
 
@@ -99,6 +108,8 @@ def drop_unusable_tools(
         drop |= _CRON_TOOLS
     if not is_whiteboard:
         drop |= _WHITEBOARD_TOOLS
+    if not is_voice:
+        drop |= VOICE_TOOLS
     if not drop:
         return schemas
 
