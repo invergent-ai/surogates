@@ -14,7 +14,7 @@ import {
 } from "electron";
 
 import type { DesktopAccount, DesktopDevice } from "../../../web/src/lib/desktop-bridge-contract.js";
-import type { ProjectSummary } from "../../../web/src/lib/projects-contract.js";
+import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow } from "../../../web/src/lib/projects-contract.js";
 import { verifyDevice } from "../device.js";
 import { appEnvironment } from "../hosts/environment.js";
 import { ToolHosts } from "../hosts/tool-hosts.js";
@@ -62,9 +62,16 @@ let account: DesktopAccount | null = null;
 const projects = new PageProjects((message) => main?.webContents()?.send("desktop:projects", message));
 let served = false;
 let listed: ProjectSummary[] = [];
-// What the centre shows: a page of the web client, the Projects page, or a project's conversation.
-type View = { kind: "web" } | { kind: "projects" } | { kind: "project"; id: string; name: string };
+// What the centre shows: a page of the web client, the Projects page, or a project's conversation,
+// or one of its threads, with the project as the way back (Section 12, View thread).
+type View =
+  | { kind: "web" }
+  | { kind: "projects" }
+  | { kind: "project"; id: string; name: string; thread: { id: string; title: string } | null };
 let view: View = { kind: "web" };
+// The open project, for the Overview pane, and what stops following it.
+let overview: { project: Project; threads: ThreadRow[]; library: LibraryEntry[]; routines: Routine[] } | null = null;
+let unfollow = (): void => {};
 
 const report = (error: unknown): void => {
   console.error(error);
@@ -90,15 +97,39 @@ function changed(): void {
 
 const appearanceNow = () => ({ ...appearance.get(), theme: theme.dark ? ("dark" as const) : ("light" as const) });
 
-// The projects the page serves, listed again: when it registers its source, and when the window comes to the front.
+// The projects the page serves, asked again: when it registers its source, when the open
+// project changes, and when the window comes to the front.
 async function refreshProjects(): Promise<void> {
   if (!served) return;
   try {
     listed = await projects.list();
+    await refreshOverview();
   } catch (error) {
     report(error);
   }
   changed();
+}
+
+// The open project's threads, library and routines. A thread open in the centre that has left the
+// project takes the centre back to the project's conversation.
+async function refreshOverview(): Promise<void> {
+  const open = view.kind === "project" ? view : null;
+  if (!open) return;
+  const [project, threads, library, routines] = await Promise.all([
+    projects.get(open.id), projects.threads(open.id), projects.library(open.id), projects.routines(open.id),
+  ]);
+  if (view !== open) return;
+  overview = { project, threads, library, routines };
+  if (open.thread && !threads.some((thread) => thread.id === open.thread?.id)) {
+    view = { ...open, thread: null };
+    main?.go(`/chat/${project.masterSessionId}`);
+  }
+}
+
+// Follow the open project's changes, as Section 12's stream tells them, once more after the page registers again.
+function follow(): void {
+  unfollow();
+  unfollow = view.kind === "project" ? projects.subscribe(view.id, () => void refreshProjects()) : () => {};
 }
 
 // The page withdrew its projects (signed out), or went: nothing is asked of it until it registers again.
@@ -219,6 +250,7 @@ function bridge(contents: WebContents, agent: Agent): void {
     registerProjects: (registered) => {
       if (!registered) return withdrawProjects(true);
       served = true;
+      follow();
       void refreshProjects();
     },
   });
@@ -268,6 +300,7 @@ function state() {
     },
     account,
     view,
+    overview: view.kind === "project" && overview?.project.id === view.id ? overview : null,
     projects: listed,
     unreachable: main?.unreachable ?? null,
     notice: credentials.unencrypted() ? "Credentials on this computer are not encrypted: Linux has no secret store here" : null,
@@ -315,12 +348,14 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:go", (path) => {
     if (typeof path !== "string" || !webClientPath(path)) throw new Error("Not a page of the web client");
     view = { kind: "web" };
+    follow();
     window.showWeb(true);
     window.go(path);
     changed();
   });
   handle("shell:projects", () => {
     view = { kind: "projects" };
+    follow();
     window.showWeb(false);
     changed();
   });
@@ -330,8 +365,18 @@ function wire(window: MainWindow, page: string): void {
     const project = await projects.get(id);
     const path = `/chat/${project.masterSessionId}`;
     if (!webClientPath(path)) throw new Error("This project's conversation is not a chat");
-    view = { kind: "project", id: project.id, name: project.name };
+    view = { kind: "project", id: project.id, name: project.name, thread: null };
+    follow();
     window.showWeb(true);
+    window.go(path);
+    void refreshProjects();
+  });
+  // A thread of the open project, in the centre.
+  handle("shell:thread", (id) => {
+    const thread = view.kind === "project" ? overview?.threads.find((found) => found.id === id) : undefined;
+    const path = `/chat/${String(id)}`;
+    if (view.kind !== "project" || !thread || !webClientPath(path)) throw new Error("No such thread in the open project");
+    view = { ...view, thread: { id: thread.id, title: thread.title } };
     window.go(path);
     changed();
   });

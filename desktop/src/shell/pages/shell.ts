@@ -14,11 +14,29 @@ interface ProjectRow {
   working: number;
 }
 
+// A thread, as Section 12's ThreadRow has it.
+interface ThreadRow {
+  id: string;
+  title: string;
+  group: "waiting" | "working" | "idle" | "resolved";
+  reason: "question" | "approval" | "failed" | "computer" | null;
+  statusLine: string | null;
+  progress: { done: number; total: number } | null;
+  files: Array<{ label: string }>;
+  place: { kind: "cloud" } | { kind: "device"; deviceName: string; online: boolean };
+  updatedAt: string;
+}
+
 interface State {
   first: boolean; // no agent yet: the first run fills the window
   agent: { name: string } | null;
-  view: { kind: "web" } | { kind: "projects" } | { kind: "project"; id: string; name: string };
+  view: { kind: "web" } | { kind: "projects" } | { kind: "project"; id: string; name: string; thread: { id: string; title: string } | null };
   projects: ProjectRow[]; // last active first
+  overview: {
+    threads: ThreadRow[]; // last active first
+    library: Array<{ path: string; origin: "added" | "produced"; threadId: string | null; size: number | null; updatedAt: string | null }>;
+    routines: Array<{ name: string; scheduleDisplay: string }>;
+  } | null;
   device: { text: string; status: string | null } | null;
   account: { name: string; email: string; userId: string; orgId: string } | null;
   unreachable: string | null;
@@ -31,6 +49,7 @@ interface Shell {
   go(path: string): Promise<void>;
   projects(): Promise<void>;
   project(id: string): Promise<void>;
+  thread(id: string): Promise<void>;
   back(): Promise<void>;
   forward(): Promise<void>;
   reload(): Promise<void>;
@@ -104,13 +123,92 @@ function renderCards(): void {
   byId("no-projects").hidden = last.projects.length > 0;
 }
 
+const plural = (count: number, one: string, many: string): string => `${count} ${count === 1 ? one : many}`;
+const kilobytes = (size: number | null): string => (size === null ? "" : ` · ${Math.max(1, Math.round(size / 1024))} KB`);
+// A row's state in a word or two: what it waits for, or else its group.
+const REASONS = { question: "Question", approval: "Approval", failed: "Failed", computer: "Computer away" } as const;
+const GROUPS = { waiting: "Waiting", working: "Working", idle: "Idle", resolved: "Resolved" } as const;
+let tab = "threads";
+
+function threadRow(thread: ThreadRow): HTMLElement {
+  const row = button("thread", "", () => void shell.thread(thread.id));
+  row.dataset.group = thread.group;
+  row.dataset.thread = thread.id;
+  const title = element("span", "title", thread.title);
+  if (thread.place.kind === "device") {
+    const place = element("span", "place");
+    place.title = `On ${thread.place.deviceName}, which is ${thread.place.online ? "online" : "offline"}`;
+    place.append(icon("laptop", 14));
+    title.append(place);
+  }
+  const words = thread.reason ? REASONS[thread.reason] : GROUPS[thread.group];
+  const side = element("span", "side");
+  if (thread.progress) side.append(element("span", "progress", `${thread.progress.done}/${thread.progress.total}`));
+  side.append(element("span", "age", ago(thread.updatedAt)));
+  row.append(element("span", "mark"), title, element("span", "status", thread.statusLine ? `${words} · ${thread.statusLine}` : words), side);
+  if (thread.files.length > 0) {
+    const chips = element("span", "chips");
+    for (const file of thread.files.slice(0, 2)) chips.append(element("span", "chip", file.label));
+    if (thread.files.length > 2) chips.append(element("span", "chip", `+${thread.files.length - 2}`));
+    row.append(chips);
+  }
+  const item = element("li", "");
+  item.append(row);
+  return item;
+}
+
+function listRow(first: string, second: string, third: string): HTMLElement {
+  const item = element("li", "file");
+  item.append(element("span", "path", first), element("span", "from", second), element("span", "age", third));
+  return item;
+}
+
+function renderOverview(state: State): void {
+  const overview = state.overview;
+  const threads = overview?.threads ?? [];
+  const waiting = threads.filter((found) => found.group === "waiting").length;
+  byId("greeting").textContent = state.account ? `Welcome back, ${state.account.name.split(" ")[0]}.` : "Welcome back.";
+  byId("greeting-line").textContent = !overview ? "Open a project to see its threads."
+    : waiting === 0 ? "Nothing is waiting on you." : `${plural(waiting, "thread is", "threads are")} waiting on you.`;
+  byId("thread-count").textContent = String(waiting);
+  for (const section of document.querySelectorAll<HTMLElement>(".section")) {
+    const rows = threads.filter((found) => found.group === section.dataset.group);
+    section.querySelector(".count")!.textContent = String(rows.length);
+    section.querySelector("ul")!.replaceChildren(...rows.map(threadRow));
+  }
+  const titles = new Map(threads.map((found) => [found.id, found.title]));
+  const library = [...(overview?.library ?? [])].sort((a, b) => Date.parse(b.updatedAt ?? "") - Date.parse(a.updatedAt ?? ""));
+  byId("files").replaceChildren(...library.map((entry) => listRow(
+    entry.path,
+    `${entry.origin === "added" ? "Added by you" : `From ${titles.get(entry.threadId ?? "") ?? "a thread"}`}${kilobytes(entry.size)}`,
+    entry.updatedAt ? ago(entry.updatedAt) : "",
+  )));
+  byId("no-files").hidden = library.length > 0;
+  const routines = overview?.routines ?? [];
+  byId("routine-list").replaceChildren(...routines.map((routine) => listRow(routine.name, routine.scheduleDisplay, "")));
+  document.querySelector<HTMLElement>('[data-tab="routines"]')!.hidden = routines.length === 0;
+  if (tab === "routines" && routines.length === 0) tab = "threads";
+  showTab();
+}
+
+function showTab(): void {
+  for (const each of document.querySelectorAll<HTMLElement>("[data-tab]")) each.setAttribute("aria-selected", String(each.dataset.tab === tab));
+  byId("threads").hidden = tab !== "threads";
+  byId("library").hidden = tab !== "library";
+  byId("routines").hidden = tab !== "routines";
+}
+
 async function render(): Promise<void> {
   const state = await shell.state();
   last = state;
+  renderOverview(state);
   document.body.classList.toggle("first", state.first);
   byId("first-run").hidden = !state.first;
   const open = state.view.kind === "project" ? state.view : null;
-  byId("title").textContent = open?.name ?? (state.view.kind === "projects" ? "Projects" : state.agent?.name ?? "");
+  byId("title").textContent = open?.thread?.title ?? open?.name ?? (state.view.kind === "projects" ? "Projects" : state.agent?.name ?? "");
+  // A thread open in the centre: its project, as the way back.
+  byId("to-project").hidden = !open?.thread;
+  byId("to-project").textContent = open?.thread ? open.name : "";
   byId("overview-dot").hidden = !state.projects.some((project) => project.id === open?.id && project.waiting > 0);
   byId("projects").replaceChildren(...state.projects.map((project) => group(project, project.id === open?.id)));
   filterSidebar();
@@ -148,6 +246,15 @@ byId("sort").addEventListener("change", renderCards);
 byId("new").addEventListener("click", () => void shell.go("/chat"));
 byId("new-project").addEventListener("click", () => void shell.go("/chat"));
 byId("open-projects").addEventListener("click", () => void shell.projects());
+byId("to-project").addEventListener("click", () => {
+  if (last?.view.kind === "project") void shell.project(last.view.id);
+});
+for (const each of document.querySelectorAll<HTMLElement>("[data-tab]")) {
+  each.addEventListener("click", () => {
+    tab = each.dataset.tab ?? "threads";
+    showTab();
+  });
+}
 for (const item of document.querySelectorAll<HTMLElement>("[data-path]")) {
   item.addEventListener("click", () => void shell.go(item.dataset.path ?? ""));
 }
@@ -164,6 +271,13 @@ const fold = (name: string, folded: boolean, show: string) => {
 };
 byId("hide-sidebar").addEventListener("click", () => fold("no-sidebar", true, "show-sidebar"));
 byId("show-sidebar").addEventListener("click", () => fold("no-sidebar", false, "show-sidebar"));
+// The Overview button opens and closes the pane; the pane's own close button closes it.
+const pane = (open: boolean) => {
+  document.body.classList.toggle("no-panel", !open);
+  byId("overview").setAttribute("aria-pressed", String(open));
+};
+byId("overview").addEventListener("click", () => pane(document.body.classList.contains("no-panel")));
+byId("close-panel").addEventListener("click", () => pane(false));
 
 // The web client is placed over the hole, wherever the layout puts it.
 new ResizeObserver(() => {

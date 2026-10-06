@@ -1,0 +1,136 @@
+import { rmSync } from "node:fs";
+
+import type { ElectronApplication, Page } from "playwright-core";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { FIXTURE_IDS, type ProjectFixtures, projectFixtures } from "../../../web/src/lib/projects.js";
+import { ACCOUNT, connect, FakeAgent, webClient } from "./fake-agent.js";
+import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
+
+const { report: REPORT, budget: BUDGET, question: QUESTION } = FIXTURE_IDS;
+
+let home: string;
+let agent: FakeAgent;
+let origin: string;
+let app: ElectronApplication | undefined;
+
+beforeEach(async () => {
+  home = dataHome();
+  agent = new FakeAgent();
+  agent.projects = projectFixtures();
+  origin = await agent.start();
+});
+
+afterEach(async () => {
+  await quit(app);
+  app = undefined;
+  await agent.stop();
+  await agent.link.stop();
+  rmSync(home, { recursive: true, force: true });
+});
+
+// The app signed in to the fake agent as Flavius, with *project* open.
+async function opened(project: string = REPORT): Promise<{ shell: ElectronApplication; page: Page; client: Page }> {
+  const shell = await launch(home);
+  app = shell;
+  await stubNative(shell);
+  const page = await shellPage(shell);
+  await connect(page, origin);
+  const client = await webClient(shell, origin);
+  await client.evaluate((account) => window.surogateDesktop!.setAccount(account), ACCOUNT);
+  await page.click(`#projects [data-project="${project}"] .project`);
+  await page.waitForSelector(".section .thread, #routine-list li, #files li", { state: "attached" });
+  return { shell, page, client };
+}
+
+const texts = (page: Page, selector: string) => page.$$eval(selector, (found) => found.map((element) => element.textContent));
+const views = (shell: ElectronApplication) => shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.contentView.children.length);
+
+describe("the Overview pane", () => {
+  it("greets the user, and groups the project's threads by what they need", async () => {
+    const { page } = await opened();
+    expect(await page.textContent("#greeting")).toBe("Welcome back, Flavius.");
+    expect(await page.textContent("#greeting-line")).toBe("3 threads are waiting on you.");
+    expect(await page.textContent("#thread-count")).toBe("3");
+    expect(await texts(page, ".section summary")).toEqual(["Waiting on you 3", "Working 2", "Idle 1", "Resolved 1"]);
+    expect(await page.$eval('[data-group="resolved"]', (section) => (section as HTMLDetailsElement).open)).toBe(false);
+    expect(await texts(page, '[data-group="waiting"] .thread .title'))
+      .toEqual(["Check the revenue figures", "Send the draft to finance", "Convert the old reports"]);
+    expect(await texts(page, '[data-group="waiting"] .thread .status')).toEqual([
+      "Question · Which quarter's exchange rate should I use?",
+      "Approval · Send an email to finance@example.com?",
+      "Failed · The PDF could not be opened: it is encrypted",
+    ]);
+    const first = `[data-thread="${QUESTION}"]`;
+    expect(await texts(page, `${first} .chip`)).toEqual(["revenue.xlsx"]);
+    expect(await page.textContent(`${first} .progress`)).toBe("2/5");
+    expect(await page.textContent(`${first} .age`)).toBe("17m");
+    // A thread on this computer carries its laptop; a thread with many files shows two and a count.
+    expect(await page.getAttribute(`[data-thread="${FIXTURE_IDS.computer}"] .place`, "title")).toBe("On thinkpad, which is offline");
+    expect(await texts(page, `[data-thread="${FIXTURE_IDS.idle}"] .chip`)).toEqual(["north.csv", "south.csv", "+1"]);
+  });
+
+  it("shows the project's library, and its routines only when it has some", async () => {
+    const { page } = await opened();
+    expect(await page.isVisible('[data-tab="routines"]')).toBe(false);
+    await page.click('[data-tab="library"]');
+    expect(await page.isVisible("#library")).toBe(true);
+    expect(await page.isVisible("#threads")).toBe(false);
+    expect(await texts(page, "#files .path")).toEqual(["threads/revenue/revenue.xlsx", "threads/summary/summary.docx", "brief.docx"]);
+    expect(await texts(page, "#files .from")).toEqual([
+      "From Check the revenue figures · 10 KB", "From Draft the summary · 51 KB", "Added by you · 18 KB",
+    ]);
+    await page.click(`#projects [data-project="${BUDGET}"] .project`);
+    await expect.poll(() => page.isVisible('[data-tab="routines"]')).toBe(true);
+    await page.click('[data-tab="routines"]');
+    expect(await texts(page, "#routine-list .path")).toEqual(["Monthly spend check", "Weekly cash report"]);
+    expect(await texts(page, "#routine-list .from")).toEqual(["On the 1st of every month at 09:00", "Every Monday at 08:00"]);
+  });
+
+  it("opens a thread in the centre, with its project as the way back, and draws no second web client", async () => {
+    const { shell, page, client } = await opened();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${QUESTION}`);
+    expect(await page.textContent("#title")).toBe("Check the revenue figures");
+    expect(await page.textContent("#to-project")).toBe("Quarterly report");
+    expect(await views(shell)).toBe(1);
+    await page.click("#to-project");
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${REPORT}`);
+    expect(await page.isVisible("#to-project")).toBe(false);
+    expect(await page.textContent("#title")).toBe("Quarterly report");
+  });
+
+  it("goes back to the project's conversation when the open thread drops out of the project", async () => {
+    const { page, client } = await opened();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${QUESTION}`);
+    const drop = (data: ProjectFixtures) => {
+      data.threads[REPORT] = data.threads[REPORT]!.filter((thread) => thread.id !== QUESTION);
+    };
+    drop(agent.projects!);
+    // The page that serves the projects drops it too, and tells; it may still be loading, so it is told until the centre moves.
+    await expect.poll(async () => {
+      await client.evaluate(([project, thread]) => {
+        const fake = (window as unknown as { fakeProjects?: { data: ProjectFixtures; changed(id: string, threadId: string): void } }).fakeProjects;
+        if (!fake) return;
+        fake.data.threads[project!] = fake.data.threads[project!]!.filter((found) => found.id !== thread);
+        fake.changed(project!, thread!);
+      }, [REPORT, QUESTION]).catch(() => {});
+      return client.url();
+    }).toBe(`${origin}/chat/${REPORT}`);
+    expect(await page.isVisible("#to-project")).toBe(false);
+    await expect.poll(() => page.textContent('[data-group="waiting"] .count')).toBe("2");
+  });
+
+  it("folds away with the Overview button, and the close button, and comes back", async () => {
+    const { page } = await opened();
+    await page.click("#overview");
+    expect(await page.isVisible("#panel")).toBe(false);
+    expect(await page.getAttribute("#overview", "aria-pressed")).toBe("false");
+    await page.click("#overview");
+    expect(await page.isVisible("#panel")).toBe(true);
+    await page.click("#close-panel");
+    expect(await page.isVisible("#panel")).toBe(false);
+    expect(await page.getAttribute("#overview", "aria-pressed")).toBe("false");
+  });
+});

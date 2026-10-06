@@ -17,6 +17,7 @@ if (location.protocol === "file:") {
     go: (path: string) => ipcRenderer.invoke("shell:go", path),
     projects: () => ipcRenderer.invoke("shell:projects"),
     project: (id: string) => ipcRenderer.invoke("shell:project", id),
+    thread: (id: string) => ipcRenderer.invoke("shell:thread", id),
     back: () => ipcRenderer.invoke("shell:back"),
     forward: () => ipcRenderer.invoke("shell:forward"),
     reload: () => ipcRenderer.invoke("shell:reload"),
