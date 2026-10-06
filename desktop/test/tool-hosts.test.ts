@@ -684,6 +684,20 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(sent(0, "stop")).toBe(0);
   });
 
+  it("stops a host that has had nothing to do once it is ready, whatever it heard of its root's processes elsewhere before", async () => {
+    const executor = toolHosts({ idleMs: 50, spawnHost: fakeSpawn((host, message) => {
+      onStop(host, message);
+      if (message.type === "op") host.say({ type: "result", id: message.id, outcome: { ok: message.id } });
+    }) });
+    const answer = executor.run(resolve(), signal());
+    // A process alive in a guest that the root's earlier host used: the ready's handles are the record's, all ended.
+    executor.processes(ROOT_A, { handles: [{ id: "proc_000000000001", command: "sleep 9", cwd: "/", task_id: null, started_at: Date.now() / 1000 }], live: 1 });
+    fakes[0]?.say({ type: "ready", processes: [] });
+    expect(await answer).toMatchObject({ ok: expect.any(String) });
+    await until(() => sent(0, "stop") === 1, 1_000);
+    expect(sent(0, "handles")).toBe(0);
+  });
+
   it("waits, when the app quits, for a host that is stopping because it had nothing to do", async () => {
     const slowStop = (host: FakeHost, message: ToHost) => {
       if (message.type === "start") host.say({ type: "ready", processes: [] });

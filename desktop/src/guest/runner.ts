@@ -18,6 +18,7 @@ import type { Readable } from "node:stream";
 import { Failure } from "../files/answers.js";
 import { findOnPath } from "../files/operations.js";
 import { unenterable, workdir } from "./command.js";
+import { KILL_GRACE_MS } from "./processes.js";
 import type { FromRunner, SpawnRequest, ToRunner } from "./protocol.js";
 
 // Every process a command starts inherits it, setsid or not: how the runner finds them all.
@@ -106,6 +107,13 @@ function outOfMemory(cgroup: string | null): boolean {
   }
 }
 
+// A command's cgroup once the command has ended, or could not start: removed once nothing of it runs.
+function retire(cgroup: string | null): void {
+  if (!cgroup) return;
+  ended.add(cgroup);
+  tidy();
+}
+
 // Each ended command's cgroup, once nothing of it runs: at its end, and at each start after.
 function tidy(): void {
   for (const cgroup of ended) {
@@ -154,9 +162,7 @@ function finish(id: string): void {
   child.proc.stderr?.destroy();
   const oom = outOfMemory(child.cgroup);
   say({ type: "exit", id, code: child.proc.exitCode, signal: child.proc.signalCode as NodeJS.Signals | null, ...(oom ? { oom } : {}) });
-  if (!child.cgroup) return;
-  ended.add(child.cgroup);
-  tidy();
+  retire(child.cgroup);
 }
 
 function start(request: SpawnRequest): void {
@@ -179,6 +185,8 @@ function start(request: SpawnRequest): void {
     // Its own process group, so one signal reaches what it started too.
     proc = spawn(file, args, { cwd: request.cwd, env, detached: true, stdio: [request.stdin ? "pipe" : "ignore", "pipe", "pipe"] });
   } catch (error) {
+    // A command past Linux's 128 KiB for one argument throws E2BIG here, its cgroup made.
+    retire(cgroup);
     say({ type: "error", id, message: error instanceof Error ? error.message : String(error) });
     return;
   }
@@ -197,6 +205,7 @@ function start(request: SpawnRequest): void {
     if (started || child.done) return;
     child.done = true;
     children.delete(id);
+    retire(cgroup);
     say({ type: "error", id, message: error.message });
   });
   proc.on("exit", () => {
@@ -213,6 +222,18 @@ function signal(id: string, name: NodeJS.Signals): void {
   if (!child) return;
   if (name === "SIGKILL") child.killed = true;
   signalAll(id, child, name);
+  // What outlives a SIGTERM ends once the registry's grace has passed, as the process itself would:
+  // a leftover that ignores it, once the process has ended, has no SIGKILL to come but this.
+  const { cgroup } = child;
+  if (name === "SIGTERM" && cgroup) {
+    setTimeout(() => {
+      try {
+        writeFileSync(join(cgroup, "cgroup.kill"), "1");
+      } catch {
+        // Its cgroup has gone, and everything in it.
+      }
+    }, KILL_GRACE_MS).unref();
+  }
   if (child.killed && child.exited) finish(id);
 }
 

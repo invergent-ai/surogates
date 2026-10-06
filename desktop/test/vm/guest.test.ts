@@ -16,10 +16,10 @@ import type { ProcessHandle } from "../../src/guest/processes.js";
 import type { HostUser, Share } from "../../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
 import type { Operation } from "../../src/link/protocol.js";
-import { vmOptions } from "../../src/vm/client.js";
+import { VmClient, vmOptions } from "../../src/vm/client.js";
 import { VmExecutor } from "../../src/vm/executor.js";
 import { bootLinux } from "../../src/vm/linux.js";
-import { type Folder, Guest, type ProcessesChange, VmManager, type VmOptions } from "../../src/vm/manager.js";
+import { type Folder, Guest, VmManager, type VmOptions } from "../../src/vm/manager.js";
 
 const IMAGE = process.env.SUROGATE_VM_IMAGE ?? fileURLToPath(new URL("../../../images/guest/out", import.meta.url));
 const AGENT_DISK = fileURLToPath(new URL("../../vm/agent-disk.sh", import.meta.url));
@@ -174,6 +174,18 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     });
   });
 
+  it("kills what a background process left that ignores SIGTERM once kill's grace has passed, though the process itself ended at once", async () => {
+    const started = await guest.op(ROOT, "start", background("(trap '' TERM; exec setsid sleep 308) </dev/null >/dev/null 2>&1 & exec sleep 309"), signal());
+    const { session_id } = (started as { ok: { session_id: string } }).ok;
+    expect(await run("sleep 0.5; pgrep -c -x sleep")).toMatchObject({ ok: { output: "2\n" } });
+    expect(await guest.op(ROOT, "kill", { session_id }, signal())).toEqual({ ok: { status: "killed", session_id } });
+    // KILL_GRACE_MS after the SIGTERM.
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(await run("for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -x sleep > /dev/null || break; sleep 0.1; done; pgrep -c -x sleep || true")).toMatchObject({
+      ok: { output: "0\n" },
+    });
+  });
+
   it("gives each command a cgroup of its own, gone once it ends, and the root's user none of the root's own limits", async () => {
     expect(await run("true")).toMatchObject({ ok: { returncode: 0 } });
     expect(await run([
@@ -226,6 +238,13 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     const stat = await run("grep nr_dying_descendants /sys/fs/cgroup/cgroup.stat; rm -f /tmp/run-*") as { ok: { output: string } };
     console.log(`after 1000 runs: ${stat.ok.output.trim()}`);
     expect(Number(/nr_dying_descendants (\d+)/.exec(stat.ok.output)?.[1])).toBeLessThan(20);
+  });
+
+  it("gives back the cgroup of each command that cannot start, so a root still runs commands after more of them than its bound", async () => {
+    // Past Linux's 128 KiB for one argument: the spawn throws E2BIG at once, once the command's cgroup is made.
+    const long = `: ${"x".repeat(140_000)}`;
+    for (let i = 0; i < 260; i += 1) expect(await run(long)).toMatchObject({ ok: { output: "spawn E2BIG", returncode: -1 } });
+    expect(await run("echo still here")).toEqual({ ok: { output: "still here\n", returncode: 0, timed_out: false } });
   });
 
   it("answers ping, and carries large results", async () => {
@@ -760,7 +779,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
   const CHAT = "5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c";
   let dir: string;
   let run: string;
-  let manager: VmManager;
+  let vm: VmClient;
   let executor: VmExecutor;
   const operation = (kind: string, args: Record<string, unknown>): Operation => ({
     id: `${kind}-${Math.random()}`, sessionId: CHAT, callingSessionId: CHAT, invocationId: "call", ordinal: 1, kind, args, digest: "d",
@@ -772,30 +791,23 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     const folder = join(dir, "folder");
     mkdirSync(folder);
     run = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-"));
-    // The manager in this process, as VmClient hears it in its own.
-    let tell: (root: string, change: ProcessesChange) => void = () => {};
-    manager = new VmManager({
-      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
-      run, console: join(dir, "console.log"), user: USER,
-    }, bootLinux, (root, change) => tell(root, change));
+    // The manager in a process of its own, as the app runs it: what it tells of a root's processes comes through its channel.
+    vm = new VmClient({
+      vm: {
+        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+        run, console: join(dir, "console.log"), user: USER,
+      },
+    });
     const { dev, ino } = statSync(folder);
     executor = new VmExecutor({
       bindingOf: (root) => (root === CHAT ? { folder, dev, ino, boot: BOOT_ID } : undefined),
-      dataDir: join(dir, "data"), env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" }, idleMs: 500,
-      vm: {
-        perform: (operation, cancel) => manager.perform(operation, cancel),
-        teardown: (root) => manager.teardown(root),
-        onProcesses: (listener) => {
-          tell = listener;
-          return () => {};
-        },
-      },
+      dataDir: join(dir, "data"), env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" }, idleMs: 500, vm,
     });
   });
 
   afterAll(async () => {
     await executor?.stop();
-    await manager?.stop();
+    await vm?.stop();
     rmSync(run, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   });

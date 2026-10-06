@@ -252,6 +252,8 @@ class Host {
   // The handles of its root's background processes elsewhere (the VM), which every
   // operation there carries: from the folder's record at its start, then as they change.
   private handles: ProcessHandle[] = [];
+  // Once its file host said ready: what came of its root's processes before is not its own.
+  private readied = false;
 
   constructor(
     private readonly process: HostProcess,
@@ -315,7 +317,10 @@ class Host {
 
   // Its root's processes elsewhere changed: the host's record keeps their handles, and a
   // host with any alive is never idle. Gone: those still running ended with their sandbox.
+  // Until its file host is ready, a change is an earlier host's or an earlier guest's: its
+  // operations reach the guest only after, and the record's handles, which ready brings, have all ended.
   processes(change: ProcessesChange): void {
+    if (!this.readied) return;
     this.handles = "gone" in change ? lostWith(this.handles) : change.handles;
     this.live = "gone" in change ? 0 : change.live;
     this.send({ type: "handles", handles: this.handles });
@@ -413,6 +418,7 @@ class Host {
   private received(message: FromHost): void {
     if (message.type === "ready") {
       this.handles = message.processes;
+      this.readied = true;
       this.settleStart(null);
     } else if (message.type === "failed") {
       // A host that failed to start is exiting: the next operation starts a new one.
