@@ -26,6 +26,9 @@ function bare(): ChildProcess {
   return child;
 }
 
+// Kills the latest runner of a test's own: the end of a runner a test left still kills by this.
+const killLatest = (own: ChildProcess[]) => () => void own.at(-1)?.kill("SIGKILL");
+
 // A runner that says it is ready, then answers nothing, as one whose view of the folder stalls.
 const STALLED = `process.stdout.write('{"ready":true}\\n'); setInterval(() => {}, 1000);`;
 
@@ -40,10 +43,11 @@ beforeEach(async () => {
   base = realpathSync(mkdtempSync(join(tmpdir(), "guest-root-")));
   user = { uid: 1000, gid: 1000, name: "someone", home: base };
   children = [];
-  // This test's own: a runner an earlier test's end killed tells its own.
+  // This test's own: a runner an earlier test's end killed tells, and kills, its own.
   const told: string[] = [];
+  const own = children;
   lost = told;
-  roots = new Roots({ start: bare, uid: () => 10_000, kill: () => void children[0]?.kill("SIGKILL"), lost: (root) => told.push(root) });
+  roots = new Roots({ start: bare, uid: () => 10_000, kill: () => void own[0]?.kill("SIGKILL"), lost: (root) => told.push(root) });
   await roots.setup("root-1", base, "r1", user);
 });
 
@@ -98,7 +102,7 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
         return child;
       },
       uid: () => 10_000,
-      kill: () => void children.at(-1)?.kill("SIGKILL"),
+      kill: killLatest(children),
     });
     await stalled.setup("root-5", base, "r1", user);
     const ask = (kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string) => stalled.perform("root-5", kind, args, signal, id);
@@ -179,7 +183,7 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
         return child;
       },
       uid: () => 10_000,
-      kill: () => void children.at(-1)?.kill("SIGKILL"),
+      kill: killLatest(children),
       lost: (root) => told.push(root),
       questionMs: 300,
     });
@@ -207,6 +211,47 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     await roots.teardown("root-1");
     await roots.setup("root-1", base, "r1", user);
     expect(await op("which", { name: "sh" }, undefined, "op-17")).toEqual({ ok: true });
+  });
+
+  it("tells the host of a lost root once everything of it has ended, and of one that cannot be ended once its runner is stopped", async () => {
+    const told: string[] = [];
+    let empty = () => {};
+    const slow = new Roots({
+      start: bare,
+      uid: () => 10_000,
+      // Its cgroup is empty when the test says so.
+      kill: () => new Promise<void>((resolve) => {
+        empty = resolve;
+      }),
+      lost: (root) => told.push(root),
+    });
+    await slow.setup("root-8", base, "r1", user);
+    children.at(-1)?.kill("SIGKILL");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(told).toEqual([]);
+    // Something of it still runs: it is not set up again.
+    await expect(slow.setup("root-8", base, "r1", user)).rejects.toThrow("This chat's sandbox is already set up");
+    empty();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(told).toEqual(["root-8"]);
+    await slow.setup("root-8", base, "r1", user);
+    const unkillable = new Roots({
+      start: () => {
+        const child = spawn(process.execPath, ["-e", STALLED], { stdio: ["pipe", "pipe", "pipe"] });
+        children.push(child);
+        return child;
+      },
+      uid: () => 10_000,
+      kill: async () => {
+        throw new Error("cgroup.kill: Permission denied");
+      },
+      lost: (root) => told.push(root),
+      questionMs: 300,
+    });
+    await unkillable.setup("root-9", base, "r1", user);
+    expect(await unkillable.perform("root-9", "which", { name: "sh" }, new AbortController().signal, "op-18")).toEqual(SANDBOX_STOPPED);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(told).toEqual(["root-8", "root-9"]);
   });
 
   it("tells the host a root whose runner went by itself", async () => {

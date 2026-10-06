@@ -478,6 +478,27 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     expect(await op(ROOT, a, "run", { command: "pgrep -c -x sleep || true", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "0\n" } });
   });
 
+  it("sets a root up again only once everything of it has ended, and says why not until then", async () => {
+    const a = join(dir, "a");
+    // Its folder's virtiofsd: the daemon, and the child that serves the share.
+    const daemon = Number(readFileSync(join(options.run, "vfs-1.pid"), "utf8"));
+    const share = [daemon, ...spawnSync("pgrep", ["-P", String(daemon)], { encoding: "utf8" }).stdout.trim().split("\n").map(Number)];
+    // A process that looks in the folder once its share has stalled: until the share answers, it cannot end.
+    const stuck = "env -i /usr/bin/setsid /usr/bin/nohup /bin/sh -c '/usr/bin/sleep 1; /usr/bin/stat ./stuck' < /dev/null > /dev/null 2>&1 & sleep 0.5; echo started";
+    expect(await op(ROOT, a, "run", { command: stuck, workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "started\n" } });
+    for (const pid of share) process.kill(pid, "SIGSTOP");
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      await managers.at(-1)!.teardown(ROOT);
+      expect(await op(ROOT, a, "run", { command: "echo back", workdir: null, timeout: 10 })).toEqual({
+        error: { type: "unavailable", message: "This computer's sandbox could not set up this chat: what this chat ran before has not ended yet" },
+      });
+    } finally {
+      for (const pid of share) process.kill(pid, "SIGCONT");
+    }
+    expect(await op(ROOT, a, "run", { command: "echo back", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "back\n" } });
+  });
+
   it("stops a guest that misses three keepalives, and boots a new one for the next operation", async () => {
     managers.push(new VmManager({ ...options, pingMs: 200 }));
     expect(await op(ROOT, join(dir, "a"), "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });

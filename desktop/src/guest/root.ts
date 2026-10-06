@@ -5,7 +5,7 @@
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { chmodSync, chownSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
 
@@ -22,6 +22,10 @@ const SHARES = "/run/surogate/shares";
 const CGROUPS = "/sys/fs/cgroup/roots";
 // How many processes one root may have of the guest's 32 768.
 const PIDS_MAX = 4096;
+// How long a root's processes have to end once its cgroup is killed. One stuck in
+// a stat of a stalled share cannot end until the share answers.
+const EMPTY_MS = 3_000;
+const EMPTY_RETRY_MS = 10;
 const ENTER_ROOT = "/run/surogate/agent/enter-root";
 // The cloud's layout of the commands' environment, written by the image's build.
 const LAYOUT = "/etc/surogate/environment";
@@ -41,7 +45,7 @@ const CLOUD_HOME = /(?<=^|:)\/home\/sandbox(?=\/|:|$)/g;
 // device, within about 50 ms: until then its mount fails, and is tried again.
 const MOUNT_MS = 5_000;
 const MOUNT_RETRY_MS = 25;
-// A root's runner starts in about 50 ms. The host gives a setup 15 s, past this and MOUNT_MS.
+// A root's runner starts in about 50 ms. The host gives a setup 15 s, past this, MOUNT_MS and EMPTY_MS.
 const RUNNER_READY_MS = 5_000;
 // A runner that answers no question in this long is stopped, by one of its own
 // commands, or stuck in a stat of the folder that does not return: it is lost.
@@ -138,6 +142,10 @@ export async function enter(root: string, place: Place, tag: string, user: HostU
   const cgroup = join(CGROUPS, root);
   // Made again for a root set up again once its runner was lost.
   await mkdir(cgroup, { recursive: true });
+  // Nothing of the root runs while enter-root checks its mount points: what it ran before ends first.
+  await killRoot(root).catch(() => {
+    throw new Error("what this chat ran before has not ended yet");
+  });
   await writeFile(join(cgroup, "pids.max"), String(PIDS_MAX));
   // In the root's cgroup before unshare runs, so it and everything it starts are
   // there, and the cgroup namespace it makes is rooted there. Each by its path:
@@ -153,9 +161,16 @@ export async function enter(root: string, place: Place, tag: string, user: HostU
   );
 }
 
-// Everything of *root* ends at once, its runner and the namespaces' PID 1 among it, whatever its uid or state.
+// Everything of *root* ends at once, its runner and the namespaces' PID 1 among it,
+// whatever its uid or state. Resolves once its cgroup is empty, or rejects if it is not by EMPTY_MS.
 export async function killRoot(root: string): Promise<void> {
-  if (ROOT_ID.test(root)) await writeFile(join(CGROUPS, root, "cgroup.kill"), "1");
+  if (!ROOT_ID.test(root)) return;
+  const cgroup = join(CGROUPS, root);
+  await writeFile(join(cgroup, "cgroup.kill"), "1");
+  for (const deadline = Date.now() + EMPTY_MS; !/^populated 0$/m.test(await readFile(join(cgroup, "cgroup.events"), "utf8"));) {
+    if (Date.now() > deadline) throw new Error(`the processes of ${root} have not ended`);
+    await new Promise((resolve) => setTimeout(resolve, EMPTY_RETRY_MS));
+  }
 }
 
 // *answer*, or the signal, or *ms* passing, whichever comes first: the runner's
@@ -179,13 +194,13 @@ export class Root {
   constructor(
     private readonly place: Place,
     private readonly runner: SessionRunner,
-    private readonly lose: () => void,
+    private readonly lose: () => Promise<void>,
     private readonly questionMs: number,
   ) {}
 
-  // Everything of the root ends; resolves once its runner has gone.
+  // Everything of the root ends; resolves once it has, and its runner has gone.
   async end(): Promise<void> {
-    this.lose();
+    await this.lose();
     await this.runner.gone;
   }
 
@@ -239,7 +254,7 @@ export interface RootsOptions {
   start(root: string, place: Place, tag: string, user: HostUser): ChildProcess | Promise<ChildProcess>;
   // The root's guest uid.
   uid(root: string): number;
-  // Ends every process of the root.
+  // Ends every process of the root; resolves once they have all ended, or rejects.
   kill(root: string): void | Promise<void>;
   // Told of a root that was set up and has lost its runner: the host sets it up again.
   lost?(root: string): void;
@@ -263,20 +278,31 @@ export class Roots {
     this.starting.add(root);
     try {
       const place = { folder, home: user.home };
-      const runner = new SessionRunner(await this.options.start(root, place, tag, user), () => {
-        if (this.roots.delete(root)) this.options.lost?.(root);
-      }, RUNNER_READY_MS);
+      let listed: Root | undefined;
+      let ending: Promise<void> | undefined;
+      // Everything of the root ends, once however often asked: its cgroup is killed
+      // and emptied or, where it cannot be, its runner's stdin is ended. Only then is
+      // a root still listed forgotten and the host told, so its setup again finds nothing of it running.
+      const lose = () => (ending ??= (async () => {
+        try {
+          await this.options.kill(root);
+        } catch {
+          await runner.stop();
+        }
+        if (listed && this.roots.get(root) === listed) {
+          this.roots.delete(root);
+          this.options.lost?.(root);
+        }
+      })());
+      const runner = new SessionRunner(await this.options.start(root, place, tag, user), () => void lose(), RUNNER_READY_MS);
       try {
         await runner.ready;
       } catch (error) {
         await runner.stop();
         throw error;
       }
-      // A cgroup that cannot be written still loses the runner: its stdin is ended.
-      const lose = () => {
-        Promise.resolve().then(() => this.options.kill(root)).catch(() => runner.stop());
-      };
-      this.roots.set(root, new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS));
+      listed = new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS);
+      this.roots.set(root, listed);
     } finally {
       this.starting.delete(root);
     }
@@ -292,12 +318,14 @@ export class Roots {
     await target.end();
   }
 
-  // One process operation's outcome. Never rejects.
-  perform(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome> {
+  // One process operation's outcome. Never rejects. A root whose runner cannot answer
+  // is lost: what waited on it is answered once all of it has ended, the host told first.
+  async perform(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome> {
     const target = this.roots.get(root);
-    if (!target) return Promise.resolve(NOT_SET_UP);
-    if (kind === "run") return target.run(args, signal, id);
-    if (kind === "which") return target.which(args, signal, id);
-    return Promise.resolve({ error: { type: "unsupported", message: `This computer cannot do '${kind}' yet` } });
+    if (!target) return NOT_SET_UP;
+    if (kind !== "run" && kind !== "which") return { error: { type: "unsupported", message: `This computer cannot do '${kind}' yet` } };
+    const outcome = await (kind === "run" ? target.run(args, signal, id) : target.which(args, signal, id));
+    if (outcome === SANDBOX_STOPPED) await target.end();
+    return outcome;
   }
 }
