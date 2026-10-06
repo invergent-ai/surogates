@@ -9,6 +9,7 @@ import { rmSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import type { Duplex } from "node:stream";
 
+import { BOOT_ID } from "../binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
 import type { FromAgent, HostUser, Share } from "../guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
@@ -73,11 +74,13 @@ export function bootFor(platform: NodeJS.Platform): BootVm | null {
   return platform === "linux" ? bootLinux : null;
 }
 
-// A root's folder as its binding holds it: the path, and its identity when it was bound.
+// A root's folder as its binding holds it: the path, and its identity when it was
+// bound, in the boot it was bound in ("", or none, when that could not be read).
 export interface Folder {
   path: string;
   dev: number;
   ino: number;
+  boot?: string;
 }
 
 export interface VmOperation {
@@ -220,7 +223,9 @@ export class Guest {
     const deadline = performance.now() + SHARE_MS;
     const found = await lstat(folder.path).catch(() => null);
     const real = await realpath(folder.path).catch(() => null);
-    if (!found?.isDirectory() || found.dev !== folder.dev || found.ino !== folder.ino || real !== folder.path) throw new FolderGone();
+    // A reboot can renumber the folder's mount: after one, only the inode is compared, as the file host does.
+    const rebooted = Boolean(folder.boot) && BOOT_ID !== "" && folder.boot !== BOOT_ID;
+    if (!found?.isDirectory() || (!rebooted && found.dev !== folder.dev) || found.ino !== folder.ino || real !== folder.path) throw new FolderGone();
     const given = await this.request({ type: "uid", root }, Math.max(0, deadline - performance.now()));
     if (!given) {
       this.lose();

@@ -92,8 +92,8 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
     expect(await executor.run(op("which", { name: "pandoc" }), signal())).toEqual(ran("ran\n"));
     const { dev, ino } = statSync(folder);
     expect(sent.map(({ root, folder: shared, kind, args }) => ({ root, shared, kind, args }))).toEqual([
-      { root: ROOT, shared: { path: folder, dev, ino }, kind: "run", args: { command: "true", workdir: null, timeout: 10 } },
-      { root: ROOT, shared: { path: folder, dev, ino }, kind: "which", args: { name: "pandoc" } },
+      { root: ROOT, shared: { path: folder, dev, ino, boot: BOOT_ID }, kind: "run", args: { command: "true", workdir: null, timeout: 10 } },
+      { root: ROOT, shared: { path: folder, dev, ino, boot: BOOT_ID }, kind: "which", args: { name: "pandoc" } },
     ]);
     // One file host for the root, whatever runs where.
     expect(spawned).toHaveLength(1);
@@ -119,6 +119,30 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
     const answer = await run();
     expect(answer).toEqual(ran(`made\n\n${HOOKS_NOTICE}.git/hooks/pre-commit`));
     expect(statSync(join(folder, ".git", "hooks", "pre-commit")).mode & 0o111).toBe(0);
+  });
+
+  it("keeps looking after a command for the hooks what it left running in the guest writes later", async () => {
+    vmExecutor();
+    const hook = join(folder, ".git", "hooks", "pre-commit");
+    // A leftover of the command's, still running in the guest once the command has answered.
+    guest = async () => {
+      setTimeout(() => {
+        mkdirSync(join(folder, ".git", "hooks"), { recursive: true });
+        writeFileSync(hook, "#!/bin/sh\n", { mode: 0o755 });
+      }, 300);
+      return ran("ran\n");
+    };
+    expect(await run()).toEqual(ran("ran\n"));
+    const answered = performance.now();
+    await until(() => {
+      try {
+        return (statSync(hook).mode & 0o111) === 0;
+      } catch {
+        return false;
+      }
+    }, 8_000);
+    // Within the host's look every 5 s.
+    expect(performance.now() - answered).toBeLessThan(6_500);
   });
 
   it.skipIf(process.getuid?.() === 0)("refuses a command while the hook guard cannot see the whole folder, and never sends it", async () => {

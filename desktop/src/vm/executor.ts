@@ -26,8 +26,8 @@ export class VmExecutor implements Executor {
 
   run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
     if (!PROCESS_KINDS.has(operation.kind)) return this.files.run(operation, signal);
-    return this.files.guarded(operation, signal, operation.kind === "run", ({ folder, dev, ino }, aborted) => this.options.vm.perform({
-      id: operation.id, root: operation.sessionId, folder: { path: folder, dev, ino }, kind: operation.kind, args: operation.args,
+    return this.files.guarded(operation, signal, operation.kind === "run", ({ folder, dev, ino, boot }, aborted) => this.options.vm.perform({
+      id: operation.id, root: operation.sessionId, folder: { path: folder, dev, ino, boot }, kind: operation.kind, args: operation.args,
     }, aborted));
   }
 

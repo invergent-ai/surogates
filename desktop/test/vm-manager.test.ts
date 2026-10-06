@@ -8,10 +8,12 @@ import { duplexPair } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { BOOT_ID } from "../src/binding/folder.js";
 import { SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
+import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { bootLinux, sweep } from "../src/vm/linux.js";
-import { type BootVm, bootFor, Guest, type VmBackend, VmManager, type VmOptions } from "../src/vm/manager.js";
+import { type BootVm, bootFor, type Folder, Guest, type VmBackend, VmManager, type VmOptions } from "../src/vm/manager.js";
 import { VIRTIOFSD } from "../src/vm/qemu.js";
 
 let dir: string;
@@ -285,6 +287,34 @@ describe("a guest that goes", () => {
     expect(await running).toEqual(SANDBOX_STOPPED);
     expect(await which()).toEqual({ ok: true });
     expect(events.slice(0, 3)).toEqual(["boot", "gone", "boot"]);
+    await manager.stop();
+  });
+});
+
+describe("a chat's folder, checked again before it is shared", () => {
+  const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+  const which = (manager: VmManager, root: string, folder: Folder) =>
+    manager.perform({ id: `which-${root}`, root, folder, kind: "which", args: {} }, new AbortController().signal);
+
+  // st_dev belongs to a mount, which a reboot can number anew: after one, only the inode is compared.
+  it("is taken after a reboot that changed its device number", async () => {
+    const manager = new VmManager(options(), fakeVm(roots));
+    const { dev, ino } = statSync(dir);
+    expect(await which(manager, "root-1", { path: dir, dev: dev + 1, ino, boot: "another-boot" })).toEqual({ ok: true });
+    await manager.stop();
+  });
+
+  // An unreadable boot id, or none, compares as this boot.
+  it("is refused on another device in the boot it was bound in, or with another inode after a reboot", async () => {
+    const manager = new VmManager(options(), fakeVm(roots));
+    const { dev, ino } = statSync(dir);
+    const cases: Folder[] = [
+      { path: dir, dev: dev + 1, ino, boot: BOOT_ID },
+      { path: dir, dev: dev + 1, ino, boot: "" },
+      { path: dir, dev: dev + 1, ino },
+      { path: dir, dev, ino: ino + 1, boot: "another-boot" },
+    ];
+    for (const [n, folder] of cases.entries()) expect(await which(manager, `root-${n}`, folder)).toEqual(FOLDER_UNAVAILABLE);
     await manager.stop();
   });
 });

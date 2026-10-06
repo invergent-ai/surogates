@@ -69,6 +69,10 @@ let processes: Processes | null = null;
 let runner: Promise<SessionRunner> | null = null;
 let liveRunner: SessionRunner | null = null;
 let watching: NodeJS.Timeout | null = null;
+// Once a command of this root's has run in the guest: what it left running there, or
+// a cancelled one still ending, can write a hook at any time, so the look every
+// WATCH_MS goes on until the host stops.
+let guestCommands = false;
 // The live runner's protected keys, from a walk that started once it was up (performance.now()),
 // and each path its wrap denies writes to, as the wrap held it (restarts.ts identity).
 type Baseline = { keys: ReadonlySet<string>; since: number; targets: ReadonlyMap<string, string | null> };
@@ -128,7 +132,11 @@ process.on("message", (raw) => {
       else void guard?.refusal().then((refused) => !failing && send({ type: "result", id: message.id, outcome: refused ?? { ok: null } }));
       break;
     case "after":
-      void guard?.after(message.outcome).then((outcome) => !failing && send({ type: "result", id: message.id, outcome }));
+      guestCommands = true;
+      void guard?.after(message.outcome).then((outcome) => {
+        watchHooks();
+        if (!failing) send({ type: "result", id: message.id, outcome });
+      });
       break;
     case "restart":
       restart(GRANT_CHANGED);
@@ -401,7 +409,7 @@ function answered(id: number, allow: boolean, remember: boolean): void {
 function watchHooks(): void {
   if (watching || !guard || stopping) return;
   const hooks = guard;
-  const alive = () => (processes?.live ?? 0) > 0 || liveRunner !== null;
+  const alive = () => (processes?.live ?? 0) > 0 || liveRunner !== null || guestCommands;
   watching = setTimeout(() => void (async () => {
     // A folder replaced since the start is not this chat's: no look or runner goes over it.
     if (!sameFolder()) return void stop(1);
