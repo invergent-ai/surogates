@@ -264,7 +264,8 @@ export interface RootsOptions {
 // The roots set up in this guest, by root session id.
 export class Roots {
   private readonly roots = new Map<string, Root>();
-  private readonly starting = new Set<string>();
+  // The setups under way, which a teardown waits for.
+  private readonly starting = new Map<string, Promise<void>>();
 
   constructor(private readonly options: RootsOptions) {}
 
@@ -275,42 +276,49 @@ export class Roots {
   // Rejects with why the root's runner did not start.
   async setup(root: string, folder: string, tag: string, user: HostUser): Promise<void> {
     if (this.roots.has(root) || this.starting.has(root)) throw new Error(ALREADY);
-    this.starting.add(root);
+    const started = this.start(root, folder, tag, user);
+    this.starting.set(root, started);
     try {
-      const place = { folder, home: user.home };
-      let listed: Root | undefined;
-      let ending: Promise<void> | undefined;
-      // Everything of the root ends, once however often asked: its cgroup is killed
-      // and emptied or, where it cannot be, its runner's stdin is ended. Only then is
-      // a root still listed forgotten and the host told, so its setup again finds nothing of it running.
-      const lose = () => (ending ??= (async () => {
-        try {
-          await this.options.kill(root);
-        } catch {
-          await runner.stop();
-        }
-        if (listed && this.roots.get(root) === listed) {
-          this.roots.delete(root);
-          this.options.lost?.(root);
-        }
-      })());
-      const runner = new SessionRunner(await this.options.start(root, place, tag, user), () => void lose(), RUNNER_READY_MS);
-      try {
-        await runner.ready;
-      } catch (error) {
-        await runner.stop();
-        throw error;
-      }
-      listed = new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS);
-      this.roots.set(root, listed);
+      await started;
     } finally {
       this.starting.delete(root);
     }
   }
 
+  private async start(root: string, folder: string, tag: string, user: HostUser): Promise<void> {
+    const place = { folder, home: user.home };
+    let listed: Root | undefined;
+    let ending: Promise<void> | undefined;
+    // Everything of the root ends, once however often asked: its cgroup is killed
+    // and emptied or, where it cannot be, its runner's stdin is ended. Only then is
+    // a root still listed forgotten and the host told, so its setup again finds nothing of it running.
+    const lose = () => (ending ??= (async () => {
+      try {
+        await this.options.kill(root);
+      } catch {
+        await runner.stop();
+      }
+      if (listed && this.roots.get(root) === listed) {
+        this.roots.delete(root);
+        this.options.lost?.(root);
+      }
+    })());
+    const runner = new SessionRunner(await this.options.start(root, place, tag, user), () => void lose(), RUNNER_READY_MS);
+    try {
+      await runner.ready;
+    } catch (error) {
+      await runner.stop();
+      throw error;
+    }
+    listed = new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS);
+    this.roots.set(root, listed);
+  }
+
   // Everything of *root* ends and it is forgotten, its share left mounted: the host
   // is letting its folder go. Its next operation sets it up again.
   async teardown(root: string): Promise<void> {
+    // A setup under way lands first, and what it set up ends with the rest.
+    await this.starting.get(root)?.catch(() => {});
     const target = this.roots.get(root);
     if (!target) return;
     // Out of the list first: the end of its runner is no loss to tell.

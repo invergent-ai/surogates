@@ -222,6 +222,8 @@ export class Guest {
   async teardown(root: string): Promise<void> {
     const entry = this.roots.get(root);
     if (!entry) return;
+    // A setup under way lands first: the teardown then ends what it set up.
+    await entry.setup;
     entry.setup = null;
     // Unanswered: the agent is stuck, and the guest goes, the root's processes with it.
     if (!(await this.request({ type: "teardown", root }, SETUP_MS))) this.lose();

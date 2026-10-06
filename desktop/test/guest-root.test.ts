@@ -254,6 +254,25 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     expect(told).toEqual(["root-8", "root-9"]);
   });
 
+  it("tears down a root whose setup is under way once it is set up, and sets it up again after", async () => {
+    const runners = new Map<string, ChildProcess>();
+    const own = new Roots({
+      start: (root) => {
+        const child = bare();
+        runners.set(root, child);
+        return child;
+      },
+      uid: () => 10_000,
+      kill: (root) => void runners.get(root)?.kill("SIGKILL"),
+    });
+    const setting = own.setup("root-2", base, "r1", user);
+    await own.teardown("root-2");
+    await setting;
+    expect(await own.perform("root-2", "which", { name: "sh" }, new AbortController().signal, "op-19")).toEqual(NOT_SET_UP);
+    await own.setup("root-2", base, "r1", user);
+    expect(await own.perform("root-2", "which", { name: "sh" }, new AbortController().signal, "op-20")).toEqual({ ok: true });
+  });
+
   it("tells the host a root whose runner went by itself", async () => {
     children[0]?.kill("SIGKILL");
     await new Promise((resolve) => setTimeout(resolve, 200));

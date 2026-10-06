@@ -3,7 +3,7 @@
 // first). Behind SUROGATE_VM_TESTS=1; SUROGATE_VM_IMAGE names another image folder.
 
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -470,12 +470,49 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
 
   it("ends everything of a root it tears down, a process that left its session and its environment too, and sets it up again", async () => {
     const a = join(dir, "a");
-    // No marker of its command's, cleared before the command ends, and a session of its own: only the root's cgroup still holds it.
-    const leaver = "env -i /usr/bin/setsid /usr/bin/nohup /usr/bin/sleep 300 < /dev/null > /dev/null 2>&1 & sleep 0.5; echo started";
+    // No marker of its command's, cleared before the command ends, and a session of its
+    // own: only the root's cgroup still holds it. It beats in the folder, where the host sees it.
+    const leaver = "env -i /usr/bin/setsid /usr/bin/nohup /bin/sh -c 'while :; do /usr/bin/date +%s%N > beat; /usr/bin/sleep 0.1; done'"
+      + " < /dev/null > /dev/null 2>&1 & sleep 0.5; echo started";
     expect(await op(ROOT, a, "run", { command: leaver, workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "started\n" } });
-    expect(await op(ROOT, a, "run", { command: "pgrep -c -x sleep", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "1\n" } });
+    const beats = async () => {
+      const before = readFileSync(join(a, "beat"), "utf8");
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      return readFileSync(join(a, "beat"), "utf8") !== before;
+    };
+    expect(await beats()).toBe(true);
+    const begun = performance.now();
     await managers.at(-1)!.teardown(ROOT);
-    expect(await op(ROOT, a, "run", { command: "pgrep -c -x sleep || true", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "0\n" } });
+    // Well before the host would stop a guest whose agent does not answer, which would end it too.
+    expect(performance.now() - begun).toBeLessThan(5_000);
+    expect(await beats()).toBe(false);
+    rmSync(join(a, "beat"));
+    expect(await op(ROOT, a, "run", { command: "echo again", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "again\n" } });
+  });
+
+  it("leaves the agent room to start processes, and to set up another root, while four roots hold all theirs", async () => {
+    // Threads until the root's cgroup refuses one more, held until the host says.
+    const hold = [
+      "import os, threading, time", "threading.stack_size(262144)", "n = 0", "try:", "    while True:",
+      "        threading.Thread(target=time.sleep, args=(120,), daemon=True).start()", "        n += 1",
+      "except RuntimeError:", "    pass", 'open("count", "w").write(str(n))',
+      'while not os.path.exists("release"):', "    time.sleep(0.1)", "print(n)",
+    ].join("\n");
+    const busy = ["busy-1", "busy-2", "busy-3", "busy-4"];
+    for (const root of [...busy, "fifth"]) mkdirSync(join(dir, root));
+    const holding = busy.map((root) => op(root, join(dir, root), "run", { command: `python3 -c '${hold}'`, workdir: null, timeout: 60 }));
+    for (const end = Date.now() + 30_000; !busy.every((root) => existsSync(join(dir, root, "count")));) {
+      if (Date.now() > end) throw new Error(`not all held: ${JSON.stringify(await Promise.race([Promise.all(holding), Promise.resolve("holding")]))}`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    try {
+      expect(await op("fifth", join(dir, "fifth"), "run", { command: "echo fifth", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "fifth\n" } });
+    } finally {
+      for (const root of busy) writeFileSync(join(dir, root, "release"), "");
+    }
+    // Each was refused by its own bound, a little under 4096 with its runner's own.
+    for (const held of await Promise.all(holding)) expect(Number((held as { ok: { output: string } }).ok.output)).toBeGreaterThan(4_000);
+    for (const root of [...busy, "fifth"]) await managers.at(-1)!.teardown(root);
   });
 
   it("sets a root up again only once everything of it has ended, and says why not until then", async () => {

@@ -45,6 +45,13 @@ sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 kernel.kexec_load_di
   fs.protected_symlinks=1 fs.protected_hardlinks=1 fs.protected_fifos=1 fs.protected_regular=2 \
   kernel.io_uring_disabled=2
 
+# The kernel sizes its task limit to the guest's memory: 15 665 for 2 GiB, below
+# four roots at their own bound, so the roots together would reach it before their
+# cgroup's and leave the agent no process to start. Each task's kernel stack and
+# task_struct are charged to its memory cgroup, so the roots' memory.max still
+# bounds what their tasks cost, and pid_max's 32 768 is the guest's limit.
+sysctl -q -w kernel.threads-max=32768
+
 # Each root in a cgroup of its own (root.ts), under one whose memory stops 256 MiB
 # short of the guest's and whose processes stop 4096 short of its 32 768, so the
 # roots together cannot take the agent's memory or leave it no process to start.

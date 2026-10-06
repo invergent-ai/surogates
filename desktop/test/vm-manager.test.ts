@@ -3,10 +3,14 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { createInterface } from "node:readline";
+import { duplexPair } from "node:stream";
+
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { Control, type ControlRoots } from "../src/guest/control.js";
 import { bootLinux, sweep } from "../src/vm/linux.js";
-import { bootFor, VmManager, type VmOptions } from "../src/vm/manager.js";
+import { type BootVm, bootFor, VmManager, type VmOptions } from "../src/vm/manager.js";
 import { VIRTIOFSD } from "../src/vm/qemu.js";
 
 let dir: string;
@@ -44,6 +48,27 @@ async function withQemu(script: string, body: () => Promise<void>): Promise<void
     process.env.PATH = path;
   }
 }
+
+// A VM whose control port reaches the guest's own Control on *roots*, with no QEMU: what the agent is asked, and when.
+const fakeVm = (roots: ControlRoots): BootVm => async () => {
+  const [host, guest] = duplexPair();
+  const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots);
+  createInterface({ input: guest }).on("line", (line) => control.receive(line));
+  control.hello();
+  let gone = (_said: string) => {};
+  const exited = new Promise<string>((resolve) => {
+    gone = resolve;
+  });
+  return {
+    control: host,
+    exited,
+    share: async () => "r1",
+    kill: async () => {
+      host.destroy();
+      gone("");
+    },
+  };
+};
 
 const alive = (pid: number) => {
   try {
@@ -128,6 +153,38 @@ describe("the VM manager on the host", () => {
       await expect(bootLinux(options(), undefined, performance.now() + 500)).rejects.toThrow("QEMU did not open its sockets");
       expect(alive(Number(readFileSync(join(dir, "qemu-pid"), "utf8")))).toBe(false);
     });
+  });
+});
+
+describe("the VM manager on a guest", () => {
+  it("tears a root down only once its setup under way has landed", async () => {
+    const asked: string[] = [];
+    let landed = () => {};
+    const roots: ControlRoots = {
+      uid: () => 10_000,
+      setup: () => {
+        asked.push("setup");
+        return new Promise<void>((resolve) => {
+          landed = () => {
+            asked.push("set up");
+            resolve();
+          };
+        });
+      },
+      teardown: async () => void asked.push("teardown"),
+      perform: async () => ({ ok: true }),
+    };
+    const manager = new VmManager(options(), fakeVm(roots));
+    const folder = { path: dir, ...statSync(dir) };
+    const answer = manager.perform({ id: "1", root: "root-1", folder, kind: "which", args: { name: "sh" } }, new AbortController().signal);
+    await until(() => asked.includes("setup"));
+    const tearing = manager.teardown("root-1");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    landed();
+    await tearing;
+    expect(asked).toEqual(["setup", "set up", "teardown"]);
+    expect(await answer).toEqual({ ok: true });
+    await manager.stop();
   });
 });
 
