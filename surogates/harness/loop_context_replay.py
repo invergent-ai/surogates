@@ -135,6 +135,20 @@ def _thread_words(text: str) -> str:
     return text.strip()
 
 
+#: The most files a report names; the rest are counted.
+_MAX_LISTED_FILES = 20
+
+
+def _listed(files: list) -> str:
+    """A report's ``Files:`` line.  An entry with neither a label nor a ref
+    is skipped rather than failing the master's every wake."""
+    labels = [_file_label(f.get("label") or f.get("ref") or "") for f in files if isinstance(f, dict)]
+    labels = [label for label in labels if label]
+    if len(labels) > _MAX_LISTED_FILES:
+        labels = [*labels[:_MAX_LISTED_FILES], f"and {len(labels) - _MAX_LISTED_FILES} more"]
+    return ", ".join(labels) or "none"
+
+
 def _file_label(label: str) -> str:
     """*label* on one line: a file name can hold a line break or another
     control character, and the ``Files:`` line comes after the report's end
@@ -164,10 +178,7 @@ def worker_note(event_type: str, data: dict) -> dict:
             content = f"{named} failed: {data.get('error', 'unknown error')}]"
         else:
             files = data.get("files")
-            if files is None:
-                listed = "not listed (the turn ended early)"
-            else:
-                listed = ", ".join(_file_label(f["label"]) for f in files) or "none"
+            listed = _listed(files) if isinstance(files, list) else "not listed (the turn ended early)"
             content = (
                 f"{named} reported]\n"
                 f"{_REPORT_BEGIN}\n{_thread_words(str(data.get('result') or ''))}\n{_REPORT_END}\n"

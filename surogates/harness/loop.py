@@ -1502,27 +1502,8 @@ class AgentHarness(
                     "Failed to emit HARNESS_CRASH event for session %s",
                     session_id,
                 )
-            # Notify parent if this is a worker session.  ``session`` is
-            # ``None`` when the crash happened in the pre-wake setup
-            # (e.g. a Hub timeout during ``resolve_agent_def``) -- the
-            # row wasn't even fetched.  Skip the parent notification in
-            # that case; the parent's delegation poll will time out
-            # normally and the next pickup retries the wake.
-            if session is not None and session.parent_id is not None:
-                from surogates.harness.worker_notify import notify_parent_on_failure
-                try:
-                    await notify_parent_on_failure(
-                        session_store=self._store,
-                        worker_session_id=session_id,
-                        parent_session_id=session.parent_id,
-                        org_id=str(session.org_id),
-                        agent_id=session.agent_id,
-                        error=traceback.format_exc()[-500:],
-                        redis=self._redis,
-                        task_id=getattr(session, "task_id", None),
-                    )
-                except Exception:
-                    logger.debug("Failed to notify parent on crash", exc_info=True)
+            # The parent hears of a crash only when the dispatcher stops
+            # retrying it (``Orchestrator._report_failure_to_parent``).
             raise
         finally:
             leave_device_session(device_token)

@@ -23,6 +23,7 @@ from surogates.harness.loop_context_replay import unread_reports
 from surogates.harness.slash_skill import build_deep_research_message
 from surogates.harness.tool_exec import _build_session_sandbox_spec, execute_single_tool
 from surogates.harness.turn_summarizer import TurnArtifact, TurnSummary
+from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.runtime import SlashCommandConfig
 from surogates.runtime.governance import build_governance_gate
 from surogates.sandbox.pool import sandbox_session_key
@@ -1561,3 +1562,81 @@ async def test_a_follow_up_that_cannot_reopen_its_thread_writes_nothing(api, mon
     result = await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Use the 2025 figures.")
     assert "the database went away" in result["error"]
     assert len(await events_of(api, thread.id, EventType.USER_MESSAGE)) == 1
+
+
+def dispatcher(api, harness=None) -> Orchestrator:
+    state = api.app.state
+    return Orchestrator(
+        state.redis, state.session_store, lambda _session_id: harness,
+        queue_key=SHARED_WORK_QUEUE_KEY, max_concurrent=1, session_factory=state.session_factory,
+    )
+
+
+@pytest.mark.parametrize("worker", ["thread", "plain"])
+@pytest.mark.parametrize("recovers", [True, False], ids=["recovers", "gives-up"])
+async def test_a_crashed_worker_reports_once_when_it_fails_for_good(api, monkeypatch, recovers, worker):
+    # A wake that crashes is retried; only the dispatcher knows when it stops trying.
+    monkeypatch.setattr("surogates.orchestrator.dispatcher._BASE_RETRY_DELAY", 0)
+    store = api.app.state.session_store
+    if worker == "thread":
+        parent = await master_of(api, await create(api))
+        child = await start(api, parent)
+        crash, reported = RuntimeError("the hub timed out"), {"error": "crash_loop_detected: the hub timed out", "title": "Draft A"}
+    else:
+        chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+        parent = await store.get_session(UUID(chat.json()["id"]))
+        child = await create_child_session(store=store, parent=parent, channel="worker")
+        await store.emit_event(child.id, EventType.USER_MESSAGE, {"content": "Check the figures."})
+        # A timeout prints as nothing, so the report names its type.
+        crash, reported = asyncio.TimeoutError(), {"error": "crash_loop_detected: TimeoutError"}
+    harness, _ = waking(api, monkeypatch)
+    crashes = 0
+
+    async def turn(session, messages, system_prompt, lease, **_):
+        nonlocal crashes
+        crashes += 1
+        if not recovers or crashes == 1:
+            raise crash
+
+    harness._run_loop = turn
+    await dispatcher(api, harness)._process(child.id)
+    failed = await events_of(api, parent.id, EventType.WORKER_FAILED)
+    if recovers:
+        assert (crashes, failed) == (2, [])
+    else:
+        [report] = failed
+        assert (crashes, report.data) == (3, {"worker_id": str(child.id), **reported})
+
+
+async def test_a_thread_the_orphan_sweeper_gives_up_on_reports_once(api):
+    # A worker that keeps dying (out of memory, evicted) never raises in a wake:
+    # the sweeper's recovery ceiling is where it ends.
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await dispatcher(api)._abandon_unrecoverable_session(thread, attempts=3, reason="orphan_sweep")
+    [failed] = await events_of(api, master.id, EventType.WORKER_FAILED)
+    assert failed.data == {"worker_id": str(thread.id), "error": "recovery_loop", "title": "Draft A"}
+    assert (await api.app.state.session_store.get_session(thread.id)).status == "failed"
+
+
+async def test_a_malformed_files_entry_does_not_break_the_masters_conversation(api):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await api.app.state.session_store.emit_event(master.id, EventType.WORKER_COMPLETE, {
+        "worker_id": str(thread.id), "result": "Drafted the memo.", "title": "Draft A",
+        "files": [{"ref": "threads/Draft A/A.docx"}, "notes.md", {"label": None}],
+    })
+    assert (await replayed(api, master))[-1]["content"].endswith("\nFiles: threads/Draft A/A.docx")
+
+
+async def test_a_report_lists_at_most_twenty_files(api):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    files = [f"threads/Draft A/{i:02}.csv" for i in range(25)]
+    await answered(api, thread, "Split the ledger by month.")
+    await turn_ends(api, thread, files=files)
+    [report] = await events_of(api, master.id, EventType.WORKER_COMPLETE)
+    assert len(report.data["files"]) == 25
+    assert (await replayed(api, master))[-1]["content"].endswith(
+        "\nFiles: " + ", ".join(files[:20]) + ", and 5 more",
+    )
