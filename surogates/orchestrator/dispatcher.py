@@ -154,6 +154,8 @@ _TASKS_TICK_INTERVAL: float = 5.0
 # interrupted harness has time to release its lease.
 _LEASE_BUSY_REQUEUE_DELAY: float = 0.25
 
+# interrupt reasons meaning nobody is left: the turn stops, the browser goes, no warning if no turn runs
+_SESSION_GONE_REASONS = frozenset({"session deleted", "call_ended"})
 # priority bump applied when a session is requeued
 # because its tenant is over the TurnConcurrencyGate cap.  Larger
 # numbers = later delivery, so the noisy tenant slips to the back of
@@ -953,9 +955,10 @@ class Orchestrator:
             )
 
     async def _handle_interrupt_signal(self, session_id: UUID, reason: str) -> None:
-        # A phone hang-up ends the call whether or not a turn is running here; most of the time
-        # none is, and that is not worth an error in the log.
-        if reason == "call_ended" and session_id not in self._active_harnesses:
+        gone = reason in _SESSION_GONE_REASONS
+        # Nobody is left (a deleted session, a phone call that ended): stop a turn running here, if
+        # any; most of the time none is, and that is not worth a warning in the log.
+        if gone and session_id not in self._active_harnesses:
             delivered = False
         else:
             delivered = self.interrupt_session(session_id, reason)
@@ -966,17 +969,17 @@ class Orchestrator:
             for slots, dequeued in list(self._turns.values()):
                 if dequeued.session_id == str(session_id):
                     slots.interrupt()
-        # A deleted session, or a phone call that ended, has no one left to use its browser.
-        if reason in ("session deleted", "call_ended") and self._browser_pool is not None:
+        # nobody is left to use its browser either
+        if gone and self._browser_pool is not None:
             try:
                 await self._browser_pool.destroy_for_session(str(session_id))
             except Exception:
                 logger.warning(
-                    "Failed to destroy browser sandbox for deleted session %s",
+                    "Failed to destroy browser sandbox for ended session %s",
                     session_id,
                     exc_info=True,
                 )
-        if not delivered and reason != "call_ended":
+        if not delivered and not gone:
             logger.warning(
                 "Interrupt for session %s could not be delivered "
                 "(no active harness on this worker)",
