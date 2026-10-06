@@ -25,7 +25,7 @@ from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.runtime.context import SlashCommandConfig
 from surogates.tools.loader import AGENT_SOURCE_PLATFORM
-from surogates.workstreams import is_project_master
+from surogates.workstreams import is_project_master, is_project_thread
 
 if TYPE_CHECKING:
     from surogates.memory.manager import MemoryManager
@@ -338,6 +338,11 @@ class PromptBuilder:
                 if is_project_master(self._session.config)
                 else "guidance/coordinator"
             ))
+
+        # A project's thread does one piece of the project's work and
+        # reports back to the master.
+        if self._session is not None and is_project_thread(self._session.config):
+            parts.append(self._prompts.get("guidance/project_thread"))
 
         # Execution discipline (verification, missing_context,
         # execute-don't-narrate, etc.) applies to any response from a
