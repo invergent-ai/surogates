@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 import pytest
@@ -207,3 +208,137 @@ async def test_deleting_the_user_deletes_their_projects(api, session_factory):
         await db.commit()
     async with session_factory() as db:
         assert await db.scalar(select(Workstream).where(Workstream.id == UUID(project["id"]))) is None
+
+
+async def patch(api, project: dict, body: dict, token: str | None = None):
+    return await api.client.patch(f"/v1/workstreams/{project['id']}", json=body, headers=api.auth(token))
+
+
+async def test_changing_a_project_writes_through_to_its_master(api):
+    project = await create(api, goal="Q3", instructions="Use euros.")
+    response = await patch(api, project, {
+        "name": "Annual report", "icon": "chart", "goal": None, "instructions": "Use dollars.",
+        "coordinator_tier": "pro", "thread_tier": "basic",
+    })
+    assert response.status_code == 200, response.text
+    changed = response.json()
+    assert {k: changed[k] for k in ("name", "icon", "goal", "instructions", "coordinator_tier", "thread_tier")} == {
+        "name": "Annual report", "icon": "chart", "goal": None, "instructions": "Use dollars.",
+        "coordinator_tier": "pro", "thread_tier": "basic",
+    }
+    master = await master_of(api, project)
+    assert master.title == "Annual report"
+    assert master.config["system"] == "Project: Annual report\n\nUse dollars."
+    assert master.config["workstream_tier"] == "pro"
+
+    cleared = await patch(api, project, {"coordinator_tier": None})
+    assert cleared.status_code == 200, cleared.text
+    assert "workstream_tier" not in (await master_of(api, project)).config
+
+
+async def test_a_change_moves_a_project_up_the_list(api):
+    project = await create(api)
+    later = await create(api, name="Budget")
+    response = await patch(api, project, {"icon": "chart"})
+    assert datetime.fromisoformat(response.json()["updated_at"]) > datetime.fromisoformat(project["updated_at"])
+    listed = await api.client.get("/v1/workstreams", headers=api.auth())
+    assert [p["id"] for p in listed.json()] == [project["id"], later["id"]]
+
+
+async def test_an_emptied_goal_or_icon_is_cleared(api):
+    project = await create(api, goal="Q3")
+    await patch(api, project, {"icon": "chart"})
+    response = await patch(api, project, {"goal": "", "icon": " "})
+    assert response.status_code == 200, response.text
+    assert (response.json()["goal"], response.json()["icon"]) == (None, None)
+    assert (await master_of(api, project)).config["system"] == "Project: Quarterly report"
+
+
+async def test_a_change_leaves_out_what_it_does_not_name(api):
+    project = await create(api, goal="Q3", instructions="Use euros.")
+    response = await patch(api, project, {"icon": "chart"})
+    assert response.status_code == 200, response.text
+    assert (response.json()["goal"], response.json()["instructions"]) == ("Q3", "Use euros.")
+    assert (await master_of(api, project)).config["system"] == "Project: Quarterly report\n\nGoal: Q3\n\nUse euros."
+
+
+@pytest.mark.parametrize("body", [
+    {"name": None},
+    {"instructions": None},
+    {"name": "  "},
+    {"icon": "x" * 65},
+    {"coordinator_tier": "max"},
+    {"thread_tier": "fast"},
+], ids=["null-name", "null-instructions", "blank-name", "long-icon", "coordinator-tier", "thread-tier"])
+async def test_a_malformed_change_is_refused(api, body):
+    project = await create(api)
+    response = await patch(api, project, body)
+    assert response.status_code == 422, response.text
+
+
+async def test_an_agent_with_one_conversation_leaves_its_projects_alone(api):
+    project = await create(api)
+    runtime(api, multi_session=False)
+    assert (await patch(api, project, {"name": "Mine"})).status_code == 409
+    deleted = await api.client.delete(f"/v1/workstreams/{project['id']}", headers=api.auth())
+    assert deleted.status_code == 409, deleted.text
+    runtime(api)
+    assert (await api.client.get(f"/v1/workstreams/{project['id']}", headers=api.auth())).json() == project
+
+
+async def test_another_users_project_cannot_be_changed_or_archived(api, session_factory):
+    project = await create(api)
+    _, their_token = await add_user(session_factory, api.org_id)
+    assert (await patch(api, project, {"name": "Mine"}, their_token)).status_code == 404
+    deleted = await api.client.delete(f"/v1/workstreams/{project['id']}", headers=api.auth(their_token))
+    assert deleted.status_code == 404, deleted.text
+    assert (await master_of(api, project)).status == "active"
+
+
+async def test_archiving_a_project_archives_its_master_and_keeps_its_files(api):
+    project = await create(api)
+    master = await master_of(api, project)
+    uploaded = await api.client.post(
+        f"/v1/sessions/{master.id}/workspace/upload",
+        files={"file": ("brief.docx", b"the brief")},
+        headers=api.auth(),
+    )
+    assert uploaded.status_code == 201, uploaded.text
+
+    response = await api.client.delete(f"/v1/workstreams/{project['id']}", headers=api.auth())
+    assert response.status_code == 204, response.text
+    assert (await master_of(api, project)).status == "archived"
+    assert (await api.client.get(f"/v1/workstreams/{project['id']}", headers=api.auth())).status_code == 404
+    assert (await api.client.get("/v1/workstreams", headers=api.auth())).json() == []
+    assert (await patch(api, project, {"name": "Again"})).status_code == 404
+    keys = await api.app.state.storage.list_keys(
+        master.config["storage_bucket"], f"boundaries/workstream:{project['id']}/workspace/",
+    )
+    assert any(key.endswith("brief.docx") for key in keys)
+
+
+async def test_a_user_archives_or_renames_a_master_only_through_its_project(api):
+    project = await create(api)
+    chat = f"/v1/sessions/{project['master_session_id']}"
+    deleted = await api.client.delete(chat, headers=api.auth())
+    assert deleted.status_code == 409, deleted.text
+    renamed = await api.client.patch(chat, json={"title": "Mine"}, headers=api.auth())
+    assert renamed.status_code == 409, renamed.text
+    master = await master_of(api, project)
+    assert (master.status, master.title) == ("active", "Quarterly report")
+
+
+async def test_ops_archiving_a_master_archives_its_project(api, session_factory):
+    # Studio's archive and the first step of its delete send this request.
+    project = await create(api)
+    account = await issue_service_account_token(session_factory, api.org_id)
+    response = await api.client.delete(
+        f"/v1/api/sessions/{project['master_session_id']}",
+        headers={"Authorization": f"Bearer {account.token}"},
+    )
+    assert response.status_code == 204, response.text
+    assert (await master_of(api, project)).status == "archived"
+    async with session_factory() as db:
+        row = await db.scalar(select(Workstream).where(Workstream.id == UUID(project["id"])))
+    assert row.status == "archived"
+    assert (await api.client.get("/v1/workstreams", headers=api.auth())).json() == []

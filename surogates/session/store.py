@@ -44,6 +44,7 @@ from surogates.db.models import (
     SessionLease as LeaseRow,
     Task as TaskRow,
     TaskLink,
+    Workstream as WorkstreamRow,
 )
 from surogates.harness.next_action import strip_next_action_blocks
 from surogates.harness.redact import redact_sensitive_data
@@ -654,6 +655,12 @@ class SessionStore:
                 update(SessionRow)
                 .where(SessionRow.id.in_(session_ids))
                 .values(status="archived", updated_at=func.now())
+            )
+            # A project goes with its master, so it never names an archived one.
+            await db.execute(
+                update(WorkstreamRow)
+                .where(WorkstreamRow.master_session_id.in_(session_ids))
+                .values(status="archived")
             )
             await db.commit()
 

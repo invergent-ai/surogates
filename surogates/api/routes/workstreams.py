@@ -8,12 +8,13 @@ capability: with it off, every web session but the canonical one is hidden.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
+from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints, model_validator
 
+from surogates.api.routes.sessions import archive_session_tree
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.session.provisioning import create_agent_session
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -51,12 +52,33 @@ def _blank_is_none(max_length: int):
 Name = _text(256)
 Goal = _blank_is_none(2000)
 Instructions = _text(16_000, min_length=0)
+Icon = _blank_is_none(64)
+# None: the agent's own tier.
+Tier = Literal["basic", "pro"] | None
 
 
 class ProjectCreate(BaseModel):
     name: Name
     goal: Goal | None = None
     instructions: Instructions = ""
+
+
+class ProjectChange(BaseModel):
+    """The fields a change names; a field it leaves out keeps its value."""
+
+    name: Name | None = None
+    icon: Icon | None = None
+    goal: Goal | None = None
+    instructions: Instructions | None = None
+    coordinator_tier: Tier = None
+    thread_tier: Tier = None
+
+    @model_validator(mode="after")
+    def _keep_required(self) -> ProjectChange:
+        for field in ("name", "instructions"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be cleared")
+        return self
 
 
 class ProjectSummaryOut(BaseModel):
@@ -132,3 +154,34 @@ async def get_project(workstream_id: UUID, request: Request, ctx: AgentRuntime, 
     if project is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
     return project
+
+
+@router.patch("/{workstream_id}", response_model=ProjectOut)
+async def change_project(
+    workstream_id: UUID, body: ProjectChange, request: Request, ctx: AgentRuntime, tenant: Tenant,
+):
+    # The master's next wake reads the change; a running turn keeps its prompt.
+    project = await _store(request).change(
+        workstream_id, body.model_dump(exclude_unset=True), **_owner(tenant, ctx),
+    )
+    if project is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
+    return project
+
+
+@router.delete("/{workstream_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def archive_project(
+    workstream_id: UUID, request: Request, background_tasks: BackgroundTasks,
+    ctx: AgentRuntime, tenant: Tenant,
+) -> Response:
+    """Archive the project with its master's tree, as a deleted chat's goes.
+
+    The project's files are a boundary workspace, so they are kept, and so is
+    its memory.
+    """
+    project = await _store(request).get(workstream_id, **_owner(tenant, ctx))
+    if project is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
+    master = await request.app.state.session_store.get_session(project.master_session_id)
+    await archive_session_tree(request, master, background_tasks)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
