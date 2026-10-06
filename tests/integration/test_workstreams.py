@@ -14,6 +14,8 @@ import surogates.harness.loop as loop_module
 from surogates.db.agent_users import purge_user_account
 from surogates.db.models import Session, SessionCursor, Workstream
 from surogates.runtime import agent_runtime_context_dep, build_agent_runtime_context
+from surogates.runtime.rate_limiter import PerTenantRateLimiter
+from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_service_account_session_token
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
@@ -103,6 +105,26 @@ async def test_a_name_in_any_script_is_kept_intact(api):
     assert master.config["system"] == f"Project: {name}"
 
 
+async def test_a_name_is_stripped_as_the_chat_title_is(api):
+    # Python's strip, which the chat title uses, also takes U+001C-U+001F.
+    project = await create(api, name="\x1fQ3\x1f")
+    master = await master_of(api, project)
+    assert (project["name"], master.title, master.config["system"]) == ("Q3", "Q3", "Project: Q3")
+
+    renamed = await patch(api, project, {"name": "\x1eQ4\x1e"})
+    assert renamed.status_code == 200, renamed.text
+    master = await master_of(api, project)
+    assert (renamed.json()["name"], master.title, master.config["system"]) == ("Q4", "Q4", "Project: Q4")
+
+
+async def test_creating_a_project_counts_against_the_agents_rate_limit(api):
+    api.app.state.rate_limiter = PerTenantRateLimiter(api.app.state.redis)
+    runtime(api, governance={"rate_limit_rpm": 1})
+    await create(api)
+    response = await api.client.post("/v1/workstreams", json={"name": "Budget"}, headers=api.auth())
+    assert response.status_code == 429, response.text
+
+
 async def test_a_user_lists_and_reads_only_their_own_projects(api, session_factory):
     first = await create(api, name="Budget")
     second = await create(api, name="Hiring")
@@ -143,20 +165,23 @@ async def test_an_unknown_project_is_not_found(api):
     {"name": "x" * 257},
     {"name": "📊" * 128 + "x"},
     {"name": "Q3\x00"},
+    {"name": "\x1c\x1d\x1e\x1f"},
     {"goal": "x" * 2001},
     {"goal": "ok\x00"},
     {"instructions": "x" * 16_001},
     {"instructions": "📊" * 8000 + "x"},
     {"instructions": "Use euros\x00"},
 ], ids=[
-    "empty", "blank", "long-name", "long-emoji-name", "nul-name", "long-goal", "nul-goal",
-    "long-instructions", "long-emoji-instructions", "nul-instructions",
+    "empty", "blank", "long-name", "long-emoji-name", "nul-name", "separators-name", "long-goal",
+    "nul-goal", "long-instructions", "long-emoji-instructions", "nul-instructions",
 ])
 async def test_a_malformed_project_is_refused(api, body):
     response = await api.client.post(
         "/v1/workstreams", json={"name": "Quarterly report", **body}, headers=api.auth(),
     )
     assert response.status_code == 422, response.text
+    async with api.app.state.session_factory() as db:
+        assert (await db.scalars(select(Session.id).where(Session.user_id == api.user_id))).all() == []
 
 
 @pytest.mark.parametrize("instructions", ["x" * 16_000, "📊" * 8000], ids=["ascii", "emoji"])
@@ -190,11 +215,14 @@ async def test_the_server_offers_projects(api):
     assert response.json()["workstreams"] is True
 
 
-async def test_a_master_whose_project_cannot_be_saved_is_archived(api, monkeypatch):
-    async def fail(self, **values):
+@pytest.mark.parametrize("step", [
+    (WorkstreamStore, "create"), (SessionStore, "update_session_title"),
+], ids=["row", "title"])
+async def test_a_master_whose_project_cannot_be_saved_is_archived(api, monkeypatch, step):
+    async def fail(self, *args, **values):
         raise RuntimeError("the database went away")
 
-    monkeypatch.setattr(WorkstreamStore, "create", fail)
+    monkeypatch.setattr(*step, fail)
     with pytest.raises(RuntimeError):
         await api.client.post("/v1/workstreams", json={"name": "Quarterly report"}, headers=api.auth())
     async with api.app.state.session_factory() as db:
@@ -279,10 +307,14 @@ async def test_a_change_leaves_out_what_it_does_not_name(api):
     {"name": None},
     {"instructions": None},
     {"name": "  "},
+    {"name": "\x1c\x1d\x1e\x1f"},
     {"icon": "x" * 65},
     {"coordinator_tier": "max"},
     {"thread_tier": "fast"},
-], ids=["null-name", "null-instructions", "blank-name", "long-icon", "coordinator-tier", "thread-tier"])
+], ids=[
+    "null-name", "null-instructions", "blank-name", "separators-name", "long-icon",
+    "coordinator-tier", "thread-tier",
+])
 async def test_a_malformed_change_is_refused(api, body):
     project = await create(api)
     response = await patch(api, project, body)

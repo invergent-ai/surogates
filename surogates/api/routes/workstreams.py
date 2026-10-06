@@ -15,7 +15,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints, model_validator
 
 from surogates.api.routes.sessions import archive_session_tree
-from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
+from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep, rate_limit_dep
 from surogates.session.provisioning import create_agent_session
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -30,17 +30,18 @@ Tenant = Annotated[TenantContext, Depends(get_current_tenant)]
 
 def _text(max_length: int, min_length: int = 1):
     def fits(value: str) -> str:
+        # Python's strip, as the chat title's: pydantic's keeps U+001C-U+001F,
+        # so the name, the title and the prompt would disagree.
+        value = value.strip()
+        if len(value) < min_length:
+            raise ValueError("must not be blank")
         # Counted in UTF-16 units, as the desktop shell counts them: an emoji is two.
         if len(value.encode("utf-16-le")) // 2 > max_length:
             raise ValueError(f"must be at most {max_length} characters")
         return value
 
     # Postgres text and jsonb refuse NUL, which would fail the write with a 500.
-    return Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, min_length=min_length, pattern=r"^[^\x00]*$"),
-        AfterValidator(fits),
-    ]
+    return Annotated[str, StringConstraints(pattern=r"^[^\x00]*$"), AfterValidator(fits)]
 
 
 def _blank_is_none(max_length: int):
@@ -117,7 +118,10 @@ def _store(request: Request) -> WorkstreamStore:
 
 
 @router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
-async def create_project(body: ProjectCreate, request: Request, ctx: AgentRuntime, tenant: Tenant):
+async def create_project(
+    body: ProjectCreate, request: Request, ctx: AgentRuntime, tenant: Tenant,
+    _rate: None = Depends(rate_limit_dep),
+):
     owner = _owner(tenant, ctx)
     workstream_id = uuid4()
     sessions = request.app.state.session_store
@@ -131,8 +135,8 @@ async def create_project(body: ProjectCreate, request: Request, ctx: AgentRuntim
         channel="web",
         config=master_config(workstream_id, name=body.name, goal=body.goal, instructions=body.instructions),
     )
-    await sessions.update_session_title(master.id, body.name)
     try:
+        await sessions.update_session_title(master.id, body.name)
         return await _store(request).create(
             id=workstream_id, master_session_id=master.id,
             name=body.name, goal=body.goal, instructions=body.instructions, **owner,
