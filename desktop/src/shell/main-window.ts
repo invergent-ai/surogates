@@ -32,13 +32,23 @@ export function lockPage(contents: WebContents): void {
   contents.session.setPermissionCheckHandler(() => false);
 }
 
-// Ctrl+Q quits from the window's page and from every view in it.
+let openSettings = (): void => {};
+
+/** What Ctrl+Shift+, does, as in Claude Desktop. */
+export function onSettingsKey(open: () => void): void {
+  openSettings = open;
+}
+
+// Ctrl+Q quits, and Ctrl+Shift+, opens Settings, from the window's page and from every view in it.
 export function keys(contents: WebContents): void {
   contents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown" || !input.control || input.alt) return;
     if (!input.shift && input.key.toLowerCase() === "q") {
       event.preventDefault();
       app.quit();
+    } else if (input.shift && input.code === "Comma") {
+      event.preventDefault();
+      openSettings();
     }
   });
 }
@@ -102,6 +112,8 @@ export class MainWindow {
   private web: WebView | null = null;
   private webShown = true; // false while the centre shows a page of the shell's own, the Projects page
   private hole: Bounds = { x: 0, y: 0, width: 0, height: 0 };
+  // Settings, over everything: a transparent view whose page dims the window beneath it.
+  private settingsView: WebContentsView | null = null;
   private dark: boolean;
 
   constructor(private readonly options: MainWindowOptions) {
@@ -209,6 +221,37 @@ export class MainWindow {
     });
     this.load(web, "/");
     return contents;
+  }
+
+  /** Open Settings over the window, with *preload*; *wire* registers its page's handlers. */
+  openSettings(page: string, preload: string, wire: (contents: WebContents) => void): void {
+    if (this.settingsView) {
+      this.settingsView.webContents.focus();
+      return;
+    }
+    const view = new WebContentsView({ webPreferences: { preload, sandbox: true, contextIsolation: true, nodeIntegration: false } });
+    view.setBackgroundColor("#00000000");
+    this.window.contentView.addChildView(view);
+    const fit = () => {
+      const { width, height } = this.window.getContentBounds();
+      view.setBounds({ x: 0, y: 0, width, height });
+    };
+    fit();
+    this.window.on("resize", fit);
+    view.webContents.once("destroyed", () => this.window.off("resize", fit));
+    lockPage(view.webContents);
+    keys(view.webContents);
+    wire(view.webContents);
+    this.settingsView = view;
+    void view.webContents.loadFile(page).then(() => view.webContents.focus());
+  }
+
+  closeSettings(): void {
+    const view = this.settingsView;
+    if (!view) return;
+    this.settingsView = null;
+    this.window.contentView.removeChildView(view);
+    view.webContents.close();
   }
 
   /** The web client in the centre, or the page beneath it: it shows only while it has something to show. */

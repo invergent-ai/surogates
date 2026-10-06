@@ -39,6 +39,7 @@ interface State {
   } | null;
   device: { text: string; status: string | null } | null;
   account: { name: string; email: string; userId: string; orgId: string } | null;
+  links: string[]; // the user menu's links the app knows for this agent
   unreachable: string | null;
   notice: string | null;
 }
@@ -55,6 +56,8 @@ interface Shell {
   reload(): Promise<void>;
   place(hole: { x: number; y: number; width: number; height: number }): Promise<void>;
   menu(which: "app" | "project"): Promise<void>;
+  settings(): Promise<void>;
+  link(which: string): Promise<void>;
   onChanged(listener: () => void): () => void;
 }
 
@@ -215,6 +218,12 @@ async function render(): Promise<void> {
   byId("open-projects").classList.toggle("selected", state.view.kind === "projects");
   byId("projects-page").hidden = state.view.kind !== "projects";
   renderCards();
+  byId("user-name").textContent = state.account?.name ?? "Not signed in";
+  byId("avatar").textContent = (state.account?.name ?? "").split(/\s+/).map((word) => word[0] ?? "").join("").slice(0, 2).toUpperCase();
+  byId("user-email").textContent = state.account?.email ?? "Sign in to the agent in the window";
+  for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-link]")) {
+    row.hidden = !state.links.includes(row.dataset.link ?? "");
+  }
   const device = byId("device");
   device.title = state.device?.text ?? "";
   device.classList.toggle("connected", state.device?.status === "connected");
@@ -263,6 +272,32 @@ byId("forward").addEventListener("click", () => void shell.forward());
 byId("refresh").addEventListener("click", () => void shell.reload());
 byId("menu").addEventListener("click", () => void shell.menu("app"));
 byId("project-menu").addEventListener("click", () => void shell.menu("project"));
+byId("open-settings").addEventListener("click", () => void shell.settings());
+
+// The user menu: a popover over the user row, closed by Escape, by a click elsewhere, and by its own rows.
+const menu = (open: boolean) => {
+  byId("user-menu").hidden = !open;
+  byId("user").setAttribute("aria-expanded", String(open));
+};
+byId("user").addEventListener("click", (event) => {
+  event.stopPropagation();
+  menu(byId("user-menu").hidden);
+});
+document.addEventListener("click", (event) => {
+  if (!byId("user-menu").contains(event.target as Node)) menu(false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") menu(false);
+});
+for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-action]")) {
+  const action = row.dataset.action ?? "";
+  if (["usage", "help", "billing", "keys"].includes(action)) row.dataset.link = action;
+  row.addEventListener("click", () => {
+    menu(false);
+    if (action === "settings") void shell.settings();
+    else if (row.dataset.link) void shell.link(action);
+  });
+}
 
 // The sidebar and the pane fold away, and come back from the centre's strip and header.
 const fold = (name: string, folded: boolean, show: string) => {

@@ -139,3 +139,8 @@ export function describeAgent(agent: Agent, device: { status: LinkStatus; comput
       return "Stopped";
   }
 }
+
+// Where an agent's user finds usage, billing and API keys: the Surogate console, for an agent
+// surogate.ai hosts. An install of its own has no console the app knows, and its menu shows no link.
+export const consoleFor = (origin: string): string | null =>
+  new URL(origin).hostname.endsWith(".surogate.ai") ? "https://ops.surogate.ai" : null;

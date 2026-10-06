@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  type Agent, AgentStore, canonicalOrigin, connectAgent, describeAgent, linkUrl, partitionFor,
+  type Agent, AgentStore, canonicalOrigin, connectAgent, consoleFor, describeAgent, linkUrl, partitionFor,
 } from "../src/shell/agents.js";
 
 const CONFIG = { agent_id: "agent-1", desktop_sessions: true, multi_session: true, self_registration_enabled: false };
@@ -178,5 +178,16 @@ describe("what the shell says about this computer and the agent", () => {
     [AGENT, { status: "stopped", computer: null }, "Stopped"],
   ] as const)("%o with %o: %s", (agent, device, text) => {
     expect(describeAgent(agent, device)).toBe(text);
+  });
+});
+describe("the console an agent's user is sent to", () => {
+  it.each([
+    ["https://acme.surogate.ai", "https://ops.surogate.ai"],
+    ["https://surogate.ai", null],
+    ["https://agent.example.com", null],
+    ["https://agents.acme.local", null],
+    ["https://evilsurogate.ai", null],
+  ])("for %s is %s", (origin, console) => {
+    expect(consoleFor(origin)).toBe(console);
   });
 });

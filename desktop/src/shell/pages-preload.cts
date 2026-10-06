@@ -23,6 +23,14 @@ if (location.protocol === "file:") {
     reload: () => ipcRenderer.invoke("shell:reload"),
     place: (hole: { x: number; y: number; width: number; height: number }) => ipcRenderer.invoke("shell:place", hole),
     menu: (which: "app" | "project") => ipcRenderer.invoke("shell:menu", which),
+    settings: () => ipcRenderer.invoke("shell:settings"),
+    link: (which: string) => ipcRenderer.invoke("shell:link", which),
     onChanged: listen("shell:changed"),
+  });
+  contextBridge.exposeInMainWorld("surogateSettings", {
+    state: () => ipcRenderer.invoke("settings:state"),
+    set: (key: string, value: string) => ipcRenderer.invoke("settings:set", key, value),
+    link: (which: string) => ipcRenderer.invoke("settings:link", which),
+    close: () => ipcRenderer.invoke("settings:close"),
   });
 }

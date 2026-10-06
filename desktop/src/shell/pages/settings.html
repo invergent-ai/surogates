@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'" />
+    <title>Settings</title>
+    <link rel="stylesheet" href="shell.css" />
+    <script type="module" src="settings.js"></script>
+  </head>
+  <body class="settings-page">
+    <div class="backdrop" id="backdrop"></div>
+    <div class="dialog" role="dialog" aria-modal="true" aria-label="Settings">
+      <nav class="settings-nav" aria-label="Settings sections">
+        <label class="search" data-icon="search">
+          <input id="settings-search" type="search" placeholder="Search" aria-label="Search settings" autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="nav-group">
+          <h3>Settings</h3>
+          <button class="item selected" type="button" data-section="general" data-icon="settings">General</button>
+          <button class="item" type="button" data-section="account" data-icon="circle-user-round">Account</button>
+          <button class="item" type="button" data-section="computer" data-icon="laptop">This computer</button>
+          <button class="item" type="button" data-section="folders" data-icon="folder-lock" disabled title="Comes with the desktop's own folder and approval prompts">Folders and permissions<span class="later">Later</span></button>
+          <button class="item" type="button" data-link="usage" data-icon="gauge">Usage<span class="external" data-icon="external-link"></span></button>
+        </div>
+        <div class="nav-group">
+          <h3>Customize</h3>
+          <button class="item" type="button" data-icon="sparkles" disabled title="Comes later">Skills<span class="later">Later</span></button>
+          <button class="item" type="button" data-icon="plug" disabled title="Comes later">Connectors<span class="later">Later</span></button>
+        </div>
+        <div class="nav-group">
+          <h3>Platform</h3>
+          <button class="item" type="button" data-link="keys" data-icon="key-round">API keys<span class="external" data-icon="external-link"></span></button>
+        </div>
+      </nav>
+      <main class="settings-content">
+        <button class="icon close" id="close" type="button" title="Close" data-icon="x"></button>
+        <section data-section="general">
+          <h2>Appearance</h2>
+          <div class="row" data-label="Theme">
+            <div class="label"><span>Theme</span></div>
+            <div class="segmented icons" data-setting="theme">
+              <button type="button" data-value="system" title="Match system" aria-label="Match system" data-icon="monitor"></button>
+              <button type="button" data-value="light" title="Light" aria-label="Light" data-icon="sun"></button>
+              <button type="button" data-value="dark" title="Dark" aria-label="Dark" data-icon="moon"></button>
+            </div>
+          </div>
+          <div class="row" data-label="Transcript text size">
+            <div class="label"><span>Transcript text size</span><span class="desc">Size of the conversation transcript text.</span></div>
+            <div class="segmented" data-setting="textSize">
+              <button type="button" data-value="small">Small</button><button type="button" data-value="medium">Medium</button><button type="button" data-value="large">Large</button>
+            </div>
+          </div>
+          <div class="row" data-label="Transcript width">
+            <div class="label"><span>Transcript width</span><span class="desc">Maximum width of the transcript and composer columns.</span></div>
+            <div class="segmented" data-setting="transcriptWidth">
+              <button type="button" data-value="narrow">Narrow</button><button type="button" data-value="medium">Medium</button><button type="button" data-value="wide">Wide</button>
+            </div>
+          </div>
+          <div class="row" data-label="Motion">
+            <div class="label"><span>Motion</span><span class="desc">Reduce animation in streaming responses and other interface elements.</span></div>
+            <div class="segmented" data-setting="motion">
+              <button type="button" data-value="system">System</button><button type="button" data-value="reduced">Reduced</button>
+            </div>
+          </div>
+        </section>
+        <section data-section="account" hidden>
+          <h2>Account</h2>
+          <div class="row" data-label="Email"><div class="label"><span>Email</span></div><span class="value" id="email"></span></div>
+          <div class="row" data-label="Name"><div class="label"><span>Name</span></div><span class="value" id="name"></span></div>
+          <div class="row" data-label="Organisation">
+            <div class="label"><span>Organisation</span><span class="desc">The organisation the agent belongs to.</span></div>
+            <span class="value" id="organisation"></span>
+          </div>
+        </section>
+        <section data-section="computer" hidden>
+          <h2>This computer</h2>
+          <div class="row" data-label="Computer name"><div class="label"><span>Computer name</span></div><span class="value" id="computer"></span></div>
+          <div class="row" data-label="Connection"><div class="label"><span>Connection</span></div><span class="value" id="connection"></span></div>
+          <div class="row" data-label="Added">
+            <div class="label"><span>Added</span><span class="desc">When this computer joined the agent.</span></div>
+            <span class="value" id="added"></span>
+          </div>
+          <div class="row" data-label="Reauthorized">
+            <div class="label"><span>Reauthorized</span><span class="desc">When its access to the agent was last restored.</span></div>
+            <span class="value" id="reauthorized">Never</span>
+          </div>
+          <div class="row" data-label="Registered agents">
+            <div class="label"><span>Registered agents</span><span class="desc">The agents this computer works for.</span></div>
+            <span class="value" id="agents"></span>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

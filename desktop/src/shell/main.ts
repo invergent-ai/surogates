@@ -19,12 +19,12 @@ import { verifyDevice } from "../device.js";
 import { appEnvironment } from "../hosts/environment.js";
 import { ToolHosts } from "../hosts/tool-hosts.js";
 import type { LinkStatus } from "../link/client.js";
-import { type Agent, AgentStore, connectAgent, describeAgent, linkUrl } from "./agents.js";
+import { type Agent, AgentStore, connectAgent, consoleFor, describeAgent, linkUrl } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
 import { type Credential, CredentialStore } from "./credentials.js";
 import { type DeviceStack, startDevice } from "./device-stack.js";
-import { letWindowClose, MainWindow } from "./main-window.js";
+import { letWindowClose, MainWindow, onSettingsKey } from "./main-window.js";
 import { PageProjects } from "./projects.js";
 import { folderPrompts, refusingApprovals } from "./prompts.js";
 import { sameOrigin, webClientPath } from "./window-policy.js";
@@ -96,6 +96,26 @@ function changed(): void {
 }
 
 const appearanceNow = () => ({ ...appearance.get(), theme: theme.dark ? ("dark" as const) : ("light" as const) });
+
+// The web client hears every change of how the app looks: the theme in effect, and the transcript's settings.
+function tellAppearance(): void {
+  main?.webContents()?.send("desktop:appearance", appearanceNow());
+}
+
+// The links the user menu and Settings open: only these, built here, never a page's own address.
+function links(): Record<string, string> {
+  const console = consoleFor(agents.get()?.origin ?? "https://localhost");
+  return {
+    help: "https://docs.surogate.ai/work/",
+    ...(console ? { usage: `${console}/usage`, billing: `${console}/billing`, keys: `${console}/settings` } : {}),
+  };
+}
+
+function openLink(which: unknown): void {
+  const url = typeof which === "string" ? links()[which] : undefined;
+  if (!url) throw new Error("No such link");
+  void shell.openExternal(url);
+}
 
 // The projects the page serves, asked again: when it registers its source, when the open
 // project changes, and when the window comes to the front.
@@ -302,6 +322,7 @@ function state() {
     view,
     overview: view.kind === "project" && overview?.project.id === view.id ? overview : null,
     projects: listed,
+    links: Object.keys(links()),
     unreachable: main?.unreachable ?? null,
     notice: credentials.unencrypted() ? "Credentials on this computer are not encrypted: Linux has no secret store here" : null,
   };
@@ -316,8 +337,55 @@ function popup(which: unknown): void {
       { label: "Reload", click: () => shown.reload() },
       { label: "Open in browser", enabled: agent !== null, click: () => agent && void shell.openExternal(agent.origin) },
     ]
-    : [{ label: "Quit Surogate", accelerator: "Ctrl+Q", click: () => app.quit() }];
+    : [
+      { label: "Settings…", accelerator: "Ctrl+Shift+,", click: showSettings },
+      { type: "separator" },
+      { label: "Quit Surogate", accelerator: "Ctrl+Q", click: () => app.quit() },
+    ];
   Menu.buildFromTemplate(template).popup({ window: shown.window });
+}
+
+function settingsState() {
+  const agent = agents.get();
+  return {
+    appearance: appearance.get(),
+    account,
+    computer: {
+      name: hostname(),
+      connection: agent ? describeAgent(agent, device && { status: device.status, computer: device.credential.name }) : "",
+      added: kept?.addedAt ?? null,
+      organisation: account?.orgId ?? kept?.orgId ?? null,
+      agents: agent ? [agent.name] : [],
+    },
+    links: { usage: "usage" in links(), keys: "keys" in links() },
+  };
+}
+
+// Settings, over the window: its page's calls are answered on its own view only.
+function showSettings(): void {
+  const page = join(PAGES, "settings.html");
+  main?.openSettings(page, PAGES_PRELOAD, (contents) => {
+    const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
+      contents.ipc.handle(channel, (event, ...args: unknown[]) => {
+        if (!fromPage(event, page)) throw new Error("Not Settings' own page");
+        return handler(...args);
+      });
+    };
+    handle("settings:state", settingsState);
+    // A theme in effect that changes reaches the web client through the theme's own paint.
+    handle("settings:set", (key, value) => {
+      if (key !== "theme") {
+        appearance.set(String(key), value);
+        tellAppearance();
+      } else if (value === "system" || value === "light" || value === "dark") {
+        theme.choose(value);
+      } else {
+        throw new Error(`No appearance setting theme = ${String(value)}`);
+      }
+    });
+    handle("settings:link", openLink);
+    handle("settings:close", () => main?.closeSettings());
+  });
 }
 
 function wire(window: MainWindow, page: string): void {
@@ -385,6 +453,8 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:reload", () => window.reload());
   handle("shell:place", (hole) => window.place(bounds(hole)));
   handle("shell:menu", popup);
+  handle("shell:settings", showSettings);
+  handle("shell:link", openLink);
 }
 
 if (!app.requestSingleInstanceLock()) {
@@ -400,8 +470,9 @@ if (!app.requestSingleInstanceLock()) {
     // Before the window: its first frame is in the chosen theme.
     theme = new Theme(nativeTheme, appearance, (dark) => {
       main?.paint(dark);
-      main?.webContents()?.send("desktop:appearance", appearanceNow());
+      tellAppearance();
     });
+    onSettingsKey(showSettings);
     const page = join(PAGES, "shell.html");
     main = new MainWindow({ states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed });
     wire(main, page);

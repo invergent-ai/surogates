@@ -904,3 +904,138 @@ body.main.first {
   padding: 12px;
   font-size: 13px;
 }
+
+
+/* Settings: a large modal over the dimmed window, its nav on the left, its rows on the right. */
+body.settings-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  background: transparent;
+}
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 0.55);
+}
+
+.dialog {
+  position: relative;
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  width: min(1200px, calc(100vw - 96px));
+  height: min(860px, calc(100vh - 96px));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 0.45);
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  padding: 16px 12px;
+  border-right: 1px solid var(--border);
+}
+
+.settings-nav .search {
+  margin: 0 0 12px;
+}
+
+.nav-group h3 {
+  margin: 14px 10px 6px;
+  color: var(--dim);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.settings-nav .item:disabled {
+  color: var(--dim);
+  cursor: default;
+}
+
+.later,
+.settings-nav .external {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 11.5px;
+}
+
+.settings-content {
+  position: relative;
+  overflow-y: auto;
+  padding: 36px 40px;
+}
+
+.settings-content .close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+}
+
+.settings-content h2 {
+  margin-bottom: 18px;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  min-height: 64px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.row .label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.row .desc {
+  font-size: 13px;
+}
+
+.row .value {
+  color: var(--fg-2);
+  text-align: right;
+  user-select: text;
+}
+
+.segmented {
+  display: inline-flex;
+  flex-shrink: 0;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--hover);
+}
+
+.segmented button {
+  min-width: 64px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+
+.segmented.icons button {
+  min-width: 34px;
+  padding: 0;
+}
+
+.segmented button[aria-pressed="true"] {
+  border-color: var(--border);
+  background: var(--row);
+  color: var(--fg);
+}
