@@ -56,7 +56,9 @@ function received(message: ToManager): void {
       await manager?.stop();
       // What ran when the stop came is answered first: "is stopping", or its end.
       await Promise.all(answering);
-      process.exit(0);
+      // Messages arrive in order: the parent, once it hears this, has every answer, and ends this process.
+      if (parent) void send({ type: "stopped" });
+      else process.exit(0);
     })();
   }
 }

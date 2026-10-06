@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
-import { forkManager, type ManagerProcess, VmClient, vmOptions } from "../src/vm/client.js";
-import type { VmOperation, VmOptions } from "../src/vm/manager.js";
+import { forkManager, type FromManager, type ManagerProcess, VmClient, vmOptions } from "../src/vm/client.js";
+import { unavailable, type VmOperation, type VmOptions } from "../src/vm/manager.js";
 
 let dir: string;
 let path: string | undefined;
@@ -140,6 +140,38 @@ describe("the VM manager's process", { timeout: 20_000 }, () => {
     expect(await waiting).toEqual({ error: { type: "unavailable", message: "This computer's sandbox is stopping" } });
     expect(running()).toBe(0);
     expect(await vm.perform(operation(), signal())).toEqual({ error: { type: "unavailable", message: "This computer's sandbox is stopping" } });
+  });
+
+  it("ends a manager that says it stopped, as Electron's utility process can lose what it sent just before its own exit", async () => {
+    // A manager that answers each operation it runs with "is stopping" at the stop, says it stopped, and waits to be ended.
+    const heard: Array<(message: FromManager) => void> = [];
+    const exits: Array<() => void> = [];
+    const tell = (message: FromManager) => heard.forEach((listener) => listener(message));
+    const running: string[] = [];
+    let ended = false;
+    const manager: ManagerProcess = {
+      send: (message) => {
+        if (message.type === "start") tell({ type: "ready" });
+        if (message.type === "op") running.push(message.operation.id);
+        if (message.type !== "stop") return;
+        for (const id of running) tell({ type: "result", id, outcome: unavailable("is stopping") });
+        tell({ type: "stopped" });
+      },
+      onMessage: (listener) => void heard.push(listener),
+      onExit: (listener) => void exits.push(listener),
+      kill: () => {
+        if (!ended) exits.forEach((listener) => listener());
+        ended = true;
+      },
+    };
+    const vm = new VmClient({ vm: { kernel: "", rootfs: "", agentDisk: "", sessions: "", run: "", console: "", user: { uid: 1, gid: 1, name: "ana", home: "/home/ana" } }, spawn: () => manager });
+    clients.push(vm);
+    const waiting = vm.perform(operation(), signal());
+    const begun = performance.now();
+    await vm.stop();
+    expect(performance.now() - begun).toBeLessThan(1_000);
+    expect(ended).toBe(true);
+    expect(await waiting).toEqual(unavailable("is stopping"));
   });
 
   it("answers that the sandbox did not start when its manager cannot", async () => {

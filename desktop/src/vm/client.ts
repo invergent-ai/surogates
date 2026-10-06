@@ -52,7 +52,10 @@ export type ToManager =
 export type FromManager =
   // It runs, and took its start.
   | { type: "ready" }
-  | { type: "result"; id: string; outcome: Outcome };
+  | { type: "result"; id: string; outcome: Outcome }
+  // Its last word at a stop, after every answer, from a process that waits to be ended: a utility
+  // process's postMessage has no callback, and an exit right after it can lose what it sent.
+  | { type: "stopped" };
 
 export interface ManagerProcess {
   send(message: ToManager): void;
@@ -158,6 +161,7 @@ export class VmClient {
     manager.onMessage((message) => {
       if (message.type === "ready") ran = true;
       else if (message.type === "result") this.pending.get(message.id)?.(message.outcome);
+      else if (message.type === "stopped") manager.kill();
     });
     manager.onExit(() => {
       if (this.manager === manager) this.manager = null;
