@@ -212,9 +212,11 @@ Important: cloud sandboxes may be cleaned up, idled out, or recreated between tu
 # Appended for a session on the user's computer (describe_for_device): its
 # guest refuses these writes with a bare "Operation not permitted".
 DEVICE_GIT_NOTE = (
-    "In a shared folder on your computer, git config, hooks and `.git` entries are read-only to commands; "
-    "run `git init` and `git clone` in your home folder instead; "
-    "submodule update and worktree add run on your computer, not here."
+    "In a shared folder on your computer, commands cannot write git's config or hooks, a `.git` itself, "
+    "or the folder's shell, editor and agent settings (`.vscode`, `.idea`, `.mcp.json`, `.claude/commands`, "
+    "`.claude/agents`, `.bashrc` and the like): such a write fails with \"Operation not permitted\". "
+    "Commit, rebase, merge and cherry-pick work. Run `git init` and `git clone` in your home folder instead, "
+    "and ask the user to run `git submodule update`, `git worktree add` and `git worktree remove` on their computer."
 )
 
 
