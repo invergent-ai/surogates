@@ -863,18 +863,23 @@ body.main.first {
   align-self: center;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px;
+  /* Room for the row's Resolve or Reopen, which takes its place while the row is hovered or focused. */
+  min-width: 72px;
 }
 
 .section li {
   position: relative;
 }
 
-/* A row's Resolve or Reopen, shown while the row is hovered or has the focus. */
+/* A row's Resolve or Reopen, shown in place of its progress and age while the row is hovered or has the
+   focus: over neither the status line nor a chip, which end where the side begins. */
 .section .act {
   position: absolute;
+  top: 50%;
   right: 12px;
-  bottom: 8px;
+  transform: translateY(-50%);
   padding: 2px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -888,6 +893,11 @@ body.main.first {
 .section li:hover .act,
 .section li:focus-within .act {
   opacity: 1;
+}
+
+.section li:hover .thread .side,
+.section li:focus-within .thread .side {
+  visibility: hidden;
 }
 
 .thread .place {

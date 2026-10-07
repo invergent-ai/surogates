@@ -203,6 +203,26 @@ describe("the Overview pane", () => {
     await expect.poll(() => texts(page, ".section summary")).toEqual(["Waiting on you 3", "Working 2", "Idle 1", "Resolved 1"]);
   });
 
+  it("shows a row's Resolve or Reopen in its age's place, over nothing else of the row", async () => {
+    // Long chips, which fill their line to the row's end.
+    const idle = agent.projects!.threads[REPORT]!.find((thread) => thread.id === IDLE)!;
+    idle.files = idle.files.map((file) => ({ ...file, label: `${"regional_sales_".repeat(4)}${file.label}` }));
+    const { page } = await opened();
+    await page.click('[data-group="resolved"] summary');
+    const covered: string[] = [];
+    for (const id of await page.$$eval(".section .thread", (found) => found.map((row) => (row as HTMLElement).dataset.thread!))) {
+      await page.hover(`[data-thread="${id}"]`);
+      covered.push(...await page.evaluate((thread) => {
+        const act = document.querySelector(`[data-act="${thread}"]`)!.getBoundingClientRect();
+        const hit = (box: DOMRect) => box.left < act.right && act.left < box.right && box.top < act.bottom && act.top < box.bottom;
+        return [...document.querySelectorAll(`[data-thread="${thread}"] :is(.title, .status, .chip, .progress, .age)`)]
+          .filter((part) => getComputedStyle(part).visibility !== "hidden" && hit(part.getBoundingClientRect()))
+          .map((part) => `${part.className} of ${thread}`);
+      }, id));
+    }
+    expect(covered).toEqual([]);
+  });
+
   it("says why a thread was not resolved", async () => {
     const { page, client } = await opened();
     await client.evaluate(() => {
