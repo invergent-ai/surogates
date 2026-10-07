@@ -292,6 +292,32 @@ describe("SessionTreePanel", () => {
     expect(container.querySelector('[title="Stop sub-agent"]')).toBeNull();
   });
 
+  it("lists no project's master or threads among the chats while one is open", async () => {
+    const node = (id: string, parentId: string | null, title: string, runKind: string | null = null) => ({
+      id, parentId, rootSessionId: "master", depth: parentId === null ? 0 : 1, agentId: "agent-1", channel: parentId === null ? "web" : "worker",
+      runKind, status: "completed", title, model: "surogate", messageCount: 1, toolCallCount: 0,
+      createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    });
+    const adapter: AgentChatAdapter = {
+      ...createAdapter([session({ id: "chat", title: "Plain chat", agentId: "agent-1" })]),
+      async getSessionTree() {
+        return { total: 2, nodes: [node("master", null, "Quarterly report", "project"), node("thread", "master", "Draft A")] };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    for (const open of ["master", "thread"]) {
+      await act(async () => {
+        root?.render(<SessionTreePanel adapter={adapter} agentId="agent-1" loadList sessionId={open} activeSessionId={open} title="Sessions" />);
+        await Promise.resolve();
+      });
+      expect(container.textContent).toContain("Plain chat");
+      expect(container.textContent).not.toContain("Quarterly report");
+      expect(container.textContent).not.toContain("Draft A");
+    }
+  });
+
   it("keeps the session list visible while selecting another session refetches", async () => {
     const sessions = [
       session({ id: "s-1", title: "First session", agentId: "agent-1" }),

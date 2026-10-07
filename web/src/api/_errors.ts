@@ -16,6 +16,9 @@ export function errorDetailMessage(detail: unknown): string | undefined {
   if (typeof detail === "string") {
     return detail || undefined;
   }
+  if (Array.isArray(detail)) {
+    return validationMessage(detail);
+  }
   if (detail && typeof detail === "object") {
     return objectDetailMessage(detail as Record<string, unknown>);
   }
@@ -24,6 +27,23 @@ export function errorDetailMessage(detail: unknown): string | undefined {
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
+}
+
+/**
+ * A 422's ``detail``, pydantic's list of ``{loc, msg}``, in words: each field
+ * named by the last part of its location, then why, and never the list as JSON.
+ */
+function validationMessage(detail: unknown[]): string | undefined {
+  const reasons = detail.flatMap((item) => {
+    const { loc, msg } = (item ?? {}) as { loc?: unknown; msg?: unknown };
+    const why = nonEmptyString(msg)?.replace(/^Value error, /, "");
+    if (!why) {
+      return [];
+    }
+    const field = Array.isArray(loc) ? nonEmptyString(loc.at(-1)) : undefined;
+    return [field ? `${field}: ${why}` : why];
+  });
+  return reasons.length > 0 ? reasons.join(". ") : undefined;
 }
 
 function objectDetailMessage(

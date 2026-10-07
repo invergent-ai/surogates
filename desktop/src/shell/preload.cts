@@ -17,24 +17,44 @@ if (origin !== undefined && window.top === window && location.origin === origin)
   // process, which checks each answer.
   let projects: ProjectsSource | null = null;
   const subscriptions = new Map<number, () => void>();
+  // Calls that reach this page before it serves its projects, as one sent while its load
+  // commits does: answered once it serves them, or refused once it says it serves none. One
+  // with under a second left by then would answer after the main process refused it: it never
+  // runs. One whose deadline has passed goes from the hold as the next call comes.
+  let early: Array<Extract<ToPage, { type: "call" }>> = [];
+  // The page said it serves none (registerProjects(null)): a call is refused at once, not held.
+  let servesNone = false;
+  const NONE = "The agent's page serves no projects";
+  const LAST_SECOND_MS = 1_000;
+  // A source's methods, which must be its own: what the page hands over is a copy, and keeps no prototype.
+  const METHODS = ["list", "get", "create", "update", "archive", "threads", "resolve", "reopen", "library", "routines", "subscribe"] as const;
   const answer = (id: number, outcome: { ok: unknown } | { error: string }) => ipcRenderer.send("desktop:projects-answer", id, outcome);
+  const called = (source: ProjectsSource, message: Extract<ToPage, { type: "call" }>) => {
+    const method = source[message.method] as (...args: unknown[]) => Promise<unknown>;
+    Promise.resolve().then(() => method(...message.args)).then(
+      (ok) => answer(message.id, { ok }),
+      (error: unknown) => answer(message.id, { error: error instanceof Error ? error.message : String(error) }),
+    ).catch(() => {
+      // An answer no message can carry, as one holding a function, is said, not left to run out of time.
+      answer(message.id, { error: "The agent's page answered with something it cannot send" });
+    });
+  };
   ipcRenderer.on("desktop:projects", (_event, message: ToPage) => {
     const source = projects;
     if (message.type === "unsubscribe") {
       subscriptions.get(message.id)?.();
       subscriptions.delete(message.id);
     } else if (!source) {
-      if (message.type === "call") answer(message.id, { error: "The agent's page serves no projects" });
+      // A subscription is made again once the page serves: the main process follows anew then.
+      if (message.type !== "call") return;
+      if (servesNone) answer(message.id, { error: NONE });
+      else early = [...early.filter((held) => Date.now() < held.deadline), message];
     } else if (message.type === "subscribe") {
       subscriptions.set(message.id, source.subscribe(message.projectId, (threadId) => {
         ipcRenderer.send("desktop:projects-changed", message.id, threadId);
       }));
     } else {
-      const method = source[message.method] as (...args: unknown[]) => Promise<unknown>;
-      Promise.resolve().then(() => method(...message.args)).then(
-        (ok) => answer(message.id, { ok }),
-        (error: unknown) => answer(message.id, { error: error instanceof Error ? error.message : String(error) }),
-      );
+      called(source, message);
     }
   });
   contextBridge.exposeInMainWorld("surogateDesktop", {
@@ -55,9 +75,20 @@ if (origin !== undefined && window.top === window && location.origin === origin)
     },
     setAccount: call("setAccount"),
     registerProjects: (source: ProjectsSource | null) => {
+      if (source && METHODS.some((name) => typeof source[name] !== "function")) {
+        throw new Error("A projects source's methods must be its own properties, as an object literal's are");
+      }
       for (const end of subscriptions.values()) end();
       subscriptions.clear();
       projects = source;
+      servesNone = source === null;
+      const held = early;
+      early = [];
+      for (const message of held) {
+        if (message.deadline - Date.now() < LAST_SECOND_MS) continue;
+        if (source) called(source, message);
+        else answer(message.id, { error: NONE });
+      }
       return ipcRenderer.invoke("desktop:registerProjects", source !== null);
     },
   });

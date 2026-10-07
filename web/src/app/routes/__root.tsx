@@ -5,7 +5,7 @@ import { Outlet, createRootRoute, useRouterState } from "@tanstack/react-router"
 import { Suspense, useEffect } from "react";
 
 import { fetchCurrentUser } from "@/api/auth";
-import { listSessions } from "@/api/sessions";
+import { workstreams } from "@/api/workstreams";
 import { hasAuthToken } from "@/features/auth";
 import { useVisualViewport } from "@/hooks/use-visual-viewport";
 import { getDesktop, joinDesktop, leaveDesktop } from "@/lib/desktop-bridge";
@@ -57,16 +57,7 @@ function useDesktop(signedInRoute: boolean): void {
         const me = await fetchCurrentUser();
         return { name: me.display_name ?? me.email, email: me.email, userId: me.id, orgId: me.org_id };
       },
-      sessions: async () =>
-        (await listSessions({ includeDescendants: true, limit: 200 })).sessions.map((session) => ({
-          id: session.id,
-          parentId: session.parent_id,
-          channel: session.channel,
-          title: session.title,
-          status: session.status,
-          createdAt: session.created_at,
-          updatedAt: session.updated_at,
-        })),
+      projects: workstreams,
     });
   }, [signedInRoute]);
 }

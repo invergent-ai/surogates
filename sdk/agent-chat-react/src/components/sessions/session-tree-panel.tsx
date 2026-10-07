@@ -412,9 +412,11 @@ export function SessionTreePanel({
           listResult.status === "fulfilled" ? listResult.value : null;
         const sessionTree =
           treeResult.status === "fulfilled" ? treeResult.value : null;
+        // A project's master and its threads are the project's, never chats of the list.
+        const project = sessionTree?.nodes.some((node) => node.parentId === null && node.runKind === "project");
         let nextNodes = mergeTreeNodes([
           sessionList?.sessions.map(sessionToTreeNode) ?? [],
-          sessionTree?.nodes ?? [],
+          project ? [] : sessionTree?.nodes ?? [],
         ]);
         if (pendingDeleteIds.current.size > 0) {
           const stillReturned = new Set<string>();

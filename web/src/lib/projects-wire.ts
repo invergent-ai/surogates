@@ -1,11 +1,13 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// A project's thread rows as the routes answer them (/v1/workstreams/{id}/threads), in
-// snake_case, and the shell's ThreadRow (projects-contract.d.ts) they map to, field by field.
-// Pure, so the desktop's ProjectsSource maps the same way, and a test can run it.
+// Projects and their thread rows as the routes answer them (/v1/workstreams), in snake_case,
+// and the shell's types (projects-contract.d.ts) they map to, field by field. Pure, so the
+// desktop's ProjectsSource maps the same way, and a test can run it.
 
-import type { ThreadRow } from "./projects-contract";
+import type {
+  LibraryEntry, Project, ProjectsSource, ProjectSummary, Routine, ThreadPlace, ThreadRow,
+} from "./projects-contract";
 
 /** A thread's row as GET /v1/workstreams/{id}/threads answers it. */
 export interface ThreadRowResponse {
@@ -22,6 +24,12 @@ export interface ThreadRowResponse {
   resolved_at: string | null;
 }
 
+function placeOf(place: ThreadRowResponse["place"]): ThreadPlace {
+  return place.kind === "cloud"
+    ? { kind: "cloud" }
+    : { kind: "device", deviceId: place.device_id, deviceName: place.device_name, online: place.online };
+}
+
 export function threadRowOf(row: ThreadRowResponse): ThreadRow {
   return {
     id: row.id,
@@ -31,11 +39,111 @@ export function threadRowOf(row: ThreadRowResponse): ThreadRow {
     statusLine: row.status_line,
     progress: row.progress,
     files: row.files.map(({ kind, label, ref, thread_id }) => ({ kind, label, ref, threadId: thread_id })),
-    place: row.place.kind === "cloud"
-      ? { kind: "cloud" }
-      : { kind: "device", deviceId: row.place.device_id, deviceName: row.place.device_name, online: row.place.online },
+    place: placeOf(row.place),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     resolvedAt: row.resolved_at,
+  };
+}
+
+/** A project as GET /v1/workstreams lists it. */
+export interface ProjectSummaryResponse {
+  id: string;
+  name: string;
+  icon: string | null;
+  created_at: string;
+  updated_at: string;
+  waiting: number;
+  working: number;
+}
+
+/** A project as GET, POST and PATCH /v1/workstreams[/{id}] answer it. */
+export interface ProjectResponse extends ProjectSummaryResponse {
+  goal: string | null;
+  instructions: string;
+  master_session_id: string;
+  coordinator_tier: Project["coordinatorTier"];
+  thread_tier: Project["threadTier"];
+}
+
+export function projectSummaryOf(project: ProjectSummaryResponse): ProjectSummary {
+  return {
+    id: project.id,
+    name: project.name,
+    icon: project.icon,
+    createdAt: project.created_at,
+    updatedAt: project.updated_at,
+    waiting: project.waiting,
+    working: project.working,
+  };
+}
+
+export function projectOf(project: ProjectResponse): Project {
+  return {
+    ...projectSummaryOf(project),
+    goal: project.goal,
+    instructions: project.instructions,
+    masterSessionId: project.master_session_id,
+    coordinatorTier: project.coordinator_tier,
+    threadTier: project.thread_tier,
+  };
+}
+
+export type ProjectChange = Parameters<ProjectsSource["update"]>[1];
+
+const CHANGE_FIELDS: Record<keyof ProjectChange, string> = {
+  name: "name",
+  icon: "icon",
+  goal: "goal",
+  instructions: "instructions",
+  coordinatorTier: "coordinator_tier",
+  threadTier: "thread_tier",
+};
+
+/** A change as PATCH /v1/workstreams/{id} takes it: the fields it names, and no others. */
+export function projectChangeOf(change: ProjectChange): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(change)
+    .filter(([field]) => Object.hasOwn(CHANGE_FIELDS, field))
+    .map(([field, value]) => [CHANGE_FIELDS[field as keyof ProjectChange], value]));
+}
+
+/** A file of a project's Library, as GET /v1/workstreams/{id}/library lists it. */
+export interface LibraryEntryResponse {
+  path: string;
+  origin: LibraryEntry["origin"];
+  thread_id: string | null;
+  size: number | null;
+  updated_at: string | null;
+  place: ThreadRowResponse["place"];
+}
+
+export function libraryEntryOf(entry: LibraryEntryResponse): LibraryEntry {
+  return {
+    path: entry.path,
+    origin: entry.origin,
+    threadId: entry.thread_id,
+    size: entry.size,
+    updatedAt: entry.updated_at,
+    place: placeOf(entry.place),
+  };
+}
+
+/** A schedule as GET /v1/scheduled-work lists it, as far as a project's Routines show it. */
+export interface RoutineResponse {
+  id: string;
+  name: string | null;
+  schedule_display: string;
+  next_run_at: string | null;
+  status: string;
+}
+
+export function routineOf(routine: RoutineResponse): Routine {
+  return {
+    id: routine.id,
+    // A schedule made without a name shows its schedule alone.
+    name: routine.name ?? "",
+    scheduleDisplay: routine.schedule_display,
+    nextRunAt: routine.next_run_at,
+    status: routine.status,
   };
 }
