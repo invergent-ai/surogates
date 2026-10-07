@@ -1,4 +1,4 @@
-import { linkSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -134,26 +134,77 @@ afterEach(async () => {
 });
 
 describe("preparing a new chat's folder", () => {
-  it("opens the dialog first when nothing was bound yet, then the sheet, and keeps the mode chosen there", async () => {
-    const user = new User([notes], [{ mode: "ask" }]);
+  it("offers a new folder of its own under ~/Surogate/<agent> when nothing was bound yet, and keeps the mode chosen there", async () => {
+    const user = new User([], [{ mode: "ask" }]);
     const ready = await binder(user).prepareFolder("last", WINDOW, never());
-    expect(user.dialogs).toEqual([join(base, "home")]);
-    expect(user.sheets).toEqual([{ agent: "Research assistant", folder: notes, mode: "free", links: null, refusal: null }]);
+    const made = user.sheets[0]?.folder ?? "";
+    expect(made).toMatch(new RegExp(`^${join(base, "home", "Surogate", "Research-assistant")}/\\d{4}-\\d{2}-\\d{2}$`));
+    expect(user.dialogs).toEqual([]);
+    expect(user.sheets).toEqual([{ agent: "Research assistant", folder: made, mode: "free", links: null, refusal: null }]);
     expect(ready).toEqual({
-      folder: notes, mode: "ask", nonce: expect.stringMatching(/^[A-Za-z0-9_-]{16,128}$/), token: expect.any(String),
+      folder: made, mode: "ask", nonce: expect.stringMatching(/^[A-Za-z0-9_-]{16,128}$/), token: expect.any(String),
     });
     expect(ready?.token).not.toBe(ready?.nonce);
+    expect(statSync(made).isDirectory()).toBe(true);
+    // Another chat the same day, before the first is bound, gets a folder of its own.
+    const second = new User([], [{ mode: "free" }]);
+    expect((await binder(second).prepareFolder("last", WINDOW, never()))?.folder).toBe(`${made} 2`);
   });
 
-  it("shows the last folder bound without a dialog, and opens the dialog there once that folder has gone", async () => {
+  it("removes the new folder again when the user cancels, or takes another", async () => {
+    const cancelling = new User([], [null]);
+    expect(await binder(cancelling).prepareFolder("last", WINDOW, never())).toBeNull();
+    const made = cancelling.sheets[0]?.folder ?? "";
+    expect(existsSync(made)).toBe(false);
+    const changing = new User([notes], ["change", { mode: "free" }]);
+    expect((await binder(changing).prepareFolder("last", WINDOW, never()))?.folder).toBe(notes);
+    expect(changing.dialogs).toEqual([made]);
+    expect(existsSync(made)).toBe(false);
+    // One the user put something in stays.
+    const filling = new User([], [null]);
+    filling.confirmFolder = (sheet) => {
+      filling.sheets.push(sheet);
+      writeFileSync(join(sheet.folder, "draft.txt"), "kept");
+      return Promise.resolve(null);
+    };
+    await binder(filling).prepareFolder("last", WINDOW, never());
+    expect(existsSync(join(made, "draft.txt"))).toBe(true);
+  });
+
+  it("shows the last folder bound without a dialog, and a new folder once that one has gone", async () => {
     journal.bindings.add({ root: OTHER, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
     const user = new User([], [{ mode: "free" }]);
     expect((await binder(user).prepareFolder("last", WINDOW, never()))?.folder).toBe(notes);
     expect(user.dialogs).toEqual([]);
     rmSync(notes, { recursive: true });
-    const again = new User([join(base, "other")], [{ mode: "free" }]);
-    expect((await binder(again).prepareFolder("last", WINDOW, never()))?.folder).toBe(join(base, "other"));
-    expect(again.dialogs).toEqual([notes]);
+    const again = new User([], [{ mode: "free" }]);
+    expect((await binder(again).prepareFolder("last", WINDOW, never()))?.folder).toMatch(/Surogate\/Research-assistant\/\d{4}-\d{2}-\d{2}$/);
+    expect(again.dialogs).toEqual([]);
+  });
+
+  it.each([
+    ["../../escape", "..-..-escape"],
+    ["[::1]:8080", "-1-8080"],
+    ["a/b", "a-b"],
+  ])("makes the new folder for the agent %s under ~/Surogate/%s", async (agent, name) => {
+    const user = new User([], [null]);
+    await binder(user, { agent }).prepareFolder("last", WINDOW, never());
+    const made = user.sheets[0]?.folder ?? "";
+    expect(made.startsWith(`${join(base, "home", "Surogate", name)}/`)).toBe(true);
+    expect(made.split("/").at(-1)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(user.sheets[0]?.refusal).toBeNull();
+  });
+
+  it("opens the dialog where the last folder was when no new folder can be made", async () => {
+    writeFileSync(join(base, "home", "Surogate"), "not a folder");
+    const user = new User([notes], [{ mode: "free" }]);
+    expect((await binder(user).prepareFolder("last", WINDOW, never()))?.folder).toBe(notes);
+    expect(user.dialogs).toEqual([join(base, "home")]);
+    // Nor for an agent whose name makes no folder name.
+    rmSync(join(base, "home", "Surogate"));
+    const unnamed = new User([notes], [{ mode: "free" }]);
+    expect((await binder(unnamed, { agent: ".." }).prepareFolder("last", WINDOW, never()))?.folder).toBe(notes);
+    expect(unnamed.dialogs).toEqual([join(base, "home")]);
   });
 
   it("shows the files in the folder that are linked from elsewhere", async () => {
@@ -424,6 +475,44 @@ describe("waiting for a chat's binding", () => {
     const chooser = binder(user, { preparedMs: 20 });
     const ready = await confirmed(user, chooser);
     await expect(chooser.bindSession(ROOT, ready.token, WINDOW)).rejects.toThrow(/expired/);
+  });
+});
+
+describe("dropping a confirmed folder", () => {
+  it("refuses the bind of a chat that was never created, and tells the page waiting for it", async () => {
+    const user = new User();
+    const chooser = binder(user);
+    const ready = await confirmed(user, chooser);
+    const waiting = chooser.bindSession(ROOT, ready.token, WINDOW);
+    chooser.cancelPrepared(ready.token, WINDOW);
+    await expect(waiting).rejects.toThrow("This folder's confirmation was dropped before its chat was created");
+    expect(await chooser.admit(bindOp(ROOT, ready), never())).toEqual(NOT_BOUND);
+    expect(journal.bindings.get(ROOT)).toBeUndefined();
+    // Dropped once: a repeat changes nothing.
+    chooser.cancelPrepared(ready.token, WINDOW);
+  });
+
+  it("removes a new folder of its own that was taken, once its confirmation is dropped or expires unbound", async () => {
+    const user = new User([], [{ mode: "free" }, { mode: "free" }]);
+    const dropping = binder(user);
+    const dropped = await dropping.prepareFolder("last", WINDOW, never());
+    dropping.cancelPrepared(dropped!.token, WINDOW);
+    expect(existsSync(dropped!.folder)).toBe(false);
+    const expiring = binder(user, { preparedMs: 20 });
+    const expired = await expiring.prepareFolder("last", WINDOW, never());
+    expect(existsSync(expired!.folder)).toBe(true);
+    await vi.waitFor(() => expect(existsSync(expired!.folder)).toBe(false));
+  });
+
+  it("drops nothing for another window, an unknown token, or a chat already bound", async () => {
+    const user = new User();
+    const chooser = binder(user);
+    const ready = await confirmed(user, chooser);
+    chooser.cancelPrepared(ready.token, "window-2");
+    chooser.cancelPrepared("x".repeat(43), WINDOW);
+    expect(await chooser.admit(bindOp(ROOT, ready), never())).toEqual({ ok: null });
+    chooser.cancelPrepared(ready.token, WINDOW);
+    expect(journal.bindings.get(ROOT)?.folder).toBe(notes);
   });
 });
 
