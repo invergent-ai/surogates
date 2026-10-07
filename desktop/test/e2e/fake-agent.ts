@@ -262,8 +262,8 @@ export async function signedInAndAdded(shell: ElectronApplication, page: Page, a
 // *delay* ms. The page keeps it as window.fakeProjects, whose changed() tells the source's subscribers,
 // whose lists counts the times the projects were listed, whose reads names each read of threads (a
 // thread's id, or null for them all), whose refusal, when set, is what a change of a project or a
-// thread answers, whose unreachable, when set, makes a project's read fail as the web client's
-// fetch does with the agent out of reach, and whose register() registers the source. What it
+// thread answers, whose unreachable, when set, makes the list and every call on a project fail as
+// the web client's fetch does with the agent out of reach, and whose register() registers the source. What it
 // changes of a project it keeps at the fake agent, so the next load serves it.
 // The source's methods read it through this, as an object's own methods may.
 function serveProjects(data: ProjectFixtures, delay: number): void {
@@ -285,17 +285,18 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
   const source = {
     served: data,
     one(id: string) {
+      if (fake.unreachable) throw new Error("API server is not reachable.");
       const found = this.served.projects.find((project) => project.id === id);
       if (!found) throw new Error("No such project");
       return found;
     },
     async list() {
       fake.lists++;
+      if (fake.unreachable) throw new Error("API server is not reachable.");
       return this.served.projects.map(({ id, name, icon, createdAt, updatedAt, waiting, working }) =>
         ({ id, name, icon, createdAt, updatedAt, waiting, working }));
     },
     async get(id: string) {
-      if (fake.unreachable) throw new Error("API server is not reachable.");
       return this.one(id);
     },
     async threads(id: string, threadId?: string) {

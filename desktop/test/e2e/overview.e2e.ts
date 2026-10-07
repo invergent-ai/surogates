@@ -55,6 +55,7 @@ interface Served {
   lists: number;
   reads: Array<string | null>;
   refusal: string | null;
+  unreachable: boolean;
   changed(id: string, threadId: string | null): void;
 }
 
@@ -293,6 +294,29 @@ describe("the Overview pane, at its edges", () => {
       expect(await shell(how), how).toBe("answered");
       await expect.poll(() => page.textContent("#failure")).toBe("No such thread in the open project");
     }
+  });
+
+  it("reads everything again after a read that failed, so the change it lost is not lost for good", async () => {
+    const { page, client } = await opened();
+    const lists = () => client.evaluate(() => (window as unknown as { fakeProjects: Served }).fakeProjects.lists);
+    const before = await lists();
+    // The agent is out of reach while the first change is told: its read fails.
+    await client.evaluate(([project, thread]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      fake.unreachable = true;
+      fake.data.threads[project!]!.find((found) => found.id === thread)!.statusLine = "Merged the regions";
+      fake.changed(project!, thread!);
+    }, [REPORT, IDLE]);
+    await expect.poll(lists).toBeGreaterThan(before);
+    // Back in reach, a change of another thread is told.
+    await client.evaluate(([project, thread]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      fake.unreachable = false;
+      fake.data.threads[project!]!.find((found) => found.id === thread)!.statusLine = "Asked which rate to use";
+      fake.changed(project!, thread!);
+    }, [REPORT, QUESTION]);
+    await expect.poll(() => page.textContent(`[data-thread="${QUESTION}"] .status`)).toBe("Question · Asked which rate to use");
+    await expect.poll(() => page.textContent(`[data-thread="${IDLE}"] .status`)).toBe("Idle · Merged the regions");
   });
 
   it("asks the page again once, not once a change, when changes come together", async () => {

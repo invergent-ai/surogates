@@ -245,6 +245,8 @@ function openLink(which: unknown): void {
 let refreshing = false;
 // What the next refresh reads: null for everything, or the threads whose rows changed.
 let wanted = new Set<string | null>();
+// The last pass failed, and lost what it was asked: the next one reads everything.
+let stale = false;
 
 // The projects the page serves, asked again: everything when it registers its source, when the
 // open project changes, when the window comes to the front and when the project's stream says
@@ -260,6 +262,7 @@ async function refreshProjects(threadId: string | null = null): Promise<void> {
     while (wanted.size > 0 && served) {
       const asked = wanted;
       wanted = new Set();
+      if (stale) asked.add(null);
       try {
         // The list is one count per project: a thread's change moves the project's counts too.
         listed = await projects.list();
@@ -274,7 +277,9 @@ async function refreshProjects(threadId: string | null = null): Promise<void> {
         } else {
           for (const id of asked) await refreshThread(id!);
         }
+        stale = false;
       } catch (error) {
+        stale = true;
         report(error);
       }
       changed();
