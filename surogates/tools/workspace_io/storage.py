@@ -43,6 +43,11 @@ class StorageWorkspaceIO:
         return "" if path in ("", ".") else path
 
     async def stat(self, key: str) -> FileStat | None:
+        # exists() first, as the download and the attachments asked it: it
+        # swallows every storage error, so one that cannot say (a 403, a
+        # throttle) is not found, as before, not a 500.
+        if not await self._storage.exists(self._bucket, self._prefix + key):
+            return None
         try:
             info = await self._storage.stat(self._bucket, self._prefix + key)
         except KeyError:

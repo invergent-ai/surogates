@@ -66,3 +66,20 @@ async def test_a_walk_lists_the_files_under_a_folder_of_this_workspace(files, st
         [("a.txt", 5), ("node_modules/x/i.js", 0), ("sub/b.md", 1)], False, None,
     )
     assert await files.walk("sub", skip=()) == Walk([("b.md", 1)], False, None)
+
+
+class _Unreadable(LocalBackend):
+    """Object storage that cannot say what a key holds, as S3 answering 403 or throttling: its exists swallows it."""
+
+    async def exists(self, bucket: str, key: str) -> bool:
+        return False
+
+    async def stat(self, bucket: str, key: str) -> dict:
+        raise RuntimeError("An error occurred (403) when calling the HeadObject operation: Forbidden")
+
+
+async def test_a_file_storage_cannot_say_is_not_found_as_before(tmp_path):
+    # The download and a message's attachments asked exists() first, which swallows every error: so they still answer
+    # 404 and 422, not 500.
+    files = StorageWorkspaceIO(_Unreadable(str(tmp_path)), bucket=BUCKET, prefix=PREFIX)
+    assert await files.stat("notes/a.md") is None
