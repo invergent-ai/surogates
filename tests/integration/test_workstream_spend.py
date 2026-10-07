@@ -317,6 +317,17 @@ async def test_a_report_waits_while_the_users_limit_is_spent(api, monkeypatch, p
     assert unread_reports(await api.app.state.session_store.get_events(master.id))
 
 
+async def test_a_paid_turn_a_refused_report_held_is_released(api, monkeypatch):
+    await a_firebase_user(api)
+    master = await reported(api)
+    harness, ran = worker(api, monkeypatch, {**PAID, **CAPPED}, ops := Ops(allowance_left=False))
+    await harness.wake(master.id)
+    # The report waits, and the paid turn it held goes back with nothing spent.
+    assert (ran, ops.held) == ([], [("paid", "fb-flavius", "web"), ("allowance", str(api.user_id), "web")])
+    assert ops.spent == [("paid", "hold-1", 0)]
+    assert "commerce_reservations" not in (await api.app.state.session_store.get_session(master.id)).config
+
+
 async def test_a_refused_thread_wakes_the_master_at_most_once(api, monkeypatch):
     master = await master_of(api, await create(api))
     await turn_of_the_master_ends(api, master)

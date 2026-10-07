@@ -1196,7 +1196,11 @@ class AgentHarness(
                 # A report has no user waiting on it: while the user's limit
                 # refuses the turn, the report waits for their next message,
                 # which the message route holds.
-                if revived_by == "worker_report" and await self._admit_turn(session, "") is not None:
+                if (
+                    revived_by == "worker_report"
+                    and admitted_at_wake(session)
+                    and await self._admit_turn(session, "") is not None
+                ):
                     logger.info("Session %s: the user's limit holds back a report", session_id)
                     return
                 if revived_by is not None:

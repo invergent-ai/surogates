@@ -9,6 +9,7 @@ instead.  Ops is not involved beyond its existing planes.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from surogates.api.routes._commerce_turn import (
@@ -19,6 +20,8 @@ from surogates.api.routes._commerce_turn import (
 )
 from surogates.channels.memory_boundary import PROJECT_BOUNDARY_PREFIX
 from surogates.runtime.platform_client import AllowanceExhaustedError, CommercePaymentRequiredError
+
+logger = logging.getLogger(__name__)
 
 
 def admitted_at_wake(session: Any) -> bool:
@@ -44,7 +47,8 @@ async def admit_turn(
 ) -> str | None:
     """Hold *session*'s turn on each plane that holds nothing for it yet: a
     typed message's turn is already held by its route.  The user's words
-    when a plane refuses it, None when it may run.
+    when a plane refuses it, the paid turn this call held going back; None
+    when it may run.
 
     Raises ``CommerceReserveError`` or ``AllowanceReserveError`` when a
     plane cannot be reached, so the turn fails closed and is retried.
@@ -55,13 +59,16 @@ async def admit_turn(
             payload = await runtime_config_cache.get(str(session.agent_id)) or {}
         except LookupError:
             pass  # ops does not know the agent: free, as the route reads it
-    config = session.config or {}
+    # The live row, not the wake's copy: a settle that ran since the wake read
+    # the session has taken the holds that copy shows.
+    config = (await session_store.get_session(session.id)).config or {}
+    paid = None
     try:
         if str(payload.get("commerce_mode") or "free") != "free" and not config.get("commerce_reservations"):
             buyer = await buyer_identity(session_factory, org_id=session.org_id, user_id=session.user_id)
             # The builder's own people, with no buyer identity, pass unmetered.
             if buyer is not None:
-                await reserve_commerce(
+                paid = await reserve_commerce(
                     platform_client=platform_client, session_store=session_store, session=session,
                     content=content, buyer=buyer, channel="web",
                 )
@@ -72,5 +79,26 @@ async def admit_turn(
                 end_user_id=str(session.user_id), channel="web", session_config=config,
             )
     except (AllowanceExhaustedError, CommercePaymentRequiredError) as exc:
+        if paid is not None:
+            await _release(platform_client, session_store, session, paid)
         return limit_notice(exc.detail, payload.get("commerce_buy_url"))
     return None
+
+
+async def _release(platform_client: Any, session_store: Any, session: Any, hold: dict) -> None:
+    """Give back at nothing spent the paid *hold* a refused turn took, and no
+    other: another wake's hold may sit beside it.  Unless a settle has
+    taken it since, which spends it."""
+    if not await session_store.remove_session_config_list_item(session.id, "commerce_reservations", hold):
+        return
+    try:
+        await platform_client.commerce_debit(
+            session.agent_id, entitlement_id=str(hold["entitlement_id"]),
+            reserved_tokens=hold["reserved_tokens"], actual_tokens=0,
+            reservation_id=hold["reservation_id"] or None,
+        )
+    except Exception:
+        logger.warning(
+            "Releasing a refused turn's paid hold failed for session %s; the ops reaper will release it",
+            session.id, exc_info=True,
+        )
