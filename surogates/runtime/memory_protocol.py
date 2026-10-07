@@ -61,10 +61,10 @@ def memory_object_key(
 ) -> str:
     """Build the R2 object key for one memory target.
 
-    ``boundary`` (set for channel sessions) keys memory per conversation —
-    ``{prefix}/boundaries/{boundary}/{target}.json`` — isolating private
-    conversations from each other.  Without it, the per-user / shared layout
-    is unchanged.
+    ``boundary`` (set for channel, evaluation and project sessions) keys
+    memory per partition — ``{prefix}/boundaries/{boundary}/{target}.json``
+    — isolating private conversations and projects from each other.
+    Without it, the per-user / shared layout is unchanged.
 
     ``target`` is ``"memory"`` (agent memory) or ``"user"`` (facts
     about the user surfaced by the UI).  Each target lands in its own

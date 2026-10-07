@@ -164,6 +164,7 @@ class ScheduledSessionStore:
         status: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        created_from_session_id: UUID | None = None,
     ) -> list[ScheduledSession]:
         _validate_principal(
             user_id, service_account_id,
@@ -182,6 +183,8 @@ class ScheduledSessionStore:
             stmt = stmt.where(ScheduledSessionRow.status == status)
         elif not include_inactive:
             stmt = stmt.where(ScheduledSessionRow.status == "active")
+        if created_from_session_id is not None:
+            stmt = stmt.where(ScheduledSessionRow.created_from_session_id == created_from_session_id)
         if offset > 0:
             stmt = stmt.offset(offset)
         if limit is not None:

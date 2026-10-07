@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import posixpath
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
@@ -274,6 +275,25 @@ class WorkstreamStore:
             await db.execute(text("SET LOCAL jit = off"))
             found = await db.execute(query)
             return {project: (latest, waiting, working) for project, latest, waiting, working in found}
+
+    async def produced(self, workstream_id: UUID) -> dict[str, UUID]:
+        """Each workspace file the project's threads produced, and the thread
+        whose turn summary named it last."""
+        async with self._sf() as db:
+            summaries = await db.execute(
+                select(Event.session_id, Event.data["artifacts"])
+                .join(WorkstreamThread, WorkstreamThread.session_id == Event.session_id)
+                .where(WorkstreamThread.workstream_id == workstream_id, Event.type == EventType.TURN_SUMMARY.value)
+                .order_by(Event.id)
+            )
+            produced: dict[str, UUID] = {}
+            for thread_id, artifacts in summaries:
+                for artifact in artifacts if isinstance(artifacts, list) else []:
+                    if isinstance(artifact, dict) and artifact.get("kind") == "file" and isinstance(artifact.get("ref"), str):
+                        # The model's argument as given: ``./a.docx`` and
+                        # ``/workspace/a.docx`` are ``a.docx``.
+                        produced[posixpath.normpath(artifact["ref"]).removeprefix("/workspace/")] = thread_id
+        return produced
 
     async def masters(self, master_ids: list[UUID]) -> dict[UUID, tuple[datetime, bool]]:
         """Each master's last activity, and whether it waits on the user: a
