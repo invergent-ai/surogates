@@ -71,7 +71,8 @@ let reloading = false;
 const apiFetch: Fetch = (url, init) => net.fetch(url, init);
 // Devices logged out while the agent could not hear it, by device: each revoked on a link of its own once it can.
 const revocations = new Map<string, { done: Promise<void>; stop(): Promise<void> }>();
-let signingOut = false;
+// A log out under way, settled once it is done: a quit waits for it.
+let signingOut: Promise<void> | null = null;
 // A device the agent revoked, being cleaned up: a restore waits for it.
 let retiring: Promise<void> = Promise.resolve();
 let restoring = false;
@@ -502,6 +503,8 @@ async function endDevice(credential: Credential): Promise<void> {
   const ending = device?.credential === credential ? device : null;
   device = null;
   kept = null;
+  // Owed before anything stops: a quit or a crash from here on still revokes it, at the next launch.
+  if (credential.token !== null) credentials.save({ ...credential, revoking: true });
   const stack = credential.token === null ? null : await ending?.started.catch(() => null);
   // A token the agent already ended needs no revoking. A stop that fails still ends access here: the
   // revocation is then owed, as when the agent could not hear it.
@@ -511,7 +514,6 @@ async function endDevice(credential: Credential): Promise<void> {
   }))) {
     credentials.remove(credential.deviceId);
   } else {
-    credentials.save({ ...credential, revoking: true });
     revokeLater(credential);
   }
   // A revoked device still being cleaned up has its journal open.
@@ -549,8 +551,9 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
       detail: `This computer's access to ${agent.name} ends, and the folders it was given here are forgotten.${cutOff()}`,
       buttons: ["Log out", "Cancel"], defaultId: 0, cancelId: 1, noLink: true,
     });
-  if (!confirmed) return;
-  signingOut = true;
+  if (!confirmed || signingOut) return;
+  const { promise, resolve: done } = Promise.withResolvers<void>();
+  signingOut = promise;
   try {
     // A sign-in under way is cancelled, and stops first: one that finished afterwards would sign the user back in.
     signingIn?.abort();
@@ -573,7 +576,8 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
       main?.go("/");
     }
   } finally {
-    signingOut = false;
+    signingOut = null;
+    done();
     changed();
   }
 }
@@ -1105,6 +1109,8 @@ async function quit(): Promise<void> {
   }
   // A sign-in under way closes its port in the browser's face; revocations still owed are tried at the next launch.
   signingIn?.abort();
+  // A log out under way finishes first: it keeps the revocation owed, and forgets the folders.
+  await signingOut;
   await Promise.all([...revocations.values()].map((revoking) => revoking.stop()));
   // The device, then the VM, which stops even when the device's stop fails. A stop that
   // fails still quits: the next launch answers what it cut off.
@@ -1155,7 +1161,11 @@ if (!app.requestSingleInstanceLock()) {
     main.window.on("focus", () => void refreshProjects());
     // Revocations owed from an earlier run, whatever agent they were for: each keeps its agent's address, device and token.
     const stored = credentials.list();
-    for (const owed of stored.filter((credential) => credential.revoking)) revokeLater(owed);
+    for (const owed of stored.filter((credential) => credential.revoking)) {
+      // Its folders went with the log out, or go now, after a crash that cut it short.
+      rmSync(join(root, "devices", owed.deviceId), { recursive: true, force: true });
+      revokeLater(owed);
+    }
     const agent = agents.get();
     if (!agent) return;
     const remembered = sessionStore.get();

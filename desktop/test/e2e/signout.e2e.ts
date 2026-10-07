@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
@@ -162,6 +162,47 @@ describe("a log out while a sign-in is finishing", () => {
     expect(existsSync(state("session.json"))).toBe(false);
     expect(existsSync(state("devices/d"))).toBe(false);
   });
+});
+
+describe("a quit during a log out the agent cannot hear", () => {
+  it.each([["quits", false], ["is killed", true]])(
+    "%s mid-way: the next launch starts no device, and revokes it once the agent can hear it",
+    async (_name, killed) => {
+      const first = await signedIn();
+      await quit(first.shell);
+      // A login shell this slow keeps the device starting, and the log out waiting for it.
+      const slow = join(home, "slow-shell");
+      writeFileSync(slow, "#!/bin/sh\nsleep 4\n", { mode: 0o755 });
+      const shell = await launch(home, { SHELL: slow });
+      app = shell;
+      await stubNative(shell);
+      const page = await shellPage(shell);
+      await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connecting…");
+      // Gone once the app has launched: Playwright's launch can hang on a window whose agent cannot be reached.
+      const port = Number(new URL(origin).port);
+      await agent.stop();
+      await logOut(page);
+      await expect.poll(() => asked(shell)).toContain(`Log out of ${host}?`);
+      app = undefined;
+      if (killed) {
+        const child = shell.process();
+        child.kill("SIGKILL");
+        if (child.exitCode === null && child.signalCode === null) await new Promise((resolve) => child.once("exit", resolve));
+      } else {
+        await quit(shell);
+        // The quit waited for the log out: its folders went with it.
+        expect(existsSync(state("devices/d"))).toBe(false);
+      }
+      expect(credentials()).toEqual([expect.objectContaining({ deviceId: "d", revoking: true })]);
+      await agent.start(port);
+      app = await launch(home);
+      const again = await shellPage(app);
+      await expect.poll(() => again.getAttribute("#device", "title")).toBe("Sign in to this agent to let it work on folders of this computer");
+      await expect.poll(() => revokes(), { timeout: 15_000 }).toBe(1);
+      await expect.poll(() => credentials()).toEqual([]);
+      expect(existsSync(state("devices/d"))).toBe(false);
+    },
+  );
 });
 
 describe("removing the agent", () => {
