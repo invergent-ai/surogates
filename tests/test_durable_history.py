@@ -145,11 +145,14 @@ def test_a_pod_looks_again_at_each_folder_main_has_before_it_reads_the_real_file
     (first.copy / "threads" / "Draft A").mkdir(parents=True)
     (first.copy / "threads" / "Draft A" / "Y.md").write_text("by A")
     land(first)
-    asked: list[str] = []
+    asked: list[tuple[str, str]] = []
+    add_all = History._add_all
     monkeypatch.setattr(os, "setxattr", lambda path, name, value: asked.append((str(path), name)))
+    monkeypatch.setattr(History, "_add_all", lambda self, git: (asked.append(("the real files", "read")), add_all(self, git))[1])
     a_pod(tmp_path, project)
     # geesefs trusts a listing for a second: one taken just before another pod's landing would hide its files.
-    folders = {path for path, name in asked if name == ".invalidate"}
+    read = asked.index(("the real files", "read"))
+    folders = {path for path, name in asked[:read] if name == ".invalidate"}
     assert {str(project), str(project / "threads"), str(project / "threads" / "Draft A")} <= folders
 
 
