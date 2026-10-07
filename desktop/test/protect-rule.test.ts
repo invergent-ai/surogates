@@ -95,8 +95,9 @@ describe("the guest rule mirrors protect.ts", () => {
     }
     return bin;
   }
-  // Without a compiler these are skipped on a developer's machine, and fail on CI.
-  const withCc = it.skipIf(!cc && process.env.CI !== "true");
+  // Without a compiler these are skipped on a developer's machine, and fail on CI: CI set to anything but false or 0.
+  const onCi = !["", "false", "0"].includes(process.env.CI ?? "");
+  const withCc = it.skipIf(!cc && !onCi);
 
   withCc("agrees on every path but git's transient state", () => {
     const paths = [...CORPUS, ...probes, ...GIT_STATE_ONLY];
