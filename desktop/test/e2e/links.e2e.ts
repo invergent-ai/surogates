@@ -66,12 +66,23 @@ describe("a surogate:// link", () => {
     await expect.poll(() => new URL(client.url()).pathname).toBe(`/chat/${CHAT}`);
   });
 
-  it("asks to connect to the agent it names at the first run, and connects once confirmed", async () => {
+  it("asks before it reaches the agent it names at the first run, then to connect, and connects once both are confirmed", async () => {
     app = await launch(home);
     await stubNative(app);
     const page = await shellPage(app);
+    const host = new URL(origin).host;
+    const messages = async () => (await asked(app!)).map((options) => options.message);
+    // Declined: nothing is asked of the address, nor of wherever it would send Surogate.
+    await app.evaluate(() => Object.assign(globalThis, { answer: 1 }));
     expect(await secondLaunch(home, link(origin))).toBe(0);
-    await expect.poll(async () => (await asked(app!)).map((options) => options.message)).toEqual([`Connect to ${new URL(origin).host}?`]);
+    await expect.poll(messages).toEqual([`Open a link to connect to ${host}?`]);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect([agent.asked.config, await page.isVisible("#first-run")]).toEqual([0, true]);
+    // Continued: the address is read, and the first run's own question follows.
+    await app.evaluate(() => Object.assign(globalThis, { answer: 0 }));
+    expect(await secondLaunch(home, link(origin))).toBe(0);
+    await expect.poll(messages).toEqual([`Open a link to connect to ${host}?`, `Open a link to connect to ${host}?`, `Connect to ${host}?`]);
+    expect(agent.asked.config).toBe(1);
     await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
   });
 
@@ -127,7 +138,8 @@ describe("a surogate:// link", () => {
     expect(await secondLaunch(home, link(origin))).toBe(0);
     await handed;
     await app.evaluate(() => (globalThis as unknown as { releaseReady(): void }).releaseReady());
-    await expect.poll(async () => (await asked(app!)).map((options) => options.message)).toEqual([`Connect to ${new URL(origin).host}?`]);
+    const host = new URL(origin).host;
+    await expect.poll(async () => (await asked(app!)).map((options) => options.message)).toEqual([`Open a link to connect to ${host}?`, `Connect to ${host}?`]);
   });
 
   it("asks about one link at a time: one that comes while a link, or the first run's Connect, is asked only shows the window", async () => {

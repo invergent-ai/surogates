@@ -1092,6 +1092,13 @@ async function openDeepLink(link: OpenLink): Promise<void> {
     const agent = agents.get();
     const host = new URL(link.origin).host;
     if (!agent) {
+      // A link any web page can make: nothing is asked of its address, or of where that sends Surogate, before the user says so.
+      const continued = await ask({
+        type: "question", message: `Open a link to connect to ${host}?`,
+        detail: `A link asks Surogate to connect to ${host}. Surogate contacts it only if you continue, and asks again before this computer joins it.`,
+        buttons: ["Continue", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
+      });
+      if (!continued) return;
       const refused = await connectTo(link.origin);
       if (refused) await ask({ type: "warning", message: `Surogate did not connect to ${host}`, detail: refused, buttons: ["OK"], noLink: true });
     } else if (agent.origin !== link.origin) {
