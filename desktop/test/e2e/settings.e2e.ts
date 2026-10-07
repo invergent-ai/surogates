@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
@@ -7,7 +8,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { ACCOUNT, connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
+import { dataHome, launch, quit, secondLaunch, shellPage, stubNative } from "./launch.js";
 
 let home: string;
 let agent: FakeAgent;
@@ -238,5 +239,92 @@ describe("Settings", () => {
     await expect.poll(() => settings.textContent("#email")).toBe("Not signed in");
     // Named by the app's own sign-in, not by what the web client reports.
     expect(await settings.textContent("#organisation")).toBe("Surogate");
+  });
+});
+
+describe("Settings → General", () => {
+  // The value a setting's control shows chosen, or null.
+  const pressed = (settings: Page, setting: string) =>
+    settings.$eval(`[data-setting="${setting}"]`, (control) => control.querySelector<HTMLElement>('[aria-pressed="true"]')?.dataset.value ?? null)
+      .catch(() => null);
+  const preferences = () => JSON.parse(readFileSync(join(home, "surogate", "preferences.json"), "utf8")) as Record<string, unknown>;
+  const menu = (shell: ElectronApplication) => shell.evaluate(({ Menu }) => Menu.getApplicationMenu()?.items.map((item) => item.label));
+  // The app's own questions, as the native box was asked them; and the box held up until it is let go.
+  const asked = (shell: ElectronApplication) =>
+    shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message?: string }> }).asked.map((options) => options.message));
+  const hold = (shell: ElectronApplication) => shell.evaluate(() => Object.assign(globalThis, { hold: true }));
+  const release = (shell: ElectronApplication) => shell.evaluate(() => (globalThis as unknown as { release(): void }).release());
+
+  it("quits when the window is closed once Keep running is off, and keeps the choice", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    // On, as the app starts: closing the window hides it, and the device link stays up.
+    expect(await pressed(settings, "keepRunning")).toBe("on");
+    await settings.click('[data-setting="keepRunning"] [data-value="off"]');
+    await expect.poll(() => pressed(settings, "keepRunning")).toBe("off");
+    expect(preferences()).toMatchObject({ keepRunning: false });
+    const exited = once(shell.process(), "exit");
+    await shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.close());
+    await exited;
+  });
+
+  it("puts Developer in the menu only in developer mode, which it asks about before it turns it on", async () => {
+    const { shell, page } = await signedIn();
+    expect(await menu(shell)).toEqual(["File", "Edit", "View", "Help"]);
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    expect(await pressed(settings, "developer")).toBe("off");
+    // Cancelled: it stays off.
+    await shell.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    await settings.click('[data-setting="developer"] [data-value="on"]');
+    await expect.poll(async () => (await asked(shell)).at(-1)).toBe("Turn on developer mode?");
+    expect(await pressed(settings, "developer")).toBe("off");
+    expect(await menu(shell)).toEqual(["File", "Edit", "View", "Help"]);
+    await shell.evaluate(() => Object.assign(globalThis, { answer: 0 }));
+    await settings.click('[data-setting="developer"] [data-value="on"]');
+    await expect.poll(() => menu(shell)).toEqual(["File", "Edit", "View", "Developer", "Help"]);
+    expect(preferences()).toMatchObject({ developer: true });
+    // Off again, with no question, and the developer tools it opened close with it.
+    const questions = (await asked(shell)).length;
+    await shell.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("dev-agent")!.click());
+    const tools = () => shell.evaluate(({ webContents }) => webContents.getAllWebContents().filter((contents) => contents.isDevToolsOpened()).length);
+    await expect.poll(tools).toBe(1);
+    await settings.click('[data-setting="developer"] [data-value="off"]');
+    await expect.poll(() => menu(shell)).toEqual(["File", "Edit", "View", "Help"]);
+    await expect.poll(tools).toBe(0);
+    expect((await asked(shell)).length).toBe(questions);
+  });
+
+  it("asks about developer mode once, however often On is pressed while its question is up", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    await hold(shell);
+    const asking = (await asked(shell)).length + 1;
+    await settings.click('[data-setting="developer"] [data-value="on"]');
+    await expect.poll(async () => (await asked(shell)).length).toBe(asking);
+    await settings.click('[data-setting="developer"] [data-value="on"]');
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect((await asked(shell)).length).toBe(asking);
+    // Its one answer turns it on.
+    await release(shell);
+    await expect.poll(() => pressed(settings, "developer")).toBe("on");
+  });
+
+  it("keeps a surogate:// link waiting while it asks about developer mode, and opens it once answered", async () => {
+    const chat = "7d2e0f8a-2b3c-4d5e-9f60-718293a4b5c6";
+    const { shell, page, client } = await signedIn();
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    await hold(shell);
+    await settings.click('[data-setting="developer"] [data-value="on"]');
+    await expect.poll(async () => (await asked(shell)).at(-1)).toBe("Turn on developer mode?");
+    const before = client.url();
+    expect(await secondLaunch(home, `surogate://open?url=${encodeURIComponent(`${origin}/chat/${chat}`)}`)).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(client.url()).toBe(before);
+    await release(shell);
+    await expect.poll(() => new URL(client.url()).pathname).toBe(`/chat/${chat}`);
   });
 });

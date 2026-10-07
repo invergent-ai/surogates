@@ -13,6 +13,7 @@ interface Appearance {
 
 interface State {
   appearance: Appearance;
+  preferences: Record<string, "on" | "off">;
   account: { name: string; email: string } | null;
   computer: { name: string; connection: string; added: string | null; organisation: string | null; agents: string[] };
   links: { usage: boolean };
@@ -69,10 +70,10 @@ const date = (iso: string | null) =>
 
 async function render(): Promise<void> {
   const state = await settings.state();
+  const chosen: Record<string, string> = { ...state.appearance, ...state.preferences };
   for (const control of document.querySelectorAll<HTMLElement>("[data-setting]")) {
-    const chosen = state.appearance[control.dataset.setting as keyof Appearance];
     for (const option of control.querySelectorAll<HTMLElement>("[data-value]")) {
-      option.setAttribute("aria-pressed", String(option.dataset.value === chosen));
+      option.setAttribute("aria-pressed", String(option.dataset.value === chosen[control.dataset.setting ?? ""]));
     }
   }
   byId("email").textContent = state.account?.email ?? "Not signed in";

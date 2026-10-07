@@ -1097,6 +1097,10 @@ body.settings-page {
   font-weight: 600;
 }
 
+.settings-content .row + h2 {
+  margin-top: 36px;
+}
+
 .row {
   display: flex;
   align-items: center;

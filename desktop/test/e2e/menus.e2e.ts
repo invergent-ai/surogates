@@ -50,7 +50,7 @@ describe("the app's menu", () => {
   it("replaces Electron's own, and no page has a key handler of its own", async () => {
     const { shell } = await signedIn();
     expect(await shell.evaluate(({ Menu }) => Menu.getApplicationMenu()?.items.map((item) => item.label)))
-      .toEqual(["File", "Edit", "View", "Developer", "Help"]);
+      .toEqual(["File", "Edit", "View", "Help"]);
     // Electron's reload, zoom and developer tools act on whatever has the keyboard: none is left.
     expect(await shell.evaluate(({ Menu }) => Menu.getApplicationMenu()!.items.flatMap((item) => item.submenu?.items ?? [])
       .map((item) => item.role).filter(Boolean))).toEqual(["close", "undo", "redo", "cut", "copy", "paste", "selectall"]);

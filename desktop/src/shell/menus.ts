@@ -16,7 +16,7 @@ export interface MenuActions {
   about(): void;
 }
 
-/** The app's menu; *developer* adds Developer, which a packaged app leaves out until it has a developer mode. */
+/** The app's menu; *developer* adds Developer, in developer mode. */
 export function appMenu(act: MenuActions, developer: boolean): MenuItemConstructorOptions[] {
   const menu: MenuItemConstructorOptions[] = [
     {

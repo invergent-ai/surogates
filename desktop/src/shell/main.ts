@@ -35,6 +35,7 @@ import { letWindowClose, MainWindow } from "./main-window.js";
 import { appMenu, trayIcon, trayMenu } from "./menus.js";
 import { Notifications } from "./notifications.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
+import { PreferencesStore } from "./preferences.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
@@ -59,6 +60,7 @@ app.setPath("userData", join(root, "electron"));
 
 const states = new WindowStates(join(root, "window-state.json"));
 const appearance = new AppearanceStore(join(root, "settings.json"));
+const preferences = new PreferencesStore(join(root, "preferences.json"));
 const agents = new AgentStore(join(root, "agent.json"));
 let main: MainWindow | null = null;
 let theme: Theme;
@@ -1357,10 +1359,51 @@ const menuActions = {
   },
 };
 
+// The app's menu, with Developer in developer mode only: its tools read and change everything on the agent's page.
+function setMenu(): void {
+  Menu.setApplicationMenu(Menu.buildFromTemplate(appMenu(menuActions, preferences.get().developer)));
+}
+
+// Developer mode is asked about before it is turned on, in a box of the app's own, so a link waits
+// while it is up. One question at a time: On pressed again while it is up asks nothing more.
+let askingDeveloper: Promise<boolean> | null = null;
+
+function confirmDeveloper(): Promise<boolean> {
+  askingDeveloper ??= ask({
+    type: "warning",
+    message: "Turn on developer mode?",
+    detail: "Its developer tools can read and change everything on the agent's page, your sign-in to it included. "
+      + "Turn it on only if you know why you need it, never because a page or a message asks you to.",
+    buttons: ["Turn on", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  }).finally(() => {
+    askingDeveloper = null;
+  });
+  return askingDeveloper;
+}
+
+// Keep running and developer mode, as Settings sends them: "on" or "off".
+async function setPreference(key: "keepRunning" | "developer", value: unknown): Promise<void> {
+  if (value !== "on" && value !== "off") throw new Error(`No setting ${key} = ${String(value)}`);
+  const on = value === "on";
+  if (key === "developer" && on && !preferences.get().developer && !(await confirmDeveloper())) return;
+  preferences.set(key, on);
+  if (key !== "developer") return;
+  setMenu();
+  // Off, the tools it opened close with it.
+  if (!on) for (const contents of [main?.webContents(), main?.window.webContents]) contents?.closeDevTools();
+}
+
+const onOff = (on: boolean) => (on ? "on" : "off");
+
 function settingsState() {
   const agent = agents.get();
+  const { keepRunning, developer } = preferences.get();
   return {
     appearance: appearance.get(),
+    preferences: { keepRunning: onOff(keepRunning), developer: onOff(developer) },
     account,
     computer: {
       name: hostname(),
@@ -1516,7 +1559,8 @@ function showSettings(): void {
     };
     handle("settings:state", settingsState);
     // A theme in effect that changes reaches the web client through the theme's own paint.
-    handle("settings:set", (key, value) => {
+    handle("settings:set", async (key, value) => {
+      if (key === "keepRunning" || key === "developer") return setPreference(key, value);
       if (key !== "theme") {
         appearance.set(String(key), value);
         tellAppearance();
@@ -1777,12 +1821,14 @@ if (!app.requestSingleInstanceLock()) {
       tellAppearance();
     });
     // Electron's own menu goes: its reload, zoom and developer tools would act on the window's own pages.
-    Menu.setApplicationMenu(Menu.buildFromTemplate(appMenu(menuActions, !app.isPackaged)));
+    setMenu();
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
     // The VM slept with the computer: at its wake its clock is set, and its keepalive starts afresh.
     powerMonitor.on("resume", () => vm?.resume());
     const page = join(PAGES, "shell.html");
-    main = new MainWindow({ states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed });
+    main = new MainWindow({
+      states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed, quitsOnClose: () => !preferences.get().keepRunning,
+    });
     wire(main, page);
     // In the tray where the desktop has one; GNOME without one shows the window at the next launch.
     tray = new Tray(trayImage());

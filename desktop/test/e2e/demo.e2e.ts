@@ -1,7 +1,7 @@
 // The demo's thread runs its commands in the VM, as the app does: behind
 // SUROGATE_VM_TESTS=1, with KVM, the image and npm run agent-disk.
 
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
@@ -166,6 +166,28 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("quitting", () => {
     } finally {
       journal.close();
     }
+  });
+
+  it("asks, with Keep running off, before closing the window quits while a thread works, and keeps the window on Cancel", async () => {
+    // Off since an earlier run.
+    mkdirSync(join(home, "surogate"), { recursive: true });
+    writeFileSync(join(home, "surogate", "preferences.json"), JSON.stringify({ keepRunning: false }));
+    const { shell, page } = await bound();
+    agent.link.send(op("run-6", "run", { command: "sleep 604", workdir: null, timeout: 900 }));
+    await expect.poll(() => sleeping(604), { timeout: 30_000 }).toBe(1);
+    await answer(shell, 2);
+    const shown = () => shell.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.isVisible());
+    await shell.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.close());
+    await expect.poll(async () => (await asked(shell)).at(-1)?.message).toBe("Surogate is still working");
+    // Cancel: the window stays, and so do the link and the command.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await shown()).toBe(true);
+    expect(await page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    expect(await sleeping(604)).toBe(1);
+    // Quit anyway, so the test's own quit goes through the app's.
+    await answer(shell, 0);
   });
 
   it("waits for the threads when told to, and quits once they finish", async () => {
