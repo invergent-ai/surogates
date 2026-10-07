@@ -141,6 +141,11 @@ class SandboxPool:
             )
         return await self._backend.execute(sandbox_id, name, input)
 
+    def holds_copy(self, session_id: str) -> bool:
+        """Whether *session_id* has a pod now, and it is a thread's, over its copy."""
+        spec = self._specs.get(session_id)
+        return spec is not None and "PROJECT_DIR" in spec.env
+
     async def release_for_session(self, session_id: str) -> str | None:
         """Detach the sandbox from *session_id*, returning its id.
 

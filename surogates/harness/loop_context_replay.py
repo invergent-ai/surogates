@@ -157,6 +157,26 @@ def _file_label(label: str) -> str:
     return " ".join(printable.split())
 
 
+#: What a report says of a thread's files that did not land, by its landing's state.
+_NOT_LANDED = {
+    "compensated": "Not landed, and the project's files are as they were",
+    "escalated": "Could not finish landing these; check them",
+}
+_NOT_MERGED = "Not merged, because the project's file changed after the thread started (the newer file was kept)"
+
+
+def _landing_lines(data: dict, kept: list, deleted: list) -> str:
+    """A thread report's lines on the files it deleted, the files that did not land, and the excluded files it made."""
+    lines = f"\nDeleted: {_listed(deleted)}" if deleted else ""
+    if kept:
+        lines += f"\n{_NOT_LANDED.get(data.get('landing'), _NOT_MERGED)}: {_listed(kept)}"
+    excluded = data.get("excluded")
+    if isinstance(excluded, list) and excluded:
+        names = [{"label": name} for name in excluded if isinstance(name, str)]
+        lines += f"\nNot saved, because the project's history leaves them out: {_listed(names)}"
+    return lines
+
+
 def worker_note(event_type: str, data: dict) -> dict:
     """The user-role message a worker's report is read as, built from its
     payload alone, so the live loop and replay produce the same bytes.  A
@@ -178,12 +198,18 @@ def worker_note(event_type: str, data: dict) -> dict:
             content = f"{named} failed: {data.get('error', 'unknown error')}]"
         else:
             files = data.get("files")
-            listed = _listed(files) if isinstance(files, list) else "not listed (the turn ended early)"
+            # A thread's files that did not land, and the ones it deleted,
+            # are named apart from the ones it made or changed.
+            kept, deleted, made = [], [], []
+            for f in files if isinstance(files, list) else ():
+                landing, change = (f.get("landing"), f.get("change")) if isinstance(f, dict) else (None, None)
+                (kept if landing == "not_merged" else deleted if change == "deleted" else made).append(f)
+            listed = _listed(made) if isinstance(files, list) else "not listed (the turn ended early)"
             content = (
                 f"{named} reported]\n"
                 f"{_REPORT_BEGIN}\n{_thread_words(str(data.get('result') or ''))}\n{_REPORT_END}\n"
                 f"Files: {listed}"
-            )
+            ) + _landing_lines(data, kept, deleted)
     return {"role": "user", "content": content}
 
 

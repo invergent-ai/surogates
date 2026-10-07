@@ -1650,6 +1650,7 @@ class AgentHarness(
         - Invalid tool call recovery
         - Per-session cost tracking
         """
+        self._turn_after_event_id = max((e.id for e in all_events or []), default=0)
         # --- Saga orchestrator ---
         saga = None
         # A project's thread always runs one: its steps are undone in its copy.

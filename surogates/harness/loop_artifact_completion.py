@@ -32,7 +32,8 @@ from surogates.harness.loop_messages import (
 from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
 from surogates.session.inbox_payload import raises_completion_inbox_item
-from surogates.workstreams import is_project_master
+from surogates.harness.landing import land_turn
+from surogates.workstreams import is_project_master, is_project_thread
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,8 @@ async def announce_failure(store: Any, session: Any, *, error: str, summary: str
 class ArtifactCompletionMixin:
     #: The turn's tool sagas, set when its loop starts; its end completes them.
     _turn_saga: Any = None
+    #: The last event before the turn's loop started: the turn's own come after it.
+    _turn_after_event_id: int = 0
 
     async def _promote_fenced_artifacts(
         self,
@@ -916,7 +919,24 @@ class ArtifactCompletionMixin:
         drains any in-flight iteration-summary tasks and emits a
         ``TURN_SUMMARY`` event before ``SESSION_COMPLETE`` so the SDK
         sees the recap in the same event stream as the closing message.
+
+        A project's thread lands its turn first: before its pod goes, and
+        before the turn summary and the report, so both see the landed files.
         """
+        landing: dict[str, Any] | None = None
+        if is_project_thread(session.config) and self._sandbox_pool is not None:
+            tool_saga = self._turn_saga.current_saga if self._turn_saga is not None else None
+            try:
+                landing = await land_turn(
+                    store=self._store, session_factory=self._session_factory,
+                    sandbox_pool=self._sandbox_pool, session=session,
+                    saga_settings=self._saga_settings,
+                    tool_saga_id=tool_saga.saga_id if tool_saga is not None else None,
+                    after_event_id=self._turn_after_event_id,
+                )
+            except Exception:
+                logger.exception("Landing failed for %s", session.id)
+
         # The turn's tool saga ends with it: a later stop compensates only its own turn.
         if self._turn_saga is not None:
             await self._finalize_sagas(self._turn_saga, session)
@@ -993,6 +1013,10 @@ class ArtifactCompletionMixin:
                 logger.exception(
                     "Turn summary drain failed for %s", session.id,
                 )
+
+        if landing is not None:
+            # A thread's files are its landing's; artifacts still come from its summary.
+            files = landing["files"] + [a for a in files or [] if a.get("kind") != "file"]
 
         complete_data: dict[str, Any] = {
             "reason": reason,
@@ -1100,6 +1124,7 @@ class ArtifactCompletionMixin:
                     task_id=getattr(session, "task_id", None),
                     session_factory=self._session_factory,
                     files=files,
+                    landing=landing,
                 )
             except Exception:
                 logger.warning(
