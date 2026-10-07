@@ -44,6 +44,9 @@ if (origin !== undefined && window.top === window && location.origin === origin)
     signOut: call("signOut"),
     prepareFolder: call("prepareFolder"),
     bindSession: call("bindSession"),
+    setMode: call("setMode"),
+    requestFreeMode: call("requestFreeMode"),
+    cancelPrepared: call("cancelPrepared"),
     getAppearance: call("getAppearance"),
     onAppearanceChanged: (listener: (appearance: unknown) => void) => {
       const relay = (_event: unknown, appearance: unknown) => listener(appearance);

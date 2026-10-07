@@ -290,9 +290,13 @@ export class OperationRunner {
       if (data === null) answer = DAMAGED;
     }
     if (signal.aborted) return;
+    // A write whose data came in a transfer is asked about, and runs, with that data in place of
+    // the transfer. Its base64 is what runs: the buffer goes, not held beside it while it runs.
+    const running = data === null ? operation : inline(operation, data);
+    data = null;
     if (answer === null) {
       try {
-        answer = (await this.executor.admit?.(operation, signal)) ?? null;
+        answer = (await this.executor.admit?.(running, signal)) ?? null;
       } catch (error) {
         answer = { error: { type: "other", message: error instanceof Error ? error.message : String(error) } };
       }
@@ -305,9 +309,6 @@ export class OperationRunner {
     }
     // The journal's claim decides: false if it was cancelled or started meanwhile.
     if (!this.journal.start(operation.id)) return;
-    const running = data === null ? operation : inline(operation, data);
-    // Its base64 is what runs: the buffer goes, not held beside it while it runs.
-    data = null;
     await this.execute(running, signal);
   }
 

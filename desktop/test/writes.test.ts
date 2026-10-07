@@ -124,7 +124,7 @@ const acks = (id: string) => server.received.filter((f) => f.type === "chunk_ack
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("a write whose data comes in a transfer", () => {
-  it("is asked about and run only once its data is whole and checked, as a write that carries it", async () => {
+  it("is asked about and run only once its data is whole and checked, with that data, as a write that carries it", async () => {
     const executor = new Recording();
     await start(executor);
     send(writeOp("a"));
@@ -135,9 +135,9 @@ describe("a write whose data comes in a transfer", () => {
     expect(executor.admitted).toEqual([]);
     send(chunk("a", 2));
     await server.until(() => results("a").length === 1);
-    // Every chunk acknowledged; asked about with the transfer its args name, then run with the data.
+    // Every chunk acknowledged; asked about and run with its data in place of the transfer.
     expect(acks("a")).toEqual([0, 1, 2]);
-    expect(executor.admitted).toEqual([{ id: "a", args: { key: "/f/big.bin", transfer: NAMED }, chunksSent: 3 }]);
+    expect(executor.admitted).toEqual([{ id: "a", args: { key: "/f/big.bin", data: DATA.toString("base64") }, chunksSent: 3 }]);
     expect(executor.ran.map((op) => op.args)).toEqual([{ key: "/f/big.bin", data: DATA.toString("base64") }]);
     expect(results("a")[0]?.outcome).toEqual({ ok: null });
   });

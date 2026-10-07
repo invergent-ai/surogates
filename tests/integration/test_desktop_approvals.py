@@ -87,9 +87,12 @@ async def test_what_its_user_denies_reaches_each_tool_as_not_done(built_client, 
         assert (await call(process_registry._handle_process, {"action": "kill", "session_id": handle}))["status"] == "killed"
 
         # What the user was asked, in order: nothing that only reads, nor the kill.
+        # An input names the command it goes to as well as what it sends.
+        approvals = [e for e in app.events if e["event"] == "approval"]
+        assert [e.get("command") for e in approvals if e["kind"] == "input"] == ["cat"]
         asked = [
-            (e["kind"], e.get("command") or e.get("path") or e.get("data"))
-            for e in app.events if e["event"] == "approval"
+            (e["kind"], e["data"] if e["kind"] == "input" else e.get("command") or e.get("path"))
+            for e in approvals
         ]
         assert asked == [
             ("command", f"touch {WORD}.txt"),

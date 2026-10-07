@@ -7,15 +7,16 @@
 import { rmSync } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
-  app, dialog, type IpcMainEvent, type IpcMainInvokeEvent, Menu, nativeTheme, net, safeStorage, session, shell, utilityProcess,
+  app, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, safeStorage, session, shell, utilityProcess,
   type WebContents, webContents,
 } from "electron";
 
 import type { DesktopAccount } from "../../../web/src/lib/desktop-bridge-contract.js";
 import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow } from "../../../web/src/lib/projects-contract.js";
+import type { ApprovalPrompts } from "../binding/approvals.js";
+import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
@@ -30,9 +31,9 @@ import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { letWindowClose, MainWindow, onSettingsKey } from "./main-window.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
 import { ANSWER_TIMEOUT_MS, PageProjects } from "./projects.js";
-import { folderPrompts, refusingApprovals } from "./prompts.js";
+import { desktopPrompts } from "./prompts.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
-import { sameOrigin, webClientPath } from "./window-policy.js";
+import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
 const PAGES = join(import.meta.dirname, "pages");
@@ -54,6 +55,8 @@ let main: MainWindow | null = null;
 let theme: Theme;
 // After ready: safeStorage answers only then.
 let credentials: CredentialStore;
+// The desktop's own prompts, over the window, once it is made.
+let prompts: FolderPrompts & ApprovalPrompts;
 let sessionStore: SessionStore;
 // Who is signed in to the app, with the agent: what adds this computer, and what the window's web client takes its session from.
 let signedIn: DesktopSession | null = null;
@@ -199,13 +202,6 @@ const vmFor = (): VmClient => {
   const { uid, gid, username } = userInfo();
   vm ??= new VmClient({ vm: vmOptions(root, { uid, gid, name: username, home: env.HOME }), spawn: utilityManager });
   return vm;
-};
-
-// A call from *page*, the window's own, in its top frame: no other page, a file dropped there included.
-const fromPage = (event: IpcMainInvokeEvent, page: string): boolean => {
-  const frame = event.senderFrame;
-  if (frame?.parent !== null || !frame.url.startsWith("file:")) return false;
-  return fileURLToPath(frame.url) === page;
 };
 
 function bounds(value: unknown): Bounds {
@@ -399,8 +395,8 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     identity: { deviceId: credential.deviceId, orgId: credential.orgId, agentId: credential.agentId, userId: credential.userId },
     // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the VM.
     tools: (bindings, network) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor() }),
-    prompts: folderPrompts(() => main?.window),
-    approvalPrompts: refusingApprovals,
+    prompts,
+    approvalPrompts: prompts,
     onStatus: (status) => {
       if (device?.credential === credential) device.status = status;
       // The agent ended this token while it is this computer's: cleaned up here, its folders kept for a restore.
@@ -838,7 +834,7 @@ async function signIn(agent: Agent): Promise<void> {
   }
 }
 
-// A folder is prepared for the window that asked: its prompts go once that window goes or its page is replaced.
+// What a window asked for, a folder or Work freely: its prompts go once that window goes or its page is replaced.
 async function preparing<T>(window: string, prepare: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const contents = webContents.fromId(Number(window));
   const controller = new AbortController();
@@ -856,6 +852,8 @@ async function preparing<T>(window: string, prepare: (signal: AbortSignal) => Pr
 
 // The bridge, on a view of the agent's web client: its calls answer for this agent only.
 function bridge(contents: WebContents, agent: Agent): void {
+  // Each load of the page is a page of its own: what its user refused there holds until it is replaced.
+  let load = 0;
   // The device is the account's it was registered for: a page signed in as anyone else sees none.
   // Until the page says who it is, it is whoever is signed in to the app, whose sign-in gave it its session.
   const anotherAccount = () => {
@@ -893,6 +891,10 @@ function bridge(contents: WebContents, agent: Agent): void {
     bindSession: async (sessionId, token, window) => {
       await (await registered()).binder.bindSession(sessionId, token, window);
     },
+    setMode: async (sessionId, mode) => (await registered()).binder.approvals.setMode(sessionId, mode),
+    requestFreeMode: (sessionId, window) =>
+      preparing(window, async (signal) => (await registered()).binder.approvals.requestFreeMode(sessionId, signal, `${window}:${load}`)),
+    cancelPrepared: async (token, window) => (await registered()).binder.cancelPrepared(token, window),
     getAppearance: appearanceNow,
     setAccount: (reported) => {
       // Another account, or none, or the first: nothing listed before is theirs. A page that
@@ -926,6 +928,7 @@ function bridge(contents: WebContents, agent: Agent): void {
   // A page that loads again starts with no source, until it registers one. Until its load commits,
   // the page there still serves: a load the shell cancels, as to an address outside the agent's, changes nothing.
   onReplaced(contents, () => {
+    load += 1;
     if (served) withdrawProjects(false);
   });
 }
@@ -995,6 +998,26 @@ function state() {
   };
 }
 
+// Held until it is clicked or closed: a notification nothing holds can lose its click.
+let notice: Notification | null = null;
+
+// A prompt waits while the window is hidden: the system's notification says so, and opens the window.
+// It names nothing the agent sent: some notification services read markup in a body.
+function notifyAsking(): void {
+  if (!Notification.isSupported()) return;
+  const shown = new Notification({ title: "Surogate is asking you something", body: "Open Surogate to answer." });
+  notice = shown;
+  const done = () => {
+    if (notice === shown) notice = null;
+  };
+  shown.on("click", () => {
+    done();
+    main?.show();
+  });
+  shown.on("close", done);
+  shown.show();
+}
+
 function popup(which: unknown): void {
   const shown = main;
   const agent = agents.get();
@@ -1034,7 +1057,7 @@ function showSettings(): void {
   main?.openSettings(page, PAGES_PRELOAD, (contents) => {
     const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
       contents.ipc.handle(channel, (event, ...args: unknown[]) => {
-        if (!fromPage(event, page)) throw new Error("Not Settings' own page");
+        if (!ownPage(event.senderFrame, page)) throw new Error("Not Settings' own page");
         return handler(...args);
       });
     };
@@ -1058,7 +1081,7 @@ function showSettings(): void {
 function wire(window: MainWindow, page: string): void {
   const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
     window.window.webContents.ipc.handle(channel, (event, ...args: unknown[]) => {
-      if (!fromPage(event, page)) throw new Error("Not the window's own page");
+      if (!ownPage(event.senderFrame, page)) throw new Error("Not the window's own page");
       return handler(...args);
     });
   };
@@ -1260,6 +1283,7 @@ if (!app.requestSingleInstanceLock()) {
       tellAppearance();
     });
     onSettingsKey(showSettings);
+    prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
     const page = join(PAGES, "shell.html");
     main = new MainWindow({ states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed });
     wire(main, page);
