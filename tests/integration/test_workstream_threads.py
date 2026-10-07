@@ -134,6 +134,20 @@ async def test_a_master_starts_a_thread_in_its_own_pod(api):
     assert (str(row.workstream_id), row.title, row.resolved_at) == (project["id"], "Draft A", None)
 
 
+async def test_a_threads_pod_mounts_the_real_files_beside_its_copy(api):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    tenant = SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id)
+    spec = await _build_session_sandbox_spec(thread, tenant, sandbox_session_key(thread))
+    [real] = spec.resources
+    assert real.mount_path == "/project"
+    assert (spec.env["PROJECT_DIR"], spec.env["HISTORY_THREAD"]) == ("/project", str(thread.id))
+    # The master, and the routine runs in its pod, work on the real files.
+    spec = await _build_session_sandbox_spec(master, tenant, sandbox_session_key(master))
+    assert [r.mount_path for r in spec.resources] == ["/workspace"]
+    assert "PROJECT_DIR" not in spec.env
+
+
 async def test_two_threads_get_two_pods(api):
     master = await master_of(api, await create(api))
     first = await start(api, master, title="Draft A")

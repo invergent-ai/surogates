@@ -373,6 +373,9 @@ class K8sSandbox:
         # Parse resources from spec for s3fs mount.  s3fs accepts
         # "bucket:/prefix" to mount a path inside the bucket.
         session_bucket_path = ""
+        # Where the files are mounted: /workspace, or /project in a
+        # thread's pod, whose /workspace is its copy on the pod's disk.
+        fuse_path = "/workspace"
         for res in spec.resources:
             if res.source_ref.startswith("s3://"):
                 source = res.source_ref[5:].rstrip("/")
@@ -381,6 +384,7 @@ class K8sSandbox:
                     session_bucket_path = f"{bucket}:/{path}"
                 else:
                     session_bucket_path = source
+                fuse_path = res.mount_path
                 break
 
         # Use the in-cluster S3 endpoint (reachable from inside the pod),
@@ -465,11 +469,15 @@ class K8sSandbox:
             volume_mounts=[
                 client.V1VolumeMount(
                     name="workspace",
-                    mount_path="/workspace",
+                    mount_path=fuse_path,
                     mount_propagation="HostToContainer",
                 ),
             ],
         )
+        if fuse_path != "/workspace":
+            sandbox_container.volume_mounts.append(
+                client.V1VolumeMount(name="copy", mount_path="/workspace"),
+            )
 
         # s3fs sidecar container — uses the entrypoint.sh from the image.
         # ``S3_REGION`` is what s3fs passes as ``-o endpoint=`` for SigV4
@@ -482,6 +490,7 @@ class K8sSandbox:
             client.V1EnvVar(name="S3_BUCKET_PATH", value=session_bucket_path),
             client.V1EnvVar(name="S3_ENDPOINT", value=s3_endpoint),
             client.V1EnvVar(name="S3_REGION", value=s3_region),
+            client.V1EnvVar(name="S3_MOUNT_POINT", value=fuse_path),
         ]
 
         s3fs_container = client.V1Container(
@@ -497,7 +506,7 @@ class K8sSandbox:
             volume_mounts=[
                 client.V1VolumeMount(
                     name="workspace",
-                    mount_path="/workspace",
+                    mount_path=fuse_path,
                     mount_propagation="Bidirectional",
                 ),
                 client.V1VolumeMount(
@@ -523,6 +532,8 @@ class K8sSandbox:
                 ),
             ),
         ]
+        if fuse_path != "/workspace":
+            volumes.append(client.V1Volume(name="copy", empty_dir=client.V1EmptyDirVolumeSource()))
         automount_sa_token = None
         pod_security_context = None
 

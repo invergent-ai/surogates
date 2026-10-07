@@ -34,7 +34,9 @@ from surogates.harness.tool_guardrails import (
 from surogates.tools.coerce import coerce_tool_args
 from surogates.runtime.governance import floor_gate
 from surogates.runtime.turn_slots import turn_activity
+from surogates.sandbox.history import PROJECT_MOUNT
 from surogates.storage.tenant import boundary_workspace_prefix
+from surogates.workstreams import is_project_thread
 
 # ---------------------------------------------------------------------------
 # Path sanitisation — replace workspace absolute paths with __WORKSPACE__
@@ -116,8 +118,13 @@ async def _build_session_sandbox_spec(
         )
 
     storage_bucket = session.config.get("storage_bucket", "")
+    # A project's thread works on its own copy: its pod mounts the real
+    # files at /project, and /workspace, the path the model and the tools
+    # know, is the copy.
+    copy = bool(storage_bucket) and is_project_thread(session.config)
+    mount_path = PROJECT_MOUNT if copy else _WORKSPACE_MOUNT_PATH
     has_workspace_mount = any(
-        r.mount_path == _WORKSPACE_MOUNT_PATH for r in sandbox_spec.resources
+        r.mount_path == mount_path for r in sandbox_spec.resources
     )
     if storage_bucket and not has_workspace_mount:
         sandbox_spec.resources.append(
@@ -130,9 +137,12 @@ async def _build_session_sandbox_spec(
                         sandbox_owner,
                     ),
                 ),
-                mount_path=_WORKSPACE_MOUNT_PATH,
+                mount_path=mount_path,
             ),
         )
+    if copy:
+        sandbox_spec.env["PROJECT_DIR"] = PROJECT_MOUNT
+        sandbox_spec.env["HISTORY_THREAD"] = sandbox_owner
     # Pass through skill-declared env vars to the sandbox pod.  Only
     # matters at provisioning time — env is baked into the pod spec.
     if not sandbox_spec.env.get("_passthrough_done"):

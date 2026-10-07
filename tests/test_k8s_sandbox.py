@@ -13,6 +13,7 @@ import pytest
 from aiohttp import web
 
 from surogates.sandbox.base import (
+    Resource,
     SandboxSpec,
     SandboxStatus,
     SandboxUnavailableError,
@@ -315,3 +316,38 @@ class TestExecuteHttp:
         finally:
             await runner.cleanup()
             await sandbox.aclose()
+
+
+class TestThreadPodLayout:
+    """A thread's pod mounts the project's real files at /project and keeps its copy at /workspace."""
+
+    async def manifest(self, sandbox: K8sSandbox, mount_path: str):
+        api = MagicMock()
+        api.create_namespaced_pod = AsyncMock()
+        pod = MagicMock()
+        pod.status.pod_ip = "10.42.0.7"
+        api.read_namespaced_pod = AsyncMock(return_value=pod)
+        spec = SandboxSpec(resources=[Resource(source_ref="s3://bucket/boundaries/w/workspace/", mount_path=mount_path)])
+        with patch.object(sandbox, "_get_api", AsyncMock(return_value=api)), \
+             patch.object(sandbox, "_create_s3_secret", AsyncMock()), \
+             patch.object(sandbox, "_wait_for_ready", AsyncMock()):
+            await sandbox.provision(spec)
+        manifest = api.create_namespaced_pod.await_args.args[1]
+        main, s3fs = manifest.spec.containers[:2]
+        mounts = lambda c: {m.mount_path: m.name for m in c.volume_mounts}  # noqa: E731
+        env = {e.name: e.value for e in s3fs.env}
+        volumes = {v.name: v for v in manifest.spec.volumes}
+        return mounts(main), mounts(s3fs), env, volumes
+
+    async def test_a_thread_pod_mounts_the_real_files_at_project_and_its_copy_on_its_disk(self, sandbox):
+        main, s3fs, env, volumes = await self.manifest(sandbox, "/project")
+        assert main == {"/project": "workspace", "/workspace": "copy"}
+        assert s3fs["/project"] == "workspace" and "/workspace" not in s3fs
+        assert env["S3_MOUNT_POINT"] == "/project"
+        assert volumes["copy"].empty_dir is not None
+
+    async def test_any_other_pod_mounts_the_files_at_workspace(self, sandbox):
+        main, s3fs, env, volumes = await self.manifest(sandbox, "/workspace")
+        assert main == {"/workspace": "workspace"}
+        assert env["S3_MOUNT_POINT"] == "/workspace"
+        assert "copy" not in volumes
