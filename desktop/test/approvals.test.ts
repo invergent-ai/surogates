@@ -15,7 +15,7 @@ import { ToolHosts } from "../src/hosts/tool-hosts.js";
 import type { Mode } from "../src/journal/bindings.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { DeviceLink } from "../src/link/client.js";
-import type { Operation } from "../src/link/protocol.js";
+import type { Operation, Outcome } from "../src/link/protocol.js";
 import { APP_CLOSED, type Executor, type OperationRunner } from "../src/operations/runner.js";
 import { FakeLinkServer } from "./fake-server.js";
 
@@ -381,6 +381,8 @@ describe("a chat that asks every time", () => {
     // Not a background command's start, or not started: nothing to name.
     approvals.started(op("run", { command: "ls" }), { ok: { session_id: "proc_2" } });
     approvals.started(op("start", { command: "npm run dev" }), { error: { type: "sandbox", message: "blocked" } });
+    // Nor one whose outcome is not an object: the start still ran.
+    for (const outcome of [null, undefined, "ran"]) approvals.started(op("start", { command: "npm run dev" }), outcome as unknown as Outcome);
     for (const [process, root] of [["proc_1", ROOT], ["proc_1", OTHER], ["proc_2", ROOT]] as const) {
       await approvals.admit(op("write_stdin", { session_id: process, data: "y\n" }, root), never());
     }

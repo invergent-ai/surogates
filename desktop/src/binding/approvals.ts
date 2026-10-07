@@ -206,8 +206,10 @@ export class Approvals {
 
   /** A background command has started: a prompt before input to its process names the command. */
   started(operation: Operation, outcome: Outcome): void {
-    const handle = "ok" in outcome ? (outcome.ok as { session_id?: unknown } | null)?.session_id : undefined;
-    if (operation.kind !== "start" || typeof handle !== "string") return;
+    // A start that ran is answered as it ran, whatever its outcome holds.
+    if (operation.kind !== "start" || typeof outcome !== "object" || outcome === null || !("ok" in outcome)) return;
+    const handle = (outcome.ok as { session_id?: unknown } | null)?.session_id;
+    if (typeof handle !== "string") return;
     this.commands.set(`${operation.sessionId}\0${handle}`, String(operation.args.command ?? ""));
   }
 
