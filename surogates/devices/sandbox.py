@@ -130,7 +130,22 @@ class DeviceCall:
             logger.warning("could not mark what a tool call read as consumed", exc_info=True)
 
     async def dispatch(self, name: str, args: dict[str, Any], *, read_tracker_id: str | None = None) -> str:
-        """Run a sandbox tool's handler on the computer, reading as the session unless *read_tracker_id* says."""
+        """Run a model's sandbox tool call on the computer, reading as the session unless *read_tracker_id* says.
+
+        The model is the session's own, or an expert's through :meth:`execute`:
+        its write into the harness's own folder is refused, whichever loop
+        sent it.  The harness writes there through :meth:`spill`.
+        """
+        refused = await harness_folder_refusal(self._workspace_io, name, args)
+        if refused is not None:
+            return refused
+        return await self._run(name, args, read_tracker_id or self._read_tracker_id)
+
+    async def spill(self, path: str, content: str) -> str:
+        """The harness's own write_file of a result too long to keep in context, into its own folder."""
+        return await self._run("write_file", {"path": path, "content": content}, self._harness_tool_tracker_id)
+
+    async def _run(self, name: str, args: dict[str, Any], read_tracker_id: str) -> str:
         return await self._tools.dispatch(
             name,
             args,
@@ -141,7 +156,7 @@ class DeviceCall:
             task_id=self._task_id,
             # What this session read, apart from its root and its sub-agents:
             # a result in one's conversation is not in the others'.
-            read_tracker_id=read_tracker_id or self._read_tracker_id,
+            read_tracker_id=read_tracker_id,
             tools=self._tools,
         )
 
@@ -149,6 +164,11 @@ class DeviceCall:
         return DEVICE_SANDBOX_ID
 
     async def execute(self, session_id: str, name: str, input: str) -> str:
+        """A sandbox tool call a harness tool makes through this call.
+
+        An expert's tool loop makes its model's here, so they are refused as
+        the session's own are (see :meth:`dispatch`).
+        """
         if name.startswith("_"):
             # _code and _checkpoint: coding agents and checkpoints are switched off.
             return refusal(name)

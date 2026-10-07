@@ -348,3 +348,37 @@ async def test_the_model_never_writes_the_harnesss_own_folder_and_the_harness_st
     spilled = await run(registry, session, "long_listing", {})
     [spill] = (folder / ".surogates-results").glob("*.txt")
     assert spill.read_text().startswith("x" * 100_000) and spill.name in spilled["content"]
+
+
+async def test_an_experts_write_to_the_harnesss_own_folder_is_refused_too_and_the_spill_still_lands(tmp_path):
+    from surogates.governance.policy import GovernanceGate
+    from surogates.tools.router import ToolRouter
+    from surogates.tools.utils.tool_result_storage import make_sandbox_writer
+
+    folder = tmp_path.resolve()
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    call = DeviceCall(
+        tools=registry, workspace_io=DeviceWorkspaceIO(InProcessRunner(LocalWorkspaceIO(workspace_path=str(folder))), root=str(folder)),
+        task_id=str(uuid4()), read_tracker_id=str(uuid4()),
+    )
+    # An expert's tool loop: its calls reach the computer through the tool call's DeviceCall.
+    expert = ToolRouter(registry, call, GovernanceGate())
+    staged = ".surogates-results/skills/xlsx/scripts/recalc.py"
+    for name, args in (
+        ("write_file", {"path": staged, "content": "print('rewritten')\n"}),
+        ("patch", {"mode": "patch", "patch": f"*** Begin Patch\n*** Add File: {staged}\n+x\n*** End Patch"}),
+        ("patch", {"mode": "replace", "path": staged, "old_string": "a", "new_string": "b"}),
+    ):
+        refused = await expert.execute(name=name, arguments=args, tenant=MagicMock(), session_id=uuid4())
+        assert json.loads(refused) == {
+            "error": "That folder is Surogate's own; write somewhere else in the chat's folder.",
+        }, (name, args)
+    assert not (folder / staged).exists()
+    written = await expert.execute(
+        name="write_file", arguments={"path": "notes.md", "content": "n"}, tenant=MagicMock(), session_id=uuid4(),
+    )
+    assert json.loads(written)["status"] == "ok"
+    # The harness's own spill there, through the same call, still lands.
+    assert await make_sandbox_writer(call, "root")(".surogates-results/call_1.txt", "x" * 10)
+    assert (folder / ".surogates-results" / "call_1.txt").read_text() == "x" * 10

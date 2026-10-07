@@ -103,13 +103,20 @@ def make_sandbox_writer(sandbox_pool: Any, sandbox_owner: str) -> ResultWriter:
 
     async def _write(file_path: str, content: str) -> bool:
         try:
-            # A local folder's tool call writes through its DeviceCall, whose folder it is.
+            # Here, not at the top: the device stack imports this module.
+            from surogates.devices.sandbox import DeviceCall
+
+            # A local folder's tool call writes through its DeviceCall, whose
+            # folder it is, as the harness: the model's writes there are refused.
             await keep_out_of_git(getattr(sandbox_pool, "workspace_io", None))
-            output = await sandbox_pool.execute(
-                sandbox_owner,
-                "write_file",
-                json.dumps({"path": file_path, "content": content}),
-            )
+            if isinstance(sandbox_pool, DeviceCall):
+                output = await sandbox_pool.spill(file_path, content)
+            else:
+                output = await sandbox_pool.execute(
+                    sandbox_owner,
+                    "write_file",
+                    json.dumps({"path": file_path, "content": content}),
+                )
         except Exception as exc:
             logger.warning("Sandbox spill write failed for %s: %s", file_path, exc)
             return False
