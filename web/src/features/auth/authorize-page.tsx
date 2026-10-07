@@ -73,9 +73,11 @@ export function AuthorizePage() {
   const answer = async (decision: "allow" | "deny") => {
     setBusy(true);
     // The sign-in may have aged past recent while the user read the consent: ask again now, not after Allow.
-    if (decision === "allow" && !recentSignIn(await freshToken())) {
+    const token = decision === "allow" ? await freshToken() : null;
+    if (decision === "allow" && !recentSignIn(token)) {
       setBusy(false);
-      setStep({ kind: "sign-in", notice: SIGN_IN_AGAIN });
+      // A refresh the network failed keeps the session: the agent could not be reached, and a new sign-in would not help.
+      setStep({ kind: "sign-in", notice: token === null && hasRefreshToken() ? UNREACHABLE : SIGN_IN_AGAIN });
       return;
     }
     const outcome = await decide(request, decision, (body) =>
