@@ -239,6 +239,18 @@ describe("the Overview pane, at its edges", () => {
     expect(await page.textContent("#greeting-line")).toBe("Open a project to see its threads.");
   });
 
+  it("leaves the project at once for a plain chat loaded in full, while its page serves nothing yet", async () => {
+    const { page, client } = await opened();
+    // The chat's page serves nothing: the shell cannot ask it whether the chat is one of the project's threads.
+    agent.registerAfterMs = -1;
+    const plain = "7e6d5c4b-3a29-4180-9f7e-6d5c4b3a2918";
+    await client.evaluate((path) => {
+      location.href = path;
+    }, `/chat/${plain}`).catch(() => {});
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${plain}`);
+    await expect.poll(() => page.textContent("#title"), { timeout: 2_000 }).toBe(new URL(origin).host);
+  });
+
   it("takes the centre to a new chat when the open project is archived elsewhere", async () => {
     const { page, client } = await opened();
     await page.click(`[data-thread="${QUESTION}"]`);

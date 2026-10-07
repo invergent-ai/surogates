@@ -414,8 +414,9 @@ function navigated(url: string): void {
     if (view.thread && chat === view.thread.id) return;
     const thread = overview?.project.id === view.id ? overview.threads.find((found) => found.id === chat) : undefined;
     if (thread) return show({ ...view, thread: { id: thread.id, title: thread.title } });
-    // A thread the pane has not listed yet, as one just started from its card: its row decides.
-    if (chat !== undefined && !masters.has(chat)) return void openedThread(view, chat);
+    // A thread the pane has not listed yet, as one just started from its card: its row decides. A page
+    // that serves nothing yet, as after a full load, cannot answer soon: the chat is a page of its own.
+    if (chat !== undefined && !masters.has(chat)) return served ? void openedThread(view, chat) : show({ kind: "web" });
   }
   const known = chat === undefined ? undefined : masters.get(chat);
   if (!known && view.kind === "web") return;
