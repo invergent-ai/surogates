@@ -683,7 +683,7 @@ class DeviceOperations:
                 return existing.id, existing.outcome
             # ponytail: the device row is locked FOR SHARE, so concurrent recorders can pass the
             # parked count together and that limit is soft by their number.
-            # A request never parks: its HTTP wait is bounded, and its own cap, which holds exactly, bounds how many.
+            # A request never parks: its HTTP wait is bounded, and the changes among them have their own cap.
             if request.invocation_id.startswith(REQUEST_PREFIX):
                 if device.revoked_at is None:
                     await _refuse_too_many_requests(db, request, device)
