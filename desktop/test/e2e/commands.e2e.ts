@@ -311,3 +311,77 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     expect(existsSync(vmRun())).toBe(false);
   });
 });
+
+describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM's processes through the app, each killed in turn", () => {
+  const pidIn = (file: string) => Number(readFileSync(join(vmRun(), file), "utf8"));
+  const newestShare = () => Math.max(...readdirSync(vmRun()).map((name) => Number(/^vfs-(\d+)\.pid$/.exec(name)?.[1] ?? 0)));
+  // A process's parent, from /proc: QEMU's is the VM manager, which execs it through setpriv.
+  const parentOf = (pid: number) => Number(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]?.split(" ")[1]);
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const run = (command: string) => operation("run", { command, workdir: null, timeout: 60 });
+
+  // Four kills, each with a boot and a backoff of 1–2 s: past vitest's 60 s on a busy machine.
+  it("answers the command each one stopped as interrupted, and runs the next: QEMU, the folder's virtiofsd, the VM manager and the file host", { timeout: 180_000 }, async () => {
+    const folder = join(home, "kills");
+    mkdirSync(folder);
+    await bound(folder);
+    expect(await run("true")).toMatchObject({ ok: { returncode: 0 } });
+    const main = app!.process().pid!;
+    const victims: Array<[string, () => number]> = [
+      ["QEMU", () => pidIn("qemu.pid")],
+      ["the folder's virtiofsd", () => pidIn(`vfs-${newestShare()}.pid`)],
+      ["the VM manager", () => parentOf(pidIn("qemu.pid"))],
+      ["the file host", () => Number(spawnSync("pgrep", ["-P", String(main), "-f", "dist/hosts/host.js"], { encoding: "utf8" }).stdout.trim().split("\n")[0])],
+    ];
+    for (const [n, [name, pidOf]] of victims.entries()) {
+      const running = run(`touch started-${n}; sleep 30`);
+      await expect.poll(() => existsSync(join(folder, `started-${n}`)), { timeout: 30_000 }).toBe(true);
+      process.kill(pidOf(), "SIGKILL");
+      expect([name, await running]).toEqual([name, { error: expect.objectContaining({ type: "interrupted" }) }]);
+      expect([name, await run(`echo back from ${n}`)]).toEqual([name, { ok: { output: `back from ${n}\n`, returncode: 0, timed_out: false } }]);
+    }
+  });
+
+  it("leaves nothing of its VM running when the app itself is killed, and runs the next command at its next launch", async () => {
+    const folder = join(home, "crash");
+    mkdirSync(folder);
+    await bound(folder);
+    expect(await run("true")).toMatchObject({ ok: { returncode: 0 } });
+    const qemu = pidIn("qemu.pid");
+    const vm = [qemu, parentOf(qemu), pidIn(`vfs-${newestShare()}.pid`)];
+    const connected = agent.link.hellos.length;
+    app!.process().kill("SIGKILL");
+    await expect.poll(() => vm.filter(alive), { timeout: 10_000 }).toEqual([]);
+    app = await launch(home, { XDG_RUNTIME_DIR: runtime, SUROGATE_VM_IMAGE: IMAGE });
+    await expect.poll(() => agent.link.hellos.length, { timeout: 30_000 }).toBe(connected + 1);
+    expect(await run("echo again")).toEqual({ ok: { output: "again\n", returncode: 0, timed_out: false } });
+  });
+
+  it("counts a chat whose background process runs in the VM as working at the quit, and the process ends with the app", async () => {
+    const folder = join(home, "server");
+    mkdirSync(folder);
+    await bound(folder);
+    expect(await operation("start", {
+      command: "sleep 3600", workdir: null, task_id: "demo", pty: false, notify_on_complete: false, watcher_interval: null,
+    })).toMatchObject({ ok: { session_id: expect.any(String) } });
+    await app!.evaluate(() => Object.assign(globalThis, { hold: true, answer: 0 }));
+    void app!.evaluate(({ app: electron }) => electron.quit()).catch(() => {});
+    await expect.poll(() => app!.evaluate(() => (globalThis as unknown as { asked: Array<{ detail?: string }> }).asked.at(-1)?.detail)).toBe(
+      "1 thread is working on this computer. Quitting now will interrupt that work.",
+    );
+    const qemu = pidIn("qemu.pid");
+    const closed = app!.waitForEvent("close");
+    await app!.evaluate(() => (globalThis as unknown as { release(): void }).release());
+    await closed;
+    app = undefined;
+    expect(alive(qemu)).toBe(false);
+    expect(existsSync(vmRun())).toBe(false);
+  });
+});

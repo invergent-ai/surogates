@@ -18,6 +18,18 @@ export interface ControlRoots {
   perform(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome>;
 }
 
+// What the control asks of the guest itself (root.ts): its clock, its runs' backstops, and its power.
+export interface ControlMachine {
+  // The guest's clock set to *now*, milliseconds since the epoch.
+  setClock(now: number): Promise<void>;
+  // The computer slept *ms*: every run's backstop falls that much later (Roots.woke).
+  woke(ms: number): void;
+  // The host said something: a backstop that waited to hear it goes on (Roots.heard).
+  heard(): void;
+  // Every root's processes end, the sessions disk is written out and let go, and the guest powers off.
+  powerOff(): Promise<void>;
+}
+
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const malformed = (type: string) => `The agent cannot take this ${type} request`;
 const isText = (value: unknown): value is string => typeof value === "string";
@@ -38,7 +50,8 @@ export class Control {
   // The operations still running, by id.
   private readonly running = new Map<number, AbortController>();
 
-  constructor(private readonly send: (message: FromAgent) => void, private readonly roots: ControlRoots) {}
+  // Without *machine*, as in the tests, the guest's clock and power are left alone.
+  constructor(private readonly send: (message: FromAgent) => void, private readonly roots: ControlRoots, private readonly machine?: ControlMachine) {}
 
   hello(): void {
     this.send({ type: "hello", id: 0 });
@@ -52,6 +65,7 @@ export class Control {
       return;
     }
     if (!isRecord(parsed) || typeof parsed.id !== "number") return;
+    this.machine?.heard();
     const message = parsed as ToAgent & Record<string, unknown>;
     const { id } = message;
     if (message.type === "done") {
@@ -97,6 +111,18 @@ export class Control {
         () => this.send({ type: "done", id }),
         (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
       );
+    } else if (message.type === "time") {
+      if (!Number.isFinite(message.now) || message.now <= 0 || !Number.isFinite(message.slept) || message.slept < 0) {
+        return this.send({ type: "failed", id, message: malformed("time") });
+      }
+      this.machine?.woke(message.slept);
+      (this.machine?.setClock(message.now) ?? Promise.resolve()).then(
+        () => this.send({ type: "done", id }),
+        (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
+      );
+    } else if (message.type === "shutdown") {
+      // No answer: the guest powers off, which the host sees as the VM's exit.
+      void this.machine?.powerOff().catch(() => {});
     } else if (message.type === "cancel") {
       this.running.get(id)?.abort();
     } else {

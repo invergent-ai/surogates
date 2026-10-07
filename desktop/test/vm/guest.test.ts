@@ -56,6 +56,24 @@ const FILES = [
 ].join("\n");
 // s_feature_incompat, in the superblock at 1024.
 const INCOMPAT = 1024 + 0x60;
+// Its folder's virtiofsd for the newest share in *run*: the daemon, and the child that serves the share.
+const shareDaemons = (run: string) => {
+  const daemon = newestDaemon(run);
+  return [daemon, ...spawnSync("pgrep", ["-P", String(daemon)], { encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean).map(Number)];
+};
+// A background process that looks in its folder a second after it starts: once the share has stalled, it waits there.
+const STUCK = "env -i /usr/bin/setsid /usr/bin/nohup /bin/sh -c '/usr/bin/sleep 1; /usr/bin/stat ./stuck' < /dev/null > /dev/null 2>&1 & echo started";
+// A disk's incompatible features, as its superblock names them.
+const incompat = (disk: string) => {
+  const fd = openSync(disk, "r");
+  try {
+    const field = Buffer.alloc(4);
+    readSync(fd, field, 0, 4, INCOMPAT);
+    return field.readUInt32LE(0);
+  } finally {
+    closeSync(fd);
+  }
+};
 
 const signal = () => new AbortController().signal;
 const background = (command: string) => ({ command, workdir: null, task_id: "vm", pty: false, notify_on_complete: false, watcher_interval: null });
@@ -80,14 +98,40 @@ const descriptors = (run: string) => {
   const children = spawnSync("pgrep", ["-P", String(daemon)], { encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean).map(Number);
   return [daemon, ...children].reduce((sum, pid) => sum + readdirSync(`/proc/${pid}/fd`).length, 0);
 };
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
 
-// The agent disk from the built agent, into *dir*.
-function agentDisk(dir: string): string {
+// The agent disk from the built agent, into *dir*, by *script*.
+function agentDisk(dir: string, script = AGENT_DISK): string {
   const image = join(dir, "agent.img");
-  const made = spawnSync(AGENT_DISK, [image], { encoding: "utf8" });
+  const made = spawnSync(script, [image], { encoding: "utf8" });
   if (made.status !== 0) throw new Error(`agent-disk.sh failed: ${made.error?.message ?? made.stderr}`);
   return image;
+}
+
+// The guest's init, as the agent disk carries it.
+const INIT = readFileSync(join(dirname(AGENT_DISK), "init"), "utf8");
+// INIT with each [from, to] made, each found.
+const altered = (...changes: Array<[string | RegExp, string]>) => changes.reduce((init, [from, to]) => {
+  const made = init.replace(from, to);
+  if (made === init) throw new Error(`vm/init has no ${String(from)}`);
+  return made;
+}, INIT);
+// An agent disk as agentDisk() makes, from a folder of its own in *dir*, with *init* for vm/init.
+function agentDiskWith(dir: string, init: string): string {
+  const desktop = mkdtempSync(join(dir, "desktop-"));
+  mkdirSync(join(desktop, "vm"));
+  for (const name of ["agent-disk.sh", "enter-root"]) symlinkSync(join(dirname(AGENT_DISK), name), join(desktop, "vm", name));
+  symlinkSync(join(dirname(AGENT_DISK), "..", "dist"), join(desktop, "dist"));
+  writeFileSync(join(desktop, "vm", "init"), init, { mode: 0o755 });
+  return agentDisk(desktop, join(desktop, "vm", "agent-disk.sh"));
 }
 
 const host = userInfo();
@@ -156,7 +200,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
   });
 
   it("activates the bpf LSM and attaches all eleven rule hooks before sessions run", () => {
-    // No command runs as the guest's root: its init says what it found on the console, before it starts the agent.
+    // No command runs as the guest's root: its agent says on the console what the init's load of the rule found, before its hello.
     const said = /surogate: the protected-names rule attached (\d+) of \d+ hooks, under the LSMs (\S+)/.exec(readFileSync(options.console, "utf8"));
     expect(said?.slice(1)).toEqual(["11", expect.stringMatching(/\bbpf\b/)]);
   });
@@ -237,7 +281,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     expect(await run([
       "ls /sys/fs/cgroup/run | grep -c '^op-'",
       "cat /proc/self/cgroup",
-      // A run's memory is not counted apart: a background process's is, for its out-of-memory note.
+      // A run's memory is not counted apart: the root's own cgroup counts it, for all of the root.
       'test -e "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.events" || echo a run has no memory cgroup',
       "(echo 1 > /sys/fs/cgroup/pids.max) 2>&1 | sed 's/.*: //'",
       "(echo 1 > /sys/fs/cgroup/init/cgroup.kill) 2>&1 | sed 's/.*: //'",
@@ -252,19 +296,20 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     });
   });
 
-  it("makes each background process's cgroup itself, which the root's user can enter and end but not make, and removes it once the process ends", async () => {
+  it("makes each background process's cgroup itself, counting no memory, which the root's user can enter and end but not make, and removes it once the process ends", async () => {
     const started = await guest.op(ROOT, "start", background("sleep 310"), signal()) as { ok: { session_id: string } };
     const { session_id } = started.ok;
     const cgroup = `/sys/fs/cgroup/proc/${session_id}`;
     expect(await run([
-      `stat -c %u ${cgroup} ${cgroup}/cgroup.procs ${cgroup}/cgroup.kill ${cgroup}/memory.max | tr '\\n' ' '; echo`,
-      // A memory cgroup a command made and removed again would hold guest memory no limit counts.
+      `stat -c %u ${cgroup} ${cgroup}/cgroup.procs ${cgroup}/cgroup.kill | tr '\\n' ' '; echo`,
+      // It counts no memory: the root's own cgroup does, for all of the root.
+      `test -e ${cgroup}/memory.max && echo counted || echo uncounted`,
       "(mkdir /sys/fs/cgroup/proc/mine) 2>&1 | sed 's/.*: //'",
       `(mkdir ${cgroup}/below) 2>&1 | sed 's/.*: //'`,
       `(rmdir ${cgroup}) 2>&1 | sed 's/.*: //'`,
       `sh -c 'echo $$ > ${cgroup}/cgroup.procs && cut -d: -f3 /proc/self/cgroup'`,
     ].join("; "))).toEqual({
-      ok: { output: `0 ${FIRST_UID} ${FIRST_UID} 0 \nPermission denied\nPermission denied\nPermission denied\n/proc/${session_id}\n`, returncode: 0, timed_out: false },
+      ok: { output: `0 ${FIRST_UID} ${FIRST_UID} \nuncounted\nPermission denied\nPermission denied\nPermission denied\n/proc/${session_id}\n`, returncode: 0, timed_out: false },
     });
     expect(await guest.op(ROOT, "kill", { session_id }, signal())).toEqual({ ok: { status: "killed", session_id } });
     expect(await run("find /sys/fs/cgroup/proc -mindepth 1 -type d | wc -l")).toMatchObject({ ok: { output: "0\n" } });
@@ -916,6 +961,151 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     ].join(" && "))).toEqual({ ok: { output: "configured\nbuilt\ntool\n", returncode: 0, timed_out: false } });
   });
 
+  it("sets its clock to the time the host tells it at a wake, which its commands then see", async () => {
+    const ahead = Date.now() + 3_600_000;
+    expect(await guest.request({ type: "time", now: ahead, slept: 0 })).toMatchObject({ type: "done" });
+    const said = await run("date +%s") as { ok: { output: string } };
+    expect(Math.abs(Number(said.ok.output) - ahead / 1000)).toBeLessThan(5);
+    expect(await guest.request({ type: "time", now: Date.now(), slept: 0 })).toMatchObject({ type: "done" });
+  });
+
+  it("is timed out by this computer, which ends the command in the guest", async () => {
+    const begun = performance.now();
+    expect(await run("sleep 311", ROOT, 1)).toEqual({ ok: { output: "Command timed out after 1 seconds", returncode: 124, timed_out: true } });
+    expect(performance.now() - begun).toBeLessThan(3_000);
+    expect(await run("sleep 0.5; pgrep -c -f '^sleep 311$' || true")).toMatchObject({ ok: { output: "0\n" } });
+  });
+
+  it("notes no shortage of memory for a background process a command ended with SIGKILL", async () => {
+    const started = await guest.op(ROOT, "start", background("exec sleep 311"), signal()) as { ok: { session_id: string; pid: number } };
+    expect(await run(`sleep 0.5; kill -KILL ${started.ok.pid}`)).toMatchObject({ ok: { returncode: 0 } });
+    expect(await guest.op(ROOT, "wait", { session_id: started.ok.session_id, timeout: 10 }, signal())).toEqual({
+      ok: { status: "exited", exit_code: 137, output: "" },
+    });
+  });
+
+  it("leaves no memory cgroup behind background processes that each leave a file in /tmp, nor behind a root set up again and again", async () => {
+    const MANY = "3e4f5a6b-7c8d-4e9f-8a0b-1c2d3e4f5a6b";
+    const path = join(dir, "many");
+    mkdirSync(path);
+    // The guest's memory cgroups, the dying among them: /proc/cgroups is not namespaced, as the
+    // root's own cgroup.stat is, and a root set up again in a new cgroup would hide those of the old.
+    const memcgs = async () => Number((await run("awk '$1 == \"memory\" { print $3 }' /proc/cgroups", MANY) as { ok: { output: string } }).ok.output);
+    expect(await guest.ready(MANY, folderOf(path))).toBeNull();
+    const before = await memcgs();
+    for (let n = 0; n < 200; n += 1) {
+      const started = await guest.op(MANY, "start", background(`echo ${n} > /tmp/bg-${n}`), signal()) as { ok: { session_id: string } };
+      expect(await guest.op(MANY, "wait", { session_id: started.ok.session_id, timeout: 10 }, signal())).toMatchObject({ ok: { status: "exited" } });
+    }
+    const processed = await memcgs();
+    for (let n = 0; n < 30; n += 1) {
+      await guest.teardown(MANY);
+      expect(await guest.ready(MANY, folderOf(path))).toBeNull();
+      expect(await run(`echo ${n} > /tmp/again-${n}`, MANY)).toMatchObject({ ok: { returncode: 0 } });
+    }
+    const after = await memcgs();
+    console.log(`memory cgroups in the guest: ${before} before, ${processed} after 200 background processes, ${after} after 30 setups more`);
+    // A leak grows them by one per process or per setup (200, 30); the kernel frees dying cgroups late, a few at a time.
+    expect([processed - before, after - before].map((grown) => grown < 20)).toEqual([true, true]);
+    await guest.teardown(MANY);
+  });
+
+  it("writes a home's file out at its stop, with no sync of its own, and leaves the sessions disk nothing to recover", async () => {
+    expect(await run("echo written > ~/written; head -c 50000000 /dev/urandom > ~/big")).toMatchObject({ ok: { returncode: 0 } });
+    const begun = performance.now();
+    await guest.stop();
+    const stopped = performance.now() - begun;
+    console.log(`stop: the guest powered off ${stopped.toFixed(0)} ms after its shutdown was asked`);
+    // debugfs reads the disk as it lies, replaying no journal: what it shows was written out.
+    const debugfs = (request: string) => spawnSync("debugfs", ["-R", request, options.sessions], { encoding: "utf8" }).stdout;
+    expect(debugfs(`cat /roots/${ROOT}/home/written`)).toBe("written\n");
+    expect(/Size: (\d+)/.exec(debugfs(`stat /roots/${ROOT}/home/big`))?.[1]).toBe("50000000");
+    expect(spawnSync("dumpe2fs", ["-h", options.sessions], { encoding: "utf8" }).stdout).not.toMatch(/^Filesystem features:.*needs_recovery/m);
+    // Its agent's power-off, well inside the 5 s past which the VM is ended. 7.0 prints no
+    // "reboot: Power down" after this line, as 6.8 did.
+    expect(stopped).toBeLessThan(2_000);
+    expect(readFileSync(options.console, "utf8")).toContain("sysrq: Power Off");
+    guest = await Guest.boot(bootLinux, options);
+    expect(await setUp(ROOT, folder)).toMatchObject({ type: "done" });
+    expect(await run("rm ~/big; cat ~/written")).toEqual({ ok: { output: "written\n", returncode: 0, timed_out: false } });
+  });
+
+  it("powers off around a process waiting on a share that stalled, and keeps what its home was written", async () => {
+    const STALLED = "4f5a6b7c-8d9e-4f0a-9b1c-2d3e4f5a6b7c";
+    const path = join(dir, "stalled");
+    mkdirSync(path);
+    expect(await guest.ready(STALLED, folderOf(path))).toBeNull();
+    const daemons = shareDaemons(options.run);
+    expect(await guest.op(STALLED, "start", background(STUCK), signal())).toMatchObject({ ok: { session_id: expect.any(String) } });
+    expect(await run("echo kept > ~/kept-stalled", STALLED)).toMatchObject({ ok: { returncode: 0 } });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    for (const pid of daemons) process.kill(pid, "SIGSTOP");
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      const begun = performance.now();
+      await guest.stop();
+      console.log(`stop around a stalled share: ${(performance.now() - begun).toFixed(0)} ms`);
+      // The guest powers off around it; QEMU, whose device stop waits on the stopped daemon, is ended at the bound.
+      expect(performance.now() - begun).toBeLessThan(6_000);
+      expect(readFileSync(options.console, "utf8")).toContain("sysrq: Power Off");
+    } finally {
+      for (const pid of daemons) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Gone with its guest.
+        }
+      }
+    }
+    guest = await Guest.boot(bootLinux, options);
+    expect(await setUp(ROOT, folder)).toMatchObject({ type: "done" });
+    expect(await guest.ready(STALLED, folderOf(path))).toBeNull();
+    expect(await run("cat ~/kept-stalled", STALLED)).toEqual({ ok: { output: "kept\n", returncode: 0, timed_out: false } });
+    await guest.teardown(STALLED);
+  });
+
+  it("fails the boot before its hello when the guest-kernel rule cannot load, and says why", async () => {
+    // QEMU, with the bpf LSM left out of the guest kernel's command line: the rule has nothing to attach to.
+    const bin = join(dir, "no-bpf");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "qemu-system-x86_64"), `#!/bin/sh\nfor arg; do shift; set -- "$@" "$(printf '%s' "$arg" | sed 's/,bpf$//')"; done\nexec /usr/bin/qemu-system-x86_64 "$@"\n`, { mode: 0o755 });
+    await guest.stop();
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      const begun = performance.now();
+      await expect(Guest.boot(bootLinux, options)).rejects.toThrow("The VM exited");
+      expect(performance.now() - begun).toBeLessThan(10_000);
+    } finally {
+      process.env.PATH = path;
+    }
+    expect(readFileSync(options.console, "utf8")).toContain("surogate: the bpf LSM is not active; refusing to run commands unprotected");
+    guest = await Guest.boot(bootLinux, options);
+    expect(await setUp(ROOT, folder)).toMatchObject({ type: "done" });
+  });
+
+  it("fails the boot before its hello when the rule's outcome comes after the agent's start: fewer hooks, a failed load, or none", { timeout: 120_000 }, async () => {
+    const want = Number(/^want=(\d+)/m.exec(INIT)?.[1]);
+    // The outcome *s* seconds late, past where the agent's ports would open: a hello before it would come first.
+    const late = (s: number): [string, string] => ["(\n  if ", `(\n  sleep ${s}\n  if `];
+    const cases: Array<[string, string]> = [
+      [altered(late(3), [/^want=\d+/m, `want=${want + 1}`]), `surogate: the protected-names rule attached ${want} of ${want + 1} hooks`],
+      [altered(late(3), ["/usr/lib/surogate/rule.bpf.o", "/usr/lib/surogate/missing.bpf.o"]), "surogate: could not load the guest-kernel protected-names rule"],
+      [altered(late(600)), "surogate: the protected-names rule did not finish loading"],
+    ];
+    await guest.stop();
+    for (const [init, said] of cases) {
+      const outcome = await Guest.boot(bootLinux, { ...options, agentDisk: agentDiskWith(dir, init) }).then(async (booted) => {
+        await booted.stop();
+        return "it said hello";
+      }, (error: Error) => error.message);
+      expect(outcome, said).toContain("The VM exited");
+      expect(readFileSync(options.console, "utf8")).toContain(said);
+    }
+    guest = await Guest.boot(bootLinux, options);
+    expect(await setUp(ROOT, folder)).toMatchObject({ type: "done" });
+  });
+
   it("repairs a sessions disk the quick check cannot, and keeps the homes on it", async () => {
     expect(await run("echo kept > ~/kept; touch ~/victim; sync")).toEqual({ ok: { output: "", returncode: 0, timed_out: false } });
     await guest.stop();
@@ -934,30 +1124,20 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
 
   it("stops the boot, and keeps the homes, on a sessions disk e2fsck cannot check", async () => {
     await guest.stop();
-    const incompat = () => {
-      const fd = openSync(options.sessions, "r");
-      try {
-        const field = Buffer.alloc(4);
-        readSync(fd, field, 0, 4, INCOMPAT);
-        return field.readUInt32LE(0);
-      } finally {
-        closeSync(fd);
-      }
-    };
     expect(spawnSync("e2fsck", ["-p", "-E", "journal_only", options.sessions], { stdio: "ignore" }).status).toBe(0);
     // A feature this e2fsck does not know, as a newer mke2fs could set: e2fsck exits 8, though the disk was made.
-    const known = incompat();
+    const known = incompat(options.sessions);
     expect(spawnSync("debugfs", ["-w", "-R", `ssv feature_incompat ${(known | 0x8000_0000) >>> 0}`, options.sessions], { stdio: "ignore" }).status).toBe(0);
     // The guest panics, which ends QEMU.
     await expect(Guest.boot(bootLinux, options)).rejects.toThrow("The VM exited");
     expect(readFileSync(options.console, "utf8")).toContain(
-      "surogate: e2fsck could not check the sessions disk (exit code 8), so the guest stops and leaves it as it is",
+      "surogate: e2fsck could not check the sessions disk (exit code 8), so the guest stops; the app keeps the disk aside and makes a new one",
     );
     // debugfs opens a disk with a feature it does not know only when forced.
     const restored = spawnSync("debugfs", ["-f", "-"], {
       input: `open -w -f ${options.sessions}\nssv feature_incompat ${known}\nclose\n`, stdio: ["pipe", "ignore", "ignore"],
     });
-    expect([restored.status, incompat()]).toEqual([0, known]);
+    expect([restored.status, incompat(options.sessions)]).toEqual([0, known]);
     guest = await Guest.boot(bootLinux, options);
     expect(await setUp(ROOT, folder)).toMatchObject({ type: "done" });
     expect(await run("cat ~/kept")).toEqual({ ok: { output: "kept\n", returncode: 0, timed_out: false } });
@@ -1009,6 +1189,42 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
   });
 });
 
+describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest's memory", { timeout: 60_000 }, () => {
+  let dir: string;
+  let options: VmOptions;
+  let guest: Guest;
+  const pss = (pid: number) => Number(/^Pss:\s+(\d+)/m.exec(readFileSync(`/proc/${pid}/smaps_rollup`, "utf8"))?.[1] ?? 0) / 1024;
+
+  beforeAll(async () => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-memory-")));
+    mkdirSync(join(dir, "folder"));
+    options = {
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+      run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER,
+    };
+    guest = await Guest.boot(bootLinux, options);
+    expect(await guest.ready(ROOT, folderOf(join(dir, "folder")))).toBeNull();
+  });
+
+  afterAll(async () => {
+    await guest?.stop();
+    rmSync(options.run, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("gives this computer back the memory a command freed within 15 s, and logs what the guest costs it (M5)", async () => {
+    const qemu = Number(readFileSync(join(options.run, "qemu.pid"), "utf8"));
+    const before = pss(qemu);
+    // 1.2 GiB touched, then freed as the process exits.
+    const touched = "python3 -c 'b = bytearray(1200 * 2 ** 20); b[::4096] = b\"x\" * len(b[::4096])'";
+    expect(await guest.op(ROOT, "run", { command: touched, workdir: null, timeout: 60 }, signal())).toMatchObject({ ok: { returncode: 0 } });
+    const used = pss(qemu);
+    await until(() => pss(qemu) < before + 300, 15_000);
+    console.log(`M5: QEMU Pss ${before.toFixed(0)} MiB before, ${used.toFixed(0)} MiB after a 1.2 GiB command, ${pss(qemu).toFixed(0)} MiB once its pages were reported`);
+    expect(used).toBeGreaterThan(before + 900);
+  });
+});
+
 describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeout: 60_000 }, () => {
   let dir: string;
   let options: VmOptions;
@@ -1033,7 +1249,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("answers a cancel while the guest boots at once, and adds no folder for it", async () => {
+  it("answers a cancel while the guest boots at once, adds no folder for it, and powers off the guest it booted for nothing", async () => {
     managers.push(new VmManager(options));
     const cancel = new AbortController();
     const begun = performance.now();
@@ -1041,10 +1257,12 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     setTimeout(() => cancel.abort(), 100);
     expect(await answer).toEqual(CANCELLED);
     expect(performance.now() - begun).toBeLessThan(1_000);
-    // The boot goes on, for the next operation; the cancelled one's folder was never added.
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
-    expect(existsSync(join(options.run, "control.sock"))).toBe(true);
-    expect(existsSync(join(options.run, "vfs-1.sock"))).toBe(false);
+    // The boot goes on; the guest it brings holds no root, so it stops, and the cancelled operation's folder was never added.
+    await until(() => existsSync(join(options.run, "qemu.pid")));
+    const qemu = qemuPid();
+    await until(() => !alive(qemu));
+    expect(readFileSync(options.console, "utf8")).toContain("sysrq: Power Off");
+    expect(existsSync(join(options.run, "vfs-1.pid"))).toBe(false);
   });
 
   it("boots at a root's first operation, adds each root's folder, and answers there", async () => {
@@ -1149,43 +1367,103 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     for (const root of [...busy, "fifth"]) await managers.at(-1)!.teardown(root);
   });
 
-  it("loses a guest that does not let a torn-down root's folder go, and boots a new one for the next operation", async () => {
+  it("keeps a torn-down root's share while a process of it waits on the share that stalled, and the guest and another root's process go on", async () => {
     // A removal's bound of its own: the share's. The manager before it stops first, so its guest has let the disks go.
     await managers.at(-1)?.stop();
     managers.push(new VmManager({ ...options, shareMs: 3_000 }));
-    const a = join(dir, "a");
+    const [a, b] = [join(dir, "a"), join(dir, "b")];
+    const other = await op(OTHER, b, "start", background("sleep 300")) as { ok: { session_id: string } };
     expect(await op(ROOT, a, "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
-    // Its folder's virtiofsd: the daemon, and the child that serves the share.
-    const daemon = newestDaemon(options.run);
-    const share = [daemon, ...spawnSync("pgrep", ["-P", String(daemon)], { encoding: "utf8" }).stdout.trim().split("\n").map(Number)];
+    const daemons = shareDaemons(options.run);
     const qemu = qemuPid();
-    // A process that looks in the folder once its share has stalled: the guest cannot let the share go while it waits.
-    const stuck = "env -i /usr/bin/setsid /usr/bin/nohup /bin/sh -c '/usr/bin/sleep 1; /usr/bin/stat ./stuck' < /dev/null > /dev/null 2>&1 & echo started";
-    expect(await op(ROOT, a, "start", background(stuck))).toMatchObject({ ok: { session_id: expect.any(String) } });
+    // A process that looks in the folder once its share has stalled: it cannot end while it waits.
+    expect(await op(ROOT, a, "start", background(STUCK))).toMatchObject({ ok: { session_id: expect.any(String) } });
     await new Promise((resolve) => setTimeout(resolve, 500));
-    for (const pid of share) process.kill(pid, "SIGSTOP");
+    for (const pid of daemons) process.kill(pid, "SIGSTOP");
     try {
       await new Promise((resolve) => setTimeout(resolve, 1_500));
       const begun = performance.now();
       await managers.at(-1)!.teardown(ROOT);
-      // The agent's 3 s for the root's processes to end, then the removal's 3 s.
-      expect(performance.now() - begun).toBeLessThan(10_000);
-      expect(() => process.kill(qemu, 0)).toThrow();
+      // The agent's 3 s for the root's processes to end, and no removal to wait on.
+      expect(performance.now() - begun).toBeLessThan(6_000);
+      expect(alive(qemu)).toBe(true);
+      expect(await op(OTHER, b, "poll", { session_id: other.ok.session_id })).toMatchObject({ ok: { status: "running" } });
     } finally {
-      for (const pid of share) {
+      for (const pid of daemons) process.kill(pid, "SIGCONT");
+    }
+    // Its share answers again, so what waited on it ends: the root is set up again, on a share of its own, in the same guest.
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(await op(ROOT, a, "run", { command: "echo back", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "back\n" } });
+    expect(qemuPid()).toBe(qemu);
+    // The tests after this one bound a share by the default 15 s.
+    await managers.at(-1)!.stop();
+    managers.push(new VmManager(options));
+    expect(await op(ROOT, a, "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+  });
+
+  it("tears another chat down while one chat's share stalls: what it wrote written out, its share let go, and kept through a power cut", async () => {
+    await managers.at(-1)?.stop();
+    managers.push(new VmManager({ ...options, shareMs: 3_000 }));
+    const [a, b] = [join(dir, "a"), join(dir, "b")];
+    // The chat whose share stalls, with a process that waits on it.
+    expect(await op(ROOT, a, "start", background(STUCK))).toMatchObject({ ok: { session_id: expect.any(String) } });
+    const stalled = shareDaemons(options.run);
+    expect(await op(OTHER, b, "run", { command: "echo durable > ~/durable", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+    const its = shareDaemons(options.run);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    for (const pid of stalled) process.kill(pid, "SIGSTOP");
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      const begun = performance.now();
+      // Its flush is of its own filesystems: sync(2) would wait for good on the stalled share.
+      await managers.at(-1)!.teardown(OTHER);
+      expect(performance.now() - begun).toBeLessThan(3_000);
+      // Its share removed: its virtiofsd ends.
+      await until(() => its.every((pid) => !alive(pid)));
+      // A power cut now keeps what the chat wrote before its teardown.
+      const qemu = qemuPid();
+      process.kill(qemu, "SIGKILL");
+      await until(() => !alive(qemu));
+    } finally {
+      for (const pid of stalled) {
         try {
-          process.kill(pid, "SIGCONT");
+          process.kill(pid, "SIGKILL");
         } catch {
           // Gone with its guest.
         }
       }
     }
-    expect(await op(ROOT, a, "run", { command: "echo back", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "back\n" } });
-    expect(qemuPid()).not.toBe(qemu);
-    // The tests after this one bound a share by the default 15 s, with a guest running.
-    await managers.at(-1)!.stop();
+    expect(await op(OTHER, b, "run", { command: "cat ~/durable", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "durable\n" } });
+  });
+
+  it("powers its guest off once its last root has let its folder go, and boots another for the next operation", async () => {
+    const a = join(dir, "a");
+    await managers.at(-1)?.stop();
     managers.push(new VmManager(options));
     expect(await op(ROOT, a, "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+    const qemu = qemuPid();
+    const begun = performance.now();
+    await managers.at(-1)!.teardown(ROOT);
+    await until(() => !alive(qemu));
+    console.log(`idle stop: the guest powered off ${(performance.now() - begun).toFixed(0)} ms after its last root's teardown began`);
+    expect(readFileSync(options.console, "utf8")).toContain("sysrq: Power Off");
+    expect(await op(ROOT, a, "run", { command: "echo again", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "again\n" } });
+    expect(qemuPid()).not.toBe(qemu);
+  });
+
+  it("keeps a sessions disk its guest could not check aside, and boots on a new one", async () => {
+    await managers.at(-1)?.stop();
+    managers.push(new VmManager(options));
+    const a = join(dir, "a");
+    expect(await op(ROOT, a, "run", { command: "echo kept > ~/kept-aside", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+    await managers.at(-1)!.stop();
+    // A feature this e2fsck does not know, as a newer mke2fs could set: e2fsck exits 8, though the disk was made.
+    const known = incompat(options.sessions);
+    expect(spawnSync("debugfs", ["-w", "-R", `ssv feature_incompat ${(known | 0x8000_0000) >>> 0}`, options.sessions], { stdio: "ignore" }).status).toBe(0);
+    managers.push(new VmManager(options));
+    expect(await op(ROOT, a, "run", { command: "cat ~/kept-aside 2>/dev/null || echo new", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "new\n" } });
+    // The old one, beside the new, as it was: its homes, under a feature only a newer e2fsck knows.
+    expect([statSync(`${options.sessions}.unchecked`).size, incompat(`${options.sessions}.unchecked`)]).toEqual([32 * 1024 ** 3, (known | 0x8000_0000) >>> 0]);
   });
 
   it("stops a guest that has not added a root's folder in 15 s, and answers as stopped by the sandbox", async () => {
@@ -1265,6 +1543,47 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
       await two?.stop();
       rmSync(runtime, { recursive: true, force: true });
     }
+  });
+
+  // M10, by hand: the computer sleeps during a command, put to sleep by `systemctl suspend` and
+  // woken by its user after at least three minutes. Behind SUROGATE_SUSPEND_TEST=1 as well: never on a
+  // computer others are using, as every process on it sleeps too. It checks the hypothesis that the
+  // guest's kvm-clock counts the sleep (its monotonic clock jumps, its wall clock does not lag), and
+  // pins what holds either way: a command the computer slept through is not timed out for the sleep.
+  it.skipIf(process.env.SUROGATE_SUSPEND_TEST !== "1")("finishes a command the computer slept through once it wakes, untimed-out for the sleep, its guest kept (M10)", { timeout: 900_000 }, async () => {
+    // A manager of its own, with the keepalive's own pace.
+    await managers.at(-1)?.stop();
+    managers.push(new VmManager(options));
+    const a = join(dir, "a");
+    const clocks = async () => {
+      const said = await op(ROOT, a, "run", { command: "cut -d' ' -f1 /proc/uptime; date +%s.%N", workdir: null, timeout: 10 }) as { ok: { output: string } };
+      const [uptime = 0, wall = 0] = said.ok.output.trim().split("\n").map(Number);
+      return { uptime, wall, hostWall: Date.now() / 1000, hostAwake: performance.now() / 1000 };
+    };
+    const qemu = (await clocks(), qemuPid());
+    const before = await clocks();
+    // Its timeout, 120 s, past its own 60 s and short of the sleep: a timeout kept on a clock that counted the sleep would end it.
+    const running = op(ROOT, a, "run", { command: "sleep 60; echo slept", workdir: null, timeout: 120 });
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    spawnSync("systemctl", ["suspend"]);
+    // Asleep, the wall clock goes on and the monotonic one does not: at the wake they are apart by the sleep.
+    const asleep = () => Date.now() / 1000 - before.hostWall - (performance.now() / 1000 - before.hostAwake);
+    await until(() => asleep() > 10, 600_000);
+    // As the shell does at powerMonitor's resume: the keepalive's tick may have told the guest first.
+    managers.at(-1)!.resume();
+    const ran = await running as { ok: { output: string; returncode: number; timed_out: boolean } };
+    const after = await clocks();
+    const awake = after.hostAwake - before.hostAwake;
+    console.log(
+      `M10: asleep ${asleep().toFixed(0)} s, ${awake.toFixed(0)} s awake; the guest's monotonic clock moved ${(after.uptime - before.uptime).toFixed(0)} s ` +
+      `(${(after.uptime - before.uptime - awake).toFixed(0)} s past the time awake: the sleep, if kvm-clock counts it); its wall clock is ` +
+      `${(after.wall - after.hostWall).toFixed(2)} s off this computer's; the command answered ${JSON.stringify(ran.ok)}`,
+    );
+    // Past the command's timeout and the guest's backstop, 130 s, or the run proves nothing of either.
+    expect(asleep()).toBeGreaterThan(150);
+    expect(ran.ok).toEqual({ output: "slept\n", returncode: 0, timed_out: false });
+    expect(qemuPid()).toBe(qemu);
+    expect(Math.abs(after.wall - after.hostWall)).toBeLessThan(2);
   });
 
   it("takes its guest's sockets and pidfiles with it when it stops", async () => {
@@ -1819,23 +2138,26 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
       }
       return { outcome, guest: span(inGuest), here: onHost.length > 0 ? span(onHost) : "no uv" };
     };
-    const wheel = await twice(`curl -sS -o /dev/null -w '%{size_download}' ${WHEEL}`, { ok: { output: "906389343", returncode: 0 } }, () => `curl -sS -o /dev/null ${WHEEL}`);
-    const set = await twice(
-      `uv pip install --python /opt/venv/bin/python --target ~/measured-pip ${PIP} && ls ~/measured-pip | grep -c dist-info; rm -rf ~/measured-pip`,
-      { ok: { output: "10\n", returncode: 0 } },
-      uv ? (turn) => `${uv} pip install --python-platform x86_64-manylinux_2_28 --target ${scratch}/pip-${turn} ${PIP}` : null,
-    );
-    const npm = await twice(
-      `npm install --cache ~/measured-npm-cache --prefix ~/measured-npm ${NPM} && ls ~/measured-npm/node_modules | wc -l; rm -rf ~/measured-npm ~/measured-npm-cache`,
-      { ok: { returncode: 0 } },
-      (turn) => `npm install --cache ${scratch}/npm-cache-${turn} --prefix ${scratch}/npm-${turn} ${NPM}`,
-    );
-    rmSync(scratch, { recursive: true, force: true });
-    expect(prompts).toEqual([]);
-    console.log([
-      `M7, twice each in turn: a 906 MB wheel in ${wheel.guest} through the guest, ${wheel.here} on this computer`,
-      `ten packages by uv in ${set.guest}, ${set.here} on this computer`,
-      `npm install of ${String((npm.outcome as { ok: { output: string } }).ok.output).trim()} top-level packages in ${npm.guest}, ${npm.here} on this computer`,
-    ].join("; "));
+    try {
+      const wheel = await twice(`curl -sS -o /dev/null -w '%{size_download}' ${WHEEL}`, { ok: { output: "906389343", returncode: 0 } }, () => `curl -sS -o /dev/null ${WHEEL}`);
+      const set = await twice(
+        `uv pip install --python /opt/venv/bin/python --target ~/measured-pip ${PIP} && ls ~/measured-pip | grep -c dist-info; rm -rf ~/measured-pip`,
+        { ok: { output: "10\n", returncode: 0 } },
+        uv ? (turn) => `${uv} pip install --python-platform x86_64-manylinux_2_28 --target ${scratch}/pip-${turn} ${PIP}` : null,
+      );
+      const npm = await twice(
+        `npm install --cache ~/measured-npm-cache --prefix ~/measured-npm ${NPM} && ls ~/measured-npm/node_modules | wc -l; rm -rf ~/measured-npm ~/measured-npm-cache`,
+        { ok: { returncode: 0 } },
+        (turn) => `npm install --cache ${scratch}/npm-cache-${turn} --prefix ${scratch}/npm-${turn} ${NPM}`,
+      );
+      expect(prompts).toEqual([]);
+      console.log([
+        `M7, twice each in turn: a 906 MB wheel in ${wheel.guest} through the guest, ${wheel.here} on this computer`,
+        `ten packages by uv in ${set.guest}, ${set.here} on this computer`,
+        `npm install of ${String((npm.outcome as { ok: { output: string } }).ok.output).trim()} top-level packages in ${npm.guest}, ${npm.here} on this computer`,
+      ].join("; "));
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });

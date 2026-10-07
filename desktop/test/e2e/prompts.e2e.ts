@@ -2,13 +2,13 @@
 // folder sheet, and the approval prompts of a chat that asks every time. Nothing here runs
 // in the VM: a denied command never reaches it, and the file kinds run in the root's file host.
 
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
+import { ACCOUNT, connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
 import { dataHome, key, launch, MAIN, press, prompt, promptsShown, quit, shellPage, stubNative } from "./launch.js";
 
 let home: string;
@@ -631,5 +631,158 @@ describe("a chat's mode, from the page", () => {
     expect(await outcome(send("bind", { folder: ready.folder, nonce: ready.nonce }))).toEqual({
       error: { type: "binding", message: "This folder was not confirmed on this computer" },
     });
+  });
+});
+
+describe("a chat's folder, from the page", () => {
+  const binding = (client: Page, chat = CHAT) => client.evaluate((id) => window.surogateDesktop!.getBinding!(id), chat);
+
+  // Show folder as the page's own button asks for it: at the user's click. Its answer, or why not.
+  async function showFolder(client: Page, chat = CHAT): Promise<string> {
+    await client.evaluate((id) => {
+      document.getElementById("show-folder")?.remove();
+      const button = Object.assign(document.createElement("button"), { id: "show-folder", textContent: "Show folder" });
+      button.onclick = () => {
+        Promise.resolve().then(() => window.surogateDesktop!.revealFolder!(id)).then(
+          () => (button.dataset.answer = "shown"),
+          (error: Error) => (button.dataset.answer = error.message),
+        );
+      };
+      document.body.append(button);
+    }, chat);
+    await client.click("#show-folder");
+    await client.waitForFunction(() => document.getElementById("show-folder")?.dataset.answer !== undefined);
+    return (await client.getAttribute("#show-folder", "data-answer"))!;
+  }
+
+  // The file manager, as the app would ask it: what it was asked to show, and to open.
+  const fileManager = () => app!.evaluate(({ shell }) => {
+    const asked = { shown: [] as string[], opened: [] as string[] };
+    Object.assign(globalThis, { fileManager: asked });
+    shell.showItemInFolder = (path: string) => void asked.shown.push(path);
+    shell.openPath = (path: string) => {
+      asked.opened.push(path);
+      return Promise.resolve("");
+    };
+  });
+  const askedOf = () => app!.evaluate(() => (globalThis as unknown as { fileManager: { shown: string[]; opened: string[] } }).fileManager);
+
+  it("tells the page the folder and the mode of a chat bound here, and each change of them", async () => {
+    const client = await signedIn();
+    await client.evaluate(() => {
+      const heard: string[] = [];
+      Object.assign(window, { heard });
+      window.surogateDesktop!.onBindingChanged!((id) => heard.push(id));
+    });
+    expect(await binding(client)).toBeNull();
+    await bound(client, folder, CHAT, "ask");
+    expect(await binding(client)).toEqual({ folder, mode: "ask" });
+    // Freed in the desktop's own window, then made to ask again by the page: the page hears each.
+    const freed = client.evaluate((id) => window.surogateDesktop!.requestFreeMode(id), CHAT);
+    await press(await prompt(app!), "free");
+    expect(await freed).toBe(true);
+    expect(await binding(client)).toEqual({ folder, mode: "free" });
+    await client.evaluate((id) => window.surogateDesktop!.setMode(id, "ask"), CHAT);
+    await expect.poll(() => client.evaluate(() => (window as unknown as { heard: string[] }).heard)).toEqual([CHAT, CHAT, CHAT]);
+    expect(await binding(client, OTHER)).toBeNull();
+  });
+
+  it.each([
+    ["signed in as another account", { ...ACCOUNT, userId: "b", email: "b@example.com" }],
+    ["that said nobody is signed in", null],
+  ])("tells a page %s nothing of this account's chats", async (_name, said) => {
+    const client = await signedIn();
+    await fileManager();
+    await bound(client, folder, CHAT, "ask");
+    await client.evaluate(() => {
+      const heard: string[] = [];
+      Object.assign(window, { heard });
+      window.surogateDesktop!.onBindingChanged!((id) => heard.push(id));
+    });
+    await client.evaluate((account) => window.surogateDesktop!.setAccount(account), said);
+    await expect(binding(client)).rejects.toThrow("another account");
+    expect(await showFolder(client)).toContain("another account");
+    // The chat's user lets it work freely at a prompt here: a page of another account hears nothing of it.
+    const id = write("a.txt", "a");
+    await press(await prompt(app!), "stop_asking");
+    expect(await outcome(id)).toEqual({ ok: null });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await client.evaluate(() => (window as unknown as { heard: string[] }).heard)).toEqual([]);
+    expect(await askedOf()).toEqual({ shown: [], opened: [] });
+  });
+
+  it("shows the chat's own folder in the file manager, never opens it, and shows none once a file took its place", async () => {
+    const client = await signedIn();
+    await fileManager();
+    await bound(client, folder);
+    expect(await showFolder(client)).toBe("shown");
+    expect(await showFolder(client, OTHER)).toContain("This chat has no folder on this computer");
+    // A script put where the folder was, as a command of another chat could: it is neither shown nor run.
+    renameSync(folder, `${folder}-moved`);
+    writeFileSync(folder, "#!/bin/sh\ntouch /tmp/ran\n", { mode: 0o755 });
+    expect(await showFolder(client)).toContain(`The folder ${folder} was replaced after it was confirmed for this chat`);
+    rmSync(folder);
+    expect(await showFolder(client)).toContain(`The folder ${folder} is not there`);
+    rmSync(`${folder}-moved`, { recursive: true });
+    expect(await askedOf()).toEqual({ shown: [folder], opened: [] });
+  });
+
+  it("shows a folder only at its user's click", async () => {
+    const client = await signedIn();
+    await fileManager();
+    await bound(client, folder);
+    // Asked by the page's own code once a click's activation has lapsed (5 s in Chromium); Playwright's
+    // evaluate brings an activation of its own, so the page asks later, from a timer.
+    await client.evaluate((id) => {
+      setTimeout(() => {
+        Promise.resolve().then(() => window.surogateDesktop!.revealFolder!(id)).then(
+          () => Object.assign(window, { asked: "shown" }),
+          (error: Error) => Object.assign(window, { asked: error.message }),
+        );
+      }, 6_000);
+    }, CHAT);
+    await client.waitForFunction(() => (window as unknown as { asked?: string }).asked !== undefined, undefined, { timeout: 15_000 });
+    expect(await client.evaluate(() => (window as unknown as { asked: string }).asked))
+      .toBe("Surogate shows a chat's folder only when its user asks, with a click");
+    expect(await askedOf()).toEqual({ shown: [], opened: [] });
+  });
+
+  it("shows one folder for each click of its user's, and none for a click its page made or one long past", async () => {
+    const client = await signedIn();
+    await fileManager();
+    await bound(client, folder);
+    const refused = "Surogate shows a chat's folder only when its user asks, with a click";
+    // A button that asks *times* times at each click, and an input that asks at each key: what each was answered.
+    await client.evaluate((id) => {
+      const answers: string[] = [];
+      const ask = () => window.surogateDesktop!.revealFolder!(id).then(() => "shown", (error: Error) => error.message)
+        .then((answer) => answers.push(answer));
+      const twice = Object.assign(document.createElement("button"), { id: "twice", textContent: "Show folder twice" });
+      twice.onclick = () => void Promise.all([ask(), ask()]);
+      const once = Object.assign(document.createElement("button"), { id: "once", textContent: "Show folder" });
+      once.onclick = () => void ask();
+      const keys = Object.assign(document.createElement("input"), { id: "keys" });
+      keys.onkeydown = () => void ask();
+      const elsewhere = Object.assign(document.createElement("p"), { id: "elsewhere", textContent: "Elsewhere" });
+      document.body.append(twice, once, keys, elsewhere);
+      Object.assign(window, { answers });
+    }, CHAT);
+    const answers = async (count: number) => {
+      await client.waitForFunction((length) => (window as unknown as { answers: string[] }).answers.length >= length, count);
+      return client.evaluate(() => (window as unknown as { answers: string[] }).answers);
+    };
+    // One click shows one folder. The second call's refusal needs no answer from the main process, so it comes first.
+    await client.click("#twice");
+    expect(await answers(2)).toEqual([refused, "shown"]);
+    // A click the page's own code made: its activation is Playwright's, the click is no user's.
+    await client.evaluate(() => document.getElementById("once")!.click());
+    expect((await answers(3))[2]).toBe(refused);
+    // A click long past, then a key pressed, which activates the page too.
+    await client.click("#elsewhere");
+    await new Promise((resolve) => setTimeout(resolve, 5_500));
+    await client.focus("#keys");
+    await client.keyboard.press("a");
+    expect((await answers(4))[3]).toBe(refused);
+    expect(await askedOf()).toEqual({ shown: [folder], opened: [] });
   });
 });

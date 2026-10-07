@@ -40,24 +40,34 @@ const read = (row: Row | undefined): Binding | undefined =>
   };
 
 export class Bindings {
+  private readonly listeners = new Set<(root: string) => void>();
+
   constructor(private readonly db: DatabaseSync) {}
+
+  /** Hear each root bound, each change of a root's mode, and each root's binding forgotten, once it is written; the returned function stops it. */
+  watch(listener: (root: string) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
 
   /** Record a root's binding. A root is bound once: a second binding for it throws. */
   add(binding: Binding): void {
     this.db
       .prepare(`INSERT INTO bindings (root, nonce, folder, dev, ino, boot, mode, bound_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(binding.root, binding.nonce, binding.folder, binding.dev, binding.ino, binding.boot, binding.mode, binding.boundAt);
+    this.changed(binding.root);
   }
 
   /**
    * Forget a deleted root's binding and what its user allowed for it, both or neither.
-   * The folder is not touched; an unknown root changes nothing.
+   * The folder is not touched; an unknown root changes nothing, and tells nothing.
    */
   retire(root: string): void {
     this.db.exec("BEGIN IMMEDIATE");
+    let forgotten: number | bigint;
     try {
       this.db.prepare(`DELETE FROM domains WHERE root = ?`).run(root);
-      this.db.prepare(`DELETE FROM bindings WHERE root = ?`).run(root);
+      forgotten = this.db.prepare(`DELETE FROM bindings WHERE root = ?`).run(root).changes;
       this.db.exec("COMMIT");
     } catch (error) {
       try {
@@ -67,11 +77,25 @@ export class Bindings {
       }
       throw error;
     }
+    if (forgotten > 0) this.changed(root);
   }
 
   /** A root's mode from now on, for it and its sub-agents. An unknown root changes nothing. */
   setMode(root: string, mode: Mode): void {
-    this.db.prepare(`UPDATE bindings SET mode = ? WHERE root = ?`).run(mode, root);
+    // Told only when it changed: an unknown root, or the mode it has, changes nothing.
+    const { changes } = this.db.prepare(`UPDATE bindings SET mode = ? WHERE root = ? AND mode <> ?`).run(mode, root, mode);
+    if (changes > 0) this.changed(root);
+  }
+
+  // A listener's failure is not the write's: it is written, and the others hear it.
+  private changed(root: string): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(root);
+      } catch {
+        // Nothing here can tell anyone more.
+      }
+    }
   }
 
   /** Let *domain* (a host, as srt's allowedDomains takes it) through for a bound root from now on. Once each; an unknown root changes nothing. */

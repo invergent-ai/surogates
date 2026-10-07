@@ -199,6 +199,9 @@ export interface AuthConfigResponse {
   // settings tab and the composer's browser-profile picker. Absent on a
   // fetch error or an older backend — treated as "unknown" (fail open).
   browser_enabled?: boolean;
+  // Chats can work on a folder of the user's computer through Surogate Desktop. Absent on an
+  // older backend: there is no local folder to offer, and the desktop says so.
+  desktop_sessions?: boolean;
   // Active messaging channels an end-user can link their identity to
   // (subset of slack/teams/telegram). Empty/absent hides "Connected
   // Channels" — there is nothing to pair against.

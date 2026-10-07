@@ -1274,6 +1274,8 @@ class Device(Base):
     # When the link first sent the device its welcome: NULL for one that never connected.
     connected_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # When its token was last reissued: a reauthorization restores a computer, and its user is told.
+    reauthorized_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     credential_generation: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("1"), default=1
     )

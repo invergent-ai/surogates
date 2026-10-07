@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
-import { forkManager, type FromManager, type ManagerProcess, VmClient, vmOptions } from "../src/vm/client.js";
+import { forkManager, type FromManager, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../src/vm/client.js";
 import { unavailable, type VmOperation, type VmOptions } from "../src/vm/manager.js";
 
 let dir: string;
@@ -341,5 +341,122 @@ describe("the VM's files", () => {
     expect(installed.sessions).toBe("/home/ana/.local/share/surogate/vm/sessions.img");
     // Without XDG_RUNTIME_DIR: the user's own folder logind makes, never /tmp.
     expect(vmOptions("/d", { ...ana, uid: 1234 }, {}).run).toMatch(/^\/run\/user\/1234\/surogate\/vm-[0-9a-f]{8}$/);
+  });
+});
+
+describe("a manager that runs on", () => {
+  // A manager that says it runs, then answers what *answers* says, or nothing; killed once.
+  const fake = (answers: { pongs: boolean; held: Array<() => void> }, sent: ToManager[], exits: Array<() => void>, killed: { count: number }): ManagerProcess => {
+    const heard: Array<(message: FromManager) => void> = [];
+    return {
+      send: (message) => {
+        sent.push(message);
+        if (message.type === "start") setTimeout(() => heard.forEach((listener) => listener({ type: "ready" })), 5);
+        if (message.type === "stop") for (const exit of exits.splice(0)) exit();
+        if (message.type !== "ping") return;
+        const pong = () => heard.forEach((listener) => listener({ type: "pong" }));
+        if (answers.pongs) pong();
+        else answers.held.push(pong);
+      },
+      onMessage: (listener) => void heard.push(listener),
+      onExit: (listener) => void exits.push(listener),
+      kill: () => {
+        killed.count += 1;
+        for (const exit of exits.splice(0)) exit();
+      },
+    };
+  };
+  const vmOf = (manager: () => ManagerProcess) => {
+    const vm = new VmClient({
+      vm: { kernel: "/k", rootfs: "/r", agentDisk: "/a", sessions: join(dir, "s.img"), run: join(dir, "run"), console: join(dir, "c.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" } },
+      spawn: manager,
+      pingMs: 100,
+    });
+    clients.push(vm);
+    return vm;
+  };
+
+  it("starts no manager for a wake when none runs", () => {
+    let starts = 0;
+    const vm = vmOf(() => {
+      starts += 1;
+      return fake({ pongs: true, held: [] }, [], [], { count: 0 });
+    });
+    vm.resume();
+    expect(starts).toBe(0);
+  });
+
+  it("is kept at the computer's wake, told it, and the pings it missed asleep not held against it", async () => {
+    const answers = { pongs: false, held: [] as Array<() => void> };
+    const sent: ToManager[] = [];
+    const killed = { count: 0 };
+    const vm = vmOf(() => fake(answers, sent, [], killed));
+    const running = vm.perform(operation(), signal());
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    vm.resume();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    answers.pongs = true;
+    for (const pong of answers.held.splice(0)) pong();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(killed.count).toBe(0);
+    expect(sent.filter((message) => message.type === "resume")).toHaveLength(1);
+    expect(await within(running, 100)).toBe("no answer");
+  });
+
+  it("is killed once it has answered no ping three times, what it ran answered as stopped by the sandbox", async () => {
+    const killed = { count: 0 };
+    const vm = vmOf(() => fake({ pongs: false, held: [] }, [], [], killed));
+    const begun = performance.now();
+    expect(await within(vm.perform(operation(), signal()), 2_000)).toEqual(SANDBOX_STOPPED);
+    expect(performance.now() - begun).toBeLessThan(1_000);
+    expect(killed.count).toBeGreaterThan(0);
+  });
+
+  it("is started again, once it went by itself, only once a second has passed, and two seconds after the next", async () => {
+    const starts: number[] = [];
+    const vm = vmOf(() => {
+      starts.push(performance.now());
+      const exits: Array<() => void> = [];
+      const manager = fake({ pongs: true, held: [] }, [], exits, { count: 0 });
+      // It runs, then crashes.
+      setTimeout(() => exits.splice(0).forEach((exit) => exit()), 50);
+      return manager;
+    });
+    for (let n = 0; n < 3; n += 1) expect(await vm.perform(operation(), signal())).toEqual(SANDBOX_STOPPED);
+    const [first = 0, second = 0, third = 0] = starts;
+    expect(second - first).toBeGreaterThan(1_000);
+    expect(third - second).toBeGreaterThan(2_000);
+  });
+
+  it("answers a cancel at once while it backs off", async () => {
+    const vm = vmOf(() => {
+      const exits: Array<() => void> = [];
+      const manager = fake({ pongs: true, held: [] }, [], exits, { count: 0 });
+      setTimeout(() => exits.splice(0).forEach((exit) => exit()), 50);
+      return manager;
+    });
+    expect(await vm.perform(operation(), signal())).toEqual(SANDBOX_STOPPED);
+    const cancel = new AbortController();
+    const waiting = vm.perform(operation(), cancel.signal);
+    setTimeout(() => cancel.abort(), 100);
+    const begun = performance.now();
+    expect(await waiting).toEqual(CANCELLED);
+    expect(performance.now() - begun).toBeLessThan(500);
+  });
+
+  it("answers an operation waiting out its backoff as soon as the app quits, not when its wait ends", async () => {
+    const vm = vmOf(() => {
+      const exits: Array<() => void> = [];
+      const manager = fake({ pongs: true, held: [] }, [], exits, { count: 0 });
+      setTimeout(() => exits.splice(0).forEach((exit) => exit()), 50);
+      return manager;
+    });
+    expect(await vm.perform(operation(), signal())).toEqual(SANDBOX_STOPPED);
+    // Its wait is a second; up to a minute after repeated crashes.
+    const waiting = vm.perform(operation(), signal());
+    setTimeout(() => void vm.stop(), 100);
+    const begun = performance.now();
+    expect(await waiting).toEqual(unavailable("is stopping"));
+    expect(performance.now() - begun).toBeLessThan(500);
   });
 });

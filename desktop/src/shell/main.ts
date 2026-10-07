@@ -9,7 +9,7 @@ import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
 import {
-  app, BrowserWindow, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, safeStorage, session, shell, Tray, utilityProcess,
+  app, BrowserWindow, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, powerMonitor, safeStorage, session, shell, Tray, utilityProcess,
   type WebContents, webContents,
 } from "electron";
 
@@ -138,6 +138,13 @@ let registering = false;
 let connecting = false;
 // What the web client tells once its user signed in (undefined until it has said), and the projects it serves.
 let account: DesktopAccount | null | undefined;
+
+// Whether the page is *who*'s. One that said nobody is signed in is no account's. One that has not
+// said yet is whoever is signed in to the app, whose sign-in gave it its session.
+function pageIs(who: { orgId: string; userId: string }): boolean {
+  const owner = account === undefined ? signedIn?.account ?? null : account;
+  return owner?.orgId === who.orgId && owner.userId === who.userId;
+}
 const projects = new PageProjects((message) => main?.webContents()?.send("desktop:projects", message));
 let served = false;
 // Settled once the page serves its projects: a project chosen while it loads waits for this.
@@ -471,9 +478,13 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     agent: agent.name,
     identity: { deviceId: credential.deviceId, orgId: credential.orgId, agentId: credential.agentId, userId: credential.userId },
     // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the VM.
-    tools: (bindings, network) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor() }),
+    tools: (bindings, network, changed) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(), changed }),
     prompts,
     approvalPrompts: prompts,
+    // The page hears which of this account's chats changed on this computer, while it is this account's page.
+    onBindingChanged: (root) => {
+      if (pageIs(credential)) main?.webContents()?.send("desktop:binding-changed", root);
+    },
     onStatus: (status) => {
       if (device?.credential === credential) device.status = status;
       // The agent ended this token while it is this computer's: cleaned up here, its folders kept for a restore.
@@ -956,12 +967,8 @@ async function preparing<T>(window: string, prepare: (signal: AbortSignal) => Pr
 function bridge(contents: WebContents, agent: Agent): void {
   // Each load of the page is a page of its own: what its user refused there holds until it is replaced.
   let load = 0;
-  // The device is the account's it was registered for: a page signed in as anyone else sees none.
-  // Until the page says who it is, it is whoever is signed in to the app, whose sign-in gave it its session.
-  const anotherAccount = () => {
-    const owner = account ?? signedIn?.account ?? null;
-    return kept !== null && (owner?.orgId !== kept.orgId || owner.userId !== kept.userId);
-  };
+  // The device is the account's it was registered for: a page of anyone else's, or of nobody's, sees none.
+  const anotherAccount = () => kept !== null && !pageIs(kept);
   // The device, once started: a page asking while it still starts, as at a launch, waits for it.
   const registered = async (): Promise<DeviceStack> => {
     if (anotherAccount()) throw new Error("This computer is registered with the agent for another account");
@@ -997,6 +1004,9 @@ function bridge(contents: WebContents, agent: Agent): void {
     requestFreeMode: (sessionId, window) =>
       preparing(window, async (signal) => (await registered()).binder.approvals.requestFreeMode(sessionId, signal, `${window}:${load}`)),
     cancelPrepared: async (token, window) => (await registered()).binder.cancelPrepared(token, window),
+    getBinding: async (sessionId) => (await registered()).binder.bindingOf(sessionId),
+    // Shown selected in its parent, never opened: a file put at its path after the look is only selected, never run.
+    revealFolder: async (sessionId) => shell.showItemInFolder(await (await registered()).binder.folderToShow(sessionId)),
     getAppearance: appearanceNow,
     setAccount: (reported) => {
       // Another account, or none, or the first: nothing listed before is theirs. A page that
@@ -1778,6 +1788,8 @@ if (!app.requestSingleInstanceLock()) {
     // Electron's own menu goes: its reload, zoom and developer tools would act on the window's own pages.
     Menu.setApplicationMenu(Menu.buildFromTemplate(appMenu(menuActions, !app.isPackaged)));
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
+    // The VM slept with the computer: at its wake its clock is set, and its keepalive starts afresh.
+    powerMonitor.on("resume", () => vm?.resume());
     const page = join(PAGES, "shell.html");
     main = new MainWindow({ states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed });
     wire(main, page);
