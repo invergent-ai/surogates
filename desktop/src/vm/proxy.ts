@@ -150,9 +150,11 @@ export class NetProxy {
     this.dial(stream, verdict.dial, port);
   }
 
-  // One ask for every connection of *root* to *key* in flight, so one npm install asks once.
+  // One ask for every connection of *root* to *key* in flight, so one npm install asks once;
+  // only of those judged alike, so one judged a private network never rides a prompt that did not say so.
   private allowed(root: string, asked: NetworkAsk, key: string): Promise<boolean> {
-    const id = `${root} ${key}`;
+    const idOf = (privateNetwork: boolean) => `${root} ${key} ${privateNetwork}`;
+    const id = idOf(asked.privateNetwork);
     const open = this.asking.get(id);
     if (open) return open;
     const met = this.metBy(root);
@@ -162,7 +164,8 @@ export class NetProxy {
       .then((allow) => allow === true, () => false)
       .then((allow) => {
         if (this.asking.get(id) === decided) this.asking.delete(id);
-        met.waiting.delete(key);
+        // Still waiting while the other kind's ask for it is open.
+        if (!this.asking.has(idOf(!asked.privateNetwork))) met.waiting.delete(key);
         if (!allow) met.refused.add(key);
         return allow;
       });

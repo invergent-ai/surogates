@@ -18,6 +18,7 @@ const names: Record<string, string[][]> = {
   "pypi.org": [["151.101.0.223"]],
   "example.com": [["93.184.215.14"]],
   "rebinding.example": [["93.184.215.14"], ["127.0.0.1"]],
+  "rebind-lan.example": [["93.184.215.14"], ["192.168.1.1"]],
   "two.example": [["192.0.2.1", "192.0.2.2"]],
   "nowhere.example": [["192.0.2.1"]],
 };
@@ -167,6 +168,25 @@ describe("the host proxy", () => {
     answer = () => Promise.resolve(true);
     expect(await tunnel("example.com:443")).toMatchObject({ status: 200 });
     expect(asked).toHaveLength(4);
+  });
+
+  it("asks apart about a connection judged a private network, never on a prompt that did not say so", async () => {
+    const answers: Array<(allowed: boolean) => void> = [];
+    answer = () => new Promise((done) => answers.push(done));
+    // The name leads elsewhere for the first, then to a private network for the second.
+    const both = [tunnel("rebind-lan.example:80"), tunnel("rebind-lan.example:80")];
+    await new Promise((done) => setTimeout(done, 100));
+    expect(asked).toEqual([
+      { root: ROOT, asked: { host: "rebind-lan.example", port: 80, privateNetwork: false } },
+      { root: ROOT, asked: { host: "rebind-lan.example", port: 80, privateNetwork: true } },
+    ]);
+    answers[0]?.(true);
+    expect((await both[0])?.status).toBe(200);
+    // The private one still waits, and the next notice says so.
+    expect(proxy.takeNotice(ROOT)).toBe("Still waiting for this computer's user to allow network access to rebind-lan.example:80.");
+    answers[1]?.(false);
+    expect(await both[1]).toMatchObject({ status: 403, reason: "denied" });
+    expect(dialed).toEqual(["93.184.215.14:80"]);
   });
 
   it("refuses what its user denies, and what an ask that fails decides, and says so in the next notice", async () => {
