@@ -85,7 +85,8 @@ export interface DesktopBridge {
   // look at this folder, or at two others, has not returned; and once the folder is not there,
   // does not answer within 5 s, or was replaced after it was confirmed for the chat.
   revealFolder?(sessionId: string): Promise<void>;
-  // Hears each chat bound on this computer, and each change of a chat's mode, by the chat's id.
+  // Hears each chat bound on this computer, each change of a chat's mode, and each chat's folder
+  // forgotten here, as for a deleted chat, by the chat's id.
   onBindingChanged?(listener: (sessionId: string) => void): () => void;
   getAppearance(): Promise<DesktopAppearance>;
   onAppearanceChanged(listener: (appearance: DesktopAppearance) => void): () => void;

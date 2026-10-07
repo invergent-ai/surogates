@@ -44,7 +44,7 @@ export class Bindings {
 
   constructor(private readonly db: DatabaseSync) {}
 
-  /** Hear each root bound, and each change of a root's mode, once it is written; the returned function stops it. */
+  /** Hear each root bound, each change of a root's mode, and each root's binding forgotten, once it is written; the returned function stops it. */
   watch(listener: (root: string) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -60,13 +60,14 @@ export class Bindings {
 
   /**
    * Forget a deleted root's binding and what its user allowed for it, both or neither.
-   * The folder is not touched; an unknown root changes nothing.
+   * The folder is not touched; an unknown root changes nothing, and tells nothing.
    */
   retire(root: string): void {
     this.db.exec("BEGIN IMMEDIATE");
+    let forgotten: number | bigint;
     try {
       this.db.prepare(`DELETE FROM domains WHERE root = ?`).run(root);
-      this.db.prepare(`DELETE FROM bindings WHERE root = ?`).run(root);
+      forgotten = this.db.prepare(`DELETE FROM bindings WHERE root = ?`).run(root).changes;
       this.db.exec("COMMIT");
     } catch (error) {
       try {
@@ -76,6 +77,7 @@ export class Bindings {
       }
       throw error;
     }
+    if (forgotten > 0) this.changed(root);
   }
 
   /** A root's mode from now on, for it and its sub-agents. An unknown root changes nothing. */
