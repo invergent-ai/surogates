@@ -140,6 +140,16 @@ describe("Settings → Folders and permissions", () => {
     expect(agent.asked.title).toBe(2);
   });
 
+  it("draws a chat again in an open Settings once its mode changes", async () => {
+    const { shell, page, client } = await signedIn();
+    await bound(client, folders[0]!, CHAT, "free");
+    const settings = await foldersSettings(shell, page);
+    await expect.poll(() => texts(settings, "#folders .row .label > .desc")).toEqual(["Works freely"]);
+    // Switched from the chat's own bar, while Settings is open.
+    await client.evaluate((id) => window.surogateDesktop!.setMode(id, "ask"), CHAT);
+    await expect.poll(() => texts(settings, "#folders .row .label > .desc")).toEqual(["Asks every time"]);
+  });
+
   it("reads each chat's title afresh once its user has logged out, as for another account", async () => {
     const { shell, page, client } = await signedIn();
     agent.titles.set(CHAT, "Quarterly report");

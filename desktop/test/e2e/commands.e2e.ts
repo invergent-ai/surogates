@@ -307,12 +307,13 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     mkdirSync(folder);
     await bound(folder);
     const run = (command: string) => operation("run", { command, workdir: null, timeout: 60 });
+    // Open while the chat is allowed the site: it shows at once.
+    const settings = await foldersSettings();
     const reached = run(status("https://example.com/"));
     await expect.poll(() => promptsShown(app!), { timeout: 30_000 }).toBe(1);
     await press(await prompt(app!), "allow_session");
     expect(await reached).toMatchObject({ ok: { returncode: 0 } });
-    const settings = await foldersSettings();
-    expect(await settings.textContent("#folders .row .line")).toBe("Reaches example.com, on every portTake back");
+    await expect.poll(() => settings.textContent("#folders .row .line")).toBe("Reaches example.com, on every portTake back");
     expect(await settings.getAttribute("#folders .row .line button", "aria-label")).toBe("Take back example.com");
     await settings.click("#folders .row .line button");
     await expect.poll(() => settings.$$("#folders .row .line").then((lines) => lines.length)).toBe(0);

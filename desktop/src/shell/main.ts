@@ -498,6 +498,8 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     approvalPrompts: prompts,
     // The page hears which of this account's chats changed on this computer, while it is this account's page.
     onBindingChanged: (root) => {
+      // Settings → Folders and permissions draws the chat's folder, mode and hosts again.
+      main?.settingsContents()?.send("settings:changed");
       if (pageIs(credential)) main?.webContents()?.send("desktop:binding-changed", root);
     },
     onStatus: (status) => {

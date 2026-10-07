@@ -381,6 +381,19 @@ describe("the bindings", () => {
     after.close();
   });
 
+  it("tell whoever watches of each host allowed for a bound root, once it is kept", () => {
+    const journal = new OperationJournal(path);
+    journal.bindings.add(binding("r1", 1));
+    const told: string[] = [];
+    journal.bindings.watch((root) => told.push(root));
+    journal.bindings.allowDomain("r1", "example.com");
+    // Allowed already, or for a root with no binding: nothing is kept, and nothing told.
+    journal.bindings.allowDomain("r1", "example.com");
+    journal.bindings.allowDomain("r2", "example.com");
+    expect(told).toEqual(["r1"]);
+    journal.close();
+  });
+
   it("forget a deleted root's binding and its allowed hosts both or neither, and tell of it once forgotten", () => {
     const journal = new OperationJournal(path);
     journal.bindings.add(binding("r1", 1));
