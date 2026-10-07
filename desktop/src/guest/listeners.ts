@@ -16,12 +16,17 @@ export const PROXY_URL = `http://127.0.0.1:${HTTP_PORT}`;
 const MAX_ANSWER = 512;
 // How long a SOCKS client has, in all, to say where it goes.
 const HANDSHAKE_MS = 10_000;
+// What a client may send before its tunnel answers, kept for the tunnel: a TLS hello, and more.
+const MAX_EARLY = 64 * 1024;
 
 // A connection to a destination through the root's socket, or the status and reason that refused it.
 export type Tunnel = { socket: Socket } | { status: number; reason: string };
 
-/** A connection to *destination* (host:port) through the root's socket at *path*. Never rejects. */
-export function tunnel(path: string, destination: string): Promise<Tunnel> {
+/**
+ * A connection to *destination* (host:port) through the root's socket at *path*, which goes
+ * once *signal* aborts, answered or not: its client has gone. Never rejects.
+ */
+export function tunnel(path: string, destination: string, signal?: AbortSignal): Promise<Tunnel> {
   return new Promise((resolve) => {
     const socket = connect({ path, allowHalfOpen: true });
     let said = "";
@@ -56,6 +61,7 @@ export function tunnel(path: string, destination: string): Promise<Tunnel> {
     };
     socket.on("data", read);
     for (const event of ["error", "end", "close"]) socket.on(event, lost);
+    signal?.addEventListener("abort", lost, { once: true });
     socket.write(`${destination}\n`);
   });
 }
@@ -68,6 +74,31 @@ function join(a: Socket, b: Socket): void {
   b.pipe(a);
   a.resume();
   b.resume();
+}
+
+// Until its tunnel answers, *client* is read, so that it is seen to leave: a CONNECT or SOCKS
+// client waits for its answer to send, so its end before then is one that gave up, and its
+// tunnel goes. What it sends meanwhile, after *early*, is kept for the tunnel.
+function waiting(client: Socket, early: Buffer): { signal: AbortSignal; answered(): Buffer } {
+  const gone = new AbortController();
+  const read = (chunk: Buffer) => {
+    early = Buffer.concat([early, chunk]);
+    if (early.length > MAX_EARLY) client.destroy();
+  };
+  const leave = () => gone.abort();
+  client.on("data", read);
+  client.once("end", leave);
+  client.once("close", leave);
+  return {
+    signal: gone.signal,
+    answered: () => {
+      client.off("data", read);
+      client.off("end", leave);
+      client.off("close", leave);
+      client.pause();
+      return early;
+    },
+  };
 }
 
 // The client's request's headers, as it gave them, but those meant for the proxy.
@@ -88,12 +119,14 @@ function httpProxy(path: string): Server {
   Object.assign(server, { httpAllowHalfOpen: true });
   server.on("connect", (req, client: Socket, head: Buffer) => {
     client.on("error", () => {});
-    void tunnel(path, req.url ?? "").then((opened) => {
+    const wait = waiting(client, head);
+    void tunnel(path, req.url ?? "", wait.signal).then((opened) => {
       if ("status" in opened) {
         return void client.end(`HTTP/1.1 ${opened.status} ${STATUS_CODES[opened.status] ?? ""}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`);
       }
+      const early = wait.answered();
       client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-      if (head.length > 0) opened.socket.write(head);
+      if (early.length > 0) opened.socket.write(early);
       join(client, opened.socket);
     });
   });
@@ -106,7 +139,11 @@ function httpProxy(path: string): Server {
     }
     if (url?.protocol !== "http:") return void res.writeHead(400, { "content-type": "text/plain" }).end("This is the sandbox's proxy\n");
     const target = url;
-    void tunnel(path, `${target.hostname}:${target.port || 80}`).then((opened) => {
+    // Its connection closed, before its answer or once it is given: its tunnel goes. One that
+    // half-closed is not gone, as an HTTP/1.0 upload does, and waits for its answer.
+    const gone = new AbortController();
+    res.once("close", () => gone.abort());
+    void tunnel(path, `${target.hostname}:${target.port || 80}`, gone.signal).then((opened) => {
       if ("status" in opened) return void res.writeHead(opened.status, { "content-type": "text/plain" }).end(`${opened.reason}\n`);
       const upstream = request({
         // Paused since its answer: the request's own reader takes it from here.
@@ -171,10 +208,13 @@ async function socks(client: Socket, path: string, handshakeMs: number): Promise
   if (host === null || !port) return void client.destroy();
   if (asked[1] !== 1) return void client.end(reply(7));
   clearTimeout(handshake);
-  const opened = await tunnel(path, `${host}:${port.readUInt16BE(0)}`);
+  const wait = waiting(client, Buffer.alloc(0));
+  const opened = await tunnel(path, `${host}:${port.readUInt16BE(0)}`, wait.signal);
   // Refused by the rules (2), refused by the destination (5), or not reached (4).
   if ("status" in opened) return void client.end(reply(opened.status === 403 ? 2 : opened.reason === "ECONNREFUSED" ? 5 : 4));
+  const early = wait.answered();
   client.write(reply(0));
+  if (early.length > 0) opened.socket.write(early);
   join(client, opened.socket);
 }
 

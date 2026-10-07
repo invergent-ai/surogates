@@ -5,7 +5,7 @@ import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { listen } from "../src/guest/listeners.js";
 
@@ -18,6 +18,8 @@ let echoPort: number;
 let proxies: Server[];
 // Each destination line the root's socket was given, and each request the web server took.
 let lines: string[];
+// Each destination line whose socket the runner let go before the agent answered it.
+let left: string[];
 let requests: Array<{ method: string | undefined; url: string | undefined; headers: IncomingHttpHeaders; body: string }>;
 
 const portOf = (server: Server) => (server.address() as { port: number }).port;
@@ -25,6 +27,7 @@ const portOf = (server: Server) => (server.address() as { port: number }).port;
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "guest-listeners-"));
   lines = [];
+  left = [];
   requests = [];
   // Says how many bytes came once its client has finished sending: a half-closed connection still hears the reply.
   echo = createServer({ allowHalfOpen: true }, (socket) => {
@@ -49,8 +52,8 @@ beforeEach(async () => {
   await new Promise<void>((done) => web.listen(0, "127.0.0.1", done));
   webPort = (web.address() as { port: number }).port;
   // The agent's end of the root's socket: a destination it refuses, one it cannot reach, one it
-  // drops without a word, one it takes 400 ms to decide, the echo server here, and every other
-  // carried to the web server here.
+  // drops without a word, one it takes 400 ms to decide, one it never decides, the echo server
+  // here, and every other carried to the web server here.
   agent = createServer({ allowHalfOpen: true }, (socket) => {
     let said = "";
     const read = (chunk: Buffer) => {
@@ -63,6 +66,7 @@ beforeEach(async () => {
       if (line.startsWith("refused.example:")) return void socket.end("403 denied\n");
       if (line.startsWith("gone.example:")) return void socket.end("502 ECONNREFUSED\n");
       if (line.startsWith("drop.example:")) return void socket.destroy();
+      if (line.startsWith("wait.example:")) return void socket.once("end", () => left.push(line));
       const carry = () => {
         const upstream = connect({ host: "127.0.0.1", port: line.startsWith("echo.example:") ? echoPort : webPort, allowHalfOpen: true });
         upstream.on("connect", () => {
@@ -220,6 +224,22 @@ describe("a root's SOCKS5 proxy", () => {
 });
 
 describe("a root's proxies", () => {
+  it("let a client's tunnel go when the client leaves before its answer: CONNECT's, SOCKS5's, and a request's", async () => {
+    // CONNECT's client gives up at its own timeout.
+    await curl("--max-time", "1", "-p", "-x", http(), "http://wait.example:443/");
+    await vi.waitFor(() => expect(left).toEqual(["wait.example:443"]), { timeout: 1_000 });
+    // SOCKS5's ends once its request is sent.
+    await socks5(domain("wait.example", 444));
+    await vi.waitFor(() => expect(left).toEqual(["wait.example:443", "wait.example:444"]), { timeout: 1_000 });
+    // A request's resets its connection.
+    const client = connect({ host: "127.0.0.1", port: portOf(proxies[0] as Server) });
+    client.on("error", () => {});
+    client.write("GET http://wait.example:445/ HTTP/1.1\r\nHost: wait.example:445\r\n\r\n");
+    await vi.waitFor(() => expect(lines).toContain("wait.example:445"), { timeout: 1_000 });
+    client.resetAndDestroy();
+    await vi.waitFor(() => expect(left).toEqual(["wait.example:443", "wait.example:444", "wait.example:445"]), { timeout: 1_000 });
+  });
+
   it("do not start where their ports are taken", async () => {
     const taken = portOf(proxies[0] as Server);
     await expect(listen(join(dir, "net.sock"), { http: taken, socks: 0 })).rejects.toThrow(/EADDRINUSE/);

@@ -151,6 +151,23 @@ describe("the agent's network", () => {
     expect(asked).toHaveLength(256);
   });
 
+  it("frees the place of a connection that leaves while its ask waits, so 256 that gave up do not shut the root out", async () => {
+    await network.listen(ROOT, uid);
+    answer = () => new Promise(() => {});
+    const waiting: Socket[] = [];
+    for (let port = 1; port <= 256; port += 1) {
+      const socket = connect(network.path(ROOT));
+      socket.on("error", () => {});
+      socket.write(`echo.example:${port}\n`);
+      waiting.push(socket);
+    }
+    await vi.waitFor(() => expect(asked).toHaveLength(256), { timeout: 5_000 });
+    // Each gives up, as a command's client does at its own timeout.
+    for (const socket of waiting) socket.destroy();
+    answer = () => Promise.resolve(true);
+    await vi.waitFor(async () => expect(await through(network.path(ROOT), "echo.example:257")).toEqual({ status: "200", reply: "got 5\n" }), { timeout: 2_000 });
+  });
+
   it("answers that the sandbox has no network once the host's end has gone", async () => {
     await network.listen(ROOT, uid);
     proxy.close();

@@ -68,9 +68,8 @@ export class Network {
       }
       clearTimeout(timer);
       socket.off("data", read);
-      socket.pause();
-      // What came after the line is the connection's own.
-      if (end + 1 < head.length) socket.unshift(head.subarray(end + 1));
+      // The runner sends nothing past its line before the answer.
+      if (end + 1 < head.length) return void socket.destroy();
       this.open(root, head.subarray(0, end).toString("latin1"), socket);
     };
     socket.on("data", read);
@@ -86,6 +85,13 @@ export class Network {
     }
     const opened = stream;
     let answered = false;
+    // Until the answer the socket is read, so a runner that leaves is seen: its end, before
+    // its 200, is its client giving up, and the stream goes, with the host's ask or dial.
+    // A byte from it is no runner's, which sends nothing before then.
+    const early = () => socket.destroy();
+    const left = () => opened.destroy();
+    socket.on("data", early);
+    socket.once("end", left);
     // Gone before the host answered, as with the guest's session: the sandbox has no network.
     opened.on("close", () => {
       if (!answered) socket.end("502 sandbox\n");
@@ -96,6 +102,8 @@ export class Network {
     socket.on("close", () => opened.destroy());
     opened.on("response", (headers) => {
       answered = true;
+      socket.off("data", early);
+      socket.off("end", left);
       const status = Number(headers[":status"]);
       if (status !== 200) return void socket.end(`${status} ${String(headers["surogate-reason"] ?? "")}\n`);
       socket.write("200\n");
