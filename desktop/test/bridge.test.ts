@@ -15,6 +15,8 @@ function calls(): BridgeCalls & Record<string, ReturnType<typeof vi.fn>> {
     setMode: vi.fn(() => Promise.resolve()),
     requestFreeMode: vi.fn(() => Promise.resolve(true)),
     cancelPrepared: vi.fn(() => Promise.resolve()),
+    getBinding: vi.fn(() => Promise.resolve({ folder: "/home/flavius/notes", mode: "ask" })),
+    revealFolder: vi.fn(() => Promise.resolve()),
     getAppearance: vi.fn(() => ({ theme: "dark", textSize: "medium", transcriptWidth: "medium", motion: "system" })),
     setAccount: vi.fn(),
     registerProjects: vi.fn(),
@@ -52,6 +54,10 @@ describe("the bridge", () => {
     expect(made.requestFreeMode).toHaveBeenCalledWith(SESSION, "7");
     await handlers.cancelPrepared!(TOP, "7", "b".repeat(43));
     expect(made.cancelPrepared).toHaveBeenCalledWith("b".repeat(43), "7");
+    expect(await handlers.getBinding!(TOP, "7", SESSION)).toEqual({ folder: "/home/flavius/notes", mode: "ask" });
+    expect(made.getBinding).toHaveBeenCalledWith(SESSION);
+    await handlers.revealFolder!(TOP, "7", SESSION);
+    expect(made.revealFolder).toHaveBeenCalledWith(SESSION);
   });
 
   it("asks one question of each kind at a time for a window, and the next once that one is answered", async () => {
@@ -74,6 +80,22 @@ describe("the bridge", () => {
     expect(made.requestFreeMode).toHaveBeenCalledTimes(1);
   });
 
+  it("shows one chat's folder at a time for a window, and says it is still showing one", async () => {
+    const made = calls();
+    let shown = () => {};
+    (made.revealFolder as ReturnType<typeof vi.fn>).mockImplementationOnce(() => new Promise<void>((resolve) => {
+      shown = resolve;
+    }));
+    const handlers = bridgeHandlers(ORIGIN, made);
+    const first = handlers.revealFolder!(TOP, "7", SESSION);
+    await expect(handlers.revealFolder!(TOP, "7", SESSION)).rejects.toThrow("Surogate is still showing a folder");
+    await vi.waitFor(() => expect(made.revealFolder).toHaveBeenCalledTimes(1));
+    shown();
+    await first;
+    await handlers.revealFolder!(TOP, "7", SESSION);
+    expect(made.revealFolder).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     ["prepareFolder", ["new"], "Not a folder choice"],
     ["bindSession", ["not-a-session", "b".repeat(43)], "Not a chat"],
@@ -86,6 +108,8 @@ describe("the bridge", () => {
     ["setMode", ["not-a-session", "ask"], "Not a chat"],
     ["requestFreeMode", [42], "Not a chat"],
     ["cancelPrepared", ["short"], "Not a folder confirmation"],
+    ["getBinding", ["not-a-session"], "Not a chat"],
+    ["revealFolder", [{ toString: () => "0b6f3c1e-8a2d-4c5e-9f10-1a2b3c4d5e6f" }], "Not a chat"],
   ])("refuses %s(%o)", async (name, args, message) => {
     const made = calls();
     await expect(bridgeHandlers(ORIGIN, made)[name]!(TOP, "7", ...args)).rejects.toThrow(message);

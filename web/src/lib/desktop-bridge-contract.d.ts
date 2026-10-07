@@ -26,6 +26,12 @@ export interface DesktopPreparedFolder {
   token: string; // for bindSession only: never sent to the server
 }
 
+// A chat's folder on this computer, as its binding holds it.
+export interface DesktopBinding {
+  folder: string; // as the folder sheet showed it, and the agent was told
+  mode: "free" | "ask";
+}
+
 export interface DesktopAppearance {
   theme: "light" | "dark"; // the theme in effect
   textSize: "small" | "medium" | "large";
@@ -65,6 +71,15 @@ export interface DesktopBridge {
   requestFreeMode(sessionId: string): Promise<boolean>;
   // Drops a folder confirmed with prepareFolder whose chat was never created.
   cancelPrepared(token: string): Promise<void>;
+  // The three calls about a chat's folder came after version 1's first desktops, which have none of
+  // them: the page looks for each before it calls it.
+  // The chat's folder on this computer, and whether it asks; null for a chat with no folder here.
+  getBinding?(sessionId: string): Promise<DesktopBinding | null>;
+  // Shows the chat's folder in the file manager, selected in its parent; only at the user's click.
+  // Rejects once the folder is gone or was replaced.
+  revealFolder?(sessionId: string): Promise<void>;
+  // Hears each chat bound on this computer, and each change of a chat's mode, by the chat's id.
+  onBindingChanged?(listener: (sessionId: string) => void): () => void;
   getAppearance(): Promise<DesktopAppearance>;
   onAppearanceChanged(listener: (appearance: DesktopAppearance) => void): () => void;
   // Who is signed in; null once nobody is.

@@ -67,6 +67,18 @@ if (origin !== undefined && window.top === window && location.origin === origin)
     setMode: call("setMode"),
     requestFreeMode: call("requestFreeMode"),
     cancelPrepared: call("cancelPrepared"),
+    getBinding: call("getBinding"),
+    // Only at its user's click: the agent's page cannot open file manager windows by itself.
+    revealFolder: (sessionId: unknown) => navigator.userActivation.isActive
+      ? ipcRenderer.invoke("desktop:revealFolder", sessionId)
+      : Promise.reject(new Error("Surogate shows a chat's folder only when its user asks, with a click")),
+    onBindingChanged: (listener: (sessionId: string) => void) => {
+      const relay = (_event: unknown, sessionId: unknown) => {
+        if (typeof sessionId === "string") listener(sessionId);
+      };
+      ipcRenderer.on("desktop:binding-changed", relay);
+      return () => ipcRenderer.off("desktop:binding-changed", relay);
+    },
     getAppearance: call("getAppearance"),
     onAppearanceChanged: (listener: (appearance: unknown) => void) => {
       const relay = (_event: unknown, appearance: unknown) => listener(appearance);

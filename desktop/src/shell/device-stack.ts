@@ -42,6 +42,8 @@ export interface DeviceStackOptions {
   prompts: FolderPrompts;
   approvalPrompts: ApprovalPrompts;
   onStatus(status: LinkStatus): void;
+  // Each chat bound here, and each change of a chat's mode, by the chat's id, once it is written.
+  onBindingChanged?: (root: string) => void;
   onError(error: unknown): void;
   // How many sessions (a chat, and each of its sub-agents) have an operation running on the tools,
   // each time that changes: the quit asks first.
@@ -95,6 +97,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
   const network: NetworkApprovals = { askNetwork: (root, asked, signal) => binder.approvals.askNetwork(root, asked, signal) };
   const tools = options.tools(journal.bindings, network);
   made.tools = tools;
+  if (options.onBindingChanged) journal.bindings.watch(options.onBindingChanged);
   // Each session's operations on the tools, counted as they run: the binder runs nothing else there.
   // A chat's sub-agents are sessions of their own: their operations carry the chat as sessionId.
   const running = new Map<string, number>();

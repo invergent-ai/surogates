@@ -474,6 +474,11 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     tools: (bindings, network) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor() }),
     prompts,
     approvalPrompts: prompts,
+    // The page hears which of this account's chats changed on this computer, while it is this account's page.
+    onBindingChanged: (root) => {
+      const owner = account ?? signedIn?.account ?? null;
+      if (owner?.orgId === credential.orgId && owner.userId === credential.userId) main?.webContents()?.send("desktop:binding-changed", root);
+    },
     onStatus: (status) => {
       if (device?.credential === credential) device.status = status;
       // The agent ended this token while it is this computer's: cleaned up here, its folders kept for a restore.
@@ -997,6 +1002,9 @@ function bridge(contents: WebContents, agent: Agent): void {
     requestFreeMode: (sessionId, window) =>
       preparing(window, async (signal) => (await registered()).binder.approvals.requestFreeMode(sessionId, signal, `${window}:${load}`)),
     cancelPrepared: async (token, window) => (await registered()).binder.cancelPrepared(token, window),
+    getBinding: async (sessionId) => (await registered()).binder.bindingOf(sessionId),
+    // Shown selected in its parent, never opened: a file put at its path after the look is only selected, never run.
+    revealFolder: async (sessionId) => shell.showItemInFolder(await (await registered()).binder.folderToShow(sessionId)),
     getAppearance: appearanceNow,
     setAccount: (reported) => {
       // Another account, or none, or the first: nothing listed before is theirs. A page that
