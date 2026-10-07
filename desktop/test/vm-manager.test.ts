@@ -10,7 +10,7 @@ import { type Duplex, duplexPair } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
-import { SANDBOX_STOPPED } from "../src/guest/command.js";
+import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
 import type { ProtectedKey } from "../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
@@ -538,6 +538,20 @@ describe("a root's network, through the guest's net port", () => {
         returncode: 0,
         timed_out: false,
       },
+    });
+    await manager.stop();
+  });
+
+  it("keeps what a root met for its next run that answers, past one that answers with an error", async () => {
+    const answers = [{ ok: { output: "done\n", returncode: 0, timed_out: false } }, CANCELLED];
+    const manager = new VmManager(options(), fakeVm({ ...roots, perform: async () => answers.shift() ?? { ok: { output: "done\n", returncode: 0, timed_out: false } } }));
+    await run(manager);
+    const session = connectH2("http://guest", { createConnection: () => agentNet as Duplex });
+    expect(await connection(session, "127.0.0.1:9")).toEqual([403, "own"]);
+    // A run the session cancelled while the connection was refused.
+    expect(await run(manager)).toEqual(CANCELLED);
+    expect(await run(manager)).toEqual({
+      ok: { output: "done\n\nThis computer does not let a chat reach its own network services (127.0.0.1:9)", returncode: 0, timed_out: false },
     });
     await manager.stop();
   });

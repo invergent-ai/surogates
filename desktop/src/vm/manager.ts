@@ -223,10 +223,12 @@ export class Guest {
     return this.control.request(message, ms);
   }
 
-  // A run that answers carries what the root's connections could not reach since its last.
+  // A run that answers carries what the root's connections could not reach since its last;
+  // one that answers with an error leaves it for the next.
   async op(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
     const outcome = await this.control.op(root, kind, args, signal);
-    return kind === "run" ? withNotice(outcome, this.proxy.takeNotice(root)) : outcome;
+    if (kind !== "run" || !("ok" in outcome)) return outcome;
+    return withNotice(outcome, this.proxy.takeNotice(root));
   }
 
   /**
