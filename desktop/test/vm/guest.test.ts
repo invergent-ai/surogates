@@ -863,7 +863,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       expect(first.ms).toBeLessThan(again.ms * 2 + 250);
     } finally {
       await guest.teardown("root-git");
-      rmSync(repo, { recursive: true, force: true });
+      // Git may still be writing into .git (auto-maintenance), so the removal retries.
+      rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
   });
 
