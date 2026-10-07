@@ -141,10 +141,16 @@ function httpProxy(path: string): Server {
     }
     if (url?.protocol !== "http:") return void res.writeHead(400, { "content-type": "text/plain" }).end("This is the sandbox's proxy\n");
     const target = url;
-    // Its connection closed, before its answer or once it is given: its tunnel goes. One that
-    // half-closed is not gone, as an HTTP/1.0 upload does, and waits for its answer.
+    // Its connection closed, before its answer or once it is given: its tunnel goes. So does an
+    // HTTP/1.1 client that half-closes before its answer, as curl and Python give up; only an
+    // HTTP/1.0 upload half-closes and waits for it.
     const gone = new AbortController();
     res.once("close", () => gone.abort());
+    if (req.httpVersion !== "1.0") {
+      const fin = () => void (res.headersSent || gone.abort());
+      req.socket.once("end", fin);
+      res.once("close", () => req.socket.off("end", fin));
+    }
     void tunnel(path, `${target.hostname}:${target.port || 80}`, gone.signal).then((opened) => {
       if ("status" in opened) return void res.writeHead(opened.status, { "content-type": "text/plain" }).end(`${opened.reason}\n`);
       const upstream = request({

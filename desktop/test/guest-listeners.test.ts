@@ -241,6 +241,57 @@ describe("a root's proxies", () => {
     await vi.waitFor(() => expect(lines).toContain("wait.example:445"), { timeout: 1_000 });
     client.resetAndDestroy();
     await vi.waitFor(() => expect(left).toEqual(["wait.example:443", "wait.example:444", "wait.example:445"]), { timeout: 1_000 });
+    // An HTTP/1.1 request's client gives up at its own timeout, as curl and Python do: a FIN.
+    await curl("--max-time", "1", "-x", http(), "http://wait.example:446/");
+    await vi.waitFor(() => expect(left).toContain("wait.example:446"), { timeout: 1_000 });
+  });
+
+  it("keep a root's network open past 256 plain-HTTP clients that gave up while their ask waited", async () => {
+    const asked: string[] = [];
+    const [host, guest] = duplexPair();
+    const proxy = new NetProxy(host, {
+      // The site's one ask is never answered; the package host needs none.
+      egress: { ask: (_root, request) => (asked.push(`${request.host}:${request.port}`), new Promise(() => {})) },
+      resolve: async (name) => (name === "pypi.org" ? ["151.101.0.223"] : ["192.0.2.10"]),
+      local: () => [],
+      connect: () => connect({ host: "127.0.0.1", port: echoPort, allowHalfOpen: true }),
+    });
+    const network = new Network(guest, join(dir, "net"));
+    const root = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
+    const unlisten = await network.listen(root, process.getuid?.() ?? 0);
+    const runner = await listen(network.path(root), { http: 0, socks: 0 });
+    const port = portOf(runner[0] as Server);
+    const clients: Socket[] = [];
+    // CONNECT's answer to *destination*, as a command's client hears it.
+    const connected = (destination: string) => new Promise<string>((done) => {
+      const socket = connect({ host: "127.0.0.1", port });
+      let said = "";
+      socket.on("error", () => {});
+      socket.on("data", (chunk: Buffer) => {
+        said += chunk.toString();
+        if (said.includes("\r\n\r\n")) socket.destroy();
+      });
+      socket.on("close", () => done(said));
+      socket.write(`CONNECT ${destination} HTTP/1.1\r\nHost: ${destination}\r\n\r\n`);
+    });
+    try {
+      for (let n = 0; n < 256; n += 1) {
+        const client = connect({ host: "127.0.0.1", port });
+        client.on("error", () => {});
+        client.write("GET http://site.example:8080/ HTTP/1.1\r\nHost: site.example:8080\r\n\r\n");
+        clients.push(client);
+      }
+      await vi.waitFor(() => expect(asked).toEqual(["site.example:8080"]));
+      await new Promise((done) => setTimeout(done, 200));
+      // Each gives up, with nothing unread: a FIN.
+      for (const client of clients) client.end();
+      await vi.waitFor(async () => expect(await connected("pypi.org:443")).toBe("HTTP/1.1 200 Connection Established\r\n\r\n"), { timeout: 3_000 });
+    } finally {
+      for (const client of clients) client.destroy();
+      for (const server of runner) server.close();
+      unlisten();
+      proxy.close();
+    }
   });
 
   it("let a plain-HTTP download whose client leaves mid-body go, at every hop to its destination", async () => {
