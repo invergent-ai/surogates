@@ -108,17 +108,18 @@ async def test_a_code_lasts_sixty_seconds(api, redis_client):
     assert 0 < await redis_client.ttl(code_key(code)) <= 60
 
 
-@pytest.mark.parametrize("changes", [
-    {"redirect_uri": "http://127.0.0.1:43124/callback"},
-    {"client_id": "another-client"},
-    {"code_verifier": "short"},
+@pytest.mark.parametrize(("changes", "error"), [
+    ({"redirect_uri": "http://127.0.0.1:43124/callback"}, "invalid_grant"),
+    ({"client_id": "another-client"}, "invalid_client"),
+    ({"code_verifier": "short"}, "invalid_grant"),
 ])
-async def test_the_exchange_must_match_the_request(api, changes):
+async def test_the_exchange_must_match_the_request(api, changes, error):
     verifier, challenge = pkce()
     code = await code_for(api, challenge)
     response = await exchange(api, code, verifier, **changes)
-    assert response.status_code == 400
-    assert response.json()["error"] in {"invalid_grant", "invalid_client"}
+    assert (response.status_code, response.json()) == (400, {"error": error})
+    # Whatever was wrong, the attempt spent the code.
+    assert (await exchange(api, code, verifier)).json() == {"error": "invalid_grant"}
 
 
 async def test_a_code_works_only_at_the_agent_that_issued_it(api):
@@ -135,23 +136,24 @@ async def test_a_code_works_only_at_the_agent_that_issued_it(api):
         api.app.dependency_overrides[agent_runtime_context_dep] = own
 
 
-@pytest.mark.parametrize("changes", [
-    {"client_id": "another-client"},
-    {"redirect_uri": "http://localhost:43123/callback"},
-    {"redirect_uri": "https://127.0.0.1:43123/callback"},
-    {"redirect_uri": "http://127.0.0.1:80/callback"},
-    {"redirect_uri": "http://127.0.0.1:43123/elsewhere"},
-    {"redirect_uri": "http://127.0.0.1:43123/callback?next=x"},
-    {"redirect_uri": "http://127.0.0.1:43123/callback\n"},
-    {"state": "s" * 24 + "\n"},
-    {"code_challenge": "too-short"},
-    {"code_challenge_method": "plain"},
-    {"state": "short"},
-    {"response_type": "token"},
+@pytest.mark.parametrize(("changes", "status"), [
+    ({"client_id": "another-client"}, 400),
+    ({"redirect_uri": "http://localhost:43123/callback"}, 400),
+    ({"redirect_uri": "https://127.0.0.1:43123/callback"}, 400),
+    ({"redirect_uri": "http://127.0.0.1:80/callback"}, 400),
+    ({"redirect_uri": "http://127.0.0.1:08080/callback"}, 400),
+    ({"redirect_uri": "http://127.0.0.1:43123/elsewhere"}, 400),
+    ({"redirect_uri": "http://127.0.0.1:43123/callback?next=x"}, 400),
+    ({"redirect_uri": "http://127.0.0.1:43123/callback\n"}, 400),
+    ({"state": "s" * 24 + "\n"}, 400),
+    ({"code_challenge": "too-short"}, 400),
+    ({"code_challenge_method": "plain"}, 422),
+    ({"state": "short"}, 400),
+    ({"response_type": "token"}, 422),
 ])
-async def test_a_request_the_desktop_would_not_make_gets_no_code(api, changes):
+async def test_a_request_the_desktop_would_not_make_gets_no_code(api, changes, status):
     response = await authorize(api, pkce()[1], **changes)
-    assert response.status_code in {400, 422}
+    assert response.status_code == status
     assert "redirect_to" not in response.json()
 
 
@@ -204,6 +206,29 @@ async def test_revoking_ends_the_sign_in_and_an_unknown_token_is_no_error(api):
     assert unknown.status_code == 200
 
 
+async def test_only_the_desktop_revokes_its_sign_in(api):
+    tokens = await signed_in(api)
+    revoked = await api.client.post("/v1/auth/oauth/revoke", data={"token": tokens["refresh_token"], "client_id": "another-client"})
+    assert (revoked.status_code, revoked.json()) == (400, {"error": "invalid_client"})
+    assert (await refresh(api, tokens["refresh_token"])).status_code == 200
+
+
+@pytest.mark.parametrize(("path", "form"), [
+    ("/v1/auth/oauth/token", {"client_id": CLIENT, "refresh_token": "surg_rt_x"}),
+    ("/v1/auth/oauth/token", {"grant_type": "refresh_token", "refresh_token": "surg_rt_x"}),
+    ("/v1/auth/oauth/revoke", {"client_id": CLIENT}),
+    ("/v1/auth/oauth/revoke", {"token": "surg_rt_x"}),
+])
+async def test_a_request_missing_a_field_is_an_invalid_request(api, path, form):
+    response = await api.client.post(path, data=form)
+    assert (response.status_code, response.json()) == (400, {"error": "invalid_request"})
+
+
+async def test_a_token_request_sent_as_json_is_an_invalid_request(api):
+    response = await api.client.post("/v1/auth/oauth/token", json={"grant_type": "refresh_token", "client_id": CLIENT})
+    assert (response.status_code, response.json()) == (400, {"error": "invalid_request"})
+
+
 async def test_a_deleted_account_signs_its_desktop_out(api, session_factory):
     tokens = await signed_in(api)
     async with session_factory() as db:
@@ -219,6 +244,7 @@ async def test_the_desktop_gives_its_window_a_session_of_its_own_once(api):
     code = minted.json()["code"]
     session = await api.client.post("/v1/auth/oauth/web-session", json={"code": code})
     assert session.status_code == 200, session.text
+    assert minted.headers["cache-control"] == session.headers["cache-control"] == "no-store"
     web = session.json()
     assert claims(web["access_token"])["auth_time"] == tokens["auth_time"]
     assert claims(web["refresh_token"])["type"] == "refresh"

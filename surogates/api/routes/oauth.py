@@ -55,7 +55,7 @@ DESKTOP_CLIENT = "surogate-desktop"
 CLIENTS = {DESKTOP_CLIENT: "Surogate Desktop"}
 
 #: A loopback redirect on any port the desktop listened on (RFC 8252, section 7.3), on one fixed path.
-_LOOPBACK = re.compile(r"^http://127\.0\.0\.1:(?P<port>[0-9]{4,5})/callback$")
+_LOOPBACK = re.compile(r"^http://127\.0\.0\.1:(?P<port>[1-9][0-9]{3,4})/callback$")
 _STATE = re.compile(r"^[A-Za-z0-9._~-]{16,256}$")
 _CHALLENGE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _VERIFIER = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
@@ -154,20 +154,23 @@ def _issued(grant: RefreshGrant, client_id: str) -> JSONResponse:
 async def token(
     request: Request,
     ctx: AgentRuntime,
-    grant_type: Annotated[str, Form()],
-    client_id: Annotated[str, Form()],
+    grant_type: Annotated[str | None, Form()] = None,
+    client_id: Annotated[str | None, Form()] = None,
     code: Annotated[str | None, Form()] = None,
     redirect_uri: Annotated[str | None, Form()] = None,
     code_verifier: Annotated[str | None, Form()] = None,
     refresh_token: Annotated[str | None, Form()] = None,
 ) -> JSONResponse:
     """The token endpoint (RFC 6749, section 3.2), for a code and its verifier, or a refresh token."""
+    if grant_type is None or client_id is None:
+        return _error("invalid_request")
+    # Any attempt spends the code, whatever is wrong with it, so a wrong verifier or client
+    # cannot be followed by a right one.
+    raw = await request.app.state.redis.getdel(code_key(code)) if grant_type == "authorization_code" and code else None
     if client_id not in CLIENTS:
         return _error("invalid_client")
     tokens = OAuthTokens(request.app.state.session_factory)
     if grant_type == "authorization_code":
-        # Any attempt spends the code, so a wrong verifier cannot be followed by a right one.
-        raw = await request.app.state.redis.getdel(code_key(code)) if code else None
         if raw is None:
             return _error("invalid_grant")
         record = json.loads(raw)
@@ -197,9 +200,15 @@ async def token(
 
 @router.post("/revoke")
 async def revoke(
-    request: Request, token: Annotated[str, Form()], client_id: Annotated[str, Form()],
+    request: Request,
+    token: Annotated[str | None, Form()] = None,
+    client_id: Annotated[str | None, Form()] = None,
 ) -> Response:
     """End the sign-in a refresh token belongs to (RFC 7009): signing out. Unknown tokens are no error."""
+    if token is None or client_id is None:
+        return _error("invalid_request")
+    if client_id not in CLIENTS:
+        return _error("invalid_client")
     await OAuthTokens(request.app.state.session_factory).revoke(token, client_id=client_id)
     return Response(status_code=status.HTTP_200_OK)
 
@@ -209,7 +218,7 @@ class WebCode(BaseModel):
 
 
 @router.post("/web-code", response_model=WebCode)
-async def web_code(request: Request, ctx: AgentRuntime, tenant: Tenant) -> WebCode:
+async def web_code(request: Request, response: Response, ctx: AgentRuntime, tenant: Tenant) -> WebCode:
     """A one-time code for the desktop's window: its web client exchanges it for a session of its own."""
     user_id = _user_of(tenant, ctx)
     family_id = tenant.oauth_family_id
@@ -224,11 +233,12 @@ async def web_code(request: Request, ctx: AgentRuntime, tenant: Tenant) -> WebCo
         "family_id": str(family_id),
     }
     await request.app.state.redis.set(_web_code_key(code), json.dumps(record), ex=CODE_TTL_S, nx=True)
+    response.headers["Cache-Control"] = "no-store"
     return WebCode(code=code)
 
 
 @router.post("/web-session", response_model=TokenResponse)
-async def web_session(body: WebCode, request: Request, ctx: AgentRuntime) -> TokenResponse:
+async def web_session(body: WebCode, request: Request, response: Response, ctx: AgentRuntime) -> TokenResponse:
     """The web client's session in the desktop's window, for a code from ``/web-code``. Used once."""
     raw = await request.app.state.redis.getdel(_web_code_key(body.code))
     record = json.loads(raw) if raw is not None else None
@@ -239,6 +249,7 @@ async def web_session(body: WebCode, request: Request, ctx: AgentRuntime) -> Tok
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This sign-in code is not valid. Sign in again from Surogate.")
     # The desktop's sign-in (sid), but not its client: the window's session ends with that sign-in.
     signed_in = {"auth_time": record["auth_time"], "family_id": family_id}
+    response.headers["Cache-Control"] = "no-store"
     return TokenResponse(
         access_token=create_access_token(org_id, user_id, USER_PERMISSIONS, **signed_in),
         refresh_token=create_refresh_token(org_id, user_id, **signed_in),
