@@ -186,7 +186,12 @@ export class Approvals {
     const chat = { agent: this.options.agent, root, calling: root, folder: binding.folder };
     return this.inLine(root, signal, "deny", async () => {
       // Allowed for the session while this one waited its turn: srt lets it through already.
-      if (this.granted(root).includes(asked.host)) return "allow";
+      try {
+        if (this.granted(root).includes(asked.host)) return "allow";
+      } catch (error) {
+        report(this.options.onError, error);
+        return "deny";
+      }
       let answer: ApprovalAnswer | undefined;
       try {
         answer = await settled(this.options.prompts.approve({ kind: "network", chat, ...asked }, signal), signal);
