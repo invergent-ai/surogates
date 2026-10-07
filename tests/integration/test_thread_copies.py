@@ -299,6 +299,40 @@ class CancelledOnTheThird(SandboxPool):
         return result
 
 
+class CancelledWhilePuttingBack(SandboxPool):
+    """A pool whose turn is cancelled, as a lost lease detaches it, once the landing starts putting files back."""
+
+    turn: asyncio.Task | None = None
+
+    async def execute(self, session_id, name, input):
+        if name == "_history" and json.loads(input or "{}").get("action") == "unapply" and self.turn is not None:
+            self.turn.cancel()
+            self.turn = None
+            await asyncio.sleep(0)
+        return await super().execute(session_id, name, input)
+
+
+async def test_a_put_back_a_cancel_reaches_still_finishes(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    apply = History.apply
+
+    def a_save_lands_first(self, path, before, after):
+        if path == "c.md":
+            (self.project / "c.md").write_text("saved by you just now")
+        return apply(self, path, before, after)
+
+    monkeypatch.setattr(History, "apply", a_save_lands_first)
+    pool = CancelledWhilePuttingBack(pods)
+    pool.turn = turn = asyncio.create_task(a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "for f in a b c d e; do echo $f > $f.md; done"})),
+        _final_response("Wrote five notes."),
+    ], pool=pool, saga_settings=QUICK))
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "c.md", "notes.txt"]
+
+
 async def test_a_cancelled_landing_puts_its_files_back(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
