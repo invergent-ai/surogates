@@ -1720,8 +1720,9 @@ async def pause_session(
         )
 
     # Only emit event + update status if not already paused.  The status
-    # first: an operation recorded after it is refused, so the cancellation
-    # below cannot miss one, and a wait that wakes on the event reads paused.
+    # first: an operation of the agent's recorded after it is refused, so the
+    # cancellation below cannot miss one, and a wait that wakes on the event
+    # reads paused.  The user's own requests on the chat's files go on.
     if session.status != "paused":
         await store.update_session_status(session_id, "paused")
         await store.emit_event(session_id, EventType.SESSION_PAUSE, {})

@@ -64,8 +64,9 @@ CANCELLED_OUTCOME: dict[str, Any] = {
     },
 }
 
-# A calling session in one of these records nothing new.  A cancellation of it
-# then cannot miss an operation recorded beside it.
+# A calling session in one of these records none of the agent's operations.  A
+# cancellation of it then cannot miss one recorded beside it.  The user's own
+# requests are refused only for a deleted chat (see _check_session).
 _STOPPED_STATUSES = frozenset({"paused", "archived", "failed"})
 
 # The longest a stopped call waits to close its own operation.
@@ -154,8 +155,9 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
     The root session must name the device and belong to the device's user and
     agent; the calling session must be the root, or a session created under it.
 
-    Returns whether the session is stopped: paused, deleted or failed, or under
-    a deleted root.  The rows stay locked FOR SHARE until the operation commits,
+    Returns whether the session is stopped for this request: for the agent's
+    operations, paused, deleted or failed, or under a deleted root; for the
+    user's own request, deleted, or under a deleted root.  The rows stay locked FOR SHARE until the operation commits,
     so a pause or a delete waits for the operation it must cancel.
     """
     rows = (await db.execute(
@@ -393,7 +395,8 @@ class DeviceOperations:
         joined, never repeated: its outcome comes back when the device reports
         it, or at once if it already has.
 
-        A new request from a stopped session (paused, deleted or failed) raises
+        A new operation of the agent's from a stopped session (paused, deleted
+        or failed), or a new request of the user's from a deleted one, raises
         "This session was stopped" and records nothing.  A caller that is
         stopped while it waits, or while its request is being recorded, closes
         its own operation unless its turn is detached, handed to another
@@ -620,10 +623,10 @@ class DeviceOperations:
                 # The lease before the session rows: emit_event takes them in that order.
                 await _check_lease(db, request)
             if await _check_session(db, request, device):
-                # A stopped session records nothing new.  One it already
-                # recorded keeps its outcome, so a call resumed as a pause
-                # lands still learns what the computer did; an open one is
-                # completed by that pause's cancellation.
+                # A session stopped for this caller records nothing new.  One
+                # it already recorded keeps its outcome, so a call resumed as
+                # a pause lands still learns what the computer did; an open
+                # one is completed by that pause's cancellation.
                 existing = (await db.execute(
                     select(DeviceOperation.id, DeviceOperation.digest, DeviceOperation.outcome).where(
                         DeviceOperation.calling_session_id == request.calling_session_id,
