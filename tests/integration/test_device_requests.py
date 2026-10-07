@@ -150,6 +150,11 @@ async def test_a_session_may_have_only_so_many_requests_open(api, session_factor
     await eventually(lambda: has_pending(ops, device_id))
     with pytest.raises(TooManyRequests, match="Too much of this chat is waiting for Flavius's ThinkPad"):
         await asyncio.wait_for(ops.run(asked(device_id, root)), 2.0)
+    # A change's claim is not a step under way: its first step is a new request, and refused too.
+    change = asked(device_id, root)
+    await ops.claim(OperationRequest(**{**_fields(change), "ordinal": 0, "kind": "request", "args": {"change": "upload"}}))
+    with pytest.raises(TooManyRequests):
+        await asyncio.wait_for(ops.run(change), 2.0)
     # The open one goes on: the same request again, and its next step.
     again = asyncio.create_task(ops.run(first, keep_open=True))
     next_step = asyncio.create_task(ops.run(OperationRequest(**{**_fields(first), "ordinal": 2}), keep_open=True))
