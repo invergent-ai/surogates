@@ -3,7 +3,7 @@
 //
 import { authFetch } from "./auth";
 import { errorDetailMessage } from "./_errors";
-import { untilAnswered } from "./device-requests";
+import { onDeviceOf, untilAnswered } from "./device-requests";
 import { getSession } from "./sessions";
 
 export interface FileEntry {
@@ -117,9 +117,7 @@ const onDevice = new Map<string, Promise<boolean>>();
 function isOnDevice(sessionId: string): Promise<boolean> {
   let known = onDevice.get(sessionId);
   if (known === undefined) {
-    known = getSession(sessionId).then(
-      (session) => (session.config?.execution as { kind?: unknown } | undefined)?.kind === "device",
-    );
+    known = getSession(sessionId).then((session) => onDeviceOf(session.config));
     // Not known after all: asked again next time.
     known.catch(() => onDevice.delete(sessionId));
     onDevice.set(sessionId, known);

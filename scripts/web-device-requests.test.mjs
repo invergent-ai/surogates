@@ -2,7 +2,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { GIVE_UP_MS, NOT_FINISHED, RETRY_FIRST_MS, RETRY_MOST_MS, untilAnswered } from "../web/src/api/device-requests.ts";
+import {
+  GIVE_UP_MS, NOT_FINISHED, onDeviceOf, RETRY_FIRST_MS, RETRY_MOST_MS, untilAnswered,
+} from "../web/src/api/device-requests.ts";
 
 // Each answer a status, [status, body], or "drop": a fetch that rejects, as a network that drops does.
 // What each send named in place of its body is in changes: null when it carried its body.
@@ -87,8 +89,17 @@ test("a cloud chat's change is sent once, as before, whatever comes of it", asyn
     const slept = [];
     const sending = untilAnswered(send, { onDevice: false, sleep: async (ms) => slept.push(ms) });
     if (status === "drop") await assert.rejects(sending, TypeError);
+    // Kept on a computer this client did not know of: never read as a finished change.
+    else if (status === 202) await assert.rejects(sending, { message: NOT_FINISHED });
     else assert.equal((await sending).status, status);
     assert.deepEqual([sent.length, slept], [1, []]);
+  }
+});
+
+test("knows a local-folder chat by where its config says it works", () => {
+  assert.equal(onDeviceOf({ execution: { kind: "device", device_id: "d" } }), true);
+  for (const config of [{ execution: { kind: "cloud" } }, { execution: "device" }, {}, null, undefined]) {
+    assert.equal(onDeviceOf(config), false, JSON.stringify(config));
   }
 });
 

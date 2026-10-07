@@ -23,6 +23,12 @@ export const GIVE_UP_MS = 11 * 60_000;
 export const NOT_FINISHED =
   "This change did not finish on the computer this chat's folder is on. It may still be waiting there: check the folder before you try again.";
 
+/** Whether a session's config says it works on a folder of its user's computer (surogates/devices/binding.py). */
+export function onDeviceOf(config: Record<string, unknown> | null | undefined): boolean {
+  const execution = config?.execution;
+  return typeof execution === "object" && execution !== null && (execution as { kind?: unknown }).kind === "device";
+}
+
 export interface UntilAnsweredOptions {
   /** A local-folder chat's change: sent again until it is answered. */
   onDevice: boolean;
@@ -60,7 +66,12 @@ export async function untilAnswered(
   { onDevice, signal, sleep = pause, now = Date.now }: UntilAnsweredOptions,
 ): Promise<Response> {
   const requestId = crypto.randomUUID().replaceAll("-", "");
-  if (!onDevice) return send(requestId, null, undefined);
+  if (!onDevice) {
+    const response = await send(requestId, null, undefined);
+    // Kept on a computer this client did not know the chat was on: not a change that finished.
+    if (response.status === 202) throw new Error(NOT_FINISHED);
+    return response;
+  }
   const started = now();
   let change: string | null = null;
   for (let wait = RETRY_FIRST_MS; ; ) {
