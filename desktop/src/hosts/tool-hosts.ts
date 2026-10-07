@@ -132,6 +132,8 @@ export interface ToolHostsOptions {
   // Waited for before a root's host lets its folder go, so what else holds the folder
   // lets it go first; told too when a host went by itself.
   release?(root: string): Promise<void>;
+  // Told each time a root's processes in the VM change, or a host goes: what liveRoots() names may have changed.
+  changed?(): void;
 }
 
 export class ToolHosts implements Executor {
@@ -175,6 +177,12 @@ export class ToolHosts implements Executor {
   /** A root's background processes in the VM changed: its host keeps their handles, and stays while any lives. */
   processes(root: string, change: ProcessesChange): void {
     this.hosts.get(root)?.processes(change);
+    this.options.changed?.();
+  }
+
+  /** The roots with a background process alive in the VM, whose work a quit would end. */
+  liveRoots(): string[] {
+    return [...this.hosts].filter(([, host]) => host.lives).map(([root]) => root);
   }
 
   // The guards each host checks its folder against: the binder's must be these, or the
@@ -237,7 +245,10 @@ export class ToolHosts implements Executor {
     );
     this.hosts.set(root, host);
     this.live.add(host);
-    void host.exited.then(() => this.live.delete(host));
+    void host.exited.then(() => {
+      this.live.delete(host);
+      this.options.changed?.();
+    });
     return host;
   }
 }
@@ -331,6 +342,11 @@ class Host {
     this.live = "gone" in change ? 0 : change.live;
     this.send({ type: "handles", handles: this.handles, live: this.live });
     this.idle();
+  }
+
+  // Whether a background process of its root lives in the VM.
+  get lives(): boolean {
+    return this.live > 0 && !this.gone;
   }
 
   // Counted while it runs: a host with work is never idle.

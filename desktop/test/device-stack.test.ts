@@ -25,11 +25,18 @@ class Tools implements ToolLayer {
   hold: "no" | "until-aborted" | "forever" = "no";
   bindings: Bindings | null = null;
   network: NetworkApprovals | null = null;
+  // The sessions it says have a background process alive, and how it tells the stack they changed.
+  liveRoots: string[] = [];
+  changed: () => void = () => {};
 
   constructor(private readonly base: string, private readonly order: string[]) {}
 
   guards(): FolderGuards {
     return { home: join(this.base, "home"), dataDir: join(this.base, "data"), appDirs: [] };
+  }
+
+  live(): string[] {
+    return this.liveRoots;
   }
 
   run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
@@ -86,9 +93,10 @@ async function start(overrides: Partial<DeviceStackOptions> = {}) {
     token: "surg_dev_test",
     agent: "agent.example.com",
     identity: IDENTITY,
-    tools: (bindings, network) => {
+    tools: (bindings, network, changed) => {
       tools.bindings = bindings;
       tools.network = network;
+      tools.changed = changed;
       return tools;
     },
     prompts: { pickFolder: () => Promise.resolve(folder), confirmFolder: (sheet) => Promise.resolve({ mode: sheet.mode }) },
@@ -233,6 +241,30 @@ describe("one agent's device", () => {
     server.send({ type: "cancel", id: "run-1" });
     server.send({ type: "cancel", id: "run-2" });
     await server.until(() => device.working() === 0);
+    expect(counts).toEqual([1, 0]);
+  });
+
+  it("counts a chat whose background process lives on the tools as working, the chat once, and says when that changes", async () => {
+    const counts: number[] = [];
+    const device = await start({ onWorking: (count) => counts.push(count) });
+    await server.until(() => statuses.includes("connected"));
+    tools.hold = "until-aborted";
+    const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
+    server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce }, true));
+    await server.until(() => results("bind-1").length === 1);
+    tools.liveRoots = [ROOT];
+    tools.changed();
+    expect(device.working()).toBe(1);
+    // A command of the same chat while its server runs: still one chat at work.
+    server.send(op("run-1", "run", { command: "sleep 9", workdir: null, timeout: 10 }));
+    await server.until(() => tools.ran.length === 1);
+    expect(device.working()).toBe(1);
+    server.send({ type: "cancel", id: "run-1" });
+    await server.until(() => order.includes("aborted"));
+    expect(device.working()).toBe(1);
+    tools.liveRoots = [];
+    tools.changed();
+    expect(device.working()).toBe(0);
     expect(counts).toEqual([1, 0]);
   });
 

@@ -463,7 +463,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     agent: agent.name,
     identity: { deviceId: credential.deviceId, orgId: credential.orgId, agentId: credential.agentId, userId: credential.userId },
     // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the VM.
-    tools: (bindings, network) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor() }),
+    tools: (bindings, network, changed) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(), changed }),
     prompts,
     approvalPrompts: prompts,
     onStatus: (status) => {
