@@ -85,6 +85,14 @@ describe("an approval prompt", () => {
       .toBe("acme.surogate.ai wants to delete this file in notes.");
   });
 
+  it.each(["/home/me/notes/a/../../.ssh/id", "/home/me/notes/", "/home/me/notes/./a", "/home/me/notes//a"])(
+    "names a key that does not plainly name a file in the folder whole, as sent, never as the folder's: %s",
+    (path) => {
+      const content = approval({ kind: "change", chat: CHAT, action: "delete", path, bytes: null, preview: null });
+      expect([content.details[0]?.value, content.lead]).toEqual([path, "acme.surogate.ai wants to delete this file."]);
+    },
+  );
+
   it("shows input with every special character marked, and the command it goes to", () => {
     const content = approval({ kind: "input", chat: CHAT, process: "proc_1", command: "python3 manage.py shell", data: "y\n" });
     expect(content.details).toEqual([
@@ -112,7 +120,7 @@ describe("an approval prompt", () => {
 });
 
 describe("a size", () => {
-  it.each([[1, "1 byte"], [900, "900 bytes"], [2048, "2 KB"], [1536, "1.5 KB"], [3 * 1024 * 1024, "3 MB"]])("of %d is %s", (bytes, text) => {
+  it.each([[1, "1 byte"], [900, "900 bytes"], [2048, "2 KB"], [1536, "1.5 KB"], [1048575, "1 MB"], [3 * 1024 * 1024, "3 MB"]])("of %d is %s", (bytes, text) => {
     expect(sizeOf(bytes)).toBe(text);
   });
 });

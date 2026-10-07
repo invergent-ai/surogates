@@ -2,7 +2,7 @@
 // every word; what the agent sent, and the names of the user's folders and files, go
 // in their own fields, which the page sets as text and never as markup.
 
-import { basename, relative } from "node:path";
+import { basename, posix } from "node:path";
 
 import { type ApprovalRequest, type ChatLabel, PREVIEW_BYTES } from "../binding/approvals.js";
 import type { FolderSheet } from "../binding/binder.js";
@@ -106,12 +106,19 @@ export function folderSheet(sheet: FolderSheet): PromptContent {
 // Who asks: the chat's agent, or one of its sub-agents.
 const asker = (chat: ChatLabel) => (chat.calling === chat.root ? chat.agent : `A sub-agent of ${chat.agent}`);
 
-// A path in the chat's folder, from the folder; any other whole.
-const inFolder = (folder: string, path: string) => (path.startsWith(`${folder}/`) ? relative(folder, path) : path);
+// Whether *path* plainly names something in the chat's folder: one with a "..", a "." or a doubled slash is
+// not taken as the folder's, though it may lead there; its file host refuses it.
+const inside = (folder: string, path: string) =>
+  path.startsWith(`${folder}/`) && path.length > folder.length + 1 && posix.normalize(path) === path;
+
+// A path in the chat's folder, as sent, from the folder; any other whole.
+const inFolder = (folder: string, path: string) => (inside(folder, path) ? path.slice(folder.length + 1) : path);
 
 export function sizeOf(bytes: number): string {
   if (bytes < 1024) return `${bytes} ${bytes === 1 ? "byte" : "bytes"}`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 102.4) / 10} KB`;
+  // Rounded to a tenth: what rounds to 1024 KB is 1 MB.
+  const kb = Math.round(bytes / 102.4) / 10;
+  if (kb < 1024) return `${kb} KB`;
   return `${Math.round(bytes / (1024 * 102.4)) / 10} MB`;
 }
 
@@ -141,7 +148,7 @@ export function approval(request: ApprovalRequest): PromptContent {
   if (request.kind === "change") {
     const file = code("File", inFolder(chat.folder, request.path));
     // A path outside the folder is named whole, and its file host refuses it.
-    const where = request.path.startsWith(`${chat.folder}/`) ? ` in ${folder}` : "";
+    const where = inside(chat.folder, request.path) ? ` in ${folder}` : "";
     if (request.action === "delete") {
       return { ...OPERATION, title: `Delete ${named(request.path)}?`, lead: `${asker(chat)} wants to delete this file${where}.`, details: [file], height: 300 };
     }
