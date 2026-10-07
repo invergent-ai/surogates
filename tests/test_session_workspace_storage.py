@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import threading
 from types import SimpleNamespace
 from io import BytesIO
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi import BackgroundTasks, Response, UploadFile
+from fastapi import BackgroundTasks, HTTPException, Response, UploadFile
 
 from surogates.api.routes import workspace as workspace_route
 from surogates.api.routes import sessions as sessions_route
@@ -39,6 +42,12 @@ class _RecordingStorage:
         keys = set(self.keys.get(bucket, []))
         keys.update(k for b, k in self.objects if b == bucket)
         return sorted(k for k in keys if k.startswith(prefix))
+
+    async def list_entries(self, bucket: str, prefix: str = "") -> list[dict]:
+        return [
+            {"key": key, "size": len(self.objects.get((bucket, key), b""))}
+            for key in await self.list_keys(bucket, prefix)
+        ]
 
     async def delete(self, bucket: str, key: str) -> None:
         self.deleted_keys.append((bucket, key))
@@ -320,6 +329,42 @@ async def test_delete_session_deletes_session_prefix_not_agent_bucket(monkeypatc
     ]
 
 
+async def test_deleting_a_local_folder_chat_deletes_nothing_in_storage(monkeypatch):
+    monkeypatch.setattr(DeviceOperations, "cancel", AsyncMock(return_value=0))
+    monkeypatch.setattr(DeviceOperations, "retire", AsyncMock(return_value=None))
+    org_id = uuid4()
+    session_id = uuid4()
+    user_id = uuid4()
+    store = _Store(org_id)
+    store.session = SimpleNamespace(
+        id=session_id,
+        org_id=org_id,
+        user_id=user_id,
+        service_account_id=None,
+        agent_id="support-bot",
+        status="active",
+        channel="web",
+        # The storage fields a local-folder chat keeps for create_child_session only.
+        config={
+            "storage_bucket": "ops-agent-bucket",
+            "execution": {"kind": "device", "device_id": str(uuid4())},
+            "workspace_path": "/home/me/notes",
+        },
+    )
+    storage = _RecordingStorage()
+    storage.keys["ops-agent-bucket"] = [f"{session_id}/file.txt"]
+    request = _request(store, storage, _Redis())
+    background_tasks = BackgroundTasks()
+
+    await sessions_route.delete_session(
+        session_id, request, background_tasks, _tenant(org_id, user_id),
+        _runtime("support-bot", org_id),
+    )
+    await background_tasks()
+
+    assert storage.deleted_keys == []
+
+
 async def test_delete_session_destroys_browser_sandbox(monkeypatch):
     monkeypatch.setattr(DeviceOperations, "cancel", AsyncMock(return_value=0))
     org_id = uuid4()
@@ -468,3 +513,105 @@ async def test_artifact_store_writes_under_session_prefix():
         "ops-agent-bucket",
         f"{session_id}/_artifacts/{meta.artifact_id}/v1.json",
     ) in storage.objects
+
+
+class _SlowStorage(_RecordingStorage):
+    """Object storage that takes its time, as a slow bucket does."""
+
+    async def read(self, bucket: str, key: str) -> bytes:
+        await asyncio.sleep(0.3)
+        return await super().read(bucket, key)
+
+    async def write(self, bucket: str, key: str, data: bytes) -> None:
+        await asyncio.sleep(0.3)
+        await super().write(bucket, key, data)
+
+
+def _slow_chat():
+    org_id = uuid4()
+    session_id = uuid4()
+    store = _Store(org_id)
+    store.session = SimpleNamespace(
+        id=session_id, org_id=org_id, agent_id="support-bot", status="active", channel="web",
+        config={"storage_bucket": "ops-agent-bucket"},
+    )
+    storage = _SlowStorage()
+    return session_id, storage, _request(store, storage, _Redis()), _tenant(org_id, uuid4())
+
+
+async def test_a_cloud_chats_slow_storage_is_read_as_before(monkeypatch):
+    # The deadlines are a computer's: object storage keeps no request to join.
+    monkeypatch.setattr(workspace_route, "READ_WITHIN_S", 0.05)
+    session_id, storage, request, tenant = _slow_chat()
+    storage.objects[("ops-agent-bucket", f"{session_id}/a.txt")] = b"slow"
+    content = await workspace_route.get_workspace_file(session_id, request, path="a.txt", tenant=tenant)
+    assert content.content == "slow"
+
+
+async def test_a_cloud_chats_slow_storage_is_written_as_before(monkeypatch):
+    monkeypatch.setattr(workspace_route, "CHANGE_WITHIN_S", 0.05)
+    session_id, storage, request, tenant = _slow_chat()
+    uploaded = await workspace_route.upload_file(
+        session_id, request, UploadFile(file=BytesIO(b"slow"), filename="a.txt"), path="", tenant=tenant,
+    )
+    assert uploaded.path == "a.txt"
+    assert storage.objects[("ops-agent-bucket", f"{session_id}/a.txt")] == b"slow"
+
+
+class _ReadOnlyStorage(_RecordingStorage):
+    """Object storage that answers a read alone, as the file panel's open asks it: one GET, no HEAD."""
+
+    async def stat(self, bucket: str, key: str) -> dict:
+        raise AssertionError("a cloud chat's open reads the object directly")
+
+    async def read(self, bucket: str, key: str) -> bytes:
+        if "\x00" in key:
+            raise ValueError("embedded null byte")
+        return await super().read(bucket, key)
+
+
+async def test_a_cloud_chats_file_is_opened_with_one_read_as_before():
+    org_id = uuid4()
+    session_id = uuid4()
+    store = _Store(org_id)
+    store.session = SimpleNamespace(
+        id=session_id, org_id=org_id, agent_id="support-bot", status="active", channel="web",
+        config={"storage_bucket": "ops-agent-bucket"},
+    )
+    storage = _ReadOnlyStorage()
+    storage.objects[("ops-agent-bucket", f"{session_id}/a.txt")] = b"alpha"
+    storage.objects[("ops-agent-bucket", f"{session_id}/dot.png")] = b"\x89PNG"
+    request = _request(store, storage, _Redis())
+    tenant = _tenant(org_id, uuid4())
+
+    text = await workspace_route.get_workspace_file(session_id, request, path="a.txt", tenant=tenant)
+    assert (text.content, text.size, text.truncated) == ("alpha", 5, False)
+    image = await workspace_route.get_workspace_file(session_id, request, path="dot.png", tenant=tenant)
+    assert (image.content, image.size) == ("iVBORw==", 4)
+    with pytest.raises(HTTPException) as missing:
+        await workspace_route.get_workspace_file(session_id, request, path="missing.txt", tenant=tenant)
+    assert (missing.value.status_code, missing.value.detail) == (404, "File not found: missing.txt")
+    # A path storage cannot take is the user's error, not the server's.
+    with pytest.raises(HTTPException) as bad:
+        await workspace_route.get_workspace_file(session_id, request, path="a\x00b.txt", tenant=tenant)
+    assert bad.value.status_code == 400
+
+
+async def test_an_uploads_change_is_named_off_the_event_loop(monkeypatch):
+    # Up to 50 MB hashed: the api's other requests share its loop.
+    named: list[bool] = []
+    real = workspace_route._change
+
+    def change(*parts):
+        named.append(threading.current_thread() is threading.main_thread())
+        return real(*parts)
+
+    monkeypatch.setattr(workspace_route, "_change", change)
+    session_id, storage, request, tenant = _slow_chat()
+    await workspace_route.upload_file(
+        session_id, request, UploadFile(file=BytesIO(b"data"), filename="a.txt"), path="", tenant=tenant,
+    )
+    assert named == [False]
+    # Each part length-prefixed, as before.
+    framed = b"".join(len(part).to_bytes(8, "big") + part for part in (b"upload", b"a.txt", b"data"))
+    assert real("upload", "a.txt", b"data") == hashlib.sha256(framed).hexdigest()

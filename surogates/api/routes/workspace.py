@@ -1,39 +1,47 @@
 """Workspace file browsing for sessions.
 
-Exposes the session's workspace via ``StorageBackend`` so the web UI can
-display a workspace panel alongside the chat thread.  Works with both
-``LocalBackend`` (dev) and ``S3Backend`` (production, Garage/S3).
+Exposes the session's files so the web UI can display a workspace panel
+alongside the chat thread: a cloud session's workspace in object storage
+(``LocalBackend`` in dev, ``S3Backend`` in production), or the folder on the
+user's computer a local-folder chat works on, through that computer
+(``surogates.session.files``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import errno
+import hashlib
 import logging
 import mimetypes
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
-from typing import Literal
-from uuid import UUID
+from typing import Annotated, Literal
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, UploadFile, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from surogates.api.session_guards import (
-    require_bound_session,
+    require_device_access,
     require_session_visible,
     require_user_writable_session,
 )
+from surogates.devices.operations import REQUEST_PREFIX, DeviceOperations, OperationConflict, TooManyRequests
+from surogates.devices.workspace import SHOWN_DOT_FOLDERS, DeviceOperationError, DeviceWorkspaceIO, answered
+from surogates.session.files import ComputerAway, DeviceAccess, session_files
 from surogates.session.models import Session
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.backend import StorageBackend
-from surogates.storage.tenant import (
-    boundary_workspace_key,
-    boundary_workspace_prefix,
-)
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+from surogates.tools.workspace_io import RevisionConflict, WorkspaceFiles
 
 
 def _workspace_root_id(session: Session) -> str:
@@ -102,6 +110,36 @@ _MAX_PDF_BYTES = 25_000_000  # 25 MB
 
 _PDF_EXTENSIONS = frozenset({".pdf"})
 
+# How long a request waits for the computer a local-folder chat's files are
+# on.  A read still unanswered then is cancelled.  A change is kept, since its
+# computer's user may still be asked to allow it, and answered 202: the same
+# request, sent again, joins it.
+READ_WITHIN_S = 60.0
+CHANGE_WITHIN_S = 20.0
+
+# Names a change, so that sending it again joins it rather than repeating it.
+RequestId = Annotated[str | None, Query(pattern=r"^[A-Za-z0-9_-]{16,64}$")]
+
+# What an upload sent again names in place of its file: the change a 202 said the server holds.
+ChangeDigest = Annotated[str | None, Header(alias="X-Change-Digest", pattern=r"^[0-9a-f]{64}$")]
+
+# What the user's own input gets wrong, not the computer: a name too long for its filesystem, or one it refuses.
+_INPUT_ERRNOS = frozenset({errno.ENAMETOOLONG, errno.EINVAL})
+
+
+def _change(*parts: str | bytes) -> str:
+    """Names what a change does, so that its request id cannot be sent again with another.
+
+    Up to 50 MB of an upload: its caller runs it off the event loop.
+    """
+    digest = hashlib.sha256()
+    for part in parts:
+        data = part.encode("utf-8", "surrogatepass") if isinstance(part, str) else part
+        # Two updates, not one of the two joined: that would copy the data first.
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
+    return digest.hexdigest()
+
 
 # Directories to skip when building the tree.
 _SKIP_DIRS = frozenset({
@@ -128,7 +166,17 @@ _RESERVED_PREFIXES: tuple[str, ...] = ("_artifacts/",)
 #
 # A project thread's coding checkouts (``.threads/``) are hidden the same
 # way: a clone's thousands of files would count against the tree's limit.
-_HIDDEN_PREFIXES: tuple[str, ...] = ("_whiteboard/", ".threads/")
+# So is the files' history (``_history/``), which only the platform writes.
+_HIDDEN_PREFIXES: tuple[str, ...] = ("_whiteboard/", ".threads/", "_history/")
+
+# The one file under them the panel's own page writes: the whiteboard's canvas.
+_CANVAS = "_whiteboard/canvas.json"
+
+# The tree's one rule for what it leaves out, which the computer's walk shares
+# so that it never enters them: at any depth a folder of _SKIP_DIRS, and a
+# dot-folder other than SHOWN_DOT_FOLDERS (_should_skip_dir); at the top, the
+# platform's own folders (_is_hidden).
+_TOP_HIDDEN: tuple[str, ...] = tuple(prefix.rstrip("/") for prefix in _RESERVED_PREFIXES + _HIDDEN_PREFIXES)
 
 
 def _is_reserved(key: str) -> bool:
@@ -269,15 +317,100 @@ async def _get_workspace_session_bucket_and_root(
     return session, bucket, _workspace_root_id(session)
 
 
-def _strip_session_prefix(session: Session, root_id: str, key: str) -> str:
-    """Strip the physical workspace prefix from a key so the viewer
-    sees session-relative paths (``sessions/{root}/`` is hidden, and so
-    is the agent ``storage_key_prefix`` when set).
+def _failure(status_code: int, error: str, message: str) -> HTTPException:
+    """A structured refusal: the web client shows its message."""
+    return HTTPException(status_code=status_code, detail={"error": error, "message": message})
+
+
+class StillWaiting(Exception):
+    """A change its computer has not answered yet: kept, for the same request to ask again."""
+
+
+def _waiting(request_id: str, change: str | None = None) -> JSONResponse:
+    """202: the change is kept.  An upload's names its *change*, so the same upload is sent again without its file."""
+    content = {"request_id": request_id, "message": "Waiting for the computer this chat's folder is on"}
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content=content if change is None else {**content, "change": change},
+    )
+
+
+@asynccontextmanager
+async def workspace_files(
+    request: Request, session: Session, *, request_id: str | None = None, change: str | None = None,
+    access: DeviceAccess | None = None,
+) -> AsyncIterator[WorkspaceFiles]:
+    """*session*'s files for one request, each failure answered as the file panel's.
+
+    A local-folder chat's computer that is offline, or whose access ended,
+    is said at once.  A read it does not answer within READ_WITHIN_S is said
+    too, and cancelled.  A *change*, named by :func:`_change`, comes under its
+    *request_id*, with the *access* ``require_device_access`` gave the route:
+    one not answered within CHANGE_WITHIN_S raises StillWaiting, and stays the
+    computer's to do.  A cloud chat's files have no deadline here, as before:
+    object storage keeps no request to join.
     """
-    prefix = boundary_workspace_prefix(session.config, session, root_id)
-    if not key.startswith(prefix):
-        return key
-    return key[len(prefix):]
+    on_device = False
+    try:
+        async with session_files(
+            session,
+            storage=_get_storage(request),
+            session_factory=request.app.state.session_factory,
+            redis=request.app.state.redis,
+            request_id=request_id,
+            change=change,
+            access=access,
+        ) as files:
+            on_device = isinstance(files, DeviceWorkspaceIO)
+            if not on_device:
+                yield files
+                return
+            async with asyncio.timeout(CHANGE_WITHIN_S if change is not None else READ_WITHIN_S):
+                yield files
+    except ComputerAway as away:
+        if away.revoked:
+            raise _failure(status.HTTP_403_FORBIDDEN, "device_revoked", str(away)) from None
+        raise _failure(status.HTTP_503_SERVICE_UNAVAILABLE, "device_offline", str(away)) from None
+    except TimeoutError:
+        if not on_device:
+            raise
+        if change is not None:
+            raise StillWaiting from None
+        raise _failure(
+            status.HTTP_504_GATEWAY_TIMEOUT, "device_timeout",
+            "The computer this chat's folder is on did not answer in time. Try again.",
+        ) from None
+    except TooManyRequests as exc:
+        raise _failure(status.HTTP_429_TOO_MANY_REQUESTS, "device_busy", str(exc)) from None
+    except WorkspaceSandboxError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from None
+    except RevisionConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
+    except OSError as exc:
+        # As the computer worded it: a denial in its user's prompt, a path
+        # through a file, a name too long, a file over its cap.
+        said = exc.strerror or str(exc)
+        if isinstance(exc, PermissionError):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=said) from None
+        if isinstance(exc, (FileNotFoundError, NotADirectoryError, IsADirectoryError)):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=said) from None
+        if isinstance(exc, FileExistsError):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=said) from None
+        if exc.errno in _INPUT_ERRNOS:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=said) from None
+        if exc.errno == errno.EFBIG:
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=said) from None
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=said) from None
+    except OperationConflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This request id was sent before with another change. Send the change under a new one.",
+        ) from None
+    except DeviceOperationError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from None
+    except ValueError as exc:
+        # A path the computer, or the journal, cannot take: a NUL, a lone surrogate.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
 
 
 def _is_text_key(key: str) -> bool:
@@ -308,7 +441,7 @@ def _is_pdf_key(key: str) -> bool:
 
 def _should_skip_dir(dirname: str) -> bool:
     """Should this directory be skipped in the tree listing?"""
-    if dirname.startswith(".") and dirname not in (".github", ".vscode"):
+    if dirname.startswith(".") and dirname not in SHOWN_DOT_FOLDERS:
         return True
     return dirname in _SKIP_DIRS
 
@@ -321,6 +454,19 @@ def _validate_path(path: str) -> None:
     if path.startswith("/"):
         raise HTTPException(status_code=403, detail="Absolute paths not allowed.")
     if _is_reserved(path):
+        raise HTTPException(
+            status_code=403,
+            detail="This path is reserved for internal storage.",
+        )
+
+
+def _validate_change(path: str) -> None:
+    """Refuse a change under the platform's own folders, which the panel hides, but to the canvas.
+
+    Judged as the computer resolves it, so "./_history/x" is under _history too.
+    """
+    normal = PurePosixPath(path).as_posix()
+    if _is_hidden(normal) and normal != _CANVAS:
         raise HTTPException(
             status_code=403,
             detail="This path is reserved for internal storage.",
@@ -403,19 +549,18 @@ async def get_workspace_tree(
     """Return the recursive file tree for a session's workspace."""
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    storage = _get_storage(request)
-    session, bucket, root_id = await _get_workspace_session_bucket_and_root(
+    session, bucket, _root_id = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant,
     )
+    await require_device_access(request, session, tenant)
 
-    prefix = boundary_workspace_prefix(session.config, session, root_id)
-    keys = await storage.list_keys(bucket, prefix=prefix)
-    relative_keys = [_strip_session_prefix(session, root_id, k) for k in keys]
+    async with workspace_files(request, session) as files:
+        walked = await files.walk(await files.resolve(""), skip=_SKIP_DIRS, skip_top=_TOP_HIDDEN, skip_hidden=True)
     # Drop keys living under reserved prefixes (artifact storage) so
     # internal server-side files don't leak into the workspace browser.
-    visible_keys = [k for k in relative_keys if k and not _is_hidden(k)]
+    visible_keys = [path for path, _size in walked.files if not _is_hidden(path)]
     entries = _build_tree(visible_keys)
-    truncated = len(visible_keys) >= _MAX_ENTRIES
+    truncated = walked.truncated or len(visible_keys) >= _MAX_ENTRIES
 
     return WorkspaceTreeResponse(
         root=bucket,
@@ -442,10 +587,10 @@ async def get_workspace_file(
     _require_service_account_api_route(request, tenant)
     _validate_path(path)
     store = _get_session_store(request)
-    storage = _get_storage(request)
-    session, bucket, root_id = await _get_workspace_session_bucket_and_root(
+    session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant,
     )
+    await require_device_access(request, session, tenant)
 
     is_text = _is_text_key(path)
     is_image = _is_image_key(path)
@@ -457,46 +602,50 @@ async def get_workspace_file(
             detail="Binary files cannot be viewed in the workspace panel.",
         )
 
-    try:
-        data = await storage.read(
-            bucket,
-            boundary_workspace_key(session.config, session, root_id, path),
-        )
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-    size = len(data)
     mime, _ = mimetypes.guess_type(path)
+    preview_bytes = _MAX_PDF_BYTES if is_pdf else _MAX_IMAGE_BYTES if is_image else _MAX_READ_BYTES
+    async with workspace_files(request, session) as files:
+        key = await files.resolve(path)
+        if isinstance(files, DeviceWorkspaceIO):
+            # Its size first, so a large file never crosses for a preview.
+            st = await files.stat(key)
+            if st is None or st.is_dir:
+                raise HTTPException(status_code=404, detail=f"File not found: {path}")
+            size = st.size
+            # A preview too large is refused below, unread; a text file is read only as far as it is shown.
+            too_large = (is_image or is_pdf) and size > preview_bytes
+            data = b"" if too_large else await files.read(key, max_bytes=preview_bytes)
+        else:
+            # As before: one read of the whole object, its size its length.
+            try:
+                data = await files.read(key)
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail=f"File not found: {path}") from None
+            size = len(data)
 
     if is_image or is_pdf:
-        max_bytes = _MAX_PDF_BYTES if is_pdf else _MAX_IMAGE_BYTES
         kind = "PDF" if is_pdf else "Image"
-        if size > max_bytes:
+        if size > preview_bytes:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"{kind} too large to preview ({size} bytes, limit {max_bytes}).",
+                detail=f"{kind} too large to preview ({size} bytes, limit {preview_bytes}).",
             )
-        content = base64.b64encode(data).decode("ascii")
         return FileContentResponse(
             path=path,
-            content=content,
+            content=base64.b64encode(data).decode("ascii"),
             size=size,
             mime_type=mime or ("application/pdf" if is_pdf else "application/octet-stream"),
             encoding="base64",
             truncated=False,
         )
 
-    # Text file path.
-    truncated = size > _MAX_READ_BYTES
-    content = data[:_MAX_READ_BYTES].decode("utf-8", errors="replace")
-
     return FileContentResponse(
         path=path,
-        content=content,
+        content=data[:_MAX_READ_BYTES].decode("utf-8", errors="replace"),
         size=size,
         mime_type=mime,
         encoding="utf-8",
-        truncated=truncated,
+        truncated=size > _MAX_READ_BYTES,
     )
 
 
@@ -513,23 +662,39 @@ async def get_workspace_file(
 async def upload_file(
     session_id: UUID,
     request: Request,
-    file: UploadFile,
+    file: UploadFile | None = None,
     path: str = Query(
         "",
         description="Relative directory within the workspace to place the file. Empty = root.",
     ),
+    request_id: RequestId = None,
+    change_digest: ChangeDigest = None,
     tenant: TenantContext = Depends(get_current_tenant),
-) -> UploadResponse:
-    """Upload a file into the session's workspace."""
+) -> UploadResponse | JSONResponse:
+    """Upload a file into the session's workspace.
+
+    202 with its request id and its change when the computer a local-folder
+    chat's folder is on has not answered yet: the same upload, sent again
+    with that id, joins it.  Sent again with that change in X-Change-Digest
+    and no file, it joins it without its data crossing again; 428
+    ``change_body_needed`` says the server holds no such change, and it is
+    sent whole.
+    """
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    storage = _get_storage(request)
-    session, bucket, root_id = await _get_workspace_session_bucket_and_root(
+    session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant
     )
     require_user_writable_session(session)
-    await require_bound_session(request, session)
+    access = await require_device_access(request, session, tenant)
 
+    if change_digest is not None:
+        if request_id is None:
+            raise HTTPException(status_code=400, detail="An upload sent again by its change names its request id.")
+        return await _upload_sent_again(request, session, access, request_id, change_digest)
+    if file is None:
+        # As the required field it was.
+        raise RequestValidationError([{"type": "missing", "loc": ("body", "file"), "msg": "Field required", "input": None}])
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
 
@@ -539,6 +704,7 @@ async def upload_file(
 
     key = f"{path}/{safe_name}" if path else safe_name
     _validate_path(key)
+    _validate_change(key)
 
     contents = await file.read(_MAX_UPLOAD_BYTES + 1)
     if len(contents) > _MAX_UPLOAD_BYTES:
@@ -547,13 +713,44 @@ async def upload_file(
             detail=f"File exceeds maximum upload size ({_MAX_UPLOAD_BYTES // 1_000_000} MB).",
         )
 
-    await storage.write(
-        bucket,
-        boundary_workspace_key(session.config, session, root_id, key),
-        contents,
-    )
+    request_id = request_id or uuid4().hex
+    change = await asyncio.to_thread(_change, "upload", key, contents)
+    try:
+        async with workspace_files(request, session, request_id=request_id, change=change, access=access) as files:
+            await files.write(await files.resolve(key), contents)
+    except StillWaiting:
+        return _waiting(request_id, change)
 
     return UploadResponse(path=key, size=len(contents))
+
+
+async def _upload_sent_again(
+    request: Request, session: Session, access: DeviceAccess, request_id: str, change: str,
+) -> UploadResponse | JSONResponse:
+    """An upload sent again by its change alone: it joins the write the server holds under its request id.
+
+    428 when it holds none: a cloud chat's, which keeps no request, or one
+    whose write it has not recorded yet.  Its file is then sent again whole.
+    """
+    joined = None
+    try:
+        async with workspace_files(request, session, request_id=request_id, change=change, access=access) as files:
+            if isinstance(files, DeviceWorkspaceIO):
+                operations = DeviceOperations(request.app.state.session_factory, request.app.state.redis)
+                joined = await operations.joined(session.id, f"{REQUEST_PREFIX}{request_id}", "write")
+            if joined is not None:
+                answered("write", joined[1])
+    except StillWaiting:
+        return _waiting(request_id, change)
+    if joined is None:
+        raise _failure(
+            status.HTTP_428_PRECONDITION_REQUIRED, "change_body_needed",
+            "This change is not waiting on the computer this chat's folder is on: send it with its file.",
+        )
+    args = dict(joined[0])
+    written = args["write"]
+    size = written["transfer"]["size"] if "transfer" in written else len(base64.b64decode(written["data"]))
+    return UploadResponse(path=args["resolve"]["path"], size=size)
 
 
 @router.get("/api/sessions/{session_id}/workspace/download")
@@ -568,27 +765,22 @@ async def download_file(
     _require_service_account_api_route(request, tenant)
     _validate_path(path)
     store = _get_session_store(request)
-    storage = _get_storage(request)
-    session, bucket, root_id = await _get_workspace_session_bucket_and_root(
+    session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant,
     )
+    await require_device_access(request, session, tenant)
 
-    storage_key = boundary_workspace_key(session.config, session, root_id, path)
-    if not await storage.exists(bucket, storage_key):
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-    try:
-        info = await storage.stat(bucket, storage_key)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-    if info["size"] > _MAX_DOWNLOAD_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="File too large to download.",
-        )
-
-    data = await storage.read(bucket, storage_key)
+    async with workspace_files(request, session) as files:
+        key = await files.resolve(path)
+        st = await files.stat(key)
+        if st is None or st.is_dir:
+            raise HTTPException(status_code=404, detail=f"File not found: {path}")
+        if st.size > _MAX_DOWNLOAD_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="File too large to download.",
+            )
+        data = await files.read(key)
     mime, _ = mimetypes.guess_type(path)
     filename = PurePosixPath(path).name
 
@@ -611,22 +803,30 @@ async def delete_file(
     session_id: UUID,
     request: Request,
     path: str = Query(..., description="Relative path within the workspace"),
+    request_id: RequestId = None,
     tenant: TenantContext = Depends(get_current_tenant),
-) -> DeleteResponse:
-    """Delete a file from the session's workspace."""
+) -> DeleteResponse | JSONResponse:
+    """Delete a file from the session's workspace; 202 as an upload is."""
     _require_service_account_api_route(request, tenant)
     _validate_path(path)
+    _validate_change(path)
     store = _get_session_store(request)
-    storage = _get_storage(request)
-    session, bucket, root_id = await _get_workspace_session_bucket_and_root(
+    session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant
     )
     require_user_writable_session(session)
+    access = await require_device_access(request, session, tenant)
 
-    storage_key = boundary_workspace_key(session.config, session, root_id, path)
-    if not await storage.exists(bucket, storage_key):
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-    await storage.delete(bucket, storage_key)
+    request_id = request_id or uuid4().hex
+    try:
+        async with workspace_files(
+            request, session, request_id=request_id, change=_change("delete", path), access=access,
+        ) as files:
+            try:
+                await files.delete(await files.resolve(path))
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail=f"File not found: {path}") from None
+    except StillWaiting:
+        return _waiting(request_id)
 
     return DeleteResponse(path=path)

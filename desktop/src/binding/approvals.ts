@@ -20,12 +20,19 @@ import { report } from "../report.js";
 // What Ask every time never asks about: these only read, or make things safer (kill).
 // Every other kind asks (run, start, write, delete, write_stdin), and so does a new one.
 export const UNASKED: ReadonlySet<string> = new Set([
-  "resolve", "check_write", "stat", "read", "read_lines", "list_dir", "ripgrep", "which", "poll", "read_output", "wait",
-  "kill", "list_processes",
+  "resolve", "check_write", "stat", "read", "read_lines", "list_dir", "walk", "ripgrep", "which", "poll", "read_output",
+  "wait", "kill", "list_processes",
 ]);
 
-// The harness's own files: the terminal spills long output here.
-const RESULTS = ".surogates-results";
+// Writes never asked about: under the folder at the top of a chat's folder where the
+// terminal spills long output, and the chat's page saving its whiteboard's canvas, every
+// few seconds while the user draws. That save is the user's own request (its invocation
+// starts "request:", surogates/devices/operations.py): an agent's tool call writing the
+// canvas would replace the user's board, and is asked about. Anything else under
+// _whiteboard/ is asked about too: the agent could write there, and the file panel hides it.
+const UNASKED_FOLDERS = [".surogates-results"];
+const CANVAS = "_whiteboard/canvas.json";
+const REQUEST = "request:";
 
 // The chat a prompt is for, and the session asking: a sub-agent of the chat when it is not the root.
 // A network prompt names the root: a connection is known by its root's socket, not by which session's command made it.
@@ -347,8 +354,12 @@ export class Approvals {
     // cannot carry a write that skips its prompt here out of this folder; a key that
     // is not already normal asks all the same.
     const key = operation.args.key;
-    const spill = typeof key === "string" && posix.normalize(key) === key && key.startsWith(`${binding.folder}/${RESULTS}/`);
-    if (operation.kind === "write" && spill) {
+    const unasked = typeof key === "string" && posix.normalize(key) === key
+      && (
+        (key === `${binding.folder}/${CANVAS}` && operation.invocationId.startsWith(REQUEST))
+        || UNASKED_FOLDERS.some((name) => key.startsWith(`${binding.folder}/${name}/`))
+      );
+    if (operation.kind === "write" && unasked) {
       return { answer: null };
     }
     return { binding };

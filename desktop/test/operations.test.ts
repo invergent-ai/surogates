@@ -1,17 +1,21 @@
 import { execFileSync } from "node:child_process";
+import { once } from "node:events";
 import {
-  type BigIntStats, chmodSync, linkSync, mkdirSync, mkdtempSync, type ReadPosition, readdirSync, readFileSync, realpathSync, rmSync,
-  statSync, symlinkSync, truncateSync, utimesSync, writeFileSync,
+  type BigIntStats, chmodSync, closeSync, constants, type Dirent, linkSync, mkdirSync, mkdtempSync, openSync,
+  type ReadPosition, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES, READ_TOO_LARGE, WRITE_TOO_LARGE,
+  MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WALK_DEPTH, MAX_WALK_FILES, MAX_WALK_LOOKS, MAX_WRITE_BYTES,
+  READ_TOO_LARGE, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "../src/files/answers.js";
-import { BAD_PAGE, type Context, perform, revisionOf } from "../src/files/operations.js";
+import { BAD_PAGE, BAD_WALK, type Context, perform, revisionOf } from "../src/files/operations.js";
 import { inFolderRefusal } from "../src/files/protect.js";
 
 // The file helper's reads come back at most this long: some filesystems answer less than asked. And how many it made.
@@ -19,6 +23,13 @@ import { inFolderRefusal } from "../src/files/protect.js";
 const reads = vi.hoisted(() => ({ cap: Number.POSITIVE_INFINITY, calls: 0, next: [] as number[] }));
 // Run once as the file helper's next write begins: another writer, changing a file meanwhile.
 const meanwhile = vi.hoisted(() => ({ run: null as (() => void) | null }));
+// How many folder entries the file helper has read, however it read them; which of its next opendirs fails,
+// counting from 1 (0: none); and how many hidden folders its next opendir lists before what is on disk.
+const dirents = vi.hoisted(() => ({ read: 0, refuse: 0, hidden: 0 }));
+// The path of each lstat the file helper made.
+const lstats = vi.hoisted(() => ({ paths: [] as string[] }));
+// Each open the file helper made, by path and flags; and which of its next opens fails, counting from 1 (0: none).
+const opens = vi.hoisted(() => ({ made: [] as Array<{ path: string; flags: number }>, refuseAt: 0 }));
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
   const readSync = (
@@ -34,7 +45,44 @@ vi.mock("node:fs", async (importOriginal) => {
     run?.();
     return fs.writeSync(fd, buffer, offset);
   };
-  return { ...fs, readSync, writeSync, default: { ...fs, readSync, writeSync } };
+  const readdirSync = ((...args: Parameters<typeof fs.readdirSync>) => {
+    const entries = fs.readdirSync(...args);
+    dirents.read += entries.length;
+    return entries;
+  }) as typeof fs.readdirSync;
+  const opendirSync = (...args: Parameters<typeof fs.opendirSync>) => {
+    if (dirents.refuse > 0 && --dirents.refuse === 0) {
+      throw Object.assign(new Error("EMFILE: too many open files, opendir"), { code: "EMFILE", errno: -24, syscall: "opendir" });
+    }
+    const dir = fs.opendirSync(...args);
+    const next = dir.readSync.bind(dir);
+    let hidden = dirents.hidden;
+    dirents.hidden = 0;
+    dir.readSync = () => {
+      if (hidden > 0) {
+        hidden -= 1;
+        dirents.read += 1;
+        return { name: Buffer.from(`.${hidden}`), isDirectory: () => true, isFile: () => false } as unknown as Dirent;
+      }
+      const entry = next();
+      if (entry !== null) dirents.read += 1;
+      return entry;
+    };
+    return dir;
+  };
+  const openSync = ((path: Parameters<typeof fs.openSync>[0], flags?: Parameters<typeof fs.openSync>[1], mode?: Parameters<typeof fs.openSync>[2]) => {
+    opens.made.push({ path: String(path), flags: typeof flags === "number" ? flags : -1 });
+    if (opens.refuseAt > 0 && --opens.refuseAt === 0) {
+      throw Object.assign(new Error("EMFILE: too many open files, open"), { code: "EMFILE", errno: -24, syscall: "open" });
+    }
+    return fs.openSync(path, flags ?? "r", mode);
+  }) as typeof fs.openSync;
+  const lstatSync = ((...args: Parameters<typeof fs.lstatSync>) => {
+    lstats.paths.push(String(args[0]));
+    return fs.lstatSync(...args);
+  }) as typeof fs.lstatSync;
+  const mocked = { readSync, writeSync, readdirSync, opendirSync, openSync, lstatSync };
+  return { ...fs, ...mocked, default: { ...fs, ...mocked } };
 });
 
 let base: string;
@@ -560,6 +608,238 @@ describe("list_dir", () => {
     expect(await run("list_dir", { key: `${folder}/long` })).toEqual({
       error: { type: "too_large", message: "The result of list_dir is too large" },
     });
+  });
+});
+
+describe("walk", () => {
+  type Walked = { ok: { files: Array<[string, number]>; truncated: boolean; cursor: string } };
+  const walk = async (args: Record<string, unknown> = {}) =>
+    (await run("walk", { key: folder, skip: [], skip_top: [], skip_hidden: false, since: null, ...args })) as Walked;
+  const listed = (walked: Walked) => [...walked.ok.files].sort();
+
+  it("lists the regular files under the key with their sizes, follows no link and enters no skipped folder", async () => {
+    writeFileSync(join(folder, "sub", "b.md"), "beta!");
+    mkdirSync(join(folder, "node_modules", "x"), { recursive: true });
+    writeFileSync(join(folder, "node_modules", "x", "i.js"), "");
+    symlinkSync(join(base, "outside"), join(folder, "out"));
+    const walked = await walk({ skip: ["node_modules"] });
+    expect(listed(walked)).toEqual([["a.txt", 6], ["sub/b.md", 5]]);
+    expect(walked.ok.truncated).toBe(false);
+    expect(walked.ok.cursor).toMatch(/^\d+$/);
+    expect(listed(await walk({ key: join(folder, "sub") }))).toEqual([["b.md", 5]]);
+  });
+
+  it("since a cursor, lists only the files changed after it, by mtime or ctime", async () => {
+    writeFileSync(join(folder, "old.txt"), "o");
+    // Past the cursor's margin, which covers a filesystem's coarser clock.
+    await new Promise((resolve) => setTimeout(resolve, Number(WALK_MARGIN_NS / 1_000_000n) + 100));
+    const first = await walk();
+    writeFileSync(join(folder, "new.txt"), "n");
+    // An mtime set back keeps a new ctime: changed all the same.
+    utimesSync(join(folder, "a.txt"), new Date(0), new Date(0));
+    expect(listed(await walk({ since: first.ok.cursor }))).toEqual([["a.txt", 6], ["new.txt", 1]]);
+  });
+
+  it("enters no folder the tree hides: a skipped name, one at the top, and a hidden one", async () => {
+    for (const name of ["src", ".cache", ".github", "_whiteboard", "sub/_whiteboard", "node_modules"]) {
+      mkdirSync(join(folder, name), { recursive: true });
+      writeFileSync(join(folder, name, "f.txt"), "x");
+    }
+    const walked = await walk({ skip: ["node_modules"], skip_top: ["_whiteboard"], skip_hidden: true });
+    expect(listed(walked)).toEqual([[".github/f.txt", 1], ["a.txt", 6], ["src/f.txt", 1], ["sub/_whiteboard/f.txt", 1]]);
+  });
+
+  it("leaves out a name that is not UTF-8, and lists its decoded twin once", async () => {
+    writeFileSync(Buffer.concat([Buffer.from(`${folder}/`), Buffer.from([0x6e, 0xff])]), "bytes");
+    writeFileSync(join(folder, "n\ufffd"), "t");
+    expect(listed(await walk())).toEqual([["a.txt", 6], ["n\ufffd", 1]]);
+  });
+
+  it("never enters a folder swapped for a link while it walks", async () => {
+    mkdirSync(join(folder, "aaa"));
+    writeFileSync(join(folder, "aaa", "in.txt"), "in");
+    // As a command in the VM writing the folder could: the folder swapped for a link outside, and back.
+    const state = new Int32Array(new SharedArrayBuffer(8)); // [stop, swaps]
+    const swapper = new Worker(`
+      const { renameSync, symlinkSync, unlinkSync } = require("node:fs");
+      const { workerData: { aaa, real, outside, state } } = require("node:worker_threads");
+      while (Atomics.load(state, 0) === 0) {
+        try {
+          renameSync(aaa, real); symlinkSync(outside, aaa); unlinkSync(aaa); renameSync(real, aaa);
+          Atomics.add(state, 1, 1);
+        } catch {}
+      }
+    `, { eval: true, workerData: { aaa: join(folder, "aaa"), real: join(folder, "aaa.real"), outside: join(base, "outside"), state } });
+    const leaked = new Set<string>();
+    try {
+      for (const deadline = Date.now() + 2_000; Date.now() < deadline;) {
+        for (const [path] of (await walk()).ok.files) if (path === "aaa/o.txt") leaked.add(path);
+      }
+    } finally {
+      Atomics.store(state, 0, 1);
+      await once(swapper, "exit");
+    }
+    expect(Atomics.load(state, 1)).toBeGreaterThan(100);
+    expect([...leaked]).toEqual([]);
+  });
+
+  it("stops once its time is up and says it did", async () => {
+    // The clock as the walk reads it: its start, then past its budget at the first entry.
+    let reads = 0;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => (reads++ === 0 ? 0 : WALK_BUDGET_MS + 1));
+    const walking = walk(); // the walk itself is synchronous: it is done once this returns
+    clock.mockRestore();
+    expect((await walking).ok).toMatchObject({ files: [], truncated: true });
+  });
+
+  it("reads a folder no further than it looks, and closes every folder it opened", async () => {
+    mkdirSync(join(folder, "deep", "many"), { recursive: true });
+    for (let i = 0; i < 2 * MAX_WALK_FILES; i++) writeFileSync(join(folder, "deep", "many", String(i)), "");
+    const handles = readdirSync("/proc/self/fd").length;
+    dirents.read = 0;
+    const walked = await walk();
+    expect(walked.ok.truncated).toBe(true);
+    // The key's and deep's few entries, then many's up to the one past the cap: not the rest of it.
+    expect(dirents.read).toBeLessThan(MAX_WALK_FILES + 10);
+    expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
+  });
+
+  it("closes the key's handle when it cannot read the key", async () => {
+    const handles = readdirSync("/proc/self/fd").length;
+    dirents.refuse = 1;
+    expect(await walk()).toMatchObject({ error: { type: "os", code: "EMFILE" } });
+    expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
+  });
+
+  it("closes a folder's handle when it cannot read the folder, and says it stopped", async () => {
+    const handles = readdirSync("/proc/self/fd").length;
+    dirents.refuse = 2; // the key's listing, then sub's
+    expect((await walk()).ok.truncated).toBe(true);
+    expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
+  });
+
+  it("opens its key without following a link, and looks at each file through its folder's handle", async () => {
+    writeFileSync(join(folder, "sub", "b.md"), "b");
+    opens.made = [];
+    lstats.paths = [];
+    await walk();
+    // Its key is checked for links first; a link put in its place since is still not followed.
+    const key = opens.made.find((open) => open.path === folder);
+    expect(key !== undefined && (key.flags & constants.O_NOFOLLOW) !== 0).toBe(true);
+    // Never by a path that a folder swapped for a link on the way could take elsewhere.
+    expect(lstats.paths).not.toContain(join(folder, "a.txt"));
+    expect(lstats.paths).not.toContain(join(folder, "sub", "b.md"));
+    expect(lstats.paths.filter((path) => /^\/proc\/self\/fd\/\d+\/(a\.txt|b\.md)$/.test(path))).toHaveLength(2);
+  });
+
+  // *depth* folders, each in the last, under *top*, a file at the bottom: built through handles, as a command in the VM
+  // could build it, past what a path can name.
+  const chain = (top: string, depth: number) => {
+    mkdirSync(top);
+    let fd = openSync(top, constants.O_RDONLY | constants.O_DIRECTORY);
+    try {
+      for (let level = 0; level < depth; level++) {
+        mkdirSync(`/proc/self/fd/${fd}/d`);
+        const child = openSync(`/proc/self/fd/${fd}/d`, constants.O_RDONLY | constants.O_DIRECTORY);
+        closeSync(fd);
+        fd = child;
+      }
+      writeFileSync(`/proc/self/fd/${fd}/bottom.txt`, "");
+    } finally {
+      closeSync(fd);
+    }
+  };
+
+  it("goes no deeper than its depth, and says it stopped", async () => {
+    const whole = join(folder, "whole");
+    const deep = join(folder, "deep");
+    try {
+      chain(whole, MAX_WALK_DEPTH);
+      chain(deep, MAX_WALK_DEPTH + 1);
+      expect((await walk({ key: whole })).ok).toMatchObject({ files: [[`${"d/".repeat(MAX_WALK_DEPTH)}bottom.txt`, 0]], truncated: false });
+      expect((await walk({ key: deep })).ok).toMatchObject({ files: [], truncated: true });
+    } finally {
+      // rmSync names each path whole, and these are past what a path can name.
+      execFileSync("rm", ["-rf", whole, deep]);
+    }
+  }, 60_000);
+
+  it.skipIf(process.getuid?.() === 0)("skips a folder it may not read, and lists every other file whole", async () => {
+    // A database's data folder bind-mounted into a project, owned by another user: as common as lost+found.
+    for (const name of ["data/postgres", "web", "src"]) mkdirSync(join(folder, name), { recursive: true });
+    writeFileSync(join(folder, "data", "postgres", "PG_VERSION"), "16");
+    writeFileSync(join(folder, "data", "seed.sql"), "x");
+    writeFileSync(join(folder, "web", "index.html"), "x");
+    writeFileSync(join(folder, "src", "main.ts"), "x");
+    chmodSync(join(folder, "data", "postgres"), 0o000);
+    try {
+      const walked = await walk();
+      expect(listed(walked)).toEqual([["a.txt", 6], ["data/seed.sql", 1], ["src/main.ts", 1], ["web/index.html", 1]]);
+      expect(walked.ok.truncated).toBe(false);
+    } finally {
+      chmodSync(join(folder, "data", "postgres"), 0o755);
+    }
+  });
+
+  it("stops at a folder it has no handle left to enter, and says it stopped", async () => {
+    writeFileSync(join(folder, "sub", "b.txt"), "b");
+    const handles = readdirSync("/proc/self/fd").length;
+    opens.refuseAt = 2; // the key's, then sub's
+    const walked = await walk();
+    opens.refuseAt = 0;
+    expect(walked.ok.truncated).toBe(true);
+    expect(walked.ok.files).not.toContainEqual(["sub/b.txt", 1]);
+    expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
+  });
+
+  it("stops at its cap and says it did", async () => {
+    mkdirSync(join(folder, "many"));
+    for (let i = 0; i < MAX_WALK_FILES; i++) writeFileSync(join(folder, "many", String(i)), "");
+    const walked = await walk();
+    expect(walked.ok.files).toHaveLength(MAX_WALK_FILES);
+    expect(walked.ok.truncated).toBe(true);
+  });
+
+  it("lists a folder of exactly its cap whole, and says it is whole", async () => {
+    mkdirSync(join(folder, "many"));
+    for (let i = 0; i < MAX_WALK_FILES; i++) writeFileSync(join(folder, "many", String(i)), "");
+    const walked = await walk({ key: join(folder, "many") });
+    expect(walked.ok.files).toHaveLength(MAX_WALK_FILES);
+    expect(walked.ok.truncated).toBe(false);
+  });
+
+  it("stops where its paths fill one frame", async () => {
+    // Each path costs 252 encoded and 24 more: 3 799 of them fit in MAX_PAYLOAD_BYTES, not 3 800.
+    mkdirSync(join(folder, "long"));
+    for (let i = 0; i < 4_000; i++) writeFileSync(join(folder, "long", String(i).padStart(250, "x")), "");
+    const walked = await walk({ key: join(folder, "long") });
+    expect(walked.ok.files).toHaveLength(3_799);
+    expect(walked.ok.truncated).toBe(true);
+  });
+
+  it("stops past its looks, a folder it does not enter counted too", async () => {
+    // Hidden, so none is entered: each is one look. Listed by the folder's Dir, none of them made on disk.
+    mkdirSync(join(folder, "dirs"));
+    const hidden = { key: join(folder, "dirs"), skip_hidden: true };
+    dirents.hidden = MAX_WALK_LOOKS;
+    expect((await walk(hidden)).ok).toMatchObject({ files: [], truncated: false });
+    dirents.hidden = MAX_WALK_LOOKS + 1;
+    expect((await walk(hidden)).ok).toMatchObject({ files: [], truncated: true });
+  });
+
+  it("fails as its folder does, and refuses a key or arguments it cannot take", async () => {
+    expect(await walk({ key: `${folder}/a.txt` })).toMatchObject({ error: { type: "os", code: "ENOTDIR" } });
+    expect(await walk({ key: `${folder}/missing` })).toMatchObject({ error: { type: "os", code: "ENOENT" } });
+    expect(await walk({ key: join(base, "outside") })).toMatchObject({ error: { type: "sandbox" } });
+    for (const args of [
+      { skip: "node_modules" }, { skip: [1] }, { skip_top: "_whiteboard" }, { skip_hidden: 1 }, { since: "yesterday" },
+      { since: "1".repeat(21) }, { since: undefined },
+    ]) {
+      expect(await walk(args)).toEqual({ error: { type: "value", message: BAD_WALK } });
+    }
+    // The key before anything else.
+    expect(await walk({ key: 7, skip: "x" })).toEqual({ error: { type: "value", message: "'key' must be a string" } });
+    expect((await walk({ since: "9".repeat(20) })).ok.files).toEqual([]);
   });
 });
 

@@ -26,7 +26,7 @@ class FakeOperations:
         self.data = data
         self.gate = gate
 
-    async def run(self, request):
+    async def run(self, request, *, keep_open=False):
         if self.gate is not None:
             await self.gate.wait()
         return named(self.data[request.ordinal])

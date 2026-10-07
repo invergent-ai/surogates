@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 
+from surogates.api.session_guards import require_device_access
 from surogates.db.models import Session
 from surogates.devices.binding import Binding, binding_of
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.presence import DevicePresence
 from surogates.devices.store import DeviceStore
 from surogates.runtime import agent_runtime_context_dep, build_agent_runtime_context
+from surogates.session.files import DeviceAccess
+from surogates.session.provisioning import create_child_session
 from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.fake_laptop import FakeLaptop
 
@@ -290,6 +295,72 @@ async def test_a_cloud_chat_takes_messages_at_once(api):
     assert created.status_code == 201, created.text
     accepted = await send(api, created.json()["id"])
     assert accepted.status_code == 202, accepted.text
+
+
+async def test_only_the_chats_own_user_reaches_it(api, session_factory):
+    device = await register(api)
+    session_id = await local_chat(api, device["id"])
+    _member_id, member = await add_user(session_factory, api.org_id)
+    account = await issue_service_account_token(session_factory, api.org_id)
+    message = {"content": "Read my notes"}
+    for route, token in (
+        (f"/v1/sessions/{session_id}/messages", member),
+        (f"/v1/api/sessions/{session_id}/messages", account.token),
+    ):
+        refused = await api.client.post(route, json=message, headers=api.auth(token))
+        # What a stranger gets: not even that the chat waits for its folder.
+        assert refused.status_code == 404, (route, refused.text)
+    assert (await send(api, session_id)).status_code == 409
+    # A cloud chat stays the org's, as before.
+    cloud = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    assert cloud.status_code == 201, cloud.text
+    accepted = await api.client.post(
+        f"/v1/sessions/{cloud.json()['id']}/messages", json=message, headers=api.auth(member),
+    )
+    assert accepted.status_code == 202, accepted.text
+
+
+async def test_only_the_chats_own_user_pauses_it_or_answers_its_question(api, session_factory):
+    device = await register(api)
+    session_id = await local_chat(api, device["id"])
+    _member_id, member = await add_user(session_factory, api.org_id)
+    answer = {"responses": [{"question": "Which folder?", "answer": "notes"}]}
+    paused = await api.client.post(f"/v1/sessions/{session_id}/pause", headers=api.auth(member))
+    answered = await api.client.post(
+        f"/v1/sessions/{session_id}/ask_user_question/call_1/respond", json=answer, headers=api.auth(member),
+    )
+    # Pausing cancels the agent's work on the user's computer; an answer wakes it there.
+    assert (paused.status_code, answered.status_code) == (404, 404), (paused.text, answered.text)
+    status = (await api.app.state.session_store.get_session(UUID(session_id))).status
+    assert status != "paused"
+    # Its own user pauses it, its folder set up or not.
+    mine = await api.client.post(f"/v1/sessions/{session_id}/pause", headers=api.auth())
+    assert mine.status_code == 200, mine.text
+    # A cloud chat stays the org's, as before.
+    cloud = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    theirs = await api.client.post(f"/v1/sessions/{cloud.json()['id']}/pause", headers=api.auth(member))
+    assert theirs.status_code == 200, theirs.text
+
+
+async def test_a_sub_agents_chat_is_its_roots_users(api, session_factory):
+    device = await register(api)
+    store = api.app.state.session_store
+    root = await store.get_session(UUID(await local_chat(api, device["id"])))
+    child = await create_child_session(store=store, parent=root, channel="worker")
+    member_id, _member = await add_user(session_factory, api.org_id)
+    request = SimpleNamespace(app=api.app)
+
+    def caller(user_id: UUID) -> SimpleNamespace:
+        return SimpleNamespace(user_id=user_id, service_account_id=None)
+
+    assert await require_device_access(request, child, caller(api.user_id), bound=False) == DeviceAccess(child.id, bound=False)
+    with pytest.raises(HTTPException) as refused:
+        await require_device_access(request, child, caller(member_id), bound=False)
+    assert refused.value.status_code == 404
+    # Its folder is its root's, still being set up.
+    with pytest.raises(HTTPException) as waiting:
+        await require_device_access(request, child, caller(api.user_id))
+    assert waiting.value.status_code == 409
 
 
 async def paused_local_chat(api) -> str:

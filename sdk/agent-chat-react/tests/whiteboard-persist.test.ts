@@ -149,14 +149,15 @@ describe("saving", () => {
     expect(JSON.parse(await file.text()).lastEventId).toBe(42);
   });
 
-  it("swallows an upload failure", async () => {
-    // Persistence is best-effort: the event log is the recovery tail, so
-    // a failed save must never surface in front of someone drawing.
+  it("says an upload failed without throwing, and that one landed", async () => {
+    // The event log is the recovery tail, so a failed save never throws in
+    // front of someone drawing: the board says it in its own small notice.
     const upload = vi.fn(async () => {
       throw new Error("offline");
     });
     await expect(saveDoc(adapterWith(null, upload), "s1", emptyDoc()))
-      .resolves.toBeUndefined();
+      .resolves.toBe(false);
+    await expect(saveDoc(adapterWith(null), "s1", emptyDoc())).resolves.toBe(true);
   });
 });
 

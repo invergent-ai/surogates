@@ -417,7 +417,7 @@ export function WhiteboardSurface({
   // A null session id is what `useDebouncedSave` already treats as
   // "nothing to write to", so the gate reuses it rather than growing a
   // second way to say the same thing.
-  useDebouncedSave(adapter, canvasReady ? sessionId : null, doc);
+  const unsaved = useDebouncedSave(adapter, canvasReady ? sessionId : null, doc);
 
   // The transcript views are only worth offering once there is a
   // transcript. Before the agent's first answer, switching to Simple or
@@ -1296,6 +1296,15 @@ export function WhiteboardSurface({
                   </span>
                 </span>
               </div>
+            </div>
+          ) : null}
+
+          {/* Small, in a corner: the next change saves the whole board again. */}
+          {unsaved ? (
+            <div className="pointer-events-none absolute right-2 top-2 z-10">
+              <span role="status" className="rounded-full border bg-background px-3 py-1 text-xs text-muted-foreground shadow-sm">
+                Your last change wasn&apos;t saved.
+              </span>
             </div>
           ) : null}
 

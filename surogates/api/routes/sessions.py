@@ -25,8 +25,8 @@ from pydantic import BaseModel, Field, StringConstraints, field_validator, model
 from sqlalchemy import text as _sql_text
 
 from surogates.api.routes.workspace import (
-    _get_storage,
     _get_workspace_session_bucket_and_root,
+    workspace_files,
 )
 from surogates.session.attachment_ingest import (  # re-exported for back-compat
     _INLINE_MAX_BYTES, _INLINE_RENDERED_CAP_CHARS, _INLINE_TOTAL_RENDERED_CAP_CHARS,
@@ -34,7 +34,7 @@ from surogates.session.attachment_ingest import (  # re-exported for back-compat
     _apply_inline_total_budget,
 )
 from surogates.api.session_guards import (
-    require_bound_session,
+    require_device_access,
     require_session_visible,
     require_user_writable_session,
 )
@@ -55,14 +55,15 @@ from surogates.api.routes._commerce_turn import (
     release_commerce_hold,
     runtime_commerce_payload,
 )
+from surogates.devices.binding import device_of
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.store import DeviceStore
+from surogates.devices.workspace import DeviceOperationError
 from surogates.session.events import SEED_SYNTHETIC_MARKER, EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.tenant import (
-    boundary_workspace_key,
     boundary_workspace_prefix,
     workspace_boundary,
 )
@@ -1046,7 +1047,7 @@ async def send_message(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
-    await require_bound_session(request, session)
+    await require_device_access(request, session, tenant)
 
     if session.status not in ("active", "idle", "failed", "paused", "completed"):
         raise HTTPException(
@@ -1182,90 +1183,22 @@ async def send_message(
         session, bucket, root_id = await _get_workspace_session_bucket_and_root(
             request, store, session_id, tenant,
         )
-        storage = _get_storage(request)
-
         # First pass (serial): validate each attachment, accumulate the
         # cumulative byte budget, and materialise inline-parse inputs.
         # We keep this serial because each step needs to fail fast with
         # a precise per-attachment 422 and because ``total_bytes`` is
-        # an accumulator.
+        # an accumulator.  The files are the session's: a local-folder
+        # chat's are read from its computer.
         resolved: list[dict] = []
         # Parallel parse tasks indexed by their position in ``resolved``
         # so we can stitch results back in order after gather.
         inline_tasks: list[tuple[int, AttachmentRef, asyncio.Task]] = []
         total_bytes = 0
-        for attachment in body.attachments:
-            storage_key = boundary_workspace_key(
-                session.config, session, root_id, attachment.path,
-            )
-            if not await storage.exists(bucket, storage_key):
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=(
-                        "Attachment path not found in workspace: "
-                        f"{attachment.path}"
-                    ),
-                )
-            try:
-                stat = await storage.stat(bucket, storage_key)
-            except KeyError:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=(
-                        "Attachment path not found in workspace: "
-                        f"{attachment.path}"
-                    ),
-                )
-            real_size = int(stat.get("size", 0))
-            if real_size > _MAX_ATTACHMENT_BYTES:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=(
-                        f"Attachment exceeds "
-                        f"{_MAX_ATTACHMENT_BYTES // 1_000_000}MB limit: "
-                        f"{attachment.path} ({real_size} bytes)"
-                    ),
-                )
-            total_bytes += real_size
-            if total_bytes > _MAX_ATTACHMENTS_TOTAL_BYTES:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=(
-                        "Attachments exceed total "
-                        f"{_MAX_ATTACHMENTS_TOTAL_BYTES // 1_000_000}MB"
-                        " limit per message"
-                    ),
-                )
-
-            attachment.size = real_size  # populate for the helper
-            entry: dict[str, Any] = {
-                "path": attachment.path,
-                "filename": attachment.filename,
-                "mime_type": attachment.mime_type,
-                "size": real_size,
-            }
-            resolved.append(entry)
-
-            # ── Inline-attachment branch ─────────────────────────────
-            # For files small enough and of a supported type, parse or
-            # decode the content server-side and persist it on the event
-            # so the LLM sees it directly without calling read_file.
-            # The parse step (liteparse: mupdf for PDFs, LibreOffice
-            # shellout for Office formats) runs as an asyncio.Task here
-            # and is awaited in parallel below via asyncio.gather, so an
-            # N-attachment message takes roughly max(parse_i) wall-clock
-            # instead of sum(parse_i) — and the per-parse work itself
-            # runs in a subprocess pool (see
-            # file_ops._parse_document_to_text) so the API event loop
-            # is never GIL-blocked even on OCR-heavy scanned PDFs.
-            inline_kind = _inline_extension_kind(attachment.filename)
-            if (
-                real_size <= _INLINE_MAX_BYTES
-                and inline_kind is not None
-            ):
-                try:
-                    raw_bytes = await storage.read(bucket, storage_key)
-                except KeyError:
+        async with workspace_files(request, session) as files:
+            for attachment in body.attachments:
+                key = await files.resolve(attachment.path)
+                stat = await files.stat(key)
+                if stat is None or stat.is_dir:
                     raise HTTPException(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                         detail=(
@@ -1273,33 +1206,81 @@ async def send_message(
                             f"{attachment.path}"
                         ),
                     )
-                document_path: Path | None = None
-                if inline_kind == "document":
-                    local_candidate = (
-                        Path(storage.resolve_bucket_path(bucket))
-                        / storage_key
+                real_size = stat.size
+                if real_size > _MAX_ATTACHMENT_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            f"Attachment exceeds "
+                            f"{_MAX_ATTACHMENT_BYTES // 1_000_000}MB limit: "
+                            f"{attachment.path} ({real_size} bytes)"
+                        ),
                     )
-                    if local_candidate.is_file():
-                        document_path = local_candidate
-                    else:
-                        suffix = (
-                            os.path.splitext(attachment.filename)[1].lower()
-                        )
-                        modified = str(stat.get("modified") or "")
+                total_bytes += real_size
+                if total_bytes > _MAX_ATTACHMENTS_TOTAL_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            "Attachments exceed total "
+                            f"{_MAX_ATTACHMENTS_TOTAL_BYTES // 1_000_000}MB"
+                            " limit per message"
+                        ),
+                    )
+
+                attachment.size = real_size  # populate for the helper
+                entry: dict[str, Any] = {
+                    "path": attachment.path,
+                    "filename": attachment.filename,
+                    "mime_type": attachment.mime_type,
+                    "size": real_size,
+                }
+                resolved.append(entry)
+
+                # ── Inline-attachment branch ─────────────────────────
+                # For files small enough and of a supported type, parse or
+                # decode the content server-side and persist it on the event
+                # so the LLM sees it directly without calling read_file.
+                # The parse step (liteparse: mupdf for PDFs, LibreOffice
+                # shellout for Office formats) runs as an asyncio.Task here
+                # and is awaited in parallel below via asyncio.gather, so an
+                # N-attachment message takes roughly max(parse_i) wall-clock
+                # instead of sum(parse_i) — and the per-parse work itself
+                # runs in a subprocess pool (see
+                # file_ops._parse_document_to_text) so the API event loop
+                # is never GIL-blocked even on OCR-heavy scanned PDFs.
+                inline_kind = _inline_extension_kind(attachment.filename)
+                if (
+                    real_size <= _INLINE_MAX_BYTES
+                    and inline_kind is not None
+                ):
+                    try:
+                        raw_bytes = await files.read(key)
+                    except FileNotFoundError:
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=(
+                                "Attachment path not found in workspace: "
+                                f"{attachment.path}"
+                            ),
+                        ) from None
+                    document_path: Path | None = None
+                    if inline_kind == "document":
+                        # Named by whose file it is and its version, so a
+                        # re-sent attachment hits the parse cache.
                         document_path = _materialize_for_cache(
                             raw_bytes=raw_bytes,
-                            bucket=bucket,
-                            storage_key=storage_key,
+                            bucket=files.identity or bucket,
+                            storage_key=f"{root_id}/{key}",
                             size=real_size,
-                            modified=modified,
-                            suffix=suffix,
+                            modified=stat.revision,
+                            suffix=os.path.splitext(attachment.filename)[1].lower(),
                         )
-                task = asyncio.create_task(
-                    _try_inline_attachment(
-                        attachment, raw_bytes, document_path,
+                    task = asyncio.create_task(
+                        _try_inline_attachment(
+                            attachment, raw_bytes, document_path,
+                        )
                     )
-                )
-                inline_tasks.append((len(resolved) - 1, attachment, task))
+                    inline_tasks.append((len(resolved) - 1, attachment, task))
 
         # Drive all inline parses in parallel.  ``return_exceptions``
         # keeps a single bad attachment from cancelling its siblings —
@@ -1715,6 +1696,9 @@ async def pause_session(
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
+    # It cancels the agent's work on a local-folder chat's computer: the chat's own user's to stop,
+    # its folder set up or not.
+    await require_device_access(request, session, tenant, bound=False)
 
     if session.status not in ("active", "processing", "paused"):
         raise HTTPException(
@@ -1723,8 +1707,9 @@ async def pause_session(
         )
 
     # Only emit event + update status if not already paused.  The status
-    # first: an operation recorded after it is refused, so the cancellation
-    # below cannot miss one, and a wait that wakes on the event reads paused.
+    # first: an operation of the agent's recorded after it is refused, so the
+    # cancellation below cannot miss one, and a wait that wakes on the event
+    # reads paused.  The user's own requests on the chat's files go on.
     if session.status != "paused":
         await store.update_session_status(session_id, "paused")
         await store.emit_event(session_id, EventType.SESSION_PAUSE, {})
@@ -1764,7 +1749,7 @@ async def resume_session(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
-    await require_bound_session(request, session)
+    await require_device_access(request, session, tenant)
 
     if session.status != "paused":
         raise HTTPException(
@@ -1809,7 +1794,7 @@ async def retry_session(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
-    await require_bound_session(request, session)
+    await require_device_access(request, session, tenant)
 
     if session.status not in ("failed", "paused"):
         raise HTTPException(
@@ -1840,6 +1825,9 @@ async def _cleanup_archived_workspaces(
     — the periodic cleanup job sweeps anything left behind.
     """
     for archived_session in archived_sessions:
+        if device_of(archived_session.config) is not None:
+            # Its files are its folder, on its computer: deleting a chat never deletes them.
+            continue
         storage_bucket = (archived_session.config or {}).get("storage_bucket")
         if not storage_bucket:
             logger.warning(
@@ -1967,6 +1955,8 @@ async def delete_session(
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
     _require_not_project_master(session, tenant, "archive the project instead")
+    # A chat whose folder never bound is deleted all the same.
+    await require_device_access(request, session, tenant, bound=False)
     await archive_session_tree(request, session, background_tasks)
 
 
@@ -1978,7 +1968,8 @@ async def archive_session_tree(
     Their schedules and missions go, a project whose master is among them is
     archived, their computers and browsers stop, their workers are
     interrupted, and their workspaces are deleted after the response, except
-    a boundary workspace, which its siblings share.
+    a boundary workspace, which its siblings share, and a local folder, which
+    its computer only forgets.
     """
     store = _get_session_store(request)
     session_id = session.id
@@ -1990,12 +1981,25 @@ async def archive_session_tree(
 
     # A deleted chat's computer stops what it was doing, its folder's set-up
     # included; the journal refuses anything more for its tree.
+    operations = DeviceOperations(request.app.state.session_factory, request.app.state.redis)
     try:
-        await DeviceOperations(request.app.state.session_factory, request.app.state.redis).cancel(
-            [archived.id for archived in archived_sessions], bindings=True,
-        )
+        await operations.cancel([archived.id for archived in archived_sessions], bindings=True)
     except Exception:
         logger.warning("could not cancel the device operations of deleted session %s", session_id, exc_info=True)
+    # Then each deleted root's computer forgets its folder: after the cancel,
+    # which would close it.  A sub-agent's root keeps its folder.
+    for archived in archived_sessions:
+        device_id = device_of(archived.config)
+        if device_id is None or (archived.config or {}).get("sandbox_root_session_id"):
+            continue
+        try:
+            await operations.retire(session_id=archived.id, device_id=device_id)
+        except DeviceOperationError:
+            # A root its computer never accepted has no folder to forget.
+            logger.info("no folder to retire for deleted session %s", archived.id)
+        except Exception:
+            # Never retried: the server refuses everything for the root, but its computer keeps the binding.
+            logger.warning("could not retire the folder of deleted session %s", archived.id, exc_info=True)
 
     for archived_session in archived_sessions:
         await _destroy_deleted_session_browser(request, archived_session.id)

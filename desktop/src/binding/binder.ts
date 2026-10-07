@@ -30,6 +30,10 @@ export const ALREADY_BOUND: Outcome = {
 export const NOT_RECORDED: Outcome = {
   error: { type: "binding", message: "This computer could not record the folder for this chat" },
 };
+// A deleted chat's binding could not be forgotten: the server keeps its answer.
+export const NOT_FORGOTTEN: Outcome = {
+  error: { type: "binding", message: "This computer could not forget the folder of a deleted chat" },
+};
 const BOUND: Outcome = { ok: null };
 
 // What the sheet shows. Accepting binds *folder* with the mode chosen there.
@@ -251,6 +255,7 @@ export class Binder implements Executor {
   // nothing, so it settles at once, an aborted one too: suspend waits for it. Every
   // other operation is the approvals', which settle once the signal aborts.
   async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
+    if (operation.kind === "retire") return this.retire(operation);
     if (operation.kind !== "bind") return this.approvals.admit(operation, signal);
     const root = operation.sessionId;
     const { folder, nonce } = operation.args;
@@ -276,6 +281,19 @@ export class Binder implements Executor {
     }
     preparation.root = root;
     this.answered.set(operation.id, preparation);
+    return BOUND;
+  }
+
+  // A deleted chat's root: its binding goes, so nothing more runs for it; its folder stays as it is.
+  private retire(operation: Operation): Outcome {
+    const own = operation.callingSessionId === operation.sessionId && operation.invocationId === "retire" && operation.ordinal === 0;
+    if (!own) return NOT_BOUND;
+    try {
+      this.options.bindings.retire(operation.sessionId);
+    } catch (error) {
+      report(this.options.onError, error);
+      return NOT_FORGOTTEN;
+    }
     return BOUND;
   }
 
