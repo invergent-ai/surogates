@@ -221,6 +221,26 @@ class WorkstreamStore:
             )
             return {master_id: (updated_at, asks) for master_id, updated_at, asks in found}
 
+    async def proposal(self, master_id: UUID, proposal_id: UUID) -> dict[str, Any] | None:
+        """The master's ``thread.proposed`` payload for *proposal_id*."""
+        async with self._sf() as db:
+            data = await db.scalar(select(Event.data).where(
+                Event.session_id == master_id,
+                Event.type == EventType.THREAD_PROPOSED.value,
+                Event.data["proposal_id"].astext == str(proposal_id),
+            ))
+        return data
+
+    async def started_from(self, master_id: UUID, proposal_id: UUID, key: str) -> bool:
+        """Whether a thread was started from the card *key* of *proposal_id*."""
+        async with self._sf() as db:
+            return await db.scalar(select(Event.id).where(
+                Event.session_id == master_id,
+                Event.type == EventType.WORKER_SPAWNED.value,
+                Event.data["proposal_id"].astext == str(proposal_id),
+                Event.data["key"].astext == key,
+            ).limit(1)) is not None
+
     async def latest_report(self, master_id: UUID, thread_id: UUID) -> Event | None:
         """The last report *thread_id* sent its master, as the master read it."""
         async with self._sf() as db:

@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints, model_validator
+from sqlalchemy import text
 from sse_starlette.sse import EventSourceResponse
 
 from surogates.api.routes.sessions import archive_session_tree
@@ -29,7 +30,7 @@ from surogates.workstreams import master_config
 from surogates.workstreams import stream as project_stream
 from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread
 from surogates.workstreams.store import WorkstreamStore
-from surogates.workstreams.threads import stop_thread
+from surogates.workstreams.threads import start_thread, stop_thread
 
 router = APIRouter(prefix="/workstreams")
 
@@ -91,6 +92,13 @@ class ProjectChange(BaseModel):
             if field in self.model_fields_set and getattr(self, field) is None:
                 raise ValueError(f"{field} cannot be cleared")
         return self
+
+
+class ProposedThreadStart(BaseModel):
+    """A card of a proposal: the thread is read from its ``thread.proposed`` event."""
+
+    proposal_id: UUID
+    key: Annotated[str, StringConstraints(pattern=r"^[1-9][0-9]{0,3}$")]
 
 
 class ProjectSummaryOut(BaseModel):
@@ -337,4 +345,44 @@ async def reopen_thread(
     thread = await _thread(request, project, thread_id)
     await _store(request).reopen_thread(thread.id)
     await project_stream.publish(request.app.state.redis, project.id, thread.id, project_stream.REOPENED)
+    return await _row(request, project, thread.id)
+
+
+@router.post("/{workstream_id}/threads", status_code=status.HTTP_201_CREATED)
+async def start_proposed_thread(
+    workstream_id: UUID, body: ProposedThreadStart, request: Request, ctx: AgentRuntime, tenant: Tenant,
+    _rate: None = Depends(rate_limit_dep),
+) -> dict[str, Any]:
+    """Start a thread the master proposed, from its card.  Its title and goal
+    are the proposal's, read from the master's log, never the request's; it
+    is news to the master, and wakes nobody but itself."""
+    project = await _project(request, workstream_id, tenant, ctx)
+    store = _store(request)
+    proposed = await store.proposal(project.master_session_id, body.proposal_id)
+    card = next((t for t in (proposed or {}).get("threads", []) if t.get("key") == body.key), None)
+    if card is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such proposed thread.")
+    if card["where"] != "cloud":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "This thread works in a folder on your computer: start it from Surogate Desktop.",
+        )
+    state = request.app.state
+    async with state.session_factory() as db:
+        # A card started twice at once, by a double click or from two
+        # devices: the second does not wait for the first, it is refused.
+        held = await db.scalar(
+            text("SELECT pg_try_advisory_xact_lock(hashtextextended(:card, 0))"),
+            {"card": f"{body.proposal_id}:{body.key}"},
+        )
+        if not held or await store.started_from(project.master_session_id, body.proposal_id, body.key):
+            raise HTTPException(status.HTTP_409_CONFLICT, "This thread was already started.")
+        thread = await start_thread(
+            session_store=state.session_store, session_factory=state.session_factory, redis=state.redis,
+            master=await state.session_store.get_session(project.master_session_id), live_config=None,
+            title=card["title"], goal=card["goal"], context="",
+            proposal={"proposal_id": str(body.proposal_id), "key": body.key},
+        )
+        await db.commit()
+    if thread is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
     return await _row(request, project, thread.id)
