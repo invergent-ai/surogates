@@ -416,6 +416,8 @@ class FakeLaptop:
         self.hold = False
         # Only those the app asks its user about in Ask every time are held: a prompt left open.
         self.hold_asked = False
+        # What it holds asked about, by id: answered once release() allows it.
+        self._asked: dict[str, dict[str, Any]] = {}
         self.cancelled: set[str] = set()
         # The type of every frame received after welcome, in order.
         self.frames: list[str] = []
@@ -448,6 +450,14 @@ class FakeLaptop:
         # Each task works on its own connection's socket. Added to, not replaced: an earlier
         # connection's tasks still end at disconnect().
         self._tasks += [asyncio.create_task(self._read(ws)), asyncio.create_task(self._ping(ws))]
+
+    async def release(self) -> None:
+        """Its user allows what it holds asked about: each runs now, and is answered on this connection."""
+        self.hold_asked = False
+        asked, self._asked = self._asked, {}
+        for frame in asked.values():
+            if frame["id"] not in self.cancelled and self._ws is not None:
+                await self._answer(frame, self._ws)
 
     def prepare(self, nonce: str, folder: str) -> None:
         """Stand in for the user confirming *folder* for a new chat."""
@@ -508,18 +518,24 @@ class FakeLaptop:
     async def _handle(self, frame: dict[str, Any], ws: ClientConnection) -> None:
         operation_id = frame["id"]
         self.received.append(operation_id)
-        held = self.hold or (self.hold_asked and frame["kind"] in ASKED)
-        if operation_id in self.cancelled or (held and operation_id not in self.outcomes):
-            # A cancelled operation is never run; a held one is still running, or still asked about.
+        if operation_id in self.cancelled or (self.hold and operation_id not in self.outcomes):
+            # A cancelled operation is never run; a held one is still running.
             return
         if operation_id not in self.outcomes and frame["kind"] == "write":
             if _malformed_write(frame["args"]):
                 # Answered, never run.
                 self.outcomes[operation_id] = MALFORMED_TRANSFER
             elif "transfer" in frame["args"]:
-                # A write whose data follows: it runs once that data is whole.
+                # A write whose data follows: it is asked about, and runs, once that data is whole.
                 self._incoming[operation_id] = (frame, bytearray())
                 return
+        await self._admit(frame, ws)
+
+    async def _admit(self, frame: dict[str, Any], ws: ClientConnection) -> None:
+        """As the app's admit phase: with hold_asked, what it asks its user about waits, a prompt left open."""
+        if self.hold_asked and frame["kind"] in ASKED and frame["id"] not in self.outcomes:
+            self._asked[frame["id"]] = frame
+            return
         await self._answer(frame, ws)
 
     async def _chunk(self, frame: dict[str, Any], ws: ClientConnection) -> None:
@@ -551,7 +567,7 @@ class FakeLaptop:
         # As the app's runner puts the data back inline: the other args, an expected revision too, stay.
         args = {name: value for name, value in op["args"].items() if name != "transfer"}
         args["data"] = base64.b64encode(data).decode("ascii")
-        await self._answer({**op, "args": args}, ws)
+        await self._admit({**op, "args": args}, ws)
 
     async def _answer(self, frame: dict[str, Any], ws: ClientConnection) -> None:
         operation_id = frame["id"]

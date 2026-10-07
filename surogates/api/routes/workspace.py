@@ -22,7 +22,8 @@ from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, UploadFile, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
@@ -31,8 +32,8 @@ from surogates.api.session_guards import (
     require_session_visible,
     require_user_writable_session,
 )
-from surogates.devices.operations import OperationConflict, TooManyRequests
-from surogates.devices.workspace import SHOWN_DOT_FOLDERS, DeviceOperationError, DeviceWorkspaceIO
+from surogates.devices.operations import REQUEST_PREFIX, DeviceOperations, OperationConflict, TooManyRequests
+from surogates.devices.workspace import SHOWN_DOT_FOLDERS, DeviceOperationError, DeviceWorkspaceIO, answered
 from surogates.session.files import ComputerAway, DeviceAccess, session_files
 from surogates.session.models import Session
 from surogates.session.store import SessionNotFoundError, SessionStore
@@ -118,6 +119,9 @@ CHANGE_WITHIN_S = 20.0
 
 # Names a change, so that sending it again joins it rather than repeating it.
 RequestId = Annotated[str | None, Query(pattern=r"^[A-Za-z0-9_-]{16,64}$")]
+
+# What an upload sent again names in place of its file: the change a 202 said the server holds.
+ChangeDigest = Annotated[str | None, Header(alias="X-Change-Digest", pattern=r"^[0-9a-f]{64}$")]
 
 # What the user's own input gets wrong, not the computer: a name too long for its filesystem, or one it refuses.
 _INPUT_ERRNOS = frozenset({errno.ENAMETOOLONG, errno.EINVAL})
@@ -322,10 +326,12 @@ class StillWaiting(Exception):
     """A change its computer has not answered yet: kept, for the same request to ask again."""
 
 
-def _waiting(request_id: str) -> JSONResponse:
+def _waiting(request_id: str, change: str | None = None) -> JSONResponse:
+    """202: the change is kept.  An upload's names its *change*, so the same upload is sent again without its file."""
+    content = {"request_id": request_id, "message": "Waiting for the computer this chat's folder is on"}
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
-        content={"request_id": request_id, "message": "Waiting for the computer this chat's folder is on"},
+        content=content if change is None else {**content, "change": change},
     )
 
 
@@ -656,18 +662,23 @@ async def get_workspace_file(
 async def upload_file(
     session_id: UUID,
     request: Request,
-    file: UploadFile,
+    file: UploadFile | None = None,
     path: str = Query(
         "",
         description="Relative directory within the workspace to place the file. Empty = root.",
     ),
     request_id: RequestId = None,
+    change_digest: ChangeDigest = None,
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> UploadResponse | JSONResponse:
     """Upload a file into the session's workspace.
 
-    202 with its request id when the computer a local-folder chat's folder is
-    on has not answered yet: the same upload, sent again with that id, joins it.
+    202 with its request id and its change when the computer a local-folder
+    chat's folder is on has not answered yet: the same upload, sent again
+    with that id, joins it.  Sent again with that change in X-Change-Digest
+    and no file, it joins it without its data crossing again; 428
+    ``change_body_needed`` says the server holds no such change, and it is
+    sent whole.
     """
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
@@ -677,6 +688,13 @@ async def upload_file(
     require_user_writable_session(session)
     access = await require_device_access(request, session, tenant)
 
+    if change_digest is not None:
+        if request_id is None:
+            raise HTTPException(status_code=400, detail="An upload sent again by its change names its request id.")
+        return await _upload_sent_again(request, session, access, request_id, change_digest)
+    if file is None:
+        # As the required field it was.
+        raise RequestValidationError([{"type": "missing", "loc": ("body", "file"), "msg": "Field required", "input": None}])
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
 
@@ -701,9 +719,38 @@ async def upload_file(
         async with workspace_files(request, session, request_id=request_id, change=change, access=access) as files:
             await files.write(await files.resolve(key), contents)
     except StillWaiting:
-        return _waiting(request_id)
+        return _waiting(request_id, change)
 
     return UploadResponse(path=key, size=len(contents))
+
+
+async def _upload_sent_again(
+    request: Request, session: Session, access: DeviceAccess, request_id: str, change: str,
+) -> UploadResponse | JSONResponse:
+    """An upload sent again by its change alone: it joins the write the server holds under its request id.
+
+    428 when it holds none: a cloud chat's, which keeps no request, or one
+    whose write it has not recorded yet.  Its file is then sent again whole.
+    """
+    joined = None
+    try:
+        async with workspace_files(request, session, request_id=request_id, change=change, access=access) as files:
+            if isinstance(files, DeviceWorkspaceIO):
+                operations = DeviceOperations(request.app.state.session_factory, request.app.state.redis)
+                joined = await operations.joined(session.id, f"{REQUEST_PREFIX}{request_id}", "write")
+            if joined is not None:
+                answered("write", joined[1])
+    except StillWaiting:
+        return _waiting(request_id, change)
+    if joined is None:
+        raise _failure(
+            status.HTTP_428_PRECONDITION_REQUIRED, "change_body_needed",
+            "This change is not waiting on the computer this chat's folder is on: send it with its file.",
+        )
+    args = dict(joined[0])
+    written = args["write"]
+    size = written["transfer"]["size"] if "transfer" in written else len(base64.b64decode(written["data"]))
+    return UploadResponse(path=args["resolve"]["path"], size=size)
 
 
 @router.get("/api/sessions/{session_id}/workspace/download")

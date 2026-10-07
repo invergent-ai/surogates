@@ -4,16 +4,20 @@ import { test } from "node:test";
 
 import { GIVE_UP_MS, NOT_FINISHED, RETRY_FIRST_MS, RETRY_MOST_MS, untilAnswered } from "../web/src/api/device-requests.ts";
 
-// Each answer a status, or "drop": a fetch that rejects, as a network that drops does.
+// Each answer a status, [status, body], or "drop": a fetch that rejects, as a network that drops does.
+// What each send named in place of its body is in changes: null when it carried its body.
 const answers = (...statuses) => {
   const sent = [];
-  const send = async (requestId) => {
+  const changes = [];
+  const send = async (requestId, change) => {
     sent.push(requestId);
-    const status = statuses.shift();
-    if (status === "drop") throw new TypeError("Failed to fetch");
-    return new Response(null, { status });
+    changes.push(change);
+    const answer = statuses.shift();
+    if (answer === "drop") throw new TypeError("Failed to fetch");
+    const [status, body] = Array.isArray(answer) ? answer : [answer, null];
+    return new Response(body === null ? null : JSON.stringify(body), { status });
   };
-  return { send, sent };
+  return { send, sent, changes };
 };
 
 test("sends a change once when it is answered", async () => {
@@ -86,4 +90,21 @@ test("a cloud chat's change is sent once, as before, whatever comes of it", asyn
     else assert.equal((await sending).status, status);
     assert.deepEqual([sent.length, slept], [1, []]);
   }
+});
+
+test("sends a change the server says it holds again by its digest, and whole when the server holds none", async () => {
+  const held = [202, { request_id: "r", message: "waiting", change: "c".repeat(64) }];
+  const { send, changes } = answers(held, held, "drop", 428, 201);
+  const slept = [];
+  const response = await untilAnswered(send, { onDevice: true, sleep: async (ms) => slept.push(ms) });
+  assert.equal(response.status, 201);
+  // Whole first; then by its digest, a dropped fetch too; whole again, at once, once the server holds none.
+  assert.deepEqual(changes, [null, "c".repeat(64), "c".repeat(64), "c".repeat(64), null]);
+  assert.deepEqual(slept, [RETRY_FIRST_MS, 2000, 4000]);
+});
+
+test("a server that holds none of a change sent whole is answered as it said", async () => {
+  const { send, changes } = answers(428);
+  assert.equal((await untilAnswered(send, { onDevice: true, sleep: async () => {} })).status, 428);
+  assert.deepEqual(changes, [null]);
 });

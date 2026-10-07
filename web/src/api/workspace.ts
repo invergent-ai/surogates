@@ -140,10 +140,13 @@ export async function uploadFile(
   formData.append("file", file);
 
   const response = await untilAnswered(
-    (requestId) =>
+    (requestId, change) =>
       authFetch(
         `/api/v1/sessions/${sessionId}/workspace/upload?${new URLSearchParams([...params, ["request_id", requestId]])}`,
-        { method: "POST", body: formData, signal },
+        // Sent again by its change, the file does not cross again.
+        change === null
+          ? { method: "POST", body: formData, signal }
+          : { method: "POST", headers: { "X-Change-Digest": change }, signal },
       ),
     { onDevice: await isOnDevice(sessionId), signal },
   );

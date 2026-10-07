@@ -852,6 +852,30 @@ class DeviceOperations:
             await db.commit()
         return len(marked)
 
+    async def joined(
+        self, calling_session_id: UUID, invocation_id: str, kind: str,
+    ) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]] | None:
+        """A request sent again by what it changes alone, without its data: what it recorded, and how it ended.
+
+        Its operations, in order, as (kind, args), and the outcome of its
+        operation of *kind* once the computer answers it, however long that
+        takes: its caller bounds the wait, which leaves the operation open.
+        None when it recorded none of *kind*: the request must be sent whole.
+        """
+        async with self._sf() as db:
+            rows = (await db.execute(
+                select(DeviceOperation.id, DeviceOperation.kind, DeviceOperation.args)
+                .where(
+                    DeviceOperation.calling_session_id == calling_session_id,
+                    DeviceOperation.invocation_id == invocation_id,
+                )
+                .order_by(DeviceOperation.ordinal)
+            )).all()
+        target = next((row.id for row in rows if row.kind == kind), None)
+        if target is None:
+            return None
+        return [(row.kind, row.args) for row in rows], await self._wait_forever(target)
+
     async def recorded(self, calling_session_id: UUID, invocation_id: str) -> int:
         """How many operations of one invocation are in the journal."""
         async with self._sf() as db:

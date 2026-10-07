@@ -7,8 +7,11 @@
 // so it runs once and is answered as it ended (surogates/api/routes/workspace.py).
 // A fetch that fails (a network that drops) is sent again the same way: the
 // change may already be waiting on the computer, and a new id would be a second
-// change. A cloud chat's change is sent once, as before: its storage keeps no
-// request to join, so sending it again would do it twice.
+// change. An upload's 202 names its change, a digest of what it does: sent again
+// by that digest alone, its file does not cross again, and a 428 says the server
+// holds no such change, so it is sent whole. A cloud chat's change is sent once,
+// as before: its storage keeps no request to join, so sending it again would do
+// it twice.
 
 export const RETRY_FIRST_MS = 1_000;
 export const RETRY_MOST_MS = 10_000;
@@ -37,24 +40,41 @@ const pause = (ms: number, signal?: AbortSignal) =>
     }, { once: true });
   });
 
-/** Sends a change under one new request id until it is answered with anything but 202. */
+// The change a 202 names, if it names one.
+async function changeOf(response: Response): Promise<string | null> {
+  const body = (await response.json().catch(() => null)) as { change?: unknown } | null;
+  return typeof body?.change === "string" ? body.change : null;
+}
+
+/**
+ * Sends a change under one new request id until it is answered with anything but 202.
+ * *send* gets the change to name in place of the body, or null to send it whole.
+ */
 export async function untilAnswered(
-  send: (requestId: string) => Promise<Response>,
+  send: (requestId: string, change: string | null) => Promise<Response>,
   { onDevice, signal, sleep = pause, now = Date.now }: UntilAnsweredOptions,
 ): Promise<Response> {
   const requestId = crypto.randomUUID().replaceAll("-", "");
-  if (!onDevice) return send(requestId);
+  if (!onDevice) return send(requestId, null);
   const started = now();
-  for (let wait = RETRY_FIRST_MS; ; wait = Math.min(wait * 2, RETRY_MOST_MS)) {
+  let change: string | null = null;
+  for (let wait = RETRY_FIRST_MS; ; ) {
     signal?.throwIfAborted();
     try {
-      const response = await send(requestId);
+      const response = await send(requestId, change);
+      if (response.status === 428 && change !== null) {
+        // The server holds no such change: sent whole, at once.
+        change = null;
+        continue;
+      }
       if (response.status !== 202) return response;
+      change = (await changeOf(response)) ?? change;
     } catch (error) {
       // Stopped: said as it was. Otherwise not answered at all: asked again below, under the same id.
       if (signal?.aborted) throw error;
     }
     if (now() - started >= GIVE_UP_MS) throw new Error(NOT_FINISHED);
     await sleep(wait, signal);
+    wait = Math.min(wait * 2, RETRY_MOST_MS);
   }
 }

@@ -456,3 +456,64 @@ async def test_the_platforms_folders_are_hidden_and_the_panel_changes_none_of_th
     # The page's own canvas is its to save.
     canvas = await upload(api, chat, "canvas.json", b"{}", path="_whiteboard", request_id="upload-000000000041")
     assert canvas.status_code == 201, canvas.text
+
+
+DIGEST = "X-Change-Digest"
+
+
+async def sent_again(api, chat, change: str, request_id: str, **params):
+    """The same upload sent again by what it changes alone: its digest in a header, and no body."""
+    return await api.client.post(
+        url(chat, "upload"), params={"request_id": request_id, **params}, headers={**api.auth(), DIGEST: change},
+    )
+
+
+async def test_an_upload_sent_again_by_its_digest_alone_joins_the_change_and_lands_once(api, chat, monkeypatch):
+    monkeypatch.setattr(workspace_routes, "CHANGE_WITHIN_S", 0.5)
+    chat.laptop.hold_asked = True
+    waiting = await upload(api, chat, "notes.txt", b"draft", path="uploads", request_id="upload-000000000050")
+    assert waiting.status_code == 202, waiting.text
+    change = waiting.json()["change"]
+    again = await sent_again(api, chat, change, "upload-000000000050")
+    assert again.status_code == 202, again.text  # still waiting for its user, and sent without its file
+    assert again.json()["change"] == change
+    await chat.laptop.release()
+    done = await sent_again(api, chat, change, "upload-000000000050")
+    assert done.status_code == 201, done.text
+    assert done.json() == {"path": "uploads/notes.txt", "size": 5}
+    assert (chat.folder / "uploads" / "notes.txt").read_bytes() == b"draft"
+    assert chat.laptop.ran.count("write") == 1
+
+
+async def test_an_upload_sent_again_by_a_digest_the_server_holds_nothing_for_asks_for_its_file(api, chat, monkeypatch):
+    monkeypatch.setattr(workspace_routes, "CHANGE_WITHIN_S", 0.5)
+    change = workspace_routes._change("upload", "notes.txt", b"draft")
+    never_sent = await sent_again(api, chat, change, "upload-000000000051")
+    assert never_sent.status_code == 428, never_sent.text
+    assert never_sent.json()["detail"]["error"] == "change_body_needed"
+    # Its file under the same id lands.
+    whole = await upload(api, chat, "notes.txt", b"draft", request_id="upload-000000000051")
+    assert whole.status_code == 201, whole.text
+    # One whose write the server has not recorded yet is asked for its file too.
+    chat.laptop.hold = True
+    first = await upload(api, chat, "other.txt", b"x", request_id="upload-000000000052")
+    assert first.status_code == 202, first.text
+    early = await sent_again(api, chat, first.json()["change"], "upload-000000000052")
+    assert early.status_code == 428, early.text
+    # Neither a file nor a change: refused as before, when the file was required.
+    nothing = await api.client.post(url(chat, "upload"), headers=api.auth())
+    assert nothing.status_code == 422, nothing.text
+    assert nothing.json()["detail"][0]["loc"] == ["body", "file"]
+
+
+async def test_an_upload_sent_again_by_another_digest_is_refused_and_changes_nothing(api, chat, monkeypatch):
+    monkeypatch.setattr(workspace_routes, "CHANGE_WITHIN_S", 0.5)
+    chat.laptop.hold_asked = True
+    first = await upload(api, chat, "notes.txt", b"one", request_id="upload-000000000053")
+    assert first.status_code == 202, first.text
+    other = await sent_again(api, chat, workspace_routes._change("upload", "notes.txt", b"two"), "upload-000000000053")
+    assert other.status_code == 409, other.text
+    await chat.laptop.release()
+    landed = await sent_again(api, chat, first.json()["change"], "upload-000000000053")
+    assert landed.status_code == 201, landed.text
+    assert (chat.folder / "notes.txt").read_bytes() == b"one"

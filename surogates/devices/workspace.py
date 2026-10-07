@@ -227,6 +227,15 @@ def _raise(error: dict[str, Any]) -> None:
     raise DeviceOperationError(message)
 
 
+def answered(kind: str, outcome: dict[str, Any]) -> Any:
+    """What an operation's outcome says: its ok value, or its error, raised as the computer worded it."""
+    if "error" in outcome:
+        _raise(outcome["error"])
+    if "ok" not in outcome:
+        raise DeviceOperationError(f"The computer returned no result for {kind}")
+    return outcome["ok"]
+
+
 class DeviceWorkspaceIO:
     """WorkspaceIO for a session's folder on the user's computer."""
 
@@ -241,12 +250,7 @@ class DeviceWorkspaceIO:
     async def _call(self, kind: str, *, payload: bytes | None = None, **args: Any) -> Any:
         if len(json.dumps(args)) > MAX_MESSAGE_CHARS:
             raise OSError(errno.EFBIG, TOO_LARGE)
-        outcome = await self._runner.run(kind, args, payload)
-        if "error" in outcome:
-            _raise(outcome["error"])
-        if "ok" not in outcome:
-            raise DeviceOperationError(f"The computer returned no result for {kind}")
-        return outcome["ok"]
+        return answered(kind, await self._runner.run(kind, args, payload))
 
     # -- files -----------------------------------------------------------
 
