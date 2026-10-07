@@ -164,27 +164,26 @@ ENV PATH="/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:$
     XDG_CACHE_HOME="/home/sandbox/.cache"
 
 # ── The guest's kernel ──────────────────────────────────────────────
-# The kernel pin: KERNEL above and these three .debs, their version and hashes, change together.
-# The dbgsym's unstripped vmlinux is the BTF the guest-kernel rule compiles against;
-# only it is unpacked, not the modules' debug info.
+# The kernel pin: KERNEL above and these two .debs, their version and hashes, change together.
 FROM python:3.12-slim AS kernel
 ADD --checksum=sha256:5ff8d86009ba6c30a6aacfe47a5176969bbb6591438c913d29881032d071e83f \
     https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-6.8.0-146-generic_6.8.0-146.146_amd64.deb /tmp/image.deb
 ADD --checksum=sha256:9287a0b722a7dd0c94a412eda8e27de4742a7925fdf2d08375b2f608516e6ab4 \
     https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-6.8.0-146-generic_6.8.0-146.146_amd64.deb /tmp/modules.deb
-ADD --checksum=sha256:caf8acf5d55f5b6b933b0d87c77149ae65d2d4c085d3004bfd75c3873ffec09b \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-unsigned-6.8.0-146-generic-dbgsym_6.8.0-146.146_amd64.ddeb /tmp/dbgsym.ddeb
-RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel \
-    && dpkg-deb --fsys-tarfile /tmp/dbgsym.ddeb | tar -x -C /kernel ./usr/lib/debug/boot/
+RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel
 
 # ── The guest-kernel rule (BPF-LSM), compiled against the pinned kernel's BTF ──
+# The BTF is the pinned vmlinuz's own: its zstd payload is a vmlinux that keeps .BTF.
 FROM ubuntu:24.04 AS bpf
 ARG KERNEL
-RUN apt-get update && apt-get install -y --no-install-recommends clang llvm libbpf-dev linux-tools-${KERNEL} \
+RUN apt-get update && apt-get install -y --no-install-recommends clang llvm libbpf-dev linux-tools-${KERNEL} zstd \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=kernel /kernel/usr/lib/debug/boot/ /dbg/
+COPY --from=kernel /kernel/boot/vmlinuz-${KERNEL} /vmlinuz
 COPY desktop/vm/rule.bpf.c desktop/vm/rule-match.h /src/
-RUN /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /dbg/vmlinux-${KERNEL} format c > /src/vmlinux.h \
+# zstd stops with an error at the bytes after the payload; bpftool refuses anything but a whole vmlinux.
+RUN at=$(LC_ALL=C grep -aboP '\x28\xb5\x2f\xfd' /vmlinuz | head -1 | cut -d: -f1) \
+    && { tail -c +$((at + 1)) /vmlinuz | zstd -dcq > /vmlinux || true; } \
+    && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format c > /src/vmlinux.h \
     && clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I/src -c /src/rule.bpf.c -o /rule.bpf.o
 
 # ── Surogate Desktop's VM guest ─────────────────────────────────────
