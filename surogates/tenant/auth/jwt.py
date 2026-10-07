@@ -47,10 +47,20 @@ def _get_secret() -> str:
 def create_access_token(
     org_id: UUID,
     user_id: UUID,
-    permissions: set[str],
+    permissions: set[str] | frozenset[str],
     expires_minutes: int = 30,
+    *,
+    auth_time: int | None = None,
+    client_id: str | None = None,
+    family_id: UUID | None = None,
 ) -> str:
-    """Create a short-lived access token."""
+    """Create a short-lived access token.
+
+    *auth_time* is when the user last signed in (epoch seconds), carried
+    through every refresh, so a route can ask for a recent sign-in.
+    *client_id* names the OAuth client the token was issued to, and
+    *family_id* (the ``sid`` claim) the OAuth sign-in it was issued under.
+    """
     now = int(time.time())
     payload: dict[str, Any] = {
         "sub": str(user_id),
@@ -61,6 +71,12 @@ def create_access_token(
         "iat": now,
         "exp": now + expires_minutes * 60,
     }
+    if auth_time is not None:
+        payload["auth_time"] = auth_time
+    if client_id is not None:
+        payload["client_id"] = client_id
+    if family_id is not None:
+        payload["sid"] = str(family_id)
     return jwt.encode(payload, _get_secret(), algorithm=_ALGORITHM)
 
 
@@ -221,8 +237,13 @@ def create_refresh_token(
     org_id: UUID,
     user_id: UUID,
     expires_days: int = 7,
+    *,
+    auth_time: int | None = None,
 ) -> str:
-    """Create a long-lived refresh token (carries no permissions)."""
+    """Create a long-lived refresh token (carries no permissions).
+
+    *auth_time* is when the user signed in: the access tokens it refreshes carry it.
+    """
     now = int(time.time())
     payload: dict[str, Any] = {
         "sub": str(user_id),
@@ -233,6 +254,8 @@ def create_refresh_token(
         "iat": now,
         "exp": now + expires_days * 86400,
     }
+    if auth_time is not None:
+        payload["auth_time"] = auth_time
     return jwt.encode(payload, _get_secret(), algorithm=_ALGORITHM)
 
 

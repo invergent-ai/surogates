@@ -14,6 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, status
 from pydantic import BaseModel, StringConstraints
 
+from surogates.api.routes._shared import require_recent_sign_in
 from surogates.devices.link import serve_device_link
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.presence import DevicePresence
@@ -99,7 +100,9 @@ def _issued(issued: IssuedDevice) -> DeviceIssued:
 async def register_device(
     body: DeviceCreate, request: Request, ctx: AgentRuntime, tenant: Tenant,
 ) -> DeviceIssued:
-    issued = await _store(request).create(name=body.name, **_owner(tenant, ctx))
+    owner = _owner(tenant, ctx)
+    require_recent_sign_in(tenant)
+    issued = await _store(request).create(name=body.name, **owner)
     return _issued(issued)
 
 
@@ -125,7 +128,9 @@ async def revoke_device(
 async def reauthorize_device(
     device_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant,
 ) -> DeviceIssued:
-    issued = await _store(request).reauthorize(device_id, **_owner(tenant, ctx))
+    owner = _owner(tenant, ctx)
+    require_recent_sign_in(tenant)
+    issued = await _store(request).reauthorize(device_id, **owner)
     if issued is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such device.")
     await _notify(request, device_id, f"rotated:{issued.device.credential_generation}")

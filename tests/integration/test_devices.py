@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -88,7 +89,8 @@ async def add_user(session_factory, org_id: UUID) -> tuple[UUID, str]:
         session_factory, org_id, user_id=user_id,
         email=f"user-{user_id}@test.com", password="testpass123",
     )
-    return user_id, create_access_token(org_id, user_id, {"sessions:read", "sessions:write"})
+    # Signed in just now: adding a computer needs a recent sign-in.
+    return user_id, create_access_token(org_id, user_id, {"sessions:read", "sessions:write"}, auth_time=int(time.time()))
 
 
 @pytest_asyncio.fixture(loop_scope="session")

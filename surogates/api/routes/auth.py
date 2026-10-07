@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from uuid import UUID
 
@@ -42,6 +43,9 @@ from surogates.tenant.models import UserResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+#: What a signed-in user's access token grants, however they signed in.
+USER_PERMISSIONS = frozenset({"sessions:read", "sessions:write", "tools:read"})
 
 
 # ---------------------------------------------------------------------------
@@ -455,12 +459,15 @@ async def firebase_exchange(
             )
             await session.commit()
 
-    permissions: set[str] = {"sessions:read", "sessions:write", "tools:read"}
+    # When the user signed in to Firebase, from the verified ID token: a fresh ID token of an
+    # old Firebase session is no new sign-in. A token that names no time is not recent.
+    firebase_auth_time = claims.get("auth_time")
+    signed_in = firebase_auth_time if isinstance(firebase_auth_time, int) else None
     access_token = create_access_token(
-        org_id=org_id, user_id=user.id, permissions=permissions,
+        org_id=org_id, user_id=user.id, permissions=USER_PERMISSIONS, auth_time=signed_in,
     )
     refresh_token = create_refresh_token(
-        org_id=org_id, user_id=user.id,
+        org_id=org_id, user_id=user.id, auth_time=signed_in,
     )
     if audit_store is not None:
         await audit_store.emit(
@@ -544,17 +551,17 @@ async def login(
             )
             await enroll_session.commit()
 
-    # Default permissions for authenticated users.
-    permissions: set[str] = {"sessions:read", "sessions:write", "tools:read"}
-
+    signed_in = int(time.time())
     access_token = create_access_token(
         org_id=org_id,
         user_id=user_id,
-        permissions=permissions,
+        permissions=USER_PERMISSIONS,
+        auth_time=signed_in,
     )
     refresh_token = create_refresh_token(
         org_id=org_id,
         user_id=user_id,
+        auth_time=signed_in,
     )
 
     if audit_store is not None:
@@ -592,13 +599,13 @@ async def refresh(body: RefreshRequest, request: Request) -> AccessTokenResponse
     org_id = UUID(payload["org_id"])
     user_id = UUID(payload["user_id"])
 
-    # Re-issue an access token with default permissions.
-    permissions: set[str] = {"sessions:read", "sessions:write", "tools:read"}
-
+    # The sign-in's time, not the refresh's: a refresh is not a sign-in.
+    signed_in = payload.get("auth_time")
     access_token = create_access_token(
         org_id=org_id,
         user_id=user_id,
-        permissions=permissions,
+        permissions=USER_PERMISSIONS,
+        auth_time=signed_in if isinstance(signed_in, int) else None,
     )
 
     return AccessTokenResponse(access_token=access_token)
