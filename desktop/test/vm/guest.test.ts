@@ -420,9 +420,10 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       repo = join(shared, "repo");
       mkdirSync(repo, { recursive: true });
       expect(spawnSync("bash", ["-c", "git init -q -b master && git config user.email a@b && git config user.name a && echo a > a.txt && git add -A && git commit -qm a && git init -q sub"], { cwd: repo }).status).toBe(0);
-      // A submodule's git folder, a linked worktree's, and the user's own hook, which is not executable.
+      // A submodule's git folder, a linked worktree's, the user's own hook, which is not executable, and an MCP config of theirs.
       for (const [path, text] of [
         [".git/modules/foo/config", "[core]\n"], [".git/worktrees/wt/commondir", "../..\n"], [".git/worktrees/wt/HEAD", "ref: refs/heads/wt\n"], [".git/hooks/post-merge", "#!/bin/sh\n"],
+        ["tool/.mcp.json", "{}\n"],
       ] as const) {
         mkdirSync(dirname(join(repo, path)), { recursive: true });
         writeFileSync(join(repo, path), text);
@@ -466,6 +467,10 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       ["hook chmod +x", "chmod +x .git/hooks/post-merge", ".git/hooks/post-merge"],
       ["config append", "echo '[core]' >> .git/config", ".git/config"],
       ["config truncate", ": > .git/config", ".git/config"],
+      // A read-only open that truncates: the host's file is emptied before the size change is judged.
+      ["config truncate read-only", "python3 -c \"import os; os.open('.git/config', os.O_RDONLY | os.O_TRUNC)\"", ".git/config"],
+      ["hook truncate read-only", "python3 -c \"import os; os.open('.git/hooks/post-merge', os.O_RDONLY | os.O_TRUNC)\"", ".git/hooks/post-merge"],
+      ["mcp.json truncate read-only", "python3 -c \"import os; os.open('tool/.mcp.json', os.O_RDONLY | os.O_TRUNC)\"", "tool/.mcp.json"],
       ["core.hooksPath", "printf '[core]\\n  hooksPath = ../evil\\n' >> .git/config", ".git/config"],
       ["gitconfig", "echo x > .gitconfig", ".gitconfig"],
       ["vscode dir", "mkdir .vscode", ".vscode"],
@@ -508,6 +513,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
 
     const allow = [
       ["ordinary write", "echo x > notes.txt"],
+      ["an ordinary file truncated by a read-only open", "echo x > plain-trunc && python3 -c \"import os; os.open('plain-trunc', os.O_RDONLY | os.O_TRUNC)\" && test ! -s plain-trunc"],
       ["I1 branch named hooks", "git branch hooks"],
       ["I1 branch named config", "git branch config"],
       ["a ref file directly", "echo 0000000000000000000000000000000000000000 > .git/refs/heads/zz"],

@@ -14,6 +14,7 @@ char LICENSE[] SEC("license") = "GPL";
 #define EPERM 1
 #define FUSE_SUPER_MAGIC 0x65735546 // virtiofs; the only share fs on Linux
 #define FMODE_WRITE 0x2
+#define O_TRUNC 01000
 #define ATTR_MODE (1 << 0)
 #define ATTR_UID (1 << 1)
 #define ATTR_GID (1 << 2)
@@ -160,10 +161,11 @@ int BPF_PROG(on_truncate, const struct path *path)
 	return DENY(refused(BPF_CORE_READ(path, dentry, d_sb), BPF_CORE_READ(path, dentry), 0));
 }
 
+// A read-only open with O_TRUNC is a write: virtiofsd truncates at the open, before setattr is asked.
 SEC("lsm/file_open")
 int BPF_PROG(on_open, struct file *file)
 {
-	if (!(BPF_CORE_READ(file, f_mode) & FMODE_WRITE))
+	if (!(BPF_CORE_READ(file, f_mode) & FMODE_WRITE) && !(BPF_CORE_READ(file, f_flags) & O_TRUNC))
 		return 0;
 	struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
 	return DENY(refused(BPF_CORE_READ(dentry, d_sb), dentry, 0));
