@@ -1,7 +1,7 @@
 import type { MenuItemConstructorOptions } from "electron";
 import { describe, expect, it } from "vitest";
 
-import { appMenu, type MenuActions } from "../src/shell/menus.js";
+import { appMenu, type MenuActions, trayIcon, trayMenu } from "../src/shell/menus.js";
 
 // Every action, recording what it was asked.
 function recording(): { asked: unknown[][]; actions: MenuActions } {
@@ -61,5 +61,27 @@ describe("the app's menu", () => {
 
   it("leaves Developer out of a packaged app, which has no developer mode yet", () => {
     expect(appMenu(recording().actions, false).map((top) => top.label)).toEqual(["File", "Edit", "View", "Help"]);
+  });
+});
+
+describe("the tray", () => {
+  it("shows the window, says how this computer is connected, opens Settings and quits", () => {
+    const asked: string[] = [];
+    const menu = trayMenu({ device: "Connected as Laptop" }, {
+      show: () => asked.push("show"), settings: () => asked.push("settings"), quit: () => asked.push("quit"),
+    });
+    expect(menu.map((item) => [item.label ?? item.type, item.enabled ?? true])).toEqual([
+      ["Show Surogate", true], ["Connected as Laptop", false], ["separator", true], ["Settings…", true], ["Quit Surogate", true],
+    ]);
+    for (const item of menu) (item.click as (() => void) | undefined)?.();
+    expect(asked).toEqual(["show", "settings", "quit"]);
+    expect(trayMenu({ device: null }, { show() {}, settings() {}, quit() {} }).map((item) => item.label ?? item.type))
+      .toEqual(["Show Surogate", "separator", "Settings…", "Quit Surogate"]);
+  });
+
+  it("takes the light icon on a dark panel, as GNOME's always is, and the dark one on a light panel", () => {
+    expect([
+      trayIcon(false, "XFCE"), trayIcon(true, "XFCE"), trayIcon(false, "ubuntu:GNOME"), trayIcon(false, "GNOME-Flashback:GNOME"), trayIcon(false, undefined),
+    ]).toEqual(["tray-light.png", "tray-dark.png", "tray-dark.png", "tray-dark.png", "tray-light.png"]);
   });
 });

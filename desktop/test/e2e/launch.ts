@@ -170,3 +170,29 @@ export const notices = (shell: ElectronApplication) => shell.evaluate(() =>
 export const clickNotice = (shell: ElectronApplication, index: number) => shell.evaluate((_electron, at) => {
   (globalThis as unknown as { notices: Electron.Notification[] }).notices[at]!.emit("click");
 }, index);
+
+// What the app sets on its tray from now on: each icon, by file name, and the latest menu. Electron lists no
+// trays, so a test reads what the app sets on its own.
+export async function watchTray(shell: ElectronApplication): Promise<void> {
+  await shell.evaluate(({ Tray }) => {
+    const icons: string[] = [];
+    Object.assign(globalThis, { icons, trayMenu: null });
+    const setImage = Tray.prototype.setImage;
+    Tray.prototype.setImage = function (this: Electron.Tray, image: Electron.NativeImage | string) {
+      icons.push(String(image).split("/").at(-1)!);
+      setImage.call(this, image);
+    };
+    const setContextMenu = Tray.prototype.setContextMenu;
+    Tray.prototype.setContextMenu = function (this: Electron.Tray, menu: Electron.Menu | null) {
+      Object.assign(globalThis, { trayMenu: menu });
+      setContextMenu.call(this, menu);
+    };
+  });
+}
+
+export const icons = (shell: ElectronApplication) => shell.evaluate(() => (globalThis as unknown as { icons: string[] }).icons);
+export const trayLabels = (shell: ElectronApplication) => shell.evaluate(() =>
+  (globalThis as unknown as { trayMenu: Electron.Menu | null }).trayMenu?.items.map((item) => item.label) ?? null);
+export const pickInTray = (shell: ElectronApplication, label: string) => shell.evaluate((_electron, chosen) => {
+  (globalThis as unknown as { trayMenu: Electron.Menu }).trayMenu.items.find((item) => item.label === chosen)!.click();
+}, label);

@@ -9,7 +9,7 @@ import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
 import {
-  app, BrowserWindow, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, safeStorage, session, shell, utilityProcess,
+  app, BrowserWindow, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, safeStorage, session, shell, Tray, utilityProcess,
   type WebContents, webContents,
 } from "electron";
 
@@ -31,7 +31,7 @@ import { reauthorize, rebind, register } from "./computer.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { letWindowClose, MainWindow } from "./main-window.js";
-import { appMenu } from "./menus.js";
+import { appMenu, trayIcon, trayMenu } from "./menus.js";
 import { Notifications } from "./notifications.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
@@ -44,6 +44,7 @@ import { type Bounds, WindowStates } from "./window-state.js";
 const PAGES = join(import.meta.dirname, "pages");
 const PAGES_PRELOAD = join(import.meta.dirname, "pages-preload.cjs");
 const BRIDGE_PRELOAD = join(import.meta.dirname, "preload.cjs");
+const ASSETS = join(import.meta.dirname, "..", "..", "assets");
 // The app's version, as its package names it.
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf8")) as { version: string }).version;
 
@@ -227,6 +228,7 @@ function bounds(value: unknown): Bounds {
 // What the window's page and an open Settings show changed: each reads its state again.
 function changed(): void {
   followAgent();
+  updateTray();
   // The web client shows only while someone is signed in to the app, and has its session.
   main?.gate(signedIn === null || reloading);
   main?.window.webContents.send("shell:changed");
@@ -1081,6 +1083,26 @@ function state() {
   };
 }
 
+// The tray, once the app is ready; and its menu as last set, set again only when it changes.
+let tray: Tray | null = null;
+let trayDrawn = "";
+
+const trayImage = (): string => join(ASSETS, trayIcon(theme.dark, process.env.XDG_CURRENT_DESKTOP));
+
+function updateTray(): void {
+  if (!tray) return;
+  const agent = agents.get();
+  const template = trayMenu({ device: agent ? deviceLine(agent) : null }, {
+    show: () => main?.show(),
+    settings: menuActions.settings,
+    quit: () => app.quit(),
+  });
+  const drawn = JSON.stringify(template.map((item) => [item.label, item.enabled]));
+  if (drawn === trayDrawn) return;
+  trayDrawn = drawn;
+  tray.setContextMenu(Menu.buildFromTemplate(template));
+}
+
 // The system's notifications, once the app is ready.
 let notifications: Notifications | null = null;
 
@@ -1644,6 +1666,7 @@ if (!app.requestSingleInstanceLock()) {
     // Before the window: its first frame is in the chosen theme.
     theme = new Theme(nativeTheme, appearance, (dark) => {
       main?.paint(dark);
+      tray?.setImage(trayImage());
       tellAppearance();
     });
     // Electron's own menu goes: its reload, zoom and developer tools would act on the window's own pages.
@@ -1652,6 +1675,11 @@ if (!app.requestSingleInstanceLock()) {
     const page = join(PAGES, "shell.html");
     main = new MainWindow({ states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed });
     wire(main, page);
+    // In the tray where the desktop has one; GNOME without one shows the window at the next launch.
+    tray = new Tray(trayImage());
+    tray.setToolTip("Surogate");
+    tray.on("click", () => main?.show());
+    updateTray();
     main.window.on("focus", () => void refreshProjects());
     // The window going away, or coming back, starts or ends the follow of the chat it shows.
     app.on("browser-window-focus", () => followAgent());
