@@ -385,3 +385,12 @@ def test_a_save_in_the_second_a_pod_read_the_file_reaches_the_next_copy(tmp_path
     time.sleep(1.1)  # the landing comes later
     land(pod, "saga:b")
     assert (a_pod(tmp_path, project).copy / "notes.txt").read_text() == "v9 notes\n"
+
+
+def test_a_kept_index_git_cannot_read_is_left_out_and_the_pod_opens(tmp_path, project):
+    first = a_pod(tmp_path, project)
+    (first.copy / "A.md").write_text("by A")
+    land(first, "saga:a")
+    (project / "_history" / "index").write_bytes(b"DIRC\x00\x00\x00\x02 not an index")
+    pod = a_pod(tmp_path, project)
+    assert sorted(p.name for p in pod.copy.iterdir()) == ["A.md", "Report.docx", "notes.txt"]

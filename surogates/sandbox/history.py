@@ -157,7 +157,12 @@ class History:
                     # Its own time: git reads again an entry no older than the index.
                     shutil.copy2(self.durable / "index", self.repo / "index")
                 # The index made main's: an entry that matches keeps its size and time.
-                self._main("read-tree", "-m", "-i", MAIN)
+                try:
+                    self._main("read-tree", "-m", "-i", MAIN)
+                except HistoryError:
+                    # A cache git cannot read: left out, every real file is read.
+                    (self.repo / "index").unlink(missing_ok=True)
+                    self._main("read-tree", MAIN)
             self._add_all(self._main)
             if self._ref(MAIN) is None:
                 self._main(*_as(you), "commit", "-q", "--allow-empty", "-m", "The project's files")
