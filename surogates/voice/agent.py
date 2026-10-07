@@ -1,10 +1,11 @@
-"""The LiveKit side of one call: turn-taking, Romanian speech, echo and goodbye handling.
+"""The LiveKit side of one call: turn-taking, speech, echo and goodbye handling.
 
 The agent's thinking happens in its surogates session (SurogatesLLM); this class only decides
 what to say aloud and when the call is over.
 """
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import AsyncIterable, Mapping
 from dataclasses import dataclass, field
@@ -13,15 +14,11 @@ from typing import Any
 from livekit import rtc
 from livekit.agents import Agent, ModelSettings, StopResponse, llm, stt
 
+from surogates.voice.lines import Lines, default_lines, lines_from_routing
 from surogates.voice.soundscape import SoundSettings
 from surogates.voice.text import caller_says_goodbye, is_echo, is_farewell, say_as, spoken_sentences
 
-GREETING_DEFAULT = "Bună ziua! Cu ce vă pot ajuta?"
-STILL_THERE = "Mai sunteți acolo?"
-GOODBYE = "Vă mulțumesc că ați sunat. O zi bună!"
-SORRY = "Îmi pare rău, am o problemă tehnică. Vă rog să sunați puțin mai târziu."
-UNAVAILABLE = "Acest număr nu este disponibil momentan."
-BUSY = "Toate liniile sunt ocupate. Vă rog să reveniți în câteva minute."
+LANGUAGE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$")  # a BCP 47 tag as Studio stores it: "ro", "en", "pt-BR"
 SENTENCE_PAUSE = 0.25  # Amami ends a sentence with almost no silence: without a breath, sentences run together
 ECHO_WINDOW = 20.0  # seconds: what we said this recently can come back through a speakerphone
 
@@ -37,7 +34,8 @@ TURN_HANDLING = {
 
 @dataclass(frozen=True)
 class CallConfig:
-    greeting: str = GREETING_DEFAULT
+    language: str = "ro"
+    lines: Lines = default_lines("ro")
     voice: str = "female"
     pronunciations: Mapping[str, str] = field(default_factory=dict)
     remember_callers: bool = False
@@ -51,10 +49,6 @@ class CallConfig:
         """Settings from the ops routing row. A bad value falls back to its default; the call never fails on it."""
         cfg, d = (cfg if isinstance(cfg, dict) else {}), cls()
 
-        def text(key: str) -> str:
-            v = cfg.get(key)
-            return v.strip() if isinstance(v, str) and v.strip() else getattr(d, key)
-
         def seconds(key: str, lo: float, hi: float) -> float:
             v = cfg.get(key)
             ok = isinstance(v, (int, float)) and not isinstance(v, bool) and lo <= v <= hi
@@ -63,8 +57,9 @@ class CallConfig:
         pron = cfg.get("pronunciations")
         pron = ({k: v.strip() for k, v in pron.items() if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip()}
                 if isinstance(pron, dict) else {})  # a non-text value would be spoken as "None" or "5"
-        return cls(greeting=text("greeting"), voice=cfg.get("voice") if cfg.get("voice") in ("female", "male") else d.voice,
-                   pronunciations=pron, remember_callers=cfg.get("remember_callers") is True,
+        language = cfg["language"] if isinstance(cfg.get("language"), str) and LANGUAGE.match(cfg["language"]) else d.language
+        return cls(language=language, lines=lines_from_routing(language, cfg),
+                   voice=cfg.get("voice") if cfg.get("voice") in ("female", "male") else d.voice, pronunciations=pron, remember_callers=cfg.get("remember_callers") is True,
                    max_call_seconds=seconds("max_call_seconds", 30, 3600),
                    idle_ask_seconds=seconds("idle_ask_seconds", 5, 300),
                    idle_hangup_seconds=seconds("idle_hangup_seconds", 5, 300),
@@ -106,20 +101,20 @@ class VoiceAgent(Agent):
         text = new_message.text_content or ""
         if is_echo(text, self._recent_said()):
             raise StopResponse()  # our own voice through a speakerphone, not the caller
-        if caller_says_goodbye(text):
+        if caller_says_goodbye(text, self.config.language):
             self.hangup_after_reply = True
 
     async def tts_node(self, text: AsyncIterable[str], model_settings: ModelSettings) -> AsyncIterable[rtc.AudioFrame]:
         tts, said = self.session.tts, []
-        async for sentence in spoken_sentences(text):
+        async for sentence in spoken_sentences(text, self.config.language):
             if said:
                 yield silence(tts.sample_rate, SENTENCE_PAUSE)
             said.append(sentence)
             self.recent.append((time.monotonic(), sentence))
             self.last_said = sentence
             # async with: a barge-in closes the generator here, and the sentence's TTS request with it
-            async with tts.synthesize(say_as(sentence, self.config.pronunciations)) as stream:
+            async with tts.synthesize(say_as(sentence, self.config.pronunciations, self.config.language)) as stream:
                 async for audio in stream:
                     yield audio.frame
-        if said and is_farewell(" ".join(said)):
+        if said and is_farewell(" ".join(said), self.config.language):
             self.hangup_after_reply = True

@@ -21,16 +21,17 @@ from redis.asyncio import Redis
 
 from surogates.channels.resolve import resolve_tenant
 from surogates.config import load_settings
-from surogates.voice.agent import BUSY, GOODBYE, SORRY, STILL_THERE, TURN_HANDLING, UNAVAILABLE, CallConfig, VoiceAgent
+from surogates.voice.agent import TURN_HANDLING, CallConfig, VoiceAgent
 from surogates.voice.capacity import CallSlots
 from surogates.voice.llm import SurogatesLLM
 from surogates.voice.soundscape import Pack, Soundscape, SoundscapePlayer, fetch_pack
-from surogates.voice.sessions import SORRY_TURN, CallTarget, VoiceSessions, normalize_caller
+from surogates.voice.sessions import CallTarget, VoiceSessions, normalize_caller
 from surogates.voice.stt import RoSTT
 from surogates.voice.text import asks_for_details
 from surogates.voice.tts import PhraseCache, RoTTS
 
 log = logging.getLogger("surogates.voice")
+NO_LINE = CallConfig().lines  # before a number's agent is known, its lines are too: the platform default
 
 
 @dataclass(frozen=True)
@@ -143,7 +144,7 @@ def follow_call(session: AgentSession, agent: Any, scape: Any, call: Any) -> Non
         speaking = ev.new_state == "speaking"
         if speaking and agent.last_said != pen_for:
             pen_for = agent.last_said  # once per question, however many breaths the answer takes
-            if asks_for_details(agent.last_said):
+            if asks_for_details(agent.last_said, agent.config.language):
                 scape.writing()
         scape.caller_speaking(speaking)
 
@@ -208,30 +209,31 @@ async def entrypoint(ctx: JobContext) -> None:
         tenant = await resolve_tenant(rt.routing, "voice", info.called) if info else None
     except Exception:  # ops down, 401, a timeout: the caller hears why, not silence
         log.exception("could not resolve room %s (called %s)", ctx.room.name, info and info.called)
-        return await apologize(ctx, vs.tts_url, "female", SORRY)
+        return await apologize(ctx, vs.tts_url, "female", NO_LINE.sorry)
     if info is None or tenant is None:
         log.warning("no agent for room %s (called %s)", ctx.room.name, info and info.called)
-        return await apologize(ctx, vs.tts_url, "female", UNAVAILABLE, rt.redis)
+        return await apologize(ctx, vs.tts_url, "female", NO_LINE.unavailable, rt.redis)
 
     config = CallConfig.from_routing(tenant.get("config"))
     slots = CallSlots(rt.redis, vs.max_concurrent_calls)  # releasing a line never taken is a no-op
     if not await slots.take(info.call_id, hold_seconds=config.max_call_seconds + 60):
         log.warning("call %s refused: all %d lines busy", info.call_id, vs.max_concurrent_calls)
         await report("busy")
-        return await apologize(ctx, vs.tts_url, config.voice, BUSY, rt.redis)
+        return await apologize(ctx, vs.tts_url, config.voice, config.lines.busy, rt.redis)
     try:
         call = await rt.sessions.open_call(
             CallTarget(org_id=UUID(str(tenant["org_id"])), agent_id=tenant["agent_id"],
                        remember_callers=config.remember_callers),
-            call_id=info.call_id, called=info.called, caller=info.caller, greeting=config.greeting)
+            call_id=info.call_id, called=info.called, caller=info.caller, greeting=config.lines.greeting,
+            language=config.language, lines=config.lines)
     except Exception:
         log.exception("could not open a session for call %s", info.call_id)
         await report("error")
-        return await apologize(ctx, vs.tts_url, config.voice, SORRY, rt.redis)
+        return await apologize(ctx, vs.tts_url, config.voice, config.lines.sorry, rt.redis)
     log.info("call %s to %s from %s -> agent %s session %s", info.call_id, info.called, call.caller,
              tenant["agent_id"], call.session_id)
     try:  # how the call reads in Studio's session list; cosmetic, never worth failing a call over
-        await call.store.update_session_title_if_empty(call.session_id, f"Apel de la {call.caller}")
+        await call.store.update_session_title_if_empty(call.session_id, f"Call from {call.caller}")
     except Exception:
         log.debug("could not title call %s", info.call_id, exc_info=True)
 
@@ -251,7 +253,7 @@ async def entrypoint(ctx: JobContext) -> None:
     def _error(ev) -> None:
         if isinstance(ev.source, SurogatesLLM):  # the turn failed: say so instead of leaving silence
             log.warning("call %s turn failed: %r", info.call_id, ev.error)
-            session.say(SORRY_TURN, add_to_chat_ctx=False)
+            session.say(config.lines.sorry_turn, add_to_chat_ctx=False)
 
     @session.on("close")
     def _closed(ev) -> None:
@@ -270,10 +272,10 @@ async def entrypoint(ctx: JobContext) -> None:
         await ctx.delete_room()  # a Future, not a coroutine: spawn() needs this wrapper
 
     async def still_there() -> None:
-        await fixed(session, phrases, STILL_THERE, add_to_chat_ctx=False).wait_for_playout()
+        await fixed(session, phrases, config.lines.still_there, add_to_chat_ctx=False).wait_for_playout()
         await asyncio.sleep(config.idle_hangup_seconds)
         if session.user_state == "away":
-            await say_and_hang_up(ctx, session, GOODBYE, phrases)
+            await say_and_hang_up(ctx, session, config.lines.goodbye, phrases)
 
     @session.on("user_state_changed")
     def _away(ev) -> None:
@@ -282,10 +284,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def time_limit() -> None:
         await asyncio.sleep(config.max_call_seconds)
-        await say_and_hang_up(ctx, session, GOODBYE, phrases)
+        await say_and_hang_up(ctx, session, config.lines.goodbye, phrases)
 
     await session.start(agent=agent, room=ctx.room)
-    fixed(session, phrases, config.greeting)
+    fixed(session, phrases, config.lines.greeting)
 
     async def _background() -> None:  # alongside the greeting: a slow download never delays the call
         nonlocal background

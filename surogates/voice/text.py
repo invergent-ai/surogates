@@ -1,4 +1,8 @@
-"""Romanian text for the phone voice: what the TTS should say, and what the caller just said.
+"""Text for the phone voice: what the TTS should say, and what the caller just said.
+
+The language rules (the agent's "I'm on it" line, goodbyes, asking for details) exist for Romanian
+and English. A line in any other language gets none of them: its calls still end through the
+agent's end_call tool, and the background simply never picks up a pen.
 
 Ported from an earlier Twilio prototype. It shapes speech
 only: the session keeps the agent's text exactly as written.
@@ -10,6 +14,7 @@ import difflib
 import re
 import unicodedata
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
+from dataclasses import dataclass
 
 BRAND = re.compile(r"\bsurogate\b", re.I)
 GLUED_NUMBER = re.compile(r"\b([A-Za-z]+)(\d{2,})\b")  # "A220" is a name and a number, not a code to dictate
@@ -17,9 +22,10 @@ MODEL_VARIANT = re.compile(r"\b([A-Za-z]+\d{2,})-\d{2,}\b")  # "A220-300": Amami
 HAS_WORDS = re.compile(r"\w")
 
 
-def say_as(text: str, table: Mapping[str, str]) -> str:
-    """Spell names the way a Romanian caller says them. Table keys match whole words, case-sensitively."""
-    text = BRAND.sub("Surogheit", text)  # hard g; "Surogeit" is wrong
+def say_as(text: str, table: Mapping[str, str], language: str = "ro") -> str:
+    """Spell names the way a caller says them. Table keys match whole words, case-sensitively."""
+    if language == "ro":
+        text = BRAND.sub("Surogheit", text)  # hard g; "Surogeit" is wrong
     if table:
         keys = "|".join(map(re.escape, sorted(table, key=len, reverse=True)))
         text = re.sub(rf"(?<![\w&])({keys})(?![\w&])", lambda m: table[m.group(1)], text)
@@ -34,10 +40,12 @@ def clean(text: str) -> str:
 
 # A sentence ends at punctuation + space, or where a preamble and the answer arrive glued ("acum.Azi").
 SENTENCE_END = re.compile(r"(?<=[.!?…])\s+|(?<=[a-zăâîșț0-9]{2}[.!?…])(?=[A-ZĂÂÎȘȚ])")
-# ...but not after "nr.", "str.", "Dl." or an initial ("S.A.", "M. Eminescu"). The initial is
-# capital-only: "Prețul e." still ends a sentence.
+# ...but not after "nr.", "str.", "Mr." or an initial ("S.A.", "M. Eminescu"). The initial is
+# capital-only: "Prețul e." still ends a sentence. Romanian and English abbreviations both: a
+# Romanian line quotes English names and the other way round.
 ABBREVIATION_END = re.compile(
-    r"((?i:\b(?:nr|dl|dna|dra|str|tel|prof|dr|ing|art|alin|pct|etc|ex|sf|bd|jud|mun))|\b[A-ZĂÂÎȘȚ])\.$")
+    r"((?i:\b(?:nr|dl|dna|dra|str|tel|prof|dr|ing|art|alin|pct|etc|ex|sf|bd|jud|mun"
+    r"|mr|mrs|ms|st|vs|no|jr|sr|inc|ltd|co|dept|approx))|\b[A-ZĂÂÎȘȚ])\.$")
 
 
 class SentenceSplitter:
@@ -80,20 +88,53 @@ def fold(text: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", text.lower()) if unicodedata.category(c) != "Mn")
 
 
-# The agent's "I'm on it" line. Once per answer is natural; the model sometimes says it again after the
-# tool returns ("O clipă, mă uit…" then "Imediat, verific…"), and twice sounds broken.
-PREAMBLE = re.compile(r"^(o clipă|imediat|stai puțin|un moment|o secundă|mă uit|verific|caut|acum verific)\b.{0,80}"
-                      r"(verific|mă uit|caut|văd|iau)", re.I)
+@dataclass(frozen=True)
+class Rules:
+    # The agent's "I'm on it" line. Once per answer is natural; the model sometimes says it again after
+    # the tool returns ("O clipă, mă uit…" then "Imediat, verific…"), and twice sounds broken.
+    preamble: re.Pattern
+    bye: re.Pattern  # the caller is done: hang up after the agent's answer
+    farewell: re.Pattern  # a whole reply that is only a goodbye
+    details: re.Pattern  # words of something a person writes down (a name, a number…)
 
 
-def is_preamble(sentence: str) -> bool:
-    return bool(PREAMBLE.search(sentence)) and len(words(sentence)) <= 14
+RULES = {
+    "ro": Rules(
+        preamble=re.compile(r"^(o clipă|imediat|stai puțin|un moment|o secundă|mă uit|verific|caut|acum verific)\b"
+                            r".{0,80}(verific|mă uit|caut|văd|iau)", re.I),
+        # "pa" only as the last word: "Papa Francisc…"
+        bye=re.compile(r"\b(la revedere|o zi bună|mulțumesc,? atât|asta e tot|gata,? mulțumesc|nimic altceva)\b"
+                       r"|\b(pa[ -]?pa|pa|mersi|ciao|bye)[.!]?$", re.I),
+        farewell=re.compile(r"^\W*(pa|la revedere|o zi bună|cu plăcere|mulțumesc|spor|numai bine|toate cele bune)\b"
+                            r"[^?]{0,60}$", re.I),
+        details=re.compile(r"\b(nume|numele|prenume|telefon|număr|numărul|e-?mail|adres[aă]|data|cnp|cod|ziua|ora)\b",
+                           re.I),
+    ),
+    "en": Rules(
+        preamble=re.compile(r"^(one moment|just a moment|one second|just a second|hold on|let me|i'll|i will)\b"
+                            r".{0,80}(check|look|find|see|search|pull)", re.I),
+        bye=re.compile(r"\b(goodbye|good bye|bye[ -]?bye|have a (nice|good|great) day|that'?s all|that is all"
+                       r"|nothing else|that'?s it,? thanks)\b|\b(bye|thanks|thank you|cheers)[.!]?$", re.I),
+        farewell=re.compile(r"^\W*(bye|goodbye|good bye|have a (nice|good|great) day|you'?re welcome|thank you"
+                            r"|thanks|take care|all the best)\b[^?]{0,60}$", re.I),
+        details=re.compile(r"\b(name|surname|phone|number|e-?mail|address|date|code|day|time|postcode|zip)\b", re.I),
+    ),
+}
+
+
+def rules(language: str) -> Rules | None:
+    return RULES.get(language.split("-")[0])
+
+
+def is_preamble(sentence: str, language: str = "ro") -> bool:
+    r = rules(language)
+    return r is not None and bool(r.preamble.search(sentence)) and len(words(sentence)) <= 14
 
 
 FLUSH_AFTER = 0.35  # seconds without new text after a full stop: the sentence is finished, say it
 
 
-async def spoken_sentences(deltas: AsyncIterable[str]) -> AsyncIterator[str]:
+async def spoken_sentences(deltas: AsyncIterable[str], language: str = "ro") -> AsyncIterator[str]:
     """One answer's sentences in speaking order, without a second preamble.
 
     A sentence that ends in a full stop and gets no more text for ``FLUSH_AFTER`` is spoken without
@@ -104,7 +145,7 @@ async def spoken_sentences(deltas: AsyncIterable[str]) -> AsyncIterator[str]:
 
     def keep(sentence: str) -> bool:
         nonlocal preambled
-        if not is_preamble(sentence):
+        if not is_preamble(sentence, language):
             return True
         first, preambled = not preambled, True
         return first
@@ -151,25 +192,18 @@ def is_echo(heard: str, recent: list[str], *, while_speaking: bool = False) -> b
     return False
 
 
-BYE = re.compile(r"\b(la revedere|o zi bună|mulțumesc,? atât|asta e tot|gata,? mulțumesc|nimic altceva)\b"
-                 r"|\b(pa[ -]?pa|pa|mersi|ciao|bye)[.!]?$", re.I)  # "pa" only as the last word: "Papa Francisc…"
-FAREWELL = re.compile(r"^\W*(pa|la revedere|o zi bună|cu plăcere|mulțumesc|spor|numai bine|toate cele bune)\b"
-                      r"[^?]{0,60}$", re.I)
+def caller_says_goodbye(text: str, language: str = "ro") -> bool:
+    r = rules(language)
+    return r is not None and bool(r.bye.search(text.strip()))
 
 
-def caller_says_goodbye(text: str) -> bool:
-    return bool(BYE.search(text.strip()))
-
-
-def is_farewell(reply: str) -> bool:
+def is_farewell(reply: str, language: str = "ro") -> bool:
     """A whole reply that is only a goodbye: the call can end after it."""
-    return bool(FAREWELL.match(reply.strip()))
+    r = rules(language)
+    return r is not None and bool(r.farewell.match(reply.strip()))
 
 
-DETAILS = re.compile(r"\b(nume|numele|prenume|telefon|număr|numărul|e-?mail|adres[aă]|data|cnp|cod|ziua|ora)\b", re.I)
-
-
-def asks_for_details(sentence: str) -> bool:
+def asks_for_details(sentence: str, language: str = "ro") -> bool:
     """The agent asked for something a person would write down (a name, a number, an address…)."""
-    s = sentence.strip()
-    return s.endswith("?") and bool(DETAILS.search(s))
+    s, r = sentence.strip(), rules(language)
+    return r is not None and s.endswith("?") and bool(r.details.search(s))

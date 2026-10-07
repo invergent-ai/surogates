@@ -81,3 +81,26 @@ async def test_an_abbreviation_at_a_pause_is_not_a_sentence():
         yield " Mihai Eminescu nr. 5."
 
     assert [s async for s in spoken_sentences(deltas())] == ["Locuiesc pe str. Mihai Eminescu nr. 5."]
+
+
+def test_english_lines_get_english_rules():
+    from surogates.voice.text import asks_for_details, is_preamble
+
+    assert caller_says_goodbye("Okay, that's all, thanks", "en")
+    assert caller_says_goodbye("Bye", "en")
+    assert not caller_says_goodbye("Byers Street, please", "en")
+    assert is_farewell("Goodbye, have a nice day!", "en")
+    assert not is_farewell("Thank you! Anything else?", "en")
+    assert is_preamble("One moment, let me check that.", "en")
+    assert asks_for_details("Could I have your phone number?", "en")
+    assert not asks_for_details("Can I help with anything else?", "en")
+
+
+def test_a_language_without_rules_never_guesses():
+    """Romanian words in a German call are not a goodbye; its calls end through the end_call tool."""
+    from surogates.voice.text import asks_for_details
+
+    assert not caller_says_goodbye("La revedere", "de")
+    assert not is_farewell("Auf Wiedersehen!", "de")
+    assert not asks_for_details("Wie ist Ihre Telefonnummer?", "de")
+    assert say_as("Surogate", {}, "de") == "Surogate"  # the Romanian spelling is for our Romanian voice

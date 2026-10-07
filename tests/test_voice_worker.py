@@ -1,4 +1,5 @@
 """Which of our numbers was called, and by whom, from the SIP participant LiveKit puts in the room."""
+from surogates.voice.agent import CallConfig
 from surogates.voice.worker import CallInfo, call_info
 
 
@@ -43,7 +44,7 @@ class _Scape:
 def test_the_soundscape_follows_who_speaks_and_the_agent_thinking():
     from types import SimpleNamespace
     from surogates.voice.worker import follow_call
-    session, scape, agent = _Session(), _Scape(), SimpleNamespace(last_said="")
+    session, scape, agent = _Session(), _Scape(), SimpleNamespace(last_said="", config=CallConfig())
     follow_call(session, agent, scape, SimpleNamespace(on_lookup=None))
     session.emit("agent_state_changed", "thinking")
     assert scape.calls[-2:] == [("agent_speaking", False), ("agent_thinking", True)]
@@ -59,7 +60,7 @@ def test_the_pen_writes_once_when_the_caller_answers_a_question_for_details():
     from types import SimpleNamespace
     from surogates.voice.worker import follow_call
     session, scape = _Session(), _Scape()
-    agent = SimpleNamespace(last_said="Pe ce nume fac programarea?")
+    agent = SimpleNamespace(last_said="Pe ce nume fac programarea?", config=CallConfig())
     follow_call(session, agent, scape, SimpleNamespace(on_lookup=None))
     session.emit("user_state_changed", "speaking")
     session.emit("user_state_changed", "listening")
@@ -88,7 +89,7 @@ def test_the_background_hears_about_lookups_from_the_call():
     from types import SimpleNamespace
     from surogates.voice.worker import follow_call
     session, scape, call = _Session(), _Scape(), SimpleNamespace(on_lookup=None)
-    follow_call(session, SimpleNamespace(last_said=""), scape, call)
+    follow_call(session, SimpleNamespace(last_said="", config=CallConfig()), scape, call)
     call.on_lookup(True)
     call.on_lookup(False)
     assert scape.calls[-2:] == [("lookup", True), ("lookup", False)]
