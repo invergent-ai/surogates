@@ -25,12 +25,14 @@ export const UNASKED: ReadonlySet<string> = new Set([
 ]);
 
 // Writes never asked about: under the folder at the top of a chat's folder where the
-// terminal spills long output, and to the one file the chat's page saves its
-// whiteboard's canvas in, every few seconds while the user draws. Anything else
-// under _whiteboard/ is asked about: the agent could write there, and the file
-// panel hides it.
+// terminal spills long output, and the chat's page saving its whiteboard's canvas, every
+// few seconds while the user draws. That save is the user's own request (its invocation
+// starts "request:", surogates/devices/operations.py): an agent's tool call writing the
+// canvas would replace the user's board, and is asked about. Anything else under
+// _whiteboard/ is asked about too: the agent could write there, and the file panel hides it.
 const UNASKED_FOLDERS = [".surogates-results"];
 const CANVAS = "_whiteboard/canvas.json";
+const REQUEST = "request:";
 
 // The chat a prompt is for, and the session asking: a sub-agent of the chat when it is not the root.
 // A network prompt names the root: a connection is known by its root's socket, not by which session's command made it.
@@ -353,7 +355,10 @@ export class Approvals {
     // is not already normal asks all the same.
     const key = operation.args.key;
     const unasked = typeof key === "string" && posix.normalize(key) === key
-      && (key === `${binding.folder}/${CANVAS}` || UNASKED_FOLDERS.some((name) => key.startsWith(`${binding.folder}/${name}/`)));
+      && (
+        (key === `${binding.folder}/${CANVAS}` && operation.invocationId.startsWith(REQUEST))
+        || UNASKED_FOLDERS.some((name) => key.startsWith(`${binding.folder}/${name}/`))
+      );
     if (operation.kind === "write" && unasked) {
       return { answer: null };
     }
