@@ -324,7 +324,10 @@ async def stream_events(
     ends it, and ``completed`` between two turns does not. Its first event,
     ``stream.start``, carries the cursor it starts from as its id, so that a
     watcher that reconnects, at ``stream.timeout`` or after a drop, takes up
-    there with ``after=<that id>``.
+    there with ``after=<that id>``. A watch waits on the session's channel, and
+    reads the session only when a publish wakes it or at the keepalive. With no
+    channel, as without Redis or when its subscription fails, it falls back to
+    the poll every stream has, a read each ``_POLL_INTERVAL``.
     """
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)

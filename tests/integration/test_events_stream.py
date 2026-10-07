@@ -337,6 +337,25 @@ async def _completed_chat(session_factory, store: SessionStore):
     return session, token, last
 
 
+async def _watch(client, session_id, token, **reading) -> list[tuple[str, str]]:
+    """The events a watch of *session_id* from its newest event gives, read as ``_read_sse_events`` reads them.
+
+    Bounded as a whole at 10 s: ASGITransport hands the response back only once the stream's
+    generator ends, so a watch that never ended would hang the run rather than fail it.
+    """
+
+    async def _read():
+        async with client.stream(
+            "GET",
+            f"/v1/sessions/{session_id}/events?after=-1&watch=1",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as response:
+            assert response.status_code == 200
+            return await _read_sse_events(response, **reading)
+
+    return await asyncio.wait_for(_read(), 10)
+
+
 async def test_watch_follows_a_chat_from_its_newest_event_across_its_turns(
     session_factory,
     app,
@@ -372,19 +391,15 @@ async def test_watch_follows_a_chat_from_its_newest_event_across_its_turns(
     comments: list[str] = []
     turn = asyncio.create_task(_next_turn())
     try:
-        async with client.stream(
-            "GET",
-            f"/v1/sessions/{session.id}/events?after=-1&watch=1",
-            headers={"Authorization": f"Bearer {token}"},
-        ) as response:
-            assert response.status_code == 200
-            events = await _read_sse_events(
-                response,
-                until_types={"stream.timeout"},
-                deadline_s=6.0,
-                ids=ids,
-                comments=comments,
-            )
+        events = await _watch(
+            client,
+            session.id,
+            token,
+            until_types={"stream.timeout"},
+            deadline_s=6.0,
+            ids=ids,
+            comments=comments,
+        )
     finally:
         await turn
 
@@ -405,12 +420,7 @@ async def test_watch_ends_on_an_archived_chat(session_factory, app, client):
     session, token, _last = await _completed_chat(session_factory, redis_store)
     await redis_store.update_session_status(session.id, "archived")
 
-    async with client.stream(
-        "GET",
-        f"/v1/sessions/{session.id}/events?after=-1&watch=1",
-        headers={"Authorization": f"Bearer {token}"},
-    ) as response:
-        events = await _read_sse_events(response, until_types={"session.done"}, deadline_s=3.0)
+    events = await _watch(client, session.id, token, until_types={"session.done"}, deadline_s=3.0)
 
     assert events[-1] == ("session.done", '{"reason": "archived", "status": "archived"}')
 
@@ -486,12 +496,7 @@ async def test_a_watch_reads_the_chat_only_when_woken_or_at_its_keepalive(
 
     turn = asyncio.create_task(_next_turn())
     try:
-        async with client.stream(
-            "GET",
-            f"/v1/sessions/{session.id}/events?after=-1&watch=1",
-            headers={"Authorization": f"Bearer {token}"},
-        ) as response:
-            events = await _read_sse_events(response, until_types={"stream.timeout"}, deadline_s=6.0)
+        events = await _watch(client, session.id, token, until_types={"stream.timeout"}, deadline_s=6.0)
     finally:
         await turn
 
@@ -574,12 +579,7 @@ async def test_a_watch_reads_the_chat_once_redis_has_taken_its_subscription(
     pubsub = app.state.redis.pubsub
     monkeypatch.setattr(app.state.redis, "pubsub", lambda: _SubscriptionInFlight(pubsub(), _next_turn))
 
-    async with client.stream(
-        "GET",
-        f"/v1/sessions/{session.id}/events?after=-1&watch=1",
-        headers={"Authorization": f"Bearer {token}"},
-    ) as response:
-        events = await _read_sse_events(response, until_types={"stream.timeout"}, deadline_s=6.0)
+    events = await _watch(client, session.id, token, until_types={"stream.timeout"}, deadline_s=6.0)
 
     assert ("user.message", '{"content": "the next turn"}') in events
     woken = next(at for at, _kind, ids in reads if turn_id[0] in ids)
@@ -611,12 +611,7 @@ async def test_a_watch_leaves_the_chat_its_inbox_items(session_factory, app, cli
 
     check_in = asyncio.create_task(_check_in())
     try:
-        async with client.stream(
-            "GET",
-            f"/v1/sessions/{session.id}/events?after=-1&watch=1",
-            headers={"Authorization": f"Bearer {token}"},
-        ) as response:
-            events = await _read_sse_events(response, until_types={"stream.timeout"}, deadline_s=5.0)
+        events = await _watch(client, session.id, token, until_types={"stream.timeout"}, deadline_s=5.0)
     finally:
         await check_in
 
@@ -627,3 +622,48 @@ async def test_a_watch_leaves_the_chat_its_inbox_items(session_factory, app, cli
             await db.execute(select(InboxItem).where(InboxItem.source_event_id == checked_in[0]))
         ).scalars().all()
     assert [row.kind for row in rows] == ["progress_checkin"]
+
+
+class _ChannelGone:
+    """A pubsub whose reads fail once the subscription is taken, as when Redis goes after the watch subscribed."""
+
+    def __init__(self, real):
+        self._real = real
+        self._reads = 0
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    async def get_message(self, **kwargs):
+        self._reads += 1
+        if self._reads == 1:
+            return await self._real.get_message(**kwargs)
+        raise ConnectionError("Redis went away")
+
+
+async def test_a_watch_whose_channel_fails_reads_the_chat_no_more_often_than_a_poll(
+    session_factory,
+    app,
+    client,
+    monkeypatch,
+):
+    """A watch whose channel fails falls back to a stream's poll, and is no busy loop on the database.
+
+    Each failed read of the channel waits a poll interval before the watch reads the chat
+    again, as a stream without Redis waits, and counts it towards the stream's length.
+    """
+    import surogates.api.routes.events as events_module
+    monkeypatch.setattr(events_module, "_MAX_STREAM_DURATION", 2)
+
+    redis_store: SessionStore = app.state.session_store
+    session, token, _last = await _completed_chat(session_factory, redis_store)
+    reads = _counting_reads(monkeypatch, redis_store, session.id)
+    pubsub = app.state.redis.pubsub
+    monkeypatch.setattr(app.state.redis, "pubsub", lambda: _ChannelGone(pubsub()))
+    started = asyncio.get_running_loop().time()
+
+    events = await _watch(client, session.id, token, until_types={"stream.timeout"}, deadline_s=6.0)
+
+    assert events[-1] == ("stream.timeout", '{"reason": "max_duration_exceeded"}')
+    # Over its first second: the access check, then the chat's events and status about every 0.5 s.
+    assert len([kind for at, kind, _ids in reads if at - started < 1.0]) <= 8
