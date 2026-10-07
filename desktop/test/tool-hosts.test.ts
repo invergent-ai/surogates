@@ -9,7 +9,7 @@ import { BOOT_ID } from "../src/binding/folder.js";
 import type { Operation } from "../src/link/protocol.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type NetworkAnswer, type NetworkAsk, type ToHost } from "../src/hosts/messages.js";
 import {
-  APP_DIRS, CANCELLED, forkHost, HOST_STOPPED, type HostProcess, NOT_BOUND, START_TIMEOUT_MS, ToolHosts,
+  APP_DIRS, CANCELLED, forkHost, HOST_STOPPED, type HostProcess, NODE, NOT_BOUND, START_TIMEOUT_MS, ToolHosts,
   type ToolHostsOptions,
 } from "../src/hosts/tool-hosts.js";
 
@@ -373,6 +373,25 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
       }),
     });
     expect(await executor.run(resolve(), signal())).toMatchObject(unavailable);
+  });
+
+  it("runs a host on the app's own node, with none of the app's environment but its PATH and HOME", async () => {
+    // What the host's node was given: as a script of the host's, it says so and goes.
+    const script = join(base, "says.cjs");
+    writeFileSync(script, "process.send({ type: 'said', node: process.execPath, title: process.title, env: Object.keys(process.env).sort() }, () => process.exit(0));\n");
+    process.env.NODE_OPTIONS = "--title=leaked";
+    process.env.OPENSSL_CONF = join(base, "openssl.cnf");
+    try {
+      const host = forkHost({ script });
+      const said = await new Promise((resolve) => host.onMessage(resolve));
+      expect(said).toEqual({
+        type: "said", node: NODE, title: expect.not.stringContaining("leaked"),
+        env: ["HOME", "PATH"],
+      });
+    } finally {
+      delete process.env.NODE_OPTIONS;
+      delete process.env.OPENSSL_CONF;
+    }
   });
 
   it("answers unavailable when the host cannot be spawned at all, and stops", async () => {

@@ -47,6 +47,9 @@ only the file helper (`src/hosts/host.ts`, `src/hosts/policy.ts`), which does th
 tools and ripgrep in a sandbox that shows it the system, the app and the chat's folder,
 and connects to no host.
 
+The file hosts and their helpers run on the app's own node, `bin/node`: Node 22 for
+linux-x64, pinned by hash and stripped (`scripts/node.sh`, which the build runs).
+
 Until the image is delivered, the app boots the image built here (or
 `SUROGATE_VM_IMAGE`'s) with the agent disk `npm run agent-disk` makes from `dist/`.
 The shell's tests that run a command boot it too:
