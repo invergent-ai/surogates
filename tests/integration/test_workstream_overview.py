@@ -814,9 +814,17 @@ async def test_a_turn_steered_after_a_report_is_summed_up_against_the_steer(api,
     assert made[0]._complete_session.await_args.kwargs["user_message"] == "Use the Q4 figures instead."
 
 
-async def test_a_turn_out_of_iterations_is_summed_up_against_the_users_request(api, monkeypatch):
+async def test_a_follow_up_at_a_turns_end_is_summed_up_against_the_follow_up(api, monkeypatch):
     parent, _ = await coordinator_with_a_report(api)
     made = harnesses(monkeypatch)
-    await live_turn(api, monkeypatch, parent, [TODO_CALL, _final_response("So far, Q3 adds up.")], budget=1)
-    ended = made[0]._complete_session.await_args.kwargs
-    assert (ended["reason"], ended["user_message"]) == ("budget_exhausted", "Check the Q3 figures.")
+
+    async def follows_up():
+        await api.app.state.session_store.emit_event(
+            parent.id, EventType.USER_MESSAGE, {"content": "Now the Q4 figures."},
+        )
+
+    await live_turn(
+        api, monkeypatch, parent, [_final_response("Q3 adds up."), _final_response("Q4 adds up.")],
+        during_reply=follows_up,
+    )
+    assert made[0]._complete_session.await_args.kwargs["user_message"] == "Now the Q4 figures."

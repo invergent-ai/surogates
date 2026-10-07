@@ -4468,7 +4468,9 @@ class AgentHarness(
     ) -> None:
         """Request one final LLM response with no tools when the budget is exhausted.
 
-        *request* is what the user asked for, for the turn's summary.
+        *request* is what the user asked for.  Nothing reads it today: a
+        ``budget_exhausted`` end writes no turn summary (``wants_turn_summary``),
+        and one that did would be judged against it.
 
         The model is asked to summarise its work so far without issuing
         any more tool calls.  The summary is emitted as an ``LLM_RESPONSE``
