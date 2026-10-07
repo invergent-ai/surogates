@@ -24,39 +24,68 @@ export function LocalChatBar({ sessionId }: { sessionId: string }) {
   // its chat, so each chat's starts empty); a revocation made meanwhile shows at the next open.
   useEffect(() => {
     let live = true;
-    let stop = () => {};
-    void getSession(sessionId).then((session) => {
-      const chat = localChatOf(sessionId, session.config, null, null);
-      // A chat in the cloud has no bar, and asks nothing of the computers.
-      if (!live || !chat) return;
-      setConfig(session.config);
-      void listDevices().then((rows) => {
-        if (live) setDevices(rows);
-      }, () => {});
-      if (!desktop) return;
-      // A sub-agent's chat works in its root's folder, which the binding names.
-      const read = () => void desktop.getBinding(chat.root).then((binding) => {
-        if (live) setHere(binding);
-      }, () => {
-        if (live) setHere(null);
-      });
-      read();
-      stop = desktop.onBindingChanged((changed) => {
-        if (changed === chat.root) read();
-      });
-    }, () => {});
+    let stop: (() => void) | undefined;
+    getSession(sessionId).then(
+      (session) => {
+        const chat = localChatOf(sessionId, session.config, null, null);
+        // A chat in the cloud has no bar, and asks nothing of the computers.
+        if (!(live && chat)) {
+          return;
+        }
+        setConfig(session.config);
+        listDevices().then(
+          (rows) => {
+            if (live) {
+              setDevices(rows);
+            }
+          },
+          () => {
+            // The computer is named as the chat's config names it.
+          },
+        );
+        if (!desktop) {
+          return;
+        }
+        // A sub-agent's chat works in its root's folder, which the binding names.
+        const read = () => {
+          desktop.getBinding(chat.root).then(
+            (binding) => {
+              if (live) {
+                setHere(binding);
+              }
+            },
+            () => {
+              if (live) {
+                setHere(null);
+              }
+            },
+          );
+        };
+        read();
+        stop = desktop.onBindingChanged((changed) => {
+          if (changed === chat.root) {
+            read();
+          }
+        });
+      },
+      () => {
+        // A chat that cannot be read has no bar.
+      },
+    );
     return () => {
       live = false;
-      stop();
+      stop?.();
     };
   }, [sessionId, desktop]);
 
   const chat = config ? localChatOf(sessionId, config, devices, here) : null;
-  if (!chat) return null;
+  if (!chat) {
+    return null;
+  }
 
   const run = (action: () => Promise<unknown>) => {
     setFailure(null);
-    void action().catch((error: unknown) => setFailure(saidBy(error)));
+    action().catch((error: unknown) => setFailure(saidBy(error)));
   };
   const mode = chat.here?.mode;
 
@@ -66,27 +95,47 @@ export function LocalChatBar({ sessionId }: { sessionId: string }) {
       className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-4 py-2 text-sm"
     >
       <span className="flex min-w-0 items-center gap-1.5">
-        <FolderIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+        <FolderIcon
+          className="size-4 shrink-0 text-muted-foreground"
+          aria-hidden="true"
+        />
         <span className="font-medium">{chat.name}</span>
-        <span className="truncate text-xs text-muted-foreground">{chat.folder}</span>
+        <span className="truncate text-xs text-muted-foreground">
+          {chat.folder}
+        </span>
       </span>
       {desktop && chat.here && (
-        <Button variant="ghost" size="sm" onClick={() => run(() => desktop.revealFolder(chat.root))}>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => run(() => desktop.revealFolder(chat.root))}
+        >
           Show folder
         </Button>
       )}
       {chat.revoked ? (
         <span className="text-destructive">Local access revoked</span>
       ) : (
-        desktop && mode && (
+        desktop &&
+        mode && (
           <>
-            <span className="text-muted-foreground">{mode === "free" ? "Works freely" : "Asks every time"}</span>
+            <span className="text-muted-foreground">
+              {mode === "free" ? "Works freely" : "Asks every time"}
+            </span>
             {/* One button, acted on when pressed: the desktop's own window confirms Work freely. */}
             <Button
               variant="ghost"
               size="sm"
               // The desktop keeps the mode it allows, and tells of each change: the mode shown is its.
-              onClick={() => run(() => switchMode(desktop, chat.root, mode === "free" ? "ask" : "free"))}
+              onClick={() =>
+                run(() =>
+                  switchMode(
+                    desktop,
+                    chat.root,
+                    mode === "free" ? "ask" : "free",
+                  ),
+                )
+              }
             >
               {mode === "free" ? "Ask every time" : "Let it work freely…"}
             </Button>

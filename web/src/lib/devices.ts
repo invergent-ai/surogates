@@ -10,33 +10,56 @@ import { formatDistance } from "date-fns";
 import { errorDetailMessage } from "../api/_errors.ts";
 import type { Device, SignIn } from "../api/devices";
 
-const ago = (at: string, now: Date): string => formatDistance(new Date(at), now, { addSuffix: true });
+const ago = (at: string, now: Date): string =>
+  formatDistance(new Date(at), now, { addSuffix: true });
 
 /** How a computer is now: revoked, online, last seen, or never connected. */
 export function deviceState(device: Device, now: Date = new Date()): string {
-  if (device.revoked_at) return `Revoked ${ago(device.revoked_at, now)}`;
-  if (device.online) return "Online";
-  if (device.last_seen_at) return `Last seen ${ago(device.last_seen_at, now)}`;
+  if (device.revoked_at) {
+    return `Revoked ${ago(device.revoked_at, now)}`;
+  }
+  if (device.online) {
+    return "Online";
+  }
+  if (device.last_seen_at) {
+    return `Last seen ${ago(device.last_seen_at, now)}`;
+  }
   return "Never connected";
 }
 
 /** When a computer was added, and, once it has been, reauthorized. */
 export function deviceHistory(device: Device, now: Date = new Date()): string {
   const added = `Added ${ago(device.created_at, now)}`;
-  return device.reauthorized_at ? `${added}, reauthorized ${ago(device.reauthorized_at, now)}` : added;
+  return device.reauthorized_at
+    ? `${added}, reauthorized ${ago(device.reauthorized_at, now)}`
+    : added;
 }
 
 /**
  * The desktop sign-ins the agent lists, or "sign-in-again": the agent shows them only to a
  * sign-in from the last 10 minutes, so a stolen session cannot end them.
  */
-export async function signInsFrom(response: Response): Promise<SignIn[] | "sign-in-again"> {
-  const body = (await response.json().catch(() => null)) as { detail?: unknown } | SignIn[] | null;
-  if (response.ok && Array.isArray(body)) return body;
+export async function signInsFrom(
+  response: Response,
+): Promise<SignIn[] | "sign-in-again"> {
+  const body = (await response.json().catch(() => null)) as
+    | { detail?: unknown }
+    | SignIn[]
+    | null;
+  if (response.ok && Array.isArray(body)) {
+    return body;
+  }
   const detail = Array.isArray(body) ? undefined : body?.detail;
-  const code = typeof detail === "object" && detail !== null ? (detail as { code?: unknown }).code : undefined;
-  if (code === "recent_sign_in_required") return "sign-in-again";
-  throw new Error(errorDetailMessage(detail) ?? "Failed to list your desktop sign-ins");
+  const code =
+    typeof detail === "object" && detail !== null
+      ? (detail as { code?: unknown }).code
+      : undefined;
+  if (code === "recent_sign_in_required") {
+    return "sign-in-again";
+  }
+  throw new Error(
+    errorDetailMessage(detail) ?? "Failed to list your desktop sign-ins",
+  );
 }
 
 // How long every web client of the user's tells them that a computer was added.
@@ -56,7 +79,9 @@ export function addedNotices(
     const at = device.reauthorized_at ?? device.created_at;
     const key = `${device.id}@${at}`;
     const recent = now.getTime() - Date.parse(at) < ADDED_NOTICE_MS;
-    return device.revoked_at === null && recent && !dismissed.has(key) ? [{ key, name: device.name }] : [];
+    return device.revoked_at === null && recent && !dismissed.has(key)
+      ? [{ key, name: device.name }]
+      : [];
   });
 }
 
@@ -72,7 +97,11 @@ type KeptStorage = Pick<Storage, "getItem" | "setItem">;
 export function dismissedNotices(storage: KeptStorage | null): Set<string> {
   try {
     const kept = JSON.parse(storage?.getItem(DISMISSED) ?? "[]") as unknown;
-    return new Set(Array.isArray(kept) ? kept.filter((key): key is string => typeof key === "string") : []);
+    return new Set(
+      Array.isArray(kept)
+        ? kept.filter((key): key is string => typeof key === "string")
+        : [],
+    );
   } catch {
     return new Set();
   }
@@ -82,9 +111,15 @@ export function dismissedNotices(storage: KeptStorage | null): Set<string> {
  * Dismiss *key* in this browser, keeping only the dismissals of notices still *told*, so the list
  * never grows past them; where nothing can be kept, the page alone forgets it.
  */
-export function dismissNotice(storage: KeptStorage | null, key: string, told: readonly string[]): void {
+export function dismissNotice(
+  storage: KeptStorage | null,
+  key: string,
+  told: readonly string[],
+): void {
   try {
-    const kept = [...dismissedNotices(storage)].filter((other) => other !== key && told.includes(other));
+    const kept = [...dismissedNotices(storage)].filter(
+      (other) => other !== key && told.includes(other),
+    );
     storage?.setItem(DISMISSED, JSON.stringify([...kept, key]));
   } catch {
     // Not kept: it shows again at the next page.

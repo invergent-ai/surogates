@@ -277,7 +277,9 @@ export function SettingsPage() {
   const { tab: asked } = useSearch({ strict: false }) as { tab?: string };
   // Not on selectTab, which changes as Channels loads: opening Channels must not bring the user back here.
   useEffect(() => {
-    if (asked === "devices" && devicesEnabled) selectTab("devices");
+    if (asked === "devices" && devicesEnabled) {
+      selectTab("devices");
+    }
   }, [asked, devicesEnabled]);
 
   const handleUnlink = useCallback(async () => {
@@ -325,7 +327,9 @@ export function SettingsPage() {
                   Browser Profiles
                 </TabsTrigger>
               )}
-              {devicesEnabled && <TabsTrigger value="devices">Devices</TabsTrigger>}
+              {devicesEnabled && (
+                <TabsTrigger value="devices">Devices</TabsTrigger>
+              )}
             </TabsList>
 
             {!sectionOpen && (
@@ -523,11 +527,11 @@ export function SettingsPage() {
                 <BrowserProfilesTab />
               </TabsContent>
             )}
-            {devicesEnabled && (
-              <TabsContent value="devices">
-                <DevicesTab />
-              </TabsContent>
-            )}
+              {devicesEnabled && (
+                <TabsContent value="devices">
+                  <DevicesTab />
+                </TabsContent>
+              )}
             </div>
           </Tabs>
         </div>

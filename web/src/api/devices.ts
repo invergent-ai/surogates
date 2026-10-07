@@ -32,14 +32,21 @@ export interface SignIn {
 
 export async function listDevices(): Promise<Device[]> {
   const response = await authFetch("/api/v1/devices");
-  if (!response.ok) return parseError(response, "Failed to list your computers");
+  if (!response.ok) {
+    return parseError(response, "Failed to list your computers");
+  }
   return (await response.json()) as Device[];
 }
 
 /** The computer's credential ends, and its queued work is cancelled; it works on no folder until restored there. */
 export async function revokeDevice(deviceId: string): Promise<void> {
-  const response = await authFetch(`/api/v1/devices/${encodeURIComponent(deviceId)}`, { method: "DELETE" });
-  if (!response.ok) return parseError(response, "Failed to revoke this computer");
+  const response = await authFetch(
+    `/api/v1/devices/${encodeURIComponent(deviceId)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    return parseError(response, "Failed to revoke this computer");
+  }
 }
 
 export async function listSignIns(): Promise<SignIn[] | "sign-in-again"> {
@@ -47,6 +54,11 @@ export async function listSignIns(): Promise<SignIn[] | "sign-in-again"> {
 }
 
 export async function endSignIn(signInId: string): Promise<void> {
-  const response = await authFetch(`/api/v1/auth/oauth/sign-ins/${encodeURIComponent(signInId)}`, { method: "DELETE" });
-  if (!response.ok) return parseError(response, "Failed to end this sign-in");
+  const response = await authFetch(
+    `/api/v1/auth/oauth/sign-ins/${encodeURIComponent(signInId)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    return parseError(response, "Failed to end this sign-in");
+  }
 }

@@ -137,20 +137,28 @@ export function ChatPage() {
   const [folderChoice, setFolderChoice] = useState<"last" | "pick">("last");
   useEffect(() => {
     const desktop = getDesktop();
-    if (!desktop) return;
+    if (!desktop) {
+      return;
+    }
     let live = true;
     const read = () => {
-      void desktop.getDevice().then(
+      desktop.getDevice().then(
         (state) => {
-          if (live) setDevice(state);
+          if (live) {
+            setDevice(state);
+          }
         },
         () => {
-          if (live) setDevice(null);
+          if (live) {
+            setDevice(null);
+          }
         },
       );
     };
     const shown = () => {
-      if (document.visibilityState === "visible") read();
+      if (document.visibilityState === "visible") {
+        read();
+      }
     };
     read();
     window.addEventListener("focus", read);
@@ -161,7 +169,11 @@ export function ChatPage() {
       document.removeEventListener("visibilitychange", shown);
     };
   }, [sessionId]);
-  const place = newChatPlace(device, { desktopSessions, multiSession }, folderChoice);
+  const place = newChatPlace(
+    device,
+    { desktopSessions, multiSession },
+    folderChoice,
+  );
   // What the composer shows, for the chat adapter to read when a message is sent: the adapter
   // stays the same, since the SDK clears a chat that has no session yet whenever its adapter changes.
   const composer = useRef({ folderChoice, shown: place });
@@ -221,18 +233,30 @@ export function ChatPage() {
         };
         // On a folder of this computer, it is confirmed and bound before the first message and its attachments go.
         const { folderChoice: choice, shown } = composer.current;
-        const rawSession = await createChat(getDesktop(), useAppStore.getState(), choice, shown, {
-          create: (execution) => sessionsApi.createSession({ ...fields, execution }),
-          online: async (deviceId) => (await listDevices()).some((row) => row.id === deviceId && row.online),
-          capabilities: async () => {
-            await useAppStore.getState().fetchCapabilities();
-            return useAppStore.getState();
+        const rawSession = await createChat(
+          getDesktop(),
+          useAppStore.getState(),
+          choice,
+          shown,
+          {
+            create: (execution) =>
+              sessionsApi.createSession({ ...fields, execution }),
+            online: async (deviceId) =>
+              (await listDevices()).some(
+                (row) => row.id === deviceId && row.online,
+              ),
+            capabilities: async () => {
+              await useAppStore.getState().fetchCapabilities();
+              return useAppStore.getState();
+            },
           },
-        }).catch((error: unknown) => {
+        ).catch((error: unknown) => {
           // A chat made whose folder could not be set up is listed all the same, and the line
           // under the composer says where the next one works.
-          void fetchSessions();
-          void getDesktop()?.getDevice().then(setDevice, () => setDevice(null));
+          fetchSessions();
+          getDesktop()
+            ?.getDevice()
+            .then(setDevice, () => setDevice(null));
           throw error;
         });
         upsertSession(rawSession);
@@ -303,7 +327,9 @@ export function ChatPage() {
           </div>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            {sessionId && <LocalChatBar key={sessionId} sessionId={sessionId} />}
+            {sessionId && (
+              <LocalChatBar key={sessionId} sessionId={sessionId} />
+            )}
             <AgentChat
               sessionId={sessionId ?? null}
               adapter={chatAdapter}

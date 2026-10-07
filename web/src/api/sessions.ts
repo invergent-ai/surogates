@@ -72,8 +72,12 @@ export async function createSession(
   });
   if (!response.ok) {
     // A chat on a folder of the user's computer is refused in the agent's words: a revoked computer, say.
-    const err = (await response.json().catch(() => null)) as { detail?: unknown } | null;
-    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to create session");
+    const err = (await response.json().catch(() => null)) as {
+      detail?: unknown;
+    } | null;
+    throw new Error(
+      errorDetailMessage(err?.detail) ?? "Failed to create session",
+    );
   }
   return (await response.json()) as Session;
 }
