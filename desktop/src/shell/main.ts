@@ -1128,9 +1128,11 @@ function openPage(path: string): void {
 
 const burst = new Burst();
 
-// Once the quit goes on, nothing more is told: the user is done with the app.
+// Once the quit goes on, nothing more is told: the user is done with the app. The end of a turn in
+// the chat followed is told by its follow, though the inbox has it too while no page streams the chat.
 function tellItem(item: InboxItem): void {
   if (leaving || !away()) return;
+  if (item.kind === "task_complete" && chat?.id === item.sessionId) return;
   const told = burst.add(item);
   if (told.length <= BURST) {
     notifications?.show({

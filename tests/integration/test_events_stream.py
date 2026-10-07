@@ -23,7 +23,9 @@ import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
+from surogates.db.models import InboxItem
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
@@ -580,3 +582,46 @@ async def test_a_watch_reads_the_chat_once_redis_has_taken_its_subscription(
     assert ("user.message", '{"content": "the next turn"}') in events
     woken = next(at for at, _kind, ids in reads if turn_id[0] in ids)
     assert woken - turn_at[0] < 0.3
+
+
+async def test_a_watch_leaves_the_chat_its_inbox_items(session_factory, app, client, monkeypatch):
+    """A watch is no live viewer: the chat's check-ins and completions still reach the inbox.
+
+    The agent leaves a chat's acknowledge-only items out of the inbox while a
+    page streams it, a page being an exact subscriber of the chat's channel.
+    Surogate Desktop tells only the end of a turn from its watch, so a
+    check-in raised while only the desktop watches belongs in the inbox.
+    """
+    import surogates.api.routes.events as events_module
+    monkeypatch.setattr(events_module, "_MAX_STREAM_DURATION", 2)
+
+    redis_store: SessionStore = app.state.session_store
+    session, token, _last = await _completed_chat(session_factory, redis_store)
+    checked_in: list[int] = []
+
+    async def _check_in():
+        await asyncio.sleep(0.5)
+        checked_in.append(await redis_store.emit_event(
+            session.id,
+            EventType.INBOX_PROGRESS_CHECKIN,
+            {"iterations": 3, "elapsed_seconds": 120, "progress_summary": "Halfway."},
+        ))
+
+    check_in = asyncio.create_task(_check_in())
+    try:
+        async with client.stream(
+            "GET",
+            f"/v1/sessions/{session.id}/events?after=-1&watch=1",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as response:
+            events = await _read_sse_events(response, until_types={"stream.timeout"}, deadline_s=5.0)
+    finally:
+        await check_in
+
+    # The watch was open when the check-in came.
+    assert "inbox.progress_checkin" in [event_type for event_type, _data in events]
+    async with session_factory() as db:
+        rows = (
+            await db.execute(select(InboxItem).where(InboxItem.source_event_id == checked_in[0]))
+        ).scalars().all()
+    assert [row.kind for row in rows] == ["progress_checkin"]

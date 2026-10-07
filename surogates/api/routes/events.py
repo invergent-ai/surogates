@@ -378,13 +378,21 @@ async def stream_events(
         if redis is not None:
             try:
                 pubsub = redis.pubsub()
-                await pubsub.subscribe(f"surogates:session:{session_id}")
                 if watch:
-                    # redis-py sends SUBSCRIBE without waiting for Redis to take
-                    # it, and a watch waits long on the channel after its first
-                    # read: a publish in between would be heard of only at the
-                    # keepalive. So the first read waits for Redis's reply.
+                    # By pattern, of the exact name (a UUID has no glob
+                    # characters): the agent counts a chat's exact subscribers
+                    # as its live viewers, and leaves its check-ins and
+                    # completions out of the inbox while one is there. A watch
+                    # is no viewer.
+                    await pubsub.psubscribe(f"surogates:session:{session_id}")
+                    # redis-py sends the subscription without waiting for Redis
+                    # to take it, and a watch waits long on the channel after
+                    # its first read: a publish in between would be heard of
+                    # only at the keepalive. So the first read waits for
+                    # Redis's reply.
                     await pubsub.get_message(timeout=_POLL_INTERVAL)
+                else:
+                    await pubsub.subscribe(f"surogates:session:{session_id}")
             except Exception:
                 pubsub = None
 

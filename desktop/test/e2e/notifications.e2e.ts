@@ -190,4 +190,22 @@ describe("the app's notifications", () => {
     await closed;
     app = undefined;
   });
+
+  it("tell a turn's end in the chat followed once, though the inbox has it too, and the chat's other items as the inbox has them", async () => {
+    const client = await signedIn();
+    agent.titles.set(CHAT, "Quarterly report");
+    await focus(app!);
+    await moveTo(client, `/chat/${CHAT}`);
+    await hide(app!);
+    await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(1);
+    await expect.poll(() => agent.inboxStreams.size).toBe(1);
+    // No page streams the chat, so the agent puts the turn's end in the inbox too.
+    agent.tell({ kind: "task_complete", title: "Quarterly report", session_id: CHAT });
+    agent.turnEnds(CHAT);
+    await expect.poll(async () => (await notices(app!)).length).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await notices(app!)).toEqual([{ title: "Quarterly report", body: "Finished." }]);
+    agent.tell({ kind: "progress_checkin", title: "Progress: 3 iterations, 2 min elapsed", session_id: CHAT });
+    await expect.poll(async () => (await notices(app!)).at(-1)).toEqual({ title: "Progress: 3 iterations, 2 min elapsed", body: "Checked in." });
+  });
 });
