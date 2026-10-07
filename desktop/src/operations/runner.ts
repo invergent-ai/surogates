@@ -43,6 +43,20 @@ class Suspension {
   constructor(readonly outcome: Outcome) {}
 }
 
+// What the user's own request (surogates/devices/operations.py's "request:" invocations: an
+// upload or a delete from the file panel) is answered when the link ends while it is still
+// asked about (it drops, the server ends it, or the app stops it for a failure): its caller is
+// an HTTP request the server now answers "offline", so it must never run later. Answered not
+// run, as the server answers a cancel, at the next welcome. The one exception is a request its
+// user already allowed: it is running, and finishes as any started operation does.
+export const DISMISSED: Outcome = {
+  error: { type: "cancelled", message: "This computer's link dropped before this was allowed, so it did not run" },
+};
+const REQUEST = "request:";
+
+// The abort reason disconnected() gives.
+class Dismissal {}
+
 // What a read is answered when its chunks cannot be journaled: up to 50 MiB makes
 // a full disk likely, and a journal error would stop the link for every chat.
 const NO_SPACE: Outcome = {
@@ -188,6 +202,8 @@ export interface Executor {
 
 export class OperationRunner {
   private readonly running = new Map<string, AbortController>();
+  // The user's own requests still asked about (or waiting for their data), by id: dismissed when the link drops.
+  private readonly requests = new Set<string>();
   private readonly inflight = new Set<Promise<void>>();
   private readonly transfers: TransferSender;
   private readonly receiver = new TransferReceiver();
@@ -222,10 +238,12 @@ export class OperationRunner {
     if (received.action === "ignore" || this.running.has(operation.id)) return;
     const controller = new AbortController();
     this.running.set(operation.id, controller);
+    if (operation.invocationId.startsWith(REQUEST)) this.requests.add(operation.id);
     const done: Promise<void> = this.admitted(operation, controller.signal)
       .catch((error: unknown) => report(this.onError, error))
       .finally(() => {
         if (this.running.get(operation.id) === controller) this.running.delete(operation.id);
+        this.requests.delete(operation.id);
         this.inflight.delete(done);
       });
     this.inflight.add(done);
@@ -234,6 +252,11 @@ export class OperationRunner {
   cancel(id: string): void {
     this.journal.cancel(id);
     this.running.get(id)?.abort();
+  }
+
+  /** The link ended: the user's own requests still asked about are answered not run. */
+  disconnected(): void {
+    for (const id of this.requests) this.running.get(id)?.abort(new Dismissal());
   }
 
   /**
@@ -256,6 +279,15 @@ export class OperationRunner {
   unwanted(id: string): void {
     this.journal.acknowledge(id);
     this.transfers.done(id);
+  }
+
+  /**
+   * The server refused this result: sent again, it would be refused at every welcome, and
+   * the link with it. So it is dropped as an acknowledged one is, and said.
+   */
+  rejected(id: string): void {
+    console.warn(new Error(`The agent rejected this computer's result for operation ${id}, so it is not sent again`));
+    this.unwanted(id);
   }
 
   chunkAcked(id: string, seq: number): void {
@@ -289,7 +321,7 @@ export class OperationRunner {
       data = await this.receiver.whole(operation.id, transfer, signal);
       if (data === null) answer = DAMAGED;
     }
-    if (signal.aborted) return;
+    if (signal.aborted) return this.dropped(operation, signal);
     // A write whose data came in a transfer is asked about, and runs, with that data in place of
     // the transfer. Its base64 is what runs: the buffer goes, not held beside it while it runs.
     const running = data === null ? operation : inline(operation, data);
@@ -300,16 +332,26 @@ export class OperationRunner {
       } catch (error) {
         answer = { error: { type: "other", message: error instanceof Error ? error.message : String(error) } };
       }
-      if (signal.aborted) return;
+      if (signal.aborted) return this.dropped(operation, signal);
     }
     if (answer) {
       const outcome = sendable(operation, answer, false);
       if (this.journal.answer(operation.id, outcome)) this.deliver(operation, outcome);
       return;
     }
+    // Allowed: from here a dropped link no longer dismisses it, as with any operation that started.
+    this.requests.delete(operation.id);
     // The journal's claim decides: false if it was cancelled or started meanwhile.
     if (!this.journal.start(operation.id)) return;
     await this.execute(running, signal);
+  }
+
+  // An admit stopped before it answered. A request dismissed by a dropped link is answered not run;
+  // after a cancel or a suspend nothing is recorded.
+  private dropped(operation: Operation, signal: AbortSignal): void {
+    if (signal.reason instanceof Dismissal && this.journal.answer(operation.id, DISMISSED)) {
+      this.deliver(operation, DISMISSED);
+    }
   }
 
   private async execute(operation: Operation, signal: AbortSignal): Promise<void> {

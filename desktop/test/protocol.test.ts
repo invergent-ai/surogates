@@ -45,6 +45,7 @@ describe("server frames", () => {
     ["cancel", { type: "cancel", id: "x" }],
     ["error", { type: "error", code: "unsupported_protocol", supported: [1] }],
     ["unwanted", { type: "unwanted", id: "x" }],
+    ["rejected", { type: "rejected", id: "x" }],
   ])("reads a %s", (_name, frame) => {
     expect(parseServerFrame(JSON.stringify(frame)).type).toBe(frame.type);
   });
@@ -77,6 +78,7 @@ describe("server frames", () => {
     ["a welcome without a heartbeat", JSON.stringify({ ...welcome, heartbeat_s: undefined })],
     ["a cancel without an id", JSON.stringify({ type: "cancel" })],
     ["an unwanted without an id", JSON.stringify({ type: "unwanted" })],
+    ["a rejected without an id", JSON.stringify({ type: "rejected" })],
     ["a chunk_ack without a seq", JSON.stringify({ type: "chunk_ack", id: "x" })],
     ["a chunk_ack with a fractional seq", JSON.stringify({ type: "chunk_ack", id: "x", seq: 0.5 })],
     ["a chunk_ack with a negative seq", JSON.stringify({ type: "chunk_ack", id: "x", seq: -1 })],

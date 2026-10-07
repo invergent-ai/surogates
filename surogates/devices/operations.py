@@ -22,7 +22,7 @@ from uuid import UUID
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from sqlalchemy import and_, delete, exists, func, insert, or_, select, text, update
+from sqlalchemy import and_, delete, exists, func, insert, or_, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import Device, DeviceOperation, DeviceTransfer, DeviceTransferChunk
 from surogates.db.models import Session as SessionRow
-from surogates.devices.binding import BIND, binding_of, device_of
+from surogates.devices.binding import BIND, RETIRE, binding_of, device_of
 from surogates.devices.presence import DevicePresence, control_channel
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import CHUNK_BYTES, DeviceOperationError, is_well_formed, transfer_of
@@ -64,12 +64,35 @@ CANCELLED_OUTCOME: dict[str, Any] = {
     },
 }
 
-# A calling session in one of these records nothing new.  A cancellation of it
-# then cannot miss an operation recorded beside it.
+# A calling session in one of these records none of the agent's operations.  A
+# cancellation of it then cannot miss one recorded beside it.  The user's own
+# requests are refused only for a deleted chat (see _check_session).
 _STOPPED_STATUSES = frozenset({"paused", "archived", "failed"})
 
 # The longest a stopped call waits to close its own operation.
 _CANCEL_PATIENCE_S = 5.0
+
+# The invocation of an operation asked for outside any tool call: the user's
+# own request on a chat's files.  A tool call's invocation starts with its
+# event id, a number, and a binding's is "bind".
+REQUEST_PREFIX = "request:"
+
+# How many of the user's changes one session may have open on its computer at
+# once: a change waiting for its user holds its data in Postgres.  A read never
+# counts, nor is refused: its own deadline (READ_WITHIN_S) bounds it.
+# ponytail: a constant; make it a setting when a deployment needs another value.
+OPEN_REQUESTS_PER_SESSION = 8
+
+# How long a request's rows are kept once the last of them closed.  A request
+# is never replayed: only the same request sent again reads them, a 202's
+# retry, which the web client gives up on after eleven minutes in all
+# (web/src/api/device-requests.ts), so no retry comes after they are gone.
+REQUEST_RETENTION = timedelta(hours=1)
+
+# What a change's ordinal 0 is answered: it is recorded as done at once, never
+# sent, and names what the change does, so its request id cannot be sent again
+# with another change.
+_CLAIMED: dict[str, Any] = {"ok": None}
 
 # How long a read's data is kept once the tool result that read it is
 # committed, and how long a read's data nothing has read is kept at all.  A
@@ -133,8 +156,9 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
     The root session must name the device and belong to the device's user and
     agent; the calling session must be the root, or a session created under it.
 
-    Returns whether the session is stopped: paused, deleted or failed, or under
-    a deleted root.  The rows stay locked FOR SHARE until the operation commits,
+    Returns whether the session is stopped for this request: for the agent's
+    operations, paused, deleted or failed, or under a deleted root; for the
+    user's own request, deleted, or under a deleted root.  The rows stay locked FOR SHARE until the operation commits,
     so a pause or a delete waits for the operation it must cancel.
     """
     rows = (await db.execute(
@@ -160,19 +184,78 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
         )
     ):
         raise DeviceOperationError("This session does not work on this computer")
-    is_binding = (
-        request.calling_session_id == request.root_session_id
-        and request.invocation_id == BIND
-        and request.ordinal == 0
-    )
+    own = request.calling_session_id == request.root_session_id and request.ordinal == 0
+    is_binding = own and request.invocation_id == BIND
+    is_retiring = own and request.invocation_id == RETIRE
     if (request.kind == BIND) != is_binding:
         raise ValueError("Only the root session's own first operation is its binding")
-    if is_binding and (root.config or {}).get("sandbox_root_session_id"):
+    if (request.kind == RETIRE) != is_retiring:
+        raise ValueError("Only the root session's own retirement retires its folder")
+    if (is_binding or is_retiring) and (root.config or {}).get("sandbox_root_session_id"):
         # A session created under another works in that session's folder.
         raise ValueError("Only a root session is bound to a folder")
     if not is_binding and (await binding_of(db, request.root_session_id)).state != "bound":
         raise DeviceOperationError("This session's folder is not set up on this computer yet")
+    if is_retiring:
+        if root.status != "archived":
+            raise ValueError("Only a deleted root session's folder is retired")
+        # Recorded once its chat is deleted, for its computer to forget the folder.
+        return False
+    if request.invocation_id.startswith(REQUEST_PREFIX):
+        # The user's own look at the folder: a paused or failed chat's files
+        # are still theirs to open.  A deleted chat's are not.
+        return "archived" in (calling.status, root.status)
     return calling.status in _STOPPED_STATUSES or root.status == "archived"
+
+
+class TooManyRequests(DeviceOperationError):
+    """The session already has its fill of the user's changes open on its computer."""
+
+
+async def _refuse_too_many_requests(db: AsyncSession, request: OperationRequest, device: Any) -> None:
+    """Refuse a new change from a session that has OPEN_REQUESTS_PER_SESSION changes open already.
+
+    Only a change counts, or is refused: a request whose claim at ordinal 0
+    names what it changes.  A read has none.  A change already under way may
+    go on: its next operation, or the same change sent again; its claim does
+    not count as under way.  Nor does a change count against itself: sent
+    twice at once, the second finds the first recorded only once it holds the
+    lock, and joins it.
+    """
+    already = (await db.execute(
+        select(DeviceOperation.id).where(
+            DeviceOperation.calling_session_id == request.calling_session_id,
+            DeviceOperation.invocation_id == request.invocation_id,
+            DeviceOperation.ordinal > 0,
+        ).limit(1)
+    )).scalar_one_or_none()
+    if already is not None:
+        return
+    changes = select(DeviceOperation.invocation_id).where(
+        DeviceOperation.calling_session_id == request.calling_session_id,
+        DeviceOperation.invocation_id.startswith(REQUEST_PREFIX),
+        DeviceOperation.ordinal == 0,
+        DeviceOperation.kind == "request",
+    )
+    if (await db.execute(
+        changes.where(DeviceOperation.invocation_id == request.invocation_id).limit(1)
+    )).scalar_one_or_none() is None:
+        return
+    # Held to the commit, so a burst of new changes counts one at a time: the
+    # device row's lock is FOR SHARE, and every one would pass the count together.
+    await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"device-requests:{request.calling_session_id}"))))
+    open_changes = (await db.execute(
+        select(func.count(func.distinct(DeviceOperation.invocation_id))).where(
+            DeviceOperation.calling_session_id == request.calling_session_id,
+            DeviceOperation.invocation_id.in_(changes),
+            DeviceOperation.invocation_id != request.invocation_id,
+            DeviceOperation.completed_at.is_(None),
+        )
+    )).scalar_one()
+    if open_changes >= OPEN_REQUESTS_PER_SESSION:
+        raise TooManyRequests(
+            f"Too much of this chat is waiting for {device.name} already: try again once it is done",
+        )
 
 
 async def _check_lease(db: AsyncSession, request: OperationRequest) -> None:
@@ -193,7 +276,8 @@ async def _refuse_when_full(db: AsyncSession, request: OperationRequest, device:
     """Refuse a new operation from a session not yet waiting on a computer that has its fill.
 
     A session already waiting may keep asking.  A binding waits for its user,
-    not for the computer, so it never counts.  A replay gets its recorded
+    not for the computer, so it never counts; nor does the user's own request,
+    which parks nothing on a worker.  A replay gets its recorded
     outcome, and a tool call already under way may finish its remaining steps:
     neither is ever refused.
     """
@@ -208,7 +292,8 @@ async def _refuse_when_full(db: AsyncSession, request: OperationRequest, device:
     open_for_device = (
         DeviceOperation.device_id == request.device_id,
         DeviceOperation.completed_at.is_(None),
-        DeviceOperation.kind != BIND,
+        DeviceOperation.kind.not_in((BIND, RETIRE)),
+        DeviceOperation.invocation_id.not_like(f"{REQUEST_PREFIX}%"),
     )
     others = (await db.execute(
         select(func.count(func.distinct(DeviceOperation.calling_session_id))).where(
@@ -324,19 +409,22 @@ class DeviceOperations:
 
     # -- the worker's side -----------------------------------------------
 
-    async def run(self, request: OperationRequest) -> dict[str, Any]:
+    async def run(self, request: OperationRequest, *, keep_open: bool = False) -> dict[str, Any]:
         """Run *request* on its device and return the outcome, however long that takes.
 
         A request already recorded under the same invocation and ordinal is
         joined, never repeated: its outcome comes back when the device reports
         it, or at once if it already has.
 
-        A new request from a stopped session (paused, deleted or failed) raises
+        A new operation of the agent's from a stopped session (paused, deleted
+        or failed), or a new request of the user's from a deleted one, raises
         "This session was stopped" and records nothing.  A caller that is
         stopped while it waits, or while its request is being recorded, closes
         its own operation unless its turn is detached, handed to another
-        worker that carries the wait on.  The call returns, or raises, only
-        after its wait's subscription is closed.
+        worker that carries the wait on, or it is *keep_open*: a request whose
+        HTTP wait ended before its computer answered, which the same request
+        joins again later.  The call returns, or raises, only after its wait's
+        subscription is closed.
         """
         waiter: asyncio.Future | None = None
         try:
@@ -359,7 +447,7 @@ class DeviceOperations:
             # again, so it must not run when the computer comes back.  Found by
             # the request's key: a stop during the record's commit leaves no
             # operation id to name, and the row may be committed.
-            if not turn_detached():
+            if not keep_open and not turn_detached():
                 await self._cancel_own(request)
             raise
         finally:
@@ -484,6 +572,59 @@ class DeviceOperations:
         if outcome is None:
             await self._announce(control_channel(device_id), f"op:{operation_id}")
 
+    async def claim(self, request: OperationRequest) -> None:
+        """Record a change's ordinal 0, which names what it does, as done at once.
+
+        It is never sent to the computer.  The same request id sent again with
+        another change finds it, and is refused: OperationConflict.  For an
+        HTTP request, so a database outage fails it rather than holding it open.
+        """
+        async with self._sf() as db:
+            await db.execute(
+                pg_insert(DeviceOperation)
+                .values(
+                    device_id=request.device_id,
+                    root_session_id=request.root_session_id,
+                    calling_session_id=request.calling_session_id,
+                    invocation_id=request.invocation_id,
+                    ordinal=request.ordinal,
+                    kind=request.kind,
+                    args=request.args,
+                    digest=request.digest,
+                    outcome=_CLAIMED,
+                    completed_at=func.now(),
+                )
+                .on_conflict_do_nothing(constraint="uq_device_operations_invocation")
+            )
+            await db.commit()
+            recorded = (await db.execute(
+                select(DeviceOperation.digest).where(
+                    DeviceOperation.calling_session_id == request.calling_session_id,
+                    DeviceOperation.invocation_id == request.invocation_id,
+                    DeviceOperation.ordinal == request.ordinal,
+                )
+            )).scalar_one()
+        if recorded != request.digest:
+            raise OperationConflict(f"{request.invocation_id} was sent before with another change")
+
+    async def retire(self, *, session_id: UUID, device_id: UUID) -> None:
+        """Ask the device to forget a deleted root session's folder, without waiting.
+
+        Recorded like any operation, so a computer away now forgets it when
+        it is back.  The folder itself is never touched.
+        """
+        operation_id, outcome = await self._record(OperationRequest(
+            device_id=device_id,
+            root_session_id=session_id,
+            calling_session_id=session_id,
+            invocation_id=RETIRE,
+            ordinal=0,
+            kind=RETIRE,
+            args={},
+        ))
+        if outcome is None:
+            await self._announce(control_channel(device_id), f"op:{operation_id}")
+
     async def _record(self, request: OperationRequest) -> tuple[UUID, dict[str, Any] | None]:
         """Record *request*, or find it already recorded.
 
@@ -521,10 +662,10 @@ class DeviceOperations:
                 # The lease before the session rows: emit_event takes them in that order.
                 await _check_lease(db, request)
             if await _check_session(db, request, device):
-                # A stopped session records nothing new.  One it already
-                # recorded keeps its outcome, so a call resumed as a pause
-                # lands still learns what the computer did; an open one is
-                # completed by that pause's cancellation.
+                # A session stopped for this caller records nothing new.  One
+                # it already recorded keeps its outcome, so a call resumed as
+                # a pause lands still learns what the computer did; an open
+                # one is completed by that pause's cancellation.
                 existing = (await db.execute(
                     select(DeviceOperation.id, DeviceOperation.digest, DeviceOperation.outcome).where(
                         DeviceOperation.calling_session_id == request.calling_session_id,
@@ -541,8 +682,12 @@ class DeviceOperations:
                     )
                 return existing.id, existing.outcome
             # ponytail: the device row is locked FOR SHARE, so concurrent recorders can pass the
-            # count together and the limit is soft by their number.
-            if request.kind != BIND and device.revoked_at is None:
+            # parked count together and that limit is soft by their number.
+            # A request never parks: its HTTP wait is bounded, and the changes among them have their own cap.
+            if request.invocation_id.startswith(REQUEST_PREFIX):
+                if device.revoked_at is None:
+                    await _refuse_too_many_requests(db, request, device)
+            elif request.kind not in (BIND, RETIRE) and device.revoked_at is None:
                 await _refuse_when_full(db, request, device)
             refused = (
                 {"outcome": REVOKED_OUTCOME, "completed_at": func.now()}
@@ -723,6 +868,30 @@ class DeviceOperations:
             await db.commit()
         return len(marked)
 
+    async def joined(
+        self, calling_session_id: UUID, invocation_id: str, kind: str,
+    ) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]] | None:
+        """A request sent again by what it changes alone, without its data: what it recorded, and how it ended.
+
+        Its operations, in order, as (kind, args), and the outcome of its
+        operation of *kind* once the computer answers it, however long that
+        takes: its caller bounds the wait, which leaves the operation open.
+        None when it recorded none of *kind*: the request must be sent whole.
+        """
+        async with self._sf() as db:
+            rows = (await db.execute(
+                select(DeviceOperation.id, DeviceOperation.kind, DeviceOperation.args)
+                .where(
+                    DeviceOperation.calling_session_id == calling_session_id,
+                    DeviceOperation.invocation_id == invocation_id,
+                )
+                .order_by(DeviceOperation.ordinal)
+            )).all()
+        target = next((row.id for row in rows if row.kind == kind), None)
+        if target is None:
+            return None
+        return [(row.kind, row.args) for row in rows], await self._wait_forever(target)
+
     async def recorded(self, calling_session_id: UUID, invocation_id: str) -> int:
         """How many operations of one invocation are in the journal."""
         async with self._sf() as db:
@@ -740,12 +909,14 @@ class DeviceOperations:
         operation_id: UUID,
         digest: str,
         outcome: dict[str, Any],
-    ) -> Literal["completed", "duplicate", "rejected", "stale"]:
+    ) -> Literal["completed", "duplicate", "gone", "rejected", "stale"]:
         """Record the device's outcome for one of its own operations.
 
-        "duplicate": already recorded.  "rejected": unknown, another device's,
-        or asked for with a different digest.  "stale": the reply came under
-        rotated-out or revoked credentials.
+        "duplicate": already recorded.  "gone": the journal no longer has it,
+        as a request reaped an hour after it closed, so there is nothing to
+        record.  "rejected": another device's, or asked for with a different
+        digest.  "stale": the reply came under rotated-out or revoked
+        credentials.
 
         The credential check is part of the write, not a step before it, so a
         reauthorization or revocation cannot land between the two.
@@ -767,7 +938,9 @@ class DeviceOperations:
                     select(DeviceOperation.device_id, DeviceOperation.digest)
                     .where(DeviceOperation.id == operation_id)
                 )).one_or_none()
-        if completed is None and (row is None or row.device_id != device_id or row.digest != digest):
+        if completed is None and row is None:
+            return "gone"
+        if completed is None and (row.device_id != device_id or row.digest != digest):
             return "rejected"
         # Announced for a duplicate too: its worker may have missed the first.
         await self._announce(operation_channel(operation_id), "completed")
@@ -785,9 +958,11 @@ class DeviceOperations:
     ) -> Literal["started", "unwanted", "rejected", "busy", "stale"]:
         """Get ready for the chunks of a read's result, sent by the connection *holder*.
 
-        "unwanted": the operation is closed, so its data is not needed.
-        "rejected": unknown, another device's, asked for with a different
-        digest, or not a read.  "busy": another connection started this
+        "unwanted": the operation is closed, or the journal no longer has it
+        (a request reaped since), so its data is not needed.
+        "rejected": another device's, asked for with a different digest, or
+        not a read, closed or not: whether another device's operation is
+        closed is not this one's to learn.  "busy": another connection started this
         transfer at the same moment, or its last chunk landed meanwhile.
         "stale": rotated-out or revoked credentials.
 
@@ -804,7 +979,9 @@ class DeviceOperations:
                     DeviceOperation.completed_at,
                 ).where(DeviceOperation.id == operation_id)
             )).one_or_none()
-            if row is None or row.device_id != device_id or row.digest != digest or row.kind != "read":
+            if row is None:
+                return "unwanted"
+            if row.device_id != device_id or row.digest != digest or row.kind != "read":
                 return "rejected"
             if row.completed_at is not None:
                 return "unwanted"
@@ -891,15 +1068,17 @@ class DeviceOperations:
     async def cancel(self, calling_session_ids: Collection[UUID], *, bindings: bool = False) -> int:
         """Cancel the open operations of these sessions, and tell their computers.
 
-        What a computer already reported keeps its outcome.  A binding is
-        cancelled only with *bindings*: deleting a chat ends its folder's
-        set-up, pausing it does not.  Returns how many were cancelled.
+        What a computer already reported keeps its outcome.  A binding and the
+        user's own requests are cancelled only with *bindings*: deleting a chat
+        ends its folder's set-up and the changes it waits on; pausing or failing
+        it stops only the agent's work.  Returns how many were cancelled.
         """
         if not calling_session_ids:
             return 0
         conditions = [DeviceOperation.calling_session_id.in_(list(calling_session_ids))]
         if not bindings:
             conditions.append(DeviceOperation.kind != BIND)
+            conditions.append(DeviceOperation.invocation_id.not_like(f"{REQUEST_PREFIX}%"))
         return await self._cancel_where(*conditions)
 
     async def cancel_invocation(self, calling_session_id: UUID, invocation_id: str) -> int:
@@ -993,6 +1172,30 @@ async def reap_transfers(session_factory: async_sessionmaker[AsyncSession]) -> i
     return len(reaped)
 
 
+async def reap_requests(session_factory: async_sessionmaker[AsyncSession]) -> int:
+    """Delete the rows of the user's own requests REQUEST_RETENTION after the last of them closed.
+
+    A request with an operation still open keeps every row: the same request
+    sent again joins them.  Their transfers go with them.
+    """
+    # ponytail: scans the journal's request rows; a partial index on them when the table grows.
+    closed = (
+        select(DeviceOperation.calling_session_id, DeviceOperation.invocation_id)
+        .where(DeviceOperation.invocation_id.startswith(REQUEST_PREFIX))
+        .group_by(DeviceOperation.calling_session_id, DeviceOperation.invocation_id)
+        .having(func.bool_and(DeviceOperation.completed_at.is_not(None)))
+        .having(func.max(DeviceOperation.completed_at) < func.now() - REQUEST_RETENTION)
+    )
+    async with session_factory() as db:
+        reaped = (await db.execute(
+            delete(DeviceOperation)
+            .where(tuple_(DeviceOperation.calling_session_id, DeviceOperation.invocation_id).in_(closed))
+            .returning(DeviceOperation.id)
+        )).all()
+        await db.commit()
+    return len(reaped)
+
+
 def _whole(chunks: list[bytes], transfer: dict[str, Any]) -> bytes | None:
     """A transfer's data, joined, if it is all there and hashes to its name."""
     data = b"".join(chunks)
@@ -1016,6 +1219,7 @@ class JournalRunner:
         calling_session_id: UUID,
         invocation_id: str,
         lease_token: str | None = None,
+        keep_open: bool = False,
     ) -> None:
         self._operations = operations
         self._device_id = device_id
@@ -1023,6 +1227,7 @@ class JournalRunner:
         self._calling_session_id = calling_session_id
         self._invocation_id = invocation_id
         self._lease_token = lease_token
+        self._keep_open = keep_open
         self._ordinal = 0
         self._conflicted = False
 
@@ -1044,7 +1249,7 @@ class JournalRunner:
                 args=args,
                 lease_token=self._lease_token,
                 payload=payload,
-            ))
+            ), keep_open=self._keep_open)
             transfer = transfer_of(outcome)
             if transfer is None:
                 return outcome

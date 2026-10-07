@@ -9,8 +9,9 @@ from fastapi import HTTPException, Request, status
 
 from surogates.devices.binding import binding_of, device_of
 from surogates.sandbox.pool import sandbox_session_key
+from surogates.session.files import DeviceAccess
 from surogates.session.models import Session
-from surogates.tenant.context import get_tenant
+from surogates.tenant.context import TenantContext, get_tenant
 
 
 SCHEDULED_RUN_READ_ONLY_DETAIL = "Scheduled run sessions are read-only."
@@ -135,14 +136,33 @@ def require_user_writable_session(session: Session) -> None:
         )
 
 
-async def require_bound_session(request: Request, session: Session) -> None:
-    """409 until the computer a local-folder chat works on has accepted its folder.
+async def require_device_access(
+    request: Request, session: Session, tenant: TenantContext, *, bound: bool = True,
+) -> DeviceAccess:
+    """What a route that reaches a local-folder chat's computer checks first; nothing for a cloud chat.
 
-    Before that the computer has no folder to run the chat's work in, and an
-    upload has nowhere to go.
+    404 to anyone but the chat's own user, or its own service account: its
+    folder is on that user's computer, where reads are never asked about and,
+    working freely, changes neither.  The org's other members and its service
+    accounts get what a stranger gets.  A session created under another
+    carries its root's user (``create_child_session`` copies it), so it is
+    the root user's too.  Then, with *bound*, 409 until the computer has
+    accepted the chat's folder: before that it has no folder to run the chat's
+    work in, and an upload has nowhere to go.
+
+    Returns the access ``session_files`` takes a change with, so no change is
+    claimed before this check.
     """
     if device_of(session.config) is None:
-        return
+        return DeviceAccess(session.id, bound=True)
+    own = (
+        (tenant.user_id is not None and tenant.user_id == session.user_id)
+        or (tenant.service_account_id is not None and tenant.service_account_id == session.service_account_id)
+    )
+    if not own:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Session {session.id} not found.")
+    if not bound:
+        return DeviceAccess(session.id, bound=False)
     async with request.app.state.session_factory() as db:
         binding = await binding_of(db, UUID(sandbox_session_key(session)))
     if binding.state == "pending":
@@ -155,3 +175,4 @@ async def require_bound_session(request: Request, session: Session) -> None:
             status_code=status.HTTP_409_CONFLICT,
             detail=f"This chat's folder could not be set up: {binding.message}. Start a new chat.",
         )
+    return DeviceAccess(session.id, bound=True)

@@ -11,7 +11,7 @@ import { connectDevice } from "../src/device.js";
 import { INTERRUPTED, OperationJournal } from "../src/journal/journal.js";
 import type { DeviceLink } from "../src/link/client.js";
 import { MAX_FRAME_CHARS, type Operation, type Outcome } from "../src/link/protocol.js";
-import { ACCESS_ENDED, APP_CLOSED, type Executor, TOO_LARGE } from "../src/operations/runner.js";
+import { ACCESS_ENDED, APP_CLOSED, DISMISSED, type Executor, TOO_LARGE } from "../src/operations/runner.js";
 import { FakeLinkServer } from "./fake-server.js";
 
 let dir: string;
@@ -235,6 +235,23 @@ describe("the link coming and going", () => {
     await server.until(() => server.connections === 2 && link?.status === "connected");
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(results("a")).toHaveLength(1);
+  });
+
+  it("drops a result the server rejects, says so, and never sends it again", async () => {
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const executor = new RecordingExecutor();
+    const { journal } = await start(executor);
+    server.send(opFrame("a"));
+    await server.until(() => results("a").length === 1);
+    // As surogates/devices/link.py refuses it: named, then the link closed.
+    server.send({ type: "rejected", id: "a" });
+    server.close(4400);
+    await server.until(() => server.connections === 2 && link?.status === "connected");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(results("a")).toHaveLength(1);
+    expect(journal.unsent()).toEqual([]);
+    expect(String(warned.mock.calls[0]?.[0])).toContain("The agent rejected this computer's result for operation a");
+    warned.mockRestore();
   });
 });
 
@@ -586,6 +603,81 @@ describe("an operation the executor admits before it starts", () => {
     server.send(opFrame("a", "run"));
     await server.until(() => results("a").length === 1);
     expect(results("a")[0]?.outcome).toEqual({ ok: "answered" });
+    expect(gate.ran).toEqual([]);
+  });
+
+  it("is answered not run when the link drops while it waits, for the user's own request, and never runs", async () => {
+    const gate = new Gate(() => "hold");
+    await start(gate);
+    // An upload from the file panel, waiting for its user's answer; and a tool call's write beside it.
+    server.send({ ...opFrame("a", "write"), invocation_id: "request:upload-0001" });
+    server.send(opFrame("z", "write"));
+    await server.until(() => gate.asked.length === 2);
+    server.close(1011);
+    await server.until(() => server.connections === 2 && link?.status === "connected");
+    // Sent at the next welcome: its caller is told offline, so it must never land later.
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual(DISMISSED);
+    expect(server.hellos.at(-1)?.open).toEqual(["z"]);
+    // The tool call's is still asked about, and runs once allowed; the request's never does.
+    gate.release("z", null);
+    await server.until(() => results("z").length === 1);
+    expect(gate.ran).toEqual(["z"]);
+  });
+
+  it("runs on and is answered as it ended when the link drops once its user allowed it", async () => {
+    // Allowed, then the link drops while it writes: it is the one exception, and finishes as any started operation.
+    const executor = new RecordingExecutor(true);
+    const allowing: Executor = { admit: () => Promise.resolve(null), run: (operation, signal) => executor.run(operation, signal) };
+    await start(allowing);
+    server.send({ ...opFrame("a", "write"), invocation_id: "request:upload-0001" });
+    await server.until(() => executor.ran.length === 1);
+    server.close(1011);
+    await server.until(() => server.connections === 2 && link?.status === "connected");
+    executor.finish("a");
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual({ ok: "ran a" });
+    expect(executor.aborted).toEqual([]);
+  });
+
+  it("is answered not run when the server ends the link for a newer app while it waits", async () => {
+    const gate = new Gate(() => "hold");
+    const { journal } = await start(gate);
+    server.send({ ...opFrame("a", "write"), invocation_id: "request:upload-0001" });
+    await server.until(() => gate.asked.length === 1);
+    server.send({ type: "error", code: "unsupported_protocol", supported: [2] });
+    server.close(4400);
+    await server.until(() => link?.status === "update_required");
+    // Kept to send once the app is updated; allowed now, it must not run.
+    await server.until(() => journal.unsent().length === 1);
+    expect(journal.unsent()).toEqual([{ id: "a", digest: "digest-a", outcome: DISMISSED }]);
+    gate.release("a", null);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(gate.ran).toEqual([]);
+  });
+
+  it("is answered not run when the app stops the link for a failure while it waits", async () => {
+    // A journal that cannot start the tool call's operation: the device cannot go on, and its link stops.
+    class Failing extends OperationJournal {
+      override start(id: string): boolean {
+        if (id === "b") throw new Error("disk I/O error");
+        return super.start(id);
+      }
+    }
+    const failing = new Failing(join(dir, "journal.sqlite"));
+    journals.push(failing);
+    const errors: unknown[] = [];
+    const gate = new Gate((operation) => (operation.id === "a" ? "hold" : null));
+    await start(gate, failing, (error) => errors.push(error));
+    server.send({ ...opFrame("a", "write"), invocation_id: "request:upload-0001" });
+    await server.until(() => gate.asked.length === 1);
+    server.send(opFrame("b", "write"));
+    await server.until(() => link?.status === "stopped");
+    expect(errors.map(String)).toEqual(["Error: disk I/O error"]);
+    await server.until(() => failing.unsent().length === 1);
+    expect(failing.unsent()).toEqual([{ id: "a", digest: "digest-a", outcome: DISMISSED }]);
+    gate.release("a", null);
+    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(gate.ran).toEqual([]);
   });
 

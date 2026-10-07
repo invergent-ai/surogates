@@ -65,6 +65,8 @@ export type ServerFrame =
   | { type: "chunk"; id: string; seq: number; data: Buffer }
   // The server closed the operation: stop sending its transfer; the result counts as acknowledged.
   | { type: "unwanted"; id: string }
+  // The server refused this result, and closes the link: it is never sent again.
+  | { type: "rejected"; id: string }
   | { type: "error"; code: string; supported: number[] }
   // A frame type this app does not know: ignored, so a newer server's
   // additions within protocol 1 do not end the link.
@@ -162,6 +164,8 @@ export function parseServerFrame(raw: string): ServerFrame {
     }
     case "unwanted":
       return { type: "unwanted", id: text(frame, "id") };
+    case "rejected":
+      return { type: "rejected", id: text(frame, "id") };
     case "chunk": {
       const { seq, data } = frame;
       if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0) {

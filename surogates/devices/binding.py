@@ -24,6 +24,9 @@ from surogates.db.models import DeviceOperation
 # invocation id never takes this form, and its ordinals start at 1.
 BIND = "bind"
 
+# The same for a deleted root's retirement: its computer forgets the folder.
+RETIRE = "retire"
+
 # The sandbox keys of the session on the user's computer this task works for,
 # set by AgentHarness.wake (see surogates.devices.sandbox).  Here, not there,
 # so the workspace fallback can read it without importing the device journal.

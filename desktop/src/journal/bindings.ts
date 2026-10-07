@@ -58,6 +58,26 @@ export class Bindings {
     this.changed(binding.root);
   }
 
+  /**
+   * Forget a deleted root's binding and what its user allowed for it, both or neither.
+   * The folder is not touched; an unknown root changes nothing.
+   */
+  retire(root: string): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(`DELETE FROM domains WHERE root = ?`).run(root);
+      this.db.prepare(`DELETE FROM bindings WHERE root = ?`).run(root);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // SQLite rolled back by itself, as on a full disk.
+      }
+      throw error;
+    }
+  }
+
   /** A root's mode from now on, for it and its sub-agents. An unknown root changes nothing. */
   setMode(root: string, mode: Mode): void {
     // Told only when it changed: an unknown root, or the mode it has, changes nothing.

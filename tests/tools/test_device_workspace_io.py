@@ -9,7 +9,10 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -29,7 +32,8 @@ from surogates.devices.workspace import (
 from surogates.tools.builtin import file_ops
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import FileStat, LinePage, LocalWorkspaceIO, RevisionConflict, RipgrepError
-from tests.fake_laptop import BAD_PAGE, CONFLICT, InProcessRunner, perform
+from tests import fake_laptop
+from tests.fake_laptop import BAD_PAGE, BAD_WALK, CONFLICT, InProcessRunner, perform
 
 
 @pytest.fixture
@@ -535,3 +539,284 @@ async def test_a_conflict_is_an_os_error_of_its_own(root):
     # An OSError, so a V4A patch reports it as that file's error and goes on with the others.
     assert isinstance(raised.value, OSError) and raised.value.errno is None
     assert str(raised.value) == "changed"
+
+
+async def test_a_walk_lists_the_files_under_a_folder_with_their_sizes(wio, root):
+    (root / "sub").mkdir()
+    (root / "a.txt").write_text("alpha")
+    (root / "sub" / "b.md").write_text("b")
+    (root / "node_modules" / "x").mkdir(parents=True)
+    (root / "node_modules" / "x" / "i.js").write_text("")
+    (root / "link").symlink_to(root / "a.txt")
+    walked = await wio.walk(await wio.resolve("."), skip={"node_modules"})
+    assert sorted(walked.files) == [("a.txt", 5), ("sub/b.md", 1)]
+    assert walked.truncated is False
+    assert walked.cursor.isdigit()
+    assert sorted((await wio.walk(str(root / "sub"), skip=())).files) == [("b.md", 1)]
+
+
+async def test_a_walk_since_a_cursor_lists_only_what_changed_after_it(wio, root):
+    (root / "old.txt").write_text("o")
+    # Past the cursor's margin, which covers a filesystem's coarser clock.
+    await asyncio.sleep(workspace.WALK_MARGIN_NS / 1e9 + 0.1)
+    first = await wio.walk(str(root), skip=())
+    (root / "new.txt").write_text("n")
+    assert (await wio.walk(str(root), skip=(), since=first.cursor)).files == [("new.txt", 1)]
+
+
+async def test_a_walk_enters_no_folder_the_tree_hides(wio, root):
+    for name in ("src", ".cache", ".github", "_whiteboard", "sub/_whiteboard", "node_modules"):
+        (root / name).mkdir(parents=True)
+        (root / name / "f.txt").write_text("x")
+    walked = await wio.walk(str(root), skip={"node_modules"}, skip_top={"_whiteboard"}, skip_hidden=True)
+    assert sorted(walked.files) == [(".github/f.txt", 1), ("src/f.txt", 1), ("sub/_whiteboard/f.txt", 1)]
+
+
+async def test_a_walk_leaves_out_a_name_that_is_not_utf_8_and_lists_its_decoded_twin_once(wio, root):
+    (root / "a.txt").write_text("a")
+    with open(os.path.join(os.fsencode(root), b"n\xff"), "wb") as fh:
+        fh.write(b"bytes")
+    (root / "n\ufffd").write_text("t")
+    assert sorted((await wio.walk(str(root), skip=())).files) == [("a.txt", 1), ("n\ufffd", 1)]
+
+
+# Swaps the folder at argv[1] for a link to argv[3] and back, as a command in the VM writing the folder could,
+# until it is killed.  Each swap is a line on stdout.
+_SWAPPER = """
+import os, sys
+folder, real, outside = sys.argv[1:4]
+while True:
+    try:
+        os.rename(folder, real); os.symlink(outside, folder); os.unlink(folder); os.rename(real, folder)
+        print(flush=True)
+    except OSError:
+        pass
+"""
+
+
+async def test_a_walk_never_enters_a_folder_swapped_for_a_link_meanwhile(wio, root, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    (outside / "o.txt").write_text("outside")
+    (root / "aaa").mkdir()
+    (root / "aaa" / "in.txt").write_text("in")
+    swapper = subprocess.Popen(
+        [sys.executable, "-c", _SWAPPER, str(root / "aaa"), str(root / "aaa.real"), str(outside)],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert swapper.stdout.readline() == b"\n"  # swapping
+        leaked, deadline = set(), time.monotonic() + 2
+        while time.monotonic() < deadline:
+            leaked |= {path for path, _ in (await wio.walk(str(root), skip=())).files if path == "aaa/o.txt"}
+    finally:
+        swapper.kill()
+        swapper.wait()
+    assert leaked == set()
+
+
+async def test_the_reference_laptops_walk_stops_once_its_time_is_up_and_says_so(root, monkeypatch):
+    (root / "a.txt").write_text("a")
+    monkeypatch.setattr(fake_laptop, "WALK_BUDGET_S", -1)  # up before the first entry
+    walked = await perform(LocalWorkspaceIO(str(root)), "walk", {
+        "key": str(root), "skip": [], "skip_top": [], "skip_hidden": False, "since": None,
+    })
+    assert walked["ok"]["files"] == [] and walked["ok"]["truncated"] is True
+
+
+async def test_a_walk_reads_a_folder_no_further_than_it_looks_and_closes_every_folder_it_opened(wio, root, monkeypatch):
+    (root / "deep" / "many").mkdir(parents=True)
+    for name in range(2 * workspace.MAX_WALK_FILES):
+        (root / "deep" / "many" / str(name)).touch()
+    scandir, read = os.scandir, 0
+
+    class Counting:
+        """os.scandir, counting the entries it yields."""
+
+        def __init__(self, path):
+            self._listing = scandir(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal read
+            entry = next(self._listing)
+            read += 1
+            return entry
+
+        def close(self):
+            self._listing.close()
+
+    handles = len(os.listdir("/proc/self/fd"))
+    monkeypatch.setattr(os, "scandir", Counting)
+    walked = await wio.walk(str(root), skip=())
+    monkeypatch.undo()
+    assert walked.truncated is True
+    assert read < workspace.MAX_WALK_FILES + 10
+    assert len(os.listdir("/proc/self/fd")) == handles
+
+
+def _chain(top: Path, depth: int) -> None:
+    """*depth* folders, each in the last, under *top*, a file at the bottom: built through handles, as a command
+    in the VM could build it, past what a path can name."""
+    fd = os.open(top, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for _ in range(depth):
+            os.mkdir("d", dir_fd=fd)
+            child = os.open("d", os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        os.close(os.open("bottom.txt", os.O_WRONLY | os.O_CREAT, dir_fd=fd))
+    finally:
+        os.close(fd)
+
+
+async def test_a_walk_goes_no_deeper_than_its_depth_and_says_so(wio, root):
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    # Two handles a level, as the app holds them: raised as Node raises its own.
+    resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+    whole, deep = root / "whole", root / "deep"
+    whole.mkdir()
+    deep.mkdir()
+    try:
+        _chain(whole, workspace.MAX_WALK_DEPTH)
+        _chain(deep, workspace.MAX_WALK_DEPTH + 1)
+        walked = await wio.walk(str(whole), skip=())
+        assert (walked.files, walked.truncated) == ([("d/" * workspace.MAX_WALK_DEPTH + "bottom.txt", 0)], False)
+        walked = await wio.walk(str(deep), skip=())
+        assert (walked.files, walked.truncated) == ([], True)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+        subprocess.run(["rm", "-rf", str(whole), str(deep)], check=True)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a folder of mode 000")
+async def test_a_walk_skips_a_folder_it_may_not_read_and_lists_every_other_file_whole(wio, root):
+    # A database's data folder bind-mounted into a project, owned by another user: as common as lost+found.
+    for name in ("data/postgres", "web", "src"):
+        (root / name).mkdir(parents=True)
+    (root / "data" / "postgres" / "PG_VERSION").write_text("16")
+    (root / "data" / "seed.sql").write_text("x")
+    (root / "web" / "index.html").write_text("x")
+    (root / "src" / "main.ts").write_text("x")
+    (root / "data" / "postgres").chmod(0o000)
+    try:
+        walked = await wio.walk(str(root), skip=())
+        assert sorted(walked.files) == [("data/seed.sql", 1), ("src/main.ts", 1), ("web/index.html", 1)]
+        assert walked.truncated is False
+    finally:
+        (root / "data" / "postgres").chmod(0o755)
+
+
+async def test_a_walk_stops_at_a_folder_it_has_no_handle_left_to_enter_and_says_so(wio, root, monkeypatch):
+    (root / "sub").mkdir()
+    (root / "sub" / "b.txt").write_text("b")
+    handles = len(os.listdir("/proc/self/fd"))
+    real_open, opened = os.open, 0
+
+    def out_of_handles(*args, **kwargs):
+        nonlocal opened
+        opened += 1
+        if opened == 2:  # the key's, then sub's
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(os, "open", out_of_handles)
+    walked = await wio.walk(str(root), skip=())
+    monkeypatch.undo()
+    # What it could not enter is unknown: not said whole.
+    assert walked.truncated is True
+    assert ("sub/b.txt", 1) not in walked.files
+    assert len(os.listdir("/proc/self/fd")) == handles
+
+
+async def test_a_walk_stops_at_its_cap_and_says_so(wio, root):
+    (root / "many").mkdir()
+    for name in range(workspace.MAX_WALK_FILES + 1):
+        (root / "many" / str(name)).touch()
+    walked = await wio.walk(str(root), skip=())
+    assert len(walked.files) == workspace.MAX_WALK_FILES
+    assert walked.truncated is True
+
+
+async def test_a_walk_lists_a_folder_of_exactly_its_cap_whole_and_says_so(wio, root):
+    for name in range(workspace.MAX_WALK_FILES):
+        (root / str(name)).touch()
+    walked = await wio.walk(str(root), skip=())
+    assert len(walked.files) == workspace.MAX_WALK_FILES
+    assert walked.truncated is False
+
+
+async def test_a_walk_stops_where_its_paths_fill_one_frame(wio, root):
+    # Each path costs 252 encoded and 24 more: 3 799 of them fit in MAX_PAYLOAD_BYTES, not 3 800.
+    for name in range(4_000):
+        (root / str(name).rjust(250, "x")).touch()
+    walked = await wio.walk(str(root), skip=())
+    assert len(walked.files) == 3_799
+    assert walked.truncated is True
+
+
+async def test_a_walk_stops_past_its_looks_a_folder_it_does_not_enter_counted_too(wio, root):
+    # Hidden, so none is entered: each is one look.
+    for name in range(workspace.MAX_WALK_LOOKS):
+        (root / f".{name}").mkdir()
+    walked = await wio.walk(str(root), skip=(), skip_hidden=True)
+    assert (walked.files, walked.truncated) == ([], False)
+    (root / ".one-more").mkdir()
+    walked = await wio.walk(str(root), skip=(), skip_hidden=True)
+    assert (walked.files, walked.truncated) == ([], True)
+
+
+async def test_a_walk_fails_as_its_folder_does(wio, root):
+    (root / "a.txt").write_text("a")
+    with pytest.raises(NotADirectoryError):
+        await wio.walk(str(root / "a.txt"), skip=())
+    with pytest.raises(FileNotFoundError):
+        await wio.walk(str(root / "missing"), skip=())
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, [], {"files": [], "truncated": False}, {"files": [["a", "1"]], "truncated": False, "cursor": "1"},
+     {"files": [["a", -1]], "truncated": False, "cursor": "1"}, {"files": [["a"]], "truncated": False, "cursor": "1"},
+     {"files": [[1, 1]], "truncated": False, "cursor": "1"}, {"files": [], "truncated": 0, "cursor": "1"},
+     {"files": [], "truncated": False, "cursor": 1}, {"files": [], "truncated": False, "cursor": ""},
+     {"files": [], "truncated": False, "cursor": "soon"}, {"files": [], "truncated": False, "cursor": "\u0661\u0662"},
+     {"files": [], "truncated": False, "cursor": "1" * 21}],
+    ids=["null", "list", "no cursor", "size as text", "negative size", "no size", "path as number",
+         "truncated as number", "cursor as number", "empty cursor", "cursor as words", "cursor in other digits",
+         "cursor too long"],
+)
+async def test_a_listing_that_is_not_one_is_an_error_not_a_wrong_tree(value):
+    with pytest.raises(DeviceOperationError, match="returned an invalid listing"):
+        await DeviceWorkspaceIO(_Answers(value), root="/").walk("/", skip=())
+
+
+@pytest.mark.parametrize("skips", [{"skip": "node_modules"}, {"skip": (), "skip_top": "_whiteboard"}], ids=["skip", "skip_top"])
+async def test_a_walk_takes_folder_names_not_one_string(skips):
+    # A string is a collection of its characters: sorted, it would skip every one-letter folder.
+    with pytest.raises(TypeError, match="folder names"):
+        await DeviceWorkspaceIO(_Answers({"files": [], "truncated": False, "cursor": "1"}), root="/").walk("/", **skips)
+
+
+async def test_the_reference_laptop_refuses_a_walk_it_cannot_take(root):
+    taken = {"key": str(root), "skip": [], "skip_top": [], "skip_hidden": False, "since": None}
+    for changes in ({"skip": "node_modules"}, {"skip_top": [1]}, {"skip_hidden": 1}, {"since": "yesterday"}, {"since": "1" * 21}):
+        assert await perform(LocalWorkspaceIO(str(root)), "walk", {**taken, **changes}) == {
+            "error": {"type": "value", "message": BAD_WALK},
+        }
+    missing = {name: value for name, value in taken.items() if name != "since"}
+    assert await perform(LocalWorkspaceIO(str(root)), "walk", missing) == {"error": {"type": "value", "message": BAD_WALK}}
+    # The key before anything else, as the app checks it.
+    assert await perform(LocalWorkspaceIO(str(root)), "walk", {**taken, "key": 7, "skip": "x"}) == {
+        "error": {"type": "value", "message": "'key' must be a string"},
+    }
+    assert (await perform(LocalWorkspaceIO(str(root)), "walk", {**taken, "since": "9" * 20}))["ok"]["files"] == []

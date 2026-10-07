@@ -298,11 +298,12 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
       input.sessionId,
       input.file,
       input.directory,
+      input.signal,
     );
   },
 
   async deleteWorkspaceFile(input) {
-    await workspaceApi.deleteFile(input.sessionId, input.path);
+    await workspaceApi.deleteFile(input.sessionId, input.path, input.signal);
   },
 
   getWorkspaceDownloadUrl(input) {

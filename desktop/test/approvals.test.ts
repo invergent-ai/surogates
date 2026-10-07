@@ -181,8 +181,8 @@ describe("a chat that asks every time", () => {
     bind(ROOT, "ask");
     user.auto = "deny";
     for (const kind of [
-      "resolve", "check_write", "stat", "read", "read_lines", "list_dir", "ripgrep", "which", "poll", "read_output",
-      "wait", "kill", "list_processes",
+      "resolve", "check_write", "stat", "read", "read_lines", "list_dir", "walk", "ripgrep", "which", "poll",
+      "read_output", "wait", "kill", "list_processes",
     ]) {
       expect(await approvals.admit(op(kind, { key: `${FOLDER}/a.txt` }), never())).toBeNull();
     }
@@ -202,6 +202,29 @@ describe("a chat that asks every time", () => {
       op("write", { key: [spill], data: "" }),
       op("write", { key: `${FOLDER}/.surogates-results/../a.txt`, data: "" }),
       op("write", { key: `${FOLDER}/.surogates-results/./x.log`, data: "" }),
+    ]) {
+      expect(await approvals.admit(operation, never())).toEqual(CHANGE_DENIED);
+    }
+    expect(user.asked).toHaveLength(6);
+  });
+
+  it("never asks about the whiteboard's canvas the chat's page saves, and asks about anything else there", async () => {
+    bind(ROOT, "ask");
+    user.auto = "deny";
+    const canvas = `${FOLDER}/_whiteboard/canvas.json`;
+    // The page's save is the user's own request.
+    const saved = { ...op("write", { key: canvas, data: "" }), invocationId: "request:0f3a9c2e7b1d4a6f" };
+    expect(await approvals.admit(saved, never())).toBeNull();
+    expect(user.asked).toEqual([]);
+    for (const operation of [
+      // An agent's tool call writing the canvas would replace the user's board: asked, as anywhere else.
+      op("write", { key: canvas, data: "" }),
+      op("delete", { key: canvas }),
+      op("write", { key: `${FOLDER}/sub/_whiteboard/canvas.json`, data: "" }),
+      op("write", { key: `${FOLDER}/_whiteboard/../a.txt`, data: "" }),
+      // Only the canvas: an agent's write beside it is asked about, as anywhere else.
+      op("write", { key: `${FOLDER}/_whiteboard/other.json`, data: "" }),
+      op("write", { key: `${FOLDER}/_whiteboard/sub/x`, data: "" }),
     ]) {
       expect(await approvals.admit(operation, never())).toEqual(CHANGE_DENIED);
     }

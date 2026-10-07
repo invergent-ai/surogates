@@ -4,11 +4,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { DatabaseSync } from "node:sqlite";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApprovalPrompts, ApprovalRequest } from "../src/binding/approvals.js";
 import {
-  ALREADY_BOUND, Binder, type BinderOptions, type FolderPrompts, type FolderSheet, NOT_RECORDED, type Prepared,
+  ALREADY_BOUND, Binder, type BinderOptions, type FolderPrompts, type FolderSheet, NOT_FORGOTTEN, NOT_RECORDED, type Prepared,
 } from "../src/binding/binder.js";
 import { BOOT_ID } from "../src/binding/folder.js";
 import { connectDevice } from "../src/device.js";
@@ -457,6 +459,66 @@ describe("a chat's bind operation", () => {
     expect(await chooser.run(op, never())).toEqual({ ok: "ran resolve" });
     await chooser.end();
     expect([hosts.ran, hosts.ended]).toEqual([[op], 1]);
+  });
+});
+
+describe("a deleted chat's retire operation", () => {
+  const retireOp = (root: string, changes: Partial<Operation> = {}): Operation => ({
+    id: `retire-${root}`, sessionId: root, callingSessionId: root, invocationId: "retire", ordinal: 0, kind: "retire",
+    args: {}, digest: `digest-${root}`, ...changes,
+  });
+  const bound = (root: string) =>
+    journal.bindings.add({ root, nonce: `nonce-${root}`, folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
+
+  it("forgets the chat's folder and what its user allowed for it, touches no file, and leaves other chats bound", async () => {
+    bound(ROOT);
+    bound(OTHER);
+    journal.bindings.allowDomain(ROOT, "example.com");
+    writeFileSync(join(notes, "kept.txt"), "kept");
+    const chooser = binder(new User());
+    expect(await chooser.admit(retireOp(ROOT), never())).toEqual({ ok: null });
+    expect(journal.bindings.get(ROOT)).toBeUndefined();
+    expect(journal.bindings.domains(ROOT)).toEqual([]);
+    expect(journal.bindings.get(OTHER)).toMatchObject({ folder: notes });
+    expect(statSync(join(notes, "kept.txt")).size).toBe(4);
+    expect(hosts.ran).toEqual([]);
+    // Once more, as after a restart: nothing left to forget.
+    expect(await chooser.admit(retireOp(ROOT), never())).toEqual({ ok: null });
+  });
+
+  it.each([
+    ["a session under the chat", { callingSessionId: OTHER }],
+    ["another invocation", { invocationId: "12:call_1" }],
+    ["a later ordinal", { ordinal: 1 }],
+  ])("is refused when it comes from %s, and forgets nothing", async (_name, changes) => {
+    bound(ROOT);
+    expect(await binder(new User()).admit(retireOp(ROOT, changes), never())).toEqual(NOT_BOUND);
+    expect(journal.bindings.get(ROOT)).toMatchObject({ folder: notes });
+  });
+
+  it("keeps the chat's granted hosts with its binding when the journal cannot forget it whole", async () => {
+    bound(ROOT);
+    journal.bindings.allowDomain(ROOT, "example.com");
+    const db = (journal.bindings as unknown as { db: DatabaseSync }).db;
+    const prepare = db.prepare.bind(db);
+    vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
+      if (sql.startsWith("DELETE FROM bindings")) throw new Error("database or disk is full");
+      return prepare(sql);
+    });
+    expect(await binder(new User()).admit(retireOp(ROOT), never())).toEqual(NOT_FORGOTTEN);
+    vi.restoreAllMocks();
+    expect(journal.bindings.get(ROOT)).toMatchObject({ folder: notes });
+    expect(journal.bindings.domains(ROOT)).toEqual(["example.com"]);
+  });
+
+  it("says so when the journal cannot forget the folder", async () => {
+    bound(ROOT);
+    const failures: unknown[] = [];
+    vi.spyOn(journal.bindings, "retire").mockImplementation(() => {
+      throw new Error("database or disk is full");
+    });
+    expect(await binder(new User(), { onError: (error) => failures.push(error) }).admit(retireOp(ROOT), never())).toEqual(NOT_FORGOTTEN);
+    expect(failures).toHaveLength(1);
   });
 });
 

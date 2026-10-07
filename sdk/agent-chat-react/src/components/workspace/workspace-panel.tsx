@@ -198,13 +198,24 @@ export function WorkspacePanel({
 	const [entries, setEntries] = useState<AgentChatWorkspaceEntry[]>([]);
 	const [treeLoading, setTreeLoading] = useState(false);
 	const [treeError, setTreeError] = useState<string | null>(null);
+	// The tree stopped short of the whole folder: at its caps, or a computer out of handles.
+	const [treeTruncated, setTreeTruncated] = useState(false);
 	const [notice, setNotice] = useState<string | null>(null);
 	const [uploading, setUploading] = useState(false);
 	const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 	const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
 	const sessionIdRef = useRef(sessionId);
+	// Aborted on unmount: an upload or a delete still waiting for the computer
+	// a local-folder chat's folder is on stops being sent again.
+	const changesRef = useRef<AbortController | null>(null);
 
 	sessionIdRef.current = sessionId;
+
+	useEffect(() => {
+		const changes = new AbortController();
+		changesRef.current = changes;
+		return () => changes.abort();
+	}, []);
 
 	const fetchTree = useCallback(async () => {
 		if (!sessionId) {
@@ -223,6 +234,7 @@ export function WorkspacePanel({
 			});
 			if (sessionIdRef.current !== requestedSessionId) return;
 			setEntries(tree.entries);
+			setTreeTruncated(tree.truncated);
 			setExpandedPaths(new Set(collectExpandedPaths(tree.entries)));
 		} catch (error) {
 			if (sessionIdRef.current !== requestedSessionId) return;
@@ -289,6 +301,7 @@ export function WorkspacePanel({
 					await adapter.uploadWorkspaceFile({
 						sessionId,
 						file: uploadedFile,
+						signal: changesRef.current?.signal,
 					});
 				}
 				setNotice(
@@ -311,7 +324,11 @@ export function WorkspacePanel({
 		async (path: string) => {
 			if (disabled || !sessionId) return;
 			try {
-				await adapter.deleteWorkspaceFile({ sessionId, path });
+				await adapter.deleteWorkspaceFile({
+					sessionId,
+					path,
+					signal: changesRef.current?.signal,
+				});
 				if (selectedPath === path) {
 					onSelectedPathChange(null);
 				}
@@ -395,6 +412,12 @@ export function WorkspacePanel({
 			{notice && (
 				<div className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
 					{notice}
+				</div>
+			)}
+
+			{treeTruncated && entries.length > 0 && (
+				<div className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
+					Some files are not shown.
 				</div>
 			)}
 
