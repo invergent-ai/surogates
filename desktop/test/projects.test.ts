@@ -51,6 +51,19 @@ describe("the projects the page serves", () => {
     await expect(negative).rejects.toThrow("The agent's page answered library with something Surogate cannot use");
   });
 
+  it("refuse a time that ends in Z but is no ISO 8601 UTC time, and take one with its fraction", async () => {
+    const { source } = page();
+    let id = 0;
+    for (const updatedAt of ["1Z", "2026Z", "2026-10-06 11:43:00Z", "Oct 6 2026 11:43 +0200 Z", "2026-13-06T11:43:00Z"]) {
+      const listed = source.list();
+      source.answered(++id, { ok: [{ ...projects[0], updatedAt }] });
+      await expect(listed, updatedAt).rejects.toThrow("The agent's page answered list with something Surogate cannot use");
+    }
+    const listed = source.list();
+    source.answered(++id, { ok: [{ ...projects[0], updatedAt: "2026-10-06T11:43:00.123456Z" }] });
+    expect((await listed)[0]!.updatedAt).toBe("2026-10-06T11:43:00.123456Z");
+  });
+
   it("ask the page for one thread's row, or for every row", () => {
     const { source, last } = page();
     void source.threads(REPORT, FIXTURE_IDS.idle);

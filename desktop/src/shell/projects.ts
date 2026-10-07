@@ -25,8 +25,10 @@ class Unusable extends Error {}
 const fields = (value: unknown): Record<string, unknown> => (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
 const text = (value: unknown, max: number): value is string => typeof value === "string" && value.length <= max;
 const named = (value: unknown): value is string => text(value, 500) && value !== "";
-// UTC with its Z (Section 12): a time with no zone would be read as this computer's local time.
-const time = (value: unknown): value is string => text(value, 40) && value.endsWith("Z") && !Number.isNaN(Date.parse(value));
+// ISO 8601 in UTC, with its Z (Section 12): a time with no zone would be read as this computer's local
+// time, and a string that merely ends in Z is read however the engine guesses.
+const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
+const time = (value: unknown): value is string => text(value, 40) && ISO_UTC.test(value) && !Number.isNaN(Date.parse(value));
 const count = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 1_000_000;
 const one = <T>(value: unknown, allowed: readonly T[]): value is T => allowed.includes(value as T);
 const tier = (value: unknown): value is Project["coordinatorTier"] => value === null || value === "basic" || value === "pro";
