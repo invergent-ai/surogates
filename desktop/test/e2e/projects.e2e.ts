@@ -510,6 +510,24 @@ describe("the project dialog", () => {
     });
   }
 
+  it("saves only what the user changed, and keeps what was changed elsewhere meanwhile", async () => {
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click("#project-settings");
+    const dialog = await projectDialog(shell);
+    // Another device changes the goal and the instructions while the dialog shows the old ones.
+    await client.evaluate((project) => {
+      const fake = (window as unknown as { fakeProjects: { data: ProjectFixtures } }).fakeProjects;
+      Object.assign(fake.data.projects.find((found) => found.id === project)!, { goal: "Changed elsewhere", instructions: "Also elsewhere" });
+    }, REPORT);
+    await dialog.selectOption("#thread-tier", "pro");
+    await dialog.click("#save");
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    expect(agent.projects!.projects.find((project) => project.id === REPORT)).toMatchObject({
+      name: "Quarterly report", goal: "Changed elsewhere", instructions: "Also elsewhere", threadTier: "pro",
+    });
+  });
+
   it("names the project in the archive box with its control and invisible characters as their code points", async () => {
     agent.projects!.projects.find((project) => project.id === REPORT)!.name = "Q3‮ report​";
     const { shell, page, client } = await signedIn();

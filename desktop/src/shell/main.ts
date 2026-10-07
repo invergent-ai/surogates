@@ -1147,6 +1147,13 @@ function projectFields(value: unknown, editing: boolean): ProjectFields {
 
 // The archive asks under the project's name as 4c's prompts show text: a control, bidi or invisible
 // character as its code point (U+202E), so none reorders or hides the question around it.
+// What the dialog changed of *shown*, the project as it showed it: a change made elsewhere meanwhile
+// to a field the user left alone is kept. The goal it showed empty is a null one.
+function changedFrom(shown: Project, fields: ProjectFields): Partial<ProjectFields> {
+  return Object.fromEntries(Object.entries(fields).filter(([key, value]) =>
+    value !== (key === "goal" ? shown.goal ?? "" : shown[key as keyof ProjectFields])));
+}
+
 async function confirmArchive(name: string): Promise<boolean> {
   if (!main) return false;
   const { response } = await dialog.showMessageBox(main.window, {
@@ -1193,9 +1200,14 @@ function showProject(editing: Opened | null): void {
     handle("project:save", async (value) => {
       const fields = projectFields(value, editing !== null);
       if (fields.name === "") return "Name the project.";
+      const change = editing && shown ? changedFrom(shown, fields) : fields;
+      if (editing && Object.keys(change).length === 0) {
+        close();
+        return null;
+      }
       try {
         const project = editing
-          ? await projects.update(editing.id, fields)
+          ? await projects.update(editing.id, change)
           : await projects.create({ name: fields.name, goal: fields.goal });
         remember(project);
         close();
