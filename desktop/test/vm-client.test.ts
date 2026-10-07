@@ -443,4 +443,20 @@ describe("a manager that runs on", () => {
     expect(await waiting).toEqual(CANCELLED);
     expect(performance.now() - begun).toBeLessThan(500);
   });
+
+  it("answers an operation waiting out its backoff as soon as the app quits, not when its wait ends", async () => {
+    const vm = vmOf(() => {
+      const exits: Array<() => void> = [];
+      const manager = fake({ pongs: true, held: [] }, [], exits, { count: 0 });
+      setTimeout(() => exits.splice(0).forEach((exit) => exit()), 50);
+      return manager;
+    });
+    expect(await vm.perform(operation(), signal())).toEqual(SANDBOX_STOPPED);
+    // Its wait is a second; up to a minute after repeated crashes.
+    const waiting = vm.perform(operation(), signal());
+    setTimeout(() => void vm.stop(), 100);
+    const begun = performance.now();
+    expect(await waiting).toEqual(unavailable("is stopping"));
+    expect(performance.now() - begun).toBeLessThan(500);
+  });
 });

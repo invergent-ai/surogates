@@ -120,6 +120,8 @@ export class VmClient {
   private manager: ManagerProcess | null = null;
   private readonly pending = new Map<string, (outcome: Outcome) => void>();
   private stopping: Promise<void> | null = null;
+  // Aborted at the stop: an operation waiting out the backoff is answered then, not when its wait ends.
+  private readonly halted = new AbortController();
   private teardowns = 0;
   private readonly listeners = new Set<(root: string, change: ProcessesChange) => void>();
   private readonly askers = new Set<Asker>();
@@ -134,16 +136,13 @@ export class VmClient {
 
   /**
    * One process operation of a root's, in the guest. A cancel is answered at once; the
-   * manager is told. One that comes while a manager that went backs off waits for it.
-   * Never rejects.
+   * manager is told. One that comes while a manager that went backs off waits for it,
+   * until it is cancelled or the VM is stopped. Never rejects.
    */
   async perform(operation: VmOperation, signal: AbortSignal): Promise<Outcome> {
     if (!this.manager && !this.stopping && this.backoff.wait > 0) {
-      try {
-        await wait(this.backoff.wait, undefined, { signal });
-      } catch {
-        return CANCELLED;
-      }
+      // Its cancel, or the stop, is answered just below.
+      await wait(this.backoff.wait, undefined, { signal: AbortSignal.any([signal, this.halted.signal]) }).catch(() => {});
     }
     if (this.stopping) return unavailable("is stopping");
     if (signal.aborted) return CANCELLED;
@@ -218,6 +217,7 @@ export class VmClient {
 
   // The manager stops its guest and exits; one that does not is killed, and its guest goes with it.
   stop(): Promise<void> {
+    this.halted.abort();
     this.stopping ??= (async () => {
       const manager = this.manager;
       if (!manager) return;
