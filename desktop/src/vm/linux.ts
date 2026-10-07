@@ -1,5 +1,5 @@
-// The VM layer's Linux backend (spec, Section 11): QEMU with KVM, the control port
-// a virtio-serial port on a Unix socket of QEMU's, and each root's folder shared by
+// The VM layer's Linux backend (spec, Section 11): QEMU with KVM, the control and net
+// ports virtio-serial ports on Unix sockets of QEMU's, and each root's folder shared by
 // a virtiofsd of its own, hot-added through QMP. QEMU and virtiofsd run through
 // setpriv --pdeathsig, so they die with the manager however it dies, and each
 // leaves a pidfile in the runtime folder, so a later manager can end one that did not.
@@ -103,7 +103,7 @@ async function reach(path: string, qemu: ChildProcess, deadline: number): Promis
 }
 
 /**
- * QEMU on *options*, once its control port and its monitor have taken their
+ * QEMU on *options*, once its control and net ports and its monitor have taken their
  * connections: its runtime folder swept first, and the sparse sessions disk made
  * at the first boot. Rejects with why not, QEMU's own words included.
  */
@@ -124,13 +124,16 @@ export const bootLinux: BootVm = async (options, signal, deadline) => {
   const halt = () => qemu.kill("SIGKILL");
   signal?.addEventListener("abort", halt, { once: true });
   let control: Socket | null = null;
+  let net: Socket | null = null;
   try {
     control = await reach(join(options.run, "control.sock"), qemu, deadline);
-    const monitor = control ? await reach(join(options.run, "qmp.sock"), qemu, deadline) : null;
-    if (!control || !monitor) throw new Error(ended(qemu) ? "QEMU exited" : "QEMU did not open its sockets");
-    return new LinuxVm(options, qemu, said, control, await Qmp.open(monitor, deadline));
+    net = control ? await reach(join(options.run, "net.sock"), qemu, deadline) : null;
+    const monitor = net ? await reach(join(options.run, "qmp.sock"), qemu, deadline) : null;
+    if (!control || !net || !monitor) throw new Error(ended(qemu) ? "QEMU exited" : "QEMU did not open its sockets");
+    return new LinuxVm(options, qemu, said, control, net, await Qmp.open(monitor, deadline));
   } catch (error) {
     control?.destroy();
+    net?.destroy();
     qemu.kill("SIGKILL");
     await exited(qemu);
     throw new Error([(error as Error).message, said()].filter(Boolean).join(": "));
@@ -165,6 +168,7 @@ class LinuxVm implements VmBackend {
     private readonly qemu: ChildProcess,
     said: () => string,
     readonly control: Socket,
+    readonly net: Socket,
     private readonly qmp: Qmp,
   ) {
     this.exited = exited(qemu).then(said);
@@ -270,6 +274,7 @@ class LinuxVm implements VmBackend {
     this.killed ??= (async () => {
       this.qmp.close();
       this.control.destroy();
+      this.net.destroy();
       for (const child of [this.qemu, ...this.daemons]) child.kill("SIGKILL");
       await Promise.all([exited(this.qemu), ...this.daemons.map(exited)]);
     })();

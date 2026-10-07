@@ -5,6 +5,7 @@
 import type { Outcome } from "../link/protocol.js";
 import type { FromManager, ToManager } from "./client.js";
 import { unavailable, VmManager } from "./manager.js";
+import type { Egress } from "./proxy.js";
 
 // Electron's, in a utility process.
 interface ParentPort {
@@ -27,6 +28,16 @@ const send = (message: FromManager): Promise<void> => new Promise((resolve) => {
 
 let manager: VmManager | null = null;
 const running = new Map<string, AbortController>();
+// The host proxy's asks the app has not answered, by id: each is the app's to decide, with its approvals.
+const asks = new Map<number, (allow: boolean) => void>();
+let lastAsk = 0;
+const egress: Egress = {
+  ask: (root, asked) => new Promise((resolve) => {
+    lastAsk += 1;
+    asks.set(lastAsk, resolve);
+    void send({ type: "ask", id: lastAsk, root, ...asked });
+  }),
+};
 // Every answer still to send.
 const answering = new Set<Promise<void>>();
 
@@ -39,7 +50,7 @@ function answer(id: string, work: Promise<Outcome>): void {
 
 function received(message: ToManager): void {
   if (message.type === "start") {
-    manager ??= new VmManager(message.options, undefined, (root, change) => void send({ type: "processes", root, change }));
+    manager ??= new VmManager(message.options, undefined, (root, change) => void send({ type: "processes", root, change }), egress);
     void send({ type: "ready" });
   } else if (message.type === "op") {
     const { id } = message.operation;
@@ -51,11 +62,17 @@ function received(message: ToManager): void {
     answer(message.id, (manager?.teardown(message.root) ?? Promise.resolve()).then(() => ({ ok: null })));
   } else if (message.type === "protect") {
     void manager?.protect(message.root, message.keys);
+  } else if (message.type === "answer") {
+    asks.get(message.id)?.(message.allow === true);
+    asks.delete(message.id);
   } else if (message.type === "cancel") {
     running.get(message.id)?.abort();
   } else if (message.type === "stop") {
     void (async () => {
       await manager?.stop();
+      // Its guest has gone, and with it every connection that waited.
+      for (const deny of asks.values()) deny(false);
+      asks.clear();
       // What ran when the stop came is answered first: "is stopping", or its end.
       await Promise.all(answering);
       // Messages arrive in order: the parent, once it hears this, has every answer, and ends this process.

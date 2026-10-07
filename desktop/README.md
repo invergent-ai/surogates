@@ -38,6 +38,9 @@ in a cgroup of its own, its manager in a utility process of its own, with the VM
 sockets in a folder of `$XDG_RUNTIME_DIR/surogate` that is its state's own.
 Each chat's folder joins the running VM while the chat works and leaves it once the
 chat lets it go, served uncached, with its protected files read-only there.
+The guest has no network device: a command's connections go through its chat's
+proxies in the guest to the app's host proxy, which lets the package hosts through,
+refuses this computer's own addresses, and asks the chat's user about the rest.
 Until the image is delivered, the app boots the image built here (or
 `SUROGATE_VM_IMAGE`'s) with the agent disk `npm run agent-disk` makes from `dist/`.
 The shell's tests that run a command boot it too:

@@ -14,8 +14,10 @@ import { Failure } from "../files/answers.js";
 import { inside } from "../files/paths.js";
 import type { Outcome } from "../link/protocol.js";
 import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STOPPED, supervise, timedOut } from "./command.js";
+import { PROXY_URL } from "./listeners.js";
+import { socketOf } from "./network.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
-import { type Answer, type BindMode, type HostUser, MAX_SHARES, type ProtectedKey, type Question, type Share } from "./protocol.js";
+import { type Answer, type BindMode, type HostUser, MAX_SHARES, type ProtectedKey, type Question, ROOT_ID, type Share } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 
 // The sessions disk's folder of roots (vm/init), each named by its root session id.
@@ -48,7 +50,6 @@ const NAMED = 20;
 // The cloud's layout of the commands' environment, written by the image's build.
 const LAYOUT = "/etc/surogate/environment";
 const FIRST_UID = 10_000;
-const ROOT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 // A share's number in its guest is never used again there, so it grows with every folder added.
 const TAG = /^r[1-9][0-9]{0,8}$/;
 // Any name a passwd line can hold, as directories join AD users (ana@corp.example):
@@ -82,6 +83,10 @@ const QUESTION_MS = 10_000;
 const GRACE_MS = 2_000;
 
 // The commands' environment: the cloud's layout under the root's own HOME, and the user's names.
+// Their proxy variables name the root's runner's proxies, the commands' one way out; ALL_PROXY
+// too, as srt set it, since httpx fails at once on a socks5h one without socksio; and the
+// root's own loopback stays direct, so a session's servers are reached as they are: by the
+// address a server says it listens on (0.0.0.0) and by the root's own name (enter-root's) too.
 // And git compares no owner, inode or sub-second time in its index (core.checkStat=minimal),
 // through git's own environment, after any the layout gives: the folder's files are the root's
 // uid in the guest and the user's on the host, so git in the guest would otherwise rehash every
@@ -94,8 +99,10 @@ export function rootEnvironment(layout: string, user: HostUser): Record<string, 
     if (at > 0) env[line.slice(0, at)] = line.slice(at + 1).replace(CLOUD_HOME, () => user.home);
   }
   const git = Number(env.GIT_CONFIG_COUNT ?? 0);
+  const proxies = Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"].flatMap((name) => [[name, PROXY_URL], [name.toLowerCase(), PROXY_URL]]));
+  const direct = "localhost,127.0.0.1,::1,0.0.0.0,surogate";
   return {
-    ...env, HOME: user.home, USER: user.name, LOGNAME: user.name, LANG: "C.UTF-8",
+    ...env, ...proxies, NO_PROXY: direct, no_proxy: direct, HOME: user.home, USER: user.name, LOGNAME: user.name, LANG: "C.UTF-8",
     GIT_CONFIG_COUNT: String(git + 1), [`GIT_CONFIG_KEY_${git}`]: "core.checkStat", [`GIT_CONFIG_VALUE_${git}`]: "minimal",
   };
 }
@@ -211,7 +218,7 @@ export async function enter(root: string, place: Place, share: Share, user: Host
     [
       "-c", 'echo $$ > "$1/cgroup.procs" && shift && exec "$@"', "sh", cgroup,
       "/usr/bin/unshare", "--mount", "--pid", "--fork", "--kill-child", "--ipc", "--uts", "--net", "--cgroup", "--propagation", "private", "--",
-      ENTER_ROOT, join(SESSIONS, root), place.folder, mount, place.home, String(uid), user.name,
+      ENTER_ROOT, join(SESSIONS, root), place.folder, mount, place.home, String(uid), user.name, socketOf(root),
     ],
     { env: rootEnvironment(readFileSync(LAYOUT, "utf8"), user), stdio: ["pipe", "pipe", "pipe"] },
   );
@@ -488,6 +495,8 @@ export interface RootsOptions {
   protect?(pid: number, binds: Array<[string, BindMode]>): Promise<Bound>;
   // The mount of a share whose root was torn down goes (unmountShare).
   unmount?(share: Share): Promise<void>;
+  // The root's socket for its connections to the host proxy, its guest user's, made before its namespaces (Network.listen); resolves with what closes it.
+  tunnels?(root: string, uid: number): Promise<() => void>;
   questionMs?: number;
 }
 
@@ -496,6 +505,9 @@ export class Roots {
   private readonly roots = new Map<string, Root>();
   // The setups under way, which a teardown waits for.
   private readonly starting = new Map<string, Promise<void>>();
+  // What of each root is ending, a teardown or a lost runner's end, to its last step: a
+  // setup waits for it, so none of it lands on what it sets up, its socket or its cgroup.
+  private readonly endings = new Map<string, Promise<void>>();
   // Each root's background processes, from its first setup in this guest to its
   // teardown: set up again once its runner was lost, a root still answers for
   // what ended with that runner, and how.
@@ -514,7 +526,9 @@ export class Roots {
     // Each root set up keeps its processes' output: a share of OUTPUT_CHARS.
     const held = new Set([...this.registries.keys(), ...this.starting.keys()]);
     if (!held.has(root) && held.size >= MAX_SHARES) throw new Error(FULL);
-    const started = this.start(root, folder, share, user, ended);
+    // Under way while it waits: a teardown waits for it, and a second setup is refused.
+    const ending = this.endings.get(root);
+    const started = ending ? ending.then(() => this.start(root, folder, share, user, ended)) : this.start(root, folder, share, user, ended);
     this.starting.set(root, started);
     try {
       await started;
@@ -527,27 +541,37 @@ export class Roots {
     const place = { folder, home: user.home };
     let listed: Root | undefined;
     let ending: Promise<void> | undefined;
+    // Its namespaces bind it, so it is there before they are made, and goes with everything of the root.
+    const unlisten = (await this.options.tunnels?.(root, this.options.uid(root))) ?? (() => {});
     // Everything of the root ends, once however often asked: its cgroup is killed
     // and emptied or, where it cannot be, its runner's stdin is ended. Only then is
     // a root still listed forgotten and the host told, so its setup again finds nothing of it running.
-    const lose = () => (ending ??= (async () => {
+    const lose = () => (ending ??= this.ends(root, (async () => {
       try {
         await this.options.kill(root);
       } catch {
         await runner.stop();
       }
+      unlisten();
       if (listed && this.roots.get(root) === listed) {
         this.roots.delete(root);
         this.options.lost?.(root);
       }
-    })());
-    const child = await this.options.start(root, place, share, user);
+    })()));
+    let child: ChildProcess;
+    try {
+      child = await this.options.start(root, place, share, user);
+    } catch (error) {
+      unlisten();
+      throw error;
+    }
     const runner = new SessionRunner(child, () => void lose(), RUNNER_READY_MS);
     try {
       await runner.ready;
       await this.options.contain?.(root, child.pid);
     } catch (error) {
       await runner.stop();
+      unlisten();
       throw error;
     }
     const { protect } = this.options;
@@ -595,20 +619,31 @@ export class Roots {
     await this.roots.get(root)?.protect(keys);
   }
 
+  // *end*, what of *root* is ending, joins whatever of it already was.
+  private ends(root: string, end: Promise<void>): Promise<void> {
+    const all: Promise<void> = Promise.allSettled([this.endings.get(root), end]).then(() => {
+      if (this.endings.get(root) === all) this.endings.delete(root);
+    });
+    this.endings.set(root, all);
+    return end;
+  }
+
   // Everything of *root* ends and it is forgotten, then the mount of *share*, its folder's,
   // goes: the host is letting the folder go, and removes the share next. Its next
   // operation shares its folder and sets it up again.
-  async teardown(root: string, share: Share): Promise<void> {
-    // A setup under way lands first, and what it set up ends with the rest.
-    await this.starting.get(root)?.catch(() => {});
-    this.registries.delete(root);
-    const target = this.roots.get(root);
-    if (target) {
-      // Out of the list first: the end of its runner is no loss to tell.
-      this.roots.delete(root);
-      await target.end();
-    }
-    await this.options.unmount?.(share);
+  teardown(root: string, share: Share): Promise<void> {
+    return this.ends(root, (async () => {
+      // A setup under way lands first, and what it set up ends with the rest.
+      await this.starting.get(root)?.catch(() => {});
+      this.registries.delete(root);
+      const target = this.roots.get(root);
+      if (target) {
+        // Out of the list first: the end of its runner is no loss to tell.
+        this.roots.delete(root);
+        await target.end();
+      }
+      await this.options.unmount?.(share);
+    })());
   }
 
   // One process operation's outcome. Never rejects. A root whose runner cannot answer
