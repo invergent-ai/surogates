@@ -102,10 +102,19 @@ int BPF_PROG(on_symlink, const struct path *dir, struct dentry *dentry, const ch
 	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
 }
 
+// A FIFO or socket at a protected name would hang the host's git or editor on it.
+SEC("lsm/path_mknod")
+int BPF_PROG(on_mknod, const struct path *dir, struct dentry *dentry, umode_t mode, unsigned int dev)
+{
+	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
+}
+
+// The old name too: a link to a protected file under an ordinary name is that file,
+// and a write through the link would land in it. || for the reason on_rename gives.
 SEC("lsm/path_link")
 int BPF_PROG(on_link, struct dentry *old, const struct path *dir, struct dentry *dentry)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
+	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0) || judge_dentry(BPF_CORE_READ(old, d_sb), old, 0));
 }
 
 SEC("lsm/path_unlink")
