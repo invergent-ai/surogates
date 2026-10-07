@@ -296,6 +296,19 @@ describe("Settings → General", () => {
     await expect.poll(async () => (await mainWindow())?.visible).toBe(true);
   });
 
+  it("keeps the window maximised after a start at login that quits before the window is shown", async () => {
+    const state = join(home, "surogate", "window-state.json");
+    mkdirSync(join(home, "surogate"), { recursive: true });
+    writeFileSync(state, JSON.stringify({ main: { x: 0, y: 0, width: 1000, height: 700, maximized: true } }));
+    app = await launch(home, {}, ["--hidden"]);
+    await expect.poll(async () => (await mainWindow())?.loading).toBe(false);
+    // The tray's Quit Surogate, with no thread working: the window was never shown.
+    const exited = once(app.process(), "exit");
+    void app.evaluate(({ app: electron }) => electron.quit()).catch(() => {});
+    await exited;
+    expect(JSON.parse(readFileSync(state, "utf8")).main.maximized).toBe(true);
+  });
+
   it("does not start at login from a build whose path GNOME would not start, and says so", async () => {
     // This build's Electron, as a folder whose name holds a % would give it.
     const percent = join(home, "percent.cjs");

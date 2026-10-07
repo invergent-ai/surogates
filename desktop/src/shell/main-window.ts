@@ -130,6 +130,11 @@ export class MainWindow {
       backgroundColor: background,
       webPreferences: { preload: options.preload, sandbox: true, contextIsolation: true, nodeIntegration: false },
     });
+    // A window started hidden and never shown has no place of its own to keep: the one it was left in stays.
+    let shown = !options.hidden;
+    this.window.once("show", () => {
+      shown = true;
+    });
     if (maximized) {
       // Maximising shows a window: one started hidden is maximised once it is first shown.
       if (options.hidden) this.window.once("show", () => this.window.maximize());
@@ -140,7 +145,7 @@ export class MainWindow {
     this.window.on("close", (event) => {
       // A place that cannot be kept, as on a full disk, is said, and the window still hides, or quits.
       try {
-        options.states.save("main", this.window.getNormalBounds(), this.window.isMaximized());
+        if (shown) options.states.save("main", this.window.getNormalBounds(), this.window.isMaximized());
       } catch (error) {
         console.error(error);
       }
