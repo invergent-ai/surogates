@@ -679,8 +679,8 @@ describe("a root's environment", () => {
       http_proxy: "http://127.0.0.1:3128",
       https_proxy: "http://127.0.0.1:3128",
       all_proxy: "http://127.0.0.1:3128",
-      NO_PROXY: "localhost,127.0.0.1,::1",
-      no_proxy: "localhost,127.0.0.1,::1",
+      NO_PROXY: "localhost,127.0.0.1,::1,0.0.0.0,surogate",
+      no_proxy: "localhost,127.0.0.1,::1,0.0.0.0,surogate",
       HOME: "/home/ana",
       USER: "ana",
       LOGNAME: "ana",
@@ -704,7 +704,7 @@ describe("a root's environment", () => {
 
   it("keeps the runner's proxies whatever the layout says", () => {
     expect(rootEnvironment("HTTPS_PROXY=http://elsewhere:8080\nNO_PROXY=*\n", { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" })).toMatchObject({
-      HTTPS_PROXY: "http://127.0.0.1:3128", NO_PROXY: "localhost,127.0.0.1,::1",
+      HTTPS_PROXY: "http://127.0.0.1:3128", NO_PROXY: "localhost,127.0.0.1,::1,0.0.0.0,surogate",
     });
   });
 

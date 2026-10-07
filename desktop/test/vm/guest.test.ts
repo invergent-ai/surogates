@@ -521,10 +521,13 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       status("--noproxy '' -p", "http://127.0.0.1:9/"),
       status("--noproxy '' --socks5-hostname 127.0.0.1:1080", "http://localhost:9/"),
       // Its own loopback is direct, so a session's own servers answer as they are: here, none.
+      // So are the address a server says it listens on, and the root's own name.
+      status("", "http://0.0.0.0:9/"),
+      status("", "http://surogate:9/"),
       status("", "http://127.0.0.1:9/"),
     ].join("; "))).toEqual({
       ok: {
-        output: "403 000\n000 403\n000 000\n000 000\n\nThis computer does not let a chat reach its own network services (127.0.0.1:9, localhost:9)",
+        output: "403 000\n000 403\n000 000\n000 000\n000 000\n000 000\n\nThis computer does not let a chat reach its own network services (127.0.0.1:9, localhost:9)",
         // The last curl's: it could not connect.
         returncode: 7,
         timed_out: false,
