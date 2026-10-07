@@ -293,11 +293,10 @@ export async function contain(root: string, pid: number | undefined): Promise<vo
 
 /**
  * The cgroups the agent makes for a root's background processes, in the root's proc
- * folder (spec, Section 11, Cgroups), which only the agent writes. A memory cgroup a
- * command made there and removed again would hold guest kernel memory that no limit
- * counts, for as long as the page cache it charged lives. Each is the root's user's to
- * enter and to end, through its cgroup.procs and cgroup.kill, which its runner writes;
- * the agent removes it once nothing of it runs.
+ * folder (spec, Section 11, Cgroups), which only the agent writes. None counts memory:
+ * the root's own cgroup does (contain), so none lingers once removed. Each is
+ * the root's user's to enter and to end, through its cgroup.procs and cgroup.kill, which
+ * its runner writes; the agent removes it once nothing of it runs.
  */
 export class ProcessCgroups {
   // Ended processes whose cgroups still held what they left: tried again at each start.
