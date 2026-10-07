@@ -1,4 +1,6 @@
-import { existsSync, linkSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -160,6 +162,15 @@ describe("preparing a new chat's folder", () => {
     expect((await binder(changing).prepareFolder("last", WINDOW, never()))?.folder).toBe(notes);
     expect(changing.dialogs).toEqual([made]);
     expect(existsSync(made)).toBe(false);
+    // A sheet that fails leaves none behind either.
+    const failing = new User();
+    failing.confirmFolder = (sheet) => {
+      failing.sheets.push(sheet);
+      return Promise.reject(new Error("Surogate has no window to ask in"));
+    };
+    await expect(binder(failing).prepareFolder("last", WINDOW, never())).rejects.toThrow("Surogate has no window to ask in");
+    expect(failing.sheets[0]?.folder).toBe(made);
+    expect(existsSync(made)).toBe(false);
     // One the user put something in stays.
     const filling = new User([], [null]);
     filling.confirmFolder = (sheet) => {
@@ -183,9 +194,10 @@ describe("preparing a new chat's folder", () => {
   });
 
   it.each([
-    ["../../escape", "..-..-escape"],
-    ["[::1]:8080", "-1-8080"],
+    ["../../escape", "escape"],
+    ["[::1]:8080", "1-8080"],
     ["a/b", "a-b"],
+    [".hidden", "hidden"],
   ])("makes the new folder for the agent %s under ~/Surogate/%s", async (agent, name) => {
     const user = new User([], [null]);
     await binder(user, { agent }).prepareFolder("last", WINDOW, never());
@@ -205,6 +217,24 @@ describe("preparing a new chat's folder", () => {
     const unnamed = new User([notes], [{ mode: "free" }]);
     expect((await binder(unnamed, { agent: ".." }).prepareFolder("last", WINDOW, never()))?.folder).toBe(notes);
     expect(unnamed.dialogs).toEqual([join(base, "home")]);
+    // Where the last folder bound was, once that one has gone.
+    const other = join(base, "other");
+    journal.bindings.add({ root: OTHER, nonce: "n".repeat(16), folder: other, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
+    rmSync(other, { recursive: true });
+    writeFileSync(join(base, "home", "Surogate"), "not a folder");
+    const gone = new User([notes], [{ mode: "free" }]);
+    expect((await binder(gone).prepareFolder("last", WINDOW, never()))?.folder).toBe(notes);
+    expect(gone.dialogs).toEqual([other]);
+  });
+
+  it("opens the dialog, and leaves no folder of its own, when the new one would be a folder no chat may have", async () => {
+    mkdirSync(join(base, "data"));
+    symlinkSync(join(base, "data"), join(base, "home", "Surogate"));
+    const user = new User([notes], [{ mode: "free" }]);
+    expect((await binder(user).prepareFolder("last", WINDOW, never()))?.folder).toBe(notes);
+    expect(user.dialogs).toEqual([join(base, "home")]);
+    expect(user.sheets.map((sheet) => sheet.folder)).toEqual([notes]);
+    expect(readdirSync(join(base, "data", "Research-assistant"))).toEqual([]);
   });
 
   it("shows the files in the folder that are linked from elsewhere", async () => {
@@ -524,6 +554,61 @@ describe("dropping a confirmed folder", () => {
     const expired = await expiring.prepareFolder("last", WINDOW, never());
     expect(existsSync(expired!.folder)).toBe(true);
     await vi.waitFor(() => expect(existsSync(expired!.folder)).toBe(false));
+  });
+
+  // The user takes the new folder of its own the sheet offers.
+  async function takenNew(user: User, chooser: Binder): Promise<Prepared> {
+    user.answers.push({ mode: "free" });
+    const ready = await chooser.prepareFolder("last", WINDOW, never());
+    if (!ready) throw new Error("the new folder was not taken");
+    return ready;
+  }
+
+  const past = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it("keeps the same day's folder made again for the next chat, which binds it, once the first's confirmation is dropped", async () => {
+    const user = new User();
+    const chooser = binder(user, { preparedMs: 200 });
+    const first = await takenNew(user, chooser);
+    chooser.cancelPrepared(first.token, WINDOW);
+    expect(existsSync(first.folder)).toBe(false);
+    const next = await takenNew(user, chooser);
+    expect(next.folder).toBe(first.folder);
+    expect(await chooser.admit(bindOp(ROOT, next), never())).toEqual({ ok: null });
+    // Past the first's expiry.
+    await past(400);
+    expect(existsSync(next.folder)).toBe(true);
+  });
+
+  it("keeps the same day's folder made again for the next chat, which binds it, when the first's expired confirmation is dropped late", async () => {
+    const user = new User();
+    const chooser = binder(user, { preparedMs: 200 });
+    const first = await takenNew(user, chooser);
+    await vi.waitFor(() => expect(existsSync(first.folder)).toBe(false));
+    const next = await takenNew(user, chooser);
+    expect(next.folder).toBe(first.folder);
+    expect(await chooser.admit(bindOp(ROOT, next), never())).toEqual({ ok: null });
+    chooser.cancelPrepared(first.token, WINDOW);
+    expect(existsSync(next.folder)).toBe(true);
+  });
+
+  it("keeps a new folder of its own that another chat's confirmation or binding holds", async () => {
+    const user = new User();
+    const chooser = binder(user, { preparedMs: 200 });
+    // Picked for another chat while its own is open, then its own is dropped.
+    const first = await takenNew(user, chooser);
+    const picked = await confirmed(user, chooser, first.folder);
+    chooser.cancelPrepared(first.token, WINDOW);
+    expect(existsSync(first.folder)).toBe(true);
+    // Picked for another chat, which binds it, then its own expires.
+    const second = await takenNew(user, chooser);
+    expect(second.folder).toBe(`${first.folder} 2`);
+    const bound = await confirmed(user, chooser, second.folder);
+    expect(await chooser.admit(bindOp(ROOT, bound), never())).toEqual({ ok: null });
+    await past(400);
+    expect(existsSync(second.folder)).toBe(true);
+    // Nor did the other chat's confirmation, expiring, remove a folder not made for it.
+    expect(existsSync(picked.folder)).toBe(true);
   });
 
   it("drops nothing for another window, an unknown token, or a chat already bound", async () => {

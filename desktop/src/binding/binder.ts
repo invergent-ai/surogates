@@ -7,7 +7,7 @@
 // folder in the bindings.
 
 import { randomBytes } from "node:crypto";
-import { mkdirSync, realpathSync, rmdirSync } from "node:fs";
+import { mkdirSync, rmdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { NOT_BOUND } from "../hosts/tool-hosts.js";
@@ -75,6 +75,7 @@ export interface BinderOptions {
 interface Preparation {
   nonce: string;
   made?: true; // its folder was made for it: gone again, if still empty, once it binds no chat
+  expiry?: ReturnType<typeof setTimeout>;
   folder: string;
   dev: number;
   ino: number;
@@ -103,21 +104,27 @@ function removeEmpty(folder: string): void {
 // A new chat's own folder, when there is no last one to offer (spec, Section 8): under
 // ~/Surogate/<agent>, named for the day, resolved. Null when none can be made. The agent's
 // name is made one folder name: a host holds no "/", but an IPv6 one holds "[" and "]",
-// which no chat's folder may.
-function newFolder(home: string, agent: string): string | null {
-  const name = agent.replace(/[^A-Za-z0-9._-]+/g, "-");
-  if (name === "" || name === "." || name === "..") return null;
-  const parent = join(home, "Surogate", name);
+// which no chat's folder may; nor does it start with "." or "-", hidden or read as an option.
+function newFolder(guards: FolderGuards, agent: string): string | null {
+  const name = agent.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+/, "");
+  if (name === "") return null;
+  const parent = join(guards.home, "Surogate", name);
+  const today = day(new Date());
   try {
     mkdirSync(parent, { recursive: true });
     for (let n = 1; n <= 100; n += 1) {
-      const folder = join(parent, n === 1 ? day(new Date()) : `${day(new Date())} ${n}`);
+      const folder = join(parent, n === 1 ? today : `${today} ${n}`);
       try {
         mkdirSync(folder);
-        return realpathSync(folder);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+        throw error;
       }
+      // One no chat may have (a link up its path into a guarded folder, say) is not offered.
+      const checked = checkFolder(folder, guards);
+      if (checked.ok) return checked.path;
+      removeEmpty(folder);
+      return null;
     }
   } catch {
     // The dialog opens instead.
@@ -149,17 +156,18 @@ export class Binder implements Executor {
     const { guards } = this.options;
     const last = this.options.bindings.last()?.folder;
     const usable = choice === "last" && last !== undefined && checkFolder(last, guards).ok ? last : null;
-    // Made for this chat, and gone again unless the user takes it.
-    const made = usable === null && choice === "last" && !signal.aborted ? newFolder(guards.home, this.options.agent) : null;
-    const prepared = await this.confirm(usable ?? made, last ?? guards.home, window, signal);
-    if (made !== null && prepared?.folder === made) {
+    // Made for this chat, and gone again unless the user takes it, even when the sheet fails.
+    const made = usable === null && choice === "last" && !signal.aborted ? newFolder(guards, this.options.agent) : null;
+    let prepared: Prepared | null = null;
+    try {
+      prepared = await this.confirm(usable ?? made, last ?? guards.home, window, signal);
+      return prepared;
+    } finally {
       // Taken: it goes still if its chat is never bound.
-      const preparation = this.byToken.get(prepared.token);
+      const preparation = made !== null && prepared?.folder === made ? this.byToken.get(prepared.token) : undefined;
       if (preparation) preparation.made = true;
-    } else if (made !== null) {
-      removeEmpty(made);
+      else if (made !== null) this.release(made);
     }
-    return prepared;
   }
 
   /** Drop a folder confirmed in *window* whose chat was never created: its bind is refused from now on. A chat bound already keeps it. */
@@ -167,9 +175,31 @@ export class Binder implements Executor {
     const preparation = this.byToken.get(preparedToken);
     if (!preparation || preparation.window !== window || preparation.root !== undefined) return;
     this.byToken.delete(preparedToken);
-    this.byNonce.delete(preparation.nonce);
-    if (preparation.made) removeEmpty(preparation.folder);
+    this.unbound(preparation);
     preparation.reject(new Error("This folder's confirmation was dropped before its chat was created"));
+  }
+
+  // A confirmation that binds no chat, dropped or expired: it can bind none from now on, and
+  // a folder made for it is let go, once.
+  private unbound(preparation: Preparation): void {
+    clearTimeout(preparation.expiry);
+    this.byNonce.delete(preparation.nonce);
+    if (!preparation.made) return;
+    delete preparation.made;
+    this.release(preparation.folder);
+  }
+
+  // A folder made for a chat that took none goes, if still empty, unless a chat holds it by
+  // now: the same day's path is made again for the next chat once it has gone, and a user may
+  // pick it for another.
+  private release(folder: string): void {
+    try {
+      const open = [...this.byNonce.values()].some((preparation) => preparation.folder === folder);
+      if (!open && !this.options.bindings.folders().includes(folder)) removeEmpty(folder);
+    } catch (error) {
+      // A journal that cannot be read keeps it.
+      report(this.options.onError, error);
+    }
   }
 
   // The sheet for *offered*, or for the folder the dialog picks from *startIn*, until the user accepts one or cancels.
@@ -289,10 +319,9 @@ export class Binder implements Executor {
     // ponytail: a preparation stays for the app's life, so a repeated bindSession is
     // answered, until bindSession hears it failed before binding a chat; one per folder
     // confirmed in this run.
-    setTimeout(() => {
-      this.byNonce.delete(nonce);
+    preparation.expiry = setTimeout(() => {
       if (preparation.root !== undefined) return;
-      if (preparation.made) removeEmpty(preparation.folder);
+      this.unbound(preparation);
       reject(new Error("This folder's confirmation expired before its chat was created"));
     }, this.options.preparedMs ?? PREPARED_MS).unref();
     return { folder: checked.path, mode, nonce, token: secret };
