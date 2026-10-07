@@ -450,6 +450,30 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     }
   });
 
+  it("runs a host whose node opens no inspector on SIGUSR1, as Electron's fuse keeps its own from opening one", async () => {
+    // A script of the host's: it says its pid, then, asked, whether an inspector listens. On port 0,
+    // so that no other process's 9229 keeps one from opening.
+    const script = join(base, "inspected.cjs");
+    writeFileSync(script, [
+      "process.debugPort = 0;",
+      "process.on('message', () => process.send({ type: 'inspector', url: require('node:inspector').url() ?? null }));",
+      "process.send({ type: 'pid', pid: process.pid });",
+    ].join("\n"));
+    const host = forkHost({ script });
+    const said: Array<{ type: string; pid?: number; url?: string | null }> = [];
+    host.onMessage((message) => said.push(message as unknown as (typeof said)[number]));
+    try {
+      await until(() => said.length > 0, 5_000);
+      process.kill(said[0]!.pid!, "SIGUSR1");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      host.send({ type: "stop" });
+      await until(() => said.length > 1, 5_000);
+      expect(said[1]).toEqual({ type: "inspector", url: null });
+    } finally {
+      host.kill();
+    }
+  });
+
   it("answers unavailable when the host cannot be spawned at all, and stops", async () => {
     const executor = toolHosts({ spawnHost: () => forkHost({ execPath: "/nonexistent/node" }) });
     expect(await executor.run(resolve(), signal())).toMatchObject(unavailable);

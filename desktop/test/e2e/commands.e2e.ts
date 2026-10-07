@@ -141,6 +141,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     });
     const onNode = processes.filter(({ exe }) => exe === realpathSync(NODE)).map(({ args }) => args.find((arg) => arg.endsWith(".js"))?.replace(/^.*\/dist\//, ""));
     expect(onNode.sort()).toEqual(["files/helper.js", "hosts/host.js"]);
+    // Neither opens an inspector on SIGUSR1: the app's node has no fuse to refuse it.
+    expect(processes.filter(({ exe }) => exe === realpathSync(NODE)).map(({ args }) => args.includes("--disable-sigusr1"))).toEqual([true, true]);
     const plainElectron = processes.filter(({ exe, args }) => exe === realpathSync(ELECTRON) && !args.some((arg) => arg.startsWith("--type=")));
     expect(plainElectron.map(({ pid }) => pid)).toEqual([main]);
   });

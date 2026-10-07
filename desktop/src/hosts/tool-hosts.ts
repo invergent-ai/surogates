@@ -77,7 +77,9 @@ export function forkHost(options: ForkOptions = {}): HostProcess {
   // along. Its stdout goes to stderr: the app's stdout may carry other things.
   // Its environment is named, never the app's: a plain node acts on NODE_OPTIONS, NODE_PATH,
   // OPENSSL_CONF and the like, and srt on CLAUDE_CODE_TMPDIR, none of which the user's may set for it.
-  const child = spawn(options.execPath ?? NODE, [options.script ?? HOST], {
+  // --disable-sigusr1: a plain node opens its inspector on SIGUSR1, which any process of the user's can
+  // send, and has no fuse to refuse it as Electron has.
+  const child = spawn(options.execPath ?? NODE, ["--disable-sigusr1", options.script ?? HOST], {
     detached: true,
     stdio: ["ignore", 2, 2, "ipc"],
     env: { PATH: process.env.PATH ?? "", HOME: homedir() },

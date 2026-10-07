@@ -245,8 +245,8 @@ async function start(message: HostStart): Promise<void> {
   // wrap time. The helper guards those names itself, so it is wrapped from the
   // temp folder and the user's folder stays as it was.
   process.chdir(tmp);
-  // The helper runs on this host's node, the app's own, as plain Node: nothing to tell it.
-  const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} ${quote(HELPER)}`);
+  // The helper runs on this host's node, the app's own, as plain Node, with no inspector on SIGUSR1.
+  const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} --disable-sigusr1 ${quote(HELPER)}`);
   const [file, flag, line] = argv;
   if (!file || flag === undefined || line === undefined) throw new Error("srt returned no command");
   // Named here only: srt's returned env is this process's own, and the app's may hold its credentials.
