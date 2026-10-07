@@ -444,9 +444,15 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
   let truncated = false;
   // The key's own failure is the answer.
   const keyFd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW));
-  const levels: Level[] = [];
+  let keyDir: Level["dir"];
   try {
-    levels.push({ fd: keyFd, rel: "", dir: io(key, () => listing(keyFd)) });
+    keyDir = io(key, () => listing(keyFd));
+  } catch (error) {
+    closeSync(keyFd);
+    throw error;
+  }
+  const levels: Level[] = [{ fd: keyFd, rel: "", dir: keyDir }];
+  try {
     while (levels.length > 0 && !truncated) {
       const level = levels.at(-1) as Level;
       let entry: Dirent<Buffer> | null;

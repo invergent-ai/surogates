@@ -22,8 +22,8 @@ import { inFolderRefusal } from "../src/files/protect.js";
 const reads = vi.hoisted(() => ({ cap: Number.POSITIVE_INFINITY, calls: 0, next: [] as number[] }));
 // Run once as the file helper's next write begins: another writer, changing a file meanwhile.
 const meanwhile = vi.hoisted(() => ({ run: null as (() => void) | null }));
-// How many folder entries the file helper has read, however it read them.
-const dirents = vi.hoisted(() => ({ read: 0 }));
+// How many folder entries the file helper has read, however it read them; and whether its next opendir fails.
+const dirents = vi.hoisted(() => ({ read: 0, refuse: false }));
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
   const readSync = (
@@ -45,6 +45,10 @@ vi.mock("node:fs", async (importOriginal) => {
     return entries;
   }) as typeof fs.readdirSync;
   const opendirSync = (...args: Parameters<typeof fs.opendirSync>) => {
+    if (dirents.refuse) {
+      dirents.refuse = false;
+      throw Object.assign(new Error("EMFILE: too many open files, opendir"), { code: "EMFILE", errno: -24, syscall: "opendir" });
+    }
     const dir = fs.opendirSync(...args);
     const next = dir.readSync.bind(dir);
     dir.readSync = () => {
@@ -674,6 +678,13 @@ describe("walk", () => {
     expect(walked.ok.truncated).toBe(true);
     // The key's and deep's few entries, then many's up to the one past the cap: not the rest of it.
     expect(dirents.read).toBeLessThan(MAX_WALK_FILES + 10);
+    expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
+  });
+
+  it("closes the key's handle when it cannot read the key", async () => {
+    const handles = readdirSync("/proc/self/fd").length;
+    dirents.refuse = true;
+    expect(await walk()).toMatchObject({ error: { type: "os", code: "EMFILE" } });
     expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
   });
 
