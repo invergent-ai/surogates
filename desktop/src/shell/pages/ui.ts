@@ -91,3 +91,34 @@ export function ago(when: string, now = Date.now(), form: "short" | "long" = "sh
     : minutes < 24 * 60 ? [Math.floor(minutes / 60), "hour"] : [Math.floor(minutes / (24 * 60)), "day"];
   return form === "short" ? `${count}${unit[0]}` : RELATIVE.format(-count, unit);
 }
+
+// What a prompt shows as its code point rather than as itself: controls and format characters (the
+// bidi controls among them), private-use, unassigned and lone surrogate code points, line and
+// paragraph separators, what draws nothing, and every space but U+0020.
+const SPECIAL = /[\p{C}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]|(?! )\p{Zs}/gu;
+
+/** *text* in runs: plain text, and each special character as its code point (U+202E). *keep* holds the special characters shown as themselves. */
+export function segments(text: string, keep = ""): Array<{ text: string; special: boolean }> {
+  const runs: Array<{ text: string; special: boolean }> = [];
+  let last = 0;
+  for (const match of text.matchAll(SPECIAL)) {
+    const [found] = match;
+    if (keep.includes(found)) continue;
+    if (match.index > last) runs.push({ text: text.slice(last, match.index), special: false });
+    runs.push({ text: `U+${found.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`, special: true });
+    last = match.index + found.length;
+  }
+  if (last < text.length) runs.push({ text: text.slice(last), special: false });
+  return runs;
+}
+
+/** Set *element*'s text to *text*, whole, with each special character marked as its code point: never markup. */
+export function showText(element: HTMLElement, text: string, keep = ""): void {
+  element.replaceChildren(...segments(text, keep).map(({ text: run, special }) => {
+    if (!special) return document.createTextNode(run);
+    const mark = document.createElement("span");
+    mark.className = "special";
+    mark.textContent = run;
+    return mark;
+  }));
+}

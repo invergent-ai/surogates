@@ -7,10 +7,9 @@
 import { rmSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
-  app, dialog, type IpcMainEvent, type IpcMainInvokeEvent, Menu, nativeTheme, net, safeStorage, session, shell, utilityProcess,
+  app, dialog, type IpcMainEvent, Menu, nativeTheme, net, safeStorage, session, shell, utilityProcess,
   type WebContents, webContents,
 } from "electron";
 
@@ -33,7 +32,7 @@ import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } 
 import { ANSWER_TIMEOUT_MS, PageProjects } from "./projects.js";
 import { folderPrompts, refusingApprovals } from "./prompts.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
-import { sameOrigin, webClientPath } from "./window-policy.js";
+import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
 const PAGES = join(import.meta.dirname, "pages");
@@ -200,13 +199,6 @@ const vmFor = (env: Record<string, string>): VmClient => {
   const { uid, gid, username, homedir } = userInfo();
   vm ??= new VmClient({ vm: vmOptions(root, { uid, gid, name: username, home: env.HOME ?? homedir }), spawn: utilityManager });
   return vm;
-};
-
-// A call from *page*, the window's own, in its top frame: no other page, a file dropped there included.
-const fromPage = (event: IpcMainInvokeEvent, page: string): boolean => {
-  const frame = event.senderFrame;
-  if (frame?.parent !== null || !frame.url.startsWith("file:")) return false;
-  return fileURLToPath(frame.url) === page;
 };
 
 function bounds(value: unknown): Bounds {
@@ -1036,7 +1028,7 @@ function showSettings(): void {
   main?.openSettings(page, PAGES_PRELOAD, (contents) => {
     const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
       contents.ipc.handle(channel, (event, ...args: unknown[]) => {
-        if (!fromPage(event, page)) throw new Error("Not Settings' own page");
+        if (!ownPage(event.senderFrame, page)) throw new Error("Not Settings' own page");
         return handler(...args);
       });
     };
@@ -1060,7 +1052,7 @@ function showSettings(): void {
 function wire(window: MainWindow, page: string): void {
   const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
     window.window.webContents.ipc.handle(channel, (event, ...args: unknown[]) => {
-      if (!fromPage(event, page)) throw new Error("Not the window's own page");
+      if (!ownPage(event.senderFrame, page)) throw new Error("Not the window's own page");
       return handler(...args);
     });
   };
