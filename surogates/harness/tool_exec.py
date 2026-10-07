@@ -1725,8 +1725,6 @@ async def _run_single_tool(
             result_content = await sandbox_pool.execute(
                 sandbox_owner, tool_name, args_str,
             )
-            if sandbox_pool.copy_remade(sandbox_owner):
-                result_content = f"{COPY_REMADE}\n\n{result_content}"
         else:
             result_content = await tools.dispatch(
                 tool_name,
@@ -1835,6 +1833,13 @@ async def _run_single_tool(
         make_sandbox_writer,
         maybe_persist_tool_result,
     )
+
+    # A thread is told once, by the next step's result whatever the tool,
+    # that its copy was made again: its pod stopped mid-turn.
+    if sandbox_pool is not None and is_project_thread(session.config):
+        from surogates.sandbox.pool import sandbox_session_key
+        if sandbox_pool.copy_remade(sandbox_session_key(session)):
+            result_content = f"{COPY_REMADE}\n\n{result_content}"
 
     spill_pool = device_call if device_call is not None else sandbox_pool
     if spill_pool is not None:

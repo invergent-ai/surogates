@@ -649,3 +649,22 @@ async def test_a_thread_turn_cut_off_outside_its_landing_lets_its_copy_go(api, m
         await harness.wake(thread.id)
     # No later turn on this worker goes on with a copy of a turn that never landed.
     assert (pool.holds_copy(str(thread.id)), pods.pods) == (False, {})
+
+
+async def test_any_step_after_a_copy_remade_tells_the_thread(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    gone: list = []
+
+    async def the_pod_goes_once(harness):
+        if not gone:
+            gone.append(await pods.destroy(next(iter(pods.pods))))
+
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "a.md", "content": "a"})),
+        calling(("memory", {"action": "add", "content": "Name: Ana"})),
+        calling(("memory", {"action": "add", "content": "City: Iasi"})),  # a harness tool, not the pod's
+        _final_response("Done."),
+    ], pool=SandboxPool(pods), during=the_pod_goes_once)
+    events = await api.app.state.session_store.get_events(thread.id, types=[EventType.TOOL_RESULT])
+    first, second = [e.data["content"] for e in events if e.data["name"] == "memory"]
+    assert not first.startswith("[This thread's copy") and second.startswith("[This thread's copy")

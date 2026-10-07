@@ -180,6 +180,8 @@ class SandboxPool:
         lock = await self._session_lock(session_id)
         async with lock:
             self._specs.pop(session_id, None)
+            # Its turn has ended: a copy made again is no later turn's news.
+            self._remade.discard(session_id)
             return self._mapping.pop(session_id, None)
 
     async def destroy_released(
