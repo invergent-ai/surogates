@@ -4,6 +4,8 @@ import { duplexPair } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { MAX_TUNNELS } from "../src/guest/network.js";
+import { MAX_SHARES } from "../src/guest/protocol.js";
 import type { NetworkAsk } from "../src/hosts/messages.js";
 import { NetProxy, networkNotice, withNotice } from "../src/vm/proxy.js";
 
@@ -21,6 +23,8 @@ const names: Record<string, string[][]> = {
 };
 const resolve = (name: string) => {
   const seen = (lookups[name] = (lookups[name] ?? 0) + 1);
+  // A name whose lookup takes 200 ms.
+  if (name === "slow.example") return new Promise<string[]>((done) => setTimeout(() => done(["93.184.215.14"]), 200));
   const answers = names[name];
   if (!answers) return Promise.reject(new Error("ENOTFOUND"));
   return Promise.resolve(answers[Math.min(seen, answers.length) - 1] ?? []);
@@ -185,6 +189,39 @@ describe("the host proxy", () => {
     await tunnel("127.0.0.1:9");
     proxy.forget(ROOT);
     expect(proxy.takeNotice(ROOT)).toBeNull();
+  });
+
+  it("asks anew for a root set up again, past an ask of its torn-down namespace still open", async () => {
+    const answers: Array<(allowed: boolean) => void> = [];
+    answer = () => new Promise((done) => answers.push(done));
+    const before = tunnel("example.com:443");
+    await new Promise((done) => setTimeout(done, 50));
+    proxy.forget(ROOT);
+    const after = tunnel("example.com:443");
+    await new Promise((done) => setTimeout(done, 50));
+    expect(asked).toHaveLength(2);
+    answers[1]?.(false);
+    expect(await after).toMatchObject({ status: 403, reason: "denied" });
+    expect(proxy.takeNotice(ROOT)).toBe("This computer did not allow network access to example.com:443.");
+    // The torn-down namespace's answer is its own connection's alone.
+    answers[0]?.(true);
+    expect(await before).toMatchObject({ status: 200 });
+    expect(proxy.takeNotice(ROOT)).toBeNull();
+  });
+
+  it("asks no one about a connection gone before it was judged", async () => {
+    const stream = client.request({ ":method": "CONNECT", ":authority": "slow.example:443", "surogate-root": ROOT });
+    stream.on("error", () => {});
+    await new Promise((done) => setTimeout(done, 50));
+    stream.close();
+    await new Promise((done) => setTimeout(done, 300));
+    expect(lookups["slow.example"]).toBe(1);
+    expect(asked).toEqual([]);
+  });
+
+  it("lets the guest open as many streams at once as its roots can have tunnels, and no more", async () => {
+    await tunnel("pypi.org:443");
+    expect(client.remoteSettings.maxConcurrentStreams).toBe(MAX_SHARES * MAX_TUNNELS);
   });
 });
 

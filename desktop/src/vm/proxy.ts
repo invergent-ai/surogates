@@ -10,13 +10,17 @@ import { performServerHandshake, type ServerHttp2Session, type ServerHttp2Stream
 import { connect as connectTcp, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 
-import { ROOT_ID } from "../guest/protocol.js";
+import { MAX_TUNNELS } from "../guest/network.js";
+import { MAX_SHARES, ROOT_ID } from "../guest/protocol.js";
 import type { NetworkAsk } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { judge, type ReachOptions } from "./egress.js";
 
 // How many destinations of a kind a notice names.
 const NOTICE_NAMES = 20;
+// How many streams the guest may have open at once: as many as its roots can have tunnels,
+// which binds only a guest whose agent no longer keeps to them.
+const MAX_STREAMS = MAX_SHARES * MAX_TUNNELS;
 
 export interface Egress {
   // Whether the chat's user lets *root* reach *asked* now: a grant, or their answer. Rejecting
@@ -84,7 +88,7 @@ export class NetProxy {
   private readonly met = new Map<string, Met>();
 
   constructor(channel: Duplex, private readonly options: ProxyOptions) {
-    this.session = performServerHandshake(channel);
+    this.session = performServerHandshake(channel, { settings: { maxConcurrentStreams: MAX_STREAMS } });
     // The guest is the one client: an error ends the session, and its streams with it.
     this.session.on("error", () => {});
     this.session.on("stream", (stream, headers) => {
@@ -113,9 +117,11 @@ export class NetProxy {
     return notice;
   }
 
-  // A root torn down: what it met goes with it, as a new namespace has met nothing.
+  // A root torn down: what it met goes with it, as a new namespace has met nothing; an ask
+  // still open answers only its own connections, and the next namespace's asks anew.
   forget(root: string): void {
     this.met.delete(root);
+    for (const id of this.asking.keys()) if (id.startsWith(`${root} `)) this.asking.delete(id);
   }
 
   // The session, and every stream in it, ends: its guest has gone.
@@ -138,6 +144,8 @@ export class NetProxy {
       if (verdict.refused !== "invalid") this.metBy(root)[verdict.refused].add(verdict.key);
       return refuse(stream, 403, verdict.refused);
     }
+    // Gone while it was judged: its user is not asked about it.
+    if (verdict.ask && stream.destroyed) return;
     if (verdict.ask && !(await this.allowed(root, verdict.ask, verdict.key))) return refuse(stream, 403, "denied");
     this.dial(stream, verdict.dial, port);
   }
@@ -153,7 +161,7 @@ export class NetProxy {
       .then(() => this.options.egress.ask(root, asked))
       .then((allow) => allow === true, () => false)
       .then((allow) => {
-        this.asking.delete(id);
+        if (this.asking.get(id) === decided) this.asking.delete(id);
         met.waiting.delete(key);
         if (!allow) met.refused.add(key);
         return allow;
