@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import select
 
 from surogates.db.models import DeviceOperation
-from surogates.devices.binding import BIND
+from surogates.devices.binding import BIND, RETIRE
 from surogates.devices.operations import DeviceOperations, OperationRequest
 
 from .test_desktop_file_operations import journal_dir, prepare  # noqa: F401  (fixture)
@@ -76,6 +76,18 @@ async def test_the_app_binds_the_chat_its_user_confirmed_and_works_in_its_folder
             invocation_id=f"call-{uuid.uuid4()}", ordinal=1, kind="resolve", args={"path": "a.txt"},
         )), 30.0)
         assert resolved == {"ok": f"{folder}/a.txt"}
+
+        # Deleted, the chat's folder is forgotten on the computer, and stays as it was.
+        assert (await api.client.delete(f"/v1/sessions/{session_id}", headers=api.auth())).status_code == 204
+
+        async def forgotten() -> bool:
+            async with api.app.state.session_factory() as db:
+                return (await db.execute(select(DeviceOperation.outcome).where(
+                    DeviceOperation.calling_session_id == UUID(session_id), DeviceOperation.invocation_id == RETIRE,
+                ))).scalar_one_or_none() == {"ok": None}
+
+        await eventually(forgotten, timeout=10.0)
+        assert (folder / "a.txt").exists()
     finally:
         await app.close()
 

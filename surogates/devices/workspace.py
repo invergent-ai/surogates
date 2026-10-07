@@ -7,6 +7,7 @@ enforces its rules; the worker never touches the folder.
 
   kind            args                                          ok value
   bind            folder, nonce                                 null
+  retire          (none)                                        null
   resolve         path                                          key (str)
   check_write     path                                          refusal (str) or null
   stat            key                                           {is_dir, size, mtime, revision} or null
@@ -39,6 +40,10 @@ recorded the binding; it refuses one it cannot match with
 {"type": "binding", "message"}.  Every other operation is for a session the
 app bound, or one created under it, and runs in the folder the app recorded,
 whatever the request says.
+
+retire is a deleted root session's own operation, invocation "retire",
+ordinal 0: the app forgets the chat's binding, and so takes no more
+operations for it.  The folder itself is never touched.
 
 A revision is "dev:ino:size:mtime_ns:ctime_ns", each the file's stat field in
 decimal (dev and ino unsigned), as LocalWorkspaceIO.stat makes it.  The worker

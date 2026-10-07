@@ -327,6 +327,42 @@ async def test_delete_session_deletes_session_prefix_not_agent_bucket(monkeypatc
     ]
 
 
+async def test_deleting_a_local_folder_chat_deletes_nothing_in_storage(monkeypatch):
+    monkeypatch.setattr(DeviceOperations, "cancel", AsyncMock(return_value=0))
+    monkeypatch.setattr(DeviceOperations, "retire", AsyncMock(return_value=None))
+    org_id = uuid4()
+    session_id = uuid4()
+    user_id = uuid4()
+    store = _Store(org_id)
+    store.session = SimpleNamespace(
+        id=session_id,
+        org_id=org_id,
+        user_id=user_id,
+        service_account_id=None,
+        agent_id="support-bot",
+        status="active",
+        channel="web",
+        # The storage fields a local-folder chat keeps for create_child_session only.
+        config={
+            "storage_bucket": "ops-agent-bucket",
+            "execution": {"kind": "device", "device_id": str(uuid4())},
+            "workspace_path": "/home/me/notes",
+        },
+    )
+    storage = _RecordingStorage()
+    storage.keys["ops-agent-bucket"] = [f"{session_id}/file.txt"]
+    request = _request(store, storage, _Redis())
+    background_tasks = BackgroundTasks()
+
+    await sessions_route.delete_session(
+        session_id, request, background_tasks, _tenant(org_id, user_id),
+        _runtime("support-bot", org_id),
+    )
+    await background_tasks()
+
+    assert storage.deleted_keys == []
+
+
 async def test_delete_session_destroys_browser_sandbox(monkeypatch):
     monkeypatch.setattr(DeviceOperations, "cancel", AsyncMock(return_value=0))
     org_id = uuid4()

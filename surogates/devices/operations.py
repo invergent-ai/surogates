@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import Device, DeviceOperation, DeviceTransfer, DeviceTransferChunk
 from surogates.db.models import Session as SessionRow
-from surogates.devices.binding import BIND, binding_of, device_of
+from surogates.devices.binding import BIND, RETIRE, binding_of, device_of
 from surogates.devices.presence import DevicePresence, control_channel
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import CHUNK_BYTES, DeviceOperationError, is_well_formed, transfer_of
@@ -183,18 +183,23 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
         )
     ):
         raise DeviceOperationError("This session does not work on this computer")
-    is_binding = (
-        request.calling_session_id == request.root_session_id
-        and request.invocation_id == BIND
-        and request.ordinal == 0
-    )
+    own = request.calling_session_id == request.root_session_id and request.ordinal == 0
+    is_binding = own and request.invocation_id == BIND
+    is_retiring = own and request.invocation_id == RETIRE
     if (request.kind == BIND) != is_binding:
         raise ValueError("Only the root session's own first operation is its binding")
-    if is_binding and (root.config or {}).get("sandbox_root_session_id"):
+    if (request.kind == RETIRE) != is_retiring:
+        raise ValueError("Only the root session's own retirement retires its folder")
+    if (is_binding or is_retiring) and (root.config or {}).get("sandbox_root_session_id"):
         # A session created under another works in that session's folder.
         raise ValueError("Only a root session is bound to a folder")
     if not is_binding and (await binding_of(db, request.root_session_id)).state != "bound":
         raise DeviceOperationError("This session's folder is not set up on this computer yet")
+    if is_retiring:
+        if root.status != "archived":
+            raise ValueError("Only a deleted root session's folder is retired")
+        # Recorded once its chat is deleted, for its computer to forget the folder.
+        return False
     if request.invocation_id.startswith(REQUEST_PREFIX):
         # The user's own look at the folder: a paused or failed chat's files
         # are still theirs to open.  A deleted chat's are not.
@@ -271,7 +276,7 @@ async def _refuse_when_full(db: AsyncSession, request: OperationRequest, device:
     open_for_device = (
         DeviceOperation.device_id == request.device_id,
         DeviceOperation.completed_at.is_(None),
-        DeviceOperation.kind != BIND,
+        DeviceOperation.kind.not_in((BIND, RETIRE)),
         DeviceOperation.invocation_id.not_like(f"{REQUEST_PREFIX}%"),
     )
     others = (await db.execute(
@@ -586,6 +591,24 @@ class DeviceOperations:
         if recorded != request.digest:
             raise OperationConflict(f"{request.invocation_id} was sent before with another change")
 
+    async def retire(self, *, session_id: UUID, device_id: UUID) -> None:
+        """Ask the device to forget a deleted root session's folder, without waiting.
+
+        Recorded like any operation, so a computer away now forgets it when
+        it is back.  The folder itself is never touched.
+        """
+        operation_id, outcome = await self._record(OperationRequest(
+            device_id=device_id,
+            root_session_id=session_id,
+            calling_session_id=session_id,
+            invocation_id=RETIRE,
+            ordinal=0,
+            kind=RETIRE,
+            args={},
+        ))
+        if outcome is None:
+            await self._announce(control_channel(device_id), f"op:{operation_id}")
+
     async def _record(self, request: OperationRequest) -> tuple[UUID, dict[str, Any] | None]:
         """Record *request*, or find it already recorded.
 
@@ -648,7 +671,7 @@ class DeviceOperations:
             if request.invocation_id.startswith(REQUEST_PREFIX):
                 if device.revoked_at is None:
                     await _refuse_too_many_requests(db, request, device)
-            elif request.kind != BIND and device.revoked_at is None:
+            elif request.kind not in (BIND, RETIRE) and device.revoked_at is None:
                 await _refuse_when_full(db, request, device)
             refused = (
                 {"outcome": REVOKED_OUTCOME, "completed_at": func.now()}

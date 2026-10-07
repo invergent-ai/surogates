@@ -557,10 +557,14 @@ class FakeLaptop:
         operation_id = frame["id"]
         if operation_id not in self.outcomes:
             self.ran.append(frame["kind"])
-            outcome = (
-                self._bind(frame) if frame["kind"] == "bind"
-                else await perform(self.folder, frame["kind"], frame["args"])
-            )
+            if frame["kind"] == "bind":
+                outcome = self._bind(frame)
+            elif frame["kind"] == "retire":
+                # A deleted chat: its folder is forgotten, never touched.
+                self.bindings.pop(frame["session_id"], None)
+                outcome = {"ok": None}
+            else:
+                outcome = await perform(self.folder, frame["kind"], frame["args"])
             self.outcomes[operation_id] = self._carried(operation_id, frame["kind"], outcome)
         if not self.reply:
             await ws.close()

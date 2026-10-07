@@ -55,8 +55,10 @@ from surogates.api.routes._commerce_turn import (
     release_commerce_hold,
     runtime_commerce_payload,
 )
+from surogates.devices.binding import device_of
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.store import DeviceStore
+from surogates.devices.workspace import DeviceOperationError
 from surogates.session.events import SEED_SYNTHETIC_MARKER, EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
@@ -1817,6 +1819,9 @@ async def _cleanup_archived_workspaces(
     — the periodic cleanup job sweeps anything left behind.
     """
     for archived_session in archived_sessions:
+        if device_of(archived_session.config) is not None:
+            # Its files are its folder, on its computer: deleting a chat never deletes them.
+            continue
         storage_bucket = (archived_session.config or {}).get("storage_bucket")
         if not storage_bucket:
             logger.warning(
@@ -1944,6 +1949,8 @@ async def delete_session(
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
     _require_not_project_master(session, tenant, "archive the project instead")
+    # A chat whose folder never bound is deleted all the same.
+    await require_device_access(request, session, tenant, bound=False)
     await archive_session_tree(request, session, background_tasks)
 
 
@@ -1955,7 +1962,8 @@ async def archive_session_tree(
     Their schedules and missions go, a project whose master is among them is
     archived, their computers and browsers stop, their workers are
     interrupted, and their workspaces are deleted after the response, except
-    a boundary workspace, which its siblings share.
+    a boundary workspace, which its siblings share, and a local folder, which
+    its computer only forgets.
     """
     store = _get_session_store(request)
     session_id = session.id
@@ -1967,12 +1975,25 @@ async def archive_session_tree(
 
     # A deleted chat's computer stops what it was doing, its folder's set-up
     # included; the journal refuses anything more for its tree.
+    operations = DeviceOperations(request.app.state.session_factory, request.app.state.redis)
     try:
-        await DeviceOperations(request.app.state.session_factory, request.app.state.redis).cancel(
-            [archived.id for archived in archived_sessions], bindings=True,
-        )
+        await operations.cancel([archived.id for archived in archived_sessions], bindings=True)
     except Exception:
         logger.warning("could not cancel the device operations of deleted session %s", session_id, exc_info=True)
+    # Then each deleted root's computer forgets its folder: after the cancel,
+    # which would close it.  A sub-agent's root keeps its folder.
+    for archived in archived_sessions:
+        device_id = device_of(archived.config)
+        if device_id is None or (archived.config or {}).get("sandbox_root_session_id"):
+            continue
+        try:
+            await operations.retire(session_id=archived.id, device_id=device_id)
+        except DeviceOperationError:
+            # A root its computer never accepted has no folder to forget.
+            logger.info("no folder to retire for deleted session %s", archived.id)
+        except Exception:
+            # Never retried: the server refuses everything for the root, but its computer keeps the binding.
+            logger.warning("could not retire the folder of deleted session %s", archived.id, exc_info=True)
 
     for archived_session in archived_sessions:
         await _destroy_deleted_session_browser(request, archived_session.id)

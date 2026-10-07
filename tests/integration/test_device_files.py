@@ -12,6 +12,7 @@ import pytest_asyncio
 
 import surogates.api.routes.workspace as workspace_routes
 import surogates.devices.operations as operations_module
+from surogates.devices.operations import DeviceOperations, OperationRequest
 from surogates.devices.workspace import MAX_WALK_FILES
 from surogates.session.provisioning import create_child_session
 from surogates.tools.workspace_io import LocalWorkspaceIO
@@ -375,3 +376,61 @@ async def test_another_member_of_the_org_attaches_nothing_from_the_users_compute
     )
     assert response.status_code == 404, response.text
     assert chat.laptop.ran == ran
+
+
+async def test_deleting_a_chat_leaves_its_folder_and_its_computer_forgets_it(api, chat):
+    (chat.folder / "notes.md").write_text("kept")
+    deleted = await api.client.delete(f"/v1/sessions/{chat.id}", headers=api.auth())
+    assert deleted.status_code == 204, deleted.text
+
+    async def forgotten() -> bool:
+        return chat.id not in chat.laptop.bindings
+
+    await eventually(forgotten)
+    assert (chat.folder / "notes.md").read_text() == "kept"
+    assert chat.laptop.ran.count("retire") == 1
+
+
+async def test_a_computer_offline_when_its_chat_is_deleted_forgets_the_folder_when_it_is_back(api, chat):
+    await chat.laptop.disconnect()
+    deleted = await api.client.delete(f"/v1/sessions/{chat.id}", headers=api.auth())
+    assert deleted.status_code == 204, deleted.text
+    await chat.laptop.connect()
+
+    async def forgotten() -> bool:
+        return chat.id not in chat.laptop.bindings
+
+    await eventually(forgotten)
+
+
+async def test_deleting_a_sub_agent_leaves_its_roots_folder_bound(api, chat):
+    store = api.app.state.session_store
+    child = await create_child_session(store=store, parent=await store.get_session(UUID(chat.id)), channel="web")
+    deleted = await api.client.delete(f"/v1/sessions/{child.id}", headers=api.auth())
+    assert deleted.status_code == 204, deleted.text
+    assert chat.laptop.bindings == {chat.id: FOLDER}
+    assert "retire" not in chat.laptop.ran
+
+
+async def test_another_member_of_the_org_cannot_delete_the_users_local_chat(api, chat):
+    stranger = await another_member(api)
+    deleted = await api.client.delete(f"/v1/sessions/{chat.id}", headers=api.auth(stranger))
+    assert deleted.status_code == 404, deleted.text
+    assert (await api.app.state.session_store.get_session(UUID(chat.id))).status != "archived"
+    assert chat.laptop.bindings == {chat.id: FOLDER}
+
+
+async def test_only_a_roots_own_retirement_retires_its_folder(api, chat):
+    ops = DeviceOperations(api.app.state.session_factory, api.app.state.redis)
+    with pytest.raises(ValueError, match="retirement"):
+        await ops.run(OperationRequest(
+            device_id=chat.device_id, root_session_id=UUID(chat.id), calling_session_id=UUID(chat.id),
+            invocation_id="1:call", ordinal=1, kind="retire", args={},
+        ))
+
+
+async def test_a_chat_still_in_use_is_never_retired(api, chat):
+    ops = DeviceOperations(api.app.state.session_factory, api.app.state.redis)
+    with pytest.raises(ValueError, match="deleted"):
+        await ops.retire(session_id=UUID(chat.id), device_id=chat.device_id)
+    assert chat.laptop.bindings == {chat.id: FOLDER}
