@@ -169,10 +169,11 @@ int BPF_PROG(on_open, struct file *file)
 	return DENY(refused(BPF_CORE_READ(dentry, d_sb), dentry, 0));
 }
 
-// The pinned kernel's hook takes no idmap (6.9 added one): declared with it, the program
-// read attr as the dentry and the hook's return slot, 0, as attr, and allowed every chmod.
+// The hook takes the mount's idmap first, as every kernel since 6.9 passes it: declared
+// without it, the program would read attr as the dentry and allow every chmod. The image's
+// build holds each program to its hook's arguments in the pinned kernel's BTF.
 SEC("lsm/inode_setattr")
-int BPF_PROG(on_setattr, struct dentry *dentry, struct iattr *attr)
+int BPF_PROG(on_setattr, struct mnt_idmap *idmap, struct dentry *dentry, struct iattr *attr)
 {
 	unsigned int valid = BPF_CORE_READ(attr, ia_valid);
 	if (!(valid & (ATTR_MODE | ATTR_UID | ATTR_GID | ATTR_SIZE)))

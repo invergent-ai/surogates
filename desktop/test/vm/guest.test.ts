@@ -896,6 +896,17 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     expect(mapped).toEqual({ ok: { output: "shared 19\nprivate\nwal disk I/O error\n", returncode: 0, timed_out: false } });
   });
 
+  it("runs the folder's own programs: a checked-in script, a built binary and a node_modules/.bin tool", async () => {
+    expect(await run([
+      "printf '#!/bin/sh\\necho configured\\n' > configure && chmod +x configure && ./configure",
+      "cp /usr/bin/true built && ./built && echo built",
+      // As npm installs a package's command: a script in the package, linked from node_modules/.bin.
+      "mkdir -p node_modules/tool/bin node_modules/.bin && printf '#!/usr/bin/env node\\nconsole.log(\"tool\")\\n' > node_modules/tool/bin/cli.js",
+      "chmod +x node_modules/tool/bin/cli.js && ln -s ../tool/bin/cli.js node_modules/.bin/tool && ./node_modules/.bin/tool",
+      "rm -rf configure built node_modules",
+    ].join(" && "))).toEqual({ ok: { output: "configured\nbuilt\ntool\n", returncode: 0, timed_out: false } });
+  });
+
   it("repairs a sessions disk the quick check cannot, and keeps the homes on it", async () => {
     expect(await run("echo kept > ~/kept; touch ~/victim; sync")).toEqual({ ok: { output: "", returncode: 0, timed_out: false } });
     await guest.stop();
