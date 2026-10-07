@@ -1,5 +1,5 @@
 import { type ClientHttp2Session, type ClientHttp2Stream, connect as connectH2 } from "node:http2";
-import { connect as connectTcp, createServer, type Server } from "node:net";
+import { connect as connectTcp, createServer, type Server, Socket } from "node:net";
 import { duplexPair } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -21,6 +21,10 @@ const names: Record<string, string[][]> = {
   "rebind-lan.example": [["93.184.215.14"], ["192.168.1.1"]],
   "two.example": [["192.0.2.1", "192.0.2.2"]],
   "nowhere.example": [["192.0.2.1"]],
+  // IPv4 first, as a lookup can order them, and its IPv6 address refuses; or IPv6 first, never answering.
+  "dual.example": [["192.0.2.2", "2001:db8::1"]],
+  "stalled.example": [["2001:db8::dead", "192.0.2.2"]],
+  "v6-only.example": [["2001:db8::1"]],
 };
 const resolve = (name: string) => {
   const seen = (lookups[name] = (lookups[name] ?? 0) + 1);
@@ -65,10 +69,12 @@ beforeEach(async () => {
     egress: { ask: (root, request) => (asked.push({ root, asked: request }), answer(root, request)) },
     resolve,
     local: () => ["127.0.0.1", "::1"],
-    // Every address judged reaches the echo server here, but 192.0.2.1, which refuses.
+    // Every address judged reaches the echo server here, but 192.0.2.1 and 2001:db8::1, which
+    // refuse, and 2001:db8::dead, which never answers.
     connect: (address, port) => {
       dialed.push(`${address}:${port}`);
-      return connectTcp({ host: "127.0.0.1", port: address === "192.0.2.1" ? closedPort : echoPort, allowHalfOpen: true });
+      if (address === "2001:db8::dead") return new Socket();
+      return connectTcp({ host: "127.0.0.1", port: ["192.0.2.1", "2001:db8::1"].includes(address) ? closedPort : echoPort, allowHalfOpen: true });
     },
   });
   client = connectH2("http://guest", { createConnection: () => guest });
@@ -203,6 +209,23 @@ describe("the host proxy", () => {
     expect(status).toBe(200);
     expect(dialed).toEqual(["192.0.2.1:443", "192.0.2.2:443"]);
     expect(await tunnel("nowhere.example:443")).toMatchObject({ status: 502, reason: "ECONNREFUSED" });
+  });
+
+  it("tries a name's judged IPv6 address first, then its IPv4 one, and no address it did not judge", async () => {
+    expect(await tunnel("dual.example:443")).toMatchObject({ status: 200 });
+    expect(dialed).toEqual(["2001:db8::1:443", "192.0.2.2:443"]);
+    // Its one address refuses: no other is tried, and it is not looked up again.
+    expect(await tunnel("v6-only.example:443")).toMatchObject({ status: 502, reason: "ECONNREFUSED" });
+    expect(dialed).toEqual(["2001:db8::1:443", "192.0.2.2:443", "2001:db8::1:443"]);
+    expect([lookups["dual.example"], lookups["v6-only.example"]]).toEqual([1, 1]);
+  });
+
+  it("tries the next judged address beside one that does not answer, after a short stagger", async () => {
+    const started = performance.now();
+    const opened = await Promise.race([tunnel("stalled.example:443"), new Promise((done) => setTimeout(() => done("no answer"), 2_000))]);
+    expect(opened).toMatchObject({ status: 200 });
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(dialed).toEqual(["2001:db8::dead:443", "192.0.2.2:443"]);
   });
 
   it("forgets what a torn-down root met", async () => {

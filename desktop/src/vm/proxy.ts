@@ -7,7 +7,7 @@
 // that root's next run.
 
 import { performServerHandshake, type ServerHttp2Session, type ServerHttp2Stream } from "node:http2";
-import { connect as connectTcp, type Socket } from "node:net";
+import { connect as connectTcp, isIPv6, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 
 import { MAX_TUNNELS } from "../guest/network.js";
@@ -80,6 +80,16 @@ interface Met {
 }
 
 const tcp = (address: string, port: number) => connectTcp({ host: address, port, allowHalfOpen: true });
+// How long an attempt has to connect before the next judged address is tried beside it: Node's
+// autoSelectFamily's stagger, so an address that never answers holds no other back.
+const STAGGER_MS = 250;
+
+// The judged addresses, IPv6 and IPv4 by turns, IPv6 first, as Node's autoSelectFamily tries them.
+function inTurn(addresses: readonly string[]): string[] {
+  const six = addresses.filter((address) => isIPv6(address));
+  const four = addresses.filter((address) => !isIPv6(address));
+  return Array.from({ length: Math.max(six.length, four.length) }, (_, at) => [six[at], four[at]]).flat().filter((address) => address !== undefined);
+}
 
 export class NetProxy {
   private readonly session: ServerHttp2Session;
@@ -173,28 +183,47 @@ export class NetProxy {
     return decided;
   }
 
-  // The addresses judged, in turn, until one takes the connection; the stream carries it from then on.
-  private dial(stream: ServerHttp2Stream, addresses: readonly string[], port: number, at = 0, failed = "EHOSTUNREACH"): void {
-    const address = addresses[at];
+  // The addresses judged, and no others, in turn (inTurn): the next at once when one fails, or
+  // beside it once it has had STAGGER_MS; the first to connect carries the stream, and the rest go.
+  private dial(stream: ServerHttp2Stream, addresses: readonly string[], port: number): void {
     if (stream.destroyed) return;
-    if (address === undefined) return refuse(stream, 502, failed);
-    const socket = (this.options.connect ?? tcp)(address, port);
-    let connected = false;
-    const drop = () => socket.destroy();
-    stream.once("close", drop);
-    socket.once("connect", () => {
-      connected = true;
-      if (stream.destroyed) return void socket.destroy();
-      stream.respond({ ":status": 200 });
-      socket.pipe(stream);
-      stream.pipe(socket);
+    const order = inTurn(addresses);
+    const trying = new Set<Socket>();
+    let next = 0;
+    let failed = "EHOSTUNREACH";
+    let carried: Socket | null = null;
+    let stagger: NodeJS.Timeout | undefined;
+    stream.once("close", () => {
+      clearTimeout(stagger);
+      for (const socket of trying) socket.destroy();
     });
-    socket.once("error", (error: NodeJS.ErrnoException) => {
-      socket.destroy();
-      if (connected) return void stream.destroy();
-      stream.off("close", drop);
-      this.dial(stream, addresses, port, at + 1, error.code ?? failed);
-    });
+    const attempt = (): void => {
+      clearTimeout(stagger);
+      const address = order[next];
+      if (stream.destroyed || carried || address === undefined) return;
+      next += 1;
+      const socket = (this.options.connect ?? tcp)(address, port);
+      trying.add(socket);
+      if (next < order.length) stagger = setTimeout(attempt, STAGGER_MS);
+      socket.once("connect", () => {
+        clearTimeout(stagger);
+        carried = socket;
+        for (const other of trying) if (other !== socket) other.destroy();
+        if (stream.destroyed) return void socket.destroy();
+        stream.respond({ ":status": 200 });
+        socket.pipe(stream);
+        stream.pipe(socket);
+      });
+      socket.once("error", (error: NodeJS.ErrnoException) => {
+        socket.destroy();
+        if (socket === carried) return void stream.destroy();
+        trying.delete(socket);
+        failed = error.code ?? failed;
+        if (next < order.length) attempt();
+        else if (trying.size === 0) refuse(stream, 502, failed);
+      });
+    };
+    attempt();
   }
 }
 
