@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { FuseState, FuseV1Options, getCurrentFuseWire } from "@electron/fuses";
 import { _electron, type ElectronApplication, type Page } from "playwright-core";
 import { afterAll, expect } from "vitest";
 
@@ -26,8 +27,8 @@ afterAll(() => {
 });
 
 // What a test app takes of the caller's environment, and nothing else: no agent, keyring, session or
-// desktop of the user's reaches it. VS Code's ELECTRON_RUN_AS_NODE, which would start Electron as plain
-// Node, is left out with the rest, and so is WAYLAND_DISPLAY: as an X11 session it draws on xvfb's.
+// desktop of the user's reaches it. In a Wayland session Electron would draw on the user's desktop:
+// WAYLAND_DISPLAY is left out with the rest, so as an X11 session it draws on xvfb's display.
 const TAKEN = ["PATH", "DISPLAY", "XAUTHORITY", "SUROGATE_VM_IMAGE"];
 
 /**
@@ -110,13 +111,20 @@ export async function quit(shell: ElectronApplication | undefined): Promise<void
   await gone(child.pid);
 }
 
+// This package's Electron is the app's, RunAsNode off, or no test of it means anything. Read once a run.
+let fused: Promise<void> | undefined;
+const appsElectron = (): Promise<void> => (fused ??= getCurrentFuseWire(ELECTRON).then((wire) => {
+  if (wire[FuseV1Options.RunAsNode] !== FuseState.DISABLE) throw new Error(`${ELECTRON} still runs as Node: run npm run electron:install`);
+}));
+
 /**
  * Launch the shell with its state under *home*; *env* adds to its environment, and *args* to its
  * arguments, as the system adds a link it opens. Each of *requires*, a script of the test's, runs
  * in the main process before the app's own code, after Playwright's.
  */
 export async function launch(home: string, env: Record<string, string> = {}, args: string[] = [], requires: string[] = []): Promise<ElectronApplication> {
-  return await _electron.launch({
+  await appsElectron();
+  return _electron.launch({
     executablePath: ELECTRON,
     // The basic store: no test leaves an item in the user's keyring.
     args: [...requires.flatMap((script) => ["-r", script]), MAIN, "--password-store=basic", ...args],

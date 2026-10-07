@@ -6,13 +6,13 @@ folder of your computer, while the agent's reasoning stays on the server.
 The device-link protocol is the module docstring of `surogates/devices/link.py`.
 
     npm install
-    npm run electron:install   # Electron 44 ships no postinstall: this fetches its binary
+    npm run electron:install   # Electron 44 ships no postinstall: this fetches its binary and sets its fuses
     npm test                   # builds first; the first build fetches the app's own node into bin/
     npm run typecheck
 
 The shell, in development:
 
-    npm start                  # builds, makes the agent disk, then runs Electron with ELECTRON_RUN_AS_NODE cleared
+    npm start                  # builds, makes the agent disk, then runs Electron
     npm run test:e2e           # the shell end to end, under xvfb-run, with its sandbox on
 
 Its state lives under `$XDG_DATA_HOME/surogate` (`~/.local/share/surogate`):
@@ -49,6 +49,9 @@ and connects to no host.
 
 The file hosts and their helpers run on the app's own node, `bin/node`: Node 22 for
 linux-x64, pinned by hash and stripped (`scripts/node.sh`, which the build runs).
+
+Electron never runs as Node: its RunAsNode fuse is off (`scripts/fuses.mjs`; this
+package's own Electron keeps the inspector, which the end-to-end tests drive).
 
 Until the image is delivered, the app boots the image built here (or
 `SUROGATE_VM_IMAGE`'s) with the agent disk `npm run agent-disk` makes from `dist/`.
