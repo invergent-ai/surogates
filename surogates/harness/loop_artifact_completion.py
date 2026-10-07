@@ -944,6 +944,21 @@ class ArtifactCompletionMixin:
                 # The master hears it: the report names the turn's files as not saved.
                 landing = {"state": "failed", "files": [], "excluded": [], "repositories": []}
 
+        not_kept: list[str] = []
+        if (
+            session.config.get("history_thread") and self._sandbox_pool is not None
+            and self._sandbox_pool.holds_copy(sandbox_session_key(session))
+        ):
+            # A thread's helper hands its copy back onto the thread's hand-off: it lands with the thread.
+            try:
+                kept = await keep_copy(
+                    session_factory=self._session_factory, sandbox_pool=self._sandbox_pool,
+                    session=session, saga_settings=self._saga_settings, action="hand_back",
+                )
+                not_kept = kept["not_kept"] if kept else []
+            except Exception:
+                logger.exception("Could not hand the copy of %s back to its thread", session.id)
+
         # The turn's tool saga ends with it: a later stop compensates only its own turn.
         if self._turn_saga is not None:
             await self._finalize_sagas(self._turn_saga, session)
@@ -1029,9 +1044,16 @@ class ArtifactCompletionMixin:
                 landed = [{**f, "landing": "not_merged"} for f in files or [] if f.get("kind") == "file"]
             files = landed + [a for a in files or [] if a.get("kind") != "file"]
 
+        if not_kept:
+            # Another helper, or the thread, changed them first: theirs stays.
+            files = [f for f in files or [] if f.get("ref") not in not_kept] + [
+                {"kind": "file", "label": path, "ref": path, "landing": "not_merged", "reason": "kept"} for path in not_kept
+            ]
+
         complete_data: dict[str, Any] = {
             "reason": reason,
             "worker_id": self._worker_id,
+            **({"not_kept": not_kept} if not_kept else {}),
         }
         if cost_tracker is not None:
             complete_data["cost_summary"] = cost_tracker.summary()
@@ -1206,16 +1228,21 @@ class ArtifactCompletionMixin:
             await self._finalize_sagas(self._turn_saga, session)
 
         # A failed turn does not land, since its files may be half made, but
-        # its copy is kept on its branch, and lands with its next turn.  Then
-        # its pod goes: the next turn takes the work up from the history.
+        # its copy is kept on its branch, and lands with its next turn.  A
+        # failed helper's is kept apart, merged onto nothing, and its thread
+        # told.  Then its pod goes: the next turn takes the work up from the history.
         saved: bool | None = None
+        left: list[str] = []
         owner = sandbox_session_key(session)
         if self._sandbox_pool is not None and self._sandbox_pool.holds_copy(owner):
+            helper = bool(session.config.get("history_thread"))
             try:
-                saved = await keep_copy(
+                kept = await keep_copy(
                     session_factory=self._session_factory, sandbox_pool=self._sandbox_pool,
-                    session=session, saga_settings=self._saga_settings,
-                ) is not None
+                    session=session, saga_settings=self._saga_settings, action="keep_apart" if helper else "keep",
+                )
+                saved = kept is not None
+                left = kept.get("left", []) if kept else []
             except Exception:
                 logger.exception("Could not keep the copy of %s", session.id)
                 saved = False
@@ -1228,6 +1255,8 @@ class ArtifactCompletionMixin:
             "reason": reason, "worker_id": self._worker_id, **data,
             # Whether the keep saved the turn's work, as a completed turn's landing does.
             **({"saved": saved} if saved is not None else {}),
+            # A failed helper's changes, kept apart in the history: never in its thread's copy.
+            **({"left": left} if left else {}),
         }
         if cost_tracker is not None:
             fail_data["cost_summary"] = cost_tracker.summary()
@@ -1244,6 +1273,8 @@ class ArtifactCompletionMixin:
             session.id, EventType.SESSION_FAIL, fail_data,
         )
         error = f"{reason}: {data}" if data else reason
+        if left:
+            error += f". Its changes to {', '.join(left)} were kept apart, not brought into the thread's copy"
         await announce_failure(
             self._store, session, error=error, summary=_last_assistant_message_excerpt(messages),
         )

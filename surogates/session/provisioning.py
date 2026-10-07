@@ -99,7 +99,8 @@ async def create_agent_session(
     # sandbox.  Only :func:`create_child_session` stamps it, from the real
     # parent.
     merged_config.pop("sandbox_root_session_id", None)
-    merged_config.pop("sandbox_root_thread", None)
+    merged_config.pop("history_thread", None)
+    merged_config.pop("history_project", None)
     # Server-owned too: where a session runs is decided from a device the API
     # checked, never by caller-supplied config.
     merged_config.pop("execution", None)
@@ -155,7 +156,8 @@ async def create_child_session(
     ``workspace_path`` and stamps ``sandbox_root_session_id`` to the
     ultimate ancestor (via :func:`sandbox_session_key`).  No new
     ``sessions/{child_id}/`` prefix is allocated on storage; tools
-    write into the root's workspace prefix.
+    write into the root's workspace prefix.  A project thread's helper is
+    its own sandbox root instead, over the thread's boundary.
 
     Identity is inherited from *parent*: ``agent_id``, ``org_id``,
     ``user_id``, and ``service_account_id`` (unless explicitly
@@ -202,12 +204,19 @@ async def create_child_session(
     if "execution" in parent_config:
         merged_config["execution"] = parent_config["execution"]
 
-    merged_config["sandbox_root_session_id"] = sandbox_session_key(parent)
-    # A project thread's helpers run in its pod, over its copy: whichever of
-    # them provisions that pod, on whichever worker, gives it the thread's layout.
-    merged_config.pop("sandbox_root_thread", None)
-    if is_project_thread(parent_config) or parent_config.get("sandbox_root_thread"):
-        merged_config["sandbox_root_thread"] = True
+    # A project thread's helper, and a helper's helper, works on a copy of
+    # its own, of the thread's work, in a pod of its own on whichever worker
+    # takes it: what it keeps there lands with the thread's next landing.
+    merged_config.pop("history_thread", None)
+    merged_config.pop("history_project", None)
+    thread = str(parent.id) if is_project_thread(parent_config) else parent_config.get("history_thread")
+    if thread:
+        session_id = session_id or uuid4()
+        merged_config["history_thread"] = thread
+        merged_config["history_project"] = parent_config.get("workstream_id") or parent_config["history_project"]
+        merged_config["sandbox_root_session_id"] = str(session_id)
+    else:
+        merged_config["sandbox_root_session_id"] = sandbox_session_key(parent)
 
     effective_service_account_id = (
         service_account_id
@@ -242,8 +251,8 @@ async def create_thread_session(
 
     A child made by :func:`create_child_session` runs in its root's pod, so
     the project's threads would share the master's.  A thread is its own
-    sandbox root instead: ``sandbox_root_session_id`` is its own id, and the
-    children it delegates to share its pod.  It keeps the master's workspace
+    sandbox root instead: ``sandbox_root_session_id`` is its own id, and each
+    child it delegates to has a pod of its own.  It keeps the master's workspace
     fields and boundaries, so every pod mounts the project's one workspace,
     the master's identity and the user's package.  It takes no
     ``execution``: a cloud thread runs in the cloud whatever the master does.

@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
 
 from surogates.db.models import WorkstreamHistory
 from surogates.governance.saga import SagaOrchestrator
@@ -19,7 +20,9 @@ from surogates.harness.tool_exec import _build_session_sandbox_spec
 from surogates.sandbox.history import History
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
+from surogates.session.provisioning import create_child_session
 from surogates.storage.tenant import boundary_workspace_prefix
+from surogates.tools.builtin.delegate import _poll_child_completion
 from surogates.workstreams import history as rows_module
 from tests.test_steer_loop import _final_response
 from tests.thread_pods import ThreadPods
@@ -827,3 +830,130 @@ async def test_a_landing_prunes_the_history_at_most_once_a_day_keeping_live_thre
     await edited(pool, lander, "echo again > again.md")
     await ends(api, pool, lander)
     assert (durable / "pruned").stat().st_mtime == pruned  # not again the same day
+
+
+async def a_helper(api, thread, *, channel="delegation"):
+    return await create_child_session(store=api.app.state.session_store, parent=thread, channel=channel)
+
+
+async def handed_off(api, pool, thread) -> None:
+    """*thread*'s copy put on its hand-off, as a step that starts a helper does first."""
+    await landing_module.keep_copy(
+        session_factory=api.app.state.session_factory, sandbox_pool=pool, session=thread,
+        saga_settings=FENCED, action="hand_off",
+    )
+
+
+async def test_a_helper_on_another_worker_works_on_its_own_copy_and_its_work_lands_with_the_thread(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    mine, theirs = SandboxPool(pods), SandboxPool(pods)  # the thread's worker, and the helper's
+    await edited(mine, thread, "echo outline > outline.md")
+    await handed_off(api, mine, thread)
+    helper = await a_helper(api, thread)
+    assert (helper.config["history_thread"], helper.config["sandbox_root_session_id"]) == (str(thread.id), str(helper.id))
+    await a_turn(api, monkeypatch, helper, [
+        calling(("terminal", {"command": "cat outline.md > sources.md && echo by the helper >> sources.md"})),
+        _final_response("Wrote the sources."),
+    ], pool=theirs)
+    # Its own pod, gone with its turn; its work on the thread's hand-off, not in the real files.
+    assert not theirs.holds_copy(str(helper.id)) and not (pods.project / "sources.md").exists()
+    assert await landing_module.take_up(mine, str(thread.id)) == []
+    assert (pods.copies[str(thread.id)] / "sources.md").read_text() == "outline\nby the helper\n"
+    await ends(api, mine, thread)
+    assert (pods.project / "sources.md").read_text() == "outline\nby the helper\n"
+    [report] = await reports(api, master)
+    assert {(f["ref"], f["landing"]) for f in report["files"]} == {("outline.md", "landed"), ("sources.md", "landed")}
+
+
+async def test_a_second_helper_is_told_which_of_its_files_the_first_changed_first(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    pool = SandboxPool(pods)
+    first, second = await a_helper(api, thread), await a_helper(api, thread)
+    for helper in (first, second):  # both at work at once, on copies made before either kept
+        await open_pod(pool, helper)
+    for helper, by in ((first, "first"), (second, "second")):
+        await a_turn(api, monkeypatch, helper, [
+            calling(("terminal", {"command": f"echo by the {by} > notes.txt && echo {by} > {by}.md"})),
+            _final_response("Done."),
+        ], pool=pool)
+    [done] = [e.data for e in await api.app.state.session_store.get_events(second.id, types=[EventType.SESSION_COMPLETE])]
+    assert done["not_kept"] == ["notes.txt"]
+    await ends(api, pool, thread)  # a turn that used no tool: what its helpers kept lands all the same
+    assert (pods.project / "notes.txt").read_text() == "by the first\n"
+    assert pods.real_names() == ["Report.docx", "first.md", "notes.txt", "second.md"]
+
+
+async def test_a_routine_run_of_a_thread_lands_with_the_threads_next_turn(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    run = await a_helper(api, thread, channel="scheduled")
+    await a_turn(api, monkeypatch, run, [
+        calling(("terminal", {"command": "echo checked >> Report.docx"})),
+        _final_response("Checked the report."),
+    ], pool=SandboxPool(pods))
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+    await ends(api, SandboxPool(pods), thread)
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1checked\n"
+
+
+async def test_a_failed_helpers_files_never_land_and_its_thread_is_told(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    pool = SandboxPool(pods)
+    helper = await a_helper(api, thread)
+    await edited(pool, helper, "printf ' half made' >> Report.docx && echo half > outline.md")
+    await ends(api, pool, helper, failed=True)
+    store = api.app.state.session_store
+    [failed] = [e.data for e in await store.get_events(helper.id, types=[EventType.SESSION_FAIL])]
+    assert failed["left"] == ["Report.docx", "outline.md"]
+    # The thread waiting on it hears which files were kept apart.
+    outcome = await _poll_child_completion(session_store=store, parent_session_id=thread.id, child_id=helper.id, timeout=5)
+    assert "Report.docx, outline.md" in outcome["reason"]
+    # Kept in the history, apart; never landed with the thread.
+    kept = git(pods.project / "_history", "ls-tree", "--name-only", f"refs/helpers/{thread.id}/{helper.id}")
+    assert kept.splitlines() == ["Report.docx", "notes.txt", "outline.md"]
+    await ends(api, SandboxPool(pods), thread)
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+
+
+async def test_a_pruning_keeps_a_live_threads_hand_off_and_its_helpers_copies_kept_apart(api):
+    thread = await a_thread(api, "Draft A", await master_of(api, await create(api)))
+    kept = await rows_module.kept_refs(api.app.state.session_factory, thread.config["workstream_id"])
+    assert {f"refs/handoff/{thread.id}", f"refs/handoff-from/{thread.id}", f"refs/helpers/{thread.id}/"} <= set(kept)
+
+
+async def test_a_hand_off_outside_its_projects_lock_is_refused(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo outline > outline.md")
+    settle = landing_module.settle_running
+
+    async def the_lock_goes(*args, **kwargs):
+        settled = await settle(*args, **kwargs)
+        await lose_the_lock(api, thread)  # a failover while the hand-off waited its turn
+        return settled
+
+    monkeypatch.setattr(landing_module, "settle_running", the_lock_goes)
+    with pytest.raises(DBAPIError):
+        await handed_off(api, pool, thread)
+    # Its check of the hand-off holds only under the lock: outside it, nothing is handed off.
+    assert not (pods.project / "_history" / "packed-refs").exists()
+
+
+async def test_a_failed_helper_lets_its_own_pod_go_and_never_its_threads(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo draft > draft.md")  # the thread's turn, at the step that started the helper
+    helper = await a_helper(api, thread)
+    await edited(pool, helper, "echo half > outline.md")
+    await ends(api, pool, helper, failed=True)
+    # Its own pod and copy went; its thread's, on the same worker, stay as they were.
+    assert (pool.holds_copy(str(helper.id)), pool.holds_copy(str(thread.id))) == (False, True)
+    assert (pods.copies[str(thread.id)] / "draft.md").read_text() == "draft\n"
+    assert not (pods.copies[str(thread.id)] / "outline.md").exists()

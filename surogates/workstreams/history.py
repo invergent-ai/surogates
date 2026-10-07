@@ -127,8 +127,9 @@ async def waits_to_land(session_factory: Any, storage: Any, session: Any) -> boo
     """Whether a thread's turn that never used its pod lands at its end all the same.
 
     It does while its branch in the project's history holds work its base
-    lacks, such as a failed turn's, or while a landing of the project is
-    left running for a lock holder to settle.
+    lacks, such as a failed turn's, while its helpers kept work on its
+    hand-off it has not taken up, or while a landing of the project is left
+    running for a lock holder to settle.
     """
     if await running_landings(session_factory, session.config["workstream_id"]):
         return True
@@ -138,7 +139,10 @@ async def waits_to_land(session_factory: Any, storage: Any, session: Any) -> boo
     except KeyError:
         return False
     refs = {ref: sha for sha, _, ref in (line.partition(" ") for line in text.splitlines())}
-    return refs.get(f"refs/heads/threads/{session.id}") != refs.get(f"refs/bases/{session.id}")
+    return any(refs.get(a) != refs.get(b) for a, b in (
+        (f"refs/heads/threads/{session.id}", f"refs/bases/{session.id}"),
+        (f"refs/handoff/{session.id}", f"refs/handoff-from/{session.id}"),
+    ))
 
 
 async def over_history_cap(storage: Any, session: Any) -> bool:
@@ -166,11 +170,20 @@ async def over_history_cap(storage: Any, session: Any) -> bool:
 
 
 async def kept_refs(session_factory: Any, workstream_id: UUID | str) -> list[str]:
-    """The branches and bases a pruning keeps: each live thread's, and each resolved within the window."""
+    """The refs a pruning keeps: each live thread's, and each resolved within the window.
+
+    A thread's branch and base, its hand-off, and its helpers' copies kept apart.
+    """
     ended = WorkstreamThread.resolved_at > func.now() - timedelta(days=PRUNE_DAYS)
     async with session_factory() as db:
         threads = await db.execute(
             select(WorkstreamThread.session_id)
             .where(WorkstreamThread.workstream_id == workstream_id, or_(WorkstreamThread.resolved_at.is_(None), ended))
         )
-        return [ref for thread in threads.scalars() for ref in (f"refs/heads/threads/{thread}", f"refs/bases/{thread}")]
+        return [
+            ref for thread in threads.scalars()
+            for ref in (
+                f"refs/heads/threads/{thread}", f"refs/bases/{thread}",
+                f"refs/handoff/{thread}", f"refs/handoff-from/{thread}", f"refs/helpers/{thread}/",
+            )
+        ]

@@ -151,26 +151,49 @@ async def land_turn(
     return outcome
 
 
-async def keep_copy(*, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any) -> dict | None:
-    """Keep *session*'s copy on its thread's branch, under the project's lock; None when it holds none.
+async def keep_copy(
+    *, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any, action: str = "keep",
+) -> dict | None:
+    """Keep *session*'s copy in the project's history, under its lock; None when it holds none.
 
-    A thread's failed turn keeps its work, base and all, to land with its
-    next turn: its files may be half made.  The landings a killed worker
-    left running are settled first, as every lock holder does.
+    *action* is the pod's: ``keep`` a thread's failed turn on its branch,
+    base and all, to land with its next turn (its files may be half made);
+    ``hand_off`` a thread's copy, for a helper about to start from it;
+    ``hand_back`` a helper's, merged onto its thread's hand-off; and
+    ``keep_apart`` a failed helper's, merged onto nothing.  The landings a
+    killed worker left running are settled first, as every lock holder does.
     """
     owner = sandbox_session_key(session)
     if not sandbox_pool.holds_copy(owner):
         return None
-    workstream = session.config["workstream_id"]
+    workstream = session.config.get("workstream_id") or session.config["history_project"]
     author = {"name": session.title or "Thread", "email": f"thread:{session.id}@surogate"}
     trailers = [
-        ["Surogate-Project", str(workstream)], ["Surogate-Thread", str(session.id)],
+        ["Surogate-Project", str(workstream)], ["Surogate-Thread", session.config.get("history_thread") or str(session.id)],
         ["Surogate-Agent", str(session.agent_id)], ["Surogate-User", str(session.user_id)],
         ["Surogate-Kind", "turn"],
     ]
     async with project_lock(session_factory, workstream) as held:
         await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
-        return await _call(sandbox_pool, owner, "keep", author=author, trailers=trailers, base=True)
+        # The pod checks the refs it moves as it reads them just before: that
+        # holds only under the lock, so one lost while it waited stops it.
+        await held()
+        return await _call(
+            sandbox_pool, owner, action, author=author, trailers=trailers, **({"base": True} if action == "keep" else {}),
+        )
+
+
+async def take_up(sandbox_pool: Any, owner: str) -> list[str]:
+    """Bring what helpers kept on the hand-off into a thread's copy; the files it kept its own version of.
+
+    No lock: it reads the history and changes the copy alone.
+    """
+    try:
+        return (await _call(sandbox_pool, owner, "take_up"))["not_taken"]
+    except Exception:
+        # Taken up at the landing, whose commit step takes it up first.
+        logger.warning("Could not take up the helpers' work into %s", owner, exc_info=True)
+        return []
 
 
 async def _prune(session_factory: Any, sandbox_pool: Any, owner: str, workstream: Any, packs: int) -> None:

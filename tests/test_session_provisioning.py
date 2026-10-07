@@ -517,15 +517,16 @@ async def test_create_child_session_of_a_cloud_parent_cannot_set_execution():
 
 
 @pytest.mark.asyncio
-async def test_a_project_threads_helpers_and_theirs_run_in_the_threads_copy_layout():
-    thread = _make_session(config={**_workspace_config(), "workstream_role": "thread"})
+async def test_a_project_threads_helpers_and_theirs_each_work_on_a_copy_of_the_threads_work():
+    thread = _make_session(config={**_workspace_config(), "workstream_role": "thread", "workstream_id": "w-1"})
     store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
     await create_child_session(store=store, parent=thread, channel="delegation")
     helper = _make_session(config=store.create_session.await_args.kwargs["config"], parent_id=thread.id)
-    # A helper's helper makes the thread's pod as the thread would, if it is first.
     await create_child_session(store=store, parent=helper, channel="delegation")
-    cfg = store.create_session.await_args.kwargs["config"]
-    assert (cfg["sandbox_root_thread"], cfg["sandbox_root_session_id"]) == (True, str(thread.id))
+    made = store.create_session.await_args.kwargs
+    # A helper's helper too: each on a copy of its own, in a pod of its own, of the thread's work.
+    assert (made["config"]["history_thread"], made["config"]["history_project"]) == (str(thread.id), "w-1")
+    assert made["config"]["sandbox_root_session_id"] == str(made["session_id"])
 
 
 @pytest.mark.asyncio
@@ -537,11 +538,11 @@ async def test_no_caller_names_a_session_a_threads_helper():
     )
     await create_agent_session(
         store=store, storage=storage, settings=SimpleNamespace(storage=SimpleNamespace(bucket="tenant-bucket")),
-        org_id=uuid4(), user_id=uuid4(), agent_id="a-1", channel="web", config={"sandbox_root_thread": True},
+        org_id=uuid4(), user_id=uuid4(), agent_id="a-1", channel="web", config={"history_thread": "t-1", "history_project": "w-1"},
     )
-    assert "sandbox_root_thread" not in store.create_session.await_args.kwargs["config"]
+    assert "history_thread" not in store.create_session.await_args.kwargs["config"]
     # Nor a child of a session that is no thread's.
     await create_child_session(
-        store=store, parent=_make_session(), channel="delegation", config={"sandbox_root_thread": True},
+        store=store, parent=_make_session(), channel="delegation", config={"history_thread": "t-1", "history_project": "w-1"},
     )
-    assert "sandbox_root_thread" not in store.create_session.await_args.kwargs["config"]
+    assert "history_thread" not in store.create_session.await_args.kwargs["config"]

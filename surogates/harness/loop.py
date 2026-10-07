@@ -1035,7 +1035,7 @@ class AgentHarness(
         """
         config = session.config or {}
         if self._storage is None or not config.get("storage_bucket") or not (
-            is_project_thread(config) or config.get("sandbox_root_thread")
+            is_project_thread(config) or config.get("history_thread")
         ):
             return session
         from surogates.workstreams.history import over_history_cap
@@ -1627,12 +1627,13 @@ class AgentHarness(
         finally:
             leave_device_session(device_token)
 
-            # A thread's turn cut off outside its landing, by a cancel or a
-            # crash, leaves a copy that never landed: its pod goes, so no
-            # later turn on this worker goes on with that copy.
+            # A thread's turn, or its helper's, cut off outside its landing, by
+            # a cancel or a crash, leaves a copy that was never kept: its pod
+            # goes, so no later turn on this worker goes on with that copy,
+            # and none waits out its pod's deadline.
             if (
-                cut_off and session is not None
-                and is_project_thread(session.config) and self._sandbox_pool is not None
+                cut_off and session is not None and self._sandbox_pool is not None
+                and (is_project_thread(session.config) or session.config.get("history_thread"))
             ):
                 from surogates.harness.landing import putting_back
 

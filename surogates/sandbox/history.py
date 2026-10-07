@@ -567,11 +567,12 @@ class History:
 
         Where both changed a file, the copy keeps its own version, named in
         ``not_taken``; the helper's stays in history.  The branch takes it up
-        at the turn's end, with the commit step.
+        at the turn's end, with the commit step.  A hand-off with no
+        ``handoff-from`` is taken up from the copy's base.
         """
         refs = self._take()
         durable = refs.get(self.handoff)
-        since = self._ref(self.handed) or refs.get(self.handoff_from)
+        since = self._ref(self.handed) or refs.get(self.handoff_from) or self._ref(self.base)
         if durable is None or durable == since:
             return {"not_taken": []}
         self._fetch(durable, since)

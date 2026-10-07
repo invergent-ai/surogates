@@ -173,6 +173,7 @@ _NOT_MERGED = {
     "changed": "Not merged, because the project's file changed after the thread started (the newer file was kept)",
     "shape": "Not merged, because the project has a folder where the thread made a file, or a file where it made a folder",
     "with": "Not merged, because they go with a change that was not merged (a move lands whole or not at all)",
+    "kept": "Not kept, because the thread or another helper changed them first (their version stays)",
 }
 
 

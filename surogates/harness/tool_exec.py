@@ -120,11 +120,10 @@ async def _build_session_sandbox_spec(
     storage_bucket = session.config.get("storage_bucket", "")
     # A project's thread works on its own copy: its pod mounts the real
     # files at /project, and /workspace, the path the model and the tools
-    # know, is the copy.  The layout is the pod's root's: a thread's helper
-    # makes the thread's pod, if it is the first to need it.
-    copy = bool(storage_bucket) and not session.config.get("history_off") and (
-        is_project_thread(session.config) or bool(session.config.get("sandbox_root_thread"))
-    )
+    # know, is the copy.  So does each of its helpers, on a copy of its own.
+    helper = session.config.get("history_thread")
+    thread = helper or (sandbox_owner if is_project_thread(session.config) else None)
+    copy = bool(storage_bucket) and not session.config.get("history_off") and thread is not None
     mount_path = PROJECT_MOUNT if copy else _WORKSPACE_MOUNT_PATH
     has_workspace_mount = any(
         r.mount_path == mount_path for r in sandbox_spec.resources
@@ -145,7 +144,9 @@ async def _build_session_sandbox_spec(
         )
     if copy:
         sandbox_spec.env["PROJECT_DIR"] = PROJECT_MOUNT
-        sandbox_spec.env["HISTORY_THREAD"] = sandbox_owner
+        sandbox_spec.env["HISTORY_THREAD"] = thread
+        if helper:
+            sandbox_spec.env["HISTORY_HELPER"] = sandbox_owner
     # Pass through skill-declared env vars to the sandbox pod.  Only
     # matters at provisioning time — env is baked into the pod spec.
     if not sandbox_spec.env.get("_passthrough_done"):

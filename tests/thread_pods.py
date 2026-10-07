@@ -29,7 +29,7 @@ class ThreadPods:
         self.project = project or root / "project"
         self.project.mkdir(parents=True, exist_ok=True)
         self.pods: dict[str, httpx.AsyncClient] = {}
-        #: Each thread's latest copy, kept after its pod goes.
+        #: Each pod owner's latest copy, a thread's or a helper's, kept after its pod goes.
         self.copies: dict[str, Path] = {}
 
     async def provision(self, spec: SandboxSpec) -> str:
@@ -41,17 +41,17 @@ class ThreadPods:
             return sandbox_id
         copy = self.root / sandbox_id / "workspace"
         copy.mkdir(parents=True)
-        thread = spec.env["HISTORY_THREAD"]
+        thread, helper = spec.env["HISTORY_THREAD"], spec.env.get("HISTORY_HELPER")
         history = History(
             repo=_shadow_repo_path(str(self.project), base=self.root / sandbox_id / "home" / ".surogates" / "history"),
-            project=self.project, copy=copy, thread=thread, user=spec.env.get("USER_ID", ""),
+            project=self.project, copy=copy, thread=thread, user=spec.env.get("USER_ID", ""), helper=helper,
         )
         app = executor_server.create_app(token="t", workspace=str(copy), require_fuse=False, history=history)
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://pod")
         ready = await client.get("/healthz")
         assert ready.status_code == 200, ready.text
         self.pods[sandbox_id] = client
-        self.copies[thread] = copy
+        self.copies[helper or thread] = copy
         return sandbox_id
 
     async def execute(self, sandbox_id: str, name: str, input: str, *, timeout: float | None = None) -> str:

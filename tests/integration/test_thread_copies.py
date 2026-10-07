@@ -583,16 +583,35 @@ async def test_a_thread_never_works_on_or_restores_its_real_files(api, monkeypat
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
 
 
-async def test_a_threads_helper_on_another_worker_makes_the_threads_own_copy(api, pods):
+async def test_a_threads_helper_on_any_worker_makes_a_copy_of_its_own_from_the_threads_hand_off(api, pods):
     thread = await a_thread(api)
     store = api.app.state.session_store
     helper = await create_child_session(store=store, parent=thread, channel="api")
     owner = sandbox_session_key(helper)
     spec = await _build_session_sandbox_spec(helper, SimpleNamespace(org_id=helper.org_id, user_id=helper.user_id), owner)
-    # The pod follows its root, the thread: whoever provisions it, it holds the thread's copy.
+    # Its own pod and copy, on whichever worker: of its thread's work, as the history has it.
     other_worker = SandboxPool(pods)
     await other_worker.ensure(owner, spec)
-    assert (owner, other_worker.holds_copy(owner), spec.env["HISTORY_THREAD"]) == (str(thread.id), True, str(thread.id))
+    assert (owner, other_worker.holds_copy(owner)) == (str(helper.id), True)
+    assert (spec.env["HISTORY_THREAD"], spec.env["HISTORY_HELPER"]) == (str(thread.id), str(helper.id))
+
+
+async def test_a_helpers_turn_cut_off_lets_its_copy_go(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    helper = await create_child_session(store=store, parent=thread, channel="delegation")
+    await store.emit_event(helper.id, EventType.USER_MESSAGE, {"content": "Summarise the report."})
+    harness = a_waking_thread_harness(api, monkeypatch, pool, None)
+
+    async def a_turn_cut_off(session, *_, **__):
+        await open_pod(pool, session)
+        raise RuntimeError("the turn's lease went to another worker")
+
+    harness._run_loop = a_turn_cut_off
+    with pytest.raises(RuntimeError):
+        await harness.wake(helper.id)
+    # Not left for a day: its pod goes as a thread's does.
+    assert (pool.holds_copy(str(helper.id)), pods.pods) == (False, {})
 
 
 async def test_a_thread_whose_pod_was_remade_mid_turn_is_told_its_edits_are_gone(api, monkeypatch, pods):

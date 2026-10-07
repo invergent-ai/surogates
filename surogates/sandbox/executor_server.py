@@ -557,7 +557,7 @@ def main() -> None:
         history = History(
             repo=_shadow_repo_path(project, base=Path.home() / ".surogates" / "history"),
             project=Path(project), copy=Path(workspace),
-            thread=os.environ["HISTORY_THREAD"], user=user,
+            thread=os.environ["HISTORY_THREAD"], user=user, helper=os.environ.get("HISTORY_HELPER"),
         )
 
     logger.info("Loading tool registry...")

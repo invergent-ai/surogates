@@ -809,3 +809,37 @@ def test_a_failed_helpers_copy_is_kept_apart_and_never_handed_back(tmp_path, pro
     ]
     assert thread.take_up() == {"not_taken": []}
     assert not (thread.copy / "Budget.xlsx").exists()
+
+
+def test_a_hand_off_with_no_handoff_from_is_taken_up_from_the_threads_base(tmp_path, project):
+    thread = a_pod(tmp_path, project)
+    (thread.copy / "outline.md").write_text("the thread's outline")
+    thread.hand_off(author=A, trailers=KEPT)
+    helper = a_helper(tmp_path, project)
+    (helper.copy / "sources.md").write_text("sources")
+    helper.hand_back(author=A, trailers=KEPT)
+    refs = project / "_history" / "packed-refs"
+    refs.write_text("".join(line for line in refs.read_text().splitlines(True) if "refs/handoff-from/" not in line))
+    # The thread's next pod takes it up all the same, from its base: what the hand-off holds since is its work.
+    pod = a_pod(tmp_path, project)
+    assert (pod.copy / "outline.md").read_text() == "the thread's outline"
+    assert (pod.copy / "sources.md").read_text() == "sources"
+    turn = pod.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "turn"]])
+    assert [c["path"] for c in turn["changes"]] == ["outline.md", "sources.md"]
+
+
+def test_a_pruning_keeps_every_ref_under_a_kept_name_ending_in_a_slash(tmp_path, project):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first)
+    for thread, helper in (("t1", "h1"), ("t1", "h2"), ("t10", "h3")):
+        apart = a_pod(tmp_path, project, thread, helper=helper)
+        (apart.copy / f"{helper}.md").write_text("half made")
+        apart.keep_apart(author=A, trailers=KEPT)
+    durable = project / "_history"
+    assert a_pod(tmp_path, project).prune(keep=["refs/helpers/t1/"], now=time.time())["pruned"] is True
+    refs = git(durable, "for-each-ref", "--format=%(refname)", "refs/helpers/").splitlines()
+    # Every ref under the name; none of a thread whose id only starts with it.
+    assert refs == ["refs/helpers/t1/h1", "refs/helpers/t1/h2"]
+    assert git(durable, "show", "refs/helpers/t1/h2:h2.md") == "half made"
+    assert git(durable, "fsck", "--no-dangling") == ""

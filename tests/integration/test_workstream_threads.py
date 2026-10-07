@@ -892,8 +892,8 @@ async def test_two_threads_clone_one_repository_into_two_folders(api):
     assert [await clone_folder_of(s) for s in (first, second, helper, plain)] == [
         f"/workspace/.threads/{first.id}/reports",
         f"/workspace/.threads/{second.id}/reports",
-        # A thread's own helper works in the thread's pod and folder.
-        f"/workspace/.threads/{first.id}/reports",
+        # A thread's helper works in a pod and copy of its own, so a folder of its own.
+        f"/workspace/.threads/{helper.id}/reports",
         "/workspace/reports",
     ]
 

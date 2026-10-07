@@ -586,6 +586,12 @@ async def _run_single_delegation(
                 },
             )
             result_text = outcome["text"]
+            not_kept = next(
+                (e.data.get("not_kept") for e in outcome["events"] if e.type == EventType.SESSION_COMPLETE.value), None,
+            )
+            if not_kept:
+                # The helper's version of these is in the history, not in the thread's copy.
+                result_text += "\n\nNot kept, because the thread or another helper changed them first: " + ", ".join(not_kept)
             if memory_manager is not None:
                 try:
                     memory_manager.on_delegation(
@@ -670,9 +676,13 @@ async def _poll_child_completion(
                 }
             if event.type == EventType.SESSION_FAIL.value:
                 reason = (event.data or {}).get("reason", "unknown")
+                # A failed helper's files may be half made: they stay in the history, apart.
+                left = (event.data or {}).get("left")
                 return {
                     "status": "failed",
-                    "reason": f"Child session failed: {reason}",
+                    "reason": f"Child session failed: {reason}" + (
+                        f". Its changes to {', '.join(left)} were kept apart, not brought into this copy" if left else ""
+                    ),
                 }
 
         if len(events) > last_event_count:
