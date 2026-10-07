@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { connect, FakeAgent, signIn, signedInAndAdded, webClient } from "./fake-agent.js";
+import { connect, FakeAgent, opened, signIn, signedInAndAdded, webClient } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
 let home: string;
@@ -98,6 +98,69 @@ describe("logging out", () => {
     await agent.start(port);
     await expect.poll(() => revokes(), { timeout: 15_000 }).toBe(1);
     await expect.poll(() => credentials()).toEqual([]);
+  });
+});
+
+// The browser came back from a sign-in, whose code the app has exchanged: what it finishes is held at the agent.
+async function approved(shell: ElectronApplication, start: () => Promise<void>): Promise<void> {
+  const before = (await opened(shell)).length;
+  await start();
+  await expect.poll(async () => (await opened(shell)).length).toBe(before + 1);
+  void agent.approve((await opened(shell))[before]!).catch(() => {});
+}
+
+describe("a log out while a sign-in is finishing", () => {
+  it("is not undone by a sign-in asking who signed in: that sign-in ends, and nothing of it is kept", async () => {
+    agent.recent = false;
+    const shell = await launch(home);
+    app = shell;
+    await stubNative(shell);
+    const page = await shellPage(shell);
+    await connect(page, origin);
+    await signIn(shell, page, agent);
+    await expect.poll(() => page.isVisible("#device-action-button")).toBe(true);
+    agent.recent = true;
+    const release = agent.hold("me");
+    const asking = agent.asked.me;
+    await approved(shell, () => page.click("#device-action-button"));
+    await expect.poll(() => agent.asked.me).toBe(asking + 1);
+    await logOut(page);
+    await expect.poll(() => asked(shell)).toContain(`Log out of ${host}?`);
+    release();
+    await expect.poll(() => agent.oauth.filter((form) => form.token).map((form) => form.token).sort()).toEqual(["rt-1", "rt-2"]);
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    expect(existsSync(state("session.json"))).toBe(false);
+    expect(agent.registered).toHaveLength(1);
+    expect(credentials()).toEqual([]);
+  });
+
+  it("is not undone by a sign-in binding the computer: the token it was issued revokes it, and no device runs", async () => {
+    const first = await signedIn();
+    await quit(first.shell);
+    rmSync(state("session.json"));
+    app = await launch(home);
+    await stubNative(app);
+    const page = await shellPage(app);
+    await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    const release = agent.hold("reauthorize");
+    await approved(app, () => page.click("#sign-in-button"));
+    await expect.poll(() => agent.asked.reauthorize).toBe(1);
+    // What the Log out row calls: nothing has redrawn the window since the sign-in started.
+    void page.evaluate(() => (globalThis as unknown as { surogateShell: { signOut(): Promise<void> } }).surogateShell.signOut());
+    await expect.poll(() => asked(app!)).toContain(`Log out of ${host}?`);
+    // No sign-in starts while the log out runs, which waits for the one under way to stop.
+    await page.evaluate(() => (globalThis as unknown as { surogateShell: { signIn(): Promise<void> } }).surogateShell.signIn());
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await opened(app!)).toHaveLength(1);
+    expect(revokes()).toBe(0);
+    release();
+    await expect.poll(() => revokes()).toBe(1);
+    await expect.poll(() => credentials()).toEqual([]);
+    await expect.poll(() => agent.oauth.some((form) => form.token === "rt-2")).toBe(true);
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    expect(await page.getAttribute("#device", "title")).toBe("Sign in to this agent to let it work on folders of this computer");
+    expect(existsSync(state("session.json"))).toBe(false);
+    expect(existsSync(state("devices/d"))).toBe(false);
   });
 });
 

@@ -60,6 +60,8 @@ let sessionStore: SessionStore;
 let signedIn: DesktopSession | null = null;
 // A sign-in under way in the system browser: starting another cancels it.
 let signingIn: AbortController | null = null;
+// Settled once every sign-in started so far has stopped: what a log out waits for.
+let signIns: Promise<unknown> = Promise.resolve();
 let signInFailure: string | null = null;
 // The agent would add this computer only on a more recent sign-in: the user signs in again.
 let signInAgain = false;
@@ -449,25 +451,35 @@ async function keepAndStart(agent: Agent, renewed: LiveCredential): Promise<void
  * Bind the sign-in that just happened to the computer kept for its account, before anything uses it:
  * revoking the computer then ends it too, and the window's session made from it. The device starts
  * again on the new token the agent issues for it. A sign-in the agent did not bind is ended rather
- * than run unbound; once it is bound, it stays, whatever the device does.
+ * than run unbound; once it is bound, it stays, whatever the device does. Once *signal* aborts (a log
+ * out), nothing is reauthorized, and a token the agent issued all the same revokes the computer.
  */
-async function bindToComputer(agent: Agent): Promise<void> {
+async function bindToComputer(agent: Agent, signal: AbortSignal): Promise<void> {
   const session = signedIn;
   const credential = kept;
   // A revoked computer stays unbound until the user restores it, which binds the sign-in it uses.
   if (!session || !live(credential) || credential.orgId !== session.account.orgId || credential.userId !== session.account.userId) return;
   rotating = credential;
-  let renewed: LiveCredential | null;
   try {
-    renewed = await rebind({ session, credential });
-  } catch (error) {
-    if (signedIn === session) signedIn = null;
-    await session.end().catch(report);
-    throw new Error(`Surogate could not tie this sign-in to this computer, so it signed out: ${error instanceof Error ? error.message : String(error)}`);
+    let renewed: LiveCredential | null;
+    try {
+      renewed = await rebind({ session, credential }, signal);
+    } catch (error) {
+      if (signedIn === session) signedIn = null;
+      await session.end().catch(report);
+      throw new Error(`Surogate could not tie this sign-in to this computer, so it signed out: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!renewed) return;
+    if (signal.aborted) {
+      // Logged out meanwhile: the computer goes with the log out, revoked with the token just issued, its only one.
+      await stopDevice(device?.started, null).catch(report);
+      await endDevice(renewed);
+    } else {
+      await keepAndStart(agent, renewed);
+    }
   } finally {
     rotating = null;
   }
-  if (renewed) await keepAndStart(agent, renewed);
 }
 
 /** Revoke *credential*'s device on a link of its own, with the link's backoff, until the agent hears it; then forget it. */
@@ -540,7 +552,9 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
   if (!confirmed) return;
   signingOut = true;
   try {
+    // A sign-in under way is cancelled, and stops first: one that finished afterwards would sign the user back in.
     signingIn?.abort();
+    await signIns;
     const ending = signedIn;
     signedIn = null;
     signInAgain = false;
@@ -613,13 +627,16 @@ async function restore(agent: Agent): Promise<void> {
   if (!confirmed || !signedIn) return;
   if (!signedIn.recent()) await signIn(agent);
   const session = signedIn;
-  // The sign-in did not finish, or another account signed in, which ended this device.
-  if (!session || kept !== credential) return;
+  // The sign-in did not finish, another account signed in, which ended this device, or a log out began.
+  if (!session || kept !== credential || signingOut) return;
   restoring = true;
   changed();
   try {
     const restored = await reauthorize({ session, credential });
-    if (restored === "gone") {
+    if (signingOut || signedIn !== session) {
+      // Logged out meanwhile: a token the agent issued all the same revokes the computer, with the log out.
+      if (typeof restored === "object") await endDevice(restored);
+    } else if (restored === "gone") {
       // The agent has no such device any more: its folders here go too, and this computer is added afresh.
       kept = null;
       device = null;
@@ -642,16 +659,34 @@ async function restore(agent: Agent): Promise<void> {
 
 /** Sign in to the agent in the system browser. A sign-in started again cancels the one under way. */
 async function signIn(agent: Agent): Promise<void> {
+  // No sign-in starts while a log out runs: it would sign the user back in.
+  if (signingOut) return;
   signingIn?.abort();
   const attempt = new AbortController();
   signingIn = attempt;
+  const { promise: stopped, resolve: stop } = Promise.withResolvers<void>();
+  signIns = Promise.all([signIns, stopped]);
   signInFailure = null;
   changed();
   try {
     const tokens = await signInWithBrowser({
       origin: agent.origin, computer: hostname(), fetch: apiFetch, signal: attempt.signal, open: (url) => shell.openExternal(url),
     });
+    let started: DesktopSession | null = null;
+    // Cancelled once the browser came back, by a log out or a sign-in started again: what this sign-in
+    // holds is ended at the agent, and it goes no further.
+    const cancelled = (): boolean => {
+      if (!attempt.signal.aborted) return false;
+      if (started === null) {
+        void revokeTokens(agent.origin, tokens.refreshToken, apiFetch).catch(report);
+      } else if (signedIn === started) {
+        signedIn = null;
+        void started.end().catch(report);
+      }
+      return true;
+    };
     const who = await accountOf(agent.origin, tokens.accessToken, apiFetch);
+    if (cancelled()) return;
     // This computer works for one account at a time: another's access here ends first, once the user agrees.
     const previous = kept;
     if (previous && (previous.orgId !== who.orgId || previous.userId !== who.userId)) {
@@ -660,19 +695,23 @@ async function signIn(agent: Agent): Promise<void> {
         detail: `This computer works for another account of ${agent.name}. Signing in as ${who.email} ends that account's access here, and forgets the folders it was given.`,
         buttons: ["Sign in", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
       });
+      if (cancelled()) return;
       if (!switching) {
         void revokeTokens(agent.origin, tokens.refreshToken, apiFetch).catch(report);
         signInFailure = `Not signed in as ${who.email}: this computer keeps working for the account that added it`;
         return;
       }
       await endDevice(previous);
+      if (cancelled()) return;
     }
     // The sign-in this one replaces ends at the agent: none is left valid with no copy here.
     void signedIn?.end().catch(report);
     const signedInNow: SignedIn = { origin: agent.origin, agentId: agent.agentId, account: who, authTime: tokens.authTime, refreshToken: tokens.refreshToken };
     sessionStore.save(signedInNow);
     startSession(signedInNow, tokens);
-    await bindToComputer(agent);
+    started = signedIn;
+    await bindToComputer(agent, attempt.signal);
+    if (cancelled()) return;
     // The web client's session comes from this sign-in: whatever the window held before goes, and
     // the sign-in shows until the web client has loaded again.
     reloading = true;
@@ -683,6 +722,7 @@ async function signIn(agent: Agent): Promise<void> {
     } finally {
       reloading = false;
     }
+    if (cancelled()) return;
     void registerComputer(agent);
   } catch (error) {
     if (!(error instanceof OAuthError && error.code === "cancelled")) {
@@ -690,6 +730,7 @@ async function signIn(agent: Agent): Promise<void> {
     }
   } finally {
     if (signingIn === attempt) signingIn = null;
+    stop();
     changed();
   }
 }

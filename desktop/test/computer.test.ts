@@ -127,8 +127,21 @@ describe("binding a new sign-in to the computer kept for its account", () => {
     expect(asked.map(({ method }) => method)).toEqual(["GET"]);
   });
 
+  it("sends no reauthorization once the sign-in is cancelled while the agent lists its computers", async () => {
+    const { asked, restoring } = rebinding([{ id: "d", revoked_at: null }]);
+    const cancel = new AbortController();
+    const listing = restoring.session.api;
+    restoring.session.api = async (path, init) => {
+      const answer = await listing(path, init);
+      cancel.abort();
+      return answer;
+    };
+    expect(await rebind(restoring, cancel.signal)).toBeNull();
+    expect(asked.map(({ method }) => method)).toEqual(["GET"]);
+  });
+
   it.each([
-    ["will not reauthorize it", { status: 500, body: {} }, "HTTP 500"],
+    ["will not reauthorize it",{ status: 500, body: {} }, "HTTP 500"],
     ["answers with no device token it can use", { status: 200, body: { id: "d", token: "not a token" } }, "without a device token Surogate can use"],
   ])("fails when the agent %s, so the app does not run on an unbound sign-in", async (_name, answer, message) => {
     const { restoring } = rebinding([{ id: "d", revoked_at: null }], answer);

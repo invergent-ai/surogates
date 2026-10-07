@@ -105,14 +105,14 @@ export async function reauthorize({ session, credential }: Restoring): Promise<L
  * Bind a new sign-in to the computer kept for its account: revoking the computer then ends that
  * sign-in too, and the window's session made from it. Its credential on the new device token; null
  * when the agent revoked the computer or no longer has it, which is left as it is: restoring it is
- * the user's to confirm. Throws when it cannot be bound.
+ * the user's to confirm. Throws when it cannot be bound. Once *signal* aborts, no reauthorization is sent.
  */
-export async function rebind(options: Restoring): Promise<LiveCredential | null> {
+export async function rebind(options: Restoring, signal?: AbortSignal): Promise<LiveCredential | null> {
   const response = await options.session.api("/api/v1/devices");
   const listed = response.ok ? ((await response.json().catch(() => null)) as unknown) : null;
   if (!Array.isArray(listed)) throw new Error(`The agent did not list this computer (HTTP ${response.status})`);
   const found = (listed as Array<{ id?: unknown; revoked_at?: unknown }>).find((one) => one.id === options.credential.deviceId);
-  if (found === undefined || found.revoked_at !== null) return null;
+  if (found === undefined || found.revoked_at !== null || signal?.aborted) return null;
   const restored = await reauthorize(options);
   if (restored === "gone") return null;
   if (restored === "sign-in-again") throw new Error("The agent wants a more recent sign-in to keep this computer");

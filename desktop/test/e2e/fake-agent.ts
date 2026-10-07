@@ -23,6 +23,9 @@ export const ROTATED = `surg_dev_${"r".repeat(44)}`;
 // The signed-in user, as /auth/me and the fake link's welcome name them.
 export const ACCOUNT = { name: "Flavius Burca", email: "flavius@example.com", userId: "u", orgId: "o" };
 
+// The routes a test can hold: who signed in, adding this computer, and reauthorizing it.
+type Held = "me" | "register" | "reauthorize";
+
 function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
 }
@@ -51,6 +54,9 @@ export class FakeAgent {
   signedInAgoS = 0;
   // True: the agent has no device left to restore.
   gone = false;
+  // Routes that answer only once the test releases them, as a slow agent would, and how often each was asked.
+  private readonly held = new Map<Held, Promise<void>>();
+  readonly asked: Record<Held, number> = { me: 0, register: 0, reauthorize: 0 };
   readonly link = new FakeLinkServer({ token: TOKEN });
   readonly registered: unknown[] = [];
   readonly deleted: string[] = [];
@@ -97,12 +103,14 @@ export class FakeAgent {
       return json(response, 200, {});
     }
     if (path === "/api/v1/auth/me" && bearer) {
+      await this.answered("me");
       const { name, email, userId, orgId } = this.account;
       return json(response, 200, { id: userId, org_id: orgId, email, display_name: name });
     }
     if (request.method === "POST" && path === "/api/v1/auth/oauth/web-code" && bearer) return json(response, 200, { code: "web-code" });
     if (request.method === "POST" && path === "/api/v1/devices" && bearer) {
       this.registered.push(JSON.parse((await body(request)) || "{}"));
+      await this.answered("register");
       if (!this.recent) return json(response, 403, { detail: { code: "recent_sign_in_required", message: "Sign in again" } });
       return json(response, 201, { id: this.link.identity.device_id, name: "Laptop", token: this.link.token });
     }
@@ -110,6 +118,7 @@ export class FakeAgent {
       return json(response, 200, [{ id: this.link.identity.device_id, name: "Laptop", revoked_at: null }]);
     }
     if (request.method === "POST" && /^\/api\/v1\/devices\/[^/]+\/reauthorize$/.test(path) && bearer) {
+      await this.answered("reauthorize");
       this.reauthorized.push(request.headers.authorization ?? "");
       if (!this.recent) return json(response, 403, { detail: { code: "recent_sign_in_required", message: "Sign in again" } });
       if (this.gone || path.split("/")[4] !== this.link.identity.device_id) return json(response, 404, { detail: "No such device." });
@@ -127,6 +136,21 @@ export class FakeAgent {
     await this.pagesHeld;
     const served = this.projects === null ? "" : `<script>(${serveProjects.toString()})(${JSON.stringify(this.projects).replace(/</g, "\\u003c")}, ${this.registerAfterMs})</script>`;
     response.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><title>Fake agent</title><p>The web client</p>${served}`);
+  }
+
+  /** Hold *route*: it answers only once the returned release is called. */
+  hold(route: Held): () => void {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.held.set(route, promise);
+    return () => {
+      this.held.delete(route);
+      resolve();
+    };
+  }
+
+  private answered(route: Held): Promise<void> | undefined {
+    this.asked[route] += 1;
+    return this.held.get(route);
   }
 
   /** The system browser on the agent's authorize page, once its user allowed the desktop: what the desktop's tab then says. */

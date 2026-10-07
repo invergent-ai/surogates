@@ -133,6 +133,23 @@ describe("restoring a revoked computer", () => {
     await expect.poll(() => page.getAttribute("#device", "title"), { timeout: 15_000 }).toBe("Connected as Laptop");
   });
 
+  it("is ended by a log out while the agent reauthorizes it: the token it was issued revokes it, and no device runs", async () => {
+    const { shell, page } = await bound();
+    agent.link.close(4403);
+    await expect.poll(() => page.textContent("#device-action-button")).toBe("Restore…");
+    const release = agent.hold("reauthorize");
+    await page.click("#device-action-button");
+    await expect.poll(() => agent.asked.reauthorize).toBe(1);
+    await page.click("#user");
+    await page.click('[data-action="logout"]');
+    await expect.poll(async () => (await asked(shell)).some((options) => options.message.startsWith("Log out of"))).toBe(true);
+    release();
+    await expect.poll(() => agent.link.received.filter((frame) => frame.type === "revoke").length).toBe(1);
+    await expect.poll(() => credentials()).toEqual([]);
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    expect(await page.getAttribute("#device", "title")).toBe("Sign in to this agent to let it work on folders of this computer");
+  });
+
   it("adds this computer afresh when the agent has no such device any more", async () => {
     const { page } = await bound();
     agent.link.close(4403);
