@@ -48,6 +48,15 @@ HISTORY_EXCLUDES = [e for e in DEFAULT_EXCLUDES if e != "*.log"] + [
     "Thumbs.db", "desktop.ini", "._*",
 ] + [f"/{folder}" for folder in PLATFORM_EXCLUDES]
 
+#: A project with more files history would track than this has no history:
+#: its threads work on the real files.
+HISTORY_CAP = 50_000
+#: A thread's pod lasts as long as its turn, however long that is: its copy
+#: lives in it, and a deadline mid-turn would make the copy again from the
+#: history.  It is deleted at the turn's end; a pod a killed worker left
+#: behind goes after a day, where any other goes after an hour.
+THREAD_POD_DEADLINE = 86_400
+
 _GIT_TIMEOUT = 120
 #: The open's git calls: the pod's ready bound of ten minutes, less a margin.
 #: Through geesefs, a large project's fetch is bound by request latency.
@@ -70,6 +79,31 @@ _HERMETIC = {
 #: A file's bytes are history's as they are: no project, home or system
 #: ``.gitattributes`` converts line endings or runs a filter on them.
 _ATTRIBUTES = "* -text -filter -ident -working-tree-encoding\n"
+
+
+
+def _name(glob: str) -> str:
+    """*glob*, a pattern for one name, as a regex: its ``*`` and ``?`` never cross a ``/``."""
+    return "".join("[^/]*" if c == "*" else "[^/]" if c == "?" else re.escape(c) for c in glob)
+
+
+#: The excludes, as one regex over a path: ``x/`` names a folder anywhere,
+#: ``/x/`` the top folder, and any other a file or folder anywhere.
+_EXCLUDED = re.compile("|".join(
+    f"^{_name(p.strip('/'))}/" if p.startswith("/") else
+    f"(?:^|/){_name(p.rstrip('/'))}/" if p.endswith("/") else
+    f"(?:^|/){_name(p)}(?:/|$)"
+    for p in HISTORY_EXCLUDES
+))
+
+
+def tracked(path: str) -> bool:
+    """Whether history would track the project's file *path*, by the excludes.
+
+    By them alone: a project's own ``.gitignore``, and a folder holding a
+    git repository, leave out more, so a count of these errs high.
+    """
+    return _EXCLUDED.search(path) is None
 
 
 class HistoryError(RuntimeError):

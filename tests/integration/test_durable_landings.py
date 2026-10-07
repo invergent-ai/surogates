@@ -15,6 +15,7 @@ from sqlalchemy import select, text
 from surogates.db.models import WorkstreamHistory
 from surogates.governance.saga import SagaOrchestrator
 from surogates.harness import landing as landing_module
+from surogates.harness.tool_exec import _build_session_sandbox_spec
 from surogates.sandbox.history import History
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
@@ -715,3 +716,32 @@ async def test_a_recovery_that_lost_its_lock_stops_and_the_next_holder_finishes_
     [row] = await rows(api, first)
     assert row.saga_state == "compensated"
     assert pods.real_names() == ["C.md", "Report.docx", "notes.txt"]
+
+
+async def test_a_project_over_the_cap_has_no_history_and_its_threads_work_on_the_real_files(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    harness = harness_of(api)
+    harness._storage = api.app.state.storage
+    tenant = SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id)
+    # Excluded files are not counted: two tracked files are within a cap of two.
+    (pods.project / "node_modules").mkdir()
+    (pods.project / "node_modules" / "x.js").write_text("x")
+    monkeypatch.setattr(rows_module, "HISTORY_CAP", 2)
+    monkeypatch.setattr(rows_module, "_COUNTED", {})
+    within = await harness._with_history_cap(thread)
+    assert within.config["history_off"] is False
+    assert "PROJECT_DIR" in (await _build_session_sandbox_spec(within, tenant, str(thread.id))).env
+    (pods.project / "c.md").write_text("one too many")
+    # A wake within the minute takes the last count; the next one counts again.
+    assert (await harness._with_history_cap(thread)).config["history_off"] is False
+    rows_module._COUNTED.clear()
+    over = await harness._with_history_cap(thread)
+    assert over.config["history_off"] is True
+    # The plain layout: the real files at /workspace, no copy, nothing to land.
+    spec = await _build_session_sandbox_spec(over, tenant, str(thread.id))
+    assert "PROJECT_DIR" not in spec.env and [r.mount_path for r in spec.resources] == ["/workspace"]
+    pool = SandboxPool(pods)
+    await pool.ensure(str(thread.id), spec)
+    assert not pool.holds_copy(str(thread.id))

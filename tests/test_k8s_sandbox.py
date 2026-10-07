@@ -411,6 +411,27 @@ class TestThreadPodLayout:
         assert (manifest.spec.termination_grace_period_seconds or 0) == grace
         assert api.delete_namespaced_pod.await_args.kwargs["grace_period_seconds"] == grace
 
+    @pytest.mark.parametrize(("env", "mount_path", "deadline", "ready"), [
+        ({"PROJECT_DIR": "/project"}, "/project", 86_400, 600),
+        ({}, "/workspace", 3600, 5),  # the fixture's pod_ready_timeout
+    ])
+    async def test_a_thread_pod_outlasts_any_turn_and_has_ten_minutes_to_open(self, sandbox, env, mount_path, deadline, ready):
+        api = MagicMock()
+        api.create_namespaced_pod = AsyncMock()
+        pod = MagicMock()
+        pod.status.pod_ip = "10.42.0.7"
+        api.read_namespaced_pod = AsyncMock(return_value=pod)
+        spec = SandboxSpec(
+            resources=[Resource(source_ref="s3://bucket/boundaries/w/workspace/", mount_path=mount_path)], env=env,
+        )
+        wait = AsyncMock()
+        with patch.object(sandbox, "_get_api", AsyncMock(return_value=api)), \
+             patch.object(sandbox, "_create_s3_secret", AsyncMock()), \
+             patch.object(sandbox, "_wait_for_ready", wait):
+            await sandbox.provision(spec)
+        assert api.create_namespaced_pod.await_args.args[1].spec.active_deadline_seconds == deadline
+        assert wait.await_args.args[2] == ready
+
     async def test_any_other_pod_mounts_the_files_at_workspace(self, sandbox):
         main, s3fs, env, volumes = await self.manifest(sandbox, "/workspace")
         assert main == {"/workspace": "workspace"}
@@ -443,4 +464,4 @@ class TestWaitForReady:
 
         with patch("surogates.sandbox.kubernetes.watch.Watch", Watch), \
              pytest.raises(RuntimeError, match="exited with 1: copy not made: the project's files could not be read$"):
-            await sandbox._wait_for_ready(MagicMock(), "sandbox-x")
+            await sandbox._wait_for_ready(MagicMock(), "sandbox-x", 60)

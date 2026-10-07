@@ -10,8 +10,10 @@ lock can finish or undo a landing whose worker died.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from itertools import islice
 from typing import Any
 from uuid import UUID
 
@@ -20,10 +22,16 @@ from sqlalchemy.dialects.postgresql import Range
 
 from surogates.db.models import WorkstreamHistory
 from surogates.governance.saga import Saga
+from surogates.sandbox.history import HISTORY_CAP, tracked
 from surogates.storage.tenant import boundary_workspace_prefix
 
 #: How long a landing waits between tries for its project's lock.
 LOCK_POLL = 0.5
+#: How long a project's count against the cap is taken again, and each one's
+#: answer with when it was counted.
+COUNT_TTL = 60
+# Per worker, an entry a project, never pruned: the projects a worker serves are few.
+_COUNTED: dict[tuple[str, str], tuple[float, bool]] = {}
 
 
 @asynccontextmanager
@@ -130,3 +138,27 @@ async def waits_to_land(session_factory: Any, storage: Any, session: Any) -> boo
         return False
     refs = {ref: sha for sha, _, ref in (line.partition(" ") for line in text.splitlines())}
     return refs.get(f"refs/heads/threads/{session.id}") != refs.get(f"refs/bases/{session.id}")
+
+
+async def over_history_cap(storage: Any, session: Any) -> bool:
+    """Whether the project of a thread, or a thread's helper, has more files than history keeps.
+
+    Counted from the bucket's listing, before a pod is made: a pod's layout
+    is fixed when it is.  Off the event loop, and stopped one past the cap;
+    a wake within a minute of the last count takes its answer.
+    """
+    bucket = session.config["storage_bucket"]
+    prefix = boundary_workspace_prefix(session.config, session, session.id)
+    counted = _COUNTED.get((bucket, prefix))
+    if counted is not None and time.monotonic() - counted[0] < COUNT_TTL:
+        return counted[1]
+    keys = await storage.list_keys(bucket, prefix)
+
+    def over() -> bool:
+        # A key ending in / is a folder's marker, which geesefs writes.
+        files = (k for k in keys if not k.endswith("/") and tracked(k.removeprefix(prefix)))
+        return next(islice(files, HISTORY_CAP, None), None) is not None
+
+    answer = await asyncio.to_thread(over)
+    _COUNTED[(bucket, prefix)] = (time.monotonic(), answer)
+    return answer

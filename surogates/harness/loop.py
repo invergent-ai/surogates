@@ -1027,6 +1027,21 @@ class AgentHarness(
             return capability_allowed(session.config, name)
         return True
 
+    async def _with_history_cap(self, session: Session) -> Session:
+        """A project's thread, or a thread's helper, marked ``history_off`` while the project has more files than history keeps.
+
+        Its pod then has the plain layout, the real files at ``/workspace``:
+        it works on them, as before projects had history, and lands nothing.
+        """
+        config = session.config or {}
+        if self._storage is None or not config.get("storage_bucket") or not (
+            is_project_thread(config) or config.get("sandbox_root_thread")
+        ):
+            return session
+        from surogates.workstreams.history import over_history_cap
+
+        return session.model_copy(update={"config": {**config, "history_off": await over_history_cap(self._storage, session)}})
+
     def _overlay_repos(self, session: Session) -> Session:
         """Overlay the agent's configured repos + ssh targets onto a wake-local session.
 
@@ -1172,6 +1187,7 @@ class AgentHarness(
             # /code and the coding tool can resolve them (the fetched row does
             # not carry them).
             session = self._overlay_repos(session)
+            session = await self._with_history_cap(session)
             # From here every sandbox request for this session, whoever
             # makes it, goes through its device or is refused.
             device_token = enter_device_session(session)

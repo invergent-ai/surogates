@@ -122,7 +122,7 @@ async def _build_session_sandbox_spec(
     # files at /project, and /workspace, the path the model and the tools
     # know, is the copy.  The layout is the pod's root's: a thread's helper
     # makes the thread's pod, if it is the first to need it.
-    copy = bool(storage_bucket) and (
+    copy = bool(storage_bucket) and not session.config.get("history_off") and (
         is_project_thread(session.config) or bool(session.config.get("sandbox_root_thread"))
     )
     mount_path = PROJECT_MOUNT if copy else _WORKSPACE_MOUNT_PATH

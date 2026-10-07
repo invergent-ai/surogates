@@ -422,3 +422,15 @@ def test_a_record_found_by_its_saga_leaves_its_pod_ready_for_the_next_landing(tm
     (history.copy / "b.md").write_text("b")
     land(history, "saga:2")
     assert (project / "b.md").read_text() == "b"
+
+
+def test_the_cap_counts_the_files_history_would_track():
+    from surogates.sandbox.history import tracked
+
+    cases = {
+        "Report.docx": True, "uploads/brief.pdf": True, "server.log": True, "a/_history/x": True, "node_modules": True,
+        "node_modules/x.js": False, "a/node_modules/x.js": False, "x/~$Report.docx": False, "notes.tmp": False,
+        "a.tmp/b.docx": False, "_history/packed-refs": False, ".env": False, "conf/.env.prod": False,
+        "proj/.git/HEAD": False, "Thumbs.db": False, "d/._x": False, ".threads/k/r": False, "coverage/a.docx": False,
+    }
+    assert {path: tracked(path) for path in cases} == cases

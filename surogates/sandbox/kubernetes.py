@@ -30,6 +30,7 @@ from kubernetes_asyncio import client, config, watch
 from kubernetes_asyncio.client import ApiException
 
 from surogates.sandbox._executor_client import ExecutorHTTPClient
+from surogates.sandbox.history import THREAD_POD_DEADLINE
 from surogates.sandbox.base import (
     SandboxSpec,
     SandboxStatus,
@@ -75,6 +76,9 @@ class _PodEntry:
 #: A thread's pod is given this long to stop, so its geesefs sidecar can
 #: finish uploading the real files a landing wrote.  Any other pod goes at once.
 _THREAD_POD_GRACE = 30
+#: How long a thread's pod may take to become ready: its open fetches the
+#: history, reads the real files that changed and checks the copy out.
+_THREAD_POD_READY = 600
 
 
 #: How long a RUNNING pod status is trusted without re-reading it from the
@@ -262,7 +266,9 @@ class K8sSandbox:
         # on the executor daemon being up AND /workspace being FUSE-
         # mounted), then capture the pod IP the daemon is reached on.
         try:
-            await self._wait_for_ready(api, pod_name)
+            await self._wait_for_ready(
+                api, pod_name, _THREAD_POD_READY if "PROJECT_DIR" in spec.env else self._pod_ready_timeout,
+            )
             pod = await api.read_namespaced_pod(pod_name, self._namespace)
             entry.pod_ip = (pod.status.pod_ip if pod.status else "") or ""
             if not entry.pod_ip:
@@ -615,7 +621,7 @@ class K8sSandbox:
             ),
             spec=client.V1PodSpec(
                 service_account_name=self._service_account,
-                active_deadline_seconds=_DEFAULT_ACTIVE_DEADLINE,
+                active_deadline_seconds=THREAD_POD_DEADLINE if fuse_path != "/workspace" else _DEFAULT_ACTIVE_DEADLINE,
                 termination_grace_period_seconds=_THREAD_POD_GRACE if fuse_path != "/workspace" else None,
                 restart_policy="Never",
                 automount_service_account_token=automount_sa_token,
@@ -892,16 +898,16 @@ class K8sSandbox:
     # Pod lifecycle helpers
     # ------------------------------------------------------------------
 
-    async def _wait_for_ready(self, api: client.CoreV1Api, pod_name: str) -> None:
-        """Watch the pod until it's Ready or the timeout expires."""
+    async def _wait_for_ready(self, api: client.CoreV1Api, pod_name: str, timeout: int) -> None:
+        """Watch the pod until it's Ready or *timeout* seconds pass."""
         w = watch.Watch()
         try:
-            async with asyncio.timeout(self._pod_ready_timeout):
+            async with asyncio.timeout(timeout):
                 async for event in w.stream(
                     api.list_namespaced_pod,
                     namespace=self._namespace,
                     field_selector=f"metadata.name={pod_name}",
-                    timeout_seconds=self._pod_ready_timeout,
+                    timeout_seconds=timeout,
                 ):
                     pod = event["object"]
                     if self._is_pod_ready(pod):
@@ -923,10 +929,7 @@ class K8sSandbox:
                             f"Sandbox pod {pod_name} entered {phase} phase"
                         )
         except TimeoutError:
-            raise RuntimeError(
-                f"Sandbox pod {pod_name} did not become ready "
-                f"within {self._pod_ready_timeout}s"
-            )
+            raise RuntimeError(f"Sandbox pod {pod_name} did not become ready within {timeout}s")
         finally:
             w.stop()
 
