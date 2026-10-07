@@ -67,6 +67,7 @@ export function shellEnv(home: string): Record<string, string> {
  * the test is told.
  */
 export async function secondLaunch(home: string, ...args: string[]): Promise<number | null> {
+  await appsElectron();
   const second = spawn(ELECTRON, [MAIN, "--password-store=basic", ...args], { env: shellEnv(home), stdio: "ignore", detached: true });
   let late: NodeJS.Timeout | undefined;
   const code = await Promise.race([
@@ -111,9 +112,10 @@ export async function quit(shell: ElectronApplication | undefined): Promise<void
   await gone(child.pid);
 }
 
-// This package's Electron is the app's, RunAsNode off, or no test of it means anything. Read once a run.
+// This package's Electron is the app's, RunAsNode off, or no test of it means anything. Read once a run,
+// and awaited before every start of it: launch(), secondLaunch() and a test's own spawn.
 let fused: Promise<void> | undefined;
-const appsElectron = (): Promise<void> => (fused ??= getCurrentFuseWire(ELECTRON).then((wire) => {
+export const appsElectron = (): Promise<void> => (fused ??= getCurrentFuseWire(ELECTRON).then((wire) => {
   if (wire[FuseV1Options.RunAsNode] !== FuseState.DISABLE) throw new Error(`${ELECTRON} still runs as Node: run npm run electron:install`);
 }));
 
