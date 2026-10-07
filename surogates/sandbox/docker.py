@@ -106,6 +106,11 @@ class DockerSandbox:
     # ------------------------------------------------------------------
 
     async def provision(self, spec: SandboxSpec) -> str:
+        if "PROJECT_DIR" in spec.env:
+            raise SandboxUnavailableError(
+                "A project thread's copy of the project's files needs the Kubernetes sandbox",
+                classification="docker",
+            )
         sandbox_id = uuid.uuid4().hex
         token = secrets.token_urlsafe(32)
 

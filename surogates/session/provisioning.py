@@ -8,6 +8,7 @@ from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.models import Session
 from surogates.session.store import SessionStore
 from surogates.storage.tenant import agent_session_bucket
+from surogates.workstreams import is_project_thread
 
 
 # Fields that pin a child session to its root's workspace.  Callers must
@@ -98,6 +99,7 @@ async def create_agent_session(
     # sandbox.  Only :func:`create_child_session` stamps it, from the real
     # parent.
     merged_config.pop("sandbox_root_session_id", None)
+    merged_config.pop("sandbox_root_thread", None)
     # Server-owned too: where a session runs is decided from a device the API
     # checked, never by caller-supplied config.
     merged_config.pop("execution", None)
@@ -201,6 +203,11 @@ async def create_child_session(
         merged_config["execution"] = parent_config["execution"]
 
     merged_config["sandbox_root_session_id"] = sandbox_session_key(parent)
+    # A project thread's helpers run in its pod, over its copy: whichever of
+    # them provisions that pod, on whichever worker, gives it the thread's layout.
+    merged_config.pop("sandbox_root_thread", None)
+    if is_project_thread(parent_config) or parent_config.get("sandbox_root_thread"):
+        merged_config["sandbox_root_thread"] = True
 
     effective_service_account_id = (
         service_account_id

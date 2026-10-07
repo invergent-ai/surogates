@@ -137,15 +137,20 @@ def _thread_words(text: str) -> str:
 
 #: The most files a report names; the rest are counted.
 _MAX_LISTED_FILES = 20
+#: The excluded files and the repositories a report names; the rest are counted.
+_MAX_LISTED_LEFT_OUT = 10
 
 
-def _listed(files: list) -> str:
-    """A report's ``Files:`` line.  An entry with neither a label nor a ref
-    is skipped rather than failing the master's every wake."""
+def _listed(files: list, limit: int = _MAX_LISTED_FILES, total: int | None = None) -> str:
+    """A report's ``Files:`` line, at most *limit* names and how many more,
+    of *total* when the payload counted more than it names.  An entry with
+    neither a label nor a ref is skipped rather than failing the master's
+    every wake."""
     labels = [_file_label(f.get("label") or f.get("ref") or "") for f in files if isinstance(f, dict)]
     labels = [label for label in labels if label]
-    if len(labels) > _MAX_LISTED_FILES:
-        labels = [*labels[:_MAX_LISTED_FILES], f"and {len(labels) - _MAX_LISTED_FILES} more"]
+    count = max(len(labels), total if isinstance(total, int) else 0)
+    if count > limit:
+        labels = [*labels[:limit], f"and {count - limit} more"]
     return ", ".join(labels) or "none"
 
 
@@ -155,6 +160,46 @@ def _file_label(label: str) -> str:
     marker, where a second line would read as the harness's."""
     printable = "".join(c if c.isprintable() else " " for c in _thread_words(str(label)))
     return " ".join(printable.split())
+
+
+#: What a report says of a thread's files that did not land, by its landing's state.
+_NOT_LANDED = {
+    "compensated": "Not landed, and the project's files are as they were",
+    "escalated": "Could not finish landing these; check them",
+    "failed": "Not saved, because the landing failed",
+}
+#: What a report says of a thread's files a landing left out, by why it left them out.
+_NOT_MERGED = {
+    "changed": "Not merged, because the project's file changed after the thread started (the newer file was kept)",
+    "shape": "Not merged, because the project has a folder where the thread made a file, or a file where it made a folder",
+    "with": "Not merged, because they go with a change that was not merged (a move lands whole or not at all)",
+}
+
+
+def _landing_lines(data: dict, kept: list, deleted: list) -> str:
+    """A thread report's lines on the files it deleted, the files that did
+    not land, the excluded files it made, and the folders inside a git
+    repository it wrote into."""
+    lines = f"\nDeleted: {_listed(deleted)}" if deleted else ""
+    if data.get("landing") in _NOT_LANDED:
+        # Said even when no file is known: the master must hear the turn did not land.
+        named = _listed(kept) if kept else "the turn's files could not be read"
+        lines += f"\n{_NOT_LANDED[data['landing']]}: {named}"
+    elif kept:
+        # A report from before reasons were given says the file changed.
+        why: dict[str, list] = {reason: [] for reason in _NOT_MERGED}
+        for f in kept:
+            why[f.get("reason") if f.get("reason") in _NOT_MERGED else "changed"].append(f)
+        lines += "".join(f"\n{_NOT_MERGED[reason]}: {_listed(named)}" for reason, named in why.items() if named)
+    for key, words in (
+        ("excluded", "Not saved, because the project's history leaves them out"),
+        ("repositories", "Not landed, because they are inside a git repository"),
+    ):
+        named = data.get(key)
+        if isinstance(named, list) and named:
+            names = [{"label": name} for name in named if isinstance(name, str)]
+            lines += f"\n{words}: {_listed(names, limit=_MAX_LISTED_LEFT_OUT, total=data.get(f'{key}_count'))}"
+    return lines
 
 
 def worker_note(event_type: str, data: dict) -> dict:
@@ -178,12 +223,18 @@ def worker_note(event_type: str, data: dict) -> dict:
             content = f"{named} failed: {data.get('error', 'unknown error')}]"
         else:
             files = data.get("files")
-            listed = _listed(files) if isinstance(files, list) else "not listed (the turn ended early)"
+            # A thread's files that did not land, and the ones it deleted,
+            # are named apart from the ones it made or changed.
+            kept, deleted, made = [], [], []
+            for f in files if isinstance(files, list) else ():
+                landing, change = (f.get("landing"), f.get("change")) if isinstance(f, dict) else (None, None)
+                (kept if landing == "not_merged" else deleted if change == "deleted" else made).append(f)
+            listed = _listed(made) if isinstance(files, list) else "not listed (the turn ended early)"
             content = (
                 f"{named} reported]\n"
                 f"{_REPORT_BEGIN}\n{_thread_words(str(data.get('result') or ''))}\n{_REPORT_END}\n"
                 f"Files: {listed}"
-            )
+            ) + _landing_lines(data, kept, deleted)
     return {"role": "user", "content": content}
 
 

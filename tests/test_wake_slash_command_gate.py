@@ -35,6 +35,7 @@ from surogates.session.events import EventType
 from surogates.session.models import Session
 from surogates.tenant.context import TenantContext
 from surogates.tools.registry import ToolRegistry
+from surogates.workstreams import thread_refusal
 
 
 def _tenant() -> TenantContext:
@@ -166,3 +167,27 @@ async def test_enabled_command_reaches_handler(monkeypatch):
     harness._handle_loop_command.assert_awaited_once()
     # The gate did not fire, so no "disabled" response was emitted.
     assert _llm_responses(store) == []
+
+
+@pytest.mark.parametrize("command", ["loop", "mission", "auto-research", "deep-research", "code"])
+def test_a_project_thread_refuses_a_command_that_starts_helpers(command):
+    harness = _harness(AsyncMock(), _permissive())
+    thread = _session()
+    thread.config["workstream_role"] = "thread"
+    assert harness._slash_command_block_reason(f"/{command} Go.", thread) == thread_refusal(f"/{command}")
+    # Elsewhere they run as before.
+    assert harness._slash_command_block_reason(f"/{command} Go.", _session()) is None
+
+
+@pytest.mark.asyncio
+async def test_a_project_threads_loop_never_schedules_a_run(monkeypatch):
+    monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
+    thread = _session()
+    thread.config["workstream_role"] = "thread"
+    store = _stub_store(thread, [_user_event(10, "/loop 5m Append a line to Report.docx.")])
+    harness = _harness(store, _permissive())
+    harness._handle_loop_command = AsyncMock()
+    await harness.wake(thread.id)
+    # No routine, so no run works on a copy its thread never lands.
+    assert _llm_responses(store) == ["A thread can't start /loop yet: do this step in the thread itself."]
+    harness._handle_loop_command.assert_not_awaited()

@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 _MAX_RESULT_CHARS: int = 10_000
 
 
+#: The most excluded files and repositories a report's payload names.
+_MAX_LEFT_OUT_NAMED = 200
+
+
 async def _thread_title(session_factory: Any | None, worker_session_id: UUID) -> str | None:
     """The title of the project's thread *worker_session_id*; None for any other worker."""
     if session_factory is None:
@@ -110,6 +114,7 @@ async def notify_parent_on_completion(
     task_id: UUID | None = None,
     session_factory: Any | None = None,
     files: list[dict[str, Any]] | None = None,
+    landing: dict[str, Any] | None = None,
 ) -> None:
     """Emit a ``WORKER_COMPLETE`` event into the parent session and re-enqueue it.
 
@@ -138,7 +143,10 @@ async def notify_parent_on_completion(
     A project's thread also reports its ``title``, and the *files* its
     turn's summary named.  A turn that ended early, or whose summary was
     not written, has None, so its report lists no files rather than
-    claiming none.
+    claiming none.  A thread whose turn landed reports its *landing*'s
+    files instead, each landed or not merged, the excluded files it made,
+    the folders inside a git repository it wrote into, and the landing's
+    state when it did not complete.
     """
     try:
         from surogates.harness.message_utils import extract_final_response
@@ -183,6 +191,14 @@ async def notify_parent_on_completion(
             payload["title"] = title
             if files is not None:
                 payload["files"] = files
+            for key in ("excluded", "repositories") if landing is not None else ():
+                if landing[key]:
+                    # At most this many names, and how many there are in all.
+                    payload[key] = landing[key][:_MAX_LEFT_OUT_NAMED]
+                    if len(landing[key]) > _MAX_LEFT_OUT_NAMED:
+                        payload[f"{key}_count"] = len(landing[key])
+            if landing is not None and landing["state"] != "completed":
+                payload["landing"] = landing["state"]
 
         await session_store.emit_event(
             parent_session_id,

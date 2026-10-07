@@ -108,6 +108,35 @@ async def compensate_mcp(
     return result
 
 
+async def compensate_history(
+    step: SagaStep,
+    sandbox_pool: SandboxPool,
+    session_id: str,
+    *,
+    ran: bool = True,
+) -> dict | None:
+    """Compensate a step of a landing, in the thread's pod.
+
+    An apply puts back the real file's version from before the landing,
+    where the real file is still the one the step wrote.  *ran* is false
+    for an apply that failed: it may still have written its file, and a
+    file it did not write is left as it is.  The commit and the record
+    need none: the turn stays on the thread's branch, and a recorded
+    landing is undone only by a new one.
+    """
+    if step.tool_name != "history.apply":
+        return None
+    # The folders the apply made for its file go with it; a failed apply's are not known.
+    made = step.execute_result.get("made", []) if isinstance(step.execute_result, dict) else []
+    raw = await sandbox_pool.execute(
+        session_id, "_history", json.dumps({**step.arguments, "made": made, "action": "unapply", "ran": ran}),
+    )
+    result = json.loads(raw)
+    if "error" in result:
+        raise SagaStateError(f"Could not put back {step.arguments.get('path')}: {result['error']}")
+    return result
+
+
 async def compensate_step(
     step: SagaStep,
     *,
@@ -116,15 +145,22 @@ async def compensate_step(
 ) -> Any:
     """Dispatch compensation for *step* based on its strategy.
 
-    Tries checkpoint restore first (builtin tools), then MCP undo tool.
-    Raises :class:`SagaStateError` if the step has no compensation
-    strategy.
+    A landing's steps first, then MCP undo tool, then checkpoint restore
+    (builtin tools).  An MCP step in a project's thread has both: its undo
+    tool runs, and then its snapshot is restored.  Raises
+    :class:`SagaStateError` if the step has no compensation strategy.
     """
-    if step.checkpoint_hash:
-        return await compensate_builtin(step, sandbox_pool, session_id)
+    if step.tool_name.startswith("history."):
+        return await compensate_history(step, sandbox_pool, session_id)
 
     if step.compensation_tool:
-        return await compensate_mcp(step, sandbox_pool, session_id)
+        undone = await compensate_mcp(step, sandbox_pool, session_id)
+        if step.checkpoint_hash:
+            await compensate_builtin(step, sandbox_pool, session_id)
+        return undone
+
+    if step.checkpoint_hash:
+        return await compensate_builtin(step, sandbox_pool, session_id)
 
     raise SagaStateError(
         f"Step {step.step_id} ({step.tool_name}) is not compensable -- "

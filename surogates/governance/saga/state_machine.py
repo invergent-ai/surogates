@@ -135,8 +135,13 @@ class SagaStep:
 
     @property
     def is_compensable(self) -> bool:
-        """Whether this step can be compensated (has checkpoint or undo tool)."""
-        return self.checkpoint_hash is not None or self.compensation_tool is not None
+        """Whether this step can be compensated (has checkpoint or undo tool,
+        or is a step of a landing, which ``compensate_history`` undoes)."""
+        return (
+            self.checkpoint_hash is not None
+            or self.compensation_tool is not None
+            or self.tool_name.startswith("history.")
+        )
 
 
 @dataclass

@@ -83,11 +83,11 @@ _MAX_FILES = 50_000
 # Shadow repo helpers
 # ---------------------------------------------------------------------------
 
-def _shadow_repo_path(working_dir: str) -> Path:
-    """Deterministic shadow repo path: sha256(abs_path)[:16]."""
+def _shadow_repo_path(working_dir: str, base: Path | None = None) -> Path:
+    """Deterministic shadow repo path: sha256(abs_path)[:16], under *base*."""
     abs_path = str(Path(working_dir).resolve())
     dir_hash = hashlib.sha256(abs_path.encode()).hexdigest()[:16]
-    return CHECKPOINT_BASE / dir_hash
+    return (base or CHECKPOINT_BASE) / dir_hash
 
 
 def _git_env(shadow_repo: Path, working_dir: str) -> dict:
@@ -195,10 +195,8 @@ def _dir_file_count(path: str) -> int:
 class CheckpointManager:
     """Manages automatic filesystem checkpoints.
 
-    Designed to be owned by the harness.  Call ``new_turn()`` at the start of
-    each conversation turn and ``ensure_checkpoint(dir, reason)`` before
-    any file-mutating tool call.  The manager deduplicates so at most one
-    snapshot is taken per directory per turn.
+    Call ``ensure_checkpoint(dir, reason)`` before a step that may change
+    files: the snapshot is what undoing the step restores.
 
     Parameters
     ----------
@@ -211,26 +209,18 @@ class CheckpointManager:
     def __init__(self, enabled: bool = False, max_snapshots: int = 50):
         self.enabled = enabled
         self.max_snapshots = max_snapshots
-        self._checkpointed_dirs: Set[str] = set()
         self._git_available: Optional[bool] = None  # lazy probe
-
-    # ------------------------------------------------------------------
-    # Turn lifecycle
-    # ------------------------------------------------------------------
-
-    def new_turn(self) -> None:
-        """Reset per-turn dedup.  Call at the start of each agent iteration."""
-        self._checkpointed_dirs.clear()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def ensure_checkpoint(self, working_dir: str, reason: str = "auto") -> bool:
-        """Take a checkpoint if enabled and not already done this turn.
+        """Take a checkpoint of *working_dir*, if enabled.
 
-        Returns True if a checkpoint was taken, False otherwise.
-        Never raises — all errors are silently logged.
+        Returns True when its latest checkpoint is its state: one was taken
+        now, or nothing changed since the last.  Never raises — all errors
+        are silently logged.
         """
         if not self.enabled:
             return False
@@ -249,12 +239,6 @@ class CheckpointManager:
         if abs_dir in ("/", str(Path.home())):
             logger.debug("Checkpoint skipped: directory too broad (%s)", abs_dir)
             return False
-
-        # Already checkpointed this turn?
-        if abs_dir in self._checkpointed_dirs:
-            return False
-
-        self._checkpointed_dirs.add(abs_dir)
 
         try:
             return self._take(abs_dir, reason)
@@ -433,31 +417,6 @@ class CheckpointManager:
             result["file"] = file_path
         return result
 
-    def get_working_dir_for_path(self, file_path: str) -> str:
-        """Resolve a file path to its working directory for checkpointing.
-
-        Walks up from the file's parent to find a reasonable project root
-        (directory containing .git, pyproject.toml, package.json, etc.).
-        Falls back to the file's parent directory.
-        """
-        path = Path(file_path).resolve()
-        if path.is_dir():
-            candidate = path
-        else:
-            candidate = path.parent
-
-        # Walk up looking for project root markers
-        markers = {".git", "pyproject.toml", "package.json", "Cargo.toml",
-                    "go.mod", "Makefile", "pom.xml", ".hg", "Gemfile"}
-        check = candidate
-        while check != check.parent:
-            if any((check / m).exists() for m in markers):
-                return str(check)
-            check = check.parent
-
-        # No project root found — use the file's parent
-        return str(candidate)
-
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -493,9 +452,9 @@ class CheckpointManager:
             allowed_returncodes={1},
         )
         if ok_diff:
-            # No changes to commit
-            logger.debug("Checkpoint skipped: no changes in %s", working_dir)
-            return False
+            # No changes to commit: the latest checkpoint is the state.
+            logger.debug("Checkpoint unchanged in %s", working_dir)
+            return True
 
         # Commit
         ok, _, err = _run_git(
