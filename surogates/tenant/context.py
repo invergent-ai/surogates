@@ -88,6 +88,16 @@ class TenantContext:
     #: ``Host`` header — which is the only thing standing between one
     #: customer's key and every other agent in the same org.
     service_account_agent_id: str | None = None
+    #: When the user last signed in (epoch seconds), from an access token
+    #: that carries it.  ``None`` for any other principal, and for a token
+    #: refreshed from a sign-in that recorded none.
+    auth_time: int | None = None
+    #: The OAuth client an access token was issued to (Surogate Desktop's
+    #: sign-in), or ``None`` for the web client's own.
+    client_id: str | None = None
+    #: The OAuth sign-in (refresh-token family) an access token was issued
+    #: under: a computer the token adds or restores is bound to it.
+    oauth_family_id: UUID | None = None
 
     def covers_session(self, session_id: UUID) -> bool:
         """Return True when this context is allowed to act on *session_id*.

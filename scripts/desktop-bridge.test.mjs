@@ -2,36 +2,26 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { joinDesktop, leaveDesktop, sessionProjects } from "../web/src/lib/desktop-bridge.ts";
+import { joinDesktop, leaveDesktop, sessionProjects, signInFromDesktop } from "../web/src/lib/desktop-bridge.ts";
 import { projectFixtures } from "../web/src/lib/projects.ts";
 
 const ACCOUNT = { name: "Flavius", email: "f@example.com", userId: "u", orgId: "o" };
 const MASTER = "0b6f3c1e-8a2d-4c5e-9f10-1a2b3c4d5e6f";
 
-function bridge(device = null, localFolders = true) {
+function bridge(code = "web-code") {
   const calls = [];
   return {
     calls,
     version: 1,
-    getDevice: async () => ({ device, computerName: "thinkpad", localFolders }),
-    registerDevice: async (token) => {
-      calls.push(["registerDevice", token]);
-      return { deviceId: "d", name: "thinkpad" };
-    },
+    getDevice: async () => ({ device: null, localFolders: true }),
+    webSignIn: async () => (code === null ? null : { code }),
     setAccount: async (account) => calls.push(["setAccount", account]),
     registerProjects: async (source) => calls.push(["registerProjects", source === null ? null : typeof source.list]),
   };
 }
 
 function api(sessions = []) {
-  const asked = [];
   return {
-    asked,
-    register: async (name) => {
-      asked.push(["register", name]);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      return { token: "surg_dev_issued" };
-    },
     account: async () => ACCOUNT,
     sessions: async () => sessions,
   };
@@ -39,23 +29,17 @@ function api(sessions = []) {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 
-test("tells the desktop who is signed in and serves its projects, then registers this computer; stopping withdraws both", async () => {
+test("tells the desktop who is signed in and serves its projects; stopping withdraws both", async () => {
   const desktop = bridge();
-  const server = api();
-  const stop = joinDesktop(desktop, server);
+  const stop = joinDesktop(desktop, api());
   await settle();
-  assert.deepEqual(server.asked, [["register", "thinkpad"]]);
-  assert.deepEqual(desktop.calls, [
-    ["setAccount", ACCOUNT],
-    ["registerProjects", "function"],
-    ["registerDevice", "surg_dev_issued"],
-  ]);
+  assert.deepEqual(desktop.calls, [["setAccount", ACCOUNT], ["registerProjects", "function"]]);
   stop();
   await settle();
-  assert.deepEqual(desktop.calls.slice(3), [["setAccount", null], ["registerProjects", null]]);
+  assert.deepEqual(desktop.calls.slice(2), [["setAccount", null], ["registerProjects", null]]);
 });
 
-test("serves nothing, and registers nothing, once stopped while the desktop is still told who is signed in", async () => {
+test("serves nothing once stopped while the desktop is still told who is signed in", async () => {
   const desktop = bridge();
   const told = desktop.setAccount;
   // The desktop takes 20 ms to hear who is signed in: the user signs out meanwhile.
@@ -63,13 +47,11 @@ test("serves nothing, and registers nothing, once stopped while the desktop is s
     await told(account);
     await new Promise((resolve) => setTimeout(resolve, 20));
   };
-  const server = api();
-  const stop = joinDesktop(desktop, server);
+  const stop = joinDesktop(desktop, api());
   await new Promise((resolve) => setTimeout(resolve, 5));
   stop();
   await settle();
   assert.deepEqual(desktop.calls, [["setAccount", ACCOUNT], ["setAccount", null], ["registerProjects", null]]);
-  assert.deepEqual(server.asked, []);
 });
 
 test("tells the desktop that nobody is signed in on a page with no sign-in, as after an expired session", async () => {
@@ -79,26 +61,25 @@ test("tells the desktop that nobody is signed in on a page with no sign-in, as a
   assert.deepEqual(desktop.calls, [["setAccount", null], ["registerProjects", null]]);
 });
 
-test("registers nothing for a computer already registered, or an agent without local folders", async () => {
-  for (const desktop of [bridge({ deviceId: "d", name: "thinkpad" }), bridge(null, false)]) {
-    const server = api();
-    const stop = joinDesktop(desktop, server);
-    await settle();
-    stop();
-    assert.deepEqual(server.asked, []);
-    assert.equal(desktop.calls.filter(([name]) => name === "registerDevice").length, 0);
-  }
+test("signs the page in with the app's sign-in: its one-time code, exchanged for the page's own session", async () => {
+  const exchanged = [];
+  const stored = [];
+  const signedIn = await signInFromDesktop(
+    bridge("web-code"),
+    async (code) => {
+      exchanged.push(code);
+      return { access_token: "at", refresh_token: "rt" };
+    },
+    (access, refresh) => stored.push([access, refresh]),
+  );
+  assert.equal(signedIn, true);
+  assert.deepEqual([exchanged, stored], [["web-code"], [["at", "rt"]]]);
 });
 
-test("registers once when joined again before the first registration ends, as a remount does", async () => {
-  const desktop = bridge();
-  const server = api();
-  joinDesktop(desktop, server);
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  const second = joinDesktop(desktop, server);
-  await settle();
-  second();
-  assert.deepEqual(server.asked, [["register", "thinkpad"]]);
+test("signs nothing in while nobody is signed in to the app", async () => {
+  const stored = [];
+  assert.equal(await signInFromDesktop(bridge(null), async () => assert.fail("no code to exchange"), (...tokens) => stored.push(tokens)), false);
+  assert.deepEqual(stored, []);
 });
 
 test("serves each root web session as a project, with every session under it as a thread, whatever its channel", async () => {

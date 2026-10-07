@@ -20,6 +20,8 @@ import { APP_CLOSED, type Executor } from "../operations/runner.js";
 // How long a quit waits for what runs to be recorded "closed by the app". An operation
 // still held after it stays "started", and the next launch answers it interrupted.
 export const QUIT_TIMEOUT_MS = 5_000;
+// How long a sign-out waits for the agent to confirm this device is revoked.
+export const REVOKE_TIMEOUT_MS = 5_000;
 
 export type Identity = Pick<Welcome, "deviceId" | "orgId" | "agentId" | "userId">;
 
@@ -48,10 +50,16 @@ export interface DeviceStackOptions {
   delay?: (attempt: number) => number;
 }
 
+const ENDED: readonly LinkStatus[] = ["revoked", "unauthenticated"];
+
 export interface DeviceStack {
   readonly binder: Binder;
   working(): number;
   stop(): Promise<void>;
+  /** Revoke this device on its own link, then stop: true once the agent confirmed, false when it could not hear it in time. */
+  revoke(timeoutMs?: number): Promise<boolean>;
+  /** The agent ended this device's token: stop, and leave the journal with nothing to send or run, its bindings kept. */
+  retire(): Promise<void>;
 }
 
 export function startDevice(options: DeviceStackOptions): DeviceStack {
@@ -121,12 +129,17 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     onError: options.onError,
   });
   const { identity } = options;
+  // Settled once the agent ends this device's token: what a revoke waits for.
+  const ended = Promise.withResolvers<void>();
   const { link, runner } = connectDevice({
     url: options.url,
     token: options.token,
     journal,
     executor: binder,
-    onStatus: options.onStatus,
+    onStatus: (status) => {
+      if (ENDED.includes(status)) ended.resolve();
+      options.onStatus(status);
+    },
     onError: options.onError,
     delay: options.delay,
     // The bindings are this identity's: a token that now names another stops before anything runs.
@@ -142,6 +155,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
   link.start();
 
   let stopping: Promise<void> | undefined;
+  let retiring = false;
   // The quit order: the link, so nothing new comes; what runs, recorded closed by the
   // app, within the deadline; the tools; the journal.
   const quit = async (): Promise<void> => {
@@ -159,15 +173,37 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     try {
       await tools.stop();
     } finally {
-      journal.close();
+      try {
+        if (retiring) journal.retire();
+      } finally {
+        journal.close();
+      }
     }
+  };
+  const stop = (): Promise<void> => {
+    stopping ??= quit();
+    return stopping;
   };
   return {
     binder,
     working: () => running.size,
-    stop: () => {
-      stopping ??= quit();
-      return stopping;
+    stop,
+    retire: () => {
+      retiring = true;
+      return stop();
+    },
+    revoke: async (timeoutMs = REVOKE_TIMEOUT_MS) => {
+      let timer: NodeJS.Timeout | undefined;
+      // The agent closes the link as revoked once it heard the frame, and suspends what runs here with it.
+      const heard = link.revoke() && await Promise.race([
+        ended.promise.then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), timeoutMs);
+        }),
+      ]);
+      clearTimeout(timer);
+      await stop();
+      return heard;
     },
   };
 }

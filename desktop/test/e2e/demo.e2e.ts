@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { OperationJournal } from "../../src/journal/journal.js";
 import { APP_CLOSED } from "../../src/operations/runner.js";
-import { connect, FakeAgent, register, webClient } from "./fake-agent.js";
+import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
 const THREAD = "6c1e9f7d-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
@@ -69,9 +69,8 @@ async function bound(): Promise<{ shell: ElectronApplication; page: Page; client
   await shell.evaluate((_electron, picked) => Object.assign(globalThis, { folder: picked }), folder);
   const page = await shellPage(shell);
   await connect(page, origin);
+  await signedInAndAdded(shell, page, agent);
   const client = await webClient(shell, origin);
-  await register(client);
-  await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
   const prepared = await client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"));
   expect(prepared).toMatchObject({ folder, mode: "free" });
   // The server records the chat with the folder and nonce, and sends its bind operation.

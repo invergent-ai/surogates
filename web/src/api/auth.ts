@@ -259,6 +259,23 @@ export async function exchangeFirebaseToken(
   };
 }
 
+/** This page's own session in Surogate Desktop's window, for a one-time code from the desktop's sign-in. */
+export async function exchangeWebCode(code: string): Promise<{
+  access_token: string;
+  refresh_token: string;
+}> {
+  const response = await fetch("/api/v1/auth/oauth/web-session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  if (!response.ok) {
+    const data = (await response.json().catch(() => null)) as { detail?: unknown } | null;
+    throw new Error(errorDetailMessage(data?.detail) ?? "Signing in from Surogate Desktop failed.");
+  }
+  return (await response.json()) as { access_token: string; refresh_token: string };
+}
+
 export function logout(): void {
   clearAuthTokens();
 }

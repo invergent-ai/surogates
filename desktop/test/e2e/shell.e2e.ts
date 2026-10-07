@@ -22,11 +22,16 @@ afterEach(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-// An agent kept from an earlier run, at an address nothing answers on: the window shows its three columns.
+// An agent kept from an earlier run, at an address nothing answers on, and its user's sign-in, as
+// the basic store keeps it: the window shows its three columns.
 function seedAgent(): void {
   mkdirSync(join(home, "surogate"), { recursive: true });
   writeFileSync(join(home, "surogate", "agent.json"), JSON.stringify({
     origin: "http://127.0.0.1:9", agentId: "a", name: "127.0.0.1:9", desktopSessions: true, multiSession: true,
+  }));
+  writeFileSync(join(home, "surogate", "session.json"), JSON.stringify({
+    origin: "http://127.0.0.1:9", agentId: "a", authTime: 1_700_000_000, plain: "surg_rt_seeded",
+    account: { name: "Flavius Burca", email: "flavius@example.com", userId: "u", orgId: "o" },
   }));
 }
 

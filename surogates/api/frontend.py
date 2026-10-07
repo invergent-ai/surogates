@@ -10,6 +10,12 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 
+#: Surogate Desktop's consent page (surogates/api/routes/oauth.py) is never framed: a page
+#: framing it could hide its "allow it only if you started signing in" line.
+_CONSENT_PATH = "oauth/authorize"
+_NOT_FRAMED = {"Content-Security-Policy": "frame-ancestors 'none'", "X-Frame-Options": "DENY"}
+
+
 def _strip_crossorigin(html_bytes: bytes) -> bytes:
     """Remove ``crossorigin`` attributes from script/link tags."""
     html = html_bytes.decode("utf-8")
@@ -48,10 +54,11 @@ def setup_frontend(app: FastAPI, build_path: Path) -> bool:
 
         content = (build_path / "index.html").read_bytes()
         content = _strip_crossorigin(content)
+        framing = _NOT_FRAMED if full_path.rstrip("/").lower() == _CONSENT_PATH else {}
         return Response(
             content=content,
             media_type="text/html",
-            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate", **framing},
         )
 
     return True

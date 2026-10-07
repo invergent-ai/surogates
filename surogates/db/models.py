@@ -1271,10 +1271,56 @@ class Device(Base):
         UTCDateTime(), nullable=False, server_default=func.now()
     )
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # When the link first sent the device its welcome: NULL for one that never connected.
+    connected_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     credential_generation: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("1"), default=1
     )
+
+
+class OAuthRefreshToken(Base):
+    """A refresh token of a public OAuth client: Surogate Desktop's sign-in.
+
+    Each sign-in starts a family.  A refresh spends its token (``used_at``)
+    and issues the next one in the same family, which keeps the sign-in's
+    ``auth_time`` and computer.  A spent token presented again means it has
+    two holders, so the whole family is revoked; so does revoking the
+    computer.  As for device tokens, only the token's SHA-256 digest is
+    stored.
+    """
+
+    __tablename__ = "oauth_refresh_tokens"
+    __table_args__ = (
+        Index("idx_oauth_refresh_tokens_family", "family_id"),
+        Index("idx_oauth_refresh_tokens_device", "device_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    family_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    # Logical reference to the ops ``Agent.id``: a token works only at the agent that issued it.
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    client_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The computer this sign-in added or restored, a logical reference to ``devices.id``:
+    # revoking the computer ends its sign-in.
+    device_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # When the user signed in, in epoch seconds, as the access tokens carry it.
+    auth_time: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    used_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class DeviceOperation(Base):

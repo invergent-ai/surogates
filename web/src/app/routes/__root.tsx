@@ -4,7 +4,7 @@
 import { Outlet, createRootRoute, useRouterState } from "@tanstack/react-router";
 import { Suspense, useEffect } from "react";
 
-import { authFetch, fetchCurrentUser } from "@/api/auth";
+import { fetchCurrentUser } from "@/api/auth";
 import { listSessions } from "@/api/sessions";
 import { hasAuthToken } from "@/features/auth";
 import { useVisualViewport } from "@/hooks/use-visual-viewport";
@@ -12,7 +12,7 @@ import { getDesktop, joinDesktop, leaveDesktop } from "@/lib/desktop-bridge";
 
 import { AppProvider } from "../provider";
 
-const BARE_ROUTES = ["/login", "/link"];
+const BARE_ROUTES = ["/login", "/link", "/oauth/authorize"];
 
 function RootLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -40,9 +40,9 @@ function RootLayout() {
   );
 }
 
-// In Surogate Desktop, once signed in: tell the desktop who is signed in, serve it their
-// projects for its sidebar and Overview pane, and register this computer. A page with no
-// sign-in, such as the sign-in page an expired session lands on, tells it nobody is.
+// In Surogate Desktop, once signed in: tell the desktop who is signed in, and serve it their
+// projects for its sidebar and Overview pane. A page with no sign-in, such as the sign-in page
+// an expired session lands on, tells it nobody is.
 function useDesktop(signedInRoute: boolean): void {
   useEffect(() => {
     const desktop = getDesktop();
@@ -53,15 +53,6 @@ function useDesktop(signedInRoute: boolean): void {
     }
     if (!signedInRoute) return;
     return joinDesktop(desktop, {
-      register: async (name) => {
-        const response = await authFetch("/api/v1/devices", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name }),
-        });
-        if (!response.ok) throw new Error(`Registering this computer failed (HTTP ${response.status})`);
-        return (await response.json()) as { token: string };
-      },
       account: async () => {
         const me = await fetchCurrentUser();
         return { name: me.display_name ?? me.email, email: me.email, userId: me.id, orgId: me.org_id };

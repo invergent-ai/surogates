@@ -5,10 +5,14 @@
 // confirms it natively (spec, Section 7).
 
 import { createHash } from "node:crypto";
+import { rmSync } from "node:fs";
 import type { LinkStatus } from "../link/client.js";
 import { readState, writeState } from "./state-file.js";
 
 const CONFIG_PATH = "/api/v1/auth/config";
+// How long the agent has to answer, and how many redirects it may send Surogate through.
+export const CONFIG_TIMEOUT_MS = 10_000;
+const MAX_HOPS = 5;
 
 export interface Agent {
   origin: string;
@@ -18,9 +22,9 @@ export interface Agent {
   multiSession: boolean; // false: one conversation, which stays in the cloud
 }
 
-// Plain http only for this computer's own servers, as in development.
-const loopback = (host: string): boolean =>
-  host === "localhost" || host.endsWith(".localhost") || host === "[::1]" || /^127(\.\d{1,3}){3}$/.test(host);
+// Plain http only for this computer's own servers, as in development: localhost and loopback
+// addresses. A name under .localhost is not trusted, since the link's resolver may ask the network for it.
+const loopback = (host: string): boolean => host === "localhost" || host === "[::1]" || /^127(\.\d{1,3}){3}$/.test(host);
 
 /** The origin *input* names; a bare host is taken as https. Throws, in words for the user, on anything else. */
 export function canonicalOrigin(input: string): string {
@@ -70,10 +74,21 @@ export class AgentStore {
   set(agent: Agent): void {
     writeState(this.path, agent);
   }
+
+  // The agent is removed: the app starts over at its first run.
+  clear(): void {
+    rmSync(this.path, { force: true });
+  }
 }
 
+/**
+ * GET *url*, telling *hop* where each redirect goes before it is followed: a hop it throws on is
+ * not followed, and the request rejects with that error. *signal* gives up on it.
+ */
+export type Get = (url: string, hop: (to: string) => void, signal: AbortSignal) => Promise<Response>;
+
 export interface ConnectOptions {
-  fetch(url: string): Promise<Response>;
+  get: Get;
   store: AgentStore;
   // The native confirmation of the origin: *typed* is where the user pointed, agent.origin where it ended.
   confirm(agent: Agent, typed: string): Promise<boolean>;
@@ -82,25 +97,44 @@ export interface ConnectOptions {
 /** The agent *input* names, kept once the user confirmed it; null when they declined. */
 export async function connectAgent(input: string, options: ConnectOptions): Promise<Agent | null> {
   const typed = canonicalOrigin(input);
-  const agent = await askAgent(typed, options.fetch);
+  const agent = await readAgent(typed, options.get);
   if (!(await options.confirm(agent, typed))) return null;
   options.store.set(agent);
   return agent;
 }
 
-async function askAgent(origin: string, fetch: ConnectOptions["fetch"]): Promise<Agent> {
+/** Who answers at *origin*: the agent its /auth/config names, at the origin its redirects end on, each hop checked. */
+export async function readAgent(origin: string, get: Get, timeoutMs = CONFIG_TIMEOUT_MS): Promise<Agent> {
   const asked = `${origin}${CONFIG_PATH}`;
+  let ended = asked;
+  let hops = 0;
+  const refusal: { error?: Error } = {};
+  const hop = (to: string): void => {
+    try {
+      hops += 1;
+      if (hops > MAX_HOPS) throw new Error(`${new URL(origin).host} redirects Surogate too many times`);
+      // Every hop is https, or plain http on this computer: an http hop on the way could pick the agent.
+      canonicalOrigin(to);
+      ended = to;
+    } catch (error) {
+      refusal.error = error instanceof Error ? error : new Error(String(error));
+      throw refusal.error;
+    }
+  };
   let response: Response;
   try {
-    response = await fetch(asked);
+    response = await get(asked, hop, AbortSignal.timeout(timeoutMs));
   } catch (error) {
-    throw new Error(`Could not reach ${origin}: ${error instanceof Error ? error.message : String(error)}`);
+    if (refusal.error) throw refusal.error;
+    const why = error instanceof Error && error.name === "TimeoutError" ? `no answer within ${timeoutMs / 1000} s`
+      : error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not reach ${origin}: ${why}`);
   }
-  const ended = new URL(response.url || asked);
-  if (ended.pathname !== CONFIG_PATH || ended.search) {
-    throw new Error(`${new URL(origin).host} sent Surogate to ${ended.href}, which is not an agent`);
+  const end = new URL(ended);
+  if (end.pathname !== CONFIG_PATH || end.search) {
+    throw new Error(`${new URL(origin).host} sent Surogate to ${end.href}, which is not an agent`);
   }
-  const final = canonicalOrigin(ended.href);
+  const final = canonicalOrigin(end.href);
   if (!response.ok) throw new Error(`No Surogate agent answers at ${final} (HTTP ${response.status})`);
   const config = (await response.json().catch(() => null)) as Record<string, unknown> | null;
   const agentId = typeof config === "object" && config !== null ? config.agent_id : undefined;
