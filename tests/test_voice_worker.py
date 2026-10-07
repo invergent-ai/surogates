@@ -93,3 +93,19 @@ def test_the_background_hears_about_lookups_from_the_call():
     call.on_lookup(True)
     call.on_lookup(False)
     assert scape.calls[-2:] == [("lookup", True), ("lookup", False)]
+
+
+def test_a_provider_that_gives_up_ends_the_call_as_a_provider_error():
+    from livekit.agents.llm import LLMError
+    from livekit.agents.stt import STTError
+    from livekit.agents.tts import TTSError
+
+    from surogates.voice.worker import provider_failed
+
+    def err(cls, recoverable):
+        return cls(timestamp=0.0, label="x", error=RuntimeError("auth_error"), recoverable=recoverable)
+
+    assert provider_failed(err(STTError, False))  # a revoked key: the ears are gone for good
+    assert provider_failed(err(TTSError, False))
+    assert not provider_failed(err(STTError, True))  # a blip that LiveKit retries
+    assert not provider_failed(err(LLMError, False))  # the agent's turn failed: it says sorry instead

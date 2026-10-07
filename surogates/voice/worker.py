@@ -18,6 +18,8 @@ from uuid import UUID
 import numpy as np
 from livekit import rtc
 from livekit.agents import Agent, AgentServer, AgentSession, JobContext, JobProcess
+from livekit.agents.stt import STTError
+from livekit.agents.tts import TTSError
 from livekit.plugins import silero
 from redis.asyncio import Redis
 
@@ -153,6 +155,12 @@ def tone(rate: int = 16000) -> list[rtc.AudioFrame]:
     return [rtc.AudioFrame(data=pcm, sample_rate=rate, num_channels=1, samples_per_channel=len(pcm) // 2)]
 
 
+def provider_failed(error: object) -> bool:
+    """The line's hearing or voice gave up for good (a revoked key, no credits left, the provider down):
+    the call cannot go on, and its owner must see why."""
+    return isinstance(error, (STTError, TTSError)) and not error.recoverable
+
+
 async def tone_and_hang_up(ctx: JobContext, tts_url: str) -> None:
     bare = AgentSession(tts=RoTTS(url=tts_url))  # never synthesizes: the tone is the audio
 
@@ -226,6 +234,7 @@ async def entrypoint(ctx: JobContext) -> None:
     participant = await ctx.wait_for_participant()
     info = call_info(ctx.room.name, participant.attributes)
     call, tasks, tts, heard, slots, tenant, background = None, set(), None, None, None, None, None
+    outcome = "completed"
     started = datetime.now(timezone.utc)
 
     async def report(outcome: str) -> None:
@@ -246,7 +255,7 @@ async def entrypoint(ctx: JobContext) -> None:
             task.cancel()
         await run_all(
             ("end the session", call and call.end()),
-            ("report the call", call and report("completed")),
+            ("report the call", call and report(outcome)),
             ("release the line", slots and slots.release(info.call_id)),
             ("stop the background", background and background.aclose()),
             ("close the TTS", tts and tts.aclose()),
@@ -312,16 +321,20 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("error")
     def _error(ev) -> None:
+        nonlocal outcome
         if isinstance(ev.source, SurogatesLLM):  # the turn failed: say so instead of leaving silence
             log.warning("call %s turn failed: %r", info.call_id, ev.error)
             session.say(config.lines.sorry_turn, add_to_chat_ctx=False)
+        elif provider_failed(ev.error):  # the session closes next; the tone and the report say why
+            log.warning("call %s: %s gave up: %r", info.call_id, ev.error.label, ev.error.error)
+            outcome = "provider_error"
 
     @session.on("close")
     def _closed(ev) -> None:
         # the session gave up (unrecoverable STT/LLM/TTS errors, or the caller left): never keep a caller
-        # on the line with nobody there
+        # on the line with nobody there. A provider that gave up gets the same two beeps as a missing key.
         log.info("call %s session closed: %s", info.call_id, ev.reason)
-        spawn(hang_up())
+        spawn(tone_and_hang_up(ctx, vs.tts_url) if outcome == "provider_error" else hang_up())
 
     @session.on("agent_state_changed")
     def _done_speaking(ev) -> None:

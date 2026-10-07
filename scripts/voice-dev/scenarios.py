@@ -299,7 +299,7 @@ def report(results: list[Result], previous: dict | None) -> None:
 
 async def main(names: list[str]) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    runs = sorted(OUT.glob("*.json"))
+    runs = sorted(OUT.glob("[0-9]*-[0-9]*.json"))  # past runs only, not other notes kept there
     previous = None
     if runs:
         prev = json.loads(runs[-1].read_text())
