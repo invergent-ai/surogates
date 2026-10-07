@@ -20,6 +20,10 @@ char LICENSE[] SEC("license") = "GPL";
 #define ATTR_SIZE (1 << 3)
 #define S_IFMT 00170000
 #define S_IFDIR 0040000
+#define RENAME_EXCHANGE (1 << 1)
+// judge's answer: bit 0, refused; bit 1, the path lies at or below a dependency folder (sg_in_dep).
+#define REFUSED 1
+#define IN_DEP 2
 
 // Walk from the target up to the mount root (leaf-first, the order sg_step wants),
 // judging each component (dir: as a directory being moved). One bounded pass, no array:
@@ -42,13 +46,13 @@ static __noinline int judge(struct dentry *dentry, int dir)
 			nm.b[j] = uc + ((ge & le) << 5);
 		}
 		if (sg_step(&st, sg_classify(&nm, got < 0 ? 0 : len)))
-			return 1;
+			return REFUSED;
 		struct dentry *parent = BPF_CORE_READ(dentry, d_parent);
 		if (parent == dentry)
 			break;
 		dentry = parent;
 	}
-	return sg_end(&st);
+	return sg_end(&st) | (sg_in_dep(&st) << 1);
 }
 
 static __noinline int share_sb(struct super_block *sb)
@@ -66,15 +70,20 @@ static __noinline int judge_dentry(struct super_block *sb, struct dentry *dentry
 	return judge(dentry, dir);
 }
 
+static __always_inline int refused(struct super_block *sb, struct dentry *dentry, int dir)
+{
+	return judge_dentry(sb, dentry, dir) & REFUSED;
+}
+
 // A negative dentry (a rename's new name, mostly) has no inode, and reads as no directory.
 static __always_inline int is_dir(struct dentry *dentry)
 {
 	return (BPF_CORE_READ(dentry, d_inode, i_mode) & S_IFMT) == S_IFDIR;
 }
 
-// judge_dentry returns 0 (allow) or 1 (refuse). The verifier does not range-track a
-// noinline subprogram's return; barrier_var stops clang from folding this to a bare
-// negation, so the verifier sees two literal return paths, both in [-EPERM, 0].
+// deny takes 0 (allow) or 1 (refuse). The verifier does not range-track a noinline
+// subprogram's return; barrier_var stops clang from folding this to a bare negation,
+// so the verifier sees two literal return paths, both in [-EPERM, 0].
 static __always_inline int deny(int r)
 {
 	barrier_var(r);
@@ -87,62 +96,68 @@ static __always_inline int deny(int r)
 SEC("lsm/inode_create")
 int BPF_PROG(on_create, struct inode *dir, struct dentry *dentry, umode_t mode)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(dir, i_sb), dentry, 0));
+	return DENY(refused(BPF_CORE_READ(dir, i_sb), dentry, 0));
 }
 
 SEC("lsm/path_mkdir")
 int BPF_PROG(on_mkdir, const struct path *dir, struct dentry *dentry, umode_t mode)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
+	return DENY(refused(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
 }
 
 SEC("lsm/path_symlink")
 int BPF_PROG(on_symlink, const struct path *dir, struct dentry *dentry, const char *old)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
+	return DENY(refused(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
 }
 
 // A FIFO or socket at a protected name would hang the host's git or editor on it.
 SEC("lsm/path_mknod")
 int BPF_PROG(on_mknod, const struct path *dir, struct dentry *dentry, umode_t mode, unsigned int dev)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
+	return DENY(refused(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
 }
 
 // The old name too: a link to a protected file under an ordinary name is that file,
-// and a write through the link would land in it. || for the reason on_rename gives.
+// and a write through the link would land in it. ||: the second walk only where the first
+// allowed, for the reason on_rename gives.
 SEC("lsm/path_link")
 int BPF_PROG(on_link, struct dentry *old, const struct path *dir, struct dentry *dentry)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0) || judge_dentry(BPF_CORE_READ(old, d_sb), old, 0));
+	return DENY(refused(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0) || refused(BPF_CORE_READ(old, d_sb), old, 0));
 }
 
 SEC("lsm/path_unlink")
 int BPF_PROG(on_unlink, const struct path *dir, struct dentry *dentry)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
+	return DENY(refused(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
 }
 
 SEC("lsm/path_rmdir")
 int BPF_PROG(on_rmdir, const struct path *dir, struct dentry *dentry)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
+	return DENY(refused(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
 }
 
-// ||, not |: the verifier then walks the new path only where the old one was allowed.
-// With |, it walks it once for each way the first walk returned, past its 1 M budget.
-// A directory moved (either one, as an exchange moves both) is judged as one on both paths.
+// The new path is walked only where the old one was allowed: walked for each way the first
+// walk returned, it would go past the verifier's 1 M budget. A directory moved (either one, as
+// an exchange moves both) is judged as one on both paths, and may not leave a dependency folder.
 SEC("lsm/path_rename")
 int BPF_PROG(on_rename, const struct path *odir, struct dentry *od, const struct path *ndir, struct dentry *nd, unsigned int flags)
 {
 	int dir = is_dir(od) | is_dir(nd);
-	return DENY(judge_dentry(BPF_CORE_READ(od, d_sb), od, dir) || judge_dentry(BPF_CORE_READ(nd, d_sb), nd, dir));
+	int old = judge_dentry(BPF_CORE_READ(od, d_sb), od, dir);
+	if (old & REFUSED)
+		return DENY(1);
+	int new = judge_dentry(BPF_CORE_READ(nd, d_sb), nd, dir);
+	return DENY((new & REFUSED) |
+		sg_moved_out(dir, (flags & RENAME_EXCHANGE) != 0, (old & IN_DEP) != 0, (new & IN_DEP) != 0));
 }
 
 SEC("lsm/path_truncate")
 int BPF_PROG(on_truncate, const struct path *path)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(path, dentry, d_sb), BPF_CORE_READ(path, dentry), 0));
+	return DENY(refused(BPF_CORE_READ(path, dentry, d_sb), BPF_CORE_READ(path, dentry), 0));
 }
 
 SEC("lsm/file_open")
@@ -151,7 +166,7 @@ int BPF_PROG(on_open, struct file *file)
 	if (!(BPF_CORE_READ(file, f_mode) & FMODE_WRITE))
 		return 0;
 	struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
-	return DENY(judge_dentry(BPF_CORE_READ(dentry, d_sb), dentry, 0));
+	return DENY(refused(BPF_CORE_READ(dentry, d_sb), dentry, 0));
 }
 
 // The pinned kernel's hook takes no idmap (6.9 added one): declared with it, the program
@@ -162,5 +177,5 @@ int BPF_PROG(on_setattr, struct dentry *dentry, struct iattr *attr)
 	unsigned int valid = BPF_CORE_READ(attr, ia_valid);
 	if (!(valid & (ATTR_MODE | ATTR_UID | ATTR_GID | ATTR_SIZE)))
 		return 0;
-	return DENY(judge_dentry(BPF_CORE_READ(dentry, d_sb), dentry, 0));
+	return DENY(refused(BPF_CORE_READ(dentry, d_sb), dentry, 0));
 }

@@ -101,6 +101,16 @@ function runsCode(rest: string[]): boolean {
   return first !== undefined && (GIT_STATE.has(first) || first === "hooks" || (rest.length === 1 && GIT_CONFIGS.has(first)));
 }
 
+// A directory moved out of a DEPENDENCY_FOLDERS folder, the folder itself too, carries what was
+// unpacked there, unjudged, to where a shell's, editor's or agent's name counts; an exchange moves
+// both ways. The guest's rule refuses it (rule-match.h's sg_moved_out).
+export function movesOutOfDependency(folder: string, from: string, to: string, exchange = false): boolean {
+  const inDependency = (key: string) =>
+    key !== folder && inside(key, folder) && key.slice(folder.length + 1).toLowerCase().split("/").some((part) => DEPENDENCY_FOLDERS.has(part));
+  const [out, back] = [inDependency(from), inDependency(to)];
+  return (out && !back) || (exchange && back && !out);
+}
+
 export function inFolderRefusal(path: string): string {
   return `Write denied: '${path}' is protected in this folder: a change to it could run code outside the sandbox.`;
 }

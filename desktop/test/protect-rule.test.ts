@@ -7,7 +7,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 // The oracle is protect.ts itself, as the source has it: a change to it shows here.
 import {
-  DEPENDENCY_FOLDERS, GIT_CONFIGS, GIT_STATE, KEY_FOLDERS, PROTECTED_NAMES, PROTECTED_PAIRS, protectedInFolder,
+  DEPENDENCY_FOLDERS, GIT_CONFIGS, GIT_STATE, KEY_FOLDERS, movesOutOfDependency, PROTECTED_NAMES, PROTECTED_PAIRS, protectedInFolder,
 } from "../src/files/protect.js";
 
 const SG_WALK = 12; // rule-match.h: the components judged, from the target up
@@ -84,7 +84,18 @@ const MOVED_REFUSED = [
   ".claude", "sub/.CLAUDE", ".git", ".git/modules", ".git/modules/foo", ".git/modules/a/b",
   ".git/modules/foo/refs/heads", ".git/worktrees", ".git/worktrees/wt", "sub/.git/worktrees/wt",
 ];
+// Every pair of directory paths of up to three components over the dependency folders, a key and
+// a filler, moved or exchanged; and, past the walk, a directory whose dependency folder the rule
+// cannot see, which it lets go though protect.ts would not: nothing below that bound can hold a
+// name sg_end would have let through.
+const PAIR_PATHS = corpus(3, [...DEPENDENCY_FOLDERS, "x", ".vscode", ".claude", "p"]);
+const PAIRS = PAIR_PATHS.flatMap((from) => PAIR_PATHS.map((to) => [from, to] as const));
+const DEP_PAST = [["node_modules", ...numbered(SG_WALK), "d"].join("/"), "d"] as const;
 const MOVED_ALLOWED = [".git/refs/heads", ".git/rebase-merge", ".git/objects/ab", ".git/info", ".claude/skills", "src", "modules/foo", "worktrees/wt"];
+
+function pairRefuses(from: string, to: string, exchange: boolean): boolean {
+  return movedRefuses(from) || movedRefuses(to) || movesOutOfDependency("/f", `/f/${from}`, `/f/${to}`, exchange);
+}
 
 function verdicts(bin: string, paths: string[], args: string[] = []): boolean[] {
   const out = execFileSync(bin, args, { input: `${paths.join("\n")}\n`, encoding: "utf8", maxBuffer: 1 << 26 }).split("\n");
@@ -139,5 +150,20 @@ describe("the guest rule mirrors protect.ts", () => {
     expect(bad).toEqual([]);
     expect(verdicts(harness(), [...MOVED_REFUSED, ...MOVED_ALLOWED], ["dir"]))
       .toEqual([...MOVED_REFUSED.map(() => true), ...MOVED_ALLOWED.map(() => false)]);
+  });
+
+  withCc("refuses a directory moved out of a dependency folder, or exchanged with one in one", () => {
+    for (const exchange of [false, true]) {
+      const kernel = verdicts(harness(), PAIRS.map(([from, to]) => `${from}\t${to}`), [exchange ? "exchange" : "rename"]);
+      const bad = PAIRS.flatMap(([from, to], i) => {
+        const want = pairRefuses(from, to, exchange);
+        return kernel[i] === want ? [] : [`${from} -> ${to} (exchange: ${exchange}): rule=${kernel[i]} expected=${want}`];
+      });
+      expect(bad).toEqual([]);
+    }
+    expect(verdicts(harness(), ["node_modules/p\tplanted", "node_modules/p\tnode_modules/.p-old", "plain\tnode_modules/plain"], ["rename"]))
+      .toEqual([true, false, false]);
+    expect(verdicts(harness(), [DEP_PAST.join("\t")], ["rename"])).toEqual([false]);
+    expect(movesOutOfDependency("/f", `/f/${DEP_PAST[0]}`, `/f/${DEP_PAST[1]}`)).toBe(true);
   });
 });

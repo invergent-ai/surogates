@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { Failure } from "../src/files/answers.js";
-import { checkWrite, inFolderRefusal, protectedInFolder } from "../src/files/protect.js";
+import { checkWrite, inFolderRefusal, movesOutOfDependency, protectedInFolder } from "../src/files/protect.js";
 
 const home = "/home/tester";
 let folder: string;
@@ -202,5 +202,15 @@ describe("protectedInFolder", () => {
     "node_modules/pkg/.git/config", ".vscode/node_modules/x", ".claude/commands/node_modules/x", "node_modules_old/.idea",
   ])("still protects git's names below a dependency folder, and any name above one: %s", (path) => {
     expect(protectedInFolder(folder, `${folder}/${path}`)).toBe(true);
+  });
+
+  // What a dependency folder holds goes unjudged: a directory moved out of one would carry it.
+  it.each([
+    ["node_modules/p", "planted", false, true], ["node_modules", "plain", false, true], ["a/site-packages/r", "a/r", false, true],
+    ["x/dist-packages", "x/y", false, true], ["Node_Modules/p", "p", false, true], ["plain", "node_modules/p", true, true],
+    ["node_modules/p", "node_modules/.p-retired", false, false], ["plain", "node_modules/p", false, false], ["a", "b", true, false],
+    ["node_modules/a/node_modules/b", "node_modules/b", false, false], ["site-packages/r", "dist-packages/r", true, false],
+  ])("judges a directory moved from %s to %s (exchange: %s): out of a dependency folder %s", (from, to, exchange, out) => {
+    expect(movesOutOfDependency(folder, `${folder}/${from}`, `${folder}/${to}`, exchange)).toBe(out);
   });
 });

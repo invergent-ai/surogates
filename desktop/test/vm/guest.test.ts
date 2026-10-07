@@ -460,6 +460,10 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       ["C1 mkdir sub/.git", "mkdir s2; mkdir s2/.git", "s2/.git"],
       ["C2 submodule config", "echo x >> .git/modules/foo/config", ".git/modules/foo/config"],
       ["C3 worktree commondir", "echo x >> .git/worktrees/wt/commondir", ".git/worktrees/wt/commondir"],
+      // What a dependency folder holds goes unjudged, and would carry its editor's and agent's folders out.
+      ["a directory renamed out of node_modules", "mkdir -p node_modules/p/.vscode && echo x > node_modules/p/.vscode/tasks.json && mv node_modules/p planted", "planted"],
+      ["node_modules itself renamed", "mkdir -p nm/node_modules/q/.idea && mv nm/node_modules nm/plain", "nm/plain"],
+      ["a directory exchanged out of site-packages", "mkdir -p lib/site-packages/r/.vscode outside-r && python3 -c \"import ctypes; libc = ctypes.CDLL(None, use_errno=True); import os; libc.renameat2(-100, b'lib/site-packages/r', -100, b'outside-r', 2) == 0 or exit(os.strerror(ctypes.get_errno()))\"", "outside-r/.vscode"],
       ["C1 mv .git (I3)", "mv .git x", ".git"],
     ] as const;
     for (const [name, command, path] of refuse) {
@@ -493,6 +497,10 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       ["a FIFO at an ordinary name", "mkfifo plain-fifo"],
       ["a hard link of an ordinary file", "echo x > plain && ln plain plain-link"],
       ["an ordinary directory renamed", "mkdir plain-dir && mv plain-dir plain-dir2"],
+      ["an editor's folder below node_modules, as a package ships one", "mkdir -p node_modules/t/.idea && echo x > node_modules/t/.idea/x.xml"],
+      ["a directory renamed within node_modules, as npm retires one", "mkdir -p node_modules/s/.vscode && mv node_modules/s node_modules/.s-retired"],
+      ["a directory renamed into node_modules", "mkdir plain-in && mv plain-in node_modules/plain-in"],
+      ["a file renamed out of node_modules", "echo x > node_modules/f.js && mv node_modules/f.js f.js"],
       // A ceiling the rule names: past its walk, a protected name above is not seen.
       ["a key thirteen components up, past the walk's bound", `echo x > ${DEEP}/10/11/x`],
     ] as const;
@@ -1639,11 +1647,17 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
   // The rule leaves what package managers unpack alone: iconv-lite's tarball holds an .idea folder.
   it("installs an npm package that ships an editor's folder into the shared folder, every file of it", async () => {
     try {
-      const installed = await command("npm install --no-audit --no-fund --no-update-notifier --cache ~/npm-cache iconv-lite@0.6.3 2>&1; echo rc=$?", 180);
-      const { output } = (installed as { ok: { output: string } }).ok;
-      expect(output).toMatch(/added 2 packages[^]*\nrc=0\n$/);
-      expect(output).not.toMatch(/TAR_ENTRY_ERROR|EPERM|not permitted/);
+      const npm = async (spec: string) => {
+        const installed = await command(`npm install --no-audit --no-fund --no-update-notifier --cache ~/npm-cache ${spec} 2>&1; echo rc=$?`, 180);
+        const { output } = (installed as { ok: { output: string } }).ok;
+        expect(output).toMatch(/(added|changed) \d+ packages?[^]*\nrc=0\n$/);
+        expect(output).not.toMatch(/TAR_ENTRY_ERROR|EPERM|not permitted/);
+      };
+      await npm("iconv-lite@0.6.3");
       expect(readdirSync(join(folder, "node_modules", "iconv-lite", ".idea"))).toContain("codeStyles");
+      // Another version: npm renames the installed one aside within node_modules first, then unpacks this one.
+      await npm("iconv-lite@0.6.2");
+      expect(JSON.parse(readFileSync(join(folder, "node_modules", "iconv-lite", "package.json"), "utf8")).version).toBe("0.6.2");
       expect(prompts).toEqual([]);
     } finally {
       for (const name of ["node_modules", "package.json", "package-lock.json"]) rmSync(join(folder, name), { recursive: true, force: true });

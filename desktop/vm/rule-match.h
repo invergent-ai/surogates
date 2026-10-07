@@ -79,13 +79,14 @@ enum sg_child { CC_OTHER, CC_HOOKS, CC_CONFIG, CC_CFGLEAF, CC_MODULES, CC_WORKTR
 // components, so at a .git, hk2 leaves out modules/<name's first part> as protect.ts does.
 // dir: 1 when the path is a directory being moved (rename), else 0; moved_key: the path
 // is one a moved directory may not take or leave. pending: a shell's, editor's or agent's
-// name lies below, with no dependency folder above it yet.
-struct sg_state { int i; int child; int any_hooks; int hk1; int hk2; int leaf_config; int dir; int moved_key; int pending; };
+// name lies below, with no dependency folder above it yet. in_dep: a dependency folder is
+// on the path, the path itself included.
+struct sg_state { int i; int child; int any_hooks; int hk1; int hk2; int leaf_config; int dir; int moved_key; int pending; int in_dep; };
 
 SG_INLINE void sg_init(struct sg_state *s, int dir)
 {
 	s->i = 0; s->child = CC_OTHER; s->any_hooks = 0; s->hk1 = 0; s->hk2 = 0; s->leaf_config = 0;
-	s->dir = dir; s->moved_key = 0; s->pending = 0;
+	s->dir = dir; s->moved_key = 0; s->pending = 0; s->in_dep = 0;
 }
 
 // Feed one component's match bits (leaf-first; i == 0 is the target). Returns 1 the
@@ -112,6 +113,7 @@ SG_INLINE int sg_step(struct sg_state *s, int bits)
 	// A shell's, editor's or agent's name counts unless a dependency folder lies above it.
 	s->pending = (s->pending & ((bits & SB_DEP) == 0)) | ((bits & SB_PROTECTED) != 0) |
 		(((bits & SB_CLAUDE) != 0) & (child == CC_CMDAGENT));
+	s->in_dep |= (bits & SB_DEP) != 0;
 	if (i == 0)
 		s->leaf_config = (bits & (SB_CONFIG | SB_CFGLEAF)) != 0;
 	s->hk2 = s->hk1;
@@ -129,6 +131,21 @@ SG_INLINE int sg_step(struct sg_state *s, int bits)
 SG_INLINE int sg_end(const struct sg_state *s)
 {
 	return s->pending;
+}
+
+// Whether the walked path lies at or below a dependency folder, within SG_WALK.
+SG_INLINE int sg_in_dep(const struct sg_state *s)
+{
+	return s->in_dep;
+}
+
+// A directory moved out of a dependency folder (old_dep, not new_dep) carries what was unpacked
+// there, unjudged, to where a shell's, editor's or agent's name counts; an exchange (RENAME_EXCHANGE)
+// moves both ways. Refused. A dependency folder past SG_WALK is not seen, but nothing below that
+// bound can hold a name sg_end let through.
+SG_INLINE int sg_moved_out(int dir, int exchange, int old_dep, int new_dep)
+{
+	return dir & ((old_dep & (new_dep ^ 1)) | (exchange & (old_dep ^ 1) & new_dep));
 }
 
 #endif
