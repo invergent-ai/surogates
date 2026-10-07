@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -46,7 +48,7 @@ from surogates.devices.presence import DevicePresence, PRESENCE_TTL_S, presence_
 from surogates.devices.sandbox import INTERRUPTED
 from surogates.devices.store import REVOKED_OUTCOME, DeviceStore
 from surogates.devices.waits import DeviceWaitNotice
-from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
+from surogates.devices.workspace import WALK_MARGIN_NS, DeviceOperationError, DeviceWorkspaceIO
 from surogates.governance.policy import GovernanceGate
 from surogates.harness.device_replay import replay_unanswered
 from surogates.harness import loop_artifact_completion
@@ -3271,3 +3273,85 @@ async def test_a_fenced_svg_waits_no_longer_than_its_bound_on_a_computer_that_do
         harness, await store.get_session(rig.root), "```svg\n<svg></svg>\n```", [],
     ), 3.0)
     assert await store.get_events(rig.root, types=[EventType.ARTIFACT_CREATED]) == []
+
+
+class TurnEnd(ArtifactCompletionMixin):
+    """The harness's turn-end scan, with only what it reads."""
+
+    def __init__(self, store, session_factory, redis_client) -> None:
+        self._store, self._session_factory, self._redis, self._storage = store, session_factory, redis_client, None
+        self._turn_started_at = datetime.now(timezone.utc)
+
+
+async def test_the_turns_files_are_what_its_computer_changed_since_the_turn_began(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    (rig.folder / "before.md").write_text("old")
+    # Past the cursor's margin, which covers a filesystem's coarser clock.
+    await asyncio.sleep(WALK_MARGIN_NS / 1e9 + 0.1)
+    await rig.laptop.connect()
+    store = SessionStore(session_factory)
+    session = await store.get_session(rig.root)
+    turn = TurnEnd(store, session_factory, redis_client)
+    turn._turn_cursor = await turn._folder_cursor(session)
+    assert turn._turn_cursor is not None
+    for name, text in [("report.md", "new"), ("seen.md", "s"), ("empty.md", ""), ("uploads/in.md", "u"),
+                       (".surogates-results/terminal-output-1.log", "x"), ("node_modules/x/i.js", "")]:
+        (rig.folder / name).parent.mkdir(parents=True, exist_ok=True)
+        (rig.folder / name).write_text(text)
+    root = session.config["workspace_path"]
+
+    found, entries = await turn._scan_workspace_for_new_files(
+        session_id=rig.root, already_seen_paths={f"{root}/seen.md"},
+    )
+
+    assert sorted(artifact.ref for artifact in found) == ["empty.md", "report.md"]
+    # No stamp: the folder's clock chose them, and the server's is another.
+    assert entries["report.md"] == entries[f"{root}/report.md"] == {"size": 3, "modified": None}
+    assert entries["empty.md"]["size"] == 0
+    assert "before.md" not in entries
+
+
+class Listing:
+    """The cloud's storage, recording what a turn lists of it."""
+
+    def __init__(self) -> None:
+        self.listed: list[tuple[str, str]] = []
+
+    async def list_entries(self, bucket, prefix=""):
+        self.listed.append((bucket, prefix))
+        return [{"key": f"{prefix}report.md", "size": 3, "modified": datetime.now(timezone.utc)}]
+
+
+async def test_a_turn_whose_computer_was_away_at_its_start_lists_no_files_and_never_the_cloud(
+    laptop_rig, session_factory, redis_client, caplog,
+):
+    rig = laptop_rig
+    caplog.set_level(logging.INFO, logger="surogates.harness.loop_artifact_completion")
+    store = SessionStore(session_factory)
+    turn = TurnEnd(store, session_factory, redis_client)
+    turn._storage = listing = Listing()
+    # The laptop never connected: no cursor, and nothing waited on.
+    turn._turn_cursor = await asyncio.wait_for(turn._folder_cursor(await store.get_session(rig.root)), 5.0)
+    assert turn._turn_cursor is None
+
+    found, entries = await turn._scan_workspace_for_new_files(session_id=rig.root, already_seen_paths=set())
+
+    # The chat's cloud prefix is metadata only: no permission to read it.
+    assert (found, entries, listing.listed) == ([], {}, [])
+    assert "did not say where this turn began" in caplog.text
+
+
+async def test_a_computer_that_does_not_answer_holds_the_turn_no_longer_than_its_bound(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    rig.laptop.hold = True  # online, but answers nothing
+    monkeypatch.setattr(loop_artifact_completion, "HARNESS_WITHIN_S", 0.5)
+    store = SessionStore(session_factory)
+    session = await store.get_session(rig.root)
+    turn = TurnEnd(store, session_factory, redis_client)
+    assert await asyncio.wait_for(turn._folder_cursor(session), 3.0) is None
+    assert await asyncio.wait_for(turn._walk_folder(session, since="1"), 3.0) is None

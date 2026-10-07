@@ -364,3 +364,44 @@ async def test_advisor_never_delays_the_first_llm_request(
     assert first_request_at[0] - started < 1.0
     # Nothing consulted the advisor on the harness's own initiative.
     assert not advisor_called.is_set()
+
+
+@pytest.mark.parametrize(("config", "asked"), [
+    ({"execution": {"kind": "device", "device_id": str(uuid4())}}, True),
+    # Its recap is ruled out whatever the turn does, so its files are never listed.
+    ({"execution": {"kind": "device", "device_id": str(uuid4())}, "active_mission_id": "m-1"}, False),
+    ({}, False),
+])
+@pytest.mark.asyncio
+async def test_a_local_folders_turn_takes_where_it_begins_before_its_first_model_call(
+    monkeypatch: pytest.MonkeyPatch, config: dict, asked: bool,
+) -> None:
+    store = AsyncMock()
+    store.emit_event = AsyncMock(side_effect=range(100, 200))
+    store.get_events = AsyncMock(return_value=[])
+    harness = _make_loop_harness(session_store=store)
+    order: list[str] = []
+
+    async def folder_cursor(session: Any) -> str:
+        order.append("cursor")
+        return "1700000000000000000"
+
+    async def fake_call_llm_with_retry(**_kwargs: Any) -> tuple[dict, dict]:
+        order.append("model")
+        return (
+            {"role": "assistant", "content": "Done.", "tool_calls": None},
+            {"model": "test-model", "finish_reason": "stop", "input_tokens": 1, "output_tokens": 2},
+        )
+
+    harness._folder_cursor = folder_cursor
+    monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
+    session = _make_session()
+    session.config.update(config)
+
+    await harness._run_loop(
+        session, [{"role": "user", "content": "do the task"}], "system",
+        SimpleNamespace(lease_token=uuid4()), all_events=[],
+    )
+
+    assert order == (["cursor", "model"] if asked else ["model"])
+    assert harness._turn_cursor == ("1700000000000000000" if asked else None)
