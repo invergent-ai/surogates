@@ -7,7 +7,7 @@ The device-link protocol is the module docstring of `surogates/devices/link.py`.
 
     npm install
     npm run electron:install   # Electron 44 ships no postinstall: this fetches its binary
-    npm test
+    npm test                   # builds first; the first build fetches the app's own node into bin/
     npm run typecheck
 
 The shell, in development:
