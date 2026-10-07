@@ -397,14 +397,15 @@ function approved(request: Record<string, unknown>): Promise<unknown> {
 }
 
 // How much of each of *selector*'s elements is in view in the prompt's body, and its height, in px; the
-// body's height; and whether the title starts in view.
+// body's height; and whether the title starts in view, and shows whole.
 const inView = (page: Page, selector: string) => page.evaluate((chosen) => {
   const body = document.querySelector(".prompt-body")!.getBoundingClientRect();
   const details = [...document.querySelectorAll(chosen)].map((element) => {
     const { top, bottom, height } = element.getBoundingClientRect();
     return { seen: Math.max(0, Math.min(bottom, body.bottom) - Math.max(top, body.top)), height };
   });
-  return { body: body.height, details, title: document.querySelector("#prompt-title")!.getBoundingClientRect().top >= 0 };
+  const title = document.querySelector("#prompt-title")!;
+  return { body: body.height, details, title: title.getBoundingClientRect().top >= 0, titleWhole: title.scrollHeight <= title.clientHeight };
 }, selector);
 
 const write = (name: string, text: string, chat = CHAT, into = folder) =>
@@ -482,15 +483,36 @@ describe("an approval prompt", () => {
     expect(content.seen).toBeCloseTo(content.height, 0);
     await press(asked, "deny");
     expect(await outcome(id)).toMatchObject({ error: { type: "os", code: "EACCES" } });
-    // The longest name a host can have, on a private network: its warning stays in view.
+    // The longest name a host can have, on a private network, in a folder with the longest name, which fills
+    // the lead: the title stays whole, and the warning and the address's start stay in view.
     const host = `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(61)}`;
-    const answered = approved({ kind: "network", chat: { agent: "acme.surogate.ai", root: CHAT, calling: CHAT, folder }, host, port: 8080, privateNetwork: true });
+    const chat = { agent: "acme.surogate.ai", root: CHAT, calling: CHAT, folder: join(folder, "\u0085".repeat(127)) };
+    const answered = approved({ kind: "network", chat, host, port: 8080, privateNetwork: true });
     const network = await prompt(app!);
-    const warned = await inView(network, ".note");
-    expect(warned.title).toBe(true);
-    expect(warned.details[0]!.seen).toBeCloseTo(warned.details[0]!.height, 0);
+    const warned = await inView(network, ".note, .detail .label");
+    expect([warned.title, warned.titleWhole]).toEqual([true, true]);
+    for (const { seen, height } of warned.details) expect(seen).toBeCloseTo(height, 0);
     await press(network, "deny");
     expect(await answered).toEqual({ button: "deny", choice: null });
+  });
+
+  it("names a long host in its title by its end and its port, and shows its whole address and its warning as it opens", async () => {
+    await signedIn();
+    // A name that leads with another site's: what it reaches is attacker.net.
+    const npm = "registry.npmjs.org.global-edge-cache-node-eu-west-1-production-0001-abcdef01234567.global-edge-cache-node-eu-west.attacker.net";
+    const longest = `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(48)}.attacker.net`;
+    expect([npm.length, longest.length]).toEqual([126, 253]);
+    for (const [host, privateNetwork] of [[npm, false], [longest, true]] as const) {
+      const answered = approved({ kind: "network", chat: { agent: "acme.surogate.ai", root: CHAT, calling: CHAT, folder }, host, port: 8080, privateNetwork });
+      const asked = await prompt(app!);
+      expect(await text(asked, "#prompt-title")).toBe(`Connect to …${host.slice(-59)}:8080?`);
+      expect(await text(asked, ".code")).toBe(`${host}:8080`);
+      const opened = await inView(asked, ".note, .detail");
+      expect([opened.titleWhole, opened.details.length]).toEqual([true, privateNetwork ? 2 : 1]);
+      for (const { seen, height } of opened.details) expect(seen).toBeCloseTo(height, 0);
+      await press(asked, "deny");
+      expect(await answered).toEqual({ button: "deny", choice: null });
+    }
   });
 
   it("lets the chat work freely once its user stops asking", async () => {

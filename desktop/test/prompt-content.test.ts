@@ -74,6 +74,8 @@ describe("an approval prompt", () => {
   ] as const)("shows a write's file from its folder, and its new content: %o", (preview, bytes, shown) => {
     const content = approval({ kind: "change", chat: CHAT, action: "write", path: "/home/me/notes/docs/a.md", bytes, preview });
     expect(content.title).toBe("Write a.md?");
+    // How much, as it opens: a long name can push the content itself down.
+    expect(content.lead).toBe(`acme.surogate.ai wants to write ${sizeOf(bytes)} to this file in notes.`);
     expect(content.details).toEqual([{ label: "File", value: "docs/a.md", code: true, keep: "" }, shown]);
   });
 
@@ -105,7 +107,7 @@ describe("an approval prompt", () => {
 
   it("asks about a destination with Allow, all its ports for the chat, and Deny, and says when it is private", () => {
     const content = approval({ kind: "network", chat: CHAT, host: "192.168.1.20", port: 8080, privateNetwork: true });
-    expect(content.title).toBe("Connect to 192.168.1.20?");
+    expect(content.title).toBe("Connect to 192.168.1.20:8080?");
     // The host is named once in the title and once in its address: a long one leaves its warning room.
     expect(content.lead).toBe("A command in notes wants to connect to this address. Allow lets through the connections waiting now; later ones ask again.");
     expect(content.details).toEqual([{ label: "Address", value: "192.168.1.20:8080", code: true, keep: "" }]);
@@ -116,6 +118,15 @@ describe("an approval prompt", () => {
     ]);
     expect(content.notes).toEqual(["This address is on a private network, such as a home or office network, or a VPN."]);
     expect(approval({ kind: "network", chat: CHAT, host: "example.com", port: 443, privateNetwork: false }).notes).toEqual([]);
+  });
+
+  it("names a long host in its title by its end, never cut there, with its port, and its address whole", () => {
+    const host = `registry.npmjs.org.${"g".repeat(63)}.${"e".repeat(30)}.attacker.net`;
+    const content = approval({ kind: "network", chat: CHAT, host, port: 8080, privateNetwork: false });
+    expect(content.title).toBe(`Connect to …${host.slice(-59)}:8080?`);
+    expect(content.details[0]?.value).toBe(`${host}:8080`);
+    // Sixty characters or fewer, it is named whole.
+    expect(approval({ kind: "network", chat: CHAT, host: "a".repeat(60), port: 1, privateNetwork: false }).title).toBe(`Connect to ${"a".repeat(60)}:1?`);
   });
 });
 

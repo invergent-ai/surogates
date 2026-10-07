@@ -1110,6 +1110,11 @@ body.prompt-page {
   gap: 12px;
 }
 
+/* No notes, no gap where they would be. */
+#prompt-notes:empty {
+  display: none;
+}
+
 .prompt-body {
   display: flex;
   flex: 1;

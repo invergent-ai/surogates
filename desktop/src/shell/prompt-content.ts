@@ -122,6 +122,11 @@ export function sizeOf(bytes: number): string {
   return `${Math.round(bytes / (1024 * 102.4)) / 10} MB`;
 }
 
+// The most of a host a title shows: a longer one is cut at its start, never its end, so its own domain and
+// the port show whatever it begins with (registry.npmjs.org.<padding>.attacker.net). The address shows it whole.
+const TITLE_HOST = 60;
+const ending = (host: string) => (host.length > TITLE_HOST ? `…${host.slice(1 - TITLE_HOST)}` : host);
+
 // What an operation's prompt offers: Deny first, focused, and what Escape and a closed window answer.
 const OPERATION = {
   notes: [],
@@ -158,7 +163,7 @@ export function approval(request: ApprovalRequest): PromptContent {
       ? { label: `New content, ${sizeOf(bytes)}`, value: "Not text.", code: false, keep: "" }
       : code(preview.cut ? `The first ${sizeOf(PREVIEW_BYTES)} of ${sizeOf(bytes)}` : `New content, ${sizeOf(bytes)}`, preview.text, "\n\t");
     return {
-      ...OPERATION, title: `Write ${named(request.path)}?`, lead: `${asker(chat)} wants to write this file${where}.`, details: [file, content], height: 420,
+      ...OPERATION, title: `Write ${named(request.path)}?`, lead: `${asker(chat)} wants to write ${sizeOf(bytes)} to this file${where}.`, details: [file, content], height: 420,
     };
   }
   if (request.kind === "input") {
@@ -173,17 +178,21 @@ export function approval(request: ApprovalRequest): PromptContent {
       height: 380,
     };
   }
+  const address = `${request.host}:${request.port}`;
+  const title = `Connect to ${ending(request.host)}:${request.port}?`;
   return {
-    title: `Connect to ${request.host}?`,
+    title,
     lead: `A command in ${folder} wants to connect to this address. Allow lets through the connections waiting now; later ones ask again.`,
-    details: [code("Address", `${request.host}:${request.port}`)],
+    details: [code("Address", address)],
     notes: request.privateNetwork ? ["This address is on a private network, such as a home or office network, or a VPN."] : [],
     choice: null,
     buttons: [button("deny", "Deny"), button("allow_session", "Allow all its ports for this chat", true), button("allow", "Allow", true)],
     focus: "deny",
     cancel: "deny",
     enter: null,
-    height: request.privateNetwork ? 340 : 290,
+    // Tall enough to show the title, the lead, the warning and the whole address as it opens: a title past
+    // 30 characters wraps to three lines of 25 px, and a line of 19 px in the address's block holds about 40.
+    height: 245 + (title.length > 30 ? 75 : 25) + (request.privateNetwork ? 70 : 0) + Math.ceil(address.length / 40) * 19,
   };
 }
 
