@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BOOT_ID } from "../src/binding/folder.js";
 import { SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
+import type { ProtectedKey } from "../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { bootLinux, sweep } from "../src/vm/linux.js";
 import { type BootVm, bootFor, type Folder, Guest, type ProcessesChange, type VmBackend, VmManager, type VmOptions } from "../src/vm/manager.js";
@@ -259,6 +260,76 @@ describe("the VM manager on a guest", () => {
     await tearing;
     expect(asked).toEqual(["setup", "set up", "teardown"]);
     expect(await answer).toEqual({ ok: true });
+    await manager.stop();
+  });
+});
+
+describe("a root's protected keys in the guest", () => {
+  const KEYS: ProtectedKey[] = [["/f/.git", 40, "rw"], ["/f/.git/config", 41, "ro"]];
+  let asked: unknown[];
+  let refuse: boolean;
+  const roots = (): ControlRoots => ({
+    uid: () => 10_000,
+    setup: async (root) => void asked.push(["setup", root]),
+    teardown: async () => {},
+    protect: async (root, keys) => {
+      asked.push(["protect", root, keys]);
+      if (refuse) throw new Error("Blocked: the computer could not make these protected files read-only in its sandbox");
+    },
+    perform: async (root, kind) => {
+      asked.push([kind, root]);
+      return { ok: true };
+    },
+  });
+  const run = (manager: VmManager, protect?: ProtectedKey[], kind = "run") => manager.perform({
+    id: `${kind}-${Math.random()}`, root: "root-1", folder: { path: dir, ...statSync(dir) }, kind, args: {}, ...(protect ? { protect } : {}),
+  }, new AbortController().signal);
+
+  beforeEach(() => {
+    asked = [];
+    refuse = false;
+  });
+
+  it("are made read-only after the root's setup and before its command, asked again only once they change or it is set up again", async () => {
+    const manager = new VmManager(options(), fakeVm(roots()));
+    expect(await run(manager, KEYS)).toEqual({ ok: true });
+    expect(await run(manager, KEYS)).toEqual({ ok: true });
+    // A kind that runs no command brings none.
+    expect(await run(manager, undefined, "poll")).toEqual({ ok: true });
+    const changed: ProtectedKey[] = [["/f/.git", 40, "rw"], ["/f/.git/config", 42, "ro"]];
+    expect(await run(manager, changed)).toEqual({ ok: true });
+    // The root's runner is lost: its namespace is made again, and its keys bound there again.
+    agent?.write(`${JSON.stringify({ type: "lost", root: "root-1" })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await run(manager, changed)).toEqual({ ok: true });
+    expect(asked).toEqual([
+      ["setup", "root-1"], ["protect", "root-1", KEYS], ["run", "root-1"], ["run", "root-1"], ["poll", "root-1"],
+      ["protect", "root-1", changed], ["run", "root-1"],
+      ["setup", "root-1"], ["protect", "root-1", changed], ["run", "root-1"],
+    ]);
+    await manager.stop();
+  });
+
+  it("refuse the root's command while they cannot be made read-only, and are asked again with the next", async () => {
+    const manager = new VmManager(options(), fakeVm(roots()));
+    refuse = true;
+    expect(await run(manager, KEYS)).toEqual({
+      error: { type: "sandbox", message: "Blocked: the computer could not make these protected files read-only in its sandbox" },
+    });
+    refuse = false;
+    expect(await run(manager, KEYS)).toEqual({ ok: true });
+    expect(asked).toEqual([["setup", "root-1"], ["protect", "root-1", KEYS], ["protect", "root-1", KEYS], ["run", "root-1"]]);
+    await manager.stop();
+  });
+
+  it("are made read-only as the root's file host finds them between commands, once a guest has the root set up", async () => {
+    const manager = new VmManager(options(), fakeVm(roots()));
+    await manager.protect("root-1", KEYS);
+    expect(await run(manager, undefined, "which")).toEqual({ ok: true });
+    await manager.protect("root-1", KEYS);
+    await manager.protect("root-1", KEYS);
+    await manager.protect("root-2", KEYS);
+    expect(asked).toEqual([["setup", "root-1"], ["which", "root-1"], ["protect", "root-1", KEYS]]);
     await manager.stop();
   });
 });

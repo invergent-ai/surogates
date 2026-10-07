@@ -903,6 +903,27 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     });
   });
 
+  it("refuses a command's write to a git config a command made, a rename to make it again, and a write to one a host program replaced since", async () => {
+    const folder = join(dir, "folder");
+    const evil = (config: string) => `(echo '[alias] x = !evil' >> ${config}) 2>&1 | sed 's/.*: //'`;
+    // What a command can do in one go: move the repository's git folder aside, make it again, and write its config.
+    const rebuild = (git: string) => `(mv ${git} ${git}-old && mkdir ${git} && cp -a ${git}-old/. ${git}/ && echo '[core] fsmonitor = ./evil' >> ${git}/config) 2>&1 | sed 's/.*: //'`;
+    try {
+      // The look after a command finds the repository it made: read-only from the next command on.
+      expect(await command("git init -q . && git init -q sub && mkdir sub/.vscode && echo made")).toMatchObject({ ok: { output: "made\n" } });
+      expect(await command(`${evil(".git/config")}; ${evil("sub/.git/config")}`)).toMatchObject({ ok: { output: "Read-only file system\nRead-only file system\n" } });
+      expect(await command(`${rebuild(".git")}; ${rebuild("sub/.git")}; (mv sub/.vscode vscode-old) 2>&1 | sed 's/.*: //'`)).toMatchObject({
+        ok: { output: "Device or resource busy\nDevice or resource busy\nDevice or resource busy\n" },
+      });
+      // git config on the host renames a new file over the old one, which takes the guest's bind with it.
+      expect(spawnSync("git", ["-C", folder, "config", "core.editor", "true"]).status).toBe(0);
+      expect(await command(evil(".git/config"))).toMatchObject({ ok: { output: "Read-only file system\n" } });
+      for (const config of [join(folder, ".git", "config"), join(folder, "sub", ".git", "config")]) expect(readFileSync(config, "utf8")).not.toContain("evil");
+    } finally {
+      for (const name of [".git", "sub", ".git-old", "vscode-old"]) rmSync(join(folder, name), { recursive: true, force: true });
+    }
+  });
+
   it("ends what a command left running once the chat's file host lets its folder go", async () => {
     // What a background process left, in a session of its own and with its environment cleared, once that process has ended.
     const leaver = "env -i /usr/bin/setsid /usr/bin/nohup /usr/bin/sleep 300 < /dev/null > /dev/null 2>&1 & echo started";
