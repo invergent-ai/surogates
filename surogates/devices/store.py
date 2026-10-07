@@ -122,10 +122,17 @@ class DeviceStore:
         return _record(row) if row is not None else None
 
     async def revoke(
-        self, device_id: UUID, *, org_id: UUID, agent_id: str, user_id: UUID,
+        self, device_id: UUID, *, org_id: UUID, agent_id: str, user_id: UUID, by_sign_in: UUID | None = None,
     ) -> DeviceRecord | None:
-        """Revoke the user's device.  Revoking again keeps the first revocation time."""
-        return await self._revoke(Device.id == device_id, *_owned_by(org_id, agent_id, user_id))
+        """Revoke the user's device.  Revoking again keeps the first revocation time.
+
+        *by_sign_in* is the caller's OAuth sign-in, if any.  When it is the one
+        bound to a device that never connected, it is unbound rather than ended:
+        the desktop taking back a computer it could not keep stays signed in.
+        """
+        return await self._revoke(
+            Device.id == device_id, *_owned_by(org_id, agent_id, user_id), by_sign_in=by_sign_in,
+        )
 
     async def revoke_by_id(self, device_id: UUID, generation: int) -> DeviceRecord | None:
         """Revoke a device at its own request, made over its authenticated link.
@@ -137,7 +144,7 @@ class DeviceStore:
             Device.id == device_id, Device.credential_generation == generation,
         )
 
-    async def _revoke(self, *where: Any) -> DeviceRecord | None:
+    async def _revoke(self, *where: Any, by_sign_in: UUID | None = None) -> DeviceRecord | None:
         async with self._sf() as db:
             row = (await db.execute(
                 update(Device)
@@ -146,6 +153,12 @@ class DeviceStore:
                 .returning(Device)
             )).scalar_one_or_none()
             if row is not None:
+                if by_sign_in is not None and row.last_seen_at is None:
+                    await db.execute(
+                        update(OAuthRefreshToken)
+                        .where(OAuthRefreshToken.family_id == by_sign_in, OAuthRefreshToken.device_id == row.id)
+                        .values(device_id=None)
+                    )
                 # The sign-in that added or restored the computer ends with it:
                 # a lost laptop's copy of the app can no longer refresh.
                 await db.execute(

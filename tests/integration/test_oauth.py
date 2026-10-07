@@ -252,6 +252,28 @@ async def test_the_computer_revoking_itself_ends_its_sign_in_too(api):
     assert (await refresh(api, tokens["refresh_token"])).json() == {"error": "invalid_grant"}
 
 
+async def test_the_desktop_taking_back_a_computer_that_never_connected_stays_signed_in(api):
+    tokens = await signed_in(api)
+    device_id = await add_computer(api, tokens["access_token"])
+    # As the app does with a computer it added but could not keep.
+    removed = await api.client.delete(f"/v1/devices/{device_id}", headers=api.auth(tokens["access_token"]))
+    assert removed.status_code == 204
+    assert (await refresh(api, tokens["refresh_token"])).status_code == 200
+
+
+@pytest.mark.parametrize("removed_by", ["its own sign-in, once it connected", "another sign-in of the desktop"])
+async def test_any_other_removal_of_the_computer_ends_its_sign_in(api, removed_by):
+    tokens = await signed_in(api)
+    device_id = await add_computer(api, tokens["access_token"])
+    if removed_by == "another sign-in of the desktop":
+        remover = (await signed_in(api))["access_token"]
+    else:
+        await DeviceStore(api.app.state.session_factory).touch(UUID(device_id))
+        remover = tokens["access_token"]
+    assert (await api.client.delete(f"/v1/devices/{device_id}", headers=api.auth(remover))).status_code == 204
+    assert (await refresh(api, tokens["refresh_token"])).json() == {"error": "invalid_grant"}
+
+
 async def test_the_sign_in_that_restores_a_computer_ends_with_it_too(api):
     first = await signed_in(api)
     device_id = await add_computer(api, first["access_token"])

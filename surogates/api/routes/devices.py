@@ -125,7 +125,7 @@ async def list_devices(request: Request, ctx: AgentRuntime, tenant: Tenant) -> l
 async def revoke_device(
     device_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant,
 ) -> Response:
-    device = await _store(request).revoke(device_id, **_owner(tenant, ctx))
+    device = await _store(request).revoke(device_id, **_owner(tenant, ctx), by_sign_in=tenant.oauth_family_id)
     if device is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such device.")
     await _notify(request, device_id, f"revoked:{device.credential_generation}")
