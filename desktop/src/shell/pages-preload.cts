@@ -38,4 +38,14 @@ if (location.protocol === "file:") {
     close: () => ipcRenderer.invoke("settings:close"),
     onChanged: listen("settings:changed"),
   });
+  contextBridge.exposeInMainWorld("surogatePrompt", {
+    state: () => ipcRenderer.invoke("prompt:state"),
+    answer: (button: string, choice: string | null) => ipcRenderer.invoke("prompt:answer", button, choice),
+    onChanged: listen("prompt:changed"),
+    onArmed: (listener: (armed: boolean) => void) => {
+      const relay = (_event: unknown, armed: unknown) => listener(armed === true);
+      ipcRenderer.on("prompt:armed", relay);
+      return () => ipcRenderer.off("prompt:armed", relay);
+    },
+  });
 }

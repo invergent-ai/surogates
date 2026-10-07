@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { OperationJournal } from "../../src/journal/journal.js";
 import { APP_CLOSED } from "../../src/operations/runner.js";
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
+import { dataHome, launch, press, prompt, quit, shellPage, stubNative } from "./launch.js";
 
 const THREAD = "6c1e9f7d-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
 
@@ -71,7 +71,10 @@ async function bound(): Promise<{ shell: ElectronApplication; page: Page; client
   await connect(page, origin);
   await signedInAndAdded(shell, page, agent);
   const client = await webClient(shell, origin);
-  const prepared = await client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"));
+  // The user accepts the folder in the desktop's own sheet, in its first mode, Work freely.
+  const preparing = client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"));
+  await press(await prompt(shell), "accept");
+  const prepared = await preparing;
   expect(prepared).toMatchObject({ folder, mode: "free" });
   // The server records the chat with the folder and nonce, and sends its bind operation.
   agent.link.send(op("bind-1", "bind", { folder: prepared!.folder, nonce: prepared!.nonce }, true));
@@ -87,7 +90,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the demo", () => {
   it("runs a local thread's command in the folder its user confirmed", async () => {
     await bound();
     const asked = await app!.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string }> }).asked);
-    expect(asked.map((options) => options.message)).toEqual([`Connect to ${origin.replace("http://", "")}?`, `Work in ${folder.split("/").at(-1)}?`]);
+    expect(asked.map((options) => options.message)).toEqual([`Connect to ${origin.replace("http://", "")}?`]);
     agent.link.send(op("run-1", "run", { command: "echo hi > made.txt", workdir: null, timeout: 30 }));
     await agent.link.until(() => results("run-1").length === 1, 30_000);
     expect(results("run-1")[0]?.outcome).toMatchObject({ ok: { returncode: 0 } });
@@ -146,9 +149,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("quitting", () => {
     await shell.evaluate(() => Object.assign(globalThis, { hold: true, answer: 1 }));
     quitApp(shell);
     quitApp(shell);
-    await expect.poll(async () => (await asked(shell)).length).toBe(3);
+    await expect.poll(async () => (await asked(shell)).length).toBe(2);
     await new Promise((resolve) => setTimeout(resolve, 500));
-    expect((await asked(shell)).map((options) => options.message).slice(2)).toEqual(["Surogate is still working"]);
+    expect((await asked(shell)).map((options) => options.message).slice(1)).toEqual(["Surogate is still working"]);
     await shell.evaluate(() => {
       Object.assign(globalThis, { hold: false });
       (globalThis as unknown as { release(): void }).release();

@@ -12,6 +12,9 @@ function calls(): BridgeCalls & Record<string, ReturnType<typeof vi.fn>> {
     webSignIn: vi.fn(() => Promise.resolve({ code: "web-code" })),
     prepareFolder: vi.fn(() => Promise.resolve(null)),
     bindSession: vi.fn(() => Promise.resolve()),
+    setMode: vi.fn(() => Promise.resolve()),
+    requestFreeMode: vi.fn(() => Promise.resolve(true)),
+    cancelPrepared: vi.fn(() => Promise.resolve()),
     getAppearance: vi.fn(() => ({ theme: "dark", textSize: "medium", transcriptWidth: "medium", motion: "system" })),
     setAccount: vi.fn(),
     registerProjects: vi.fn(),
@@ -43,6 +46,32 @@ describe("the bridge", () => {
     await handlers.bindSession!(TOP, "7", SESSION, "b".repeat(43));
     expect(made.bindSession).toHaveBeenCalledWith(SESSION, "b".repeat(43), "7");
     expect(await handlers.getAppearance!(TOP, "7")).toMatchObject({ theme: "dark" });
+    await handlers.setMode!(TOP, "7", SESSION, "ask");
+    expect(made.setMode).toHaveBeenCalledWith(SESSION, "ask");
+    expect(await handlers.requestFreeMode!(TOP, "7", SESSION)).toBe(true);
+    expect(made.requestFreeMode).toHaveBeenCalledWith(SESSION, "7");
+    await handlers.cancelPrepared!(TOP, "7", "b".repeat(43));
+    expect(made.cancelPrepared).toHaveBeenCalledWith("b".repeat(43), "7");
+  });
+
+  it("asks one question of each kind at a time for a window, and the next once that one is answered", async () => {
+    const made = calls();
+    const open: Array<(value: unknown) => void> = [];
+    const pending = () => new Promise((resolve) => open.push(resolve));
+    for (const held of [made.prepareFolder, made.requestFreeMode]) (held as ReturnType<typeof vi.fn>).mockImplementationOnce(pending);
+    const handlers = bridgeHandlers(ORIGIN, made);
+    const folder = handlers.prepareFolder!(TOP, "7", "pick");
+    const free = handlers.requestFreeMode!(TOP, "7", SESSION);
+    await expect(handlers.prepareFolder!(TOP, "7", "last")).rejects.toThrow("Surogate is already asking");
+    await expect(handlers.requestFreeMode!(TOP, "7", SESSION)).rejects.toThrow("Surogate is already asking");
+    // Another window's are its own.
+    expect(await handlers.prepareFolder!(TOP, "8", "pick")).toBeNull();
+    await vi.waitFor(() => expect(open).toHaveLength(2));
+    for (const answer of open) answer(null);
+    await Promise.all([folder, free]);
+    expect(await handlers.prepareFolder!(TOP, "7", "pick")).toBeNull();
+    expect(made.prepareFolder).toHaveBeenCalledTimes(3);
+    expect(made.requestFreeMode).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -53,6 +82,10 @@ describe("the bridge", () => {
     ["setAccount", [{ ...ACCOUNT, userId: "" }], "Not an account"],
     ["setAccount", [{ name: "Flavius", email: "f@example.com" }], "Not an account"],
     ["registerProjects", ["yes"], "Not a registration"],
+    ["setMode", [SESSION, "free"], "Only the desktop can let a chat work freely"],
+    ["setMode", ["not-a-session", "ask"], "Not a chat"],
+    ["requestFreeMode", [42], "Not a chat"],
+    ["cancelPrepared", ["short"], "Not a folder confirmation"],
   ])("refuses %s(%o)", async (name, args, message) => {
     const made = calls();
     await expect(bridgeHandlers(ORIGIN, made)[name]!(TOP, "7", ...args)).rejects.toThrow(message);

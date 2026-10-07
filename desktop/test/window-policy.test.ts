@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { permitted, sameOrigin, webClientPath, windowOpen } from "../src/shell/window-policy.js";
+import { ownPage, permitted, sameOrigin, webClientPath, windowOpen } from "../src/shell/window-policy.js";
 
 const AGENT = "https://agent.example.com";
 
@@ -60,5 +60,24 @@ describe("where the sidebar may take the web client", () => {
     ["/chat/not-a-session", false],
   ])("%s is %s", (path, allowed) => {
     expect(webClientPath(path)).toBe(allowed);
+  });
+});
+
+describe("one of the app's own pages", () => {
+  const PAGE = "/opt/surogate/dist/shell/pages/prompt.html";
+
+  it.each([
+    ["its own top frame", { url: "file:///opt/surogate/dist/shell/pages/prompt.html", parent: null }, true],
+    ["another of the app's pages", { url: "file:///opt/surogate/dist/shell/pages/shell.html", parent: null }, false],
+    ["a file dropped on it", { url: "file:///home/me/Downloads/prompt.html", parent: null }, false],
+    ["a frame inside it", { url: "file:///opt/surogate/dist/shell/pages/prompt.html", parent: {} }, false],
+    ["a web page", { url: "https://agent.example.com/prompt.html", parent: null }, false],
+    ["a frame that has gone", null, false],
+    ["a frame that was never there", undefined, false],
+    ["a file of another host", { url: "file://evil.example/opt/surogate/dist/shell/pages/prompt.html", parent: null }, false],
+    ["a path with an encoded slash", { url: "file:///opt/surogate/dist/shell/pages%2Fprompt.html", parent: null }, false],
+  ])("is %s: %s", (_name, frame, own) => {
+    // No frame, however a caller spells it, is none of the app's pages.
+    expect(ownPage(frame as Parameters<typeof ownPage>[0], PAGE)).toBe(own);
   });
 });
