@@ -1617,15 +1617,20 @@ class AgentHarness(
                 cut_off and session is not None
                 and is_project_thread(session.config) and self._sandbox_pool is not None
             ):
+                from surogates.harness.landing import put_back_settled
+
                 owner = sandbox_session_key(session)
-                try:
-                    held = self._sandbox_pool.holds_copy(owner)
-                    await asyncio.shield(self._sandbox_pool.destroy_for_session(owner))
-                    # The turn's retry, if it comes here, is told its copy was made afresh.
-                    if held:
-                        self._sandbox_pool.mark_copy_remade(owner)
-                except BaseException:
-                    logger.warning("Could not let the copy of %s go", session_id, exc_info=True)
+                # A landing of this turn still putting files back needs its
+                # pod, and lets it go itself once it is done.
+                if await put_back_settled(owner):
+                    try:
+                        held = self._sandbox_pool.holds_copy(owner)
+                        await asyncio.shield(self._sandbox_pool.destroy_for_session(owner))
+                        # The turn's retry, if it comes here, is told its copy was made afresh.
+                        if held:
+                            self._sandbox_pool.mark_copy_remade(owner)
+                    except BaseException:
+                        logger.warning("Could not let the copy of %s go", session_id, exc_info=True)
 
             # Stop the background renewal task before touching the
             # lease.  ``None`` when the wake bailed before the lease

@@ -35,8 +35,22 @@ logger = logging.getLogger(__name__)
 
 #: How long a cancelled landing waits for its put-back before the cancel goes on.
 _PUT_BACK_BOUND = 300
-#: Put-backs still running after their landing was cancelled: each finishes.
-_PUTTING_BACK: set[asyncio.Future] = set()
+#: Each thread's put-back still running, kept until done: a cancel never cuts one short.
+_PUTTING_BACK: dict[str, asyncio.Future] = {}
+#: A cancelled landing's pod going, once its slow put-back is done.
+_TEARDOWNS: set[asyncio.Future] = set()
+
+
+async def put_back_settled(owner: str) -> bool:
+    """Whether no landing of *owner* is still putting files back, waiting within its bound for one."""
+    pending = _PUTTING_BACK.get(owner)
+    if pending is None:
+        return True
+    try:
+        await asyncio.wait_for(asyncio.shield(pending), _PUT_BACK_BOUND)
+    except BaseException:
+        return False
+    return True
 
 
 class LandingStepError(RuntimeError):
@@ -153,8 +167,8 @@ async def _land(
         logger.warning("Landing of session %s rolled back", session.id, exc_info=True)
         # Kept, and shielded: a cancel never cuts a put-back short.
         put_back = asyncio.ensure_future(_put_back(saga, orchestrator, sandbox_pool, owner))
-        _PUTTING_BACK.add(put_back)
-        put_back.add_done_callback(_PUTTING_BACK.discard)
+        _PUTTING_BACK[owner] = put_back
+        put_back.add_done_callback(lambda done: _PUTTING_BACK.pop(owner, None) if _PUTTING_BACK.get(owner) is done else None)
         if not isinstance(exc, Exception):
             # Cancelled: the turn's lease went to another worker, which cannot
             # reach this pod.  What was applied still goes back, then the cancel goes on.
@@ -187,13 +201,23 @@ async def _after_cancel(put_back: asyncio.Future, sandbox_pool: Any, owner: str)
     """Wait, bounded, for a cancelled landing's put-back, then let the thread's pod go.
 
     No later turn on this worker takes up the copy whose writes were put
-    back.  A put-back still running keeps its pod.
+    back.  A put-back still running keeps its pod, and lets it go once done.
     """
+    if not await put_back_settled(owner):
+        logger.warning("The cancelled landing of %s is still putting files back", owner)
+        put_back.add_done_callback(lambda _: _let_go(sandbox_pool, owner))
+        return
     try:
-        await asyncio.wait_for(asyncio.shield(put_back), _PUT_BACK_BOUND)
         await asyncio.shield(sandbox_pool.destroy_for_session(owner))
     except BaseException:
-        logger.warning("The cancelled landing of %s did not finish putting back and going", owner, exc_info=True)
+        logger.warning("The cancelled landing of %s did not let its pod go", owner, exc_info=True)
+
+
+def _let_go(sandbox_pool: Any, owner: str) -> None:
+    """Destroy *owner*'s pod in the background, kept until done."""
+    going = asyncio.ensure_future(sandbox_pool.destroy_for_session(owner))
+    _TEARDOWNS.add(going)
+    going.add_done_callback(_TEARDOWNS.discard)
 
 
 async def _put_back(saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str) -> list[SagaStep]:

@@ -16,6 +16,7 @@ from sqlalchemy import text
 
 from surogates.governance.saga import SagaOrchestrator
 import surogates.harness.loop as loop_module
+from surogates.harness import landing as landing_module
 from surogates.harness import loop_artifact_completion, tool_exec
 from surogates.runtime import SlashCommandConfig
 from surogates.harness.loop_context_replay import worker_note
@@ -749,3 +750,34 @@ async def test_a_retried_wake_that_ends_normally_keeps_its_copy(api, monkeypatch
     except RuntimeError:
         await harness.wake(thread.id)  # the dispatcher retries inside its handler
     assert pool.holds_copy(str(thread.id))
+
+
+async def test_a_cut_off_turns_slow_put_back_finishes_before_its_pod_goes(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store, pool = api.app.state.session_store, CancelledOnTheThird(pods)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Write five notes."})
+    monkeypatch.setattr(landing_module, "_PUT_BACK_BOUND", 0.2)
+    unapply = History.unapply
+
+    def slowly(self, *args, **kwargs):  # in the pod's child: each put-back outlasts the bound
+        time.sleep(1)
+        return unapply(self, *args, **kwargs)
+
+    monkeypatch.setattr(History, "unapply", slowly)
+
+    async def writes_five_and_lands(session, messages, system_prompt, lease, **_):
+        await open_pod(pool, session)
+        for name in "abcde":
+            (pods.copies[str(session.id)] / f"{name}.md").write_text(name)
+        await harness._complete_session(session, messages, lease, reason="completed")
+
+    harness = a_waking_thread_harness(api, monkeypatch, pool, writes_five_and_lands)
+    harness._saga_settings = QUICK
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(asyncio.create_task(harness.wake(thread.id)), 60)
+    async with asyncio.timeout(30):  # the put-back, then its pod's going
+        while landing_module._PUTTING_BACK or landing_module._TEARDOWNS:
+            await asyncio.sleep(0.1)
+    # Every applied file was put back: no half-landed turn, and then the pod went.
+    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "notes.txt"]
+    assert pods.pods == {}
