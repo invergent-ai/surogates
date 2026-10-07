@@ -362,6 +362,51 @@ describe("the guard", () => {
   });
 });
 
+// The guest's rule judges a write by the path it reaches, not by a link's name on the way: a link
+// the user made at a protected name, to a path in the folder that is not protected, lets a command write it.
+describe("a protected name linked into the folder", () => {
+  const LINKED = "Make it a file, or point it outside the folder, to run commands here.";
+  const refused = (message: string) => ({ error: { type: "sandbox", message } });
+
+  it("refuses commands while it is a link, and lets them run once it is a file", async () => {
+    mkdirSync(join(folder, "config"));
+    writeFileSync(join(folder, "config", "mcp.json"), "{}\n");
+    symlinkSync("config/mcp.json", join(folder, ".mcp.json"));
+    const guard = new HookGuard(folder);
+    expect(await guard.refusal()).toEqual(refused(`Blocked: .mcp.json is a link to config/mcp.json in this folder. ${LINKED}`));
+    rmSync(join(folder, ".mcp.json"));
+    writeFileSync(join(folder, ".mcp.json"), "{}\n");
+    expect(await guard.refusal()).toBeNull();
+  });
+
+  it("names each: a folder, a file in a protected folder, one through a link a command could swap, and one that leads to nothing yet", async () => {
+    mkdirSync(join(folder, "scripts"));
+    symlinkSync("scripts", join(folder, ".vscode"));
+    mkdirSync(join(folder, ".idea"));
+    symlinkSync("../workspace.xml", join(folder, ".idea", "workspace.xml"));
+    // Where it ends is out of the folder, but cfg is a command's to make a folder of its own.
+    symlinkSync(other, join(folder, "cfg"));
+    symlinkSync("cfg/gitconfig", join(folder, ".gitconfig"));
+    symlinkSync("missing", join(folder, ".zshrc"));
+    expect(await new HookGuard(folder).refusal()).toEqual(refused([
+      "Blocked: .gitconfig is a link to cfg/gitconfig in this folder.", ".idea/workspace.xml is a link to workspace.xml in this folder.",
+      ".vscode is a link to scripts in this folder.", ".zshrc is a link to missing in this folder.",
+      "Make each a file, or point it outside the folder, to run commands here.",
+    ].join(" ")));
+  });
+
+  it("lets commands run beside one linked out of the folder, or to a protected name in it, and a git hook linked to a script, which the guard stops", async () => {
+    symlinkSync(other, join(folder, ".vscode"));
+    symlinkSync("/nowhere", join(folder, ".bashrc"));
+    mkdirSync(join(folder, ".idea"));
+    symlinkSync(".idea/mcp.json", join(folder, ".mcp.json"));
+    hook("scripts/pre-commit");
+    mkdirSync(join(folder, ".git", "hooks"), { recursive: true });
+    symlinkSync("../../scripts/pre-commit", join(folder, ".git", "hooks", "pre-commit"));
+    expect(await new HookGuard(folder).refusal()).toBeNull();
+  });
+});
+
 describe("the walk's protected keys", () => {
   it("are every entry under a protected name at any depth, folders too, and a .git file, but not a .git folder", async () => {
     const deep = hook("a/b/c/d/e/f/g/h/i/j/k/.git/hooks/pre-commit");

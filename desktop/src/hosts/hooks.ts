@@ -3,12 +3,13 @@
 // and srt protects a repository's hooks only when it was there before the command
 // started. So after every command the host looks through the whole folder and
 // makes each hook that is not the user's own, unchanged, non-executable: git skips
-// those. Nothing is deleted.
+// those. Nothing is deleted. The same look refuses commands while a protected name
+// is a link to a path in the folder that is not protected (linkedInto).
 
 import { access, constants, lstat, open, readdir, readlink, realpath, stat } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
-import { inside } from "../files/paths.js";
+import { inside, realpath as followed } from "../files/paths.js";
 import { protectedInFolder } from "../files/protect.js";
 import type { Outcome } from "../link/protocol.js";
 
@@ -24,6 +25,9 @@ export interface HookScan {
   // Every entry under one of the folder's protected names (protectedInFolder),
   // files and folders alike, but not a .git folder itself: a .git file is one.
   protectedKeys: Set<string>;
+  // Each of those that is a link, but for a git hook (the guard stops those), to what a
+  // write through it reaches in the folder that is not protected (linkedInto).
+  links: Map<string, string>;
 }
 
 export interface GuardOptions {
@@ -70,10 +74,23 @@ async function describe(path: string): Promise<string | null> {
     : `${own}>`;
 }
 
+// What a write through the link at *path* reaches in the folder that is not protected, or null.
+// The guest's rule judges a write by the path it reaches, not by a link's name on the way. Where
+// the link's own target names counts as well as where it ends: a link on the way that lies in the
+// folder is a command's to swap for a folder of its own.
+// ponytail: a chain that leaves the folder and comes back in through a link there is judged by its
+// first step and its end only; follow each step if links like that turn up.
+async function linkedInto(folder: string, path: string): Promise<string | null> {
+  const named = await readlink(path).then((to) => resolve(dirname(path), to), () => null);
+  const end = followed(path);
+  const reached = [named, end.loop ? null : end.path];
+  return reached.find((to) => to !== null && inside(to, folder) && !protectedInFolder(folder, to)) ?? null;
+}
+
 // Never rejects. Linked folders are not followed; node_modules and git's object
 // stores are skipped: they are large, and git runs no hook from them.
 export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1): Promise<HookScan> {
-  const scan: HookScan = { hooks: new Map(), unreadable: [], protectedKeys: new Set() };
+  const scan: HookScan = { hooks: new Map(), unreadable: [], protectedKeys: new Set(), links: new Map() };
   const walk = async (dir: string, inGit: boolean): Promise<void> => {
     let entries;
     try {
@@ -102,7 +119,11 @@ export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1):
         return;
       }
       const name = entry.name.toLowerCase();
-      if (!(entry.isDirectory() && name === ".git") && protectedInFolder(folder, path)) scan.protectedKeys.add(path);
+      if (!(entry.isDirectory() && name === ".git") && protectedInFolder(folder, path)) {
+        scan.protectedKeys.add(path);
+        const to = entry.isSymbolicLink() && !isGitHook(folder, path) ? await linkedInto(folder, path) : null;
+        if (to !== null) scan.links.set(path, to);
+      }
       if (entry.isDirectory()) {
         const store = gitFolder && name === "objects"
           && await lstat(join(path, "HEAD")).then(() => false, (error: NodeJS.ErrnoException) => error.code === "ENOENT");
@@ -285,6 +306,10 @@ export class HookGuard {
     const unstopped = stuck.length > 0
       ? `Blocked: the computer could not stop these git hooks from running outside the sandbox: ${listed(this.folder, stuck)}. Remove them or make them non-executable to run commands here.`
       : null;
-    return { changed, blocked: [unstopped, unseen, untold].filter(Boolean).join(" ") || null };
+    const links = [...scan.links].map(([path, to]) => `${relative(this.folder, path)} is a link to ${relative(this.folder, to) || "."} in this folder.`).sort();
+    const linked = links.length > 0
+      ? `Blocked: ${links.join(" ")} Make ${links.length > 1 ? "each" : "it"} a file, or point it outside the folder, to run commands here.`
+      : null;
+    return { changed, blocked: [unstopped, unseen, untold, linked].filter(Boolean).join(" ") || null };
   }
 }

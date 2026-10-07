@@ -1313,26 +1313,43 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     }
   });
 
-  it("binds what a protected name's link leads to in the folder, and runs commands beside one linked out of it", async () => {
+  it("runs commands beside a protected name linked out of the folder, or to a protected name in it, whose file the rule keeps", async () => {
     const folder = join(dir, "folder");
     // An editor's settings shared with a sibling worktree, which the guest does not have.
     const shared = join(dir, "shared-vscode");
     mkdirSync(shared);
     writeFileSync(join(shared, "settings.json"), "{}\n");
     symlinkSync(shared, join(folder, ".vscode"));
+    mkdirSync(join(folder, ".idea"));
+    writeFileSync(join(folder, ".idea", "mcp.json"), "{}\n");
+    symlinkSync(".idea/mcp.json", join(folder, ".mcp.json"));
+    try {
+      expect(await command("echo ran; echo '{\"x\": 1}' 2>/dev/null > .mcp.json || echo refused")).toMatchObject({ ok: { output: "ran\nrefused\n" } });
+      expect(await command("echo ran")).toMatchObject({ ok: { output: "ran\n" } });
+      expect([readFileSync(join(folder, ".idea", "mcp.json"), "utf8"), readFileSync(join(shared, "settings.json"), "utf8")]).toEqual(["{}\n", "{}\n"]);
+    } finally {
+      for (const name of [".vscode", ".mcp.json", ".idea"]) rmSync(join(folder, name), { recursive: true, force: true });
+      rmSync(shared, { recursive: true, force: true });
+    }
+  });
+
+  // The rule judges a write by the path it reaches: through this link, mcp.json, which it does not keep.
+  it("refuses a command, before it runs, while a protected name links to a file in the folder the rule does not keep, and runs it once the name is a file", async () => {
+    const folder = join(dir, "folder");
     writeFileSync(join(folder, "mcp.json"), "{}\n");
     symlinkSync("mcp.json", join(folder, ".mcp.json"));
-    const write = (name: string) => `(echo '{"x": 1}' > ${name}) 2>&1 | sed 's/.*: //'`;
     try {
-      // The look after a command names the links the host made.
-      expect(await command("echo ran")).toMatchObject({ ok: { output: "ran\n" } });
-      expect(await command(`echo ran; ${write(".mcp.json")}; ${write("mcp.json")}`)).toMatchObject({
-        ok: { output: "ran\nRead-only file system\nRead-only file system\n" },
+      // A look sees the link the host made, at the host's start or after this command: commands are refused from the next one.
+      await command("true");
+      expect(await command("touch ran")).toEqual({
+        error: { type: "sandbox", message: "Blocked: .mcp.json is a link to mcp.json in this folder. Make it a file, or point it outside the folder, to run commands here." },
       });
-      expect([readFileSync(join(folder, "mcp.json"), "utf8"), readFileSync(join(shared, "settings.json"), "utf8")]).toEqual(["{}\n", "{}\n"]);
+      expect(existsSync(join(folder, "ran"))).toBe(false);
+      rmSync(join(folder, ".mcp.json"));
+      writeFileSync(join(folder, ".mcp.json"), "{}\n");
+      expect(await command("touch ran && echo ran")).toMatchObject({ ok: { output: "ran\n" } });
     } finally {
-      for (const name of [".vscode", ".mcp.json", "mcp.json"]) rmSync(join(folder, name), { force: true });
-      rmSync(shared, { recursive: true, force: true });
+      for (const name of [".mcp.json", "mcp.json", "ran"]) rmSync(join(folder, name), { force: true });
     }
   });
 

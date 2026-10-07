@@ -167,7 +167,7 @@ describe("a folder's protected keys, for a guest's read-only binds", { timeout: 
     ]);
   });
 
-  it("name what a link at a protected name leads to in the folder, nothing for one that leads out of it, and the link itself for one that leads to nothing there", async () => {
+  it("name what a link at a protected name leads to in the folder, nothing for one that leads out of it, and the link itself for one that leads to nothing there, and refuse commands while one leads in", async () => {
     const a = folders[ROOT_A] ?? "";
     // An editor's settings shared with a sibling worktree, out of the folder.
     mkdirSync(join(base, "shared-vscode"));
@@ -178,8 +178,14 @@ describe("a folder's protected keys, for a guest's read-only binds", { timeout: 
     symlinkSync("missing", join(a, ".idea"));
     symlinkSync(join(base, "nowhere"), join(a, ".zshrc"));
     const carried: ProtectedKey[][] = [];
-    expect(await command(toolHosts({ protect: () => {} }), carried)).toEqual(RAN);
-    expect(carried).toEqual([[key(".git", "rw"), key(".git/config"), key(".git/hooks"), key(".idea"), key("mcp.json")]]);
+    const told: ProtectedKey[][] = [];
+    expect(await command(toolHosts({ protect: (_root, keys) => void told.push(keys) }), carried)).toEqual({
+      error: {
+        type: "sandbox",
+        message: "Blocked: .idea is a link to missing in this folder. .mcp.json is a link to mcp.json in this folder. Make each a file, or point it outside the folder, to run commands here.",
+      },
+    });
+    expect([carried, told.at(-1)]).toEqual([[], [key(".git", "rw"), key(".git/config"), key(".git/hooks"), key(".idea"), key("mcp.json")]]);
   });
 
   it("are not named for an executor that binds none", async () => {
