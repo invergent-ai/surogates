@@ -177,9 +177,11 @@ class History:
             unpaired = {p for p, (_, after) in versions.items() if after is None and p not in paired}
             held = _together(held | unpaired, links)
         changes = [
-            # A real file already as the turn left it lands as a no-op.
+            # A real file already as the turn left it lands as a no-op.  Writes
+            # land before deletions: a landing cut off between a move's two
+            # halves leaves the file under both names, never under neither.
             {"path": path, "before": real[path], "after": versions[path][1]}
-            for path in sorted(versions) if path not in held
+            for path in sorted(versions, key=lambda p: (versions[p][1] is None, p)) if path not in held
         ]
         overlapped = [
             # Why each waits: the real file changed since, it is a change of

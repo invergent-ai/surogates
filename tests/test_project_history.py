@@ -674,3 +674,12 @@ def test_a_landing_that_left_out_two_thousand_files_is_recorded(tmp_path, projec
     out = history.record(turn=turn["commit"], applied=applied, author=THREAD_A, trailers=trailers("landing", *held))
     named = git(history, "log", "-1", "--format=%(trailers:key=Surogate-Not-Merged,valueonly)", out["commit"])
     assert len(named.splitlines()) == 2000
+
+
+def test_a_rename_lands_its_new_name_before_it_removes_the_old(tmp_path, project):
+    (project / "Draft.docx").write_bytes(b"the draft")
+    history = opened(tmp_path, project)
+    (history.copy / "Draft.docx").rename(history.copy / "Final.docx")
+    turn = history.commit_turn(author=THREAD_A, trailers=trailers("turn"))
+    # Cut off between the two, the document is under both names, never under neither.
+    assert [(c["path"], c["after"] is None) for c in turn["changes"]] == [("Final.docx", False), ("Draft.docx", True)]
