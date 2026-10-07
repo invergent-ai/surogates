@@ -64,6 +64,32 @@ async function focus(shell: ElectronApplication): Promise<void> {
   await expect.poll(() => shell.evaluate(({ BrowserWindow }) => BrowserWindow.getFocusedWindow() !== null)).toBe(true);
 }
 
+/**
+ * Quit, and hold the quit once it has gone on, past the window's hide: a sign-in under way, held at who
+ * signed in, keeps the app stopping until the returned release. *page* is the window's own.
+ */
+async function quitHeld(shell: ElectronApplication, page: Page): Promise<() => void> {
+  const release = agent.hold("me");
+  const asking = agent.asked.me;
+  const before = (await opened(shell)).length;
+  await page.evaluate(() => (window as unknown as { surogateShell: { signIn(): Promise<void> } }).surogateShell.signIn());
+  await expect.poll(async () => (await opened(shell)).length).toBe(before + 1);
+  void agent.approve((await opened(shell))[before]!).catch(() => {});
+  await expect.poll(() => agent.asked.me).toBe(asking + 1);
+  void shell.evaluate(({ app: electron }) => electron.quit()).catch(() => {});
+  // The quit went on: the inbox is followed no more.
+  await expect.poll(() => agent.inboxStreams.size).toBe(0);
+  return release;
+}
+
+// The held quit released, and the app gone.
+async function quitted(shell: ElectronApplication, release: () => void): Promise<void> {
+  const closed = shell.waitForEvent("close");
+  release();
+  await closed;
+  app = undefined;
+}
+
 describe("the app's notifications", () => {
   it("tell of a prompt waiting over the hidden window, and a click shows it", async () => {
     const client = await signedIn();
@@ -169,26 +195,75 @@ describe("the app's notifications", () => {
     await hide(app!);
     await expect.poll(() => agent.inboxStreams.size).toBe(1);
     await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(1);
-    // A sign-in under way, held at who signed in: the quit waits for it once the window has gone.
-    const release = agent.hold("me");
-    const asking = agent.asked.me;
-    const before = (await opened(app!)).length;
-    await page.evaluate(() => (window as unknown as { surogateShell: { signIn(): Promise<void> } }).surogateShell.signIn());
-    await expect.poll(async () => (await opened(app!)).length).toBe(before + 1);
-    void agent.approve((await opened(app!))[before]!).catch(() => {});
-    await expect.poll(() => agent.asked.me).toBe(asking + 1);
-    const closed = app!.waitForEvent("close");
-    void app!.evaluate(({ app: electron }) => electron.quit()).catch(() => {});
+    const release = await quitHeld(app!, page);
     // The inbox and the chat are followed no more: what comes now raises nothing.
-    await expect.poll(() => agent.inboxStreams.size).toBe(0);
     await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(0);
     agent.tell({ kind: "input_required", title: "Which report should I start from?", session_id: OTHER });
     agent.turnEnds(CHAT);
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(await notices(app!)).toEqual([]);
-    release();
-    await closed;
-    app = undefined;
+    await quitted(app!, release);
+  });
+
+  it("tell nothing of an item read in the moment the quit goes on", async () => {
+    await signedIn();
+    const page = await shellPage(app!);
+    await hide(app!);
+    await expect.poll(() => agent.inboxStreams.size).toBe(1);
+    // The item is told on the stream, and its read is under way as the quit goes on.
+    const read = agent.hold("item");
+    agent.tell({ kind: "input_required", title: "Which report should I start from?", session_id: OTHER });
+    await expect.poll(() => agent.asked.item).toBe(1);
+    const release = await quitHeld(app!, page);
+    read();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await notices(app!)).toEqual([]);
+    await quitted(app!, release);
+  });
+
+  it("tell nothing of a turn that ends in the moment the quit goes on", async () => {
+    const client = await signedIn();
+    const page = await shellPage(app!);
+    await focus(app!);
+    await moveTo(client, `/chat/${CHAT}`);
+    await hide(app!);
+    await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(1);
+    // The turn ends, and the chat's title is being read as the quit goes on.
+    const read = agent.hold("title");
+    agent.turnEnds(CHAT);
+    await expect.poll(() => agent.asked.title).toBe(1);
+    const release = await quitHeld(app!, page);
+    read();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await notices(app!)).toEqual([]);
+    await quitted(app!, release);
+  });
+
+  it("tell nothing of a prompt asked once the quit has gone on", async () => {
+    const client = await signedIn();
+    const page = await shellPage(app!);
+    await hide(app!);
+    const release = await quitHeld(app!, page);
+    // The web client still runs while the app stops, and asks for a folder over the hidden window.
+    void client.evaluate(() => window.surogateDesktop!.prepareFolder("pick")).catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await notices(app!)).toEqual([]);
+    await quitted(app!, release);
+  });
+
+  it("open nothing on a click once the quit has gone on, though they were told before", async () => {
+    const client = await signedIn();
+    const page = await shellPage(app!);
+    await hide(app!);
+    await expect.poll(() => agent.inboxStreams.size).toBe(1);
+    agent.tell({ kind: "input_required", title: "Which report should I start from?", session_id: CHAT });
+    await expect.poll(async () => (await notices(app!)).length).toBe(1);
+    const before = client.url();
+    const release = await quitHeld(app!, page);
+    await clickNotice(app!, 0);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect([await shown(app!), client.url()]).toEqual([false, before]);
+    await quitted(app!, release);
   });
 
   it("tell a turn's end in the chat followed once, though the inbox has it too, and the chat's other items as the inbox has them", async () => {

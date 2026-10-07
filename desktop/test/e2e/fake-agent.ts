@@ -24,8 +24,9 @@ export const ROTATED = `surg_dev_${"r".repeat(44)}`;
 // The signed-in user, as /auth/me and the fake link's welcome name them.
 export const ACCOUNT = { name: "Flavius Burca", email: "flavius@example.com", userId: "u", orgId: "o" };
 
-// The routes a test can hold: who the agent is, who signed in, adding this computer, and reauthorizing it.
-type Held = "config" | "me" | "register" | "reauthorize";
+// The routes a test can hold: who the agent is, who signed in, adding this computer, reauthorizing it,
+// an inbox item's read and a chat's title.
+type Held = "config" | "me" | "register" | "reauthorize" | "item" | "title";
 
 function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
@@ -63,7 +64,7 @@ export class FakeAgent {
   revokedAt: string | null = null;
   // Routes that answer only once the test releases them, as a slow agent would, and how often each was asked.
   private readonly held = new Map<Held, Promise<void>>();
-  readonly asked: Record<Held, number> = { config: 0, me: 0, register: 0, reauthorize: 0 };
+  readonly asked: Record<Held, number> = { config: 0, me: 0, register: 0, reauthorize: 0, item: 0, title: 0 };
   readonly link = new FakeLinkServer({ token: TOKEN });
   readonly registered: unknown[] = [];
   readonly deleted: string[] = [];
@@ -174,6 +175,7 @@ export class FakeAgent {
     const chat = /^\/api\/v1\/sessions\/([^/?]+)\?agent_id=(.*)$/.exec(path);
     if (chat && bearer) {
       if (chat[2] !== this.config.agent_id) return json(response, 400, { detail: "no agent_id in request" });
+      await this.answered("title");
       return json(response, 200, { id: chat[1], title: this.titles.get(chat[1]!) ?? null });
     }
     if (path.startsWith("/api/v1/inbox") && bearer) {
@@ -189,6 +191,7 @@ export class FakeAgent {
         response.on("close", () => this.inboxStreams.delete(response));
         return;
       }
+      await this.answered("item");
       const found = this.inbox.get(Number(/^\/api\/v1\/inbox\/(\d+)$/.exec(asked.pathname)?.[1]));
       return found ? json(response, 200, found) : json(response, 404, { detail: "Not found." });
     }

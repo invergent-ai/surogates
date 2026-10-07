@@ -1170,9 +1170,10 @@ const TOLD: Record<string, string> = {
 // The window is away: hidden, minimised, or behind another app's.
 const away = (): boolean => BrowserWindow.getFocusedWindow() === null;
 
-// A page of the web client, the window shown: what a notification's click opens.
+// A page of the web client, the window shown: what a notification's click opens. Once the quit goes
+// on there is no notice left to click: the quit closes them all as it hides the window.
 function openPage(path: string): void {
-  if (!main || leaving || !webClientPath(path)) return;
+  if (!main || !webClientPath(path)) return;
   main.show();
   goWeb(path);
 }
