@@ -331,6 +331,8 @@ async def test_a_put_back_a_cancel_reaches_still_finishes(api, monkeypatch, pods
     with pytest.raises(asyncio.CancelledError):
         await turn
     assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "c.md", "notes.txt"]
+    # Its pod goes: no later turn takes up the copy whose writes were put back.
+    assert (pool.holds_copy(str(thread.id)), pods.pods) == (False, {})
 
 
 async def test_a_cancelled_landing_puts_its_files_back(api, monkeypatch, pods):
@@ -344,6 +346,7 @@ async def test_a_cancelled_landing_puts_its_files_back(api, monkeypatch, pods):
         await turn
     # a.md and b.md were applied, and c.md written before its reply was read: all go back.
     assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "notes.txt"]
+    assert pods.pods == {}
 
 
 class FailsToCommit(SandboxPool):

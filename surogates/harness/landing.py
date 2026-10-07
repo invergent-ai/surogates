@@ -158,12 +158,12 @@ async def _land(
         if not isinstance(exc, Exception):
             # Cancelled: the turn's lease went to another worker, which cannot
             # reach this pod.  What was applied still goes back, then the cancel goes on.
-            await _after_cancel(put_back, session.id)
+            await _after_cancel(put_back, sandbox_pool, owner)
             raise
         try:
             failed = await asyncio.shield(put_back)
         except asyncio.CancelledError:
-            await _after_cancel(put_back, session.id)
+            await _after_cancel(put_back, sandbox_pool, owner)
             raise
         outcome.update(state="escalated" if failed else "compensated")
     applied = {c["path"]: c for c in outcome["landed"]}
@@ -183,12 +183,17 @@ async def _land(
     return outcome
 
 
-async def _after_cancel(put_back: asyncio.Future, session_id: Any) -> None:
-    """Wait, bounded, for a cancelled landing's put-back to finish."""
+async def _after_cancel(put_back: asyncio.Future, sandbox_pool: Any, owner: str) -> None:
+    """Wait, bounded, for a cancelled landing's put-back, then let the thread's pod go.
+
+    No later turn on this worker takes up the copy whose writes were put
+    back.  A put-back still running keeps its pod.
+    """
     try:
         await asyncio.wait_for(asyncio.shield(put_back), _PUT_BACK_BOUND)
+        await asyncio.shield(sandbox_pool.destroy_for_session(owner))
     except BaseException:
-        logger.warning("The put-back of %s's cancelled landing is still running", session_id, exc_info=True)
+        logger.warning("The cancelled landing of %s did not finish putting back and going", owner, exc_info=True)
 
 
 async def _put_back(saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str) -> list[SagaStep]:
