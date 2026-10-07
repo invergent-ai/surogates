@@ -194,6 +194,21 @@ describe("signing in", () => {
     expect(agent.registered).toHaveLength(1);
   });
 
+  it("stays signed in once the agent bound the sign-in, though the computer's link cannot connect: the computer shows offline until it can", async () => {
+    const { shell, page } = await signInEnded();
+    await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    agent.link.refusing = true;
+    await signIn(shell, page, agent);
+    await expect.poll(() => agent.reauthorized).toEqual(["Bearer at-2"]);
+    await expect.poll(() => page.getAttribute("#device", "title"), { timeout: 5_000 }).toBe("Offline: reconnecting");
+    expect(await page.isVisible("#sign-in")).toBe(false);
+    expect(existsSync(state("session.json"))).toBe(true);
+    // The new token is its only copy: kept, whatever the link does.
+    expect(readFileSync(state("credentials.json"), "utf8")).toContain(ROTATED);
+    agent.link.refusing = false;
+    await expect.poll(() => page.getAttribute("#device", "title"), { timeout: 15_000 }).toBe("Connected as Laptop");
+  });
+
   it("signs out rather than keep a sign-in it cannot bind to the computer", async () => {
     const { shell, page } = await signInEnded();
     agent.reauthorizeStatus = 500;

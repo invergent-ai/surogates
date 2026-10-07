@@ -118,6 +118,21 @@ describe("restoring a revoked computer", () => {
     await expect.poll(() => agent.oauth.some((form) => form.token === "rt-1")).toBe(true);
   });
 
+  it("keeps the restored token though the link cannot connect yet: the computer shows offline until it can", async () => {
+    const { page, client } = await bound();
+    agent.link.close(4403);
+    await expect.poll(() => page.textContent("#device-action-button")).toBe("Restore…");
+    agent.link.refusing = true;
+    await page.click("#device-action-button");
+    await expect.poll(() => page.getAttribute("#device", "title"), { timeout: 5_000 }).toBe("Offline: reconnecting");
+    expect(agent.reauthorized).toEqual(["Bearer at-1"]);
+    expect(credentials()).toEqual([expect.objectContaining({ deviceId: "d", plain: ROTATED })]);
+    expect(await page.isVisible("#device-action")).toBe(false);
+    expect(await client.evaluate(() => window.surogateDesktop!.getDevice())).toMatchObject({ localFolders: true });
+    agent.link.refusing = false;
+    await expect.poll(() => page.getAttribute("#device", "title"), { timeout: 15_000 }).toBe("Connected as Laptop");
+  });
+
   it("adds this computer afresh when the agent has no such device any more", async () => {
     const { page } = await bound();
     agent.link.close(4403);

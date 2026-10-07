@@ -25,6 +25,8 @@ export class FakeLinkServer {
   // The close code of each connection, in order.
   readonly closes: number[] = [];
   connections = 0;
+  // True: every connection is dropped as it opens, as a proxy that blocks WebSockets would.
+  refusing = false;
   // Frames sent right behind each welcome, in one burst with it.
   behindWelcome: Record<string, unknown>[] = [];
   private server: WebSocketServer | null = null;
@@ -39,6 +41,7 @@ export class FakeLinkServer {
     this.server = at ? new WebSocketServer(at) : new WebSocketServer({ host: "127.0.0.1", port: 0 });
     if (!at) await once(this.server, "listening");
     this.server.on("connection", (socket, request) => {
+      if (this.refusing) return void socket.terminate();
       this.connections += 1;
       this.socket = socket;
       socket.on("close", (code) => this.closes.push(code));

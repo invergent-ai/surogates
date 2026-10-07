@@ -427,10 +427,29 @@ async function registerComputer(agent: Agent): Promise<void> {
 }
 
 /**
+ * Keep the token the agent just issued this computer, its only copy, and run the device on it. The
+ * sign-in is bound by then, so nothing here ends it: a link that cannot connect shows offline and
+ * retries as any link does, and a device that cannot start is reported, as at launch.
+ */
+async function keepAndStart(agent: Agent, renewed: LiveCredential): Promise<void> {
+  kept = renewed;
+  try {
+    credentials.save(renewed);
+  } catch (error) {
+    // Still kept in memory: the device runs on it until the app quits.
+    report(error);
+  }
+  // The device on the old token goes first: the new one keeps the same journal.
+  await stopDevice(device?.started, null).catch(report);
+  device = null;
+  await startStack(agent, renewed).catch(report);
+}
+
+/**
  * Bind the sign-in that just happened to the computer kept for its account, before anything uses it:
  * revoking the computer then ends it too, and the window's session made from it. The device starts
- * again on the new token the agent issues for it. A sign-in that cannot be bound is ended rather than
- * run unbound.
+ * again on the new token the agent issues for it. A sign-in the agent did not bind is ended rather
+ * than run unbound; once it is bound, it stays, whatever the device does.
  */
 async function bindToComputer(agent: Agent): Promise<void> {
   const session = signedIn;
@@ -438,19 +457,9 @@ async function bindToComputer(agent: Agent): Promise<void> {
   // A revoked computer stays unbound until the user restores it, which binds the sign-in it uses.
   if (!session || !live(credential) || credential.orgId !== session.account.orgId || credential.userId !== session.account.userId) return;
   rotating = credential;
+  let renewed: LiveCredential | null;
   try {
-    const restored = await rebind({
-      agent, session, credential,
-      verify: (token) => verifyDevice(linkUrl(agent.origin), token),
-      // The device on the old token goes first: the new one keeps the same journal.
-      start: async (renewed) => {
-        await stopDevice(device?.started, null);
-        device = null;
-        return startStack(agent, renewed);
-      },
-      save: (renewed) => credentials.save(renewed),
-    });
-    if (restored) kept = restored;
+    renewed = await rebind({ session, credential });
   } catch (error) {
     if (signedIn === session) signedIn = null;
     await session.end().catch(report);
@@ -458,6 +467,7 @@ async function bindToComputer(agent: Agent): Promise<void> {
   } finally {
     rotating = null;
   }
+  if (renewed) await keepAndStart(agent, renewed);
 }
 
 /** Revoke *credential*'s device on a link of its own, with the link's backoff, until the agent hears it; then forget it. */
@@ -608,12 +618,7 @@ async function restore(agent: Agent): Promise<void> {
   restoring = true;
   changed();
   try {
-    const restored = await reauthorize({
-      agent, session, credential,
-      verify: (token) => verifyDevice(linkUrl(agent.origin), token),
-      start: (made) => startStack(agent, made),
-      save: (made) => credentials.save(made),
-    });
+    const restored = await reauthorize({ session, credential });
     if (restored === "gone") {
       // The agent has no such device any more: its folders here go too, and this computer is added afresh.
       kept = null;
@@ -624,10 +629,10 @@ async function restore(agent: Agent): Promise<void> {
     } else if (restored === "sign-in-again") {
       restoreFailure = "The agent wants a newer sign-in: sign in again, then restore";
     } else {
-      kept = restored;
+      await keepAndStart(agent, restored);
     }
   } catch (error) {
-    if (kept === credential) device = null;
+    // The agent did not restore it: nothing was issued, and nothing started.
     restoreFailure = error instanceof Error ? error.message : String(error);
   } finally {
     restoring = false;
