@@ -15,7 +15,7 @@ import { inside } from "../files/paths.js";
 import type { Outcome } from "../link/protocol.js";
 import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STOPPED, supervise, timedOut } from "./command.js";
 import { PROXY_URL } from "./listeners.js";
-import { TUNNELS } from "./network.js";
+import { socketOf } from "./network.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
 import { type Answer, type BindMode, type HostUser, MAX_SHARES, type ProtectedKey, type Question, ROOT_ID, type Share } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
@@ -217,7 +217,7 @@ export async function enter(root: string, place: Place, share: Share, user: Host
     [
       "-c", 'echo $$ > "$1/cgroup.procs" && shift && exec "$@"', "sh", cgroup,
       "/usr/bin/unshare", "--mount", "--pid", "--fork", "--kill-child", "--ipc", "--uts", "--net", "--cgroup", "--propagation", "private", "--",
-      ENTER_ROOT, join(SESSIONS, root), place.folder, mount, place.home, String(uid), user.name, join(TUNNELS, `${root}.sock`),
+      ENTER_ROOT, join(SESSIONS, root), place.folder, mount, place.home, String(uid), user.name, socketOf(root),
     ],
     { env: rootEnvironment(readFileSync(LAYOUT, "utf8"), user), stdio: ["pipe", "pipe", "pipe"] },
   );

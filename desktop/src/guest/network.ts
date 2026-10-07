@@ -12,7 +12,7 @@ import { join } from "node:path";
 import type { Duplex } from "node:stream";
 
 // The roots' sockets, the agent's own: each root's namespace has its own bound at /run/surogate/net.sock.
-export const TUNNELS = "/run/surogate/net";
+const TUNNELS = "/run/surogate/net";
 // A destination line: a host, as a command spelled it and the host proxy judges it, and a port.
 const DESTINATION = /^[^\s/]{1,255}:\d{1,5}$/;
 // A destination line's bound: its bytes, and the time it has to end.
@@ -20,6 +20,11 @@ const MAX_LINE = 512;
 const LINE_MS = 5_000;
 // How many connections one root may have open at once: past it, a connection is refused at once.
 export const MAX_TUNNELS = 256;
+
+/** *root*'s socket, in the agent's folder of them unless *folder* is given. */
+export function socketOf(root: string, folder = TUNNELS): string {
+  return join(folder, `${root}.sock`);
+}
 
 export class Network {
   private readonly session: ClientHttp2Session;
@@ -51,7 +56,7 @@ export class Network {
   }
 
   path(root: string): string {
-    return join(this.folder, `${root}.sock`);
+    return socketOf(root, this.folder);
   }
 
   // A connection of *root*'s: its destination line, then a stream for it.
