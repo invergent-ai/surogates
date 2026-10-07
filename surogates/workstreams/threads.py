@@ -44,7 +44,7 @@ async def start_thread(
     )
     if project is None:
         return None
-    config = thread_config(project.id, title=title, tier=project.thread_tier)
+    config = thread_config(project, title=title)
     # The master's board group, so verified notes reach sibling threads.
     await ensure_group_and_inherit(
         parent_session=master, session_store=session_store,

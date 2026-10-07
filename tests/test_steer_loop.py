@@ -271,3 +271,31 @@ async def test_no_followup_completes_normally(monkeypatch):
 
     await _drive(harness, responses=[_final_response("done")], monkeypatch=monkeypatch)
     assert harness._complete_session.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stopped", ["before_the_call", "during_the_call"])
+async def test_a_stop_hands_the_turns_spend_to_its_teardown(monkeypatch, stopped):
+    """Both interrupt checks pass the turn's tracker, so the stop settles
+    what the turn spent rather than each hold's reserved floor."""
+    from surogates.harness.cost_tracker import SessionCostTracker
+
+    store = AsyncMock()
+    store.get_events = AsyncMock(return_value=[])
+    harness = _make_loop_harness(session_store=store)
+    harness._abort_iteration_with_pause = AsyncMock(return_value=None)
+    if stopped == "before_the_call":
+        harness.interrupt("paused by user")
+
+    async def call(**_kwargs):
+        harness.interrupt("paused by user")
+        return _final_response("Half a memo.")
+
+    monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", call)
+    session, tracker = _make_session(), SessionCostTracker()
+    await harness._run_loop(
+        session, [{"role": "user", "content": "do the task"}], "system",
+        SimpleNamespace(lease_token=uuid4()), cost_tracker=tracker, all_events=[],
+    )
+    [(args, _)] = harness._abort_iteration_with_pause.await_args_list
+    assert (args[0], args[2]) == (session, tracker)

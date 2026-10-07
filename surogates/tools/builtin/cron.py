@@ -83,7 +83,8 @@ async def _cron_create_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     cron = str(arguments.get("cron") or "").strip()
     timezone_name = str(arguments.get("timezone") or "UTC")
     recurring = bool(arguments.get("recurring", True))
-    name = str(arguments.get("name") or "").strip() or _default_name(prompt)
+    # The model names it; a project's Routines tab shows at most 500 units.
+    name = (str(arguments.get("name") or "").strip() or _default_name(prompt))[:200]
 
     try:
         validate_scheduled_prompt(prompt, source="cron_create")

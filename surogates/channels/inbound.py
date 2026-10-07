@@ -167,31 +167,6 @@ class InboundOutcome(str, Enum):
     session message was emitted or enqueued."""
 
 
-def _allowance_block_notice(code: str | None, buy_url: str | None) -> str:
-    """User-facing notice when the allowance gate drops a channel turn.
-
-    Names the reason (subscription vs. usage limit) and appends the buy
-    link when the agent projects one, so slack/telegram senders get a
-    real path to keep going rather than a dead "try again later".
-    """
-    if code == "operator_subscription_exhausted":
-        # The agent OWNER ran out of platform credit; buying more access
-        # cannot help the sender, so no buy link is offered.
-        return (
-            "This assistant is temporarily unavailable. Its owner has "
-            "run out of credit."
-        )
-    if code == "subscription_required":
-        lead = "A subscription is required to keep chatting with this assistant."
-    elif code == "channel_not_included":
-        lead = "Your current plan doesn't include this channel."
-    else:
-        lead = "You've reached your usage limit for this assistant."
-    if buy_url:
-        return f"{lead} Get more access here: {buy_url}"
-    return f"{lead} Please try again later."
-
-
 @lru_cache(maxsize=256)
 def _mention_pattern_regex(csv: str) -> re.Pattern | None:
     """Compile a routing config's ``mention_patterns`` CSV into one regex.
@@ -816,6 +791,7 @@ class ChannelInboundPipeline:
         ):
             from surogates.api.routes._commerce_turn import (
                 AllowanceReserveError,
+                limit_notice,
                 reserve_allowance,
             )
             from surogates.runtime.platform_client import (
@@ -848,7 +824,7 @@ class ChannelInboundPipeline:
                         await deps.input_nudge(
                             session_id,
                             msg,
-                            _allowance_block_notice(
+                            limit_notice(
                                 exc.detail,
                                 runtime_payload.get("commerce_buy_url"),
                             ),

@@ -125,7 +125,10 @@ _RESERVED_PREFIXES: tuple[str, ...] = ("_artifacts/",)
 # feature -- but surfacing a canvas.json in the file browser invites a
 # delete that silently destroys the user's ink, which the event-log tail
 # cannot rebuild.
-_HIDDEN_PREFIXES: tuple[str, ...] = ("_whiteboard/",)
+#
+# A project thread's coding checkouts (``.threads/``) are hidden the same
+# way: a clone's thousands of files would count against the tree's limit.
+_HIDDEN_PREFIXES: tuple[str, ...] = ("_whiteboard/", ".threads/")
 
 
 def _is_reserved(key: str) -> bool:

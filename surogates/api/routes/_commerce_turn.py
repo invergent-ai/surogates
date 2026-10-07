@@ -39,7 +39,8 @@ async def authorize_commerce_turn(
     *,
     buyer: dict | None = None,
     channel: str | None = None,
-) -> None:
+    record: bool = True,
+) -> dict | None:
     """Gate one visitor message behind the agent's monetization mode.
 
     Free agents (the default, and every agent while the platform's
@@ -47,13 +48,15 @@ async def authorize_commerce_turn(
     immediately.  Monetized agents require a session-bound buyer
     identity and a successful ops-side token reservation; the receipt
     is pinned on ``session.config`` for the worker to settle after the
-    turn.  402 details are structured (``{"code", "buy_url"}``) so the
-    widget can render a paywall instead of a generic error.
+    turn, or with *record* off returned for the caller to pin
+    (:func:`reserve_commerce`).  402 details are structured
+    (``{"code", "buy_url"}``) so the widget can render a paywall
+    instead of a generic error.
     """
     payload = await runtime_commerce_payload(request, str(session.agent_id))
     mode = str(payload.get("commerce_mode") or "free")
     if mode == "free":
-        return
+        return None
     buy_url = payload.get("commerce_buy_url")
     if buyer is None:
         buyer = (session.config or {}).get("commerce_buyer") or {}
@@ -62,28 +65,22 @@ async def authorize_commerce_turn(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail={"code": "sign_in_required", "buy_url": buy_url},
         )
-    client = getattr(request.app.state, "platform_client", None)
-    if client is None:
-        logger.error("platform_client is not wired on app.state")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Access checks are temporarily unavailable; try again.",
-        )
     try:
-        receipt = await client.commerce_authorize(
-            str(session.agent_id),
-            firebase_uid=buyer["firebase_uid"],
-            estimated_tokens=estimate_turn_tokens(content),
-            email=buyer.get("email"),
-            name=buyer.get("name"),
+        return await reserve_commerce(
+            platform_client=getattr(request.app.state, "platform_client", None),
+            session_store=getattr(request.app.state, "session_store", None),
+            session=session,
+            content=content,
+            buyer=buyer,
             channel=channel,
+            record=record,
         )
     except CommercePaymentRequiredError as exc:
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail={"code": exc.detail, "buy_url": buy_url},
         ) from exc
-    except Exception as exc:
+    except CommerceReserveError as exc:
         # Fail closed: a paid agent must not serve free turns because
         # the metering plane blinked.
         logger.error(
@@ -95,25 +92,89 @@ async def authorize_commerce_turn(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Access checks are temporarily unavailable; try again.",
         ) from exc
+
+
+class CommerceReserveError(RuntimeError):
+    """The commerce plane could not be reached — callers fail closed."""
+
+
+async def reserve_commerce(
+    *,
+    platform_client,
+    session_store,
+    session,
+    content: str,
+    buyer: dict,
+    channel: str | None,
+    record: bool = True,
+) -> dict | None:
+    """Channel-agnostic paid-turn reservation for one turn of a monetized
+    agent (no HTTP request).
+
+    Reserves the turn's estimate against *buyer*'s purchased tokens and
+    pins the receipt on ``session.config`` for the worker to settle.
+    Returns the hold, None when the receipt carries none; with *record*
+    off it is left for the caller to pin.
+    Raises :class:`~surogates.runtime.platform_client.CommercePaymentRequiredError`
+    on 402 and :class:`CommerceReserveError` when the plane is unreachable.
+    """
+    if platform_client is None:
+        raise CommerceReserveError("platform_client not wired")
+    try:
+        receipt = await platform_client.commerce_authorize(
+            str(session.agent_id),
+            firebase_uid=buyer["firebase_uid"],
+            estimated_tokens=estimate_turn_tokens(content),
+            email=buyer.get("email"),
+            name=buyer.get("name"),
+            channel=channel,
+        )
+    except CommercePaymentRequiredError:
+        raise
+    except Exception as exc:
+        raise CommerceReserveError(str(exc)) from exc
     await pin_entitlements(
-        getattr(request.app.state, "session_store", None),
+        session_store,
         session.id,
         session.config,
         receipt.get("features"),
     )
-    if receipt.get("entitlement_id"):
-        store = get_session_store(request)
+    if not receipt.get("entitlement_id"):
+        return None
+    hold = {
+        "entitlement_id": receipt["entitlement_id"],
+        "reserved_tokens": int(receipt.get("reserved_tokens") or 0),
+        "reservation_id": receipt.get("reservation_id") or "",
+    }
+    if record:
+        if session_store is None:
+            raise CommerceReserveError("session_store not wired")
         # Appended, not overwritten: a second message can land while a
         # turn is still running, and each hold must survive until the
         # worker's settlement takes the whole list atomically.
-        await store.append_session_config_list(
+        await session_store.append_session_config_list(
+            session.id, "commerce_reservations", hold,
+        )
+    return hold
+
+
+async def release_commerce_hold(platform_client, session, hold: dict) -> None:
+    """Give back at nothing spent a paid *hold* that was never pinned: its
+    turn will not run.  Best-effort; the ops reaper releases it otherwise."""
+    try:
+        await platform_client.commerce_debit(
+            session.agent_id,
+            entitlement_id=str(hold["entitlement_id"]),
+            reserved_tokens=hold["reserved_tokens"],
+            actual_tokens=0,
+            reservation_id=hold["reservation_id"] or None,
+        )
+    except Exception:
+        logger.warning(
+            "Releasing an unused paid hold failed for session %s; the ops "
+            "reaper will release it",
             session.id,
-            "commerce_reservations",
-            {
-                "entitlement_id": receipt["entitlement_id"],
-                "reserved_tokens": int(receipt.get("reserved_tokens") or 0),
-                "reservation_id": receipt.get("reservation_id") or "",
-            },
+            exc_info=True,
         )
 
 
@@ -332,16 +393,22 @@ async def firebase_buyer_identity(
     the web message gate and the Plan & tokens tab."""
     if getattr(tenant, "user_id", None) is None:
         return None
+    return await buyer_identity(
+        request.app.state.session_factory, org_id=tenant.org_id, user_id=tenant.user_id,
+    )
+
+
+async def buyer_identity(session_factory, *, org_id, user_id) -> dict | None:
+    """*user_id*'s buyer identity, as :func:`firebase_buyer_identity` gives it."""
     from sqlalchemy import select
 
     from surogates.db.models import User
 
-    session_factory = request.app.state.session_factory
     async with session_factory() as db:
         user = await db.scalar(
             select(User).where(
-                User.id == tenant.user_id,
-                User.org_id == tenant.org_id,
+                User.id == user_id,
+                User.org_id == org_id,
             )
         )
     if (
@@ -355,3 +422,29 @@ async def firebase_buyer_identity(
         "email": user.email,
         "name": user.display_name,
     }
+
+
+def limit_notice(code: str | None, buy_url: str | None) -> str:
+    """User-facing notice when the allowance or paid-turn gate refuses a
+    turn no client is waiting on: a channel's, or a project thread's.
+
+    Names the reason (subscription vs. usage limit) and appends the buy
+    link when the agent projects one, so the user gets a real path to
+    keep going rather than a dead "try again later".
+    """
+    if code == "operator_subscription_exhausted":
+        # The agent OWNER ran out of platform credit; buying more access
+        # cannot help the sender, so no buy link is offered.
+        return (
+            "This assistant is temporarily unavailable. Its owner has "
+            "run out of credit."
+        )
+    if code == "subscription_required":
+        lead = "A subscription is required to keep chatting with this assistant."
+    elif code == "channel_not_included":
+        lead = "Your current plan doesn't include this channel."
+    else:
+        lead = "You've reached your usage limit for this assistant."
+    if buy_url:
+        return f"{lead} Get more access here: {buy_url}"
+    return f"{lead} Please try again later."
