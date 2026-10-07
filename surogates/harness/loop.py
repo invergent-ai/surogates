@@ -1167,6 +1167,12 @@ class AgentHarness(
                         revived_by = "stranded_user_message"
                     elif is_project_master(session.config) and await self._has_unread_report(session_id):
                         revived_by = "worker_report"
+                # A report has no user waiting on it: while the user's limit
+                # refuses the turn, the report waits for their next message,
+                # which the message route holds.
+                if revived_by == "worker_report" and await self._admit_turn(session, "") is not None:
+                    logger.info("Session %s: the user's limit holds back a report", session_id)
+                    return
                 if revived_by is not None:
                     logger.info(
                         "Session %s: status is '%s' but %s is unprocessed — resuming",
@@ -1272,7 +1278,8 @@ class AgentHarness(
 
             # 4'. A project's turn no route admitted (a thread's, a helper's,
             # or a master's resumed or retried) is held against the user's
-            # allowance and paid turns, as a typed message is.
+            # allowance and paid turns, as a typed message is.  A report
+            # wake was held when it revived the master.
             if revived_by != "worker_report" and admitted_at_wake(session):
                 refused = await self._admit_turn(session, _latest_user_event_text(all_events))
                 if refused is not None:

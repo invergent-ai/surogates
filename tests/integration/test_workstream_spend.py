@@ -10,6 +10,7 @@ from sqlalchemy import update
 import surogates.harness.loop as loop_module
 from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
 from surogates.db.models import User
+from surogates.harness.loop_context_replay import unread_reports
 from surogates.runtime import SlashCommandConfig
 from surogates.runtime.platform_client import AllowanceExhaustedError, CommercePaymentRequiredError
 from surogates.session.events import EventType
@@ -17,7 +18,7 @@ from surogates.session.provisioning import create_child_session
 from tests.test_wake_slash_command_gate import _harness
 
 from .test_devices import api  # noqa: F401  (api is a fixture)
-from .test_workstream_threads import answered, events_of, start, turn_ends
+from .test_workstream_threads import answered, events_of, start, turn_ends, turn_of_the_master_ends
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -267,3 +268,54 @@ async def test_a_message_typed_to_the_master_past_the_users_limit_is_refused(api
     # The message is not taken, so no turn runs for it.
     typed = await events_of(api, master.id, EventType.USER_MESSAGE)
     assert "Where are we?" not in [event.data.get("content") for event in typed]
+
+
+async def reported(api):
+    """A master whose turn ended, and whose thread has reported since."""
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await turn_of_the_master_ends(api, master)
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    return master
+
+
+async def test_a_report_wake_is_held_and_spent_against_the_users_allowance(api, monkeypatch):
+    master = await reported(api)
+    ops = Ops()
+    harness, ran = worker(api, monkeypatch, CAPPED, ops)
+    await harness.wake(master.id)
+    assert ran == [master.id]
+    assert (ops.held, ops.spent) == ([("allowance", str(api.user_id), "web")], [("allowance", "hold-1", 1500)])
+
+
+@pytest.mark.parametrize("payload, ops", [
+    (CAPPED, Ops(allowance_left=False)), (PAID, Ops(paid_left=False)),
+], ids=["allowance", "paid"])
+async def test_a_report_waits_while_the_users_limit_is_spent(api, monkeypatch, payload, ops):
+    await a_firebase_user(api)
+    master = await reported(api)
+    harness, ran = worker(api, monkeypatch, payload, ops)
+    await harness.wake(master.id)
+    assert ran == []
+    assert (await api.app.state.session_store.get_session(master.id)).status == "completed"
+    assert await events_of(api, master.id, EventType.SESSION_RESUME, EventType.SESSION_FAIL) == []
+    # The user's next message, once their limit allows it, reads the report.
+    assert unread_reports(await api.app.state.session_store.get_events(master.id))
+
+
+async def test_a_refused_thread_wakes_the_master_at_most_once(api, monkeypatch):
+    master = await master_of(api, await create(api))
+    await turn_of_the_master_ends(api, master)
+    # 100 tokens left: less than a thread's goal, more than a report's 4.
+    harness, ran = worker(api, monkeypatch, CAPPED, ops := Ops(tokens_left=100))
+    goal = "Draft A from the board's Q3 figures, " * 20
+    await harness.wake((await start(api, master, goal=goal)).id)
+    # The thread is refused, and its report wakes the master into one turn
+    # past the limit, which the settle takes down to nothing left.
+    await harness.wake(master.id)
+    assert (ran, ops.tokens_left) == ([master.id], 0)
+    # From then on a report waits for the user's next message.
+    await harness.wake((await start(api, master, title="Summarise B", goal=goal)).id)
+    await harness.wake(master.id)
+    assert ran == [master.id]
