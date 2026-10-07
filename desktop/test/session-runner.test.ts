@@ -18,11 +18,11 @@ let runners: SessionRunner[];
 let raw: ChildProcess[];
 let next = 0;
 
-// The runner as the host starts it, without srt: the protocol is the same.
+// The root runner without its namespaces, as the tests start it: the protocol is the same.
 function bare(args: string[] = [RUNNER]): ChildProcess {
   const child = spawn(process.execPath, args, {
     cwd: base,
-    env: { PATH: "/usr/bin:/bin", HOME: base, LANG: "C.UTF-8", ELECTRON_RUN_AS_NODE: "1" },
+    env: { PATH: "/usr/bin:/bin", HOME: base, LANG: "C.UTF-8" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   raw.push(child);
@@ -67,7 +67,6 @@ more();
 setInterval(() => {}, 1000);
 `;
 
-// Ids of their own: a bare runner's sweep reads every process's marker, other test files' too.
 const request = (command: string, background = false, extra: Partial<SpawnRequest> = {}): SpawnRequest => ({
   id: `sr-${next++}`, command, cwd: base, env: {}, pty: false, stdin: background, ...extra,
 });
@@ -123,32 +122,32 @@ describe("the session runner", { timeout: 20_000 }, () => {
     });
   });
 
-  it("gives a command the runner's environment, the host's names and its marker, without Electron's flag", async () => {
+  it("gives a command the runner's environment and the host's names, and nothing to find it by", async () => {
     const started = await runner();
     const child = started.spawn(request("env", false, { env: { EXTRA: "1" } }));
     const lines = (await collect(child)).out.split("\n");
-    expect(lines).toContain(`SUROGATE_PROCESS=${child.id}`);
     expect(lines).toContain("EXTRA=1");
     expect(lines).toContain(`HOME=${base}`);
-    expect(lines.filter((line) => line.startsWith("ELECTRON_RUN_AS_NODE="))).toEqual([]);
+    // A command's cgroup holds all it starts in the guest: no variable marks it, for a command to clear.
+    expect(lines.filter((line) => line.startsWith("SUROGATE_PROCESS="))).toEqual([]);
   });
 
-  it("ends what a run leaves behind when its shell exits, setsid or not", async () => {
+  it("ends what a run leaves in its process group when its shell exits", async () => {
     const started = await runner();
     const begun = Date.now();
-    expect(await collect(started.spawn(request("sleep 641 & setsid sleep 642 & echo started")))).toEqual({
+    expect(await collect(started.spawn(request("sleep 641 & (sleep 642 &); echo started")))).toEqual({
       out: "started\n", err: "", end: { code: 0, signal: null },
     });
     expect(Date.now() - begun).toBeLessThan(5_000);
     await until(() => running("^sleep 64[12]$") === 0);
   });
 
-  it("keeps what a background process starts, and kills all of it, setsid and double forks too", async () => {
+  it("keeps what a background process starts in its process group, and kills all of it, double forks too", async () => {
     const started = await runner();
-    const child = started.spawn(request("sleep 643 & setsid sleep 644 & (sleep 645 &); sleep 646", true));
+    const child = started.spawn(request("sleep 643 & (sleep 645 &); sleep 646", true));
     const ended = collect(child);
     expect(await child.started).toEqual(expect.any(Number));
-    await until(() => running("^sleep 64[3-6]$") === 4);
+    await until(() => running("^sleep 64[3-6]$") === 3);
     child.kill();
     expect((await ended).end).toEqual({ code: null, signal: "SIGKILL" });
     await until(() => running("^sleep 64[3-6]$") === 0);

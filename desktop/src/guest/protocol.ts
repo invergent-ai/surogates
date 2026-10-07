@@ -56,13 +56,12 @@ export type FromAgent =
   | { type: "result"; id: number; outcome: Outcome };
 
 // Each root runner (runner.ts), after its {"ready":true}. The agent ends the
-// runner by ending its stdin. Until commands move into the VM, a tool host speaks
-// the same to its session runner.
+// runner by ending its stdin.
 
 export type ToRunner =
   // stdin: a pipe the host can write to (a background process); else /dev/null.
   | { type: "spawn"; id: string; command: string; cwd: string; env: Record<string, string>; pty: boolean; stdin: boolean }
-  // To the command's process group and to everything that carries its marker.
+  // To everything of the command: its cgroup in the guest, its process group without one.
   | { type: "signal"; id: string; signal: NodeJS.Signals }
   | { type: "stdin"; id: string; data: string } // base64; answered written, or error with stdin
   // Where a command would run, looked up in the runner's own view and as its user: run's workdir checks.

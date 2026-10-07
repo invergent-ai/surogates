@@ -1,7 +1,7 @@
 // Git hooks a command left in the folder. Git runs an executable file in a .git
 // folder's hooks folder outside the sandbox, the next time someone runs git there,
-// and srt protects a repository's hooks only when it was there before the command
-// started. So after every command the host looks through the whole folder and
+// and the guest's rule refuses the writes that would plant one. As a backstop,
+// after every command the host looks through the whole folder and
 // makes each hook that is not the user's own, unchanged, non-executable: git skips
 // those. Nothing is deleted. The same look refuses commands while a protected name,
 // or a key place, is a link to a path in the folder that is not protected (linkedInto),
@@ -35,9 +35,6 @@ export interface HookScan {
   hooks: Map<string, string>;
   // Folders that could not be read where a command could have hidden a hook.
   unreadable: string[];
-  // Every entry under one of the folder's protected names (protectedInFolder),
-  // files and folders alike, but not a .git folder itself: a .git file is one.
-  protectedKeys: Set<string>;
   // Each link at a protected name or a key place (keyPlace), but for a git hook (the guard
   // stops those), to what a write through it reaches in the folder that is not protected (linkedInto).
   links: Map<string, string>;
@@ -56,9 +53,6 @@ export interface GuardOptions {
   // Every folder a command can write: a hook linked into one is a command's to change.
   writable?: readonly string[];
   timeoutMs?: number;
-  // Told the protected keys of every look that finished, when it started (performance.now()),
-  // and whether it was a look between commands.
-  seen?: (keys: ReadonlySet<string>, startedAt: number, between: boolean) => void;
   // Whether something of the chat's other than its runs could be writing the folder now: a
   // background process, a runner, or a guest run that was answered before its processes ended.
   writing?: () => boolean;
@@ -129,7 +123,7 @@ function leadsInto(folder: string, path: string): string | null {
 // Never rejects. Linked folders are not followed; node_modules and git's object
 // stores are skipped: they are large, and git runs no hook from them.
 export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1): Promise<HookScan> {
-  const scan: HookScan = { hooks: new Map(), unreadable: [], protectedKeys: new Set(), links: new Map(), dependencyLinks: new Map(), todos: [] };
+  const scan: HookScan = { hooks: new Map(), unreadable: [], links: new Map(), dependencyLinks: new Map(), todos: [] };
   const walk = async (dir: string, inGit: boolean): Promise<void> => {
     let entries;
     try {
@@ -161,7 +155,6 @@ export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1):
       }
       const name = entry.name.toLowerCase();
       const key = !(entry.isDirectory() && name === ".git") && protectedInFolder(folder, path);
-      if (key) scan.protectedKeys.add(path);
       const to = entry.isSymbolicLink() && (key || keyPlace(folder, path)) && !isGitHook(folder, path) ? linkedInto(folder, path) : null;
       if (to !== null) scan.links.set(path, to);
       else if (entry.isSymbolicLink() && !isGitHook(folder, path) && dependencyFolder(folder, path) === null) {
@@ -324,7 +317,6 @@ export class HookGuard {
   private readonly known: (hooks: ReadonlyMap<string, string>) => void;
   private readonly writable: readonly string[];
   private readonly timeoutMs: number;
-  private readonly seen: (keys: ReadonlySet<string>, startedAt: number, between: boolean) => void;
   private readonly writing: () => boolean;
   private readonly running: () => boolean;
 
@@ -333,13 +325,12 @@ export class HookGuard {
     this.known = options.known ?? (() => {});
     this.writable = options.writable ?? [folder];
     this.timeoutMs = options.timeoutMs ?? SCAN_TIMEOUT_MS;
-    this.seen = options.seen ?? (() => {});
     this.writing = options.writing ?? (() => false);
     this.running = options.running ?? (() => false);
     // After a crash: no step in a todo is known to be the user's, since the killed host's commands ran.
     this.steps = options.inherited ? new Map() : null;
     this.wrote = Boolean(options.inherited);
-    // The first look starts at once, while srt starts. After a crash it also
+    // The first look starts at once, while the helper starts. After a crash it also
     // catches what the killed host's commands left.
     this.first = this.check();
   }
@@ -383,11 +374,11 @@ export class HookGuard {
     return { ok: { ...ok, output: `${ok.output}${ok.output ? "\n" : ""}${notices.join("\n")}` } };
   }
 
-  // A look between commands, while background processes or an idle runner live: one
-  // may write a hook at any time. What it stops is told with the next command's output.
+  // A look between commands, once one has run in the guest: what it left running may
+  // write a hook at any time. What it stops is told with the next command's output.
   async watch(): Promise<void> {
     await this.first;
-    const { changed, stripped } = await this.check(true);
+    const { changed, stripped } = await this.check();
     for (const key of changed) this.unreported.add(key);
     for (const todo of stripped) this.unstripped.add(todo);
   }
@@ -405,9 +396,9 @@ export class HookGuard {
   // One look, numbered. Only the newest says whether commands may run: an older
   // one may have seen the folder before the newest did. Its own verdict goes back
   // to the caller either way.
-  private async check(between = false): Promise<{ changed: string[]; stripped: string[]; held: boolean; blocked: string | null }> {
+  private async check(): Promise<{ changed: string[]; stripped: string[]; held: boolean; blocked: string | null }> {
     const mine = ++this.looks;
-    const verdict = await this.look(between);
+    const verdict = await this.look();
     if (mine === this.looks) this.blocked = verdict.blocked;
     return verdict;
   }
@@ -416,26 +407,19 @@ export class HookGuard {
   // recorded before any command runs; every look makes what is not in it unable
   // to run, as far as it can see, and, while no command runs, comments out each exec step in a
   // todo that is not the user's. What it changed, the todos it commented steps out of, and why commands may not run, or null.
-  private async look(between: boolean): Promise<{ changed: string[]; stripped: string[]; held: boolean; blocked: string | null }> {
+  private async look(): Promise<{ changed: string[]; stripped: string[]; held: boolean; blocked: string | null }> {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), this.timeoutMs);
     });
-    const startedAt = performance.now();
     const scan = await Promise.race([scanHooks(this.folder), late]);
     clearTimeout(timer);
-    let untold: string | null = null;
-    try {
-      if (scan) this.seen(scan.protectedKeys, startedAt, between);
-    } catch (error) {
-      untold = `Blocked: the computer could not check this folder's protected paths, so commands cannot run here: ${error instanceof Error ? error.message : String(error)}`;
-    }
     const unseen = !scan
       ? `Blocked: the computer could not look through this folder for git hooks within ${this.timeoutMs / 1000} seconds, so commands cannot run here.`
       : scan.unreadable.length > 0
         ? `Blocked: the computer cannot read ${listed(this.folder, scan.unreadable)} in this folder, so it cannot check there for git hooks, which would run outside the sandbox. Make it readable to run commands here.`
         : null;
-    if (!scan || (unseen && !this.baseline)) return { changed: [], stripped: [], held: true, blocked: [unseen, untold].filter(Boolean).join(" ") || null };
+    if (!scan || (unseen && !this.baseline)) return { changed: [], stripped: [], held: true, blocked: unseen };
     this.baseline ??= scan.hooks;
     if (!this.recorded) {
       try {
@@ -446,10 +430,7 @@ export class HookGuard {
           changed: [],
           stripped: [],
           held: true,
-          blocked: [
-            `Blocked: the computer could not record this folder's state, so commands cannot run here: ${error instanceof Error ? error.message : String(error)}`,
-            untold,
-          ].filter(Boolean).join(" "),
+          blocked: `Blocked: the computer could not record this folder's state, so commands cannot run here: ${error instanceof Error ? error.message : String(error)}`,
         };
       }
     }
@@ -470,7 +451,7 @@ export class HookGuard {
     const unremoved = unstrippable.length > 0
       ? `Blocked: the computer could not remove the steps that appeared in ${listed(this.folder, unstrippable)} while this chat's commands could write there, which git would run outside the sandbox. Abort that rebase or cherry-pick, or remove those exec lines, to run commands here.`
       : null;
-    return { changed, stripped, held, blocked: [unstopped, unseen, untold, linked, shown, unremoved].filter(Boolean).join(" ") || null };
+    return { changed, stripped, held, blocked: [unstopped, unseen, linked, shown, unremoved].filter(Boolean).join(" ") || null };
   }
 
   // A look's work on *todos*. While a run is in flight it does nothing, held: the run's own git
