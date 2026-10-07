@@ -129,9 +129,16 @@ function chatRow(chat: Folder["chats"][number]): HTMLElement {
 }
 
 async function renderFolders(): Promise<void> {
-  const folders = await settings.folders();
-  showText(byId("folders-failed"), refused ?? "");
-  byId("folders-none").hidden = folders.length > 0;
+  // A list that cannot be read, as on a computer the agent revoked, says why in its place.
+  let folders: Folder[] = [];
+  let unread: string | null = null;
+  try {
+    folders = await settings.folders();
+  } catch (error) {
+    unread = said(error);
+  }
+  showText(byId("folders-failed"), unread ?? refused ?? "");
+  byId("folders-none").hidden = folders.length > 0 || unread !== null;
   byId("folders").replaceChildren(...folders.map((folder) => {
     const group = document.createElement("div");
     group.className = "folder";

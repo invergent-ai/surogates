@@ -136,6 +136,8 @@ let rotating: Credential | null = null;
 
 // A credential whose token the agent still takes: one a device can start on.
 const live = (credential: Credential | null): credential is LiveCredential => credential?.token != null;
+// What a page asking of a computer the agent revoked is told.
+const REVOKED = "This computer's access to the agent was revoked: restore it from Surogate's window";
 // What the file hosts are told of this computer's user: the home, which no chat's folder may be, and the language.
 const env = { HOME: homedir(), LANG: process.env.LANG || "C.UTF-8" };
 // This computer's credential for the agent, as stored: what the page is told, and what keeps a second registration out.
@@ -993,7 +995,7 @@ function bridge(contents: WebContents, agent: Agent): void {
   // The device, once started: a page asking while it still starts, as at a launch, waits for it.
   const registered = async (): Promise<DeviceStack> => {
     if (anotherAccount()) throw new Error("This computer is registered with the agent for another account");
-    if (kept?.token === null) throw new Error("This computer's access to the agent was revoked: restore it from Surogate's window");
+    if (kept?.token === null) throw new Error(REVOKED);
     if (!device) throw new Error("This computer is not registered with the agent");
     return device.stack ?? device.started;
   };
@@ -1462,11 +1464,15 @@ function chatTitle(root: string): Promise<string> {
   return read;
 }
 
+// The device's stack while its journal is open: a computer the agent revoked keeps its stack, closed, until it is restored.
+const openStack = (): DeviceStack | null => (kept?.token === null ? null : device?.stack ?? null);
+
 // Settings → Folders and permissions: the folders this computer works on for its device's account.
-const folderRows = (): Promise<FolderRow[]> => {
-  const stack = device?.stack;
-  return stack ? listFolders(stack.bindings, chatTitle, alive) : Promise.resolve([]);
-};
+async function folderRows(): Promise<FolderRow[]> {
+  if (kept?.token === null) throw new Error(REVOKED);
+  const stack = openStack();
+  return stack ? listFolders(stack.bindings, chatTitle, alive) : [];
+}
 
 function settingsState() {
   const agent = agents.get();
@@ -1635,7 +1641,7 @@ function showSettings(): void {
     handle("settings:folders", folderRows);
     // A host a chat's user let it reach, taken back: the chat's next connection there asks again.
     handle("settings:take-back", (root, host) => {
-      const bindings = device?.stack?.bindings;
+      const bindings = openStack()?.bindings;
       if (!bindings || typeof root !== "string" || typeof host !== "string" || !bindings.domains(root).includes(host)) {
         throw new Error("This chat cannot reach that host");
       }
@@ -1644,7 +1650,7 @@ function showSettings(): void {
     // A chat's background process, stopped by its user, as the agent's own kill stops one. Only one
     // Settings shows: the VM runs other devices' chats too, and a chat deleted here keeps its processes there.
     handle("settings:stop", async (processRoot, id) => {
-      const stack = device?.stack;
+      const stack = openStack();
       if (
         !stack || typeof processRoot !== "string" || typeof id !== "string" || !stack.bindings.get(processRoot)
         || !alive.of(processRoot).some((found) => found.id === id)

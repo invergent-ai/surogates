@@ -150,6 +150,32 @@ describe("Settings → Folders and permissions", () => {
     await expect.poll(() => texts(settings, "#folders .row .label > .desc")).toEqual(["Asks every time"]);
   });
 
+  it("says this computer's access was revoked once the agent revokes it, and refuses a Take back or a Stop", async () => {
+    const { shell, page, client } = await signedIn();
+    await bound(client, folders[0]!, CHAT, "free");
+    agent.link.close(4403);
+    await expect.poll(() => page.textContent("#device-action-text")).toBe("Local access revoked.");
+    const settings = await foldersSettings(shell, page);
+    await settings.evaluate(() => {
+      const rejections: string[] = [];
+      Object.assign(window, { rejections });
+      window.addEventListener("unhandledrejection", (event) => rejections.push(String(event.reason)));
+    });
+    // Drawn again, as each change of the app's state draws it.
+    await shell.evaluate(({ webContents }) => {
+      webContents.getAllWebContents().find((contents) => contents.getURL().endsWith("/settings.html"))!.send("settings:changed");
+    });
+    await expect.poll(() => settings.textContent("#folders-failed")).toBe("This computer's access to the agent was revoked: restore it from Surogate's window");
+    expect(await settings.isVisible("#folders-none")).toBe(false);
+    // Each refused as anything Settings does not show is.
+    const call = (name: "takeBack" | "stop", what: string) => settings.evaluate(([method, root, other]) =>
+      (window as unknown as { surogateSettings: Record<string, (root: string, other: string) => Promise<void>> }).surogateSettings[method]!(root, other)
+        .then(() => "done", (error: Error) => error.message), [name, CHAT, what] as const);
+    expect(await call("takeBack", "example.com")).toBe("Error invoking remote method 'settings:take-back': Error: This chat cannot reach that host");
+    expect(await call("stop", "proc_000000000000")).toBe("Error invoking remote method 'settings:stop': Error: This chat runs no such process");
+    expect(await settings.evaluate(() => (window as unknown as { rejections: string[] }).rejections)).toEqual([]);
+  });
+
   it("reads each chat's title afresh once its user has logged out, as for another account", async () => {
     const { shell, page, client } = await signedIn();
     agent.titles.set(CHAT, "Quarterly report");
