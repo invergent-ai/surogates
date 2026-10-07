@@ -303,12 +303,19 @@ async function refreshOverview(): Promise<void> {
 }
 
 // One thread's row of the open project, read alone: it keeps its place, a new one comes first,
-// and one the project no longer has goes.
+// and one the project no longer has goes. A row new or gone, or whose files changed, changes the
+// Library too, which is read again with it.
 async function refreshThread(threadId: string): Promise<void> {
   const open = view.kind === "project" ? view : null;
   if (!open) return;
   const row = (await projects.threads(open.id, threadId)).find((found) => found.id === threadId);
   if (view !== open || overview?.project.id !== open.id) return;
+  const before = overview.threads.find((found) => found.id === threadId);
+  if (!row || !before || JSON.stringify(row.files) !== JSON.stringify(before.files)) {
+    const library = await projects.library(open.id);
+    if (view !== open || overview?.project.id !== open.id) return;
+    overview = { ...overview, library };
+  }
   overview = { ...overview, threads: merged(overview.threads, threadId, row) };
   leaveIfGone(open);
 }

@@ -152,6 +152,30 @@ describe("the Overview pane", () => {
     expect(fake).toEqual({ reads: [IDLE], lists: 1 });
   });
 
+  it("reads the Library again when a thread's change brings it a file, and not when it brings none", async () => {
+    const { page, client } = await opened();
+    await page.click('[data-tab="library"]');
+    await client.evaluate(([project, thread]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      const row = fake.data.threads[project!]!.find((found) => found.id === thread)!;
+      row.files = [...row.files, { kind: "file", label: "west.csv", ref: "threads/sales/west.csv", threadId: thread! }];
+      fake.data.library[project!] = [...fake.data.library[project!]!, {
+        path: "threads/sales/west.csv", origin: "produced", threadId: thread!, size: 1024, updatedAt: new Date().toISOString(), place: { kind: "cloud" },
+      }];
+      fake.changed(project!, thread!);
+    }, [REPORT, IDLE]);
+    await expect.poll(() => texts(page, "#files .path")).toContain("threads/sales/west.csv");
+    // A change that brings no file leaves the Library as it was read.
+    await client.evaluate(([project, thread]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      fake.data.library[project!] = [];
+      fake.data.threads[project!]!.find((found) => found.id === thread)!.statusLine = "Merged the regions";
+      fake.changed(project!, thread!);
+    }, [REPORT, IDLE]);
+    await expect.poll(() => page.textContent(`[data-thread="${IDLE}"] .status`)).toBe("Idle · Merged the regions");
+    expect(await texts(page, "#files .path")).toContain("threads/sales/west.csv");
+  });
+
   it("shows a thread it has not listed yet as one of the project's, as a card's View thread opens it", async () => {
     const { page, client } = await opened();
     const started = "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d";
