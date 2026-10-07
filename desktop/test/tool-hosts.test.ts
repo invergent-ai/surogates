@@ -301,7 +301,8 @@ describe("the file tools, against a process of this computer's racing them", { t
     rmSync(outside, { recursive: true, force: true });
     mkdirSync(outside);
     writeFileSync(join(outside, "only-outside"), "OUTSIDE\n");
-    const flipper = spawn("sh", ["-c", `cd '${folder}' && while :; do rm -rf sub; mkdir sub; echo inside > sub/inside; rm -rf sub; ln -s '${outside}' sub; done`], {
+    // It ends with this process: a run killed partway leaves no attacker spinning.
+    const flipper = spawn("sh", ["-c", `cd '${folder}' && while kill -0 ${process.pid} 2>/dev/null; do rm -rf sub; mkdir sub; echo inside > sub/inside; rm -rf sub; ln -s '${outside}' sub; done`], {
       stdio: "ignore", detached: true,
     });
     let reached = 0;
