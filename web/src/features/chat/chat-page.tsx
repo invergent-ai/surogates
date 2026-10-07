@@ -162,6 +162,12 @@ export function ChatPage() {
     };
   }, [sessionId]);
   const place = newChatPlace(device, { desktopSessions, multiSession }, folderChoice);
+  // What the composer shows, for the chat adapter to read when a message is sent: the adapter
+  // stays the same, since the SDK clears a chat that has no session yet whenever its adapter changes.
+  const composer = useRef({ folderChoice });
+  useEffect(() => {
+    composer.current = { folderChoice };
+  });
 
   // Show disclosure banner when transparency is enabled and the user has not
   // yet accepted.  This covers two states:
@@ -214,7 +220,7 @@ export function ChatPage() {
           browserProfileId: browserProfileId ?? undefined,
         };
         // On a folder of this computer, it is confirmed and bound before the first message and its attachments go.
-        const rawSession = await createChat(getDesktop(), { desktopSessions, multiSession }, folderChoice, {
+        const rawSession = await createChat(getDesktop(), useAppStore.getState(), composer.current.folderChoice, {
           create: (execution) => sessionsApi.createSession({ ...fields, execution }),
           online: async (deviceId) => (await listDevices()).some((row) => row.id === deviceId && row.online),
         }).catch((error: unknown) => {
@@ -238,7 +244,7 @@ export function ChatPage() {
         return toAgentChatSession(rawSession);
       },
     }),
-    [handleSessionChange, upsertSession, browserProfileId, desktopSessions, multiSession, folderChoice, fetchSessions],
+    [handleSessionChange, upsertSession, browserProfileId, fetchSessions],
   );
 
   const handleDisclosureConfirmed = useCallback(() => {
