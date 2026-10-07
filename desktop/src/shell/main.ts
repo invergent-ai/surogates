@@ -153,6 +153,8 @@ const masters = new Map<string, Opened>();
 let choice = 0;
 // Why what the user last asked for did not happen: a project that did not open, a thread not resolved.
 let failure: string | null = null;
+// A thread's row, open or resolve, that left the pane between its drawing and the click.
+const NO_SUCH_THREAD = "No such thread in the open project";
 // The open project, for the Overview pane, and what stops following it.
 let overview: { project: Project; threads: ThreadRow[]; library: LibraryEntry[]; routines: Routine[] } | null = null;
 let unfollow = (): void => {};
@@ -1306,13 +1308,16 @@ function wire(window: MainWindow, page: string): void {
       changed();
     }
   });
-  // A thread of the open project, in the centre.
+  // A thread of the open project, in the centre. One that has left the pane since it was drawn is said so.
   handle("shell:thread", (id) => {
     const thread = view.kind === "project" && overview?.project.id === view.id
       ? overview.threads.find((found) => found.id === id) : undefined;
     const path = `/chat/${String(id)}`;
-    if (view.kind !== "project" || !thread || !webClientPath(path)) throw new Error("No such thread in the open project");
     choose();
+    if (view.kind !== "project" || !thread || !webClientPath(path)) {
+      failure = NO_SUCH_THREAD;
+      return changed();
+    }
     view = { ...view, thread: { id: thread.id, title: thread.title } };
     window.go(path);
     changed();
@@ -1321,7 +1326,8 @@ function wire(window: MainWindow, page: string): void {
   const settle = (how: "resolve" | "reopen") => async (id: unknown) => {
     const open = view.kind === "project" && overview?.project.id === view.id ? view : null;
     if (!open || typeof id !== "string" || !overview?.threads.some((found) => found.id === id)) {
-      throw new Error("No such thread in the open project");
+      failure = NO_SUCH_THREAD;
+      return changed();
     }
     const mine = choose();
     changed();

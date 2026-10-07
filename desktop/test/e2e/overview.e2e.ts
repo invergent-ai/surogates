@@ -227,14 +227,31 @@ describe("the Overview pane, at its edges", () => {
     expect(await page.textContent("#greeting-line")).toBe("Open a project to see its threads.");
   });
 
-  it("opens only a thread of the project that is open", async () => {
-    const { page } = await opened();
+  it("opens only a thread of the project that is open, and says why it opened none", async () => {
+    const { page, client } = await opened();
     const outcome = await page.evaluate(async ([budget, question]) => {
       const shell = (window as unknown as { surogateShell: { project(id: string): Promise<void>; thread(id: string): Promise<void> } }).surogateShell;
       await shell.project(budget!);
-      return shell.thread(question!).then(() => "opened", () => "refused");
+      return shell.thread(question!).then(() => "answered", () => "rejected");
     }, [BUDGET, QUESTION]);
-    expect(outcome).toBe("refused");
+    expect(outcome).toBe("answered");
+    await expect.poll(() => page.textContent("#failure")).toBe("No such thread in the open project");
+    expect(client.url()).not.toBe(`${origin}/chat/${QUESTION}`);
+  });
+
+  it("says why a thread that has just left the pane was not resolved, reopened or opened", async () => {
+    const { page } = await opened();
+    const shell = (how: "resolve" | "reopen" | "thread") => page.evaluate((call) => {
+      const calls = (window as unknown as { surogateShell: Record<string, (id: string) => Promise<void>> }).surogateShell;
+      return calls[call]!("9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d").then(() => "answered", () => "rejected");
+    }, how);
+    for (const how of ["resolve", "reopen", "thread"] as const) {
+      // Forward, with nothing to go forward to, draws the last failure away.
+      await page.click("#forward");
+      await expect.poll(() => page.isVisible("#failure")).toBe(false);
+      expect(await shell(how), how).toBe("answered");
+      await expect.poll(() => page.textContent("#failure")).toBe("No such thread in the open project");
+    }
   });
 
   it("asks the page again once, not once a change, when changes come together", async () => {
