@@ -133,6 +133,21 @@ describe("a chat that asks every time", () => {
       { kind: "change", action: "write", path: `${FOLDER}/a.bin`, bytes: 4, preview: null },
     ],
     [
+      "a write of UTF-8 with a NUL in it",
+      op("write", { key: `${FOLDER}/a.bin`, data: Buffer.from("a\u0000b").toString("base64") }),
+      { kind: "change", action: "write", path: `${FOLDER}/a.bin`, bytes: 3, preview: null },
+    ],
+    [
+      "a write that ends part-way through a character",
+      op("write", { key: `${FOLDER}/a.txt`, data: Buffer.from([0x68, 0x69, 0xc3]).toString("base64") }),
+      { kind: "change", action: "write", path: `${FOLDER}/a.txt`, bytes: 3, preview: null },
+    ],
+    [
+      "a write that opens with a byte order mark",
+      op("write", { key: `${FOLDER}/run.sh`, data: Buffer.from("﻿#!/bin/sh\n").toString("base64") }),
+      { kind: "change", action: "write", path: `${FOLDER}/run.sh`, bytes: 13, preview: { text: "﻿#!/bin/sh\n", cut: false } },
+    ],
+    [
       "a delete",
       op("delete", { key: `${FOLDER}/a.txt` }),
       { kind: "change", action: "delete", path: `${FOLDER}/a.txt`, bytes: null, preview: null },

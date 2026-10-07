@@ -112,8 +112,10 @@ function previewOf(data: string, bytes: number): Preview | null {
   const head = Buffer.from(data.slice(0, PREVIEW_BASE64), "base64").subarray(0, PREVIEW_BYTES);
   if (head.includes(0)) return null;
   try {
-    // A character the head cuts in two is left out, not refused.
-    return { text: new TextDecoder("utf-8", { fatal: true }).decode(head, { stream: true }), cut: bytes > head.length };
+    // A character the head cuts in two is left out, not refused; one the data itself ends in
+    // the middle of is not UTF-8. A byte order mark is kept, for the page to mark.
+    const cut = bytes > head.length;
+    return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(head, { stream: cut }), cut };
   } catch {
     return null;
   }
