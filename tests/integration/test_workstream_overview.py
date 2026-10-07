@@ -137,16 +137,20 @@ async def test_only_the_owner_reads_a_projects_threads(api, session_factory):
     assert unknown.status_code == 404, unknown.text
 
 
-async def test_a_question_answered_in_the_thread_ends_its_wait(api):
+async def test_a_question_answered_in_the_thread_ends_its_wait(api, monkeypatch):
     project = await create(api)
     thread = await start(api, await master_of(api, project))
     await asks(api, thread, "Which year?")
     [row] = await rows(api, project)
     assert (row["group"], row["reason"], row["status_line"]) == ("waiting", "question", "Which year?")
+    changes = heard(api, monkeypatch)
     response = await api.client.post(f"/v1/sessions/{thread.id}/messages", json={"content": "2025"}, headers=api.auth())
     assert response.status_code == 202, response.text
-    # The typed message is the question's answer.
+    # The typed message is the question's answer, heard once the wait is over.
     assert await api.app.state.session_store.get_events(thread.id, types=[EventType.ASK_USER_QUESTION_RESPONSE])
+    assert [groups[str(thread.id)] for _, kind, groups in changes if kind == "ask_user_question.response"] == [
+        "working",
+    ]
     [row] = await rows(api, project)
     assert (row["group"], row["reason"]) == ("working", None)
 
@@ -618,6 +622,7 @@ async def test_bringing_a_resolved_thread_back_reopens_it(api, monkeypatch, rout
 async def test_a_resolve_reaches_the_projects_stream(api, monkeypatch):
     project = await create(api)
     thread = await start(api, await master_of(api, project))
+    changes = heard(api, monkeypatch)
 
     async def act():
         await act_on(api, project, thread, "resolve")
@@ -627,6 +632,23 @@ async def test_a_resolve_reaches_the_projects_stream(api, monkeypatch):
         ("ready", {}),
         ("change", {"thread_id": tid, "type": "session.pause"}),
         ("change", {"thread_id": tid, "type": "thread.resolved"}),
+    ]
+    # Heard once it is resolved.
+    assert [groups[tid] for _, kind, groups in changes if kind == "thread.resolved"] == ["resolved"]
+
+
+async def test_a_reopen_is_heard_once_it_is_out_of_resolved(api, monkeypatch):
+    project = await create(api)
+    thread = await start(api, await master_of(api, project))
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    assert (await act_on(api, project, thread, "resolve")).json()["group"] == "resolved"
+    changes = heard(api, monkeypatch)
+    response = await act_on(api, project, thread, "reopen")
+    assert response.status_code == 200, response.text
+    tid = str(thread.id)
+    assert [(kind, groups[tid]) for session_id, kind, groups in changes if session_id == tid] == [
+        ("thread.reopened", "idle"),
     ]
 
 
