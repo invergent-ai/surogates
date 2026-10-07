@@ -408,15 +408,19 @@ async def test_the_app_walks_a_name_that_is_not_utf_8_as_the_cloud_does(built_cl
     with open(os.path.join(os.fsencode(folder), b"n\xff"), "wb") as fh:
         fh.write(b"bytes")
     (folder / "n\ufffd").write_text("t")
-    args = {"key": str(folder), "skip": [], "skip_top": [], "skip_hidden": False, "since": None}
+    # A hidden folder the tree shows: each side's SHOWN_DOT_FOLDERS enters it, hidden ones skipped or not.
+    (folder / ".github").mkdir()
+    (folder / ".github" / "x").write_text("x")
     app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)
     try:
         await app.until(connected)
-        got = await on_app(laptop_rig, "walk", args)
-        want = await perform(LocalWorkspaceIO(str(folder)), "walk", args)
-        assert comparable("walk", args, got) == comparable("walk", args, want) == {
-            "ok": {"files": [["a.txt", 1], ["n\ufffd", 1]], "truncated": False},
-        }
+        for hidden in (False, True):
+            args = {"key": str(folder), "skip": [], "skip_top": [], "skip_hidden": hidden, "since": None}
+            got = await on_app(laptop_rig, "walk", args)
+            want = await perform(LocalWorkspaceIO(str(folder)), "walk", args)
+            assert comparable("walk", args, got) == comparable("walk", args, want) == {
+                "ok": {"files": [[".github/x", 1], ["a.txt", 1], ["n\ufffd", 1]], "truncated": False},
+            }, hidden
     finally:
         await app.close()
 
