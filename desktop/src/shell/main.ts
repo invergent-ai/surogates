@@ -151,7 +151,7 @@ let beforeProjects: View = { kind: "web" };
 const masters = new Map<string, Opened>();
 // Each choice of what the centre shows takes a number: an answer that comes after a later choice applies nothing.
 let choice = 0;
-// Why the project last chosen did not open.
+// Why what the user last asked for did not happen: a project that did not open, a thread not resolved.
 let failure: string | null = null;
 // The open project, for the Overview pane, and what stops following it.
 let overview: { project: Project; threads: ThreadRow[]; library: LibraryEntry[]; routines: Routine[] } | null = null;
@@ -1211,6 +1211,24 @@ function wire(window: MainWindow, page: string): void {
     window.go(path);
     changed();
   });
+  // A thread of the open project resolved, or reopened, from its row: the page's answer is its row.
+  const settle = (how: "resolve" | "reopen") => async (id: unknown) => {
+    const open = view.kind === "project" && overview?.project.id === view.id ? view : null;
+    if (!open || typeof id !== "string" || !overview?.threads.some((found) => found.id === id)) {
+      throw new Error("No such thread in the open project");
+    }
+    const mine = choose();
+    changed();
+    try {
+      const row = await projects[how](open.id, id);
+      if (view === open && overview?.project.id === open.id) overview = { ...overview, threads: merged(overview.threads, id, row) };
+    } catch (error) {
+      if (mine === choice) failure = error instanceof Error ? error.message : String(error);
+    }
+    changed();
+  };
+  handle("shell:resolve", settle("resolve"));
+  handle("shell:reopen", settle("reopen"));
   // Back and Forward move the web client; on the Projects page they leave it, for what the centre
   // showed before it, as the client still is there. A failure the choice cleared is drawn away.
   const move = (step: () => void) => {

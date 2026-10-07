@@ -12,7 +12,7 @@ import type { AddressInfo } from "node:net";
 import type { ElectronApplication, Page } from "playwright-core";
 import { expect } from "vitest";
 
-import type { Project, ProjectFixtures, ProjectsSource } from "../../../web/src/lib/projects.js";
+import type { Project, ProjectFixtures, ProjectsSource, ThreadRow } from "../../../web/src/lib/projects.js";
 import { FakeLinkServer } from "../fake-server.js";
 
 // As surogates/devices/store.py issues one: surg_dev_ and token_urlsafe(33).
@@ -255,7 +255,8 @@ export async function signedInAndAdded(shell: ElectronApplication, page: Page, a
 // Run in the fake agent's page: a ProjectsSource on *data*, registered with the desktop after
 // *delay* ms. The page keeps it as window.fakeProjects, whose changed() tells the source's subscribers,
 // whose lists counts the times the projects were listed, whose reads names each read of threads (a
-// thread's id, or null for them all), and whose register() registers the source.
+// thread's id, or null for them all), whose refusal, when set, is what a change of a project or a
+// thread answers, and whose register() registers the source.
 // The source's methods read it through this, as an object's own methods may.
 function serveProjects(data: ProjectFixtures, delay: number): void {
   const listeners = new Map<string, Set<(threadId: string | null) => void>>();
@@ -263,6 +264,7 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
     data,
     lists: 0,
     reads: [] as Array<string | null>,
+    refusal: null as string | null,
     register: () => {},
     changed: (id: string, threadId: string | null) => {
       for (const listener of listeners.get(id) ?? []) listener(threadId);
@@ -297,15 +299,26 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
     create: refuse,
     update: refuse,
     archive: refuse,
-    resolve: refuse,
-    reopen: refuse,
+    // Resolved or reopened, the row is the same row, moved, as the route answers it.
+    async resolve(id: string, threadId: string) {
+      return this.moved(id, threadId, "resolved");
+    },
+    async reopen(id: string, threadId: string) {
+      return this.moved(id, threadId, "idle");
+    },
+    moved(id: string, threadId: string, group: "resolved" | "idle") {
+      if (fake.refusal) throw new Error(fake.refusal);
+      const row = (this.served.threads[this.one(id).id] ?? []).find((found) => found.id === threadId);
+      if (!row) throw new Error("No such thread.");
+      return Object.assign(row, { group, reason: null, resolvedAt: group === "resolved" ? new Date().toISOString() : null });
+    },
     subscribe(id: string, onChange: (threadId: string | null) => void) {
       const heard = listeners.get(id) ?? new Set();
       heard.add(onChange);
       listeners.set(id, heard);
       return () => void heard.delete(onChange);
     },
-  } satisfies ProjectsSource & { served: ProjectFixtures; one(id: string): Project };
+  } satisfies ProjectsSource & { served: ProjectFixtures; one(id: string): Project; moved(id: string, threadId: string, group: string): ThreadRow };
   fake.register = () => void window.surogateDesktop?.registerProjects(source);
   Object.assign(window, { fakeProjects: fake });
   if (delay >= 0) setTimeout(fake.register, delay);

@@ -54,6 +54,7 @@ interface Served {
   data: ProjectFixtures;
   lists: number;
   reads: Array<string | null>;
+  refusal: string | null;
   changed(id: string, threadId: string | null): void;
 }
 
@@ -161,6 +162,31 @@ describe("the Overview pane", () => {
     await expect.poll(() => page.textContent("#title")).toBe("Summarise B");
     expect(await page.textContent("#to-project")).toBe("Quarterly report");
     expect(await page.isVisible(`[data-thread="${started}"]`)).toBe(true);
+  });
+
+  it("resolves a thread from its row, and reopens it", async () => {
+    const { page } = await opened();
+    const act = `[data-act="${IDLE}"]`;
+    await page.hover(`[data-thread="${IDLE}"]`);
+    expect(await page.getAttribute(act, "aria-label")).toBe("Resolve Collect the sales data");
+    await page.click(act);
+    await expect.poll(() => texts(page, ".section summary")).toEqual(["Waiting on you 3", "Working 2", "Idle 0", "Resolved 2"]);
+    await page.click('[data-group="resolved"] summary');
+    await page.hover(`[data-thread="${IDLE}"]`);
+    expect(await page.textContent(act)).toBe("Reopen");
+    await page.click(act);
+    await expect.poll(() => texts(page, ".section summary")).toEqual(["Waiting on you 3", "Working 2", "Idle 1", "Resolved 1"]);
+  });
+
+  it("says why a thread was not resolved", async () => {
+    const { page, client } = await opened();
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: Served }).fakeProjects.refusal = "No such thread.";
+    });
+    await page.hover(`[data-thread="${IDLE}"]`);
+    await page.click(`[data-act="${IDLE}"]`);
+    await expect.poll(() => page.textContent("#failure")).toBe("No such thread.");
+    expect(await page.isVisible(`[data-group="idle"] [data-thread="${IDLE}"]`)).toBe(true);
   });
 
   it("folds away with the Overview button, and the close button, and comes back", async () => {

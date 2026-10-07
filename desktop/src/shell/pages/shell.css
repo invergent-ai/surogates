@@ -866,6 +866,30 @@ body.main.first {
   gap: 10px;
 }
 
+.section li {
+  position: relative;
+}
+
+/* A row's Resolve or Reopen, shown while the row is hovered or has the focus. */
+.section .act {
+  position: absolute;
+  right: 12px;
+  bottom: 8px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--raised);
+  color: var(--fg-2);
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.section li:hover .act,
+.section li:focus-within .act {
+  opacity: 1;
+}
+
 .thread .place {
   display: inline-flex;
   margin-left: 6px;

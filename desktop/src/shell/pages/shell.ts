@@ -32,7 +32,7 @@ interface State {
   agent: { name: string } | null;
   view: { kind: "web" } | { kind: "projects" } | { kind: "project"; id: string; name: string; thread: { id: string; title: string } | null };
   projects: ProjectRow[]; // as the page listed them
-  failure: string | null; // why the project last chosen did not open
+  failure: string | null; // why what the user last asked for, a project or a thread's resolve, did not happen
   overview: {
     threads: ThreadRow[]; // last active first
     library: Array<{ path: string; origin: "added" | "produced"; threadId: string | null; size: number | null; updatedAt: string | null }>;
@@ -58,6 +58,8 @@ interface Shell {
   projects(): Promise<void>;
   project(id: string): Promise<void>;
   thread(id: string): Promise<void>;
+  resolve(id: string): Promise<void>;
+  reopen(id: string): Promise<void>;
   back(): Promise<void>;
   forward(): Promise<void>;
   reload(): Promise<void>;
@@ -174,8 +176,13 @@ function threadRow(thread: ThreadRow): HTMLElement {
     if (thread.files.length > 2) chips.append(element("span", "chip", `+${thread.files.length - 2}`));
     row.append(chips);
   }
+  // Resolved threads come back with Reopen; any other is resolved from its row, a working one stopped first.
+  const resolved = thread.group === "resolved";
+  const act = button("act", resolved ? "Reopen" : "Resolve", () => void (resolved ? shell.reopen(thread.id) : shell.resolve(thread.id)));
+  act.dataset.act = thread.id;
+  act.setAttribute("aria-label", `${resolved ? "Reopen" : "Resolve"} ${thread.title}`);
   const item = element("li", "");
-  item.append(row);
+  item.append(row, act);
   return item;
 }
 
