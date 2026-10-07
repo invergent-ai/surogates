@@ -31,7 +31,7 @@ import { type Credential, CredentialStore, type LiveCredential } from "./credent
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { letWindowClose, MainWindow, onSettingsKey } from "./main-window.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
-import { ANSWER_TIMEOUT_MS, PageProjects } from "./projects.js";
+import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
 import { segments } from "./pages/ui.js";
@@ -1181,6 +1181,13 @@ function showProject(editing: Opened | null): void {
       });
     };
     const refused = (error: unknown) => (error instanceof Error ? error.message : String(error));
+    // A change the page did not answer in time may have been made all the same: it is said so, and the
+    // projects are read again, so one that was made shows.
+    const unanswered = (error: unknown, what: string) => {
+      if (!(error instanceof TimedOut)) return refused(error);
+      void refreshProjects();
+      return `${error.message}: ${what}`;
+    };
     // The project as the dialog showed it: its archive is asked under the name the user sees.
     let shown: Project | null = null;
     // A project that cannot be read, gone or out of reach, is said so, with nothing to save.
@@ -1221,7 +1228,7 @@ function showProject(editing: Opened | null): void {
         void refreshProjects();
         return null;
       } catch (error) {
-        return refused(error);
+        return unanswered(error, editing ? "the change may have been made" : "the project may have been made");
       }
     });
     handle("project:archive", async () => {
@@ -1229,7 +1236,7 @@ function showProject(editing: Opened | null): void {
       try {
         await projects.archive(editing.id);
       } catch (error) {
-        return refused(error);
+        return unanswered(error, "the project may have been archived");
       }
       close();
       if (view.kind === "project" && view.id === editing.id) {

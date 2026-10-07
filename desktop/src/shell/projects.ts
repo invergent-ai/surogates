@@ -22,6 +22,9 @@ export type ToPage =
 
 class Unusable extends Error {}
 
+/** A call the page did not answer in time: one that changes something may have changed it all the same. */
+export class TimedOut extends Error {}
+
 const fields = (value: unknown): Record<string, unknown> => (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
 const text = (value: unknown, max: number): value is string => typeof value === "string" && value.length <= max;
 const named = (value: unknown): value is string => text(value, 500) && value !== "";
@@ -192,7 +195,7 @@ export class PageProjects implements ProjectsSource {
     const { promise, resolve, reject } = Promise.withResolvers<T>();
     const timer = setTimeout(() => {
       this.calls.delete(id);
-      reject(new Error(`The agent's page did not answer ${method} in time`));
+      reject(new TimedOut(`The agent's page did not answer ${method} in time`));
     }, this.timeoutMs);
     this.calls.set(id, { method, args, resolve: resolve as (value: unknown) => void, reject, timer });
     this.send({ type: "call", id, method, args, deadline: Date.now() + this.timeoutMs });

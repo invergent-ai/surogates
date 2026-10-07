@@ -510,6 +510,22 @@ describe("the project dialog", () => {
     });
   }
 
+  it("says a create that did not answer in time may have made the project, and lists it once made", async () => {
+    const { shell, page, client } = await signedIn();
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { lag: number } }).fakeProjects.lag = 11_000;
+    });
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    await dialog.fill("#name", "Late");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error"), { timeout: 15_000 })
+      .toBe("The agent's page did not answer create in time: the project may have been made");
+    expect(await dialog.inputValue("#name")).toBe("Late");
+    await expect.poll(() => texts(page, "#projects .project .name")).toContain("Late");
+  });
+
   it("saves only what the user changed, and keeps what was changed elsewhere meanwhile", async () => {
     const { shell, page, client } = await signedIn();
     await opened(page, client, REPORT);

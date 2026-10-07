@@ -263,8 +263,9 @@ export async function signedInAndAdded(shell: ElectronApplication, page: Page, a
 // whose lists counts the times the projects were listed, whose reads names each read of threads (a
 // thread's id, or null for them all), whose refusal, when set, is what a change of a project or a
 // thread answers, whose unreachable, when set, makes the list and every call on a project fail as
-// the web client's fetch does with the agent out of reach, and whose register() registers the source. What it
-// changes of a project it keeps at the fake agent, so the next load serves it.
+// the web client's fetch does with the agent out of reach, whose lag is how many ms a change of a
+// project takes to answer once it is made, as a slow agent's, and whose register() registers the
+// source. What it changes of a project it keeps at the fake agent, so the next load serves it.
 // The source's methods read it through this, as an object's own methods may.
 function serveProjects(data: ProjectFixtures, delay: number): void {
   const listeners = new Map<string, Set<(threadId: string | null) => void>>();
@@ -274,6 +275,7 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
     reads: [] as Array<string | null>,
     refusal: null as string | null,
     unreachable: false,
+    lag: 0,
     register: () => {},
     changed: (id: string, threadId: string | null) => {
       for (const listener of listeners.get(id) ?? []) listener(threadId);
@@ -281,6 +283,7 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
   };
   const keep = async (served: ProjectFixtures) => {
     await fetch("/fake/projects", { method: "PUT", body: JSON.stringify(served) });
+    await new Promise((resolve) => setTimeout(resolve, fake.lag));
   };
   const source = {
     served: data,
