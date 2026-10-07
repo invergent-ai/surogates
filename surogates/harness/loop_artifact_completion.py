@@ -26,7 +26,6 @@ from surogates.harness.loop_messages import (
     _as_aware_utc,
     _is_scheduled_run,
     _last_assistant_message_excerpt,
-    _latest_user_message_text,
     _seconds_since,
     _should_notify_parent_on_completion,
 )
@@ -905,7 +904,7 @@ class ArtifactCompletionMixin:
         through_event_id: int | None = None,
         cost_tracker: SessionCostTracker | None = None,
         turn_id: str | None = None,
-        user_message: str | None = None,
+        user_message: str = "",
     ) -> None:
         """Emit SESSION_COMPLETE and advance the cursor.
 
@@ -978,9 +977,7 @@ class ArtifactCompletionMixin:
                 files = await self._drain_and_emit_turn_summary(
                     session_id=session.id,
                     turn_id=turn_id,
-                    user_message=user_message
-                    if user_message is not None
-                    else _latest_user_message_text(messages),
+                    user_message=user_message,
                     # The closing message is the only place a delivery
                     # claim with nothing behind it can be seen.
                     final_message=_last_assistant_message_excerpt(messages),
