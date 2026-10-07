@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'" />
+    <title>Project</title>
+    <link rel="stylesheet" href="shell.css" />
+    <script type="module" src="project.js"></script>
+  </head>
+  <body class="settings-page">
+    <div class="backdrop" id="backdrop"></div>
+    <form class="dialog project-dialog" id="form" role="dialog" aria-modal="true" aria-labelledby="heading" novalidate>
+      <fieldset id="fields">
+        <h2 id="heading"></h2>
+        <label class="field"><span>Name</span><input id="name" type="text" maxlength="256" autocomplete="off" spellcheck="false" /></label>
+        <div class="field"><label for="goal">Goal</label><span class="desc" id="goal-desc">What the project is for. Its conversation and its threads see it.</span><textarea id="goal" maxlength="2000" rows="3" aria-describedby="goal-desc"></textarea></div>
+        <div class="settings-only" id="settings-only">
+          <div class="field"><label for="instructions">Instructions</label><span class="desc" id="instructions-desc">How the project's threads work: the tone, the format, what to leave out. A thread started after a change follows it.</span><textarea id="instructions" maxlength="16000" rows="6" aria-describedby="instructions-desc"></textarea></div>
+          <label class="field"><span>The conversation's model</span><select id="coordinator-tier" aria-describedby="tier-desc"><option value="">The agent's own</option><option value="basic">Basic</option><option value="pro">Pro</option></select></label>
+          <label class="field"><span>The threads' model</span><select id="thread-tier" aria-describedby="tier-desc"><option value="">The agent's own</option><option value="basic">Basic</option><option value="pro">Pro</option></select></label>
+          <p class="desc" id="tier-desc">A model above your plan's runs as your plan's.</p>
+        </div>
+        <p class="error" id="error" role="alert"></p>
+        <div class="actions">
+          <button class="btn" id="archive" type="button">Archive project…</button>
+          <span class="spacer"></span>
+          <button class="btn" id="cancel" type="button">Cancel</button>
+          <button class="btn primary" id="save" type="submit"></button>
+        </div>
+      </fieldset>
+    </form>
+  </body>
+</html>

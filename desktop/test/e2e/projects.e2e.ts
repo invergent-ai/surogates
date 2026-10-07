@@ -193,6 +193,17 @@ describe("the sidebar's projects", () => {
     expect(await page.isVisible("#failure")).toBe(false);
   });
 
+  it("draw away a failure that Back or Forward cleared", async () => {
+    agent.projects!.projects.find((project) => project.id === BUDGET)!.masterSessionId = "not-a-chat";
+    const { page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click(row(BUDGET));
+    await expect.poll(() => page.isVisible("#failure")).toBe(true);
+    // Nothing to go forward to: only the choice moves.
+    await page.click("#forward");
+    await expect.poll(() => page.isVisible("#failure")).toBe(false);
+  });
+
   it("say why a project did not open", async () => {
     agent.projects!.projects.find((project) => project.id === BUDGET)!.masterSessionId = "not-a-chat";
     const { page, client } = await signedIn();
@@ -242,6 +253,21 @@ describe("the Projects page", () => {
     expect(await page.getAttribute("#open-projects", "aria-current")).toBe(null);
   });
 
+  it("is left by Back for the thread that was open, with its project as the way back", async () => {
+    const { page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    const thread = FIXTURE_IDS.question;
+    await page.click(`[data-thread="${thread}"]`);
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${thread}`);
+    await page.click("#open-projects");
+    await expect.poll(() => page.isVisible("#projects-page")).toBe(true);
+    await page.click("#back");
+    await expect.poll(() => page.isVisible("#projects-page")).toBe(false);
+    expect(client.url()).toBe(`${origin}/chat/${thread}`);
+    await expect.poll(() => page.textContent("#title")).toBe("Check the revenue figures");
+    expect(await page.textContent("#to-project")).toBe("Quarterly report");
+  });
+
   it("is left by Back, for the web client where it was", async () => {
     const { shell, page, client } = await signedIn();
     await opened(page, client, REPORT);
@@ -252,5 +278,421 @@ describe("the Projects page", () => {
     expect(await webShown(shell)).toBe(true);
     expect(client.url()).toBe(`${origin}/chat/${MASTERS[REPORT]}`);
     await expect.poll(() => page.textContent("#title")).toBe("Quarterly report");
+  });
+});
+
+// The app signed in to the fake agent, whose page is up and serves nothing until a test registers it.
+async function unserved(): Promise<{ shell: ElectronApplication; page: Page; client: Page }> {
+  agent.registerAfterMs = -1;
+  const shell = await launch(home);
+  app = shell;
+  await stubNative(shell);
+  const page = await shellPage(shell);
+  await connect(page, origin);
+  await signIn(shell, page, agent);
+  return { shell, page, client: await webClient(shell, origin) };
+}
+
+// What the page's preload answers *call*, sent as the main process sends one, or "no answer" after *waitMs*.
+const callPage = (shell: ElectronApplication, call: { id: number; method: string; args: unknown[]; deadline: number }, waitMs = 2_000) =>
+  shell.evaluate(({ webContents }, [url, sent, wait]) => new Promise((resolve) => {
+    const contents = webContents.getAllWebContents().find((found) => found.getURL().startsWith(url))!;
+    const timer = setTimeout(() => resolve("no answer"), wait);
+    contents.ipc.on("desktop:projects-answer", (_event, id: unknown, outcome: unknown) => {
+      if (id !== sent.id) return;
+      clearTimeout(timer);
+      resolve(outcome);
+    });
+    contents.send("desktop:projects", { type: "call", ...sent });
+  }), [origin, call, waitMs] as const);
+
+describe("the page's projects source", () => {
+  it("refuses the calls it holds once the page says it serves none", async () => {
+    const { shell, client } = await unserved();
+    const held = callPage(shell, { id: 999_990, method: "list", args: [], deadline: Date.now() + 60_000 }, 5_000);
+    // The call reaches the page's hold before the page says it serves nothing.
+    await pause(300);
+    await client.evaluate(() => window.surogateDesktop!.registerProjects(null));
+    expect(await held).toEqual({ error: "The agent's page serves no projects" });
+  });
+
+  it("refuses at once a call that comes after the page said it serves none, and holds none", async () => {
+    const { shell, client } = await unserved();
+    await client.evaluate(() => window.surogateDesktop!.registerProjects(null));
+    const started = Date.now();
+    expect(await callPage(shell, { id: 999_991, method: "list", args: [], deadline: Date.now() + 60_000 }))
+      .toEqual({ error: "The agent's page serves no projects" });
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("says so when the page answers with something it cannot send, rather than letting the call run out of time", async () => {
+    const { shell, client } = await unserved();
+    // A source whose project holds a function, which no message can carry.
+    await client.evaluate(() => {
+      const nothing = async () => [];
+      void window.surogateDesktop!.registerProjects({
+        list: nothing, get: async () => ({ id: "x", open() {} }), create: nothing, update: nothing, archive: nothing,
+        threads: nothing, resolve: nothing, reopen: nothing, library: nothing, routines: nothing, subscribe: () => () => {},
+      } as never);
+    });
+    expect(await callPage(shell, { id: 999_993, method: "get", args: [REPORT], deadline: Date.now() + 60_000 }))
+      .toEqual({ error: "The agent's page answered with something it cannot send" });
+  });
+
+  it("never runs a held call with under a second left, whose answer would come after the main process gave up", async () => {
+    const { shell, client } = await unserved();
+    const answered = callPage(shell, { id: 999_992, method: "threads", args: [REPORT, "late"], deadline: Date.now() + 1_000 });
+    // Held a fifth of a second: the page serves with four fifths left.
+    await pause(200);
+    await client.evaluate(() => (window as unknown as { fakeProjects: { register(): void } }).fakeProjects.register());
+    expect(await answered).toBe("no answer");
+    expect(await client.evaluate(() => (window as unknown as { fakeProjects: { reads: unknown[] } }).fakeProjects.reads)).not.toContain("late");
+  });
+
+  it("answers a call that reaches the page before it serves, once it serves, and drops one whose time ran out", async () => {
+    // The page serves its projects only once the test says so.
+    agent.registerAfterMs = -1;
+    const shell = await launch(home);
+    app = shell;
+    await stubNative(shell);
+    const page = await shellPage(shell);
+    await connect(page, origin);
+    await signIn(shell, page, agent);
+    const client = await webClient(shell, origin);
+    // The page is up and serves nothing yet, as a page whose load has just committed: two calls reach
+    // it, one of them past its time, which the main process has refused already.
+    await shell.evaluate(({ webContents }, [url, project]) => {
+      const contents = webContents.getAllWebContents().find((found) => found.getURL().startsWith(url!))!;
+      Object.assign(globalThis, {
+        early: new Promise((resolve) => {
+          contents.ipc.on("desktop:projects-answer", (_event, id: unknown, answered: unknown) => {
+            if (id === 999_998) Object.assign(globalThis, { late: answered });
+            if (id === 999_999) resolve(answered);
+          });
+        }),
+      });
+      contents.send("desktop:projects", { type: "call", id: 999_998, method: "threads", args: [project], deadline: 0 });
+      contents.send("desktop:projects", { type: "call", id: 999_999, method: "list", args: [], deadline: Date.now() + 60_000 });
+    }, [origin, REPORT] as const);
+    await client.evaluate(() => (window as unknown as { fakeProjects: { register(): void } }).fakeProjects.register());
+    const outcome = await shell.evaluate(() => (globalThis as unknown as { early: Promise<unknown> }).early);
+    expect((outcome as { ok?: Array<{ name: string }> }).ok?.map((project) => project.name).sort())
+      .toEqual(["Budget", "Hiring plan", "Quarterly report"]);
+    // Held with the one answered, the late one would have run before it: it never ran.
+    expect(await client.evaluate(() => (window as unknown as { fakeProjects: { reads: unknown[] } }).fakeProjects.reads)).toEqual([]);
+    expect(await shell.evaluate(() => (globalThis as unknown as { late?: unknown }).late)).toBeUndefined();
+  });
+
+  it("refuses a source whose methods are not its own, as a class instance's are, and keeps the one it serves", async () => {
+    const { page, client } = await signedIn();
+    const refused = await client.evaluate(async () => {
+      // Every method a source has, on its prototype: refused only because the copy keeps no prototype.
+      const nothing = () => Promise.resolve([]);
+      class Source {
+        list() { return nothing(); }
+        get() { return nothing(); }
+        create() { return nothing(); }
+        update() { return nothing(); }
+        archive() { return Promise.resolve(); }
+        threads() { return nothing(); }
+        resolve() { return nothing(); }
+        reopen() { return nothing(); }
+        library() { return nothing(); }
+        routines() { return nothing(); }
+        subscribe() { return () => {}; }
+      }
+      const source = new Source();
+      try {
+        await window.surogateDesktop!.registerProjects(source as never);
+        return "registered";
+      } catch (error) {
+        return (error as Error).message;
+      }
+    });
+    expect(refused).toContain("A projects source's methods must be its own properties");
+    // The source it serves still answers: a project's read opens it, where a source swapped in would refuse it.
+    await opened(page, client, REPORT);
+    await expect.poll(() => page.textContent("#title")).toBe("Quarterly report");
+    expect(await page.isVisible("#failure")).toBe(false);
+  });
+});
+
+// The project dialog's page, once it is open over the window and has drawn what it shows, which
+// can take *timeout* ms when it waits for the page to serve.
+async function projectDialog(shell: ElectronApplication, timeout = 1_000): Promise<Page> {
+  let found: Page | undefined;
+  await expect.poll(() => {
+    found = shell.windows().find((page) => page.url().endsWith("/project.html"));
+    return found !== undefined;
+  }).toBe(true);
+  await found!.waitForLoadState();
+  await expect.poll(() => found!.textContent("#heading"), { timeout }).not.toBe("");
+  return found!;
+}
+
+const overlayOpen = (shell: ElectronApplication, page: string) => shell.evaluate(({ BrowserWindow }, file) =>
+  BrowserWindow.getAllWindows()[0]!.contentView.children
+    .some((view) => (view as Electron.WebContentsView).webContents.getURL().endsWith(file)), page);
+const dialogOpen = (shell: ElectronApplication) => overlayOpen(shell, "/project.html");
+
+describe("the project dialog", () => {
+  it("makes a new project from its name and goal, lists it at once, and opens its conversation", async () => {
+    const { shell, page, client } = await signedIn();
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    expect(await dialog.textContent("#heading")).toBe("New project");
+    expect(await dialog.isVisible("#instructions")).toBe(false);
+    expect(await dialog.isVisible("#archive")).toBe(false);
+    await dialog.fill("#name", "  Hiring brief ");
+    await dialog.fill("#goal", "Hire two analysts by December.");
+    await dialog.click("#save");
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    const made = agent.projects!.projects.find((project) => project.name === "Hiring brief")!;
+    expect(made.goal).toBe("Hire two analysts by December.");
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${made.masterSessionId}`);
+    await expect.poll(() => page.textContent("#title")).toBe("Hiring brief");
+    expect(await page.getAttribute(row(made.id), "aria-current")).toBe("page");
+  });
+
+  it("changes the open project's name, instructions and tiers, then archives it", async () => {
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click("#project-settings");
+    let dialog = await projectDialog(shell);
+    expect(await dialog.textContent("#heading")).toBe("Project settings");
+    expect(await dialog.inputValue("#name")).toBe("Quarterly report");
+    await dialog.fill("#name", "Q3 report");
+    await dialog.fill("#instructions", "Write in French.");
+    await dialog.selectOption("#thread-tier", "pro");
+    await dialog.click("#save");
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    await expect.poll(() => page.textContent("#title")).toBe("Q3 report");
+    expect(agent.projects!.projects.find((project) => project.id === REPORT))
+      .toMatchObject({ name: "Q3 report", instructions: "Write in French.", coordinatorTier: null, threadTier: "pro" });
+    await page.click("#project-settings");
+    dialog = await projectDialog(shell);
+    await dialog.click("#archive");
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    const asked = await shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string }> }).asked);
+    expect(asked.at(-1)!.message).toBe("Archive Q3 report?");
+    await expect.poll(() => page.isVisible(`#projects [data-project="${REPORT}"]`)).toBe(false);
+    await expect.poll(() => client.url()).toBe(`${origin}/chat`);
+    expect(await page.textContent("#title")).toBe(new URL(origin).host);
+  });
+
+  for (const [why, cut, said] of [
+    ["archived on another device", "archived", "No such project"],
+    ["with the agent out of reach", "unreachable", "API server is not reachable."],
+    ["while the page has served nothing for ten seconds", "loading", "The agent's page did not serve its projects in time"],
+  ] as const) {
+    it(`says why a project's settings cannot open: ${why}`, async () => {
+      const { shell, page, client } = await signedIn();
+      await opened(page, client, REPORT);
+      if (cut === "loading") {
+        // The page loads again, and serves nothing this time.
+        agent.registerAfterMs = -1;
+        await client.reload();
+      } else {
+        await client.evaluate(([how, project]) => {
+          const fake = (window as unknown as { fakeProjects: { data: ProjectFixtures; unreachable: boolean } }).fakeProjects;
+          if (how === "unreachable") fake.unreachable = true;
+          else fake.data.projects = fake.data.projects.filter((found) => found.id !== project);
+        }, [cut, REPORT] as const);
+      }
+      await page.click("#project-settings");
+      const dialog = await projectDialog(shell, 15_000);
+      expect(await dialog.textContent("#heading")).toBe("Project settings");
+      expect(await dialog.textContent("#error")).toBe(said);
+      expect(await dialog.isVisible("#save")).toBe(false);
+      expect(await dialog.isVisible("#archive")).toBe(false);
+      // Nothing to change: only Cancel is left, with the focus.
+      for (const field of ["#name", "#goal", "#instructions", "#coordinator-tier", "#thread-tier"]) {
+        expect(await dialog.isEnabled(field), field).toBe(false);
+      }
+      expect(await dialog.evaluate(() => document.activeElement?.id)).toBe("cancel");
+      await dialog.click("#cancel");
+      await expect.poll(() => dialogOpen(shell)).toBe(false);
+    });
+  }
+
+  it("says a create that did not answer in time may have made the project, and lists it once made", async () => {
+    const { shell, page, client } = await signedIn();
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { lag: number } }).fakeProjects.lag = 11_000;
+    });
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    await dialog.fill("#name", "Late");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error"), { timeout: 15_000 })
+      .toBe("The agent's page did not answer create in time: the project may have been made");
+    expect(await dialog.inputValue("#name")).toBe("Late");
+    await expect.poll(() => texts(page, "#projects .project .name")).toContain("Late");
+  });
+
+  it("names each field by its label alone, describes it by its help, and gives the name the focus back after a refusal", async () => {
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click("#project-settings");
+    const dialog = await projectDialog(shell);
+    const named = (role: "textbox" | "combobox", name: string) => dialog.getByRole(role, { name, exact: true }).getAttribute("id");
+    expect(await named("textbox", "Goal")).toBe("goal");
+    expect(await named("textbox", "Instructions")).toBe("instructions");
+    expect(await named("combobox", "The conversation's model")).toBe("coordinator-tier");
+    expect(await named("combobox", "The threads' model")).toBe("thread-tier");
+    const described = (id: string) => dialog.$eval(`#${id}`, (field) =>
+      (field.getAttribute("aria-describedby") ?? "").split(" ").map((by) => document.getElementById(by)?.textContent).join(" "));
+    expect(await described("goal")).toBe("What the project is for. Its conversation and its threads see it.");
+    expect(await described("thread-tier")).toBe("A model above your plan's runs as your plan's.");
+    expect(await described("coordinator-tier")).toBe("A model above your plan's runs as your plan's.");
+    await dialog.fill("#name", " ");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error")).toBe("Name the project.");
+    expect(await dialog.evaluate(() => document.activeElement?.id)).toBe("name");
+  });
+
+  it("says a create or a save is under way while the agent answers it", async () => {
+    const { shell, page, client } = await signedIn();
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { lag: number } }).fakeProjects.lag = 1_500;
+    });
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    let dialog = await projectDialog(shell);
+    await dialog.fill("#name", "  ");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error")).toBe("Name the project.");
+    expect([await dialog.textContent("#save"), await dialog.getAttribute("#form", "aria-busy")]).toEqual(["Create project", null]);
+    await dialog.fill("#name", "Busy");
+    await dialog.click("#save");
+    expect([await dialog.textContent("#save"), await dialog.getAttribute("#form", "aria-busy")]).toEqual(["Creating…", "true"]);
+    await expect.poll(() => dialogOpen(shell), { timeout: 5_000 }).toBe(false);
+    await expect.poll(() => page.textContent("#title")).toBe("Busy");
+    // The new project's conversation is a load of its own: its page is as slow again.
+    await client.waitForLoadState();
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { lag: number } }).fakeProjects.lag = 1_500;
+    });
+    await page.click("#project-settings");
+    dialog = await projectDialog(shell);
+    await dialog.fill("#name", "Busier");
+    await dialog.click("#save");
+    expect([await dialog.textContent("#save"), await dialog.getAttribute("#form", "aria-busy")]).toEqual(["Saving…", "true"]);
+    await expect.poll(() => dialogOpen(shell), { timeout: 5_000 }).toBe(false);
+  });
+
+  it("makes one project for a Create clicked twice before the agent answers", async () => {
+    const { shell, page, client } = await signedIn();
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { lag: number } }).fakeProjects.lag = 1_000;
+    });
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    await dialog.fill("#name", "Twice");
+    await dialog.evaluate(() => {
+      document.querySelector<HTMLButtonElement>("#save")!.click();
+      document.querySelector<HTMLButtonElement>("#save")!.click();
+    });
+    await expect.poll(() => dialogOpen(shell), { timeout: 5_000 }).toBe(false);
+    expect(agent.projects!.projects.filter((project) => project.name === "Twice")).toHaveLength(1);
+  });
+
+  it("opens nothing for a create that lands after its dialog closed, and leaves Settings opened since", async () => {
+    const { shell, page, client } = await signedIn();
+    const before = client.url();
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { lag: number } }).fakeProjects.lag = 1_500;
+    });
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    await dialog.fill("#name", "Escaped");
+    await dialog.click("#save");
+    // Closed while the create is under way, and Settings opened in its place.
+    await dialog.keyboard.press("Escape").catch(() => {});
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    await page.evaluate(() => (window as unknown as { surogateShell: { settings(): Promise<void> } }).surogateShell.settings());
+    await expect.poll(() => overlayOpen(shell, "/settings.html")).toBe(true);
+    await expect.poll(() => texts(page, "#projects .project .name"), { timeout: 5_000 }).toContain("Escaped");
+    expect(await overlayOpen(shell, "/settings.html")).toBe(true);
+    expect(await page.isVisible("#projects-page")).toBe(true);
+    expect(client.url()).toBe(before);
+  });
+
+  it("saves only what the user changed, and keeps what was changed elsewhere meanwhile", async () => {
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click("#project-settings");
+    const dialog = await projectDialog(shell);
+    // Another device changes the goal and the instructions while the dialog shows the old ones.
+    await client.evaluate((project) => {
+      const fake = (window as unknown as { fakeProjects: { data: ProjectFixtures } }).fakeProjects;
+      Object.assign(fake.data.projects.find((found) => found.id === project)!, { goal: "Changed elsewhere", instructions: "Also elsewhere" });
+    }, REPORT);
+    await dialog.selectOption("#thread-tier", "pro");
+    await dialog.click("#save");
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    expect(agent.projects!.projects.find((project) => project.id === REPORT)).toMatchObject({
+      name: "Quarterly report", goal: "Changed elsewhere", instructions: "Also elsewhere", threadTier: "pro",
+    });
+  });
+
+  it("names the project in the archive box with its control and invisible characters as their code points", async () => {
+    agent.projects!.projects.find((project) => project.id === REPORT)!.name = "Q3‮ report​";
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click("#project-settings");
+    const dialog = await projectDialog(shell);
+    await shell.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    await dialog.click("#archive");
+    await expect.poll(() => shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string }> }).asked.at(-1)?.message))
+      .toBe("Archive Q3U+202E reportU+200B?");
+  });
+
+  it("goes with the account whose project it shows", async () => {
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click("#project-settings");
+    await projectDialog(shell);
+    // The page says nobody is signed in, as after its session expired.
+    await client.evaluate(() => window.surogateDesktop!.registerProjects(null));
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+  });
+
+  it("asks for a name, says what the agent refused, and keeps a project when the archive is cancelled", async () => {
+    const { shell, page, client } = await signedIn();
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    let dialog = await projectDialog(shell);
+    await dialog.fill("#name", "   ");
+    await dialog.fill("#goal", "Hire two analysts by December.");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error")).toBe("Name the project.");
+    expect([await dialog.inputValue("#name"), await dialog.inputValue("#goal")]).toEqual(["   ", "Hire two analysts by December."]);
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { refusal: string | null } }).fakeProjects.refusal = "This agent keeps a single conversation, so it has no projects.";
+    });
+    await dialog.fill("#name", "Hiring brief");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error")).toBe("This agent keeps a single conversation, so it has no projects.");
+    expect([await dialog.inputValue("#name"), await dialog.inputValue("#goal")]).toEqual(["Hiring brief", "Hire two analysts by December."]);
+    // The dialog goes on the key's way down, before its way up.
+    await dialog.press("#name", "Escape").catch(() => {});
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { refusal: string | null } }).fakeProjects.refusal = null;
+    });
+    await opened(page, client, REPORT);
+    await page.click("#project-settings");
+    dialog = await projectDialog(shell);
+    await shell.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    await dialog.click("#archive");
+    await expect.poll(() => shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string }> }).asked.at(-1)!.message))
+      .toBe("Archive Quarterly report?");
+    expect(await dialogOpen(shell)).toBe(true);
+    expect(agent.projects!.projects.some((project) => project.id === REPORT)).toBe(true);
   });
 });

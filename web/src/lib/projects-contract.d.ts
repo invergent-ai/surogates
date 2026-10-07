@@ -74,7 +74,8 @@ export interface ProjectsSource {
     patch: Partial<Pick<Project, "name" | "icon" | "goal" | "instructions" | "coordinatorTier" | "threadTier">>,
   ): Promise<Project>;
   archive(projectId: string): Promise<void>;
-  threads(projectId: string): Promise<ThreadRow[]>;
+  // With threadId, that thread's row alone: none once it is no longer one of the project's threads.
+  threads(projectId: string, threadId?: string): Promise<ThreadRow[]>;
   resolve(projectId: string, threadId: string): Promise<ThreadRow>;
   reopen(projectId: string, threadId: string): Promise<ThreadRow>;
   library(projectId: string): Promise<LibraryEntry[]>;

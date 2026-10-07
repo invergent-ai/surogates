@@ -276,6 +276,62 @@ describe("the cards in the conversation", () => {
     expect(document.activeElement).toBe(view);
   });
 
+  it("keeps a card's Starting… and the focus it owes across a change of view mode, which draws the card anew", async () => {
+    let finish: () => void = () => {};
+    const startProposedThread = vi.fn(() => new Promise<AgentChatThreadRow>((resolve) => {
+      finish = () => resolve({ id: "thread-1", title: "", group: "working", reason: null, statusLine: null, progress: null, files: [] });
+    }));
+    const adapter = adapterStub({ startProposedThread });
+    const context = { projectId: "project-1", onOpenSession: vi.fn() };
+    // The master writes on below its card: each view mode draws the card in a place of its own.
+    const state = applied(proposed, { type: "llm.response", data: { message: { content: "Start the ones you want." } } });
+    const dom = mount(thread(state, "simple"), adapter, context);
+    const card = () => dom.querySelector('[data-testid="proposed-thread"]')!;
+    const start = button(dom, "Start", card());
+    start.focus();
+    await act(async () => start.click());
+    act(() => root?.render(provided(thread(state, "expert"), adapter, context)));
+    expect(card().contains(start)).toBe(false);
+    expect(button(dom, "Starting…", card()).disabled).toBe(true);
+    await act(async () => finish());
+    expect(document.activeElement).toBe(button(dom, "View thread", card()));
+    expect(startProposedThread).toHaveBeenCalledTimes(1);
+  });
+
+  it("owes no focus for a start that finished while its card was not drawn", async () => {
+    let finish: () => void = () => {};
+    const startProposedThread = vi.fn(() => new Promise<AgentChatThreadRow>((resolve) => {
+      finish = () => resolve({ id: "thread-1", title: "", group: "working", reason: null, statusLine: null, progress: null, files: [] });
+    }));
+    const adapter = adapterStub({ startProposedThread });
+    const context = { projectId: "project-1", onOpenSession: vi.fn() };
+    const state = applied(proposed);
+    const dom = mount(thread(state, "simple"), adapter, context);
+    const card = () => dom.querySelector('[data-testid="proposed-thread"]')!;
+    const start = button(dom, "Start", card());
+    start.focus();
+    await act(async () => start.click());
+    // The user went elsewhere: the conversation, with its card, is not drawn when the start finishes.
+    act(() => root?.render(provided(<p>Another session</p>, adapter, context)));
+    await act(async () => finish());
+    act(() => root?.render(provided(thread(state, "simple"), adapter, context)));
+    expect(button(dom, "View thread", card())).toBeTruthy();
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("says Started in a status region that was there before it", async () => {
+    const startProposedThread = vi.fn(async () => (
+      { id: "thread-1", title: "", group: "working" as const, reason: null, statusLine: null, progress: null, files: [] }
+    ));
+    const dom = mount(thread(applied(proposed), "simple"), adapterStub({ startProposedThread }), { projectId: "project-1" });
+    const card = dom.querySelector('[data-testid="proposed-thread"]')!;
+    const region = card.querySelector('[role="status"]');
+    expect(region?.textContent).toBe("");
+    await act(async () => button(dom, "Start", card).click());
+    expect(card.querySelector('[role="status"]')).toBe(region);
+    expect(region?.textContent).toBe("Started");
+  });
+
   it("offers Start all while two cloud threads wait", async () => {
     const startProposedThread = vi.fn(async ({ key }: { key: string }) => ({
       id: `thread-${key}`, title: "", group: "working" as const, reason: null, statusLine: null, progress: null, files: [],

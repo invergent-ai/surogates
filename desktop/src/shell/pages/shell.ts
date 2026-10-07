@@ -32,7 +32,7 @@ interface State {
   agent: { name: string } | null;
   view: { kind: "web" } | { kind: "projects" } | { kind: "project"; id: string; name: string; thread: { id: string; title: string } | null };
   projects: ProjectRow[]; // as the page listed them
-  failure: string | null; // why the project last chosen did not open
+  failure: string | null; // why what the user last asked for, a project or a thread's resolve, did not happen
   overview: {
     threads: ThreadRow[]; // last active first
     library: Array<{ path: string; origin: "added" | "produced"; threadId: string | null; size: number | null; updatedAt: string | null }>;
@@ -58,12 +58,16 @@ interface Shell {
   projects(): Promise<void>;
   project(id: string): Promise<void>;
   thread(id: string): Promise<void>;
+  resolve(id: string): Promise<void>;
+  reopen(id: string): Promise<void>;
   back(): Promise<void>;
   forward(): Promise<void>;
   reload(): Promise<void>;
   place(hole: { x: number; y: number; width: number; height: number }): Promise<void>;
   menu(which: "app" | "project"): Promise<void>;
   settings(): Promise<void>;
+  newProject(): Promise<void>;
+  projectSettings(): Promise<void>;
   link(which: string): Promise<void>;
   onChanged(listener: () => void): () => void;
 }
@@ -174,8 +178,13 @@ function threadRow(thread: ThreadRow): HTMLElement {
     if (thread.files.length > 2) chips.append(element("span", "chip", `+${thread.files.length - 2}`));
     row.append(chips);
   }
+  // Resolved threads come back with Reopen; any other is resolved from its row, a working one stopped first.
+  const resolved = thread.group === "resolved";
+  const act = button("act", resolved ? "Reopen" : "Resolve", () => void (resolved ? shell.reopen(thread.id) : shell.resolve(thread.id)));
+  act.dataset.act = thread.id;
+  act.setAttribute("aria-label", `${resolved ? "Reopen" : "Resolve"} ${thread.title}`);
   const item = element("li", "");
-  item.append(row);
+  item.append(row, act);
   return item;
 }
 
@@ -248,6 +257,7 @@ async function render(): Promise<void> {
   // A thread open in the centre: its project, as the way back.
   byId("to-project").hidden = !open?.thread;
   byId("to-project").textContent = open?.thread ? (name ?? "") : "";
+  byId<HTMLButtonElement>("project-settings").disabled = !open;
   byId("overview-dot").hidden = !state.projects.some((project) => project.id === open?.id && project.waiting > 0);
   byId("projects").replaceChildren(...state.projects.map((project) => group(project, project.id === open?.id)));
   filterSidebar();
@@ -308,9 +318,9 @@ byId("device-action-button").addEventListener("click", () => {
 byId("search").addEventListener("input", filterSidebar);
 byId("project-search").addEventListener("input", renderCards);
 byId("sort").addEventListener("change", renderCards);
-// A new chat at the root is a new project: today's server keeps no projects of its own.
 byId("new").addEventListener("click", () => void shell.go("/chat"));
-byId("new-project").addEventListener("click", () => void shell.go("/chat"));
+byId("new-project").addEventListener("click", () => void shell.newProject());
+byId("project-settings").addEventListener("click", () => void shell.projectSettings());
 byId("open-projects").addEventListener("click", () => void shell.projects());
 byId("to-project").addEventListener("click", () => {
   if (last?.view.kind === "project") void shell.project(last.view.id);

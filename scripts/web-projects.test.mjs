@@ -1,4 +1,5 @@
-// The web client's project helpers, which the desktop's ProjectsSource reuses: a row's mapping
+// The web client's project routes (web/src/api/workstream-routes.ts), which are also the
+// ProjectsSource it serves Surogate Desktop, and their helpers: a row's mapping
 // (web/src/lib/projects-wire.ts) and the streams that open themselves again
 // (web/src/lib/reopening-stream.ts). A project's stream runs over the SDK's own
 // FetchSseEventStream, as web/src/api/workstreams.ts opens it.
@@ -6,6 +7,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { FetchSseEventStream } from "../sdk/agent-chat-react/src/runtime/fetch-sse-stream.ts";
+import { workstreamRoutes } from "../web/src/api/workstream-routes.ts";
 import { threadRowOf } from "../web/src/lib/projects-wire.ts";
 import {
   INBOX_REOPENING,
@@ -227,4 +229,228 @@ test("a row maps to the shell's ThreadRow field by field", () => {
     place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z",
     resolved_at: "2026-10-07T12:00:00Z",
   }).place, { kind: "cloud" });
+});
+
+// The project routes over a fake fetch: *answer* gives each request's response, and every
+// request is kept, as [method, url, body], and a POST or a PATCH with the type its body was sent as.
+function routesOver(answer) {
+  const asked = [];
+  const fetchFn = async (input, init = {}) => {
+    const method = init.method ?? "GET";
+    const request = [method, String(input), init.body === undefined ? undefined : JSON.parse(init.body)];
+    if (method === "POST" || method === "PATCH") request.push(init.headers?.["Content-Type"]);
+    asked.push(request);
+    return answer(String(input), init);
+  };
+  return { asked, routes: workstreamRoutes(fetchFn, (url, watched) => new FetchSseEventStream(url, { fetchFn: watched })) };
+}
+
+const PROJECT = {
+  id: "p-1", name: "Quarterly report", icon: null, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z",
+  waiting: 1, working: 2, goal: "Close Q3", instructions: "Write in French.", master_session_id: "m-1",
+  coordinator_tier: null, thread_tier: "pro",
+};
+const ROW = {
+  id: "t-1", title: "Draft A", group: "idle", reason: null, status_line: "Drafted the memo.", progress: null, files: [],
+  place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
+};
+
+const FILE = {
+  path: "threads/Draft A/A.docx", origin: "produced", thread_id: "t-1", size: 2048, updated_at: "2026-10-07T11:00:00Z",
+  place: { kind: "cloud" },
+};
+const ROUTINE = {
+  id: "r-1", name: "Weekly cash report", prompt: "Report the cash.", status: "active", kind: "cron",
+  schedule_display: "Every Monday at 08:00", next_run_at: "2026-10-12T08:00:00Z", created_from_session_id: "m-1",
+};
+
+test("each project route is asked at its own path, and answers the shell's types", async () => {
+  const { asked, routes } = routesOver((url, init) => {
+    if (init.method === "DELETE") return new Response(null, { status: 204 });
+    if (url.endsWith("/library")) return Response.json([FILE]);
+    if (url.startsWith("/api/v1/scheduled-work")) return Response.json({ items: [ROUTINE, { ...ROUTINE, id: "r-2", name: null }], total: 2 });
+    if (url.includes("/threads")) return Response.json(init.method === "POST" ? ROW : [ROW]);
+    return Response.json(url === "/api/v1/workstreams" && !init.method ? [PROJECT] : PROJECT);
+  });
+  const summary = {
+    id: "p-1", name: "Quarterly report", icon: null, createdAt: "2026-10-07T10:00:00Z", updatedAt: "2026-10-07T11:00:00Z",
+    waiting: 1, working: 2,
+  };
+  const project = { ...summary, goal: "Close Q3", instructions: "Write in French.", masterSessionId: "m-1", coordinatorTier: null, threadTier: "pro" };
+  assert.deepEqual(await routes.list(), [summary]);
+  assert.deepEqual(await routes.get("p-1"), project);
+  assert.deepEqual(await routes.create({ name: "Quarterly report", goal: "Close Q3" }), project);
+  // Only the fields a change names, in the route's own names.
+  assert.deepEqual(await routes.update("p-1", { name: "Q3", coordinatorTier: "pro", threadTier: null, secret: "x" }), project);
+  assert.equal(await routes.archive("p-1"), undefined);
+  assert.deepEqual((await routes.threads("p-1")).map((row) => row.statusLine), ["Drafted the memo."]);
+  assert.equal((await routes.threads("p-1", "t-1"))[0].id, "t-1");
+  assert.equal((await routes.resolve("p-1", "t-1")).id, "t-1");
+  assert.equal((await routes.reopen("p-1", "t-1")).id, "t-1");
+  assert.equal((await routes.start("p-1", "pr-1", "2")).id, "t-1");
+  assert.deepEqual(await routes.library("p-1"), [{
+    path: "threads/Draft A/A.docx", origin: "produced", threadId: "t-1", size: 2048, updatedAt: "2026-10-07T11:00:00Z",
+    place: { kind: "cloud" },
+  }]);
+  // A schedule made without a name shows its schedule alone.
+  assert.deepEqual(await routes.routines("p-1"), [
+    { id: "r-1", name: "Weekly cash report", scheduleDisplay: "Every Monday at 08:00", nextRunAt: "2026-10-12T08:00:00Z", status: "active" },
+    { id: "r-2", name: "", scheduleDisplay: "Every Monday at 08:00", nextRunAt: "2026-10-12T08:00:00Z", status: "active" },
+  ]);
+  assert.deepEqual(asked, [
+    ["GET", "/api/v1/workstreams", undefined],
+    ["GET", "/api/v1/workstreams/p-1", undefined],
+    ["POST", "/api/v1/workstreams", { name: "Quarterly report", goal: "Close Q3" }, "application/json"],
+    ["PATCH", "/api/v1/workstreams/p-1", { name: "Q3", coordinator_tier: "pro", thread_tier: null }, "application/json"],
+    ["DELETE", "/api/v1/workstreams/p-1", undefined],
+    ["GET", "/api/v1/workstreams/p-1/threads", undefined],
+    ["GET", "/api/v1/workstreams/p-1/threads?thread_id=t-1", undefined],
+    ["POST", "/api/v1/workstreams/p-1/threads/t-1/resolve", undefined, undefined],
+    ["POST", "/api/v1/workstreams/p-1/threads/t-1/reopen", undefined, undefined],
+    ["POST", "/api/v1/workstreams/p-1/threads", { proposal_id: "pr-1", key: "2" }, "application/json"],
+    ["GET", "/api/v1/workstreams/p-1/library", undefined],
+    // The routines are the master's schedules: the project is read for its master first.
+    ["GET", "/api/v1/workstreams/p-1", undefined],
+    ["GET", "/api/v1/scheduled-work?created_from_session_id=m-1&status=all&limit=200", undefined],
+  ]);
+});
+
+test("a project route puts each id in its path as one segment, so no id reaches another route", async () => {
+  const { asked, routes } = routesOver((url, init) => {
+    if (init.method === "DELETE") return new Response(null, { status: 204 });
+    if (url.endsWith("/library")) return Response.json([]);
+    if (url.includes("/threads")) return Response.json(init.method === "POST" ? ROW : []);
+    return Response.json(PROJECT);
+  });
+  await routes.get("../devices");
+  await routes.update("p/1", { name: "Q3" });
+  await routes.archive("p?1");
+  await routes.threads("p#1");
+  await routes.threads("p 1", "t&thread_id=2");
+  await routes.resolve("p%1", "t/../2");
+  await routes.reopen("p1", "t?2");
+  await routes.library("p/1");
+  await routes.start("p/1", "pr-1", "2");
+  assert.deepEqual(asked.map(([method, url]) => [method, url]), [
+    ["GET", "/api/v1/workstreams/..%2Fdevices"],
+    ["PATCH", "/api/v1/workstreams/p%2F1"],
+    ["DELETE", "/api/v1/workstreams/p%3F1"],
+    ["GET", "/api/v1/workstreams/p%231/threads"],
+    ["GET", "/api/v1/workstreams/p%201/threads?thread_id=t%26thread_id%3D2"],
+    ["POST", "/api/v1/workstreams/p%251/threads/t%2F..%2F2/resolve"],
+    ["POST", "/api/v1/workstreams/p1/threads/t%3F2/reopen"],
+    ["GET", "/api/v1/workstreams/p%2F1/library"],
+    ["POST", "/api/v1/workstreams/p%2F1/threads"],
+  ]);
+  // A dot segment the URL would resolve away is no id at all.
+  await assert.rejects(routes.archive(".."), { message: "No such project." });
+  await assert.rejects(routes.resolve("p1", "."), { message: "No such thread." });
+  assert.equal(asked.length, 9);
+});
+
+test("a project route whose answer is not JSON, or not of its shape, says the route's own words, and never succeeds hollow", async () => {
+  const words = {
+    list: "Failed to fetch the projects",
+    get: "Failed to fetch the project",
+    create: "The project could not be created.",
+    update: "The project could not be changed.",
+    threads: "Failed to fetch the project's threads",
+    resolve: "The thread could not be resolved.",
+    reopen: "The thread could not be reopened.",
+    library: "Failed to fetch the project's Library",
+    start: "The thread could not be started.",
+  };
+  for (const body of ["<!doctype html><p>Sign in</p>", "{}", "[{}]", "null", '[{"id": "t-1"}]', '{"id": "t-1"}']) {
+    const { routes } = routesOver(() => new Response(body, { headers: { "content-type": "application/json" } }));
+    const calls = {
+      list: () => routes.list(),
+      get: () => routes.get("p-1"),
+      create: () => routes.create({ name: "Q3" }),
+      update: () => routes.update("p-1", { name: "Q3" }),
+      threads: () => routes.threads("p-1", "t-1"),
+      resolve: () => routes.resolve("p-1", "t-1"),
+      reopen: () => routes.reopen("p-1", "t-1"),
+      library: () => routes.library("p-1"),
+      start: () => routes.start("p-1", "pr-1", "2"),
+    };
+    for (const [name, call] of Object.entries(calls)) {
+      await assert.rejects(call(), { message: words[name] }, `${name} answered ${body}`);
+    }
+  }
+  // The routines read the project first: a schedule list that is not one is the routines' own failure.
+  for (const body of ["<!doctype html>", "{}", '{"items": {}}', '{"items": [{}]}']) {
+    const { routes } = routesOver((url) => url.startsWith("/api/v1/scheduled-work")
+      ? new Response(body, { headers: { "content-type": "application/json" } })
+      : Response.json(PROJECT));
+    await assert.rejects(routes.routines("p-1"), { message: "Failed to fetch the project's routines" }, `routines answered ${body}`);
+  }
+});
+
+test("a project route that refuses a field says why in words, never as the route's raw detail", async () => {
+  const { routes } = routesOver(() => Response.json({
+    detail: [
+      { type: "value_error", loc: ["body", "name"], msg: "Value error, must not be blank", input: "\u001f" },
+      { type: "string_pattern_mismatch", loc: ["body", "goal"], msg: "String should match pattern '^[^\\x00]*$'", input: "\u0000" },
+    ],
+  }, { status: 422 }));
+  await assert.rejects(routes.create({ name: "\u001f", goal: "\u0000" }), {
+    message: "name: must not be blank. goal: String should match pattern '^[^\\x00]*$'",
+  });
+});
+
+test("a project route that refuses says the route's own words", async () => {
+  const { routes } = routesOver((url) => url.endsWith("/workstreams")
+    ? Response.json({ detail: "This agent keeps a single conversation, so it has no projects." }, { status: 409 })
+    : new Response("Bad Gateway", { status: 502 }));
+  await assert.rejects(routes.create({ name: "Q3" }), /This agent keeps a single conversation, so it has no projects\./);
+  await assert.rejects(routes.get("p-1"), /Failed to fetch the project/);
+});
+
+const EVENTS = 'event: ready\ndata: {}\n\nevent: change\ndata: {"thread_id": "t-1", "type": "session.complete"}\n\n'
+  + 'event: change\ndata: {"thread_id": null, "type": "worker.spawned"}\n\nevent: change\ndata: not json\n\n';
+
+test("a project is followed at its own stream, over the fetch it was given: ready and each change", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { asked, routes } = routesOver(() => new Response(EVENTS, { headers: { "content-type": "text/event-stream" } }));
+  const heard = [];
+  const stop = routes.subscribe("p-1", (threadId) => heard.push(threadId));
+  t.after(stop);
+  await settled();
+  assert.deepEqual(heard, [null, "t-1", null, null]);
+  assert.deepEqual(asked, [["GET", "/api/v1/workstreams/p-1/stream", undefined]]);
+});
+
+test("a project gone from its stream is a project-wide change, heard once", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { asked, routes } = routesOver(() => Response.json({ detail: "No such project." }, { status: 404 }));
+  const heard = [];
+  t.after(routes.subscribe("p-1", (threadId) => heard.push(threadId)));
+  await settled();
+  t.mock.timers.tick(120_000);
+  await settled();
+  assert.deepEqual(heard, [null]);
+  assert.equal(asked.length, 1);
+});
+
+test("a stream closed while it waits to open again stops listening for the network", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const target = new EventTarget();
+  const listening = new Set();
+  globalThis.addEventListener = (type, listener) => {
+    listening.add(listener);
+    target.addEventListener(type, listener);
+  };
+  globalThis.removeEventListener = (type, listener) => {
+    listening.delete(listener);
+    target.removeEventListener(type, listener);
+  };
+  t.after(() => {
+    globalThis.addEventListener = undefined;
+    globalThis.removeEventListener = undefined;
+  });
+  const { stream, connections } = opened(projectReopening(() => false));
+  connections[0].onerror();
+  assert.equal(listening.size, 1);
+  stream.close();
+  assert.equal(listening.size, 0);
 });
