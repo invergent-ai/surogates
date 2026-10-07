@@ -2137,23 +2137,26 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
       }
       return { outcome, guest: span(inGuest), here: onHost.length > 0 ? span(onHost) : "no uv" };
     };
-    const wheel = await twice(`curl -sS -o /dev/null -w '%{size_download}' ${WHEEL}`, { ok: { output: "906389343", returncode: 0 } }, () => `curl -sS -o /dev/null ${WHEEL}`);
-    const set = await twice(
-      `uv pip install --python /opt/venv/bin/python --target ~/measured-pip ${PIP} && ls ~/measured-pip | grep -c dist-info; rm -rf ~/measured-pip`,
-      { ok: { output: "10\n", returncode: 0 } },
-      uv ? (turn) => `${uv} pip install --python-platform x86_64-manylinux_2_28 --target ${scratch}/pip-${turn} ${PIP}` : null,
-    );
-    const npm = await twice(
-      `npm install --cache ~/measured-npm-cache --prefix ~/measured-npm ${NPM} && ls ~/measured-npm/node_modules | wc -l; rm -rf ~/measured-npm ~/measured-npm-cache`,
-      { ok: { returncode: 0 } },
-      (turn) => `npm install --cache ${scratch}/npm-cache-${turn} --prefix ${scratch}/npm-${turn} ${NPM}`,
-    );
-    rmSync(scratch, { recursive: true, force: true });
-    expect(prompts).toEqual([]);
-    console.log([
-      `M7, twice each in turn: a 906 MB wheel in ${wheel.guest} through the guest, ${wheel.here} on this computer`,
-      `ten packages by uv in ${set.guest}, ${set.here} on this computer`,
-      `npm install of ${String((npm.outcome as { ok: { output: string } }).ok.output).trim()} top-level packages in ${npm.guest}, ${npm.here} on this computer`,
-    ].join("; "));
+    try {
+      const wheel = await twice(`curl -sS -o /dev/null -w '%{size_download}' ${WHEEL}`, { ok: { output: "906389343", returncode: 0 } }, () => `curl -sS -o /dev/null ${WHEEL}`);
+      const set = await twice(
+        `uv pip install --python /opt/venv/bin/python --target ~/measured-pip ${PIP} && ls ~/measured-pip | grep -c dist-info; rm -rf ~/measured-pip`,
+        { ok: { output: "10\n", returncode: 0 } },
+        uv ? (turn) => `${uv} pip install --python-platform x86_64-manylinux_2_28 --target ${scratch}/pip-${turn} ${PIP}` : null,
+      );
+      const npm = await twice(
+        `npm install --cache ~/measured-npm-cache --prefix ~/measured-npm ${NPM} && ls ~/measured-npm/node_modules | wc -l; rm -rf ~/measured-npm ~/measured-npm-cache`,
+        { ok: { returncode: 0 } },
+        (turn) => `npm install --cache ${scratch}/npm-cache-${turn} --prefix ${scratch}/npm-${turn} ${NPM}`,
+      );
+      expect(prompts).toEqual([]);
+      console.log([
+        `M7, twice each in turn: a 906 MB wheel in ${wheel.guest} through the guest, ${wheel.here} on this computer`,
+        `ten packages by uv in ${set.guest}, ${set.here} on this computer`,
+        `npm install of ${String((npm.outcome as { ok: { output: string } }).ok.output).trim()} top-level packages in ${npm.guest}, ${npm.here} on this computer`,
+      ].join("; "));
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });
