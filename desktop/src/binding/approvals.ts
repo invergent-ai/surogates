@@ -164,20 +164,25 @@ export class Approvals {
 
   /**
    * A connection a command of the chat makes to a destination off the package
-   * hosts, in either mode, asked in the chat's line. Settles once *signal* aborts
-   * (its host stopped), denying. Fails closed: a chat this computer did not bind, a
-   * journal that cannot be read, a prompt that fails, and any answer it does not
-   * offer deny it. "Allow for this session" keeps the host, on every port, with the binding.
+   * hosts, in either mode, asked in the chat's line; a host allowed for the session
+   * goes through unasked. Settles once *signal* aborts (its host stopped), denying.
+   * Fails closed: a chat this computer did not bind, a journal that cannot be read, a
+   * prompt that fails, and any answer it does not offer deny it. "Allow for this
+   * session" keeps the host, on every port, with the binding.
    */
   async askNetwork(root: string, asked: NetworkAsk, signal: AbortSignal): Promise<NetworkAnswer> {
     let binding: Binding | undefined;
+    let granted = false;
     try {
       binding = this.options.bindings.get(root);
+      // Allowed for the session already: through at once, not behind the chat's open prompt.
+      granted = binding !== undefined && this.granted(root).includes(asked.host);
     } catch (error) {
       report(this.options.onError, error);
       return "deny";
     }
     if (!binding) return "deny";
+    if (granted) return "allow";
     const chat = { agent: this.options.agent, root, calling: root, folder: binding.folder };
     return this.inLine(root, signal, "deny", async () => {
       // Allowed for the session while this one waited its turn: srt lets it through already.

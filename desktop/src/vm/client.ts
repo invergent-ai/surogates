@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
 import type { HostUser, ProtectedKey } from "../guest/protocol.js";
+import type { NetworkAnswer, NetworkAsk } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { type ProcessesChange, unavailable, type VmOperation, type VmOptions } from "./manager.js";
 
@@ -52,6 +53,8 @@ export type ToManager =
   | { type: "teardown"; id: string; root: string }
   // A root's protected keys, found between its commands: read-only in its namespace.
   | { type: "protect"; root: string; keys: ProtectedKey[] }
+  // The app's answer to an ask of the host proxy's.
+  | { type: "answer"; id: number; allow: boolean }
   | { type: "stop" };
 
 export type FromManager =
@@ -60,6 +63,8 @@ export type FromManager =
   | { type: "result"; id: string; outcome: Outcome }
   // Unasked: a root's background processes in the guest changed.
   | { type: "processes"; root: string; change: ProcessesChange }
+  // A connection of a root's command waits for its user's word on a destination off the package hosts.
+  | ({ type: "ask"; id: number; root: string } & NetworkAsk)
   // Its last word at a stop, after every answer, from a process that waits to be ended: a utility
   // process's postMessage has no callback, and an exit right after it can lose what it sent.
   | { type: "stopped" };
@@ -92,6 +97,9 @@ export function forkManager(script = MANAGER): ManagerProcess {
   };
 }
 
+// Who answers a root's ask: the device whose chat it is, or null for a root that is not its.
+export type Asker = (root: string, asked: NetworkAsk) => Promise<NetworkAnswer> | null;
+
 export interface VmClientOptions {
   vm: VmOptions;
   spawn?: () => ManagerProcess;
@@ -104,6 +112,7 @@ export class VmClient {
   private stopping: Promise<void> | null = null;
   private teardowns = 0;
   private readonly listeners = new Set<(root: string, change: ProcessesChange) => void>();
+  private readonly askers = new Set<Asker>();
   // The roots whose processes the manager has told of: a manager that goes takes them with its guest.
   private readonly told = new Set<string>();
 
@@ -168,6 +177,12 @@ export class VmClient {
     if (!this.stopping) this.manager?.send({ type: "protect", root, keys });
   }
 
+  /** Asked about each root's destination off the package hosts, whichever device's it is. Returns what stops it. */
+  onAsk(asker: Asker): () => void {
+    this.askers.add(asker);
+    return () => void this.askers.delete(asker);
+  }
+
   /** Told each change of a root's processes in the guest, whichever device's root it is. Returns what stops it. */
   onProcesses(listener: (root: string, change: ProcessesChange) => void): () => void {
     this.listeners.add(listener);
@@ -198,6 +213,7 @@ export class VmClient {
       if (message.type === "ready") ran = true;
       else if (message.type === "result") this.pending.get(message.id)?.(message.outcome);
       else if (message.type === "processes") this.tell(message.root, message.change);
+      else if (message.type === "ask") this.asked(manager, message);
       else if (message.type === "stopped") manager.kill();
     });
     manager.onExit(() => {
@@ -209,6 +225,19 @@ export class VmClient {
     });
     manager.send({ type: "start", options: this.options.vm });
     return manager;
+  }
+
+  // The first asker whose root it is answers; with none, or one that fails, it is denied.
+  private asked(manager: ManagerProcess, { id, root, host, port, privateNetwork }: Extract<FromManager, { type: "ask" }>): void {
+    let answer: Promise<NetworkAnswer> | null = null;
+    try {
+      for (const asker of this.askers) if ((answer = asker(root, { host, port, privateNetwork }))) break;
+    } catch {
+      answer = null;
+    }
+    void (answer ?? Promise.resolve<NetworkAnswer>("deny")).catch((): NetworkAnswer => "deny").then((choice) => {
+      manager.send({ type: "answer", id, allow: choice === "allow" || choice === "allow_session" });
+    });
   }
 
   private tell(root: string, change: ProcessesChange): void {

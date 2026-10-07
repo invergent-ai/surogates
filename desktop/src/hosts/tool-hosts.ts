@@ -170,6 +170,14 @@ export class ToolHosts implements Executor {
     return this.hostFor(operation.sessionId, binding).guarded(operation, signal, guard, (aborted, ended, keys) => inner(binding, aborted, ended, keys));
   }
 
+  /**
+   * A destination one of *root*'s commands elsewhere (the VM) asked for, decided as its
+   * own commands' are: denied when the root has no host, or nothing of it runs.
+   */
+  ask(root: string, asked: NetworkAsk): Promise<NetworkAnswer> {
+    return this.hosts.get(root)?.ask(asked) ?? Promise.resolve("deny");
+  }
+
   /** A root's background processes elsewhere (the VM) changed: its host keeps their handles, and stays while any lives. */
   processes(root: string, change: ProcessesChange): void {
     this.hosts.get(root)?.processes(change);
@@ -275,7 +283,7 @@ class Host {
     startTimeoutMs: number,
     private readonly idleMs: number,
     private readonly onGone: () => void,
-    private readonly ask: (asked: NetworkAsk, signal: AbortSignal) => Promise<NetworkAnswer>,
+    private readonly askUser: (asked: NetworkAsk, signal: AbortSignal) => Promise<NetworkAnswer>,
     private readonly release: () => Promise<void>,
     private readonly protect: (keys: ProtectedKey[]) => void,
   ) {
@@ -457,7 +465,10 @@ class Host {
       if (this.commands > 0) this.unpushed = true;
       else this.protect(message.keys);
     } else if (message.type === "ask") {
-      this.asked(message.id, { host: message.host, port: message.port, privateNetwork: message.privateNetwork });
+      const { id } = message;
+      void this.ask({ host: message.host, port: message.port, privateNetwork: message.privateNetwork }).then((choice) => {
+        this.send({ type: "answer", id, allow: choice === "allow" || choice === "allow_session", remember: choice === "allow_session" });
+      });
     } else {
       const answer = this.pending.get(message.id);
       this.pending.delete(message.id);
@@ -465,18 +476,12 @@ class Host {
     }
   }
 
-  // A destination one of its commands asked for: its host waits for this answer for
-  // every connection to it. Fails closed: a choice that fails denies, and so does an ask
-  // that comes once nothing of the root runs (a lookup that outlasted its command), with no prompt.
-  private asked(id: number, asked: NetworkAsk): void {
-    const answer = (choice: NetworkAnswer) => {
-      const allow = choice === "allow" || choice === "allow_session";
-      this.send({ type: "answer", id, allow, remember: choice === "allow_session" });
-    };
-    if (this.running === 0 && this.live === 0) return answer("deny");
-    Promise.resolve()
-      .then(() => this.ask(asked, this.prompts.signal))
-      .then(answer, () => answer("deny"));
+  // A destination one of its root's commands asked for: every connection to it waits for
+  // this answer. Fails closed: a choice that fails denies, and so does an ask that comes once
+  // nothing of the root runs (a lookup that outlasted its command), with no prompt.
+  ask(asked: NetworkAsk): Promise<NetworkAnswer> {
+    if (this.running === 0 && this.live === 0) return Promise.resolve("deny");
+    return Promise.resolve().then(() => this.askUser(asked, this.prompts.signal)).catch(() => "deny" as const);
   }
 
   private leave(): void {

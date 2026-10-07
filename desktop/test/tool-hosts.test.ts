@@ -700,6 +700,8 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     command.abort();
     await running;
     expect(prompt?.aborted).toBe(true);
+    // The dismissed prompt's denial is the host's answer.
+    await until(() => fakes[0]?.sent.at(-1)?.type === "answer");
     expect(fakes[0]?.sent.at(-1)).toEqual({ type: "answer", id: 1, allow: false, remember: false });
   });
 
