@@ -325,6 +325,20 @@ describe("the page's projects source", () => {
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
+  it("says so when the page answers with something it cannot send, rather than letting the call run out of time", async () => {
+    const { shell, client } = await unserved();
+    // A source whose project holds a function, which no message can carry.
+    await client.evaluate(() => {
+      const nothing = async () => [];
+      void window.surogateDesktop!.registerProjects({
+        list: nothing, get: async () => ({ id: "x", open() {} }), create: nothing, update: nothing, archive: nothing,
+        threads: nothing, resolve: nothing, reopen: nothing, library: nothing, routines: nothing, subscribe: () => () => {},
+      } as never);
+    });
+    expect(await callPage(shell, { id: 999_993, method: "get", args: [REPORT], deadline: Date.now() + 60_000 }))
+      .toEqual({ error: "The agent's page answered with something it cannot send" });
+  });
+
   it("never runs a held call with under a second left, whose answer would come after the main process gave up", async () => {
     const { shell, client } = await unserved();
     const answered = callPage(shell, { id: 999_992, method: "threads", args: [REPORT, "late"], deadline: Date.now() + 1_000 });

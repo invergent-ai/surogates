@@ -34,7 +34,10 @@ if (origin !== undefined && window.top === window && location.origin === origin)
     Promise.resolve().then(() => method(...message.args)).then(
       (ok) => answer(message.id, { ok }),
       (error: unknown) => answer(message.id, { error: error instanceof Error ? error.message : String(error) }),
-    );
+    ).catch(() => {
+      // An answer no message can carry, as one holding a function, is said, not left to run out of time.
+      answer(message.id, { error: "The agent's page answered with something it cannot send" });
+    });
   };
   ipcRenderer.on("desktop:projects", (_event, message: ToPage) => {
     const source = projects;
