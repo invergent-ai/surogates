@@ -172,16 +172,17 @@ def endpoint(name: str) -> dict:
     return {"model": f"{name}-model", "base_url": f"https://{name}.example/v1", "api_key_ref": f"vault://{name}"}
 
 
-async def model_of(session, *, pro_projected: bool = True) -> str:
-    """The model *session*'s worker builds its main slot on, for a basic agent.
+async def model_of(session, *, agent: str = "basic") -> str:
+    """The model *session*'s worker builds its main slot on, for an agent of *agent*'s tier.
 
-    Ops projects the pro endpoint for every hosted basic agent; a BYO agent
-    has none.
+    Ops projects the other tier's endpoint for every hosted agent: pro for a
+    basic one, basic for a pro one.  A BYO agent has none.
     """
+    other = {"basic": {"llm_tier_pro": endpoint("pro")}, "pro": {"llm_tier_basic": endpoint("basic")}, "byo": {}}
     ctx = build_agent_runtime_context({
         "agent_id": session.agent_id, "org_id": str(session.org_id), "project_id": "test-project",
         "enabled": True, "version": 1, "storage_key_prefix": PREFIX,
-        "llm_main": endpoint("basic"), "llm_tier_pro": endpoint("pro") if pro_projected else None,
+        "llm_main": endpoint(agent), **other[agent],
     })
     vault = SimpleNamespace(resolve_ref=AsyncMock(return_value="sk-test"))
     bundle = await build_session_llm_clients(ctx, vault=vault, user_id=session.user_id, session_config=session.config)
@@ -191,26 +192,56 @@ async def model_of(session, *, pro_projected: bool = True) -> str:
         await bundle.aclose()
 
 
+async def pin(api, project, package: dict | None) -> None:
+    """What the message route does at a message typed to the master: pin the
+    user's package on its config, or take the pin off when there is none."""
+    await api.app.state.session_store.reconcile_session_config_key(
+        UUID(project["master_session_id"]), "entitlements", package,
+    )
+
+
 async def test_the_coordinator_and_the_threads_run_on_their_projects_tiers(api):
     project = await create(api)
-    await patch(api, project, {"coordinator_tier": "pro"})
+    # The user's package allows pro, so each session runs on its project's tier.
+    await pin(api, project, {"model_tier": "pro"})
+    await patch(api, project, {"coordinator_tier": "pro", "thread_tier": "basic"})
     master = await master_of(api, project)
-    plain = await start(api, master)
-    await patch(api, project, {"coordinator_tier": None, "thread_tier": "pro"})
+    basic = await start(api, master)
+    await patch(api, project, {"coordinator_tier": "basic", "thread_tier": "pro"})
     pro = await start(api, await master_of(api, project), title="Summarise B", goal="Summarise B.pdf.")
-    assert [await model_of(s) for s in (master, plain, pro, await master_of(api, project))] == [
+    assert [await model_of(s) for s in (master, basic, pro, await master_of(api, project))] == [
         "pro-model", "basic-model", "pro-model", "basic-model",
     ]
     # A BYO agent has no other tier's endpoint, so a project's tier changes nothing.
-    assert await model_of(pro, pro_projected=False) == "basic-model"
+    assert await model_of(pro, agent="byo") == "byo-model"
+
+
+@pytest.mark.parametrize("package", [None, {"capabilities": ["code"]}], ids=["no-package", "no-tier"])
+async def test_a_project_runs_no_higher_than_the_users_package_allows(api, package):
+    # A package that names no tier allows the agent's own, as no package does.
+    project = await create(api)
+    await pin(api, project, package)
+    await patch(api, project, {"coordinator_tier": "pro", "thread_tier": "pro"})
+    master = await master_of(api, project)
+    assert [await model_of(s) for s in (master, await start(api, master))] == ["basic-model", "basic-model"]
+
+
+@pytest.mark.parametrize("package", [None, {"model_tier": "pro"}], ids=["no-package", "pro-package"])
+async def test_a_project_on_basic_runs_a_pro_agent_on_basic(api, package):
+    project = await create(api)
+    await pin(api, project, package)
+    await patch(api, project, {"coordinator_tier": "basic", "thread_tier": "basic"})
+    master = await master_of(api, project)
+    assert [await model_of(s, agent="pro") for s in (master, await start(api, master))] == [
+        "basic-model", "basic-model",
+    ]
 
 
 async def test_the_users_package_tier_wins_over_the_projects(api):
     project = await create(api)
     await patch(api, project, {"thread_tier": "pro"})
-    master = await master_of(api, project)
     # The master's last message pinned the user's package, which keeps them on basic.
-    await api.app.state.session_store.reconcile_session_config_key(master.id, "entitlements", {"model_tier": "basic"})
+    await pin(api, project, {"model_tier": "basic"})
     thread = await start(api, await master_of(api, project))
     assert thread.config["entitlements"] == {"model_tier": "basic"}
     assert await model_of(thread) == "basic-model"
@@ -218,13 +249,21 @@ async def test_the_users_package_tier_wins_over_the_projects(api):
 
 async def test_a_threads_helper_runs_under_the_users_package(api):
     project = await create(api)
-    store = api.app.state.session_store
     package = {"model_tier": "basic", "capabilities": ["code"]}
-    await store.reconcile_session_config_key((await master_of(api, project)).id, "entitlements", package)
+    await pin(api, project, package)
     thread = await start(api, await master_of(api, project))
     # A helper's turn, often its only one, runs before any hold of its own pins the package.
-    helper = await create_child_session(store=store, parent=thread, channel="delegation")
+    helper = await create_child_session(store=api.app.state.session_store, parent=thread, channel="delegation")
     assert helper.config["entitlements"] == package
+
+
+async def test_a_child_takes_its_parents_package_and_no_other(api):
+    thread = await start(api, await master_of(api, await create(api)))
+    helper = await create_child_session(
+        store=api.app.state.session_store, parent=thread, channel="delegation",
+        config={"entitlements": {"model_tier": "pro"}},
+    )
+    assert "entitlements" not in helper.config
 
 
 async def routine_made_in(monkeypatch, session, session_factory, prompt: str) -> None:

@@ -1611,8 +1611,8 @@ async def run_worker(settings: Settings) -> None:
         )
         from surogates.tools.builtin.media_gen import MediaGenConfig
 
-        # The main slot is the tier the sender's package pins, else the
-        # session's project's tier, else the agent's own.
+        # The main slot is the lower of the tier the sender's package
+        # allows and the session's project's tier.
         llm_bundle = await build_session_llm_clients(
             ctx, vault=credential_vault,
             user_id=credential.user_id,

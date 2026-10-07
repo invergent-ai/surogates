@@ -169,6 +169,8 @@ async def create_child_session(
     merged_config = dict(config or {})
     # A child runs where its root runs: on the same computer, when it names one.
     merged_config.pop("execution", None)
+    # The package comes from the parent, never from the code making the child.
+    merged_config.pop("entitlements", None)
 
     parent_config = parent.config or {}
     missing = [f for f in _WORKSPACE_SHARING_FIELDS if f not in parent_config]

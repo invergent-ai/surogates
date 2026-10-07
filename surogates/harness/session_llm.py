@@ -146,19 +146,29 @@ async def _resolve_vault_ref(
     return None
 
 
-def _main_endpoint(ctx: AgentRuntimeContext, session_config: dict | None) -> LLMEndpoint:
-    """The main slot's endpoint: the tier the sender's package pins, else
-    the tier the session's project gives it, else the agent's own.
+_TIER_RANK = {"basic": 0, "pro": 1}
 
-    Ops projects ``llm_tier_pro`` only for basic-tier agents and
-    ``llm_tier_basic`` only for pro-tier agents, so a tier that is the
-    agent's own, or any tier on a BYO agent, finds no endpoint and keeps
-    ``llm_main``; the proxy meters by endpoint role, so billing follows
-    the swap.  Client and model swap together: the tier lives in the
-    endpoint URL, so a bare model-string swap would misroute.
+
+def _main_endpoint(ctx: AgentRuntimeContext, session_config: dict | None) -> LLMEndpoint:
+    """The main slot's endpoint: the lower of the tier the sender's package
+    allows and the tier the session's project gives it.
+
+    A package that names no tier allows the agent's own, as no package
+    does, so a project can lower the tier but never raise it past what the
+    user bought.  Ops projects ``llm_tier_pro`` only for basic-tier agents
+    and ``llm_tier_basic`` only for pro-tier agents, which is how the
+    agent's own tier is known; a tier that is the agent's own, or any tier
+    on a BYO agent, finds no endpoint and keeps ``llm_main``.  The proxy
+    meters by endpoint role, so billing follows the swap.  Client and model
+    swap together: the tier lives in the endpoint URL, so a bare
+    model-string swap would misroute.
     """
     config = session_config or {}
-    tier = entitled_model_tier(config) or config.get("workstream_tier")
+    own = "basic" if ctx.llm_tier_pro else "pro" if ctx.llm_tier_basic else None
+    tier = min(
+        (t for t in (entitled_model_tier(config) or own, config.get("workstream_tier")) if t in _TIER_RANK),
+        key=_TIER_RANK.__getitem__, default=None,
+    )
     return {"pro": ctx.llm_tier_pro, "basic": ctx.llm_tier_basic}.get(tier) or ctx.llm_main
 
 
