@@ -296,6 +296,15 @@ describe("Settings → General", () => {
     await expect.poll(async () => (await mainWindow())?.visible).toBe(true);
   });
 
+  it("shows no window at a second start at login while it runs hidden", async () => {
+    app = await launch(home, {}, ["--hidden"]);
+    await expect.poll(async () => (await mainWindow())?.loading).toBe(false);
+    // Started at login again, as a second graphical login of the same user starts it.
+    expect(await secondLaunch(home, "--hidden")).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect((await mainWindow())?.visible).toBe(false);
+  });
+
   it("shows no window when it starts at login with the window left maximised", async () => {
     // Maximising a window shows it: one started hidden is maximised once it is first shown.
     mkdirSync(join(home, "surogate"), { recursive: true });

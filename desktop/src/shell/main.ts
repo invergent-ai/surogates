@@ -1883,11 +1883,11 @@ async function quit(): Promise<void> {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  // A second launch shows the window, and hands it the link it was started with, if any; once the quit
-  // goes on, it does neither.
+  // A second launch shows the window, unless it is a start at login, and hands it the link it was started
+  // with, if any; once the quit goes on, it does neither.
   app.on("second-instance", (_event, argv) => {
     if (leaving) return;
-    main?.show();
+    if (!argv.includes(HIDDEN)) main?.show();
     const link = linkIn(argv);
     if (link) void openDeepLink(link).catch(report);
   });
