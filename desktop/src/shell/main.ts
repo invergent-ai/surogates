@@ -485,7 +485,11 @@ async function bindToComputer(agent: Agent, signal: AbortSignal): Promise<void> 
       await session.end().catch(report);
       throw new Error(`Surogate could not tie this sign-in to this computer, so it signed out: ${error instanceof Error ? error.message : String(error)}`);
     }
-    if (!renewed) return;
+    if (!renewed) {
+      // The agent lists the computer revoked, or has it no more: it is cleaned up here, as its link would be told.
+      if (!signal.aborted) void retire(credential);
+      return;
+    }
     if (signal.aborted) {
       // Logged out meanwhile: the computer goes with the log out, revoked with the token just issued, its only one.
       await stopDevice(device?.started, null).catch(report);
@@ -608,7 +612,9 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
 function retire(credential: Credential): Promise<void> {
   const retired: Credential = { ...credential, token: null };
   kept = retired;
-  credentials.save(retired);
+  restoreFailure = null;
+  // A save that fails still stops the device: the token is gone at the agent either way.
+  trying(() => credentials.save(retired));
   const ending = device?.credential === credential ? device : null;
   retiring = (async () => {
     const stack = await ending?.started.catch(() => null);

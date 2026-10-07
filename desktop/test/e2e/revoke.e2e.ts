@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
@@ -73,6 +73,20 @@ describe("a computer the agent ends", () => {
       await expect(client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"))).rejects.toThrow("was revoked");
     },
   );
+});
+
+describe("a log out right after the agent ended this computer", () => {
+  it("forgets it and its folders, with nothing left to revoke", async () => {
+    const { page } = await bound();
+    agent.link.close(4403);
+    await expect.poll(() => page.textContent("#device-action-button")).toBe("Restore…");
+    await page.click("#user");
+    await page.click('[data-action="logout"]');
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    await expect.poll(() => credentials()).toEqual([]);
+    await expect.poll(() => existsSync(join(home, "surogate", "devices", "d"))).toBe(false);
+    expect(agent.link.received.filter((frame) => frame.type === "revoke")).toEqual([]);
+  });
 });
 
 describe("restoring a revoked computer", () => {
@@ -192,6 +206,21 @@ describe("a later sign-in, while this computer is revoked", () => {
     expect(agent.reauthorized).toEqual([]);
     expect(credentials()).toEqual([expect.not.objectContaining({ plain: expect.anything() })]);
     expect(agent.registered).toHaveLength(1);
+  });
+
+  it("retires it once the agent lists it revoked, though its link here has not been told", async () => {
+    const { shell } = await bound();
+    await quit(shell);
+    rmSync(join(home, "surogate", "session.json"));
+    agent.revokedAt = new Date().toISOString();
+    app = await launch(home);
+    await stubNative(app);
+    const again = await shellPage(app);
+    await expect.poll(() => again.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    await signIn(app, again, agent);
+    await expect.poll(() => again.textContent("#device-action-button")).toBe("Restore…");
+    expect(agent.reauthorized).toEqual([]);
+    expect(credentials()).toEqual([expect.not.objectContaining({ plain: expect.anything() })]);
   });
 });
 
