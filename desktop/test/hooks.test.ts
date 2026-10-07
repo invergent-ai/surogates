@@ -446,6 +446,48 @@ describe("a protected name linked into the folder", () => {
   });
 });
 
+// What a dependency folder holds goes unjudged (protect.ts): a link outside one into one would show it,
+// an editor's .vscode or an agent's .claude/commands, at a place where such names count.
+describe("a link into a dependency folder", () => {
+  const refused = (message: string) => ({ error: { type: "sandbox", message } });
+
+  it("refuses commands while a link outside one leads into one, and lets them run once it is gone", async () => {
+    mkdirSync(join(folder, "node_modules", "p", ".vscode"), { recursive: true });
+    writeFileSync(join(folder, "node_modules", "p", ".vscode", "tasks.json"), "{}\n");
+    symlinkSync("node_modules/p", join(folder, "sub"));
+    const guard = new HookGuard(folder);
+    expect(await guard.refusal()).toEqual(refused("Blocked: sub leads into node_modules. Remove the link to run commands here."));
+    rmSync(join(folder, "sub"));
+    expect(await guard.refusal()).toBeNull();
+  });
+
+  it("names each, the dependency folder as the link reaches it, one that leads to nothing yet too", async () => {
+    mkdirSync(join(folder, ".venv", "lib", "python3.12", "site-packages", "pkg"), { recursive: true });
+    mkdirSync(join(folder, "a"));
+    symlinkSync("../.venv/lib/python3.12/site-packages/pkg", join(folder, "a", "pkg"));
+    symlinkSync("node_modules", join(folder, "nm"));
+    symlinkSync("node_modules/missing", join(folder, "later"));
+    expect(await new HookGuard(folder).refusal()).toEqual(refused([
+      "Blocked: a/pkg leads into .venv/lib/python3.12/site-packages.", "later leads into node_modules.", "nm leads into node_modules.",
+      "Remove the links to run commands here.",
+    ].join(" ")));
+  });
+
+  it("lets commands run beside links inside a dependency folder, links out of the folder, and a git hook linked into one", async () => {
+    mkdirSync(join(folder, "node_modules", "typescript", "bin"), { recursive: true });
+    mkdirSync(join(folder, "node_modules", ".bin"));
+    symlinkSync("../typescript/bin/tsc", join(folder, "node_modules", ".bin", "tsc"));
+    const site = join(folder, ".venv", "lib", "python3.12", "site-packages");
+    mkdirSync(join(site, "b"), { recursive: true });
+    symlinkSync("b", join(site, "a"));
+    symlinkSync(join(other, "node_modules"), join(folder, "elsewhere"));
+    hook("node_modules/pre-commit/hook");
+    mkdirSync(join(folder, ".git", "hooks"), { recursive: true });
+    symlinkSync("../../node_modules/pre-commit/hook", join(folder, ".git", "hooks", "pre-commit"));
+    expect(await new HookGuard(folder).refusal()).toBeNull();
+  });
+});
+
 describe("the walk's protected keys", () => {
   it("are every entry under a protected name at any depth, folders too, and a .git file, but not a .git folder", async () => {
     const deep = hook("a/b/c/d/e/f/g/h/i/j/k/.git/hooks/pre-commit");

@@ -105,10 +105,16 @@ function runsCode(rest: string[]): boolean {
 // unpacked there, unjudged, to where a shell's, editor's or agent's name counts; an exchange moves
 // both ways. The guest's rule refuses it (rule-match.h's sg_moved_out).
 export function movesOutOfDependency(folder: string, from: string, to: string, exchange = false): boolean {
-  const inDependency = (key: string) =>
-    key !== folder && inside(key, folder) && key.slice(folder.length + 1).toLowerCase().split("/").some((part) => DEPENDENCY_FOLDERS.has(part));
-  const [out, back] = [inDependency(from), inDependency(to)];
+  const [out, back] = [dependencyFolder(folder, from) !== null, dependencyFolder(folder, to) !== null];
   return (out && !back) || (exchange && back && !out);
+}
+
+// The DEPENDENCY_FOLDERS folder *key* lies at or below in the folder, the outermost, or null.
+export function dependencyFolder(folder: string, key: string): string | null {
+  if (key === folder || !inside(key, folder)) return null;
+  const parts = key.slice(folder.length + 1).split("/");
+  const at = parts.findIndex((part) => DEPENDENCY_FOLDERS.has(part.toLowerCase()));
+  return at < 0 ? null : join(folder, ...parts.slice(0, at + 1));
 }
 
 export function inFolderRefusal(path: string): string {

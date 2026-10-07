@@ -4,7 +4,8 @@
 // started. So after every command the host looks through the whole folder and
 // makes each hook that is not the user's own, unchanged, non-executable: git skips
 // those. Nothing is deleted. The same look refuses commands while a protected name,
-// or a key place, is a link to a path in the folder that is not protected (linkedInto).
+// or a key place, is a link to a path in the folder that is not protected (linkedInto),
+// and while a link outside a dependency folder leads into one (leadsInto).
 // It also comments out each exec step that appeared in a paused rebase's or
 // cherry-pick's todo while the chat's commands could write there, which the host's
 // git rebase --continue would run outside the sandbox: the guest's rule lets commands
@@ -16,7 +17,7 @@ import { access, constants, lstat, open, readdir, readlink, realpath, rename, st
 import { basename, dirname, join, relative } from "node:path";
 
 import { inside, realpath as followed } from "../files/paths.js";
-import { KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
+import { dependencyFolder, KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
 import type { Outcome } from "../link/protocol.js";
 
 export const SCAN_TIMEOUT_MS = 30_000;
@@ -40,6 +41,9 @@ export interface HookScan {
   // Each link at a protected name or a key place (keyPlace), but for a git hook (the guard
   // stops those), to what a write through it reaches in the folder that is not protected (linkedInto).
   links: Map<string, string>;
+  // Each other link outside a dependency folder, but for a git hook, to the dependency folder in
+  // the folder it leads into: it would show what was unpacked there, which no rule judges.
+  dependencyLinks: Map<string, string>;
   // Where a paused rebase or cherry-pick keeps its todo, in each git folder the walk found.
   todos: string[];
 }
@@ -115,10 +119,17 @@ function linkedInto(folder: string, path: string): string | null {
   return reached.find((to) => inside(to, folder) && !protectedInFolder(folder, to)) ?? null;
 }
 
+// The dependency folder in the folder that the link at *path* leads into, followed fully, or null.
+// Synchronous, with linkedInto's ceiling.
+function leadsInto(folder: string, path: string): string | null {
+  const end = followed(path);
+  return end.loop ? null : dependencyFolder(folder, end.path);
+}
+
 // Never rejects. Linked folders are not followed; node_modules and git's object
 // stores are skipped: they are large, and git runs no hook from them.
 export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1): Promise<HookScan> {
-  const scan: HookScan = { hooks: new Map(), unreadable: [], protectedKeys: new Set(), links: new Map(), todos: [] };
+  const scan: HookScan = { hooks: new Map(), unreadable: [], protectedKeys: new Set(), links: new Map(), dependencyLinks: new Map(), todos: [] };
   const walk = async (dir: string, inGit: boolean): Promise<void> => {
     let entries;
     try {
@@ -153,6 +164,10 @@ export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1):
       if (key) scan.protectedKeys.add(path);
       const to = entry.isSymbolicLink() && (key || keyPlace(folder, path)) && !isGitHook(folder, path) ? linkedInto(folder, path) : null;
       if (to !== null) scan.links.set(path, to);
+      else if (entry.isSymbolicLink() && !isGitHook(folder, path) && dependencyFolder(folder, path) === null) {
+        const into = leadsInto(folder, path);
+        if (into !== null) scan.dependencyLinks.set(path, into);
+      }
       if (entry.isDirectory()) {
         const store = gitFolder && name === "objects"
           && await lstat(join(path, "HEAD")).then(() => false, (error: NodeJS.ErrnoException) => error.code === "ENOENT");
@@ -448,10 +463,14 @@ export class HookGuard {
     const linked = links.length > 0
       ? `Blocked: ${links.join(" ")} Make ${links.length > 1 ? "each" : "it"} a file or folder of its own, or point it outside the folder or at a protected name, to run commands here.`
       : null;
+    const intoDependencies = [...scan.dependencyLinks].map(([path, to]) => `${relative(this.folder, path)} leads into ${relative(this.folder, to)}.`).sort();
+    const shown = intoDependencies.length > 0
+      ? `Blocked: ${intoDependencies.join(" ")} Remove the link${intoDependencies.length > 1 ? "s" : ""} to run commands here.`
+      : null;
     const unremoved = unstrippable.length > 0
       ? `Blocked: the computer could not remove the steps that appeared in ${listed(this.folder, unstrippable)} while this chat's commands could write there, which git would run outside the sandbox. Abort that rebase or cherry-pick, or remove those exec lines, to run commands here.`
       : null;
-    return { changed, stripped, held, blocked: [unstopped, unseen, untold, linked, unremoved].filter(Boolean).join(" ") || null };
+    return { changed, stripped, held, blocked: [unstopped, unseen, untold, linked, shown, unremoved].filter(Boolean).join(" ") || null };
   }
 
   // A look's work on *todos*. While a run is in flight it does nothing, held: the run's own git

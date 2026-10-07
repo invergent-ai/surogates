@@ -1504,6 +1504,28 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     });
   }
 
+  // A command can unpack an editor's folder below node_modules (the rule leaves dependency folders alone),
+  // and a link outside it would show that folder where editors read it.
+  it("refuses a command, before it runs, while a link a command made leads into a dependency folder, and runs it once the link is gone", async () => {
+    const folder = join(dir, "folder");
+    const clear = () => {
+      for (const name of ["node_modules", "sub", "ran"]) rmSync(join(folder, name), { recursive: true, force: true });
+    };
+    try {
+      expect(await command("mkdir -p node_modules/p/.vscode && echo '{}' > node_modules/p/.vscode/tasks.json && ln -s node_modules/p sub && echo made")).toMatchObject({
+        ok: { output: "made\n" },
+      });
+      expect(await command("touch ran")).toEqual({
+        error: { type: "sandbox", message: "Blocked: sub leads into node_modules. Remove the link to run commands here." },
+      });
+      expect(existsSync(join(folder, "ran"))).toBe(false);
+      rmSync(join(folder, "sub"));
+      expect(await command("echo ran")).toMatchObject({ ok: { output: "ran\n" } });
+    } finally {
+      clear();
+    }
+  });
+
   it("shows a command what the file tools wrote just before it, each time, with nothing to wait for", async () => {
     const folder = join(dir, "folder");
     const key = join(folder, "lint.py");
@@ -1658,6 +1680,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
       // Another version: npm renames the installed one aside within node_modules first, then unpacks this one.
       await npm("iconv-lite@0.6.2");
       expect(JSON.parse(readFileSync(join(folder, "node_modules", "iconv-lite", "package.json"), "utf8")).version).toBe("0.6.2");
+      // One with a program: npm links it in node_modules/.bin, a link inside the dependency folder, and commands still run.
+      await npm("semver@7.6.3");
+      expect(await command("readlink node_modules/.bin/semver")).toMatchObject({ ok: { output: "../semver/bin/semver.js\n" } });
       expect(prompts).toEqual([]);
     } finally {
       for (const name of ["node_modules", "package.json", "package-lock.json"]) rmSync(join(folder, name), { recursive: true, force: true });
