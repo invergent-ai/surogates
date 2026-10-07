@@ -412,6 +412,19 @@ async def test_a_master_is_not_in_the_chat_list(api):
     assert opened.status_code == 200, opened.text
 
 
+async def test_a_masters_tree_says_it_is_a_project(api):
+    """The chat list draws the open chat's tree: a project's it leaves out."""
+    project = await create(api)
+    chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    assert chat.status_code == 201, chat.text
+    kinds = {}
+    for name, session_id in (("master", project["master_session_id"]), ("chat", chat.json()["id"])):
+        tree = await api.client.get(f"/v1/sessions/{session_id}/tree", headers=api.auth())
+        assert tree.status_code == 200, tree.text
+        kinds[name] = [node["run_kind"] for node in tree.json()["nodes"]]
+    assert kinds == {"master": ["project"], "chat": [None]}
+
+
 async def test_config_cannot_make_a_chat_part_of_a_project(api):
     project = await create(api)
     response = await api.client.post("/v1/sessions", json={"config": {

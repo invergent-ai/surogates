@@ -7,9 +7,9 @@
 // written by a model, so each sits in its own <bdi>: a bidirectional control
 // character in one cannot reorder the card around it.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { useAgentChatAdapterContext } from "../../adapter-context";
-import type { AgentChatThreadProposal, AgentChatThreadRow, AgentChatWorker, ChatMessage } from "../../types";
+import type { AgentChatAdapter, AgentChatThreadProposal, AgentChatThreadRow, AgentChatWorker, ChatMessage } from "../../types";
 import { Button } from "../ui/button";
 
 const GROUP_LABEL: Record<AgentChatThreadRow["group"], string> = {
@@ -38,6 +38,40 @@ function statusLineOf(report: string | null): string | null {
     if (plain) return plain;
   }
   return null;
+}
+
+// What each proposed card's Start did, by proposal and key, kept for the adapter outside the
+// card: a change of view mode draws the card anew, and "Starting…", the error and the focus
+// a start owes its View thread survive it.
+type CardStart =
+  | { state: "starting" }
+  | { state: "failed"; error: string }
+  | { state: "started"; threadId: string; focus: boolean };
+const cardStarts = new WeakMap<AgentChatAdapter, Map<string, CardStart>>();
+const startListeners = new Set<() => void>();
+let startsChanged = 0;
+// How many cards of each proposal are drawn now: a start that finishes while none is owes no focus,
+// which would otherwise jump to its View thread whenever the card is drawn again.
+const drawnCards = new Map<string, number>();
+
+function setCardStart(adapter: AgentChatAdapter, card: string, start: CardStart): void {
+  const starts = cardStarts.get(adapter) ?? new Map<string, CardStart>();
+  cardStarts.set(adapter, starts.set(card, start));
+  startsChanged++;
+  for (const listener of startListeners) listener();
+}
+
+function useCardStarts(adapter: AgentChatAdapter): ReadonlyMap<string, CardStart> {
+  useSyncExternalStore(
+    (listener) => {
+      startListeners.add(listener);
+      return () => {
+        startListeners.delete(listener);
+      };
+    },
+    () => startsChanged,
+  );
+  return cardStarts.get(adapter) ?? new Map();
 }
 
 /** The card a "worker" or "thread_proposal" system message draws, or nothing. */
@@ -110,46 +144,56 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
 
 function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
   const { adapter, projectId, onOpenSession } = useAgentChatAdapterContext();
+  const starts = useCardStarts(adapter);
+  const startOf = (key: string) => starts.get(`${proposal.proposalId}:${key}`);
+  const told = (key: string, start: CardStart) => setCardStart(adapter, `${proposal.proposalId}:${key}`, start);
   // Started here: shown at once, before the thread's own event arrives.
-  const [startedHere, setStartedHere] = useState<Record<string, string>>({});
-  const [starting, setStarting] = useState<Record<string, boolean>>({});
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  const started = { ...startedHere, ...proposal.started };
+  const started: Record<string, string> = {};
+  for (const { key } of proposal.threads) {
+    const start = startOf(key);
+    if (start?.state === "started") started[key] = start.threadId;
+  }
+  Object.assign(started, proposal.started);
+  const starting = (key: string) => startOf(key)?.state === "starting";
   const canStart = !!projectId && !!adapter.startProposedThread;
   // A card started here gives its View thread the focus its Start took away with it,
-  // unless the user has put the focus elsewhere meanwhile.
+  // unless the user has put the focus elsewhere meanwhile; a card drawn anew owes it still,
+  // when one was drawn as the start finished.
   const viewButtons = useRef<Record<string, HTMLButtonElement | null>>({});
-  const [startedNow, setStartedNow] = useState<string | null>(null);
   useEffect(() => {
-    if (startedNow === null) return;
-    if (!document.activeElement || document.activeElement === document.body) viewButtons.current[startedNow]?.focus();
-    setStartedNow(null);
-  }, [startedNow]);
+    drawnCards.set(proposal.proposalId, (drawnCards.get(proposal.proposalId) ?? 0) + 1);
+    return () => {
+      const left = (drawnCards.get(proposal.proposalId) ?? 1) - 1;
+      if (left > 0) drawnCards.set(proposal.proposalId, left);
+      else drawnCards.delete(proposal.proposalId);
+    };
+  }, [proposal.proposalId]);
+  useEffect(() => {
+    for (const { key } of proposal.threads) {
+      const start = startOf(key);
+      if (start?.state !== "started" || !start.focus) continue;
+      if (!document.activeElement || document.activeElement === document.body) viewButtons.current[key]?.focus();
+      told(key, { ...start, focus: false });
+    }
+  });
 
   const start = async (key: string) => {
-    setStarting((current) => ({ ...current, [key]: true }));
-    setErrors(({ [key]: _cleared, ...rest }) => rest);
+    told(key, { state: "starting" });
     try {
       const row = await adapter.startProposedThread!({ projectId: projectId!, proposalId: proposal.proposalId, key });
-      setStartedHere((current) => ({ ...current, [key]: row.id }));
-      setStartedNow(key);
+      told(key, { state: "started", threadId: row.id, focus: drawnCards.has(proposal.proposalId) });
     } catch (error) {
-      setErrors((current) => ({
-        ...current,
-        [key]: error instanceof Error ? error.message : "The thread could not be started.",
-      }));
-    } finally {
-      setStarting(({ [key]: _done, ...rest }) => rest);
+      told(key, { state: "failed", error: error instanceof Error ? error.message : "The thread could not be started." });
     }
   };
   const startable = proposal.threads.filter(
-    (thread) => thread.where === "cloud" && !started[thread.key] && !starting[thread.key],
+    (thread) => thread.where === "cloud" && !started[thread.key] && !starting(thread.key),
   );
   // One at a time, each awaited: a card that fails leaves the rest to go on. Every
   // card waiting its turn counts as starting, so neither its Start nor Start all
   // starts it a second time.
   const startAll = async (keys: string[]) => {
-    setStarting((current) => ({ ...current, ...Object.fromEntries(keys.map((key) => [key, true])) }));
+    for (const key of keys) told(key, { state: "starting" });
     for (const key of keys) await start(key);
   };
 
@@ -166,6 +210,7 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
       <ul className="mt-1 space-y-2">
         {proposal.threads.map((thread) => {
           const threadId = started[thread.key];
+          const tried = startOf(thread.key);
           return (
             <li key={thread.key} data-testid="proposed-thread">
               <div className="break-words font-medium text-foreground">
@@ -174,10 +219,11 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
               <p className="line-clamp-2 break-words text-foreground/70">
                 <bdi>{thread.goal}</bdi>
               </p>
-              {threadId ? (
-                <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <span role="status">Started</span>
-                  {onOpenSession && (
+              <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                {/* There before it says Started, so that a screen reader hears it say so. */}
+                <span role="status">{threadId ? "Started" : ""}</span>
+                {threadId ? (
+                  onOpenSession && (
                     <Button
                       ref={(node) => {
                         viewButtons.current[thread.key] = node;
@@ -189,25 +235,25 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
                     >
                       View thread
                     </Button>
-                  )}
-                </span>
-              ) : thread.where === "device" ? (
-                <span className="text-xs text-muted-foreground">Works in a folder on your computer</span>
-              ) : canStart ? (
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={!!starting[thread.key]}
-                  aria-label={`${starting[thread.key] ? "Starting" : "Start"} ${thread.title}`}
-                  onClick={() => void start(thread.key)}
-                >
-                  {starting[thread.key] ? "Starting…" : "Start"}
-                </Button>
-              ) : null}
+                  )
+                ) : thread.where === "device" ? (
+                  <span>Works in a folder on your computer</span>
+                ) : canStart ? (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={starting(thread.key)}
+                    aria-label={`${starting(thread.key) ? "Starting" : "Start"} ${thread.title}`}
+                    onClick={() => void start(thread.key)}
+                  >
+                    {starting(thread.key) ? "Starting…" : "Start"}
+                  </Button>
+                ) : null}
+              </span>
               {/* A start refused once the card is started, here or elsewhere, is moot. */}
-              {!threadId && errors[thread.key] && (
+              {!threadId && tried?.state === "failed" && (
                 <p role="alert" className="text-xs text-destructive">
-                  {errors[thread.key]}
+                  {tried.error}
                 </p>
               )}
             </li>

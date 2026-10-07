@@ -9,7 +9,7 @@ import * as missionsApi from "@/api/missions";
 import * as sessionsApi from "@/api/sessions";
 import { type SkillSummary, listSkills } from "@/api/skills";
 import * as workspaceApi from "@/api/workspace";
-import * as workstreamsApi from "@/api/workstreams";
+import { workstreams } from "@/api/workstreams";
 import { getAuthToken } from "@/features/auth";
 import { INBOX_REOPENING, reopeningStream } from "@/lib/reopening-stream";
 import { useAppStore } from "@/stores/app-store";
@@ -194,15 +194,15 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
   },
 
   async listProjectThreads(input) {
-    return workstreamsApi.listThreads(input.projectId, input.threadId);
+    return workstreams.threads(input.projectId, input.threadId);
   },
 
   openProjectStream(input) {
-    return workstreamsApi.openProjectStream(input.projectId);
+    return workstreams.stream(input.projectId);
   },
 
   async startProposedThread(input) {
-    return workstreamsApi.startThread(input.projectId, input.proposalId, input.key);
+    return workstreams.start(input.projectId, input.proposalId, input.key);
   },
 
   async stopSession(input) {

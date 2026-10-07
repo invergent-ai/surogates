@@ -14,7 +14,7 @@ import {
 } from "electron";
 
 import type { DesktopAccount } from "../../../web/src/lib/desktop-bridge-contract.js";
-import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow } from "../../../web/src/lib/projects-contract.js";
+import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow, Tier } from "../../../web/src/lib/projects-contract.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
@@ -30,9 +30,10 @@ import { type Credential, CredentialStore, type LiveCredential } from "./credent
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { letWindowClose, MainWindow, onSettingsKey } from "./main-window.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
-import { ANSWER_TIMEOUT_MS, PageProjects } from "./projects.js";
+import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
+import { segments } from "./pages/ui.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
@@ -144,15 +145,21 @@ type View =
   | { kind: "projects" }
   | ({ kind: "project"; thread: { id: string; title: string } | null } & Opened);
 let view: View = { kind: "web" };
+// What the centre showed before the Projects page: Back and Forward leave the page for it.
+let beforeProjects: View = { kind: "web" };
 // The projects the page named, by their master session: the web client arriving at one shows that project.
 const masters = new Map<string, Opened>();
 // Each choice of what the centre shows takes a number: an answer that comes after a later choice applies nothing.
 let choice = 0;
-// Why the project last chosen did not open.
+// Why what the user last asked for did not happen: a project that did not open, a thread not resolved.
 let failure: string | null = null;
+// A thread's row, open or resolve, that left the pane between its drawing and the click.
+const NO_SUCH_THREAD = "No such thread in the open project";
 // The open project, for the Overview pane, and what stops following it.
 let overview: { project: Project; threads: ThreadRow[]; library: LibraryEntry[]; routines: Routine[] } | null = null;
 let unfollow = (): void => {};
+// The project dialog's view, while it is open over the window.
+let projectDialog: WebContents | null = null;
 
 const report = (error: unknown): void => {
   console.error(error);
@@ -236,42 +243,53 @@ function openLink(which: unknown): void {
 }
 
 let refreshing = false;
-let again = false;
+// What the next refresh reads: null for everything, or the threads whose rows changed.
+let wanted = new Set<string | null>();
+// The last pass failed, and lost what it was asked: the next one reads everything.
+let stale = false;
 
-// The projects the page serves, asked again: when it registers its source, when the open
-// project changes, and when the window comes to the front. One refresh runs at a time, and
-// asks once more for whatever changed meanwhile, so an older answer never lands last. The
-// open project, once the page lists it no more, is left.
-async function refreshProjects(): Promise<void> {
+// The projects the page serves, asked again: everything when it registers its source, when the
+// open project changes, when the window comes to the front and when the project's stream says
+// so; only a thread's row when the stream names the thread. One refresh runs at a time, and asks
+// once more for whatever changed meanwhile, so an older answer never lands last. The open
+// project, once the page lists it no more, is left for a new chat.
+async function refreshProjects(threadId: string | null = null): Promise<void> {
   if (!served) return;
-  if (refreshing) {
-    again = true;
-    return;
-  }
+  wanted.add(threadId);
+  if (refreshing) return;
   refreshing = true;
   try {
-    do {
-      again = false;
+    while (wanted.size > 0 && served) {
+      const asked = wanted;
+      wanted = new Set();
+      if (stale) asked.add(null);
       try {
+        // The list is one count per project: a thread's change moves the project's counts too.
         listed = await projects.list();
         const open = view.kind === "project" ? view : null;
         if (open && !listed.some((project) => project.id === open.id)) {
+          // Archived elsewhere: its conversation or thread goes from the centre with it, as the dialog's archive takes it.
           overview = null;
           show({ kind: "web" });
+          main?.go("/chat");
+        } else if (asked.has(null) || overview?.project.id !== open?.id) {
+          await refreshOverview();
+        } else {
+          for (const id of asked) await refreshThread(id!);
         }
-        await refreshOverview();
+        stale = false;
       } catch (error) {
+        stale = true;
         report(error);
       }
       changed();
-    } while (again && served);
+    }
   } finally {
     refreshing = false;
   }
 }
 
-// The open project's threads, library and routines. A thread open in the centre that has left the
-// project takes the centre back to the project's conversation.
+// The open project's threads, library and routines.
 async function refreshOverview(): Promise<void> {
   const open = view.kind === "project" ? view : null;
   if (!open) return;
@@ -281,8 +299,36 @@ async function refreshOverview(): Promise<void> {
   remember(project);
   if (view !== open) return;
   overview = { project, threads, library, routines };
-  const path = `/chat/${project.masterSessionId}`;
-  if (open.thread && !threads.some((thread) => thread.id === open.thread?.id) && webClientPath(path)) {
+  leaveIfGone(open);
+}
+
+// One thread's row of the open project, read alone: it keeps its place, a new one comes first,
+// and one the project no longer has goes. A row new or gone, or whose files changed, changes the
+// Library too, which is read again with it.
+async function refreshThread(threadId: string): Promise<void> {
+  const open = view.kind === "project" ? view : null;
+  if (!open) return;
+  const row = (await projects.threads(open.id, threadId)).find((found) => found.id === threadId);
+  if (view !== open || overview?.project.id !== open.id) return;
+  const before = overview.threads.find((found) => found.id === threadId);
+  if (!row || !before || JSON.stringify(row.files) !== JSON.stringify(before.files)) {
+    const library = await projects.library(open.id);
+    if (view !== open || overview?.project.id !== open.id) return;
+    overview = { ...overview, library };
+  }
+  overview = { ...overview, threads: merged(overview.threads, threadId, row) };
+  leaveIfGone(open);
+}
+
+function merged(threads: ThreadRow[], threadId: string, row: ThreadRow | undefined): ThreadRow[] {
+  if (!row) return threads.filter((found) => found.id !== threadId);
+  return threads.some((found) => found.id === threadId) ? threads.map((found) => (found.id === threadId ? row : found)) : [row, ...threads];
+}
+
+// A thread open in the centre that has left the project takes the centre back to the project's conversation.
+function leaveIfGone(open: View & { kind: "project" }): void {
+  const path = overview ? `/chat/${overview.project.masterSessionId}` : "";
+  if (open.thread && overview && !overview.threads.some((thread) => thread.id === open.thread?.id) && webClientPath(path)) {
     view = { ...open, thread: null };
     main?.go(path);
   }
@@ -291,7 +337,7 @@ async function refreshOverview(): Promise<void> {
 // Follow the open project's changes, as Section 12's stream tells them, once more after the page registers again.
 function follow(): void {
   unfollow();
-  unfollow = view.kind === "project" ? projects.subscribe(view.id, () => void refreshProjects()) : () => {};
+  unfollow = view.kind === "project" ? projects.subscribe(view.id, (threadId) => void refreshProjects(threadId)) : () => {};
 }
 
 // The page withdrew its projects (signed out), or went: nothing is asked of it until it registers
@@ -304,9 +350,14 @@ function withdrawProjects(signedOut: boolean): void {
   changed();
 }
 
-// The account's own: its projects, the masters its page named, the open project and its pane.
+// The account's own: its projects, the masters its page named, the open project and its pane, and
+// why what it last asked for did not happen.
 function forgetAccount(): void {
   listed = [];
+  failure = null;
+  // The project dialog shows one of its projects: it goes too, and nothing it sends reaches the next account's page.
+  if (projectDialog && main?.settingsContents() === projectDialog) main.closeSettings();
+  beforeProjects = { kind: "web" };
   masters.clear();
   overview = null;
   if (view.kind === "project") show({ kind: "web" });
@@ -375,11 +426,29 @@ function navigated(url: string): void {
     if (view.thread && chat === view.thread.id) return;
     const thread = overview?.project.id === view.id ? overview.threads.find((found) => found.id === chat) : undefined;
     if (thread) return show({ ...view, thread: { id: thread.id, title: thread.title } });
+    // A thread the pane has not listed yet, as one just started from its card: its row decides. A page
+    // that serves nothing yet, as after a full load, cannot answer soon: the chat is a page of its own.
+    if (chat !== undefined && !masters.has(chat)) return served ? void openedThread(view, chat) : show({ kind: "web" });
   }
   const known = chat === undefined ? undefined : masters.get(chat);
   if (!known && view.kind === "web") return;
   show(known ? { kind: "project", ...known, thread: null } : { kind: "web" });
   void refreshProjects();
+}
+
+// The web client went to *chat* while *open* was shown: a thread of the project, read alone, is
+// shown with the project as the way back; anything else is a page of the web client's own.
+async function openedThread(open: View & { kind: "project" }, chat: string): Promise<void> {
+  let row: ThreadRow | undefined;
+  try {
+    row = (await projects.threads(open.id, chat)).find((found) => found.id === chat);
+  } catch (error) {
+    report(error);
+  }
+  if (view !== open) return;
+  if (!row) return show({ kind: "web" });
+  if (overview?.project.id === open.id) overview = { ...overview, threads: merged(overview.threads, chat, row) };
+  show({ ...open, thread: { id: row.id, title: row.title } });
 }
 
 /**
@@ -1051,6 +1120,136 @@ function settingsState() {
   };
 }
 
+// What the project dialog sends for a project: its name and goal, and, for one that exists, its
+// instructions and tiers. Lengths are the routes' own, in UTF-16 units as JavaScript counts them.
+interface ProjectFields {
+  name: string;
+  goal: string;
+  instructions?: string;
+  coordinatorTier?: Tier;
+  threadTier?: Tier;
+}
+
+const tierOf = (value: unknown): value is Tier => value === null || value === "basic" || value === "pro";
+
+function projectFields(value: unknown, editing: boolean): ProjectFields {
+  const { name, goal, instructions, coordinatorTier, threadTier } = (value ?? {}) as Record<string, unknown>;
+  const fits = (field: unknown, max: number) => typeof field === "string" && field.length <= max;
+  if (!fits(name, 256) || !fits(goal, 2_000)) throw new Error("Not a project's fields");
+  if (editing && !(fits(instructions, 16_000) && tierOf(coordinatorTier) && tierOf(threadTier))) throw new Error("Not a project's fields");
+  const named = { name: (name as string).trim(), goal: goal as string };
+  return editing
+    ? { ...named, instructions: instructions as string, coordinatorTier: coordinatorTier as Tier, threadTier: threadTier as Tier }
+    : named;
+}
+
+// What the dialog changed of *shown*, the project as it showed it: a change made elsewhere meanwhile
+// to a field the user left alone is kept. The goal it showed empty is a null one.
+function changedFrom(shown: Project, fields: ProjectFields): Partial<ProjectFields> {
+  return Object.fromEntries(Object.entries(fields).filter(([key, value]) =>
+    value !== (key === "goal" ? shown.goal ?? "" : shown[key as keyof ProjectFields])));
+}
+
+// The archive asks under the project's name as the app's prompts show text: a control, bidi or invisible
+// character as its code point (U+202E), so none reorders or hides the question around it.
+async function confirmArchive(name: string): Promise<boolean> {
+  if (!main) return false;
+  const { response } = await dialog.showMessageBox(main.window, {
+    type: "warning",
+    message: `Archive ${segments(name).map((run) => run.text).join("")}?`,
+    detail: "It leaves your projects, with its conversation and its threads. Its files and its memory are kept.",
+    buttons: ["Archive", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  });
+  return response === 0;
+}
+
+// The project dialog, over the window: a new project, or the open project's settings. Its page's
+// calls are answered on its own view only; each answers why it was refused, or null once done.
+function showProject(editing: Opened | null): void {
+  const page = join(PAGES, "project.html");
+  main?.openSettings(page, PAGES_PRELOAD, (contents) => {
+    projectDialog = contents;
+    const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
+      contents.ipc.handle(channel, (event, ...args: unknown[]) => {
+        if (!ownPage(event.senderFrame, page)) throw new Error("Not the project dialog's own page");
+        return handler(...args);
+      });
+    };
+    const refused = (error: unknown) => (error instanceof Error ? error.message : String(error));
+    // A change the page did not answer in time may have been made all the same: it is said so, and the
+    // projects are read again, so one that was made shows.
+    const unanswered = (error: unknown, what: string) => {
+      if (!(error instanceof TimedOut)) return refused(error);
+      void refreshProjects();
+      return `${error.message}: ${what}`;
+    };
+    // The project as the dialog showed it: its archive is asked under the name the user sees.
+    let shown: Project | null = null;
+    // A project that cannot be read, gone or out of reach, is said so, with nothing to save.
+    handle("project:state", async () => {
+      if (!editing) return { editing: false, project: null, refused: null };
+      try {
+        shown = await askServed(() => projects.get(editing.id));
+        return { editing: true, project: shown, refused: null };
+      } catch (error) {
+        return { editing: true, project: null, refused: refused(error) };
+      }
+    });
+    // Only this dialog: one the user closed meanwhile may have given its place to Settings, or another.
+    const close = () => {
+      if (main?.settingsContents() === contents) main.closeSettings();
+    };
+    handle("project:save", async (value) => {
+      const fields = projectFields(value, editing !== null);
+      if (fields.name === "") return "Name the project.";
+      const change = editing && shown ? changedFrom(shown, fields) : fields;
+      if (editing && Object.keys(change).length === 0) {
+        close();
+        return null;
+      }
+      try {
+        const project = editing
+          ? await projects.update(editing.id, change)
+          : await projects.create({ name: fields.name, goal: fields.goal });
+        remember(project);
+        // A new project opens on its conversation, as one chosen in the sidebar does, unless its dialog
+        // was closed meanwhile: the user has gone on to something else, which a late answer leaves alone.
+        const opening = !editing && main?.settingsContents() === contents;
+        close();
+        if (opening && webClientPath(`/chat/${project.masterSessionId}`)) {
+          choose();
+          show({ kind: "project", id: project.id, name: project.name, masterSessionId: project.masterSessionId, thread: null });
+          main?.showWeb(true);
+          main?.go(`/chat/${project.masterSessionId}`);
+        }
+        void refreshProjects();
+        return null;
+      } catch (error) {
+        return unanswered(error, editing ? "the change may have been made" : "the project may have been made");
+      }
+    });
+    handle("project:archive", async () => {
+      if (!editing || !(await confirmArchive(shown?.name ?? editing.name))) return null;
+      try {
+        await projects.archive(editing.id);
+      } catch (error) {
+        return unanswered(error, "the project may have been archived");
+      }
+      close();
+      if (view.kind === "project" && view.id === editing.id) {
+        show({ kind: "web" });
+        main?.go("/chat");
+      }
+      void refreshProjects();
+      return null;
+    });
+    handle("project:close", () => main?.closeSettings());
+  });
+}
+
 // Settings, over the window: its page's calls are answered on its own view only.
 function showSettings(): void {
   const page = join(PAGES, "settings.html");
@@ -1128,6 +1327,7 @@ function wire(window: MainWindow, page: string): void {
   });
   handle("shell:projects", () => {
     choose();
+    if (view.kind !== "projects") beforeProjects = view;
     show({ kind: "projects" });
     window.showWeb(false);
   });
@@ -1152,25 +1352,54 @@ function wire(window: MainWindow, page: string): void {
       changed();
     }
   });
-  // A thread of the open project, in the centre.
+  // A thread of the open project, in the centre. One that has left the pane since it was drawn is said so.
   handle("shell:thread", (id) => {
     const thread = view.kind === "project" && overview?.project.id === view.id
       ? overview.threads.find((found) => found.id === id) : undefined;
     const path = `/chat/${String(id)}`;
-    if (view.kind !== "project" || !thread || !webClientPath(path)) throw new Error("No such thread in the open project");
     choose();
+    if (view.kind !== "project" || !thread || !webClientPath(path)) {
+      failure = NO_SUCH_THREAD;
+      return changed();
+    }
     view = { ...view, thread: { id: thread.id, title: thread.title } };
     window.go(path);
     changed();
   });
-  // Back and Forward move the web client; on the Projects page they leave it, for the client where it is.
+  // A thread of the open project resolved, or reopened, from its row: the page's answer is its row.
+  // A row's action is no choice of what the centre shows, so a project opening meanwhile still opens:
+  // it takes a number of its own, and only the latest action's refusal is said.
+  let settling = 0;
+  const settle = (how: "resolve" | "reopen") => async (id: unknown) => {
+    const open = view.kind === "project" && overview?.project.id === view.id ? view : null;
+    if (!open || typeof id !== "string" || !overview?.threads.some((found) => found.id === id)) {
+      failure = NO_SUCH_THREAD;
+      return changed();
+    }
+    const mine = ++settling;
+    failure = null;
+    changed();
+    try {
+      const row = await projects[how](open.id, id);
+      if (view === open && overview?.project.id === open.id) overview = { ...overview, threads: merged(overview.threads, id, row) };
+    } catch (error) {
+      if (mine === settling) failure = error instanceof Error ? error.message : String(error);
+    }
+    changed();
+  };
+  handle("shell:resolve", settle("resolve"));
+  handle("shell:reopen", settle("reopen"));
+  // Back and Forward move the web client; on the Projects page they leave it, for what the centre
+  // showed before it, as the client still is there. A failure the choice cleared is drawn away.
   const move = (step: () => void) => {
     choose();
+    changed();
     if (view.kind !== "projects") return step();
-    show({ kind: "web" });
+    show(beforeProjects);
     window.showWeb(true);
     const url = window.webContents()?.getURL();
     if (url) navigated(url);
+    void refreshProjects();
   };
   handle("shell:back", () => move(() => window.back()));
   handle("shell:forward", () => move(() => window.forward()));
@@ -1178,6 +1407,11 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:place", (hole) => window.place(bounds(hole)));
   handle("shell:menu", popup);
   handle("shell:settings", showSettings);
+  handle("shell:new-project", () => showProject(null));
+  handle("shell:project-settings", () => {
+    if (view.kind !== "project") throw new Error("No project is open");
+    showProject({ id: view.id, name: view.name, masterSessionId: view.masterSessionId });
+  });
   handle("shell:link", openLink);
 }
 

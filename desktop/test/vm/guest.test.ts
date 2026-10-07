@@ -420,9 +420,10 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       repo = join(shared, "repo");
       mkdirSync(repo, { recursive: true });
       expect(spawnSync("bash", ["-c", "git init -q -b master && git config user.email a@b && git config user.name a && echo a > a.txt && git add -A && git commit -qm a && git init -q sub"], { cwd: repo }).status).toBe(0);
-      // A submodule's git folder, a linked worktree's, and the user's own hook, which is not executable.
+      // A submodule's git folder, a linked worktree's, the user's own hook, which is not executable, and an MCP config of theirs.
       for (const [path, text] of [
         [".git/modules/foo/config", "[core]\n"], [".git/worktrees/wt/commondir", "../..\n"], [".git/worktrees/wt/HEAD", "ref: refs/heads/wt\n"], [".git/hooks/post-merge", "#!/bin/sh\n"],
+        ["tool/.mcp.json", "{}\n"],
       ] as const) {
         mkdirSync(dirname(join(repo, path)), { recursive: true });
         writeFileSync(join(repo, path), text);
@@ -466,6 +467,10 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       ["hook chmod +x", "chmod +x .git/hooks/post-merge", ".git/hooks/post-merge"],
       ["config append", "echo '[core]' >> .git/config", ".git/config"],
       ["config truncate", ": > .git/config", ".git/config"],
+      // A read-only open that truncates: the host's file is emptied before the size change is judged.
+      ["config truncate read-only", "python3 -c \"import os; os.open('.git/config', os.O_RDONLY | os.O_TRUNC)\"", ".git/config"],
+      ["hook truncate read-only", "python3 -c \"import os; os.open('.git/hooks/post-merge', os.O_RDONLY | os.O_TRUNC)\"", ".git/hooks/post-merge"],
+      ["mcp.json truncate read-only", "python3 -c \"import os; os.open('tool/.mcp.json', os.O_RDONLY | os.O_TRUNC)\"", "tool/.mcp.json"],
       ["core.hooksPath", "printf '[core]\\n  hooksPath = ../evil\\n' >> .git/config", ".git/config"],
       ["gitconfig", "echo x > .gitconfig", ".gitconfig"],
       ["vscode dir", "mkdir .vscode", ".vscode"],
@@ -508,6 +513,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
 
     const allow = [
       ["ordinary write", "echo x > notes.txt"],
+      ["an ordinary file truncated by a read-only open", "echo x > plain-trunc && python3 -c \"import os; os.open('plain-trunc', os.O_RDONLY | os.O_TRUNC)\" && test ! -s plain-trunc"],
       ["I1 branch named hooks", "git branch hooks"],
       ["I1 branch named config", "git branch config"],
       ["a ref file directly", "echo 0000000000000000000000000000000000000000 > .git/refs/heads/zz"],
@@ -868,32 +874,46 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     }
   });
 
-  it("maps a folder's file for one process's own use, and refuses to share a mapping of it, as virtiofsd 1.10 serves an uncached file", async () => {
+  it("refuses a shared mapping of a folder's file, writable or read-only, so SQLite's WAL fails there plainly and works in the home folder", async () => {
     const mapped = await run([
       "python3 - <<'EOF'",
-      "import mmap, sqlite3",
+      "import mmap, os, sqlite3",
       "with open('mapped', 'w+b') as f:",
       "    f.write(b'x' * 4096)",
       "    f.flush()",
-      "    try:",
-      "        mmap.mmap(f.fileno(), 4096, mmap.MAP_SHARED)",
-      "        print('shared')",
-      "    except OSError as error:",
-      "        print('shared', error.errno)",
-      "    mmap.mmap(f.fileno(), 4096, mmap.MAP_PRIVATE)",
+      "    for access in (mmap.ACCESS_WRITE, mmap.ACCESS_READ):",
+      "        try:",
+      "            mmap.mmap(f.fileno(), 4096, access=access)",
+      "            print('shared')",
+      "        except OSError as error:",
+      "            print('shared', error.errno)",
+      "    mmap.mmap(f.fileno(), 4096, access=mmap.ACCESS_COPY)",
       "    print('private')",
-      "try:",
-      "    db = sqlite3.connect('wal.db')",
-      "    db.execute('pragma journal_mode=wal')",
-      "    db.execute('create table t (x)')",
-      "    print('wal')",
-      "except sqlite3.Error as error:",
-      "    print('wal', error)",
+      "for path in ('wal.db', os.path.expanduser('~/wal.db')):",
+      "    try:",
+      "        db = sqlite3.connect(path)",
+      "        db.execute('pragma journal_mode=wal')",
+      "        db.execute('create table t (x)')",
+      "        print('wal')",
+      "    except sqlite3.Error as error:",
+      "        print('wal', error)",
       "EOF",
-      "rm -f mapped wal.db wal.db-wal wal.db-shm",
+      "rm -f mapped wal.db wal.db-wal wal.db-shm ~/wal.db ~/wal.db-wal ~/wal.db-shm",
     ].join("\n"));
-    // A shared mapping of a file opened for direct I/O needs virtiofsd's --allow-mmap, which 1.10 has not; SQLite's WAL maps its index so.
-    expect(mapped).toEqual({ ok: { output: "shared 19\nprivate\nwal disk I/O error\n", returncode: 0, timed_out: false } });
+    // The folder is served uncached without --allow-mmap: a shared mapping fails with ENODEV, as the
+    // model's note says, rather than lose writes either side makes while it is mapped. The home is the guest's own disk.
+    expect(mapped).toEqual({ ok: { output: "shared 19\nshared 19\nprivate\nwal disk I/O error\nwal\n", returncode: 0, timed_out: false } });
+  });
+
+  it("runs the folder's own programs: a checked-in script, a built binary and a node_modules/.bin tool", async () => {
+    expect(await run([
+      "printf '#!/bin/sh\\necho configured\\n' > configure && chmod +x configure && ./configure",
+      "cp /usr/bin/true built && ./built && echo built",
+      // As npm installs a package's command: a script in the package, linked from node_modules/.bin.
+      "mkdir -p node_modules/tool/bin node_modules/.bin && printf '#!/usr/bin/env node\\nconsole.log(\"tool\")\\n' > node_modules/tool/bin/cli.js",
+      "chmod +x node_modules/tool/bin/cli.js && ln -s ../tool/bin/cli.js node_modules/.bin/tool && ./node_modules/.bin/tool",
+      "rm -rf configure built node_modules",
+    ].join(" && "))).toEqual({ ok: { output: "configured\nbuilt\ntool\n", returncode: 0, timed_out: false } });
   });
 
   it("repairs a sessions disk the quick check cannot, and keeps the homes on it", async () => {

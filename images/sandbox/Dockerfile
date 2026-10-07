@@ -19,9 +19,11 @@
 # Load into k3d cluster (optional, if using k3d):
 #   k3d image import ghcr.io/invergent-ai/surogates-agent-sandbox:latest -c surogates
 
-# The guest's kernel: Ubuntu 24.04's generic kernel, booted directly. Its .debs
+# The guest's kernel: Ubuntu 24.04's hardware-enablement kernel, 26.04's 7.0, booted
+# directly. 6.8.0-146 fails every kernel read of an uncached virtiofs file with EFAULT,
+# exec's first read among them, so no program in a chat's folder could run. Its .debs
 # come from Launchpad, which keeps every published version, and are checked by hash.
-ARG KERNEL=6.8.0-146-generic
+ARG KERNEL=7.0.0-34-generic
 
 # ── Python dependencies: the data libraries ──────────────────────────
 FROM python:3.12-slim AS python-deps
@@ -164,51 +166,68 @@ ENV PATH="/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:$
     XDG_CACHE_HOME="/home/sandbox/.cache"
 
 # ── The guest's kernel ──────────────────────────────────────────────
-# The kernel pin: KERNEL above and these two .debs, their version and hashes, change together.
+# The kernel pin: KERNEL above and these four .debs, their version and hashes, change
+# together: the kernel, its modules, and the tools whose bpftool loads the guest-kernel rule.
 FROM python:3.12-slim AS kernel
-ADD --checksum=sha256:5ff8d86009ba6c30a6aacfe47a5176969bbb6591438c913d29881032d071e83f \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-6.8.0-146-generic_6.8.0-146.146_amd64.deb /tmp/image.deb
-ADD --checksum=sha256:9287a0b722a7dd0c94a412eda8e27de4742a7925fdf2d08375b2f608516e6ab4 \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-6.8.0-146-generic_6.8.0-146.146_amd64.deb /tmp/modules.deb
-RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel
+ADD --checksum=sha256:2bd0e1fa6fd72b00041f4523b97b730c94a9c14198a8f07231d24d49d334bd37 \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-7.0.0-34-generic_7.0.0-34.34~24.04.1_amd64.deb /tmp/image.deb
+ADD --checksum=sha256:e81f48d95ef2ee583b342836491cc77c7fe3fbe62735b3283bc43aec5d1c7e8c \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-7.0.0-34-generic_7.0.0-34.34~24.04.1_amd64.deb /tmp/modules.deb
+ADD --checksum=sha256:6228b31dd28232ee2823a0fc68744c5857eb53e96c3d8d12c594112e935104e6 \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-tools-7.0.0-34-generic_7.0.0-34.34~24.04.1_amd64.deb /tmp/tools.deb
+ADD --checksum=sha256:951c54d2fcbfa11a6bfe95614c8cd7d3d0135b42efc613c0b5726691c9525ca5 \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-hwe-7.0-tools-7.0.0-34_7.0.0-34.34~24.04.1_amd64.deb /tmp/hwe-tools.deb
+RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel \
+    && dpkg-deb -x /tmp/tools.deb /tools && dpkg-deb -x /tmp/hwe-tools.deb /tools
 
 # ── The guest-kernel rule (BPF-LSM), compiled against the pinned kernel's BTF ──
 # The BTF is the pinned vmlinuz's own: its zstd payload is a vmlinux that keeps .BTF.
 FROM ubuntu:24.04 AS bpf
 ARG KERNEL
-RUN apt-get update && apt-get install -y --no-install-recommends clang llvm libbpf-dev linux-tools-${KERNEL} zstd \
+RUN apt-get update && apt-get install -y --no-install-recommends clang llvm libbpf-dev zstd \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=kernel /kernel/boot/vmlinuz-${KERNEL} /vmlinuz
+# bpftool, from the pinned kernel's own tools: /usr/lib/linux-tools/${KERNEL}/bpftool.
+COPY --from=kernel /tools/usr/lib/ /usr/lib/
 COPY desktop/vm/rule.bpf.c desktop/vm/rule-match.h /src/
 # zstd stops with an error at the bytes after the payload; bpftool refuses anything but a whole vmlinux.
-# Each lsm/<hook> program must take as many arguments as bpf_lsm_<hook> in the BTF (its FUNC_PROTO's vlen):
-# the verifier loads one that does not, which then reads the wrong ones, or the hook's return slot as one.
-# The check counts the commas of the BPF_PROG( line after each SEC, so it misjudges a declaration split
+# Each lsm/<hook> program must take bpf_lsm_<hook>'s arguments in the BTF, type for type: the verifier
+# loads one that does not, which then reads the wrong ones, or the hook's return slot as one.
+# The check reads the BPF_PROG( line after each SEC, so it misjudges a declaration split
 # across lines, or one that also takes the optional trailing int ret: keep each on one line, without ret.
+# ctype names a BTF type as C writes it, for the pointers, qualifiers and types the hooks take.
 RUN at=$(LC_ALL=C grep -aboP '\x28\xb5\x2f\xfd' /vmlinuz | head -1 | cut -d: -f1) \
     && { tail -c +$((at + 1)) /vmlinuz | zstd -dcq > /vmlinux || true; } \
     && { test -s /vmlinux || { echo "no vmlinux decompressed from /vmlinuz" >&2; exit 1; }; } \
     && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format c > /src/vmlinux.h \
     && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format raw | awk ' \
-        FNR == NR && $2 == "FUNC_PROTO" { for (i = 3; i <= NF; i++) if ($i ~ /^vlen=/) vlen[substr($1, 2, length($1) - 2)] = substr($i, 6); next; } \
-        FNR == NR && $2 == "FUNC" && $3 ~ /^.bpf_lsm_/ { proto[substr($3, 10, length($3) - 10)] = substr($4, 9); next; } \
+        function ctype(id,   k, t) { k = kind[id]; t = target[id]; if (k == "PTR") return ctype(t) " *"; \
+          if (k == "CONST" || k == "VOLATILE") return kind[t] == "PTR" ? ctype(t) " " tolower(k) : tolower(k) " " ctype(t); \
+          if (k == "STRUCT" || k == "UNION" || k == "ENUM") return tolower(k) " " name[id]; return name[id]; } \
+        BEGIN { q = sprintf("%c", 39); } \
+        FNR == NR && /^\[/ { id = substr($1, 2, length($1) - 2); kind[id] = $2; split($0, f, q); name[id] = f[2]; \
+          if (match($0, / type_id=[0-9]+/)) target[id] = substr($0, RSTART + 9, RLENGTH - 9); \
+          if ($2 == "FUNC" && name[id] ~ /^bpf_lsm_/) proto[substr(name[id], 9)] = target[id]; next; } \
+        FNR == NR && kind[id] == "FUNC_PROTO" { match($0, / type_id=[0-9]+/); param[id, ++params[id]] = substr($0, RSTART + 9, RLENGTH - 9); next; } \
         FNR == NR { next; } \
         hook != "" && !/BPF_PROG\(/ { print "lsm/" hook ": no BPF_PROG on the line after its SEC" > "/dev/stderr"; bad = 1; hook = ""; } \
-        hook != "" { args = $0; sub(/.*BPF_PROG\(/, "", args); sub(/\).*/, "", args); n = gsub(/,/, "", args); want = vlen[proto[hook]]; \
-          if (want == "") { print "lsm/" hook ": the pinned kernel has no bpf_lsm_" hook > "/dev/stderr"; bad = 1; } \
-          else if (n != want) { print "lsm/" hook ": its program takes " n " arguments, and bpf_lsm_" hook " in the pinned kernel takes " want > "/dev/stderr"; bad = 1; } \
+        hook != "" { args = $0; sub(/.*BPF_PROG\(/, "", args); sub(/\).*/, "", args); n = split(args, arg, ",") - 1; p = proto[hook]; \
+          if (p == "") { print "lsm/" hook ": the pinned kernel has no bpf_lsm_" hook > "/dev/stderr"; bad = 1; } \
+          else if (n != params[p] + 0) { print "lsm/" hook ": its program takes " n " arguments, and bpf_lsm_" hook " in the pinned kernel takes " params[p] + 0 > "/dev/stderr"; bad = 1; } \
+          else for (i = 1; i <= n; i++) { c = arg[i + 1]; sub(/[A-Za-z_][A-Za-z0-9_]*[ \t]*$/, "", c); gsub(/\*/, " *", c); gsub(/[ \t]+/, " ", c); sub(/^ /, "", c); sub(/ $/, "", c); \
+            k = ctype(param[p, i]); if (c != k) { print "lsm/" hook ": its argument " i " is " c ", and bpf_lsm_" hook " in the pinned kernel takes " k > "/dev/stderr"; bad = 1; } } \
           checked++; hook = ""; } \
         /^SEC\("lsm\// { hook = $0; sub(/^SEC\("lsm\//, "", hook); sub(/".*/, "", hook); } \
-        END { if (bad || !checked) exit 1; print checked " lsm programs take as many arguments as their hooks"; }' \
+        END { if (bad || !checked) exit 1; print checked " lsm programs take the arguments of their hooks, type for type"; }' \
         - /src/rule.bpf.c \
     && clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I/src -c /src/rule.bpf.c -o /rule.bpf.o
 
 # ── Surogate Desktop's VM guest ─────────────────────────────────────
 FROM tools AS guest
 ARG KERNEL
-# libelf1, zlib1g, libcap2 and libzstd1 are bpftool's libraries.
+# libelf1, zlib1g, libcap2 and libssl3t64 are bpftool's libraries.
 RUN apt-get update && apt-get install -y --no-install-recommends iproute2 e2fsprogs kmod \
-        libelf1 zlib1g libcap2 libzstd1 \
+        libelf1 zlib1g libcap2 libssl3t64 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=kernel /kernel/lib/modules/ /usr/lib/modules/
 COPY --from=bpf /rule.bpf.o /usr/lib/surogate/rule.bpf.o
