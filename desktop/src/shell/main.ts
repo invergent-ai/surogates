@@ -899,6 +899,9 @@ async function signIn(agent: Agent): Promise<void> {
       await endDevice(previous);
       if (cancelled()) return;
     }
+    // What the agent told another account here opens nothing more: its notices go with its sign-in.
+    const before = signedIn?.account ?? previous;
+    if (before && (before.orgId !== who.orgId || before.userId !== who.userId)) notifications?.closeAll();
     // The sign-in this one replaces ends at the agent: none is left valid with no copy here.
     void signedIn?.end().catch(report);
     const signedInNow: SignedIn = { origin: agent.origin, agentId: agent.agentId, account: who, authTime: tokens.authTime, refreshToken: tokens.refreshToken };

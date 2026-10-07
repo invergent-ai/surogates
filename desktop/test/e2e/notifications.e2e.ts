@@ -7,7 +7,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { FIXTURE_IDS, projectFixtures } from "../../../web/src/lib/projects.js";
-import { ACCOUNT, connect, FakeAgent, quitHeld, signedInAndAdded, webClient } from "./fake-agent.js";
+import { ACCOUNT, connect, FakeAgent, opened, quitHeld, signedInAndAdded, webClient } from "./fake-agent.js";
 import { clickNotice, dataHome, launch, notices, press, prompt, promptsShown, quit, shellPage, stubNative, stubNotifications } from "./launch.js";
 
 let home: string;
@@ -44,6 +44,7 @@ async function signedIn(): Promise<Page> {
   return webClient(app, origin);
 }
 
+const asked = (shell: ElectronApplication) => shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string }> }).asked);
 const hide = (shell: ElectronApplication) => shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.hide());
 const shown = (shell: ElectronApplication) => shell.evaluate(({ BrowserWindow }) =>
   BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.isVisible());
@@ -286,6 +287,28 @@ describe("the app's notifications", () => {
     // No page streams the chat, so the agent puts the turn's end in the inbox: only the inbox can tell it.
     agent.tell({ kind: "task_complete", title: "Quarterly report", session_id: CHAT });
     await expect.poll(() => notices(app!)).toEqual([{ title: "Quarterly report", body: "Finished." }]);
+  });
+
+  it("open nothing the account before told of, once another account signs in on this computer", async () => {
+    const client = await signedIn();
+    const page = await shellPage(app!);
+    await hide(app!);
+    await expect.poll(() => agent.inboxStreams.size).toBe(1);
+    agent.tell({ kind: "input_required", title: "Which report should I start from?", session_id: CHAT });
+    await expect.poll(async () => (await notices(app!)).length).toBe(1);
+    // Another user signs in at the agent's page, and agrees to end the first one's access here.
+    agent.account = { name: "Bea Other", email: "bea@example.com", userId: "b", orgId: "o" };
+    agent.link.identity = { ...agent.link.identity, device_id: "d2", user_id: "b" };
+    const before = (await opened(app!)).length;
+    await page.evaluate(() => (window as unknown as { surogateShell: { signIn(): Promise<void> } }).surogateShell.signIn());
+    await expect.poll(async () => (await opened(app!)).length).toBe(before + 1);
+    await agent.approve((await opened(app!))[before]!);
+    await expect.poll(async () => (await asked(app!)).map((options) => options.message)).toContain("Sign in as bea@example.com?");
+    await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    await expect.poll(() => new URL(client.url()).pathname).toBe("/");
+    await clickNotice(app!, 0);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(new URL(client.url()).pathname).toBe("/");
   });
 
   it("follow the chat the window shows no more once the user logs out", async () => {
