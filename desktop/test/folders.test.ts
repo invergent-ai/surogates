@@ -70,6 +70,14 @@ describe("Settings → Folders and permissions", () => {
     expect(await shown()).toEqual([]);
   });
 
+  it("forgets every chat's background processes at once, as a log out does", async () => {
+    bind(FIRST, "/home/me/notes", "free", 1);
+    const live = new LiveProcesses();
+    live.heard(FIRST, { handles: [{ id: "proc_1", command: "npm run dev", cwd: "/home/me/notes", task_id: null, started_at: 1 }], live: 1 });
+    live.clear();
+    expect((await listFolders(journal.bindings, async () => "A chat", live))[0]!.chats[0]!.processes).toEqual([]);
+  });
+
   it("stops a process as the agent's own kill does, named as the user's", () => {
     expect(stopOperation(FIRST, "proc_1")).toMatchObject({
       sessionId: FIRST, callingSessionId: FIRST, invocationId: "settings", ordinal: 0, kind: "kill", args: { session_id: "proc_1" },

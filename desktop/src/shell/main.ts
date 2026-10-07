@@ -698,6 +698,10 @@ async function endDevice(credential: Credential): Promise<void> {
   // A revoked device still being cleaned up has its journal open.
   await retiring;
   trying(() => rmSync(join(root, "devices", credential.deviceId), { recursive: true, force: true }));
+  // What was read and heard of its chats goes with them: their titles, and the background processes they ran.
+  titles.clear();
+  reads.clear();
+  alive.clear();
 }
 
 // The app's native message boxes up now. While one is, a link waits, the first that comes; it opens
@@ -1433,7 +1437,7 @@ const STOP_PROCESS_MS = 15_000;
 
 // Each bound chat's title, read on the app's own sign-in, and kept once the agent named it. One it
 // names not yet, or whose read failed, is read once each time Settings opens, not at each redraw.
-// ponytail: kept for the app's life, one per chat bound here: a chat renamed meanwhile keeps its old title until the next launch.
+// ponytail: kept until the app quits or this computer's access ends for its user, one per chat bound here: a chat renamed meanwhile keeps its old title until then.
 const titles = new Map<string, string>();
 const reads = new Map<string, Promise<string>>(); // this opening of Settings' own
 

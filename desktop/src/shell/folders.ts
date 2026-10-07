@@ -32,6 +32,10 @@ export class LiveProcesses {
     else this.byRoot.set(root, change.handles.filter((handle) => handle.ended === undefined));
   }
 
+  clear(): void {
+    this.byRoot.clear();
+  }
+
   of(root: string): Array<{ id: string; command: string }> {
     return (this.byRoot.get(root) ?? []).map(({ id, command }) => ({ id, command }));
   }

@@ -7,7 +7,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
+import { ACCOUNT, connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
 import { dataHome, launch, press, prompt, quit, shellPage, stubNative } from "./launch.js";
 
 const CHAT = "7d2e0f8a-2b3c-4d5e-9f60-718293a4b5c6";
@@ -138,5 +138,26 @@ describe("Settings → Folders and permissions", () => {
     const again = await foldersSettings(shell, page);
     await expect.poll(() => texts(again, "#folders .row .label > span:first-child")).toEqual(["Receipts"]);
     expect(agent.asked.title).toBe(2);
+  });
+
+  it("reads each chat's title afresh once its user has logged out, as for another account", async () => {
+    const { shell, page, client } = await signedIn();
+    agent.titles.set(CHAT, "Quarterly report");
+    await bound(client, folders[0]!, CHAT, "free");
+    const settings = await foldersSettings(shell, page);
+    await expect.poll(() => texts(settings, "#folders .row .label > span:first-child")).toEqual(["Quarterly report"]);
+    await settings.keyboard.press("Escape").catch(() => {});
+    await expect.poll(() => settings.isClosed()).toBe(true);
+    // Logged out, then back in: this computer is added again, and the chat bound on it again.
+    await page.click("#user");
+    await page.click('[data-action="logout"]');
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    await signedInAndAdded(shell, page, agent);
+    // The web client says who is signed in on it, as it does once its session is in.
+    await client.evaluate((account) => window.surogateDesktop!.setAccount(account), ACCOUNT);
+    agent.titles.set(CHAT, "Receipts");
+    await bound(client, folders[0]!, CHAT, "free");
+    const again = await foldersSettings(shell, page);
+    await expect.poll(() => texts(again, "#folders .row .label > span:first-child")).toEqual(["Receipts"]);
   });
 });
