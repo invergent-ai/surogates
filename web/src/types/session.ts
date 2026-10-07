@@ -189,6 +189,8 @@ export interface SessionTreeNode {
   agent_id: string;
   agent_type: string | null;
   run_kind: "dynamic_loop" | "scheduled" | string | null;
+  /** A chat on a folder of the user's computer: that computer's name. Null in the cloud. */
+  computer: string | null;
   channel: string;
   status: "active" | "paused" | "completed" | "failed";
   title: string | null;

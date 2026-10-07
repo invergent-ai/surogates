@@ -123,6 +123,7 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
         agentId: node.agent_id,
         agentType: node.agent_type,
         runKind: node.run_kind,
+        computer: node.computer,
         channel: node.channel,
         status: node.status,
         title: node.title,

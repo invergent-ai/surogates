@@ -59,7 +59,7 @@ async def test_a_local_folder_chat_is_created_waiting_for_its_binding(api):
     response = await api.client.post("/v1/sessions", json=local(device["id"]), headers=api.auth())
     assert response.status_code == 201, response.text
     session = response.json()
-    assert session["config"]["execution"] == {"kind": "device", "device_id": device["id"]}
+    assert session["config"]["execution"] == {"kind": "device", "device_id": device["id"], "device_name": "Flavius's ThinkPad"}
     assert session["config"]["workspace_path"] == FOLDER
     assert await binding(api, session["id"]) == Binding("pending")
     [op] = await journal(api).pending(UUID(device["id"]), 1)

@@ -209,6 +209,33 @@ async def test_tree_marks_dynamic_loop_runs(
     assert by_id[str(loop_run.id)]["run_kind"] == "dynamic_loop"
 
 
+async def test_tree_names_the_computer_a_local_folder_chat_works_on(
+    client: AsyncClient, session_factory, session_store,
+):
+    org_id, user_id, token = await _tenant(session_factory)
+    execution = {"kind": "device", "device_id": str(uuid.uuid4()), "device_name": "Flavius's ThinkPad"}
+    root = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id=_AGENT_ID,
+        config={"execution": execution, "workspace_path": "/home/flavius/notes"},
+    )
+    # A sub-agent's chat works on its root's folder, and carries the same execution.
+    child = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id=_AGENT_ID, parent_id=root.id,
+        channel="delegation", config={"execution": execution},
+    )
+    cloud = await session_store.create_session(user_id=user_id, org_id=org_id, agent_id=_AGENT_ID)
+
+    by_id = {}
+    for asked in (root, cloud):
+        resp = await client.get(f"/v1/sessions/{asked.id}/tree", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 200, resp.text
+        by_id |= {n["id"]: n for n in resp.json()["nodes"]}
+
+    assert by_id[str(root.id)]["computer"] == "Flavius's ThinkPad"
+    assert by_id[str(child.id)]["computer"] == "Flavius's ThinkPad"
+    assert by_id[str(cloud.id)]["computer"] is None
+
+
 async def test_tree_returns_full_root_tree_when_called_with_subagent_id(
     client: AsyncClient, session_factory, session_store,
 ):

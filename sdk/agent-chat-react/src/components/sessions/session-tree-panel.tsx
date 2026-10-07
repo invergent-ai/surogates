@@ -11,11 +11,13 @@ import { formatDistanceToNow } from "date-fns";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
+  LaptopIcon,
   SquareIcon,
   Trash2Icon,
   UsersIcon,
 } from "lucide-react";
 import { Badge } from "../ui/badge";
+import { sessionComputer } from "../../lib/sessions";
 import { cn } from "../../lib/utils";
 import type {
   AgentChatAdapter,
@@ -112,6 +114,7 @@ function sessionToTreeNode(session: AgentChatSession): AgentChatSessionTreeNode 
     model: session.model,
     messageCount: session.messageCount,
     toolCallCount: session.toolCallCount,
+    computer: sessionComputer(session.config),
     createdAt: session.createdAt ?? timestamp,
     updatedAt: session.updatedAt ?? timestamp,
   };
@@ -290,7 +293,17 @@ function TreeNodeRow({
         )}
         <div className="flex-1 min-w-0">
           <div className="text-sm truncate">{title}</div>
-          <div className="text-xs text-faint truncate">{subtitle}</div>
+          <div className="flex items-center gap-1 text-xs text-faint min-w-0">
+            {entry.computer && (
+              // A chat on a folder of the user's computer, in every list of chats, the browser's too.
+              <span data-testid="session-computer" title={`On ${entry.computer}`} className="inline-flex shrink-0 items-center gap-1">
+                <LaptopIcon className="w-3 h-3" aria-hidden="true" />
+                {entry.computer}
+              </span>
+            )}
+            {entry.computer && subtitle && <span aria-hidden="true">·</span>}
+            <span className="truncate">{subtitle}</span>
+          </div>
         </div>
         {isRunning && canStop && isChildSession && (
           <button

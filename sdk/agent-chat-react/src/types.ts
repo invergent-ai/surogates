@@ -266,6 +266,8 @@ export interface AgentChatSessionTreeNode {
   model?: string | null;
   messageCount?: number;
   toolCallCount?: number;
+  /** A chat on a folder of the user's computer: that computer's name. Null in the cloud. */
+  computer?: string | null;
   createdAt: string;
   updatedAt: string;
 }

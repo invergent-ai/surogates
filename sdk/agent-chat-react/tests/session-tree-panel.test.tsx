@@ -318,6 +318,50 @@ describe("SessionTreePanel", () => {
     }
   });
 
+  it("marks a chat on a folder of a computer with a laptop and the computer's name, its sub-agents too", async () => {
+    const local = { execution: { kind: "device", device_id: "d-1", device_name: "Flavius's ThinkPad" }, workspace_path: "/home/flavius/notes" };
+    const adapter: AgentChatAdapter = {
+      ...createAdapter([
+        session({ id: "local", title: "Tidy my notes", agentId: "agent-1", config: local }),
+        session({ id: "cloud", title: "Plan the trip", agentId: "agent-1" }),
+      ]),
+      async getSessionTree() {
+        return {
+          total: 2,
+          nodes: [
+            {
+              id: "local", parentId: null, rootSessionId: "local", depth: 0, agentId: "agent-1", channel: "web",
+              status: "completed", title: "Tidy my notes", computer: "Flavius's ThinkPad",
+              createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+            },
+            {
+              id: "helper", parentId: "local", rootSessionId: "local", depth: 1, agentId: "agent-1", channel: "delegation",
+              status: "completed", title: "Sort the receipts", computer: "Flavius's ThinkPad",
+              createdAt: "2026-01-01T00:01:00Z", updatedAt: "2026-01-01T00:01:00Z",
+            },
+          ],
+        };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<SessionTreePanel adapter={adapter} agentId="agent-1" loadList sessionId="local" activeSessionId="local" />);
+      await Promise.resolve();
+    });
+
+    const marks = (title: string) => {
+      const row = Array.from(container!.querySelectorAll('[role="button"]')).find((element) => element.textContent?.includes(title));
+      if (!row) throw new Error(`no row for ${title}`);
+      return Array.from(row.querySelectorAll('[data-testid="session-computer"]')).map((mark) => [mark.textContent, mark.querySelector("svg") !== null]);
+    };
+    expect(marks("Tidy my notes")).toEqual([["Flavius's ThinkPad", true]]);
+    expect(marks("Sort the receipts")).toEqual([["Flavius's ThinkPad", true]]);
+    expect(marks("Plan the trip")).toEqual([]);
+  });
+
   it("keeps the session list visible while selecting another session refetches", async () => {
     const sessions = [
       session({ id: "s-1", title: "First session", agentId: "agent-1" }),
