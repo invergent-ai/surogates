@@ -72,6 +72,31 @@ describe("the projects the page serves", () => {
     expect(last()).toEqual({ type: "call", id: 2, method: "threads", args: [REPORT], deadline: expect.any(Number) });
   });
 
+  it("hold a thread's one-row read to that row alone, or none, and a resolved or reopened row to the thread asked", async () => {
+    const { source } = page();
+    const question = threads[REPORT]!.find((row) => row.id === FIXTURE_IDS.question)!;
+    const other = threads[REPORT]!.find((row) => row.id !== FIXTURE_IDS.question)!;
+    const refused = "The agent's page answered %s with something Surogate cannot use";
+    const another = source.threads(REPORT, question.id);
+    source.answered(1, { ok: [other] });
+    await expect(another).rejects.toThrow(refused.replace("%s", "threads"));
+    const two = source.threads(REPORT, question.id);
+    source.answered(2, { ok: [question, question] });
+    await expect(two).rejects.toThrow(refused.replace("%s", "threads"));
+    const none = source.threads(REPORT, question.id);
+    source.answered(3, { ok: [] });
+    expect(await none).toEqual([]);
+    const alone = source.threads(REPORT, question.id);
+    source.answered(4, { ok: [question] });
+    expect(await alone).toEqual([question]);
+    const resolved = source.resolve(REPORT, question.id);
+    source.answered(5, { ok: other });
+    await expect(resolved).rejects.toThrow(refused.replace("%s", "resolve"));
+    const reopened = source.reopen(REPORT, question.id);
+    source.answered(6, { ok: other });
+    await expect(reopened).rejects.toThrow(refused.replace("%s", "reopen"));
+  });
+
   it("send each call with the moment its time runs out, for a page that holds it", () => {
     vi.useFakeTimers({ now: 1_000 });
     try {

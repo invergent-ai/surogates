@@ -92,21 +92,34 @@ function routineOf(value: unknown): Routine {
   return { id, name, scheduleDisplay, nextRunAt, status } as Routine;
 }
 
-const CHECKS: Record<Method, (value: unknown) => unknown> = {
+// The row a thread's call answers must be that thread's: the shell cannot tell a project's rows apart otherwise.
+function theThread(row: ThreadRow, threadId: unknown): ThreadRow {
+  need(row.id === threadId);
+  return row;
+}
+
+// Each answer checked against what its call, with these *args*, returns.
+const CHECKS: Record<Method, (value: unknown, args: unknown[]) => unknown> = {
   list: (value) => listOf(value, 500, summaryOf),
   get: projectOf,
   create: projectOf,
   update: projectOf,
   archive: (value) => need(value === undefined || value === null),
-  threads: (value) => listOf(value, 500, threadOf),
-  resolve: threadOf,
-  reopen: threadOf,
+  // With a thread, the read is that row alone, or none once it is no longer one of the project's.
+  threads: (value, [, threadId]) => {
+    const rows = listOf(value, 500, threadOf);
+    need(threadId === undefined || rows.length <= 1);
+    return threadId === undefined ? rows : rows.map((row) => theThread(row, threadId));
+  },
+  resolve: (value, [, threadId]) => theThread(threadOf(value), threadId),
+  reopen: (value, [, threadId]) => theThread(threadOf(value), threadId),
   library: (value) => listOf(value, 2_000, entryOf),
   routines: (value) => listOf(value, 200, routineOf),
 };
 
 interface Call {
   method: Method;
+  args: unknown[];
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer: NodeJS.Timeout;
@@ -152,7 +165,7 @@ export class PageProjects implements ProjectsSource {
       return;
     }
     try {
-      call.resolve(CHECKS[call.method](ok));
+      call.resolve(CHECKS[call.method](ok, call.args));
     } catch {
       call.reject(new Error(`The agent's page answered ${call.method} with something Surogate cannot use`));
     }
@@ -181,7 +194,7 @@ export class PageProjects implements ProjectsSource {
       this.calls.delete(id);
       reject(new Error(`The agent's page did not answer ${method} in time`));
     }, this.timeoutMs);
-    this.calls.set(id, { method, resolve: resolve as (value: unknown) => void, reject, timer });
+    this.calls.set(id, { method, args, resolve: resolve as (value: unknown) => void, reject, timer });
     this.send({ type: "call", id, method, args, deadline: Date.now() + this.timeoutMs });
     return promise;
   }
