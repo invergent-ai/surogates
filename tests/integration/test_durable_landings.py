@@ -381,7 +381,8 @@ async def lose_the_lock(api, thread) -> None:
     """*thread*'s project's lock lost unseen, as a failover or a pooler restart loses it: its connection ends."""
     async with api.app.state.session_factory() as db:
         await db.execute(text(
-            "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND granted "
+            # Waits until the backend is gone, as a failover's is.
+            "SELECT pg_terminate_backend(pid, 5000) FROM pg_locks WHERE locktype = 'advisory' AND granted "
             "AND objid::text::bigint = (hashtext(:key)::bigint & 4294967295)"
         ), {"key": f"workstream:{thread.config['workstream_id']}"})
         await db.commit()
@@ -679,3 +680,35 @@ async def test_a_put_back_that_failed_before_its_worker_died_is_tried_again_by_t
     [row] = await rows(api, first)
     assert row.saga_state == "compensated"
     assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
+
+
+async def test_a_recovery_that_lost_its_lock_stops_and_the_next_holder_finishes_it(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second, third = [await a_thread(api, name, master) for name in ("Draft A", "Draft B", "Draft C")]
+    pool = SandboxPool(pods)
+    await edited(pool, first, "for f in a b c d; do echo $f > $f.md; done")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply b.md")
+    await edited(pool, second, "echo by B > B.md")
+    compensate, put_back = landing_module.compensate_history, []
+
+    async def the_lock_goes_after_the_first(it, sandbox_pool, owner, **kwargs):
+        result = await compensate(it, sandbox_pool, owner, **kwargs)
+        put_back.append(it.arguments["path"])
+        if owner == str(second.id) and len(put_back) == 1:
+            await lose_the_lock(api, second)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "compensate_history", the_lock_goes_after_the_first)
+        await ends(api, pool, second)
+    # B's recovery stops at its lock's loss: b.md went back, a.md waits for the next holder.
+    assert put_back == ["b.md"]
+    assert pods.real_names() == ["Report.docx", "a.md", "notes.txt"]
+    [row] = await rows(api, first)
+    assert row.saga_state == "running"
+
+    await edited(pool, third, "echo by C > C.md")
+    await ends(api, pool, third)
+    [row] = await rows(api, first)
+    assert row.saga_state == "compensated"
+    assert pods.real_names() == ["C.md", "Report.docx", "notes.txt"]

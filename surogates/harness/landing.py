@@ -122,7 +122,7 @@ async def land_turn(
     outcome = None
     try:
         async with project_lock(session_factory, workstream) as held:
-            settled = await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings)
+            settled = await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
             outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
     except Exception as exc:
         if _cancelling():
@@ -160,8 +160,8 @@ async def keep_copy(*, session_factory: Any, sandbox_pool: Any, session: Any, sa
         ["Surogate-Agent", str(session.agent_id)], ["Surogate-User", str(session.user_id)],
         ["Surogate-Kind", "turn"],
     ]
-    async with project_lock(session_factory, workstream):
-        await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings)
+    async with project_lock(session_factory, workstream) as held:
+        await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
         return await _call(sandbox_pool, owner, "keep", author=author, trailers=trailers, base=True)
 
 
@@ -330,7 +330,7 @@ def _row_files(saga: Any, state: str) -> list[dict]:
 
 async def _settle(
     saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str, save: Any,
-    *, recovered: bool = False,
+    *, recovered: bool = False, held: Any = None,
 ) -> tuple[str, str | None]:
     """End a landing that did not finish: ``completed`` with its commit when it pushed, else put back.
 
@@ -340,7 +340,8 @@ async def _settle(
     is a landing that pushed and was then landed over: that takes a lost lock
     and a fence that fell short.  A
     *recovered* landing's steps are as its row last had them: a step it
-    was in shows ``pending``.
+    was in shows ``pending``.  Its put-backs ask *held* first, as a
+    landing's applies do.
     """
     record = next((s for s in saga.steps if s.tool_name == "history.record"), None)
     # Whatever its state: a try that pushed shows ``pending`` again in its retry's wait.
@@ -351,7 +352,7 @@ async def _settle(
                 saga.transition(SagaState.COMPLETED)
             await _written(save, tries=2, state="completed", commit=looked["main"], files=_row_files(saga, "completed"))
             return "completed", looked["main"]
-    failed = await _put_back(saga, orchestrator, sandbox_pool, owner, save, recovered=recovered)
+    failed = await _put_back(saga, orchestrator, sandbox_pool, owner, save, recovered=recovered, held=held)
     state = "escalated" if failed else "compensated"
     await _written(save, tries=2, state=state)
     return state, None
@@ -371,12 +372,13 @@ async def _written(save: Any, *, tries: int = 1, **values: Any) -> None:
 
 
 async def settle_running(
-    session_factory: Any, sandbox_pool: Any, owner: str, workstream_id: Any, saga_settings: Any,
+    session_factory: Any, sandbox_pool: Any, owner: str, workstream_id: Any, saga_settings: Any, held: Any,
 ) -> list[dict]:
     """Settle the project's landings left running, through *owner*'s pod; each ``{thread, state, files}``.
 
     A row written within the fence is waited for: its worker may still be
-    in a step, or putting files back past its bound.
+    in a step, or putting files back past its bound.  A settle that loses
+    the lock stops, its row left for the next holder.
     """
     fence = _fence(saga_settings)
     settled = []
@@ -393,7 +395,8 @@ async def settle_running(
             # The turn and its base: the versions a put-back writes.
             await _call(sandbox_pool, owner, "fetch", commits=[c for c in (committed["commit"], committed["base"]) if c])
         state, _ = await _settle(
-            saga, orchestrator, sandbox_pool, owner, partial(save_landing, session_factory, row.id, saga), recovered=True,
+            saga, orchestrator, sandbox_pool, owner, partial(save_landing, session_factory, row.id, saga),
+            recovered=True, held=held,
         )
         logger.warning("Settled landing %s of %s, left running: %s", row.saga_id, row.thread_id, state)
         settled.append({"thread": row.thread_id, "state": state, "files": _row_files(saga, state)})
@@ -431,7 +434,7 @@ async def _destroy_if_still(sandbox_pool: Any, owner: str, sandbox_id: str | Non
 
 async def _put_back(
     saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str, save: Any,
-    *, recovered: bool = False,
+    *, recovered: bool = False, held: Any = None,
 ) -> list[SagaStep]:
     """Put back what a landing applied; the steps that could not be put back.
 
@@ -441,11 +444,25 @@ async def _put_back(
     landing's apply still ``pending`` may have too: the kill came before its
     state was written.  The saga's row is written before each put-back, the
     step already ``compensating``: a worker killed in one leaves it to run again.
+    With *held*, each put-back asks it first, and a lock lost stops them all.
     """
     unsure = (StepState.FAILED, StepState.EXECUTING, *((StepState.PENDING,) if recovered else ()))
     failed: list[SagaStep] = []
+    lost: list[Exception] = []
+
+    async def still_held() -> None:
+        if lost:
+            raise lost[0]
+        if held is not None:
+            try:
+                await held()
+            except Exception as exc:
+                lost.append(exc)
+                raise
+
     for it in saga.steps:
         if it.tool_name == "history.apply" and it.state in unsure:
+            await still_held()
             await _written(save)
             try:
                 await asyncio.wait_for(compensate_history(it, sandbox_pool, owner, ran=False), it.timeout_seconds)
@@ -454,8 +471,12 @@ async def _put_back(
                 failed.append(it)
 
     async def compensate(it: SagaStep) -> Any:
+        await still_held()
         await _written(save)
         return await compensate_step(it, sandbox_pool=sandbox_pool, session_id=owner)
 
     failed += await orchestrator.compensate(saga.saga_id, compensate)
+    if lost:
+        # Not a put-back that failed: the next holder of the lock does the rest.
+        raise lost[0]
     return failed
