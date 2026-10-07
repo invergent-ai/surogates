@@ -166,14 +166,19 @@ _NOT_MERGED = "Not merged, because the project's file changed after the thread s
 
 
 def _landing_lines(data: dict, kept: list, deleted: list) -> str:
-    """A thread report's lines on the files it deleted, the files that did not land, and the excluded files it made."""
+    """A thread report's lines on the files it deleted, the files that did
+    not land, the excluded files it made, and the folders inside a git
+    repository it wrote into."""
     lines = f"\nDeleted: {_listed(deleted)}" if deleted else ""
     if kept:
         lines += f"\n{_NOT_LANDED.get(data.get('landing'), _NOT_MERGED)}: {_listed(kept)}"
-    excluded = data.get("excluded")
-    if isinstance(excluded, list) and excluded:
-        names = [{"label": name} for name in excluded if isinstance(name, str)]
-        lines += f"\nNot saved, because the project's history leaves them out: {_listed(names)}"
+    for key, words in (
+        ("excluded", "Not saved, because the project's history leaves them out"),
+        ("repositories", "Not landed, because they are inside a git repository"),
+    ):
+        named = data.get(key)
+        if isinstance(named, list) and named:
+            lines += f"\n{words}: {_listed([{'label': name} for name in named if isinstance(name, str)])}"
     return lines
 
 

@@ -141,7 +141,8 @@ async def notify_parent_on_completion(
     not written, has None, so its report lists no files rather than
     claiming none.  A thread whose turn landed reports its *landing*'s
     files instead, each landed or not merged, the excluded files it made,
-    and the landing's state when it did not complete.
+    the folders inside a git repository it wrote into, and the landing's
+    state when it did not complete.
     """
     try:
         from surogates.harness.message_utils import extract_final_response
@@ -188,6 +189,8 @@ async def notify_parent_on_completion(
                 payload["files"] = files
             if landing is not None and landing["excluded"]:
                 payload["excluded"] = landing["excluded"]
+            if landing is not None and landing["repositories"]:
+                payload["repositories"] = landing["repositories"]
             if landing is not None and landing["state"] != "completed":
                 payload["landing"] = landing["state"]
 

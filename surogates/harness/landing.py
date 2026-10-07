@@ -51,9 +51,11 @@ async def land_turn(
     """Land *session*'s turn; its outcome, or None when the turn never used its pod.
 
     The outcome is ``{saga, state, commit, landed, overlapped, excluded,
-    files}``: *state* is ``completed``, ``compensated`` (rolled back whole)
-    or ``escalated`` (a put-back failed); *files* are the report's, every
-    file the turn changed, ``landed`` or ``not_merged``.
+    repositories, files}``: *state* is ``completed``, ``compensated``
+    (rolled back whole) or ``escalated`` (a put-back failed); *files* are
+    the report's, every file the turn changed, ``landed`` or
+    ``not_merged``; *repositories* are the folders inside a git repository
+    the turn wrote into, which never land.
 
     The whole saga runs under the project's lock, a Postgres advisory
     transaction lock keyed by ``workstream:<id>``: one landing at a time per
@@ -121,13 +123,13 @@ async def _land(
 
     outcome: dict[str, Any] = {
         "saga": saga.saga_id, "state": "completed", "commit": None,
-        "landed": [], "overlapped": [], "excluded": [], "files": [],
+        "landed": [], "overlapped": [], "excluded": [], "repositories": [], "files": [],
     }
     changes: list[dict] = []
     try:
         turn = await execute(step("commit", author=thread, trailers=[*audit, ["Surogate-Kind", "turn"]]))
         changes = turn["changes"]
-        outcome.update(overlapped=turn["overlapped"], excluded=turn["excluded"])
+        outcome.update(overlapped=turn["overlapped"], excluded=turn["excluded"], repositories=turn["repositories"])
         if turn["commit"] is not None:
             applies = [step("apply", **change) for change in changes]
             for it in applies:

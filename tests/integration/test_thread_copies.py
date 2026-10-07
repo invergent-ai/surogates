@@ -280,6 +280,22 @@ async def test_an_excluded_file_a_turn_made_is_named_in_its_report(api, monkeypa
     )
 
 
+async def test_a_folder_inside_a_git_repository_a_turn_wrote_into_is_named_as_not_landed(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    await a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "git init -q clone && echo x > clone/x.md && echo kept > kept.md"})),
+        _final_response("Kept a note."),
+    ], pool=SandboxPool(pods))
+    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "kept.md", "notes.txt"]
+    [report] = await reports(api, master)
+    assert (report["repositories"], "excluded" in report) == (["clone/"], False)
+    assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
+        "Files: kept.md\n"
+        "Not landed, because they are inside a git repository: clone/"
+    )
+
+
 async def test_a_turn_that_never_used_its_pod_lands_nothing(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
