@@ -10,7 +10,9 @@ import type {
   AgentChatToolCallInfo,
   AgentChatTurnArtifactRef,
   AgentChatViewMode,
+  AgentChatWorker,
 } from "../types";
+import { stripMissionControlMarkup } from "../components/missions/mission-derive";
 import { WORKSPACE_MUTATING_TOOLS } from "./events";
 
 export const EMPTY_TOKEN_USAGE: AgentChatTokenUsage = {
@@ -204,6 +206,16 @@ export function applyAgentChatEvent(
 
     case "device.resumed":
       return { ...nextState, deviceWait: null };
+
+    case "worker.spawned":
+      return withMessages(nextState, applyWorkerSpawned(nextState.messages, event));
+
+    case "worker.complete":
+    case "worker.failed":
+      return withMessages(nextState, applyWorkerReport(nextState.messages, event));
+
+    case "thread.proposed":
+      return withMessages(nextState, [...nextState.messages, proposalMessage(event)]);
 
     case "llm.delta":
       return applyLlmDelta(nextState, event);
@@ -877,6 +889,86 @@ function applyTurnSummary(
     turnSummary: { turnId, recap, artifacts },
   };
   return { ...state, messages };
+}
+
+function workerMessage(worker: AgentChatWorker): AgentChatMessage {
+  return {
+    id: `worker-${worker.id}`,
+    role: "system",
+    content: worker.title ?? worker.goal,
+    createdAt: new Date(),
+    status: "complete",
+    systemKind: "worker",
+    worker,
+  };
+}
+
+/** A worker's card, and its proposal's card marked started when the user started it from one. */
+function applyWorkerSpawned(
+  messages: AgentChatMessage[],
+  event: AgentChatRuntimeEvent,
+): AgentChatMessage[] {
+  const id = stringValue(event.data.worker_id);
+  const proposalId = stringValue(event.data.proposal_id);
+  const key = stringValue(event.data.key);
+  const marked = proposalId && key
+    ? messages.map((message) => message.proposal?.proposalId === proposalId
+      ? { ...message, proposal: { ...message.proposal, started: { ...message.proposal.started, [key]: id } } }
+      : message)
+    : messages;
+  if (marked.some((message) => message.worker?.id === id)) return marked;
+  return [...marked, workerMessage({
+    id,
+    title: stringValue(event.data.title) || null,
+    goal: stringValue(event.data.goal),
+    state: "working",
+    report: null,
+    files: [],
+  })];
+}
+
+/** A report updates its worker's card where the card is: the conversation reads on below it. */
+function applyWorkerReport(
+  messages: AgentChatMessage[],
+  event: AgentChatRuntimeEvent,
+): AgentChatMessage[] {
+  const id = stringValue(event.data.worker_id);
+  const failed = event.type === "worker.failed";
+  const index = messages.findIndex((message) => message.worker?.id === id);
+  const worker: AgentChatWorker = index === -1
+    ? { id, title: stringValue(event.data.title) || null, goal: "", state: "working", report: null, files: [] }
+    : messages[index]!.worker!;
+  const reported: AgentChatWorker = {
+    ...worker,
+    state: failed ? "failed" : "reported",
+    // A mission worker's result can carry the loop's control markup, which never reaches the UI.
+    report: stripMissionControlMarkup(stringValue(failed ? event.data.error : event.data.result)) || null,
+    files: failed ? worker.files : parseTurnArtifacts(event.data.files),
+  };
+  if (index === -1) return [...messages, workerMessage(reported)];
+  const next = [...messages];
+  next[index] = { ...next[index]!, worker: reported };
+  return next;
+}
+
+function proposalMessage(event: AgentChatRuntimeEvent): AgentChatMessage {
+  const threads = (Array.isArray(event.data.threads) ? event.data.threads : [])
+    .filter((thread): thread is Record<string, unknown> => !!thread && typeof thread === "object")
+    .map((thread) => ({
+      key: stringValue(thread.key),
+      title: stringValue(thread.title),
+      goal: stringValue(thread.goal),
+      where: thread.where === "device" ? "device" as const : "cloud" as const,
+    }));
+  return {
+    id: `proposal-${stringValue(event.data.proposal_id)}`,
+    role: "system",
+    content: threads.map((thread) => thread.title).join(", "),
+    createdAt: new Date(),
+    status: "complete",
+    systemKind: "thread_proposal",
+    proposal: { proposalId: stringValue(event.data.proposal_id), threads, started: {} },
+  };
 }
 
 function parseTurnArtifacts(raw: unknown): AgentChatTurnArtifactRef[] {

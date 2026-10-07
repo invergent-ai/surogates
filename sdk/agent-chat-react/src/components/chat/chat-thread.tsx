@@ -75,6 +75,7 @@ import { stripAndParseNextAction } from "../../lib/next-action";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
 import { TurnSummaryCard } from "./turn-summary-card";
+import { ThreadCards } from "./thread-cards";
 import { cn } from "../../lib/utils";
 import {
   AlertTriangle,
@@ -253,6 +254,7 @@ type TimelineEntry =
   | { kind: "thinking"; key: string }
   | { kind: "skill_invoked"; key: string; skill: string; stagedAt: string | null }
   | { kind: "browser_marker"; key: string; content: string; warning: boolean }
+  | { kind: "thread_card"; key: string; message: ChatMessageType }
   | {
       kind: "artifact";
       key: string;
@@ -393,6 +395,9 @@ function messageToEntries(
         version,
         originatingSessionId,
       }];
+    }
+    if (msg.systemKind === "worker" || msg.systemKind === "thread_proposal") {
+      return [{ kind: "thread_card", key: msg.id, message: msg }];
     }
     if (
       msg.systemKind === "browser_marker"
@@ -725,6 +730,14 @@ function OrphanSystemMarker({
     );
   }
 
+  if (message.systemKind === "worker" || message.systemKind === "thread_proposal") {
+    return (
+      <div className="mx-auto w-full max-w-4xl px-4">
+        <ThreadCards message={message} />
+      </div>
+    );
+  }
+
   return null;
 }
 
@@ -878,6 +891,20 @@ function TimelineEntryItem({
             )}
             <span>{entry.content}</span>
           </div>
+        </TimelineContent>
+      </TimelineItem>
+    );
+  }
+
+  if (entry.kind === "thread_card") {
+    return (
+      <TimelineItem step={step}>
+        <TimelineHeader>
+          <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
+          <TimelineIndicator className="size-2 border-none bg-foreground/30" />
+        </TimelineHeader>
+        <TimelineContent>
+          <ThreadCards message={entry.message} />
         </TimelineContent>
       </TimelineItem>
     );

@@ -7,7 +7,9 @@ export type AgentChatSystemKind =
   | "artifact"
   | "error"
   | "browser_marker"
-  | "browser_marker_warning";
+  | "browser_marker_warning"
+  | "worker"
+  | "thread_proposal";
 
 export interface AgentChatImageAttachment {
   /** data: URL (data:image/png;base64,...) or raw base64 string */
@@ -97,6 +99,49 @@ export interface AgentChatMessage {
     scheduledSessionId?: string;
     runCompletedAt?: string;
   };
+  /** Set on a "worker" system message: the card of a worker the session started. */
+  worker?: AgentChatWorker;
+  /** Set on a "thread_proposal" system message: threads proposed for the user to start. */
+  proposal?: AgentChatThreadProposal;
+}
+
+/**
+ * A worker the session started, as the session's own events tell it: a
+ * project's thread, or a coordinator's worker.
+ */
+export interface AgentChatWorker {
+  id: string;
+  /** A project's thread has a title; any other worker is named by its goal. */
+  title: string | null;
+  goal: string;
+  /** "working" until its first report, then how its latest report ended. */
+  state: "working" | "reported" | "failed";
+  /** Its latest report's text, or the error it failed with. */
+  report: string | null;
+  /** The files its latest report named. */
+  files: AgentChatTurnArtifactRef[];
+}
+
+/** Threads a project's master proposed, for the user to start from their cards. */
+export interface AgentChatThreadProposal {
+  proposalId: string;
+  threads: { key: string; title: string; goal: string; where: "cloud" | "device" }[];
+  /** The thread started from each card, by its key. */
+  started: Record<string, string>;
+}
+
+/**
+ * A project's thread as the Overview reads it (`ThreadRow`,
+ * `web/src/lib/projects-contract.d.ts`): the fields its card shows live.
+ */
+export interface AgentChatThreadRow {
+  id: string;
+  title: string;
+  group: "waiting" | "working" | "idle" | "resolved";
+  reason: "question" | "approval" | "failed" | "computer" | null;
+  statusLine: string | null;
+  progress: { done: number; total: number } | null;
+  files: { kind: "file" | "artifact"; label: string; ref: string }[];
 }
 
 export interface AgentChatIterationSummary {
@@ -546,7 +591,11 @@ export type AgentChatEventType =
   | "turn.summary"
   | "loop.result"
   | "device.waiting"
-  | "device.resumed";
+  | "device.resumed"
+  | "worker.spawned"
+  | "worker.complete"
+  | "worker.failed"
+  | "thread.proposed";
 
 export interface AgentChatRuntimeEvent {
   type: AgentChatEventType;
@@ -935,6 +984,12 @@ export interface AgentChatAdapter {
     itemId: number;
   }): Promise<AgentChatInboxItem>;
   openInboxStream?(): AgentChatInboxEventStream;
+  /** Start a thread a project's master proposed, from its card (POST /v1/workstreams/{projectId}/threads). */
+  startProposedThread?(input: {
+    projectId: string;
+    proposalId: string;
+    key: string;
+  }): Promise<AgentChatThreadRow>;
   getArtifact(input: {
     sessionId: string;
     artifactId: string;

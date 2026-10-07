@@ -8,6 +8,10 @@ export interface AgentChatAdapterContextValue {
   /** Navigate to the host's billing page. Wired by the host through
    *  ``AgentChat``; consumed by the insufficient-credits card. */
   onOpenBilling?: () => void;
+  /** Open another session in the centre: a card's View thread. */
+  onOpenSession?: (sessionId: string) => void;
+  /** The project whose master this conversation is, or null: its proposal cards start threads. */
+  projectId?: string | null;
 }
 
 const AgentChatAdapterContext =
