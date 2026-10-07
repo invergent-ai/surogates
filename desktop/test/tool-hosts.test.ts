@@ -339,6 +339,8 @@ describe("the file tools, against a process of this computer's racing them", { t
     // The file host worked in the folder: its writes landed while sub was a folder.
     expect(sandboxed).toEqual({ reached: 0, wrote: expect.any(Number), wroteOutside: 0, kept: "OUTSIDE\n" });
     expect(sandboxed.wrote).toBeGreaterThan(0);
+    // The attacker met the file host: some of its writes found sub a link, or gone.
+    expect(sandboxed.wrote).toBeLessThan(1_250);
   });
 });
 
