@@ -16,5 +16,7 @@ export const Route = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
   beforeLoad: () => requireAuth(),
+  // The section to open: Devices, from the "computer added" notice.
+  validateSearch: (search: Record<string, unknown>): { tab?: "devices" } => (search.tab === "devices" ? { tab: "devices" } : {}),
   component: SettingsPage,
 });

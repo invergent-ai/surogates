@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   ChevronRightIcon,
@@ -272,6 +272,13 @@ export function SettingsPage() {
     },
     [channels.length, loadChannels],
   );
+
+  // Opened at a section, as the "computer added" notice's Review opens Devices.
+  const { tab: asked } = useSearch({ strict: false }) as { tab?: string };
+  // Not on selectTab, which changes as Channels loads: opening Channels must not bring the user back here.
+  useEffect(() => {
+    if (asked === "devices" && devicesEnabled) selectTab("devices");
+  }, [asked, devicesEnabled]);
 
   const handleUnlink = useCallback(async () => {
     if (!unlinkTarget) return;

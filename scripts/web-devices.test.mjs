@@ -3,7 +3,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { deviceHistory, deviceState, signInsFrom } from "../web/src/lib/devices.ts";
+import {
+  addedNotice, addedNotices, deviceHistory, deviceState, dismissedNotices, dismissNotice, signInsFrom,
+} from "../web/src/lib/devices.ts";
 
 const NOW = new Date("2026-10-07T12:00:00Z");
 const DEVICE = {
@@ -32,4 +34,41 @@ test("lists the desktop sign-ins, or asks for a recent sign-in, as the agent doe
   assert.equal(await signInsFrom(answer(403, stale)), "sign-in-again");
   await assert.rejects(signInsFrom(answer(403, { detail: "Devices belong to a user account." })), { message: "Devices belong to a user account." });
   await assert.rejects(signInsFrom(new Response("<html>", { status: 502 })), { message: "Failed to list your desktop sign-ins" });
+});
+
+test("tells of each computer added or reauthorized in the last 7 days that can still work, until it is dismissed here", () => {
+  const devices = [
+    { ...DEVICE, id: "new", name: "New laptop", created_at: "2026-10-06T12:00:00Z" },
+    { ...DEVICE, id: "old", name: "Old desktop", created_at: "2026-09-01T12:00:00Z" },
+    { ...DEVICE, id: "back", name: "Restored laptop", created_at: "2026-09-01T12:00:00Z", reauthorized_at: "2026-10-05T12:00:00Z" },
+    { ...DEVICE, id: "gone", name: "Revoked laptop", created_at: "2026-10-06T12:00:00Z", revoked_at: "2026-10-06T13:00:00Z" },
+  ];
+  assert.deepEqual(addedNotices(devices, NOW, new Set()), [
+    { key: "new@2026-10-06T12:00:00Z", name: "New laptop" },
+    { key: "back@2026-10-05T12:00:00Z", name: "Restored laptop" },
+  ]);
+  // Dismissed here, it is told no more; a dismissal of an earlier time does not hide a later reauthorization.
+  const dismissed = new Set(["new@2026-10-06T12:00:00Z", "back@2026-09-01T12:00:00Z"]);
+  assert.deepEqual(addedNotices(devices, NOW, dismissed).map((notice) => notice.name), ["Restored laptop"]);
+  // Seven days on, it goes by itself.
+  assert.deepEqual(addedNotices(devices, new Date("2026-10-13T12:00:01Z"), new Set()), []);
+  assert.equal(addedNotice("New laptop", "acme.surogate.ai"), "New laptop can now work on folders of your computer through acme.surogate.ai");
+});
+
+test("keeps what this browser dismissed, only while it is told, and dismisses for the page alone where nothing can be kept", () => {
+  const kept = new Map();
+  const storage = { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, value) };
+  const told = ["new@2026-10-06T12:00:00Z", "back@2026-10-05T12:00:00Z"];
+  dismissNotice(storage, "new@2026-10-06T12:00:00Z", told);
+  dismissNotice(storage, "back@2026-10-05T12:00:00Z", told);
+  assert.deepEqual([...dismissedNotices(storage)], told);
+  // A notice no longer told, as one past its 7 days, is kept no more: the list never grows past what is told.
+  dismissNotice(storage, "later@2026-10-07T11:00:00Z", ["back@2026-10-05T12:00:00Z", "later@2026-10-07T11:00:00Z"]);
+  assert.deepEqual([...dismissedNotices(storage)], ["back@2026-10-05T12:00:00Z", "later@2026-10-07T11:00:00Z"]);
+  kept.set("surogate:computers-told", "not json");
+  assert.deepEqual([...dismissedNotices(storage)], []);
+  const blocked = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); } };
+  dismissNotice(blocked, "new@2026-10-06T12:00:00Z", told);
+  assert.deepEqual([...dismissedNotices(blocked)], []);
+  assert.deepEqual([...dismissedNotices(null)], []);
 });

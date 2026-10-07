@@ -38,3 +38,55 @@ export async function signInsFrom(response: Response): Promise<SignIn[] | "sign-
   if (code === "recent_sign_in_required") return "sign-in-again";
   throw new Error(errorDetailMessage(detail) ?? "Failed to list your desktop sign-ins");
 }
+
+// How long every web client of the user's tells them that a computer was added.
+export const ADDED_NOTICE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * The computers to tell the user of: each added or reauthorized in the last 7 days that still
+ * works, and not dismissed in this browser. Each is keyed by its computer and that time, so a
+ * later reauthorization tells again.
+ */
+export function addedNotices(
+  devices: Device[],
+  now: Date,
+  dismissed: ReadonlySet<string>,
+): Array<{ key: string; name: string }> {
+  return devices.flatMap((device) => {
+    const at = device.reauthorized_at ?? device.created_at;
+    const key = `${device.id}@${at}`;
+    const recent = now.getTime() - Date.parse(at) < ADDED_NOTICE_MS;
+    return device.revoked_at === null && recent && !dismissed.has(key) ? [{ key, name: device.name }] : [];
+  });
+}
+
+export const addedNotice = (computer: string, agent: string): string =>
+  `${computer} can now work on folders of your computer through ${agent}`;
+
+// Where this browser keeps the notices its user dismissed.
+const DISMISSED = "surogate:computers-told";
+
+type KeptStorage = Pick<Storage, "getItem" | "setItem">;
+
+/** The notices dismissed in this browser; none where its storage cannot be read. */
+export function dismissedNotices(storage: KeptStorage | null): Set<string> {
+  try {
+    const kept = JSON.parse(storage?.getItem(DISMISSED) ?? "[]") as unknown;
+    return new Set(Array.isArray(kept) ? kept.filter((key): key is string => typeof key === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Dismiss *key* in this browser, keeping only the dismissals of notices still *told*, so the list
+ * never grows past them; where nothing can be kept, the page alone forgets it.
+ */
+export function dismissNotice(storage: KeptStorage | null, key: string, told: readonly string[]): void {
+  try {
+    const kept = [...dismissedNotices(storage)].filter((other) => other !== key && told.includes(other));
+    storage?.setItem(DISMISSED, JSON.stringify([...kept, key]));
+  } catch {
+    // Not kept: it shows again at the next page.
+  }
+}
