@@ -327,3 +327,51 @@ async def test_a_change_to_an_offline_computers_folder_is_refused_at_once(api, c
 async def test_a_request_id_is_a_short_token(api, chat):
     response = await upload(api, chat, "notes.txt", b"draft", request_id="../../x")
     assert response.status_code == 422, response.text
+
+
+async def test_a_messages_attachment_is_read_from_the_folder(api, chat):
+    (chat.folder / "uploads").mkdir()
+    (chat.folder / "uploads" / "notes.txt").write_text("draft from the laptop")
+    response = await api.client.post(
+        f"/v1/sessions/{chat.id}/messages",
+        json={"content": "Tidy these", "attachments": [
+            {"path": "uploads/notes.txt", "filename": "notes.txt", "mime_type": "text/plain", "size": 1},
+        ]},
+        headers=api.auth(),
+    )
+    assert response.status_code == 202, response.text
+    [event] = [e for e in await api.app.state.session_store.get_events(UUID(chat.id)) if e.type == "user.message"]
+    [attachment] = event.data["attachments"]
+    assert (attachment["size"], attachment["inlined_text"]) == (21, "draft from the laptop")
+
+
+async def test_an_attachment_missing_from_the_folder_is_refused(api, chat):
+    response = await api.client.post(
+        f"/v1/sessions/{chat.id}/messages",
+        json={"content": "Tidy these", "attachments": [{"path": "uploads/gone.txt", "filename": "gone.txt"}]},
+        headers=api.auth(),
+    )
+    assert response.status_code == 422, response.text
+    assert "uploads/gone.txt" in response.json()["detail"]
+
+
+async def test_an_attachment_path_the_journal_cannot_take_is_the_users_error(api, chat):
+    response = await api.client.post(
+        f"/v1/sessions/{chat.id}/messages",
+        content=b'{"content": "Tidy these", "attachments": [{"path": "\\ud800.txt", "filename": "x.txt"}]}',
+        headers={**api.auth(), "Content-Type": "application/json"},
+    )
+    assert response.status_code == 400, response.text
+
+
+async def test_another_member_of_the_org_attaches_nothing_from_the_users_computer(api, chat):
+    stranger = await another_member(api)
+    (chat.folder / "notes.txt").write_text("private")
+    ran = list(chat.laptop.ran)
+    response = await api.client.post(
+        f"/v1/sessions/{chat.id}/messages",
+        json={"content": "Show me", "attachments": [{"path": "notes.txt", "filename": "notes.txt"}]},
+        headers=api.auth(stranger),
+    )
+    assert response.status_code == 404, response.text
+    assert chat.laptop.ran == ran

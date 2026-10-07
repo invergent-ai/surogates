@@ -108,11 +108,6 @@ class _FakeStorage:
             raise KeyError(key)
         return b"\x00" * self._files[key]
 
-    def resolve_bucket_path(self, _bucket: str) -> str:
-        # No real local backing store — force the route to fall back to
-        # ``_materialize_for_cache``.
-        return "/nonexistent-fake-storage-root"
-
 
 @pytest.fixture
 def patched_send_message(monkeypatch):
@@ -122,10 +117,9 @@ def patched_send_message(monkeypatch):
     ``workspace_files`` (mapping ``relative_path -> size_in_bytes``) and
     runs the route end-to-end, returning ``(result, store, detector)``.
 
-    The fake ``boundary_workspace_key`` is the identity function on the
-    user-supplied path, so workspace_files keys are the same as the paths
-    the client sends in.  This keeps the test's mental model simple
-    without coupling it to the real session/root-id prefix.
+    ``workspace_files`` keys are the paths the client sends in; the fake
+    storage holds them under the session's own workspace prefix, as the
+    route's resolver reads them.
     """
 
     base_detector = _StubInjectionDetector()
@@ -165,11 +159,6 @@ def patched_send_message(monkeypatch):
             lambda _req: store,
         )
 
-        monkeypatch.setattr(
-            "surogates.api.routes.sessions._get_storage",
-            lambda _req: _FakeStorage(workspace_files),
-        )
-
         async def _get_bucket_and_root(_request, _store, _sid, _tenant):
             return session, "test-bucket", "root/"
 
@@ -179,11 +168,6 @@ def patched_send_message(monkeypatch):
             _get_bucket_and_root,
         )
         monkeypatch.setattr(
-            "surogates.api.routes.sessions.boundary_workspace_key",
-            lambda _config, _session, _root_id, path: path,
-        )
-
-        monkeypatch.setattr(
             "surogates.api.routes.sessions.enqueue_session",
             AsyncMock(return_value=None),
         )
@@ -192,8 +176,10 @@ def patched_send_message(monkeypatch):
             lambda _session: None,
         )
 
+        # Keyed as the session's workspace keys its files: under its own prefix.
+        storage = _FakeStorage({f"{session.id}/{path}": size for path, size in workspace_files.items()})
         request = SimpleNamespace(
-            app=SimpleNamespace(state=SimpleNamespace(redis=None)),
+            app=SimpleNamespace(state=SimpleNamespace(redis=None, session_factory=None, storage=storage)),
             url=SimpleNamespace(path="/sessions/x/messages"),
         )
 
