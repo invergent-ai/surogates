@@ -425,3 +425,158 @@ async def test_without_watch_a_completed_chat_still_ends_its_stream(session_fact
         events = await _read_sse_events(response, until_types={"session.done"}, deadline_s=3.0)
 
     assert events == [("session.done", '{"reason": "completed", "status": "completed"}')]
+
+
+def _counting_reads(monkeypatch, store: SessionStore, session_id) -> list[tuple[float, str, list[int]]]:
+    """Each database read of *session_id*'s events or status: when, which, and the event ids it gave."""
+    loop = asyncio.get_running_loop()
+    reads: list[tuple[float, str, list[int]]] = []
+    get_events, get_session = store.get_events, store.get_session
+
+    async def counted_events(asked, *args, **kwargs):
+        events = await get_events(asked, *args, **kwargs)
+        if asked == session_id:
+            reads.append((loop.time(), "events", [event.id for event in events]))
+        return events
+
+    async def counted_session(asked, *args, **kwargs):
+        if asked == session_id:
+            reads.append((loop.time(), "session", []))
+        return await get_session(asked, *args, **kwargs)
+
+    monkeypatch.setattr(store, "get_events", counted_events)
+    monkeypatch.setattr(store, "get_session", counted_session)
+    return reads
+
+
+async def test_a_watch_reads_the_chat_only_when_woken_or_at_its_keepalive(
+    session_factory,
+    app,
+    client,
+    monkeypatch,
+):
+    """A watched chat between its turns costs no database read while nothing happens.
+
+    Surogate Desktop holds its watch for as long as its window is away, which
+    can be days. Every ``emit_event`` publishes on the session's channel after
+    its commit, so the watch waits there: it reads the chat when a publish
+    wakes it, and at each keepalive. A stream that polled would read it every
+    ``_POLL_INTERVAL``.
+    """
+    import surogates.api.routes.events as events_module
+    monkeypatch.setattr(events_module, "_MAX_STREAM_DURATION", 3)
+    monkeypatch.setattr(events_module, "_KEEPALIVE_INTERVAL", 1.0)
+    monkeypatch.setattr(events_module, "_POLL_INTERVAL", 0.05)
+
+    redis_store: SessionStore = app.state.session_store
+    session, token, _last = await _completed_chat(session_factory, redis_store)
+    reads = _counting_reads(monkeypatch, redis_store, session.id)
+    loop = asyncio.get_running_loop()
+    turn_at: list[float] = []
+    turn_id: list[int] = []
+
+    async def _next_turn():
+        await asyncio.sleep(1.5)
+        turn_at.append(loop.time())
+        turn_id.append(await redis_store.emit_event(session.id, EventType.USER_MESSAGE, {"content": "the next turn"}))
+
+    turn = asyncio.create_task(_next_turn())
+    try:
+        async with client.stream(
+            "GET",
+            f"/v1/sessions/{session.id}/events?after=-1&watch=1",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as response:
+            events = await _read_sse_events(response, until_types={"stream.timeout"}, deadline_s=6.0)
+    finally:
+        await turn
+
+    assert ("user.message", '{"content": "the next turn"}') in events
+    # Before the turn: the access check, then the chat's events and status at the start, and again at the keepalive.
+    assert [kind for at, kind, _ids in reads if at < turn_at[0]] == ["session", "events", "session", "events", "session"]
+    # The turn's publish woke the watch: it read the turn at once, not at the next keepalive.
+    woken = next(at for at, _kind, ids in reads if turn_id[0] in ids)
+    assert woken - turn_at[0] < 0.3
+
+
+class _SubscriptionInFlight:
+    """A pubsub whose subscription Redis takes a moment after the stream sent it, once *meanwhile* ran.
+
+    As redis-py's own: ``subscribe`` and ``psubscribe`` send the command and return, and no reply
+    can be read before Redis takes it. What *meanwhile* publishes reaches nobody.
+    """
+
+    def __init__(self, real, meanwhile):
+        self._real = real
+        self._meanwhile = meanwhile
+        self._taken = asyncio.Event()
+
+    def __getattr__(self, name):
+        sent = getattr(self._real, name)
+        if name not in ("subscribe", "psubscribe"):
+            return sent
+
+        async def in_flight(*channels):
+            async def taken():
+                await asyncio.sleep(0.2)
+                await self._meanwhile()
+                await sent(*channels)
+                self._taken.set()
+
+            self._taking = asyncio.create_task(taken())
+
+        return in_flight
+
+    async def get_message(self, *, ignore_subscribe_messages: bool = False, timeout: float = 0.0):
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        try:
+            await asyncio.wait_for(self._taken.wait(), timeout)
+        except asyncio.TimeoutError:
+            return None
+        return await self._real.get_message(
+            ignore_subscribe_messages=ignore_subscribe_messages,
+            timeout=max(0.0, timeout - (loop.time() - started)),
+        )
+
+
+async def test_a_watch_reads_the_chat_once_redis_has_taken_its_subscription(
+    session_factory,
+    app,
+    client,
+    monkeypatch,
+):
+    """A turn published while the watch's subscription is on its way to Redis is still read at once.
+
+    redis-py sends SUBSCRIBE without waiting for Redis to take it. A watch
+    that read the chat before then, and waited on the channel after, would
+    hear of a turn published in between only at its next keepalive.
+    """
+    import surogates.api.routes.events as events_module
+    monkeypatch.setattr(events_module, "_MAX_STREAM_DURATION", 3)
+    monkeypatch.setattr(events_module, "_KEEPALIVE_INTERVAL", 2.0)
+
+    redis_store: SessionStore = app.state.session_store
+    session, token, _last = await _completed_chat(session_factory, redis_store)
+    reads = _counting_reads(monkeypatch, redis_store, session.id)
+    loop = asyncio.get_running_loop()
+    turn_at: list[float] = []
+    turn_id: list[int] = []
+
+    async def _next_turn():
+        turn_at.append(loop.time())
+        turn_id.append(await redis_store.emit_event(session.id, EventType.USER_MESSAGE, {"content": "the next turn"}))
+
+    pubsub = app.state.redis.pubsub
+    monkeypatch.setattr(app.state.redis, "pubsub", lambda: _SubscriptionInFlight(pubsub(), _next_turn))
+
+    async with client.stream(
+        "GET",
+        f"/v1/sessions/{session.id}/events?after=-1&watch=1",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as response:
+        events = await _read_sse_events(response, until_types={"stream.timeout"}, deadline_s=6.0)
+
+    assert ("user.message", '{"content": "the next turn"}') in events
+    woken = next(at for at, _kind, ids in reads if turn_id[0] in ids)
+    assert woken - turn_at[0] < 0.3

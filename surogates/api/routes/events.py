@@ -105,6 +105,32 @@ def _get_session_store(request: Request) -> SessionStore:
     return store
 
 
+async def _wait_for_publish(pubsub, timeout: float) -> float:
+    """Wait up to *timeout* seconds for a publish on *pubsub*: the seconds waited.
+
+    Subscribe replies wake nothing. A subscription that fails waits as a
+    stream without Redis does, a poll interval, so that the caller reads on
+    and misses nothing.
+    """
+    loop = asyncio.get_event_loop()
+    started = loop.time()
+    deadline = started + timeout
+    while (remaining := deadline - loop.time()) > 0:
+        try:
+            message = await asyncio.wait_for(
+                pubsub.get_message(ignore_subscribe_messages=True, timeout=remaining),
+                timeout=remaining + 0.5,
+            )
+        except asyncio.TimeoutError:
+            break
+        except Exception:
+            await asyncio.sleep(min(remaining, _POLL_INTERVAL))
+            break
+        if message is not None:
+            break
+    return loop.time() - started
+
+
 def _require_service_account_api_route(
     request: Request,
     tenant: TenantContext,
@@ -353,6 +379,12 @@ async def stream_events(
             try:
                 pubsub = redis.pubsub()
                 await pubsub.subscribe(f"surogates:session:{session_id}")
+                if watch:
+                    # redis-py sends SUBSCRIBE without waiting for Redis to take
+                    # it, and a watch waits long on the channel after its first
+                    # read: a publish in between would be heard of only at the
+                    # keepalive. So the first read waits for Redis's reply.
+                    await pubsub.get_message(timeout=_POLL_INTERVAL)
             except Exception:
                 pubsub = None
 
@@ -479,18 +511,29 @@ async def stream_events(
                         continue
 
                     # Wait for a Redis notification or fall back to polling.
-                    if pubsub is not None:
-                        try:
-                            msg = await asyncio.wait_for(
-                                pubsub.get_message(ignore_subscribe_messages=True, timeout=_POLL_INTERVAL),
-                                timeout=_POLL_INTERVAL + 0.5,
-                            )
-                        except (asyncio.TimeoutError, Exception):
-                            pass
+                    if watch and pubsub is not None:
+                        # A watch sits through a chat's idle hours: it reads the
+                        # chat again only when a publish wakes it (every
+                        # emit_event publishes after its commit), or at the
+                        # keepalive, or as the stream ends.
+                        now = asyncio.get_event_loop().time()
+                        elapsed += await _wait_for_publish(
+                            pubsub,
+                            min(last_emit + _KEEPALIVE_INTERVAL - now, _MAX_STREAM_DURATION - elapsed),
+                        )
                     else:
-                        await asyncio.sleep(_POLL_INTERVAL)
+                        if pubsub is not None:
+                            try:
+                                msg = await asyncio.wait_for(
+                                    pubsub.get_message(ignore_subscribe_messages=True, timeout=_POLL_INTERVAL),
+                                    timeout=_POLL_INTERVAL + 0.5,
+                                )
+                            except (asyncio.TimeoutError, Exception):
+                                pass
+                        else:
+                            await asyncio.sleep(_POLL_INTERVAL)
 
-                    elapsed += _POLL_INTERVAL
+                        elapsed += _POLL_INTERVAL
 
                     # Keep the connection warm through proxy idle timeouts.
                     now = asyncio.get_event_loop().time()
