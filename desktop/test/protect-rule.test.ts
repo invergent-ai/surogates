@@ -1,64 +1,94 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-// A faithful port of desktop/src/files/protect.ts protectedInFolder (the oracle).
-const PN = new Set([".gitconfig",".gitmodules",".bashrc",".bash_profile",".zshrc",".zprofile",".profile",".ripgreprc",".mcp.json",".vscode",".idea"]);
-const PAIRS: [string,string][] = [[".claude","commands"],[".claude","agents"],[".git","hooks"],[".git","config"]];
-const GIT_STATE = new Set(["worktrees","rebase-merge","rebase-apply","sequencer"]);
-const GIT_CONFIGS = new Set(["config","config.worktree","commondir"]);
-function runsCode(rest: string[]): boolean {
-  const [first, ...after] = rest;
-  if (first === "modules" && after.length > 1) {
-    const below = after.slice(1);
-    return below.some((p) => p === "hooks" || GIT_STATE.has(p)) || GIT_CONFIGS.has(below.at(-1) ?? "");
+// The oracle is protect.ts itself, as built (npm run build): a change to it shows here.
+const { GIT_CONFIGS, GIT_STATE, PROTECTED_NAMES, PROTECTED_PAIRS, protectedInFolder } =
+  (await import(new URL("../dist/files/protect.js", import.meta.url).href)) as typeof import("../src/files/protect.js");
+
+const SG_WALK = 12; // rule-match.h: the components judged, from the target up
+const onHost = (p: string) => protectedInFolder("/f", `/f/${p}`);
+const lower = (p: string) => p.toLowerCase().split("/");
+const inGitState = (parts: string[]) => parts.some((part, i) => GIT_STATE.has(part) && parts.slice(0, i).includes(".git"));
+
+// What the guest rule must answer: protect.ts's verdict, with git's transient state no
+// reason to refuse (the guest's own git rebases and cherry-picks), except a linked
+// worktree's config leaf (.git/worktrees/<name>/…/config), which redirects the host's git.
+function ruleRefuses(p: string): boolean {
+  const parts = lower(p);
+  const worktreeConfig = GIT_CONFIGS.has(parts.at(-1) ?? "") &&
+    parts.some((part, i) => part === ".git" && parts[i + 1] === "worktrees" && parts.length - i >= 4);
+  return worktreeConfig || onHost(parts.map((part) => (GIT_STATE.has(part) ? "x" : part)).join("/"));
+}
+
+// Every path of up to four components over the names protect.ts acts on, and a filler.
+const NAMES = [...new Set([...PROTECTED_NAMES, ...PROTECTED_PAIRS.flat(), ...GIT_CONFIGS, ...GIT_STATE, "modules", "x"])];
+function corpus(depth: number): string[] {
+  let all: string[] = [];
+  let level = [""];
+  for (let d = 0; d < depth; d++) {
+    level = level.flatMap((p) => NAMES.map((name) => (p ? `${p}/${name}` : name)));
+    all = all.concat(level);
   }
-  return first !== undefined && (GIT_STATE.has(first) || first === "hooks" || (rest.length === 1 && GIT_CONFIGS.has(first)));
-}
-function protectedInFolder(rel: string): boolean {
-  const parts = rel.toLowerCase().split("/");
-  return parts.at(-1) === ".git" || parts.some((part, i) =>
-    PN.has(part) || PAIRS.some(([a, b]) => part === a && parts[i + 1] === b) || (part === ".git" && runsCode(parts.slice(i + 1))));
+  return all;
 }
 
-// Paths protect.ts refuses only because of git transient-state content the kernel
-// deliberately allows (decision 3); the kernel allows exactly these.
-const GIT_STATE_ONLY = new Set([
-  ".git/rebase-merge/git-rebase-todo", ".git/sequencer/todo", ".git/rebase-apply/0001",
-  ".git/worktrees/wt/HEAD", ".git/modules/foo/rebase-merge/todo",
-]);
-
+// The readable spec, beside the corpus.
 const probes = [
   ".git/hooks/pre-commit", ".git/config", ".git/config.worktree", ".git/commondir", ".git",
-  ".git/modules/foo/config", ".git/modules/foo/hooks/pre-commit",
+  ".git/modules/foo/config", ".git/modules/foo/hooks/pre-commit", ".git/modules/hooks/HEAD",
   ".git/worktrees/wt/commondir", ".git/worktrees/wt/config.worktree",
   ".git/refs/heads/hooks", ".git/refs/heads/config", ".git/logs/refs/heads/hooks",
-  ".git/rebase-merge/git-rebase-todo", ".git/sequencer/todo", ".git/rebase-apply/0001",
   ".mcp.json", "a/b/c/.vscode/settings.json", ".claude/commands/x", ".claude/agents/y",
   "sub/.git/config", "sub/.git", "notes.txt", ".git/refs/heads/tmp", "src/main.c",
   ".gitconfig", ".gitmodules", ".bashrc", ".idea/x",
-  ".git/worktrees/wt/HEAD", ".git/modules/a/b/hooks/x", ".git/modules/foo/rebase-merge/todo",
-  "deep/a/b/c/d/.git/config", ".git/objects/ab/cd", ".git/HEAD", ".git/index",
+  ".git/modules/a/b/hooks/x", "deep/a/b/c/d/.git/config", ".git/objects/ab/cd", ".git/HEAD", ".git/index",
+  ".GIT/config", ".Git/Hooks/pre-commit", ".GIT/MODULES/Foo/CONFIG", "a/.CLAUDE/Commands/x",
 ];
+// Paths protect.ts refuses only for git's transient state, which the rule allows.
+const GIT_STATE_ONLY = [
+  ".git/rebase-merge/git-rebase-todo", ".git/sequencer/todo", ".git/rebase-apply/0001",
+  ".git/worktrees/wt/HEAD", ".git/modules/foo/rebase-merge/todo",
+];
+// The walk's named ceiling: a protected name more than SG_WALK components above the target.
+const numbered = (n: number) => Array.from({ length: n }, (_, i) => String(i + 1));
+const WITHIN = [".vscode", ...numbered(SG_WALK - 2), "x"].join("/");
+const BEYOND = [".vscode", ...numbered(SG_WALK - 1), "x"].join("/");
+
+function verdicts(bin: string, paths: string[]): boolean[] {
+  const out = execFileSync(bin, { input: `${paths.join("\n")}\n`, encoding: "utf8", maxBuffer: 1 << 26 }).split("\n");
+  out.pop();
+  expect(out.length).toBe(paths.length);
+  return out.map((v) => v === "1");
+}
 
 describe("the guest rule mirrors protect.ts", () => {
   const cc = ["cc", "clang", "gcc"].find((c) => { try { execFileSync(c, ["--version"]); return true; } catch { return false; } });
-  it.skipIf(!cc)("agrees on every probe but the pinned git-state allows", () => {
+  // Without a compiler the test is skipped on a developer's machine, and fails on CI.
+  it.skipIf(!cc && process.env.CI !== "true")("agrees on every path but git's transient state", () => {
+    if (!cc) throw new Error("no C compiler (cc, clang or gcc) to build the guest rule's harness");
     const dir = mkdtempSync(join(tmpdir(), "rule-"));
-    const bin = join(dir, "rule");
-    execFileSync(cc!, ["-O2", "-I", new URL("../vm/", import.meta.url).pathname,
-      "-o", bin, new URL("./rule-harness.c", import.meta.url).pathname]);
-    const out = execFileSync(bin, probes, { encoding: "utf8" }).trim().split("\n");
-    const kernel = new Map(out.map((l) => { const [v, ...p] = l.split(" "); return [p.join(" "), v === "1"]; }));
-    const bad: string[] = [];
-    for (const p of probes) {
-      const h = protectedInFolder(p), k = kernel.get(p);
-      if (h === k) continue;
-      if (h && !k && GIT_STATE_ONLY.has(p)) continue; // intended (decision 3)
-      bad.push(`${p}: protect.ts=${h} kernel=${k}`);
+    try {
+      const bin = join(dir, "rule");
+      execFileSync(cc, ["-O2", "-I", fileURLToPath(new URL("../vm/", import.meta.url)),
+        "-o", bin, fileURLToPath(new URL("./rule-harness.c", import.meta.url))]);
+      const paths = [...corpus(4), ...probes, ...GIT_STATE_ONLY];
+      const kernel = verdicts(bin, paths);
+      const bad: string[] = [];
+      paths.forEach((p, i) => {
+        const host = onHost(p);
+        if (kernel[i] !== ruleRefuses(p)) bad.push(`${p}: rule=${kernel[i]} expected=${ruleRefuses(p)} protect.ts=${host}`);
+        else if (kernel[i] !== host && (kernel[i] || !inGitState(lower(p)))) bad.push(`${p}: rule=${kernel[i]} protect.ts=${host}`);
+      });
+      expect(bad).toEqual([]);
+      expect(GIT_STATE_ONLY.map((p) => [p, kernel[paths.indexOf(p)], onHost(p)])).toEqual(GIT_STATE_ONLY.map((p) => [p, false, true]));
+      expect(verdicts(bin, [WITHIN, BEYOND])).toEqual([true, false]);
+      expect([onHost(WITHIN), onHost(BEYOND)]).toEqual([true, true]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
-    expect(bad).toEqual([]);
   });
 });

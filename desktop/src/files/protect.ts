@@ -21,11 +21,11 @@ const SENSITIVE_PREFIXES = ["/etc/", "/boot/", "/usr/lib/systemd/"];
 const SENSITIVE_PATHS = ["/var/run/docker.sock", "/run/docker.sock"];
 
 // Matched at any depth and in any case: stricter than srt's three levels.
-const PROTECTED_NAMES = new Set([
+export const PROTECTED_NAMES: ReadonlySet<string> = new Set([
   ".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile",
   ".ripgreprc", ".mcp.json", ".vscode", ".idea",
 ]);
-const PROTECTED_PAIRS: ReadonlyArray<readonly [string, string]> = [
+export const PROTECTED_PAIRS: ReadonlyArray<readonly [string, string]> = [
   [".claude", "commands"], [".claude", "agents"], [".git", "hooks"], [".git", "config"],
 ];
 // The folders that hold protected names: renamed away and made again, each would hand a
@@ -35,7 +35,7 @@ export const KEY_FOLDERS: ReadonlySet<string> = new Set(PROTECTED_PAIRS.map(([fi
 // parent's .git/modules): the config files git reads, in the folder or through
 // commondir, and the hooks. A config can name a program that git runs on its
 // next status; so can a hook.
-const GIT_CONFIGS = new Set(["config", "config.worktree", "commondir"]);
+export const GIT_CONFIGS: ReadonlySet<string> = new Set(["config", "config.worktree", "commondir"]);
 
 const real = (path: string) => realpath(path).path;
 

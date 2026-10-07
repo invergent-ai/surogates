@@ -1,17 +1,14 @@
-// Native harness for the drift test: judge a share-relative path, printing 1
-// (refuse) or 0 (allow), feeding components leaf-first to the shared stepper.
+// Native harness for the drift test: judge share-relative paths, one per stdin line,
+// printing one verdict per line, 1 (refuse) or 0 (allow), by feeding each path's
+// components leaf-first to the shared stepper.
 #include <stdio.h>
 #include <string.h>
 #include "rule-match.h"
 
-static int refuses(const char *path)
+static int refuses(char *path)
 {
-	char buf[4096];
-	int plen = strlen(path);
-	if (plen >= (int)sizeof buf) plen = sizeof buf - 1;
-	memcpy(buf, path, plen); buf[plen] = 0;
 	char *comps[256]; int nc = 0;
-	for (char *p = strtok(buf, "/"); p && nc < 256; p = strtok(NULL, "/")) comps[nc++] = p;
+	for (char *p = strtok(path, "/"); p && nc < 256; p = strtok(NULL, "/")) comps[nc++] = p;
 	struct sg_state st; sg_init(&st);
 	for (int i = 0; i < nc && i < SG_WALK; i++) {
 		char *c = comps[nc - 1 - i];
@@ -26,8 +23,12 @@ static int refuses(const char *path)
 	return 0;
 }
 
-int main(int argc, char **argv)
+int main(void)
 {
-	for (int i = 1; i < argc; i++) printf("%d %s\n", refuses(argv[i]), argv[i]);
+	static char line[4096];
+	while (fgets(line, sizeof line, stdin)) {
+		line[strcspn(line, "\n")] = 0;
+		printf("%d\n", refuses(line));
+	}
 	return 0;
 }
