@@ -6,7 +6,7 @@
   "license": "AGPL-3.0-only",
   "type": "module",
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22.14"
   },
   "scripts": {
     "build": "scripts/node.sh && tsc -p tsconfig.build.json && mkdir -p dist/shell/pages && cp src/shell/pages/*.html src/shell/pages/*.css dist/shell/pages/",
