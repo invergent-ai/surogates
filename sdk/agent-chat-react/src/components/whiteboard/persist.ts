@@ -11,7 +11,7 @@
  * between an agent reply and the next debounced save — the event log is
  * a backstop, not a second source of truth.
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AgentChatAdapter, AgentChatMessage } from "../../types";
 import {
   type CommandResolver,
@@ -44,7 +44,7 @@ export const SAVE_DEBOUNCE_MS = 1500;
  * One writer means the file is still the document; it just has to be
  * finished being written before it is read.
  */
-const inFlightSaves = new Map<string, Promise<void>>();
+const inFlightSaves = new Map<string, Promise<boolean>>();
 
 function decode(content: string, encoding: string): string {
   if (encoding !== "base64") return content;
@@ -109,17 +109,20 @@ export async function loadDoc(
 }
 
 /**
- * Write the canvas document.
+ * Write the canvas document; resolves whether it was saved.
  *
- * Best-effort: a failed save is swallowed because the event log still
- * carries the agent's objects, and surfacing an error here would put a
- * network hiccup in front of someone who is drawing.
+ * Never rejects: the event log still carries the agent's objects, and a
+ * thrown error here would put a network hiccup in front of someone who is
+ * drawing. A failed save is not retried by itself: the next save writes the
+ * whole document again, and meanwhile the board says the last change was
+ * not saved (a local-folder chat's computer may be away, or the chat's
+ * changes waiting their turn on it).
  */
 export function saveDoc(
   adapter: AgentChatAdapter,
   sessionId: string,
   doc: WbDoc,
-): Promise<void> {
+): Promise<boolean> {
   const done = (async () => {
     try {
       const body = JSON.stringify(doc);
@@ -131,8 +134,10 @@ export function saveDoc(
         file,
         directory: CANVAS_DIR,
       });
+      return true;
     } catch {
-      // Intentionally silent — see the docstring.
+      // Said by the board, not thrown — see the docstring.
+      return false;
     }
   })();
   // Registered synchronously: the unmount flush and the remount load run
@@ -140,10 +145,11 @@ export function saveDoc(
   // its first await would not be visible to the load that has to wait
   // for it.
   inFlightSaves.set(sessionId, done);
-  return done.then(() => {
+  return done.then((saved) => {
     if (inFlightSaves.get(sessionId) === done) {
       inFlightSaves.delete(sessionId);
     }
+    return saved;
   });
 }
 
@@ -152,14 +158,15 @@ export function saveDoc(
  *
  * The flush matters: without it, closing the tab within the debounce
  * window drops the last strokes, and those are the ones the user just
- * made.
+ * made. Returns whether the last save failed, until a later one lands.
  */
 export function useDebouncedSave(
   adapter: AgentChatAdapter,
   sessionId: string | null,
   doc: WbDoc,
   delayMs: number = SAVE_DEBOUNCE_MS,
-): void {
+): boolean {
+  const [unsaved, setUnsaved] = useState(false);
   // Held in a ref so the unmount effect can flush the newest document
   // without re-subscribing on every keystroke.
   const latest = useRef(doc);
@@ -180,7 +187,7 @@ export function useDebouncedSave(
     }
     dirty.current = true;
     const timer = setTimeout(() => {
-      void saveDoc(adapter, sessionId, latest.current);
+      void saveDoc(adapter, sessionId, latest.current).then((saved) => setUnsaved(!saved));
     }, delayMs);
     return () => clearTimeout(timer);
   }, [adapter, sessionId, doc, delayMs]);
@@ -191,6 +198,8 @@ export function useDebouncedSave(
       void saveDoc(adapter, sessionId, latest.current);
     };
   }, [adapter, sessionId]);
+
+  return unsaved;
 }
 
 /**

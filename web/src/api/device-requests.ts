@@ -9,9 +9,10 @@
 // change may already be waiting on the computer, and a new id would be a second
 // change. An upload's 202 names its change, a digest of what it does: sent again
 // by that digest alone, its file does not cross again, and a 428 says the server
-// holds no such change, so it is sent whole. A cloud chat's change is sent once,
-// as before: its storage keeps no request to join, so sending it again would do
-// it twice.
+// holds no such change, so it is sent whole. A 429 says the chat has its fill of
+// changes waiting on the computer: it is sent again the same way until one of
+// them is done and it is let in. A cloud chat's change is sent once, as before:
+// its storage keeps no request to join, so sending it again would do it twice.
 
 export const RETRY_FIRST_MS = 1_000;
 export const RETRY_MOST_MS = 10_000;
@@ -47,7 +48,7 @@ async function changeOf(response: Response): Promise<string | null> {
 }
 
 /**
- * Sends a change under one new request id until it is answered with anything but 202.
+ * Sends a change under one new request id until it is answered with anything but 202 or 429.
  * *send* gets the change to name in place of the body, or null to send it whole.
  */
 export async function untilAnswered(
@@ -67,7 +68,8 @@ export async function untilAnswered(
         change = null;
         continue;
       }
-      if (response.status !== 202) return response;
+      // Waiting on the computer (202), or waiting its turn there (429): asked again below.
+      if (response.status !== 202 && response.status !== 429) return response;
       change = (await changeOf(response)) ?? change;
     } catch (error) {
       // Stopped: said as it was. Otherwise not answered at all: asked again below, under the same id.

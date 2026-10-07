@@ -53,6 +53,14 @@ def asked(device_id: UUID, root: UUID) -> OperationRequest:
     return OperationRequest(**{**_fields(request_for(device_id, root)), "invocation_id": f"{REQUEST_PREFIX}{uuid.uuid4().hex}"})
 
 
+async def claimed(ops: DeviceOperations, request: OperationRequest, change: str = "upload") -> OperationRequest:
+    """*request* made a change: its claim at ordinal 0 recorded first, as session_files records it."""
+    await ops.claim(OperationRequest(**{
+        **_fields(request), "ordinal": 0, "kind": "request", "args": {"change": change}, "payload": None,
+    }))
+    return request
+
+
 async def test_a_paused_chats_folder_takes_requests_but_not_tool_calls(api, session_factory, redis_client, tmp_path):
     issued, root = await bound_device(api)
     device_id = UUID(issued["id"])
@@ -140,33 +148,33 @@ async def test_a_request_not_kept_open_is_cancelled_when_its_wait_ends(api, sess
     assert await ops.pending(device_id, 1) == []
 
 
-async def test_a_session_may_have_only_so_many_requests_open(api, session_factory, redis_client, monkeypatch):
+async def test_a_session_may_have_only_so_many_changes_open_and_a_read_is_never_refused(
+    api, session_factory, redis_client, monkeypatch,
+):
     monkeypatch.setattr(operations_module, "OPEN_REQUESTS_PER_SESSION", 1)
     issued, root = await bound_device(api)
     device_id = UUID(issued["id"])
     ops = DeviceOperations(session_factory, redis_client)
-    first = asked(device_id, root)
+    first = await claimed(ops, asked(device_id, root))
     waiting = asyncio.create_task(ops.run(first, keep_open=True))
     await eventually(lambda: has_pending(ops, device_id))
+    # A change's claim is not a step under way: its first step is a new change, and refused.
     with pytest.raises(TooManyRequests, match="Too much of this chat is waiting for Flavius's ThinkPad"):
-        await asyncio.wait_for(ops.run(asked(device_id, root)), 2.0)
-    # A change's claim is not a step under way: its first step is a new request, and refused too.
-    change = asked(device_id, root)
-    await ops.claim(OperationRequest(**{**_fields(change), "ordinal": 0, "kind": "request", "args": {"change": "upload"}}))
-    with pytest.raises(TooManyRequests):
-        await asyncio.wait_for(ops.run(change), 2.0)
-    # The open one goes on: the same request again, and its next step.
+        await asyncio.wait_for(ops.run(await claimed(ops, asked(device_id, root))), 2.0)
+    # A read neither counts nor is refused: its own deadline bounds it.
+    reading = asyncio.create_task(ops.run(asked(device_id, root), keep_open=True))
+    # The open change goes on: the same change again, and its next step.
     again = asyncio.create_task(ops.run(first, keep_open=True))
     next_step = asyncio.create_task(ops.run(OperationRequest(**{**_fields(first), "ordinal": 2}), keep_open=True))
 
-    async def both_recorded() -> bool:
-        for task in (again, next_step):
+    async def all_recorded() -> bool:
+        for task in (reading, again, next_step):
             if task.done():
                 task.result()  # a refusal surfaces here
-        return len(await ops.pending(device_id, 1)) == 2
+        return len(await ops.pending(device_id, 1)) == 3
 
-    await eventually(both_recorded)
-    for task in (waiting, again, next_step):
+    await eventually(all_recorded)
+    for task in (waiting, reading, again, next_step):
         await stop(task)
 
 
@@ -179,10 +187,10 @@ async def test_a_burst_of_new_requests_opens_no_more_than_the_cap(api, session_f
     data = os.urandom(4 * 1024 * 1024)
     transfer = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
     uploads = [
-        OperationRequest(**{
+        await claimed(ops, OperationRequest(**{
             **_fields(asked(device_id, root)), "kind": "write",
             "args": {"key": f"/folder/{n}.bin", "transfer": transfer}, "payload": data,
-        })
+        }))
         for n in range(10)
     ]
     burst = [asyncio.create_task(ops.run(upload, keep_open=True)) for upload in uploads]
@@ -204,11 +212,11 @@ async def test_the_same_request_sent_twice_at_once_at_the_cap_joins_itself(api, 
     ops = DeviceOperations(session_factory, redis_client)
     # An upload sent again while the first send still stores its data: one request, under one id.
     data = os.urandom(4 * 1024 * 1024)
-    upload = OperationRequest(**{
+    upload = await claimed(ops, OperationRequest(**{
         **_fields(asked(device_id, root)), "kind": "write",
         "args": {"key": "/folder/a.bin", "transfer": {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}},
         "payload": data,
-    })
+    }))
     for _ in range(3):
         sends = [asyncio.create_task(ops.run(upload, keep_open=True)) for _ in range(2)]
 
@@ -223,7 +231,9 @@ async def test_the_same_request_sent_twice_at_once_at_the_cap_joins_itself(api, 
         assert not any(task.done() for task in sends)  # both wait on the one write
         for task in sends:
             await stop(task)
-        upload = OperationRequest(**{**_fields(upload), "invocation_id": f"{REQUEST_PREFIX}{uuid.uuid4().hex}", "payload": data})
+        upload = await claimed(ops, OperationRequest(**{
+            **_fields(upload), "invocation_id": f"{REQUEST_PREFIX}{uuid.uuid4().hex}", "payload": data,
+        }))
         await ops.cancel([root], bindings=True)
 
 

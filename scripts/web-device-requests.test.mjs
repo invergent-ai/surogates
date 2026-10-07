@@ -108,3 +108,12 @@ test("a server that holds none of a change sent whole is answered as it said", a
   assert.equal((await untilAnswered(send, { onDevice: true, sleep: async () => {} })).status, 428);
   assert.deepEqual(changes, [null]);
 });
+
+test("sends a change told to wait its turn again, under the same request id, as a 202", async () => {
+  const { send, sent } = answers(202, 429, 429, 201);
+  const slept = [];
+  const response = await untilAnswered(send, { onDevice: true, sleep: async (ms) => slept.push(ms) });
+  assert.equal(response.status, 201);
+  assert.equal(new Set(sent).size, 1);
+  assert.deepEqual(slept, [RETRY_FIRST_MS, 2000, 4000]);
+});

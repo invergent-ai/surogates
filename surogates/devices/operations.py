@@ -77,9 +77,9 @@ _CANCEL_PATIENCE_S = 5.0
 # event id, a number, and a binding's is "bind".
 REQUEST_PREFIX = "request:"
 
-# How many of the user's requests one session may have open on its computer at
-# once: a change waiting for its user holds its data in Postgres, and a read a
-# pub/sub connection on the api.
+# How many of the user's changes one session may have open on its computer at
+# once: a change waiting for its user holds its data in Postgres.  A read never
+# counts, nor is refused: its own deadline (READ_WITHIN_S) bounds it.
 # ponytail: a constant; make it a setting when a deployment needs another value.
 OPEN_REQUESTS_PER_SESSION = 8
 
@@ -209,16 +209,18 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
 
 
 class TooManyRequests(DeviceOperationError):
-    """The session already has its fill of the user's requests open on its computer."""
+    """The session already has its fill of the user's changes open on its computer."""
 
 
 async def _refuse_too_many_requests(db: AsyncSession, request: OperationRequest, device: Any) -> None:
-    """Refuse a new request from a session that has OPEN_REQUESTS_PER_SESSION open already.
+    """Refuse a new change from a session that has OPEN_REQUESTS_PER_SESSION changes open already.
 
-    A request already under way may go on: its next operation, or the same
-    request sent again.  A change's claim at ordinal 0 does not count as under way.
-    Nor does a request count against itself: sent twice at once, the second
-    finds the first recorded only once it holds the lock, and joins it.
+    Only a change counts, or is refused: a request whose claim at ordinal 0
+    names what it changes.  A read has none.  A change already under way may
+    go on: its next operation, or the same change sent again; its claim does
+    not count as under way.  Nor does a change count against itself: sent
+    twice at once, the second finds the first recorded only once it holds the
+    lock, and joins it.
     """
     already = (await db.execute(
         select(DeviceOperation.id).where(
@@ -229,18 +231,28 @@ async def _refuse_too_many_requests(db: AsyncSession, request: OperationRequest,
     )).scalar_one_or_none()
     if already is not None:
         return
-    # Held to the commit, so a burst of new requests counts one at a time: the
+    changes = select(DeviceOperation.invocation_id).where(
+        DeviceOperation.calling_session_id == request.calling_session_id,
+        DeviceOperation.invocation_id.startswith(REQUEST_PREFIX),
+        DeviceOperation.ordinal == 0,
+        DeviceOperation.kind == "request",
+    )
+    if (await db.execute(
+        changes.where(DeviceOperation.invocation_id == request.invocation_id).limit(1)
+    )).scalar_one_or_none() is None:
+        return
+    # Held to the commit, so a burst of new changes counts one at a time: the
     # device row's lock is FOR SHARE, and every one would pass the count together.
     await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"device-requests:{request.calling_session_id}"))))
-    open_requests = (await db.execute(
+    open_changes = (await db.execute(
         select(func.count(func.distinct(DeviceOperation.invocation_id))).where(
             DeviceOperation.calling_session_id == request.calling_session_id,
-            DeviceOperation.invocation_id.startswith(REQUEST_PREFIX),
+            DeviceOperation.invocation_id.in_(changes),
             DeviceOperation.invocation_id != request.invocation_id,
             DeviceOperation.completed_at.is_(None),
         )
     )).scalar_one()
-    if open_requests >= OPEN_REQUESTS_PER_SESSION:
+    if open_changes >= OPEN_REQUESTS_PER_SESSION:
         raise TooManyRequests(
             f"Too much of this chat is waiting for {device.name} already: try again once it is done",
         )

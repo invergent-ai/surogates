@@ -530,3 +530,43 @@ async def test_a_change_still_asked_about_when_its_computers_link_drops_never_la
     assert again.json()["detail"] == "This computer's link dropped before this was allowed, so it did not run"
     assert not (chat.folder / "notes.txt").exists()
     assert "write" not in chat.laptop.ran
+
+
+async def sent_until_answered(send):
+    """As the web client sends a change: again under its id while it is answered 202 or 429."""
+    for _ in range(40):
+        response = await send()
+        if response.status_code not in (202, 429):
+            return response
+    raise AssertionError("never answered")
+
+
+async def test_ten_attachments_in_ask_every_time_all_land_and_their_message_is_sent(api, chat, monkeypatch):
+    monkeypatch.setattr(workspace_routes, "CHANGE_WITHIN_S", 0.5)
+    # Low enough that some are told to wait their turn: a change between two steps has nothing open to count.
+    monkeypatch.setattr(operations_module, "OPEN_REQUESTS_PER_SESSION", 2)
+    chat.laptop.hold_asked = True  # each waits for its user's answer, as the app's prompts do
+    ids = [f"attachment-{n:012d}" for n in range(10)]
+
+    def send(n: int):
+        return upload(api, chat, f"{n}.txt", f"note {n}".encode(), path="uploads", request_id=ids[n])
+
+    # As the composer sends them, all at once: past the cap, a change is told to wait its turn.
+    first = await asyncio.gather(*(send(n) for n in range(10)))
+    statuses = [response.status_code for response in first]
+    assert set(statuses) == {202, 429}, [response.text for response in first]
+    # The file panel still reads the folder meanwhile: a read is never refused for the changes waiting.
+    tree = await api.client.get(url(chat, "tree"), headers=api.auth())
+    assert tree.status_code == 200, tree.text
+    await chat.laptop.release()
+    landed = await asyncio.gather(*(sent_until_answered(lambda n=n: send(n)) for n in range(10)))
+    assert [response.status_code for response in landed] == [201] * 10
+    message = await api.client.post(
+        f"/v1/sessions/{chat.id}/messages",
+        json={"content": "Tidy these", "attachments": [
+            {"path": f"uploads/{n}.txt", "filename": f"{n}.txt", "mime_type": "text/plain", "size": 6}
+            for n in range(10)
+        ]},
+        headers=api.auth(),
+    )
+    assert message.status_code == 202, message.text
