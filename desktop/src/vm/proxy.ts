@@ -80,11 +80,13 @@ interface Met {
 }
 
 const tcp = (address: string, port: number) => connectTcp({ host: address, port, allowHalfOpen: true });
-// How long an attempt has to connect before the next judged address is tried beside it: Node's
-// autoSelectFamily's stagger, so an address that never answers holds no other back.
+// How long an attempt has to connect before the next judged address is tried beside it, the
+// earlier one still running (RFC 8305), so an address that never answers holds no other back.
+// Node's autoSelectFamily waits as long, then drops the earlier one.
 const STAGGER_MS = 250;
 
-// The judged addresses, IPv6 and IPv4 by turns, IPv6 first, as Node's autoSelectFamily tries them.
+// The judged addresses, IPv6 and IPv4 by turns, always IPv6 first, whatever order the lookup
+// gave them. Node's autoSelectFamily leads with the family of the lookup's first address.
 function inTurn(addresses: readonly string[]): string[] {
   const six = addresses.filter((address) => isIPv6(address));
   const four = addresses.filter((address) => !isIPv6(address));
