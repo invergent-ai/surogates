@@ -61,7 +61,11 @@ const openOutside = (url: string): void => {
 // open, the Composio sign-in, gets no bridge, and opens nothing further.
 function confine(contents: WebContents, origin: string): void {
   contents.on("will-navigate", (event) => {
-    if (sameOrigin(origin, event.url)) return;
+    if (sameOrigin(origin, event.url)) {
+      // The agent's sign-in pages open only in the system browser: the window never shows a password form.
+      if (new URL(event.url).pathname.startsWith("/oauth/")) event.preventDefault();
+      return;
+    }
     event.preventDefault();
     openOutside(event.url);
   });
@@ -111,6 +115,7 @@ export class MainWindow {
   readonly window: BrowserWindow;
   private web: WebView | null = null;
   private webShown = true; // false while the centre shows a page of the shell's own, the Projects page
+  private gated = false; // nobody is signed in to the app: the web client stays hidden under the sign-in
   private hole: Bounds = { x: 0, y: 0, width: 0, height: 0 };
   // Settings, over everything: a transparent view whose page dims the window beneath it.
   private settingsView: WebContentsView | null = null;
@@ -195,6 +200,7 @@ export class MainWindow {
     this.window.contentView.addChildView(view, 0);
     const web: WebView = { agent, view, unreachable: null, failing: false, attempt: 0 };
     this.web = web;
+    this.showWeb(this.webShown);
     const contents = view.webContents;
     confine(contents, agent.origin);
     keys(contents);
@@ -268,7 +274,14 @@ export class MainWindow {
   /** The web client in the centre, or the page beneath it: it shows only while it has something to show. */
   showWeb(shown: boolean): void {
     this.webShown = shown;
-    this.web?.view.setVisible(shown && this.web.unreachable === null);
+    this.web?.view.setVisible(shown && !this.gated && this.web.unreachable === null);
+  }
+
+  /** Hide the web client while nobody is signed in to the app; show it again once someone is. */
+  gate(closed: boolean): void {
+    if (this.gated === closed) return;
+    this.gated = closed;
+    this.showWeb(this.webShown);
   }
 
   // The centre's hole, as the page measures it.
@@ -277,8 +290,9 @@ export class MainWindow {
     this.web?.view.setBounds(hole);
   }
 
-  go(path: string): void {
-    if (this.web) this.load(this.web, path);
+  /** Load *path* of the web client: settled once it has loaded, or failed to. */
+  go(path: string): Promise<void> {
+    return this.web ? this.load(this.web, path) : Promise.resolve();
   }
 
   back(): void {
@@ -295,9 +309,9 @@ export class MainWindow {
     this.web?.view.webContents.reload();
   }
 
-  private load(web: WebView, path: string): void {
+  private load(web: WebView, path: string): Promise<void> {
     clearTimeout(web.retry);
-    void web.view.webContents.loadURL(`${web.agent.origin}${path}`).catch(() => {});
+    return web.view.webContents.loadURL(`${web.agent.origin}${path}`).catch(() => {});
   }
 
   // A failed load is tried again, with the link's backoff, once the agent answers its /auth/config.

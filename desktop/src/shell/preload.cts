@@ -40,7 +40,7 @@ if (origin !== undefined && window.top === window && location.origin === origin)
   contextBridge.exposeInMainWorld("surogateDesktop", {
     version: 1,
     getDevice: call("getDevice"),
-    registerDevice: call("registerDevice"),
+    webSignIn: call("webSignIn"),
     prepareFolder: call("prepareFolder"),
     bindSession: call("bindSession"),
     getAppearance: call("getAppearance"),

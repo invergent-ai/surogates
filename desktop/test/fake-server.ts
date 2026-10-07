@@ -16,6 +16,10 @@ export interface FakeLinkServerOptions {
 }
 
 export class FakeLinkServer {
+  // The device token it accepts: a reauthorization replaces it.
+  token: string;
+  // Who its welcome names.
+  identity = { device_id: "d", org_id: "o", agent_id: "a", user_id: "u", name: "Laptop" };
   readonly received: Record<string, unknown>[] = [];
   readonly hellos: Record<string, unknown>[] = [];
   // The close code of each connection, in order.
@@ -26,7 +30,9 @@ export class FakeLinkServer {
   private server: WebSocketServer | null = null;
   private socket: WebSocket | null = null;
 
-  constructor(private readonly options: FakeLinkServerOptions = {}) {}
+  constructor(private readonly options: FakeLinkServerOptions = {}) {
+    this.token = options.token ?? "surg_dev_test";
+  }
 
   // On a port of its own; or on *at*'s listening server and path, as the api serves the link beside its pages.
   async start(at?: { server: Server; path: string }): Promise<string> {
@@ -36,8 +42,7 @@ export class FakeLinkServer {
       this.connections += 1;
       this.socket = socket;
       socket.on("close", (code) => this.closes.push(code));
-      const token = this.options.token ?? "surg_dev_test";
-      if (request.headers.authorization !== `Bearer ${token}`) {
+      if (request.headers.authorization !== `Bearer ${this.token}`) {
         socket.close(4401, "unauthenticated");
         return;
       }
@@ -47,10 +52,7 @@ export class FakeLinkServer {
         if (frame.type === "hello") {
           this.hellos.push(frame);
           if (this.options.welcome !== false) {
-            socket.send(JSON.stringify({
-              type: "welcome", protocol: 1, device_id: "d", org_id: "o", agent_id: "a",
-              user_id: "u", name: "Laptop", heartbeat_s: this.options.heartbeatS ?? 15,
-            }));
+            socket.send(JSON.stringify({ type: "welcome", protocol: 1, ...this.identity, heartbeat_s: this.options.heartbeatS ?? 15 }));
             for (const behind of this.behindWelcome) socket.send(JSON.stringify(behind));
           }
         } else if (frame.type === "ping" && this.options.pong !== false) {

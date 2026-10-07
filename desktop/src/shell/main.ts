@@ -9,25 +9,28 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  app, dialog, type IpcMainEvent, type IpcMainInvokeEvent, Menu, nativeTheme, net, safeStorage, shell, utilityProcess, type WebContents,
-  webContents,
+  app, dialog, type IpcMainEvent, type IpcMainInvokeEvent, Menu, nativeTheme, net, safeStorage, session, shell, utilityProcess,
+  type WebContents, webContents,
 } from "electron";
 
-import type { DesktopAccount, DesktopDevice } from "../../../web/src/lib/desktop-bridge-contract.js";
+import type { DesktopAccount } from "../../../web/src/lib/desktop-bridge-contract.js";
 import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow } from "../../../web/src/lib/projects-contract.js";
 import { verifyDevice } from "../device.js";
 import { appEnvironment } from "../hosts/environment.js";
 import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../vm/client.js";
 import { VmExecutor } from "../vm/executor.js";
-import { type Agent, AgentStore, connectAgent, describeAgent, linksFor, linkUrl } from "./agents.js";
+import { type Agent, AgentStore, connectAgent, describeAgent, linksFor, linkUrl, partitionFor } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
+import { register } from "./computer.js";
 import { type Credential, CredentialStore } from "./credentials.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { letWindowClose, MainWindow, onSettingsKey } from "./main-window.js";
+import { type Fetch, OAuthError, signInWithBrowser, type Tokens } from "./oauth.js";
 import { ANSWER_TIMEOUT_MS, PageProjects } from "./projects.js";
 import { folderPrompts, refusingApprovals } from "./prompts.js";
+import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
 import { sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
@@ -50,6 +53,18 @@ let main: MainWindow | null = null;
 let theme: Theme;
 // After ready: safeStorage answers only then.
 let credentials: CredentialStore;
+let sessionStore: SessionStore;
+// Who is signed in to the app, with the agent: what adds this computer, and what the window's web client takes its session from.
+let signedIn: DesktopSession | null = null;
+// A sign-in under way in the system browser: starting another cancels it.
+let signingIn: AbortController | null = null;
+let signInFailure: string | null = null;
+// The agent would add this computer only on a more recent sign-in: the user signs in again.
+let signInAgain = false;
+// The window's web client loads again with a new sign-in's session: the sign-in shows until it has.
+let reloading = false;
+// The app's calls to the agent, through Chromium's network as the window's are.
+const apiFetch: Fetch = (url, init) => net.fetch(url, init);
 // The commands' environment, read from the login shell once.
 let environment: Promise<Record<string, string>>;
 // This computer's credential for the agent, as stored: what the page is told, and what keeps a second registration out.
@@ -142,6 +157,8 @@ function bounds(value: unknown): Bounds {
 
 // What the window's page and an open Settings show changed: each reads its state again.
 function changed(): void {
+  // The web client shows only while someone is signed in to the app, and has its session.
+  main?.gate(signedIn === null || reloading);
   main?.window.webContents.send("shell:changed");
   main?.settingsContents()?.send("settings:changed");
 }
@@ -349,34 +366,82 @@ function startStack(agent: Agent, credential: Credential): Promise<DeviceStack> 
   });
 }
 
-async function registerDevice(agent: Agent, token: string): Promise<DesktopDevice> {
-  // ponytail: one device per agent on this computer; signing out and restoring access come with sign-in in the system browser.
-  if (kept || registering) throw new Error("This computer is already registered with this agent");
-  const signedIn = account;
-  if (!signedIn) throw new Error("Sign in to the agent before registering this computer");
+// The window's web client forgets whoever was signed in there: its storage, cookies and caches.
+const clearWindow = (agent: Agent): Promise<void> => session.fromPartition(partitionFor(agent.origin, agent.agentId)).clearStorageData();
+
+// The app's sign-in, from now on. *first* holds the tokens of a sign-in that just happened.
+function startSession(remembered: SignedIn, first?: Tokens): void {
+  signedIn = new DesktopSession(remembered, {
+    store: sessionStore,
+    fetch: apiFetch,
+    // The agent ended the sign-in: the window asks for a new one, and says why. The device stays, on a token of its own.
+    onEnded: (why) => {
+      signedIn = null;
+      signInFailure = why;
+      changed();
+    },
+  }, first);
+}
+
+/** Add this computer to the agent for the signed-in user, when the agent has local folders and none is kept. */
+async function registerComputer(agent: Agent): Promise<void> {
+  const session = signedIn;
+  if (!session || kept || registering || !agent.desktopSessions || !agent.multiSession) return;
   registering = true;
+  signInAgain = false;
   try {
-    const welcome = await verifyDevice(linkUrl(agent.origin), token);
-    if (welcome.agentId !== agent.agentId) throw new Error("This token is for another agent");
-    if (welcome.orgId !== signedIn.orgId || welcome.userId !== signedIn.userId) throw new Error("This token is for another user");
-    const credential: Credential = {
-      origin: agent.origin, orgId: welcome.orgId, agentId: welcome.agentId, userId: welcome.userId,
-      deviceId: welcome.deviceId, name: welcome.name, addedAt: new Date().toISOString(), token,
-    };
-    // Kept only once its device runs: a start that fails leaves nothing behind.
-    const stack = await startStack(agent, credential);
-    try {
-      credentials.save(credential);
-    } catch (error) {
-      device = null;
-      await stack.stop();
-      throw error;
-    }
-    kept = credential;
-    changed();
-    return { deviceId: credential.deviceId, name: credential.name };
+    const added = await register({
+      agent, session, computer: hostname(),
+      verify: (token) => verifyDevice(linkUrl(agent.origin), token),
+      start: (credential) => startStack(agent, credential),
+      save: (credential) => credentials.save(credential),
+    });
+    if (added === "sign-in-again") signInAgain = true;
+    else kept = added;
+  } catch (error) {
+    // Nothing was kept: no device runs for it.
+    device = null;
+    report(error);
   } finally {
     registering = false;
+    changed();
+  }
+}
+
+/** Sign in to the agent in the system browser. A sign-in started again cancels the one under way. */
+async function signIn(agent: Agent): Promise<void> {
+  signingIn?.abort();
+  const attempt = new AbortController();
+  signingIn = attempt;
+  signInFailure = null;
+  changed();
+  try {
+    const tokens = await signInWithBrowser({
+      origin: agent.origin, computer: hostname(), fetch: apiFetch, signal: attempt.signal, open: (url) => shell.openExternal(url),
+    });
+    const who = await accountOf(agent.origin, tokens.accessToken, apiFetch);
+    // The sign-in this one replaces ends at the agent: none is left valid with no copy here.
+    void signedIn?.end().catch(report);
+    const signedInNow: SignedIn = { origin: agent.origin, agentId: agent.agentId, account: who, authTime: tokens.authTime, refreshToken: tokens.refreshToken };
+    sessionStore.save(signedInNow);
+    startSession(signedInNow, tokens);
+    // The web client's session comes from this sign-in: whatever the window held before goes, and
+    // the sign-in shows until the web client has loaded again.
+    reloading = true;
+    try {
+      await clearWindow(agent);
+      await main?.go("/");
+    } finally {
+      reloading = false;
+    }
+    void registerComputer(agent);
+  } catch (error) {
+    if (!(error instanceof OAuthError && error.code === "cancelled")) {
+      signInFailure = error instanceof Error ? error.message : String(error);
+    }
+  } finally {
+    if (signingIn === attempt) signingIn = null;
+    changed();
   }
 }
 
@@ -399,7 +464,11 @@ async function preparing<T>(window: string, prepare: (signal: AbortSignal) => Pr
 // The bridge, on a view of the agent's web client: its calls answer for this agent only.
 function bridge(contents: WebContents, agent: Agent): void {
   // The device is the account's it was registered for: a page signed in as anyone else sees none.
-  const anotherAccount = () => kept !== null && (account?.orgId !== kept.orgId || account.userId !== kept.userId);
+  // Until the page says who it is, it is whoever is signed in to the app, whose sign-in gave it its session.
+  const anotherAccount = () => {
+    const owner = account ?? signedIn?.account ?? null;
+    return kept !== null && (owner?.orgId !== kept.orgId || owner.userId !== kept.userId);
+  };
   const registered = (): DeviceStack => {
     if (anotherAccount()) throw new Error("This computer is registered with the agent for another account");
     if (!device?.stack) throw new Error("This computer is not registered with the agent");
@@ -408,10 +477,17 @@ function bridge(contents: WebContents, agent: Agent): void {
   const handlers = bridgeHandlers(agent.origin, {
     getDevice: () => ({
       device: kept && !anotherAccount() ? { deviceId: kept.deviceId, name: kept.name } : null,
-      computerName: hostname(),
       localFolders: !anotherAccount() && agent.desktopSessions && agent.multiSession,
     }),
-    registerDevice: (token) => registerDevice(agent, token),
+    // A one-time code for the web client's own session, from the app's sign-in.
+    webSignIn: async () => {
+      if (!signedIn) return null;
+      const response = await signedIn.api("/api/v1/auth/oauth/web-code", { method: "POST" });
+      if (!response.ok) throw new Error(`The agent did not give this window a session (HTTP ${response.status})`);
+      const { code } = (await response.json()) as { code?: unknown };
+      if (typeof code !== "string") throw new Error("The agent gave this window no session");
+      return { code };
+    },
     prepareFolder: (choice, window) => preparing(window, (signal) => registered().binder.prepareFolder(choice, window, signal)),
     bindSession: async (sessionId, token, window) => {
       await registered().binder.bindSession(sessionId, token, window);
@@ -477,6 +553,12 @@ async function confirmAgent(agent: Agent, typed: string): Promise<boolean> {
   return response === 0;
 }
 
+// What the user can do about this computer, as the sidebar offers it.
+function deviceAction(agent: Agent | null): { text: string; button: string; action: "sign-in" } | null {
+  if (!agent || !signedIn || !signInAgain) return null;
+  return { text: `Sign in again to let ${agent.name} work on folders of this computer.`, button: "Sign in again", action: "sign-in" };
+}
+
 function state() {
   const agent = agents.get();
   return {
@@ -493,7 +575,10 @@ function state() {
     failure,
     links: Object.keys(links()),
     unreachable: main?.unreachable ?? null,
-    notice: credentials.unencrypted() ? "Credentials on this computer are not encrypted: Linux has no secret store here" : null,
+    notice: credentials.unencrypted() || sessionStore.unencrypted()
+      ? "Credentials on this computer are not encrypted: Linux has no secret store here" : null,
+    signIn: { needed: agent !== null && (signedIn === null || reloading), pending: signingIn !== null, failure: signInFailure },
+    deviceAction: deviceAction(agent),
   };
 }
 
@@ -581,6 +666,10 @@ function wire(window: MainWindow, page: string): void {
     } finally {
       connecting = false;
     }
+  });
+  handle("shell:sign-in", () => {
+    const agent = agents.get();
+    if (agent) void signIn(agent);
   });
   handle("shell:go", (path) => {
     if (typeof path !== "string" || !webClientPath(path)) throw new Error("Not a page of the web client");
@@ -697,6 +786,8 @@ async function quit(): Promise<void> {
       waiting = null;
     }
   }
+  // A sign-in under way closes its port in the browser's face.
+  signingIn?.abort();
   // The device, then the VM, which stops even when the device's stop fails. A stop that
   // fails still quits: the next launch answers what it cut off.
   try {
@@ -732,6 +823,7 @@ if (!app.requestSingleInstanceLock()) {
   });
   void app.whenReady().then(() => {
     credentials = new CredentialStore(join(root, "credentials.json"), safeStorage, report);
+    sessionStore = new SessionStore(join(root, "session.json"), safeStorage, report);
     environment = appEnvironment();
     // Before the window: its first frame is in the chosen theme.
     theme = new Theme(nativeTheme, appearance, (dark) => {
@@ -745,9 +837,17 @@ if (!app.requestSingleInstanceLock()) {
     main.window.on("focus", () => void refreshProjects());
     const agent = agents.get();
     if (!agent) return;
-    open(main, agent);
+    const remembered = sessionStore.get();
+    if (remembered?.origin === agent.origin && remembered.agentId === agent.agentId) startSession(remembered);
+    // Gated before the web client is attached: with nobody signed in, it never shows.
+    changed();
+    // A window no sign-in of the app's owns has nobody signed in: whatever an older one left there goes.
+    const shown = main;
+    void (signedIn ? Promise.resolve() : clearWindow(agent)).catch(report).then(() => open(shown, agent));
     kept = credentials.list().find((stored) => stored.origin === agent.origin && stored.agentId === agent.agentId) ?? null;
     if (kept) void startStack(agent, kept).catch(report);
+    // An earlier try to add this computer did not end in a device: try again, once.
+    void registerComputer(agent);
   }).catch((error: unknown) => {
     // A start that fails is said, and ends the app: one left with no window would keep the
     // single-instance lock, and every later launch would hand it nothing.

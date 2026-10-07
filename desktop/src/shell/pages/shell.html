@@ -23,6 +23,17 @@
         <p class="error" id="error" role="alert"></p>
       </div>
     </section>
+    <section class="first-run" id="sign-in" hidden>
+      <div class="top"></div>
+      <div class="first-run-card">
+        <span class="logo" data-icon="bot"></span>
+        <h1 id="sign-in-title"></h1>
+        <p class="desc">Surogate opens your browser to sign you in to your agent there. Come back here once you have.</p>
+        <button class="btn primary" id="sign-in-button" type="button">Continue in your browser</button>
+        <p class="desc" id="sign-in-waiting" hidden>Finish signing in in your browser, then come back here.</p>
+        <p class="error" id="sign-in-error" role="alert"></p>
+      </div>
+    </section>
     <nav class="sidebar" id="sidebar" aria-label="Projects">
       <div class="top">
         <button class="icon" id="menu" type="button" title="Menu" data-icon="menu"></button>
@@ -46,6 +57,7 @@
       <div class="projects" id="projects"></div>
       <p class="warn" id="failure" role="alert" hidden></p>
       <p class="warn" id="notice" hidden></p>
+      <p class="warn" id="device-action" hidden><span id="device-action-text"></span> <button class="link" id="device-action-button" type="button"></button></p>
       <div class="user">
         <button class="user-row" id="user" type="button" aria-haspopup="menu" aria-expanded="false">
           <span class="avatar" id="avatar"></span><span class="who" id="user-name"></span><span data-icon="chevron-up"></span>

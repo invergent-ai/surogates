@@ -5,7 +5,7 @@
 // its shape. What the page sends is copied field by field. No call answers an approval.
 
 import type {
-  DesktopAccount, DesktopAppearance, DesktopDevice, DesktopDeviceState, DesktopPreparedFolder,
+  DesktopAccount, DesktopAppearance, DesktopDeviceState, DesktopPreparedFolder,
 } from "../../../web/src/lib/desktop-bridge-contract.js";
 import { sameOrigin } from "./window-policy.js";
 
@@ -17,7 +17,7 @@ export interface SenderFrame {
 
 export interface BridgeCalls {
   getDevice(): DesktopDeviceState;
-  registerDevice(token: string): Promise<DesktopDevice>;
+  webSignIn(): Promise<{ code: string } | null>;
   prepareFolder(choice: "last" | "pick", window: string): Promise<DesktopPreparedFolder | null>;
   bindSession(sessionId: string, token: string, window: string): Promise<void>;
   getAppearance(): DesktopAppearance;
@@ -28,8 +28,6 @@ export interface BridgeCalls {
 
 export type Handler = (frame: SenderFrame | null, window: string, ...args: unknown[]) => Promise<unknown>;
 
-// surogates/devices/store.py issues surg_dev_ plus token_urlsafe(33); it goes in a header, so nothing else passes.
-const DEVICE_TOKEN = /^surg_dev_[A-Za-z0-9_-]{20,200}$/;
 // The binder's confirmation token: 32 random bytes, base64url.
 const PREPARED = /^[A-Za-z0-9_-]{43}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -51,10 +49,7 @@ export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<strin
   };
   return {
     getDevice: checked(() => calls.getDevice()),
-    registerDevice: checked((_window, token) => {
-      if (typeof token !== "string" || !DEVICE_TOKEN.test(token)) throw new Error("Not a device token");
-      return calls.registerDevice(token);
-    }),
+    webSignIn: checked(() => calls.webSignIn()),
     prepareFolder: checked((window, choice) => {
       if (choice !== "last" && choice !== "pick") throw new Error("Not a folder choice");
       return calls.prepareFolder(choice, window);

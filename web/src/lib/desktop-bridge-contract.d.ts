@@ -10,8 +10,7 @@ export interface DesktopDevice {
 }
 
 export interface DesktopDeviceState {
-  device: DesktopDevice | null; // null until this computer is registered with the agent
-  computerName: string; // the name to register it under
+  device: DesktopDevice | null; // null until the app has added this computer to the agent
   localFolders: boolean; // the agent can bind a chat to a folder of this computer
 }
 
@@ -40,8 +39,10 @@ export interface DesktopAccount {
 export interface DesktopBridge {
   readonly version: 1;
   getDevice(): Promise<DesktopDeviceState>;
-  // Only for the signed-in account: the token must be theirs, of this agent and organisation.
-  registerDevice(token: string): Promise<DesktopDevice>;
+  // The app signs in itself, in the system browser: this is a one-time code for the page's own
+  // session, which the page exchanges at POST /api/v1/auth/oauth/web-session. Null while nobody
+  // is signed in to the app.
+  webSignIn(): Promise<{ code: string } | null>;
   prepareFolder(choice: "last" | "pick"): Promise<DesktopPreparedFolder | null>;
   bindSession(sessionId: string, token: string): Promise<void>;
   getAppearance(): Promise<DesktopAppearance>;

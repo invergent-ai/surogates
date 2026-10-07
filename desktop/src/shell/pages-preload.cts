@@ -14,6 +14,7 @@ if (location.protocol === "file:") {
   contextBridge.exposeInMainWorld("surogateShell", {
     state: () => ipcRenderer.invoke("shell:state"),
     connect: (address: string) => ipcRenderer.invoke("shell:connect", address),
+    signIn: () => ipcRenderer.invoke("shell:sign-in"),
     go: (path: string) => ipcRenderer.invoke("shell:go", path),
     projects: () => ipcRenderer.invoke("shell:projects"),
     project: (id: string) => ipcRenderer.invoke("shell:project", id),

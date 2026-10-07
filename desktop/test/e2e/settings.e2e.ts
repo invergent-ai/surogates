@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { connect, FakeAgent, register, webClient } from "./fake-agent.js";
+import { ACCOUNT, connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
 let home: string;
@@ -35,9 +35,10 @@ async function signedIn(): Promise<{ shell: ElectronApplication; page: Page; cli
   await stubNative(shell);
   const page = await shellPage(shell);
   await connect(page, origin);
+  await signedInAndAdded(shell, page, agent);
   const client = await webClient(shell, origin);
-  await register(client);
-  await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+  // The web client says who is signed in on it, as it does once its session is in.
+  await client.evaluate((account) => window.surogateDesktop!.setAccount(account), ACCOUNT);
   return { shell, page, client };
 }
 
@@ -105,13 +106,14 @@ describe("the user menu", () => {
     const { shell, page } = await signedIn();
     await page.click("#user");
     await page.click('[data-action="help"]');
-    await expect.poll(() => shell.evaluate(() => (globalThis as unknown as { opened: string[] }).opened)).toEqual(["https://docs.surogate.ai/work/"]);
+    // After the sign-in's own address, which the system browser opened first.
+    await expect.poll(() => shell.evaluate(() => (globalThis as unknown as { opened: string[] }).opened.slice(1))).toEqual(["https://docs.surogate.ai/work/"]);
     // Off surogate.ai there is no console; and a name that is no link, a prototype's included, opens nothing.
     for (const which of ["usage", "billing", "constructor", "__proto__"]) {
       await expect(page.evaluate((name) => (window as unknown as { surogateShell: { link(which: string): Promise<void> } })
         .surogateShell.link(name), which)).rejects.toThrow("No such link");
     }
-    expect(await shell.evaluate(() => (globalThis as unknown as { opened: unknown[] }).opened.length)).toBe(1);
+    expect(await shell.evaluate(() => (globalThis as unknown as { opened: unknown[] }).opened.length)).toBe(2);
   });
 
   it("forgets the account once the user signs out in the web client", async () => {
