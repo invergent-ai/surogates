@@ -214,8 +214,11 @@ async def test_only_a_session_on_the_computer_is_told_what_git_and_shared_mappin
         f"{TERMINAL_TOOL_DESCRIPTION}{DEVICE_GIT_NOTE}\n{DEVICE_MAPPING_NOTE}\n"
     )
     assert "git init" in DEVICE_GIT_NOTE
-    # The guest serves a folder uncached and refuses a shared mapping of its files, as SQLite's WAL makes.
-    assert "WAL" in DEVICE_MAPPING_NOTE and "rollback journal" in DEVICE_MAPPING_NOTE
+    # The guest serves a folder uncached and refuses a shared mapping of its files, as SQLite's WAL makes,
+    # and no lock crosses the share: a rollback journal is safe only while the user's computer leaves it alone.
+    assert "WAL" in DEVICE_MAPPING_NOTE and "in your home folder" in DEVICE_MAPPING_NOTE
+    assert "rollback journal only while nothing on the user's computer has it open" in DEVICE_MAPPING_NOTE
+    assert "including one a failed attempt switched, cannot be opened there" in DEVICE_MAPPING_NOTE
     for cloud in ({}, None, {"execution": {"kind": "cloud"}}):
         assert terminal(describe_for_device(schemas, cloud)) == TERMINAL_TOOL_DESCRIPTION
     # The registry's schema, which every session shares, keeps the cloud's text.
