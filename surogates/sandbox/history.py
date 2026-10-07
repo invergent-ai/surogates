@@ -208,19 +208,18 @@ class History:
         index.unlink(missing_ok=True)
         env = {"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project), "GIT_INDEX_FILE": str(index)}
         self._git(["read-tree", main], env=env, cwd=self.project)
+        written = {c["path"] for c in applied if c["after"] is not None}
         modes = {}
-        written = [c["path"] for c in applied if c["after"] is not None]
-        if written:
-            for entry in self._main("ls-tree", "-z", turn, "--", *written).split("\0"):
-                if entry:
-                    meta, path = entry.split("\t", 1)
-                    modes[path] = meta.split(" ")[0]
-        for c in applied:
-            if c["after"] is None:
-                self._git(["update-index", "--force-remove", "--", c["path"]], env=env, cwd=self.project)
-            else:
-                cacheinfo = f"{modes[c['path']]},{c['after']},{c['path']}"
-                self._git(["update-index", "--add", "--cacheinfo", cacheinfo], env=env, cwd=self.project)
+        for entry in self._main("ls-tree", "-r", "-z", turn).split("\0"):
+            meta, _, path = entry.partition("\t")
+            if path in written:
+                modes[path] = meta.split(" ")[0]
+        # On stdin, not the command line: a landing may hold any number of files.
+        entries = "".join(
+            f"0 {_ZERO}\t{c['path']}\0" if c["after"] is None else f"{modes[c['path']]} {c['after']}\t{c['path']}\0"
+            for c in applied
+        )
+        self._git(["update-index", "-z", "--index-info"], env=env, cwd=self.project, input=entries)
         tree = self._git(["write-tree"], env=env, cwd=self.project)
         index.unlink()
         landing = self._main(
@@ -347,11 +346,11 @@ class History:
         """Git in the copy, on the thread's branch."""
         return self._git(list(args), env={"GIT_DIR": str(self._admin), "GIT_WORK_TREE": str(self.copy)}, cwd=self.copy)
 
-    def _git(self, args: list[str], *, env: dict[str, str], cwd: Path) -> str:
+    def _git(self, args: list[str], *, env: dict[str, str], cwd: Path, input: str | None = None) -> str:
         try:
             result = subprocess.run(
                 ["git", *args], capture_output=True, text=True, env=_environ(env), cwd=cwd,
-                timeout=_GIT_TIMEOUT,
+                input=input, timeout=_GIT_TIMEOUT,
             )
         except subprocess.TimeoutExpired as exc:
             # The git it killed held the index's lock, and no later git could run.

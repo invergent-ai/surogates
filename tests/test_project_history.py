@@ -451,3 +451,21 @@ def test_a_git_killed_by_its_timeout_leaves_the_copy_usable(tmp_path, project, m
             history.snapshot("before terminal")
     git(history, "config", "--unset", "core.fsmonitor")
     assert history.snapshot("before write_file") != git(history, "rev-parse", "refs/heads/main")
+
+
+def test_a_landing_of_sixteen_thousand_files_is_recorded(tmp_path, project):
+    history = opened(tmp_path, project)
+    folder = history.copy / ("a folder with a long name, " * 4)
+    folder.mkdir()
+    for n in range(16_000):
+        (folder / f"{'a file with a long name, ' * 4}{n}.md").write_text(str(n))
+    turn = history.snapshot("the turn")
+    applied = [
+        {"path": path, "before": None, "after": meta.split(" ")[2]}
+        for meta, path in (e.split("\t", 1) for e in git(history, "ls-tree", "-r", "-z", turn).split("\0") if e)
+        if path.startswith("a folder")
+    ]
+    applied.append({"path": "Report.docx", "before": git(history, "rev-parse", "main:Report.docx"), "after": None})
+    out = history.record(turn=turn, applied=applied, author=THREAD_A, trailers=trailers("landing"))
+    files = git(history, "ls-tree", "-r", "-z", "--name-only", out["commit"]).split("\0")
+    assert len([f for f in files if f.startswith("a folder")]) == 16_000 and "Report.docx" not in files
