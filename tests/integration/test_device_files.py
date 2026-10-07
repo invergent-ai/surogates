@@ -434,3 +434,25 @@ async def test_a_chat_still_in_use_is_never_retired(api, chat):
     with pytest.raises(ValueError, match="deleted"):
         await ops.retire(session_id=UUID(chat.id), device_id=chat.device_id)
     assert chat.laptop.bindings == {chat.id: FOLDER}
+
+
+async def test_the_platforms_folders_are_hidden_and_the_panel_changes_none_of_them_but_the_canvas(api, chat):
+    for name in ("_history", "_whiteboard", ".threads", "_artifacts"):
+        (chat.folder / name).mkdir()
+        (chat.folder / name / "x.json").write_text("{}")
+    (chat.folder / "notes.md").write_text("n")
+    tree = await api.client.get(url(chat, "tree"), headers=api.auth())
+    assert tree.status_code == 200, tree.text
+    assert [entry["name"] for entry in tree.json()["entries"]] == ["notes.md"]
+    ran = list(chat.laptop.ran)
+    for path in ("_history/x.json", "./_history/x.json", "_whiteboard/x.json", ".threads/x.json", "_artifacts/x.json"):
+        deleted = await api.client.delete(url(chat, "file"), params={"path": path}, headers=api.auth())
+        assert deleted.status_code == 403, (path, deleted.text)
+    uploaded = await upload(api, chat, "x.json", b"[]", path="_history", request_id="upload-000000000040")
+    assert uploaded.status_code == 403, uploaded.text
+    assert chat.laptop.ran == ran
+    for name in ("_history", "_whiteboard", ".threads", "_artifacts"):
+        assert (chat.folder / name / "x.json").read_text() == "{}"
+    # The page's own canvas is its to save.
+    canvas = await upload(api, chat, "canvas.json", b"{}", path="_whiteboard", request_id="upload-000000000041")
+    assert canvas.status_code == 201, canvas.text

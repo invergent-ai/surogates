@@ -157,7 +157,11 @@ _RESERVED_PREFIXES: tuple[str, ...] = ("_artifacts/",)
 #
 # A project thread's coding checkouts (``.threads/``) are hidden the same
 # way: a clone's thousands of files would count against the tree's limit.
-_HIDDEN_PREFIXES: tuple[str, ...] = ("_whiteboard/", ".threads/")
+# So is the files' history (``_history/``), which only the platform writes.
+_HIDDEN_PREFIXES: tuple[str, ...] = ("_whiteboard/", ".threads/", "_history/")
+
+# The one file under them the panel's own page writes: the whiteboard's canvas.
+_CANVAS = "_whiteboard/canvas.json"
 
 # The tree's one rule for what it leaves out, which the computer's walk shares
 # so that it never enters them: at any depth a folder of _SKIP_DIRS, and a
@@ -445,6 +449,19 @@ def _validate_path(path: str) -> None:
         )
 
 
+def _validate_change(path: str) -> None:
+    """Refuse a change under the platform's own folders, which the panel hides, but to the canvas.
+
+    Judged as the computer resolves it, so "./_history/x" is under _history too.
+    """
+    normal = PurePosixPath(path).as_posix()
+    if _is_hidden(normal) and normal != _CANVAS:
+        raise HTTPException(
+            status_code=403,
+            detail="This path is reserved for internal storage.",
+        )
+
+
 def _build_tree(keys: list[str]) -> list[FileEntry]:
     """Build a nested FileEntry tree from a flat list of S3 keys.
 
@@ -664,6 +681,7 @@ async def upload_file(
 
     key = f"{path}/{safe_name}" if path else safe_name
     _validate_path(key)
+    _validate_change(key)
 
     contents = await file.read(_MAX_UPLOAD_BYTES + 1)
     if len(contents) > _MAX_UPLOAD_BYTES:
@@ -740,6 +758,7 @@ async def delete_file(
     """Delete a file from the session's workspace; 202 as an upload is."""
     _require_service_account_api_route(request, tenant)
     _validate_path(path)
+    _validate_change(path)
     store = _get_session_store(request)
     session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant
