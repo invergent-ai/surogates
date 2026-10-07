@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
+import anyio
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints, model_validator
 from sse_starlette.sse import EventSourceResponse
@@ -299,9 +300,10 @@ async def stream_project(workstream_id: UUID, request: Request, ctx: AgentRuntim
                     "type": kind,
                 })}
         finally:
-            with contextlib.suppress(Exception):
-                await pubsub.unsubscribe()
-            with contextlib.suppress(Exception):
+            # Shielded: a client that leaves cancels the stream, and every
+            # await here again, which would keep the connection from its
+            # pool.  Closing it ends the subscription.
+            with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
                 await pubsub.aclose()
 
     return EventSourceResponse(changes())

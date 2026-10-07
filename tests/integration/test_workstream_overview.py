@@ -555,6 +555,39 @@ async def test_a_malformed_change_is_skipped_and_the_stream_stays_open(api, monk
     assert "not-a-session:x" in caplog.text
 
 
+async def test_a_client_that_leaves_the_stream_leaves_no_connection_behind(api):
+    project = await create(api)
+    redis = api.app.state.redis
+    in_use = len(redis.connection_pool._in_use_connections)
+    path = f"/v1/workstreams/{project['id']}/stream"
+    left, requested = asyncio.Event(), asyncio.Event()
+
+    # The test client reads a response whole, so the client is driven over ASGI.
+    async def receive():
+        if not requested.is_set():
+            requested.set()
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await left.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if b"event: ready" in message.get("body", b""):
+            # It leaves while the relay waits for a change.
+            asyncio.get_running_loop().call_later(0.2, left.set)
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET", "scheme": "http",
+        "path": path, "raw_path": path.encode(), "query_string": b"", "root_path": "",
+        "headers": [(key.lower().encode(), value.encode()) for key, value in api.auth().items()],
+        "client": ("127.0.0.1", 1), "server": ("test", 80),
+    }
+    async with asyncio.timeout(10):
+        await api.app(scope, receive, send)
+    assert left.is_set()
+    assert (await redis.pubsub_numsub(f"surogates:workstream:{project['id']}"))[0][1] == 0
+    assert len(redis.connection_pool._in_use_connections) == in_use
+
+
 async def test_a_chat_outside_projects_publishes_on_no_projects_stream(api, monkeypatch):
     publishing(api, monkeypatch)
     chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
