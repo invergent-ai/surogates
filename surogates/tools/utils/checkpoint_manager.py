@@ -83,11 +83,11 @@ _MAX_FILES = 50_000
 # Shadow repo helpers
 # ---------------------------------------------------------------------------
 
-def _shadow_repo_path(working_dir: str) -> Path:
-    """Deterministic shadow repo path: sha256(abs_path)[:16]."""
+def _shadow_repo_path(working_dir: str, base: Path | None = None) -> Path:
+    """Deterministic shadow repo path: sha256(abs_path)[:16], under *base*."""
     abs_path = str(Path(working_dir).resolve())
     dir_hash = hashlib.sha256(abs_path.encode()).hexdigest()[:16]
-    return CHECKPOINT_BASE / dir_hash
+    return (base or CHECKPOINT_BASE) / dir_hash
 
 
 def _git_env(shadow_repo: Path, working_dir: str) -> dict:
