@@ -7,7 +7,7 @@ import { FIXTURE_IDS, type ProjectFixtures, projectFixtures } from "../../../web
 import { ACCOUNT, connect, FakeAgent, signIn, webClient } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
-const { report: REPORT, budget: BUDGET, question: QUESTION } = FIXTURE_IDS;
+const { report: REPORT, budget: BUDGET, question: QUESTION, idle: IDLE } = FIXTURE_IDS;
 
 let home: string;
 let agent: FakeAgent;
@@ -133,6 +133,36 @@ describe("the Overview pane", () => {
     await expect.poll(() => page.textContent('[data-group="waiting"] .count')).toBe("2");
   });
 
+  it("reads only the row a change names, and the project's counts with it", async () => {
+    const { page, client } = await opened();
+    await client.evaluate(([project, thread]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      fake.reads.length = 0;
+      fake.lists = 0;
+      fake.data.threads[project!]!.find((found) => found.id === thread)!.statusLine = "Merged the regions";
+      fake.changed(project!, thread!);
+    }, [REPORT, IDLE]);
+    await expect.poll(() => page.textContent(`[data-thread="${IDLE}"] .status`)).toBe("Idle · Merged the regions");
+    const fake = await client.evaluate(() => {
+      const { reads, lists } = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      return { reads, lists };
+    });
+    expect(fake).toEqual({ reads: [IDLE], lists: 1 });
+  });
+
+  it("shows a thread it has not listed yet as one of the project's, as a card's View thread opens it", async () => {
+    const { page, client } = await opened();
+    const started = "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d";
+    await client.evaluate(([project, id]) => {
+      const threads = (window as unknown as { fakeProjects: Served }).fakeProjects.data.threads[project!]!;
+      threads.unshift({ ...threads[0]!, id: id!, title: "Summarise B", group: "working", reason: null, statusLine: null });
+      history.pushState(null, "", `/chat/${id}`);
+    }, [REPORT, started]);
+    await expect.poll(() => page.textContent("#title")).toBe("Summarise B");
+    expect(await page.textContent("#to-project")).toBe("Quarterly report");
+    expect(await page.isVisible(`[data-thread="${started}"]`)).toBe(true);
+  });
+
   it("folds away with the Overview button, and the close button, and comes back", async () => {
     const { page } = await opened();
     await page.click("#overview");
@@ -240,7 +270,8 @@ describe("the Overview pane, at its edges", () => {
       const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
       fake.data.projects.find((found) => found.id === project)!.masterSessionId = "not-a-chat";
       fake.data.threads[project!] = fake.data.threads[project!]!.filter((found) => found.id !== thread);
-      fake.changed(project!, thread!);
+      // Project-wide: the project itself is read again, with its new master.
+      fake.changed(project!, null);
     }, [REPORT, QUESTION]);
     await expect.poll(() => page.textContent('[data-group="waiting"] .count')).toBe("2");
     await pause(500);

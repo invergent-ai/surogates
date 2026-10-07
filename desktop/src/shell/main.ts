@@ -145,6 +145,8 @@ type View =
   | { kind: "projects" }
   | ({ kind: "project"; thread: { id: string; title: string } | null } & Opened);
 let view: View = { kind: "web" };
+// What the centre showed before the Projects page: Back and Forward leave the page for it.
+let beforeProjects: View = { kind: "web" };
 // The projects the page named, by their master session: the web client arriving at one shows that project.
 const masters = new Map<string, Opened>();
 // Each choice of what the centre shows takes a number: an answer that comes after a later choice applies nothing.
@@ -237,42 +239,46 @@ function openLink(which: unknown): void {
 }
 
 let refreshing = false;
-let again = false;
+// What the next refresh reads: null for everything, or the threads whose rows changed.
+let wanted = new Set<string | null>();
 
-// The projects the page serves, asked again: when it registers its source, when the open
-// project changes, and when the window comes to the front. One refresh runs at a time, and
-// asks once more for whatever changed meanwhile, so an older answer never lands last. The
-// open project, once the page lists it no more, is left.
-async function refreshProjects(): Promise<void> {
+// The projects the page serves, asked again: everything when it registers its source, when the
+// open project changes, when the window comes to the front and when the project's stream says
+// so; only a thread's row when the stream names the thread. One refresh runs at a time, and asks
+// once more for whatever changed meanwhile, so an older answer never lands last. The open
+// project, once the page lists it no more, is left.
+async function refreshProjects(threadId: string | null = null): Promise<void> {
   if (!served) return;
-  if (refreshing) {
-    again = true;
-    return;
-  }
+  wanted.add(threadId);
+  if (refreshing) return;
   refreshing = true;
   try {
-    do {
-      again = false;
+    while (wanted.size > 0 && served) {
+      const asked = wanted;
+      wanted = new Set();
       try {
+        // The list is one count per project: a thread's change moves the project's counts too.
         listed = await projects.list();
         const open = view.kind === "project" ? view : null;
         if (open && !listed.some((project) => project.id === open.id)) {
           overview = null;
           show({ kind: "web" });
+        } else if (asked.has(null) || overview?.project.id !== open?.id) {
+          await refreshOverview();
+        } else {
+          for (const id of asked) await refreshThread(id!);
         }
-        await refreshOverview();
       } catch (error) {
         report(error);
       }
       changed();
-    } while (again && served);
+    }
   } finally {
     refreshing = false;
   }
 }
 
-// The open project's threads, library and routines. A thread open in the centre that has left the
-// project takes the centre back to the project's conversation.
+// The open project's threads, library and routines.
 async function refreshOverview(): Promise<void> {
   const open = view.kind === "project" ? view : null;
   if (!open) return;
@@ -282,8 +288,29 @@ async function refreshOverview(): Promise<void> {
   remember(project);
   if (view !== open) return;
   overview = { project, threads, library, routines };
-  const path = `/chat/${project.masterSessionId}`;
-  if (open.thread && !threads.some((thread) => thread.id === open.thread?.id) && webClientPath(path)) {
+  leaveIfGone(open);
+}
+
+// One thread's row of the open project, read alone: it keeps its place, a new one comes first,
+// and one the project no longer has goes.
+async function refreshThread(threadId: string): Promise<void> {
+  const open = view.kind === "project" ? view : null;
+  if (!open) return;
+  const row = (await projects.threads(open.id, threadId)).find((found) => found.id === threadId);
+  if (view !== open || overview?.project.id !== open.id) return;
+  overview = { ...overview, threads: merged(overview.threads, threadId, row) };
+  leaveIfGone(open);
+}
+
+function merged(threads: ThreadRow[], threadId: string, row: ThreadRow | undefined): ThreadRow[] {
+  if (!row) return threads.filter((found) => found.id !== threadId);
+  return threads.some((found) => found.id === threadId) ? threads.map((found) => (found.id === threadId ? row : found)) : [row, ...threads];
+}
+
+// A thread open in the centre that has left the project takes the centre back to the project's conversation.
+function leaveIfGone(open: View & { kind: "project" }): void {
+  const path = overview ? `/chat/${overview.project.masterSessionId}` : "";
+  if (open.thread && overview && !overview.threads.some((thread) => thread.id === open.thread?.id) && webClientPath(path)) {
     view = { ...open, thread: null };
     main?.go(path);
   }
@@ -292,7 +319,7 @@ async function refreshOverview(): Promise<void> {
 // Follow the open project's changes, as Section 12's stream tells them, once more after the page registers again.
 function follow(): void {
   unfollow();
-  unfollow = view.kind === "project" ? projects.subscribe(view.id, () => void refreshProjects()) : () => {};
+  unfollow = view.kind === "project" ? projects.subscribe(view.id, (threadId) => void refreshProjects(threadId)) : () => {};
 }
 
 // The page withdrew its projects (signed out), or went: nothing is asked of it until it registers
@@ -308,6 +335,7 @@ function withdrawProjects(signedOut: boolean): void {
 // The account's own: its projects, the masters its page named, the open project and its pane.
 function forgetAccount(): void {
   listed = [];
+  beforeProjects = { kind: "web" };
   masters.clear();
   overview = null;
   if (view.kind === "project") show({ kind: "web" });
@@ -376,11 +404,28 @@ function navigated(url: string): void {
     if (view.thread && chat === view.thread.id) return;
     const thread = overview?.project.id === view.id ? overview.threads.find((found) => found.id === chat) : undefined;
     if (thread) return show({ ...view, thread: { id: thread.id, title: thread.title } });
+    // A thread the pane has not listed yet, as one just started from its card: its row decides.
+    if (chat !== undefined && !masters.has(chat)) return void openedThread(view, chat);
   }
   const known = chat === undefined ? undefined : masters.get(chat);
   if (!known && view.kind === "web") return;
   show(known ? { kind: "project", ...known, thread: null } : { kind: "web" });
   void refreshProjects();
+}
+
+// The web client went to *chat* while *open* was shown: a thread of the project, read alone, is
+// shown with the project as the way back; anything else is a page of the web client's own.
+async function openedThread(open: View & { kind: "project" }, chat: string): Promise<void> {
+  let row: ThreadRow | undefined;
+  try {
+    row = (await projects.threads(open.id, chat)).find((found) => found.id === chat);
+  } catch (error) {
+    report(error);
+  }
+  if (view !== open) return;
+  if (!row) return show({ kind: "web" });
+  if (overview?.project.id === open.id) overview = { ...overview, threads: merged(overview.threads, chat, row) };
+  show({ ...open, thread: { id: row.id, title: row.title } });
 }
 
 /**
@@ -1130,6 +1175,7 @@ function wire(window: MainWindow, page: string): void {
   });
   handle("shell:projects", () => {
     choose();
+    if (view.kind !== "projects") beforeProjects = view;
     show({ kind: "projects" });
     window.showWeb(false);
   });
@@ -1165,14 +1211,17 @@ function wire(window: MainWindow, page: string): void {
     window.go(path);
     changed();
   });
-  // Back and Forward move the web client; on the Projects page they leave it, for the client where it is.
+  // Back and Forward move the web client; on the Projects page they leave it, for what the centre
+  // showed before it, as the client still is there. A failure the choice cleared is drawn away.
   const move = (step: () => void) => {
     choose();
+    changed();
     if (view.kind !== "projects") return step();
-    show({ kind: "web" });
+    show(beforeProjects);
     window.showWeb(true);
     const url = window.webContents()?.getURL();
     if (url) navigated(url);
+    void refreshProjects();
   };
   handle("shell:back", () => move(() => window.back()));
   handle("shell:forward", () => move(() => window.forward()));

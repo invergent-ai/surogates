@@ -193,6 +193,17 @@ describe("the sidebar's projects", () => {
     expect(await page.isVisible("#failure")).toBe(false);
   });
 
+  it("draw away a failure that Back or Forward cleared", async () => {
+    agent.projects!.projects.find((project) => project.id === BUDGET)!.masterSessionId = "not-a-chat";
+    const { page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click(row(BUDGET));
+    await expect.poll(() => page.isVisible("#failure")).toBe(true);
+    // Nothing to go forward to: only the choice moves.
+    await page.click("#forward");
+    await expect.poll(() => page.isVisible("#failure")).toBe(false);
+  });
+
   it("say why a project did not open", async () => {
     agent.projects!.projects.find((project) => project.id === BUDGET)!.masterSessionId = "not-a-chat";
     const { page, client } = await signedIn();
@@ -240,6 +251,21 @@ describe("the Projects page", () => {
     expect(await page.isVisible("#title")).toBe(true);
     expect(await page.isVisible("#panel")).toBe(true);
     expect(await page.getAttribute("#open-projects", "aria-current")).toBe(null);
+  });
+
+  it("is left by Back for the thread that was open, with its project as the way back", async () => {
+    const { page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    const thread = FIXTURE_IDS.question;
+    await page.click(`[data-thread="${thread}"]`);
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${thread}`);
+    await page.click("#open-projects");
+    await expect.poll(() => page.isVisible("#projects-page")).toBe(true);
+    await page.click("#back");
+    await expect.poll(() => page.isVisible("#projects-page")).toBe(false);
+    expect(client.url()).toBe(`${origin}/chat/${thread}`);
+    await expect.poll(() => page.textContent("#title")).toBe("Check the revenue figures");
+    expect(await page.textContent("#to-project")).toBe("Quarterly report");
   });
 
   it("is left by Back, for the web client where it was", async () => {
