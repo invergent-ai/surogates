@@ -1693,6 +1693,9 @@ async def pause_session(
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
+    # It cancels the agent's work on a local-folder chat's computer: the chat's own user's to stop,
+    # its folder set up or not.
+    await require_device_access(request, session, tenant, bound=False)
 
     if session.status not in ("active", "processing", "paused"):
         raise HTTPException(

@@ -320,6 +320,28 @@ async def test_only_the_chats_own_user_reaches_it(api, session_factory):
     assert accepted.status_code == 202, accepted.text
 
 
+async def test_only_the_chats_own_user_pauses_it_or_answers_its_question(api, session_factory):
+    device = await register(api)
+    session_id = await local_chat(api, device["id"])
+    _member_id, member = await add_user(session_factory, api.org_id)
+    answer = {"responses": [{"question": "Which folder?", "answer": "notes"}]}
+    paused = await api.client.post(f"/v1/sessions/{session_id}/pause", headers=api.auth(member))
+    answered = await api.client.post(
+        f"/v1/sessions/{session_id}/ask_user_question/call_1/respond", json=answer, headers=api.auth(member),
+    )
+    # Pausing cancels the agent's work on the user's computer; an answer wakes it there.
+    assert (paused.status_code, answered.status_code) == (404, 404), (paused.text, answered.text)
+    status = (await api.app.state.session_store.get_session(UUID(session_id))).status
+    assert status != "paused"
+    # Its own user pauses it, its folder set up or not.
+    mine = await api.client.post(f"/v1/sessions/{session_id}/pause", headers=api.auth())
+    assert mine.status_code == 200, mine.text
+    # A cloud chat stays the org's, as before.
+    cloud = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    theirs = await api.client.post(f"/v1/sessions/{cloud.json()['id']}/pause", headers=api.auth(member))
+    assert theirs.status_code == 200, theirs.text
+
+
 async def test_a_sub_agents_chat_is_its_roots_users(api, session_factory):
     device = await register(api)
     store = api.app.state.session_store
