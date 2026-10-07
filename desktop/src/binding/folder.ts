@@ -25,6 +25,13 @@ export const BOOT_ID = (() => {
   }
 })();
 
+// Whether *found* is the folder confirmed as *expect*. A reboot can renumber the folder's
+// mount: after one, only the inode is compared. A boot id that could not be read counts as this boot.
+export function confirmedFolder(expect: { dev: number; ino: number; boot?: string }, found: { dev: number; ino: number }): boolean {
+  const rebooted = Boolean(expect.boot) && BOOT_ID !== "" && expect.boot !== BOOT_ID;
+  return found.ino === expect.ino && (rebooted || found.dev === expect.dev);
+}
+
 // What a chat's folder must keep clear of: the home folder, the app's own data
 // and files (which run outside the sandbox), and the credential folders.
 export interface FolderGuards {

@@ -9,7 +9,7 @@ import { rmSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import type { Duplex } from "node:stream";
 
-import { BOOT_ID } from "../binding/folder.js";
+import { confirmedFolder } from "../binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
 import type { ProcessHandle } from "../guest/processes.js";
 import type { FromAgent, HostUser, Share } from "../guest/protocol.js";
@@ -282,9 +282,7 @@ export class Guest {
     ]);
     if (looked === "late") throw new Error(`it did not answer within ${this.shareMs / 1000} s`);
     const [found, real] = looked;
-    // A reboot can renumber the folder's mount: after one, only the inode is compared, as the file host does.
-    const rebooted = Boolean(folder.boot) && BOOT_ID !== "" && folder.boot !== BOOT_ID;
-    if (!found?.isDirectory() || (!rebooted && found.dev !== folder.dev) || found.ino !== folder.ino || real !== folder.path) throw new FolderGone();
+    if (!found?.isDirectory() || !confirmedFolder(folder, found) || real !== folder.path) throw new FolderGone();
     const given = await this.request({ type: "uid", root }, Math.max(0, deadline - performance.now()));
     if (!given) {
       this.lose();

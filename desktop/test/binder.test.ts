@@ -623,6 +623,86 @@ describe("dropping a confirmed folder", () => {
   });
 });
 
+describe("what the page may know of a chat's folder", () => {
+  it("is the folder and the mode of a chat bound here, as its mode changes, and nothing for a chat with none", async () => {
+    const user = new User();
+    const chooser = binder(user);
+    expect(chooser.bindingOf(ROOT)).toBeNull();
+    const ready = await confirmed(user, chooser, notes, "ask");
+    expect(await chooser.admit(bindOp(ROOT, ready), never())).toEqual({ ok: null });
+    expect(chooser.bindingOf(ROOT)).toEqual({ folder: notes, mode: "ask" });
+    journal.bindings.setMode(ROOT, "free");
+    expect(chooser.bindingOf(ROOT)).toEqual({ folder: notes, mode: "free" });
+    expect(chooser.bindingOf(OTHER)).toBeNull();
+  });
+
+  it("tells whoever watches of each chat bound and each change of its mode, until they stop, whatever one of them throws", async () => {
+    const heard: string[] = [];
+    journal.bindings.watch(() => {
+      throw new Error("a listener that fails");
+    });
+    const stop = journal.bindings.watch((root) => heard.push(root));
+    const user = new User();
+    const chooser = binder(user);
+    const ready = await confirmed(user, chooser);
+    // Recorded all the same: a listener's failure is not the binding's.
+    expect(await chooser.admit(bindOp(ROOT, ready), never())).toEqual({ ok: null });
+    chooser.approvals.setMode(ROOT, "ask");
+    // A write that changes nothing tells nothing: a chat with no folder here, a mode it has already.
+    journal.bindings.setMode(OTHER, "ask");
+    journal.bindings.setMode(ROOT, "ask");
+    stop();
+    journal.bindings.setMode(ROOT, "free");
+    expect(heard).toEqual([ROOT, ROOT]);
+  });
+
+  it("shows a chat's folder only while it is still the one its user confirmed", async () => {
+    const user = new User();
+    const chooser = binder(user);
+    const ready = await confirmed(user, chooser);
+    await chooser.admit(bindOp(ROOT, ready), never());
+    expect(await chooser.folderToShow(ROOT)).toBe(notes);
+    await expect(chooser.folderToShow(OTHER)).rejects.toThrow("This chat has no folder on this computer");
+    // Another folder at its path, a link to another folder, a file: none is the chat's.
+    renameSync(notes, join(base, "moved"));
+    mkdirSync(notes);
+    const replaced = `The folder ${notes} was replaced after it was confirmed for this chat`;
+    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(replaced);
+    rmSync(notes, { recursive: true });
+    symlinkSync(join(base, "other"), notes);
+    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(replaced);
+    rmSync(notes);
+    writeFileSync(notes, "");
+    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(replaced);
+    rmSync(notes);
+    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`The folder ${notes} is not there`);
+  });
+
+  it("refuses a file that took the folder's inode, as a deleted folder's can be given again", async () => {
+    // On ext4 a file made where the folder was gets a new inode, which the inode compare already
+    // refuses: a look that answers a file with the binding's own inode pins the folder check.
+    const user = new User();
+    const { dev, ino } = statSync(notes);
+    const chooser = binder(user, { look: async () => ({ isDirectory: () => false, dev, ino }) });
+    await chooser.admit(bindOp(ROOT, await confirmed(user, chooser)), never());
+    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`The folder ${notes} was replaced after it was confirmed for this chat`);
+  });
+
+  it("gives up on a folder that does not answer, and looks again only once that look has ended", async () => {
+    const user = new User();
+    const { promise: answered, resolve: answer } = Promise.withResolvers<{ isDirectory(): boolean; dev: number; ino: number }>();
+    const chooser = binder(user, { look: () => answered, lookMs: 50 });
+    await chooser.admit(bindOp(ROOT, await confirmed(user, chooser)), never());
+    // A dead network or FUSE mount: its look holds a thread until it returns, so one look at a time.
+    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`The folder ${notes} did not answer within 0.05 s`);
+    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`Surogate is still looking for ${notes}`);
+    answer(statSync(notes));
+    await answered;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(await chooser.folderToShow(ROOT)).toBe(notes);
+  });
+});
+
 describe("binding over the link", () => {
   async function connect(executor: Executor, onError: (error: unknown) => void = () => {}): Promise<DeviceLink> {
     url ??= await server.start();
