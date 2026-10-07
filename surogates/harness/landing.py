@@ -62,6 +62,14 @@ class LandingStepError(RuntimeError):
     """A ``_history`` step answered with an error."""
 
 
+async def _call(sandbox_pool: Any, owner: str, action: str, **arguments: Any) -> dict:
+    """One ``_history`` action in *owner*'s pod; an error answer raises."""
+    result = json.loads(await sandbox_pool.execute(owner, "_history", json.dumps({**arguments, "action": action})))
+    if "error" in result or result.get("timed_out"):
+        raise LandingStepError(result.get("error") or "the pod's step timed out")
+    return result
+
+
 async def land_turn(
     *,
     store: Any,
@@ -135,12 +143,7 @@ async def _land(
         )
 
     async def run(it: SagaStep) -> dict:
-        action = it.tool_name.removeprefix("history.")
-        raw = await sandbox_pool.execute(owner, "_history", json.dumps({**it.arguments, "action": action}))
-        result = json.loads(raw)
-        if "error" in result or result.get("timed_out"):
-            raise LandingStepError(result.get("error") or "the pod's step timed out")
-        return result
+        return await _call(sandbox_pool, owner, it.tool_name.removeprefix("history."), **it.arguments)
 
     async def execute(it: SagaStep) -> dict:
         return await orchestrator.execute_step(saga.saga_id, it.step_id, lambda: run(it))
@@ -150,7 +153,11 @@ async def _land(
         "landed": [], "overlapped": [], "excluded": [], "repositories": [], "files": [],
     }
     changes: list[dict] = []
+    main: str | None = None
     try:
+        # The first look, outside the steps: it changes nothing, and under
+        # the lock no one else moves main until this landing is done.
+        main = (await _call(sandbox_pool, owner, "fetch"))["main"]
         turn = await execute(step("commit", author=thread, trailers=[*audit, ["Surogate-Kind", "turn"]]))
         changes = turn["changes"]
         outcome.update(overlapped=turn["overlapped"], excluded=turn["excluded"], repositories=turn["repositories"])
@@ -160,7 +167,7 @@ async def _land(
                 await execute(it)
             landed = [it.execute_result for it in applies]
             recorded = await execute(step(
-                "record", turn=turn["commit"], applied=landed, author=thread,
+                "record", turn=turn["commit"], applied=landed, author=thread, main=main,
                 trailers=[
                     *audit, ["Surogate-Kind", "landing"],
                     *(["Surogate-Not-Merged", o["path"]] for o in turn["overlapped"]),

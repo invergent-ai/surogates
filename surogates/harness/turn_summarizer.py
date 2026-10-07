@@ -380,12 +380,13 @@ def _duplicates_prior_caption(text: str, priors: list[str]) -> bool:
 #: ``_HIDDEN_PREFIXES``. These hold the storage behind a rendered
 #: surface, not files the user asked for: ``_artifacts/`` is where
 #: ArtifactStore keeps ``v1.json``, ``v2.json`` … for an artifact that is
-#: already shown as its own panel, and ``_whiteboard/`` holds the canvas.
+#: already shown as its own panel, and ``_whiteboard/`` holds the canvas,
+#: and ``_history/`` is a project's history.
 #:
 #: Listed explicitly rather than filtering every ``_``-prefixed path: a
 #: Jekyll site's ``_posts/`` and ``_config.yml`` are real deliverables,
 #: and hiding a user's work is a worse failure than showing one extra row.
-_INTERNAL_WORKSPACE_PREFIXES: tuple[str, ...] = ("_artifacts", "_whiteboard")
+_INTERNAL_WORKSPACE_PREFIXES: tuple[str, ...] = ("_artifacts", "_whiteboard", "_history")
 
 
 def is_platform_path(path: str) -> bool:

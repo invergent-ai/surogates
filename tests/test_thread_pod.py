@@ -76,13 +76,13 @@ async def test_a_thread_pods_tools_work_on_its_copy_and_its_checkpoints_restore_
 async def test_a_thread_pod_lands_through_its_history_steps(pods):
     pod = await a_pod(pods)
     (pods.copies["t1"] / "Report.docx").write_bytes(b"report v2")
-    turn = await call(pods, pod, "_history", action="commit", author=THREAD, trailers=[["Surogate-Kind", "turn"]])
+    turn = await call(pods, pod, "_history", action="commit", author=THREAD, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "turn"]])
     [change] = turn["changes"]
     applied = await call(pods, pod, "_history", action="apply", **change)
     assert (pods.project / "Report.docx").read_bytes() == b"report v2"
     record = await call(
         pods, pod, "_history", action="record",
-        turn=turn["commit"], applied=[applied], author=THREAD, trailers=[["Surogate-Kind", "landing"]],
+        turn=turn["commit"], applied=[applied], author=THREAD, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "landing"]], main=None,
     )
     assert len(record["commit"]) == 40
     # A conflict is an error result, so the landing saga fails the step.
@@ -189,7 +189,7 @@ def test_a_thread_pod_without_its_user_refuses_to_start(tmp_path, monkeypatch, c
 async def test_a_history_step_that_times_out_answers_an_error(pods, monkeypatch):
     pod = await a_pod(pods)
     (pods.copies["t1"] / "Report.docx").write_bytes(b"report v2")
-    turn = await call(pods, pod, "_history", action="commit", author=THREAD, trailers=[["Surogate-Kind", "turn"]])
+    turn = await call(pods, pod, "_history", action="commit", author=THREAD, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "turn"]])
 
     def timed_out(self, path, blob):
         raise subprocess.TimeoutExpired(["git", "cat-file", "blob", blob], 120)
@@ -252,7 +252,7 @@ async def test_a_pod_whose_real_files_came_unmounted_lands_nothing(tmp_path):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://pod") as client:
         mounts.write_text(f"geesefs {project} fuse.geesefs rw 0 0\n")
         assert (await client.get("/healthz")).status_code == 200
-        step = {"action": "commit", "author": THREAD, "trailers": [["Surogate-Kind", "turn"]]}
+        step = {"action": "commit", "author": THREAD, "trailers": [["Surogate-Saga", "saga:1"], ["Surogate-Kind", "turn"]]}
         # Mounted, the real files answer a landing's step: the copy, on the pod's disk, is never a mount.
         (copy / "new.md").write_text("new")
         mounted = (await client.post("/execute", json={"name": "_history", "args": step}, headers=AUTH)).json()

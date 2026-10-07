@@ -22,11 +22,11 @@ from surogates.tools.utils.checkpoint_manager import _shadow_repo_path
 class ThreadPods:
     """A sandbox backend whose pods are thread pods."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, project: Path | None = None) -> None:
         if executor_server._REGISTRY is None:
             executor_server.init_registry()
         self.root = root
-        self.project = root / "project"
+        self.project = project or root / "project"
         self.project.mkdir(parents=True, exist_ok=True)
         self.pods: dict[str, httpx.AsyncClient] = {}
         #: Each thread's latest copy, kept after its pod goes.
@@ -67,6 +67,10 @@ class ThreadPods:
         client = self.pods.pop(sandbox_id, None)
         if client is not None:
             await client.aclose()
+
+    def real_names(self) -> list[str]:
+        """The names in the project's folder, its history aside."""
+        return sorted(p.name for p in self.project.iterdir() if p.name != "_history")
 
     async def status(self, sandbox_id: str) -> SandboxStatus:
         return SandboxStatus.RUNNING if sandbox_id in self.pods else SandboxStatus.TERMINATED

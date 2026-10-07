@@ -117,7 +117,7 @@ async def test_stopping_a_thread_puts_its_copy_back_and_leaves_the_real_files(ap
     assert (copy / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
     assert not (copy / "threads" / "Draft A" / "outline.md").exists()
     # The real files never changed.
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
     *_, (kind, done) = await saga_events(api, thread.id)
     assert (kind, done["status"]) == (EventType.SAGA_COMPLETE.value, "completed")
@@ -236,7 +236,7 @@ async def test_an_apply_that_fails_on_the_third_of_five_files_puts_the_first_two
         _final_response("Wrote five notes."),
     ], pool=SandboxPool(pods), saga_settings=QUICK)
     # All or nothing: the real files are as they were before the landing.
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "c.md", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "c.md", "notes.txt"]
     assert (pods.project / "c.md").read_text() == "saved by you just now"
     [report] = await reports(api, master)
     assert report["landing"] == "compensated"
@@ -263,7 +263,7 @@ async def test_a_rolled_back_landing_takes_away_the_folders_it_made_and_leaves_t
         calling(("terminal", {"command": "mkdir -p Drafts/2026 Reports && echo a > Drafts/2026/a.md && echo q > Reports/q1.md && echo c > c.md"})),
         _final_response("Wrote three notes."),
     ], pool=SandboxPool(pods), saga_settings=QUICK)
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "Reports", "c.md", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "Reports", "c.md", "notes.txt"]
     assert not any((pods.project / "Reports").iterdir())
 
 
@@ -286,7 +286,7 @@ async def test_an_apply_whose_reply_is_lost_is_put_back(api, monkeypatch, pods):
         _final_response("Wrote three notes."),
     ], pool=LosesAReply(pods), saga_settings=QUICK)
     # The pod wrote b.md, but the landing never heard: it is put back with a.md.
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
     [report] = await reports(api, master)
     assert report["landing"] == "compensated"
 
@@ -334,7 +334,7 @@ async def test_a_put_back_a_cancel_reaches_still_finishes(api, monkeypatch, pods
     ], pool=pool, saga_settings=QUICK))
     with pytest.raises(asyncio.CancelledError):
         await turn
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "c.md", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "c.md", "notes.txt"]
     # Its pod goes: no later turn takes up the copy whose writes were put back.
     assert (pool.holds_copy(str(thread.id)), pods.pods) == (False, {})
 
@@ -349,7 +349,7 @@ async def test_a_cancelled_landing_puts_its_files_back(api, monkeypatch, pods):
     with pytest.raises(asyncio.CancelledError):
         await turn
     # a.md and b.md were applied, and c.md written before its reply was read: all go back.
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
     assert pods.pods == {}
 
 
@@ -400,7 +400,7 @@ async def test_an_excluded_file_a_turn_made_is_named_in_its_report(api, monkeypa
         _final_response("Kept a note."),
     ], pool=SandboxPool(pods))
     # The deletion waits: the turn wrote files history leaves out, and it may be a move into one.
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "kept.md", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "kept.md", "notes.txt"]
     [report] = await reports(api, master)
     assert report["excluded"] == ["node_modules/", "notes.tmp"]
     assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
@@ -417,7 +417,7 @@ async def test_a_landed_deletion_is_named_apart_in_its_report(api, monkeypatch, 
         calling(("terminal", {"command": "echo kept > kept.md && rm notes.txt"})),
         _final_response("Kept a note."),
     ], pool=SandboxPool(pods))
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "kept.md"]
+    assert pods.real_names() == ["Report.docx", "kept.md"]
     [report] = await reports(api, master)
     # A deletion is named apart: the master must not read it as a file to open.
     assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
@@ -432,7 +432,7 @@ async def test_a_folder_inside_a_git_repository_a_turn_wrote_into_is_named_as_no
         calling(("terminal", {"command": "git init -q clone && echo x > clone/x.md && echo kept > kept.md"})),
         _final_response("Kept a note."),
     ], pool=SandboxPool(pods))
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "kept.md", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "kept.md", "notes.txt"]
     [report] = await reports(api, master)
     assert (report["repositories"], "excluded" in report) == (["clone/"], False)
     assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
@@ -605,7 +605,7 @@ async def test_a_thread_whose_pod_was_remade_mid_turn_is_told_its_edits_are_gone
         "Check the files before making any of those changes again.]\n\n"
     ), second
     # What it wrote before is gone with the old copy; what it wrote after lands.
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "b.md", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "b.md", "notes.txt"]
 
 
 async def test_a_reports_excluded_files_are_capped_in_its_payload_and_counted(api, monkeypatch, pods):
@@ -807,7 +807,7 @@ async def test_a_cut_off_turns_slow_put_back_finishes_before_its_pod_goes(api, m
         while landing_module._PUTTING_BACK or landing_module._TEARDOWNS:
             await asyncio.sleep(0.1)
     # Every applied file was put back: no half-landed turn, and then the pod went.
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
     assert pods.pods == {}
 
 
