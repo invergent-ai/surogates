@@ -139,6 +139,39 @@ describe("a project's rows", () => {
     expect(rows()).toBe("");
   });
 
+  it("drops a thread's row read that lands after the project's stream ended", async () => {
+    const stream = new FakeStream();
+    let land: () => void = () => {};
+    const listProjectThreads = vi.fn(() => new Promise<AgentChatThreadRow[]>((resolve) => {
+      land = () => resolve([row()]);
+    }));
+    const rows = mountRows({ ...NO_BROWSER_ADAPTER, listProjectThreads, openProjectStream: () => stream } as unknown as AgentChatAdapter);
+    act(() => stream.emit("change", { thread_id: THREAD }));
+    act(() => stream.onerror?.());
+    await act(async () => land());
+    await settle();
+    expect(listProjectThreads).toHaveBeenCalledWith({ projectId: "project-1", threadId: THREAD });
+    expect(rows()).toBe("");
+  });
+
+  it("reads a thread's row with the adapter's own method, as a class instance's", async () => {
+    class ProjectAdapter {
+      readonly stream = new FakeStream();
+      readonly rows = [row()];
+      async listProjectThreads({ threadId }: { projectId: string; threadId?: string }) {
+        return this.rows.filter((found) => found.id === threadId);
+      }
+      openProjectStream() {
+        return this.stream;
+      }
+    }
+    const adapter = new ProjectAdapter();
+    const rows = mountRows(adapter as unknown as AgentChatAdapter);
+    act(() => adapter.stream.emit("change", { thread_id: THREAD }));
+    await settle();
+    expect(rows()).toBe(THREAD);
+  });
+
   it("calls the adapter's own methods, as a class instance's", async () => {
     class ProjectAdapter {
       readonly stream = new FakeStream();
