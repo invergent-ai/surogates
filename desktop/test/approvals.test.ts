@@ -385,6 +385,17 @@ describe("a command's connection to a destination off the package hosts", () => 
     expect(user.asked).toHaveLength(1);
   });
 
+  it("lets a host allowed for the session through at once, not behind the chat's open prompt", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowDomain(ROOT, "example.com");
+    const command = approvals.admit(op("run", RUN), never());
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    expect(await approvals.askNetwork(ROOT, { ...SITE, port: 8443 }, never())).toBe("allow");
+    expect(user.asked.map(({ kind }) => kind)).toEqual(["command"]);
+    user.answer("allow");
+    expect(await command).toBeNull();
+  });
+
   it("denies on Deny, on an answer a network prompt does not offer, and when the prompt fails, saying why", async () => {
     bind(ROOT, "ask");
     for (const answer of ["deny", "stop_asking", "maybe"] as ApprovalAnswer[]) {
@@ -411,19 +422,43 @@ describe("a command's connection to a destination off the package hosts", () => 
     expect(user.asked).toEqual([]);
   });
 
-  it("denies when the chat's binding cannot be read, saying why, and asks nothing", async () => {
+  it("denies when the chat's binding or its grants cannot be read, saying why, and asks nothing", async () => {
     bind(ROOT, "free");
     user.auto = "allow";
     const errors: unknown[] = [];
     const reading = new Approvals({
       bindings: journal.bindings, prompts: user, agent: "Research assistant", onError: (error) => errors.push(error),
     });
-    vi.spyOn(journal.bindings, "get").mockImplementation(() => {
+    const get = vi.spyOn(journal.bindings, "get").mockImplementation(() => {
       throw new Error("locked");
     });
     expect(await reading.askNetwork(ROOT, SITE, never())).toBe("deny");
-    expect(errors.map(String)).toEqual(["Error: locked"]);
+    get.mockRestore();
+    vi.spyOn(journal.bindings, "domains").mockImplementation(() => {
+      throw new Error("busy");
+    });
+    expect(await reading.askNetwork(ROOT, SITE, never())).toBe("deny");
+    expect(errors.map(String)).toEqual(["Error: locked", "Error: busy"]);
     expect(user.asked).toEqual([]);
+  });
+
+  it("denies, saying why, an ask whose chat's grants cannot be read once its turn in the chat's line comes", async () => {
+    bind(ROOT, "free");
+    const errors: unknown[] = [];
+    const reading = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant", onError: (error) => errors.push(error),
+    });
+    const first = reading.askNetwork(ROOT, SITE, never());
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    // Its grants read as it is asked, then not once the prompt before it is answered.
+    const second = reading.askNetwork(ROOT, { ...SITE, port: 80 }, never());
+    vi.spyOn(journal.bindings, "domains").mockImplementation(() => {
+      throw new Error("busy");
+    });
+    user.answer("allow");
+    expect(await Promise.allSettled([first, second])).toEqual([{ status: "fulfilled", value: "allow" }, { status: "fulfilled", value: "deny" }]);
+    expect(errors.map(String)).toEqual(["Error: busy"]);
+    expect(user.asked).toHaveLength(1);
   });
 
   it("waits its turn in the chat's line, and is dismissed when its host stops", async () => {

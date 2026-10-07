@@ -43,11 +43,17 @@ interface State {
   links: string[]; // the user menu's links the app knows for this agent
   unreachable: string | null;
   notice: string | null;
+  signIn: { needed: boolean; pending: boolean; failure: string | null }; // the app's own sign-in, in the system browser
+  deviceAction: { text: string; button: string; action: "sign-in" | "restore" } | null; // what the user can do about this computer
 }
 
 interface Shell {
   state(): Promise<State>;
   connect(address: string): Promise<string | null>; // why it was refused, or null
+  signIn(): Promise<void>;
+  signOut(): Promise<void>;
+  remove(): Promise<void>;
+  restore(): Promise<void>;
   go(path: string): Promise<void>;
   projects(): Promise<void>;
   project(id: string): Promise<void>;
@@ -226,8 +232,14 @@ async function render(): Promise<void> {
   state.projects.sort(byActivity);
   last = state;
   renderOverview(state);
-  document.body.classList.toggle("first", state.first);
+  // The first run, and then the sign-in, fill the window until someone is signed in to the agent.
+  document.body.classList.toggle("first", state.first || state.signIn.needed);
   byId("first-run").hidden = !state.first;
+  byId("sign-in").hidden = state.first || !state.signIn.needed;
+  byId("sign-in-title").textContent = state.agent ? `Sign in to ${state.agent.name}` : "";
+  byId("sign-in-button").textContent = state.signIn.pending ? "Open the browser again" : "Continue in your browser";
+  byId("sign-in-waiting").hidden = !state.signIn.pending;
+  byId("sign-in-error").textContent = state.signIn.failure ?? "";
   const open = state.view.kind === "project" ? state.view : null;
   // The open project and thread as last listed: a rename shows in the header too.
   const name = state.projects.find((project) => project.id === open?.id)?.name ?? open?.name;
@@ -251,7 +263,7 @@ async function render(): Promise<void> {
   renderCards();
   byId("user-name").textContent = state.account?.name ?? "Not signed in";
   byId("avatar").textContent = (state.account?.name ?? "").split(/\s+/).map((word) => word[0] ?? "").join("").slice(0, 2).toUpperCase();
-  byId("user-email").textContent = state.account?.email ?? "Sign in to the agent in the window";
+  byId("user-email").textContent = state.account?.email ?? "Signing in…";
   for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-link]")) {
     row.hidden = !state.links.includes(row.dataset.link ?? "");
   }
@@ -263,9 +275,13 @@ async function render(): Promise<void> {
   device.classList.toggle("ended", ENDED.includes(state.device?.status ?? ""));
   byId("notice").hidden = state.notice === null;
   byId("notice").textContent = state.notice ?? "";
+  byId("device-action").hidden = state.deviceAction === null;
+  byId("device-action-text").textContent = state.deviceAction?.text ?? "";
+  byId("device-action-button").textContent = state.deviceAction?.button ?? "";
+  byId("device-action-button").hidden = !state.deviceAction?.button;
   byId("unreachable").hidden = state.unreachable === null;
   byId("headline").textContent = state.agent ? `Couldn't connect to ${state.agent.name}` : "";
-  byId("why").textContent = state.unreachable ? `Check your network connection (${state.unreachable})` : "";
+  byId("why").textContent = state.unreachable ?? "";
 }
 
 // One connection at a time: the form waits for the answer.
@@ -280,6 +296,14 @@ byId<HTMLFormElement>("connect").addEventListener("submit", (event) => {
   }).finally(() => {
     form.disabled = false;
   });
+});
+// Continue opens the browser; pressed again, it opens it once more, for a new sign-in.
+byId("sign-in-button").addEventListener("click", () => void shell.signIn());
+// An agent nobody can sign in to any more is removed from here, as from the user menu.
+byId("sign-in-remove").addEventListener("click", () => void shell.remove());
+byId("device-action-button").addEventListener("click", () => {
+  if (last?.deviceAction?.action === "sign-in") void shell.signIn();
+  else if (last?.deviceAction?.action === "restore") void shell.restore();
 });
 byId("search").addEventListener("input", filterSidebar);
 byId("project-search").addEventListener("input", renderCards);
@@ -330,6 +354,8 @@ for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-actio
   row.addEventListener("click", () => {
     menu(false);
     if (action === "settings") void shell.settings();
+    else if (action === "logout") void shell.signOut();
+    else if (action === "remove") void shell.remove();
     else if (row.dataset.link) void shell.link(action);
   });
 }

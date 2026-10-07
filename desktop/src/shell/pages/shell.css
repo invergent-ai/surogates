@@ -393,6 +393,16 @@ body.main.first {
   font-size: 12.5px;
 }
 
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .user {
   display: flex;
   align-items: center;

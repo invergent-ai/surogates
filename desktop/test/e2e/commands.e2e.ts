@@ -13,7 +13,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { vmOptions } from "../../src/vm/client.js";
-import { connect, FakeAgent, register, webClient } from "./fake-agent.js";
+import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
 const IMAGE = process.env.SUROGATE_VM_IMAGE ?? fileURLToPath(new URL("../../../images/guest/out", import.meta.url));
@@ -67,9 +67,10 @@ async function launched(): Promise<Page> {
   const origin = await agent.start();
   app = await launch(home, { XDG_RUNTIME_DIR: runtime, SUROGATE_VM_IMAGE: IMAGE });
   await stubNative(app);
-  await connect(await shellPage(app), origin);
+  const page = await shellPage(app);
+  await connect(page, origin);
+  await signedInAndAdded(app, page, agent);
   const client = await webClient(app, origin);
-  await register(client);
   return client;
 }
 
@@ -130,6 +131,25 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     const config = readFileSync(join(first, ".git", "config"), "utf8");
     expect(await run("(echo '[core]\n\tfsmonitor = ./evil' >> .git/config) 2>&1 | sed 's/.*: //'")).toEqual(ran("Read-only file system\n"));
     expect(readFileSync(join(first, ".git", "config"), "utf8")).toBe(config);
+  });
+
+  it("installs a package from PyPI in the VM with no prompt, and tells the agent what the app refused: its own services, and a site its prompts deny", async () => {
+    const folder = join(home, "net");
+    mkdirSync(folder);
+    await bound(folder);
+    const run = (command: string) => operation("run", { command, workdir: null, timeout: 120 });
+    expect(await run("pip install --no-cache-dir --no-deps --reinstall --quiet cowsay==6.1 && python3 -c 'import cowsay; print(\"installed\")'")).toEqual({
+      ok: { output: "installed\n", returncode: 0, timed_out: false },
+    });
+    // Its approval prompts are not drawn yet: it denies each network prompt.
+    const status = (url: string, flags = "") => `curl -sS --max-time 20 ${flags} -o /dev/null -w '%{http_code} %{http_connect}\\n' ${url} 2>/dev/null`;
+    expect(await run(`${status("https://example.com/")}; ${status("http://127.0.0.1:9/", "--noproxy ''")}`)).toEqual({
+      ok: {
+        output: "000 403\n403 000\n\nThis computer does not let a chat reach its own network services (127.0.0.1:9)\nThis computer did not allow network access to example.com:443.",
+        returncode: 0,
+        timed_out: false,
+      },
+    });
   });
 
   it("runs a background server in the folder, which the agent's next command reaches, and stops it with the app", async () => {

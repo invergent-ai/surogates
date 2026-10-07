@@ -58,15 +58,24 @@ const openOutside = (url: string): void => {
 };
 
 // The web client stays on the agent's origin, and gets no other powers. The one popup it may
-// open, the Composio sign-in, gets no bridge, and opens nothing further.
-function confine(contents: WebContents, origin: string): void {
+// open, the Composio sign-in, gets no bridge, and opens nothing further. A redirect of the page
+// elsewhere, as a single sign-on gateway sends one, is refused and told *onRefused*.
+function confine(contents: WebContents, origin: string, onRefused: (url: string) => void): void {
   contents.on("will-navigate", (event) => {
-    if (sameOrigin(origin, event.url)) return;
+    if (sameOrigin(origin, event.url)) {
+      // The agent's sign-in pages open only in the system browser: the window never shows a password form.
+      // The web client routes paths whatever their case, so the refusal does too.
+      const path = new URL(event.url).pathname.toLowerCase();
+      if (path === "/oauth" || path.startsWith("/oauth/")) event.preventDefault();
+      return;
+    }
     event.preventDefault();
     openOutside(event.url);
   });
   contents.on("will-redirect", (event) => {
-    if (event.isMainFrame && !sameOrigin(origin, event.url)) event.preventDefault();
+    if (!event.isMainFrame || sameOrigin(origin, event.url)) return;
+    event.preventDefault();
+    onRefused(event.url);
   });
   contents.on("will-attach-webview", (event) => event.preventDefault());
   contents.setWindowOpenHandler(({ url, frameName }) => {
@@ -111,6 +120,7 @@ export class MainWindow {
   readonly window: BrowserWindow;
   private web: WebView | null = null;
   private webShown = true; // false while the centre shows a page of the shell's own, the Projects page
+  private gated = false; // nobody is signed in to the app: the web client stays hidden under the sign-in
   private hole: Bounds = { x: 0, y: 0, width: 0, height: 0 };
   // Settings, over everything: a transparent view whose page dims the window beneath it.
   private settingsView: WebContentsView | null = null;
@@ -195,8 +205,13 @@ export class MainWindow {
     this.window.contentView.addChildView(view, 0);
     const web: WebView = { agent, view, unreachable: null, failing: false, attempt: 0 };
     this.web = web;
+    this.showWeb(this.webShown);
     const contents = view.webContents;
-    confine(contents, agent.origin);
+    confine(contents, agent.origin, (url) => {
+      web.unreachable = `${agent.name} sent Surogate to ${new URL(url).host}, which it does not open in its window`;
+      this.showWeb(this.webShown);
+      this.options.onChange();
+    });
     keys(contents);
     contents.on("did-start-loading", () => {
       web.failing = false;
@@ -205,7 +220,7 @@ export class MainWindow {
       // -3 is a load that another load replaced.
       if (!isMainFrame || code === -3) return;
       web.failing = true;
-      web.unreachable = description || "The agent did not answer";
+      web.unreachable = `Check your network connection (${description || "the agent did not answer"})`;
       this.showWeb(this.webShown);
       this.options.onChange();
       this.tryAgain(web);
@@ -222,6 +237,16 @@ export class MainWindow {
     });
     this.load(web, "/");
     return contents;
+  }
+
+  /** Take the web client out of the window, as removing its agent does: the next agent attaches its own. */
+  detach(): void {
+    const web = this.web;
+    if (!web) return;
+    this.web = null;
+    clearTimeout(web.retry);
+    this.window.contentView.removeChildView(web.view);
+    web.view.webContents.close();
   }
 
   /** Open Settings over the window, with *preload*; *wire* registers its page's handlers. */
@@ -268,7 +293,14 @@ export class MainWindow {
   /** The web client in the centre, or the page beneath it: it shows only while it has something to show. */
   showWeb(shown: boolean): void {
     this.webShown = shown;
-    this.web?.view.setVisible(shown && this.web.unreachable === null);
+    this.web?.view.setVisible(shown && !this.gated && this.web.unreachable === null);
+  }
+
+  /** Hide the web client while nobody is signed in to the app; show it again once someone is. */
+  gate(closed: boolean): void {
+    if (this.gated === closed) return;
+    this.gated = closed;
+    this.showWeb(this.webShown);
   }
 
   // The centre's hole, as the page measures it.
@@ -277,8 +309,9 @@ export class MainWindow {
     this.web?.view.setBounds(hole);
   }
 
-  go(path: string): void {
-    if (this.web) this.load(this.web, path);
+  /** Load *path* of the web client: settled once it has loaded, or failed to. */
+  go(path: string): Promise<void> {
+    return this.web ? this.load(this.web, path) : Promise.resolve();
   }
 
   back(): void {
@@ -295,17 +328,21 @@ export class MainWindow {
     this.web?.view.webContents.reload();
   }
 
-  private load(web: WebView, path: string): void {
+  private load(web: WebView, path: string): Promise<void> {
     clearTimeout(web.retry);
-    void web.view.webContents.loadURL(`${web.agent.origin}${path}`).catch(() => {});
+    return web.view.webContents.loadURL(`${web.agent.origin}${path}`).catch(() => {});
   }
 
   // A failed load is tried again, with the link's backoff, once the agent answers its /auth/config.
   private tryAgain(web: WebView): void {
     clearTimeout(web.retry);
     web.retry = setTimeout(() => {
-      void net.fetch(`${web.agent.origin}/api/v1/auth/config`).then((response) => response.ok, () => false)
-        .then((up) => (up ? web.view.webContents.reload() : this.tryAgain(web)));
+      void net.fetch(`${web.agent.origin}/api/v1/auth/config`).then((response) => response.ok, () => false).then((up) => {
+        // Taken out of the window meanwhile, as removing its agent does: that agent is asked nothing more.
+        if (this.web !== web) return;
+        if (up) web.view.webContents.reload();
+        else this.tryAgain(web);
+      });
     }, reconnectDelayMs(web.attempt++));
   }
 }

@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { connectDevice, verifyDevice } from "../src/device.js";
+import { connectDevice, revokeDevice, verifyDevice } from "../src/device.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { DeviceLink } from "../src/link/client.js";
 import type { Welcome } from "../src/link/protocol.js";
@@ -94,5 +94,49 @@ describe("verifying a token", () => {
     server = new FakeLinkServer({ welcome: false });
     const url = await server.start();
     await expect(verifyDevice(url, "surg_dev_test", 300)).rejects.toThrow("The agent did not answer in time");
+  });
+});
+
+describe("revoking a device on a link of its own", () => {
+  it("connects, revokes once welcomed, and is done when the agent ends the token", async () => {
+    const url = await server.start();
+    const revoking = revokeDevice(url, "surg_dev_test");
+    await revoking.done;
+    await server.until(() => server.closes.length === 1);
+    expect(server.received.map((frame) => frame.type)).toEqual(["hello", "revoke"]);
+    expect(server.closes).toEqual([4403]);
+    await revoking.stop();
+  });
+
+  it("keeps trying while the agent cannot be reached, and is done once it is", async () => {
+    const url = await server.start();
+    const port = new URL(url).port;
+    await server.stop();
+    let done = false;
+    const revoking = revokeDevice(url, "surg_dev_test", () => 20);
+    void revoking.done.then(() => {
+      done = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(done).toBe(false);
+    server = new FakeLinkServer();
+    const { createServer } = await import("node:http");
+    const http = createServer();
+    await new Promise<void>((resolve) => http.listen(Number(port), "127.0.0.1", resolve));
+    await server.start({ server: http, path: new URL(url).pathname });
+    await revoking.done;
+    await server.until(() => server.closes.length === 1);
+    expect(server.closes).toEqual([4403]);
+    await revoking.stop();
+    http.close();
+  });
+
+  it("is done at once for a token the agent no longer knows", async () => {
+    const url = await server.start();
+    const revoking = revokeDevice(url, "surg_dev_gone");
+    await revoking.done;
+    await server.until(() => server.closes.length === 1);
+    expect(server.closes).toEqual([4401]);
+    await revoking.stop();
   });
 });

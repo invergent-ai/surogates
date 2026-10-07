@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  type Agent, AgentStore, canonicalOrigin, connectAgent, consoleFor, describeAgent, linkUrl, linksFor, partitionFor,
+  type Agent, AgentStore, canonicalOrigin, connectAgent, consoleFor, describeAgent, type Get, linkUrl, linksFor, partitionFor, readAgent,
 } from "../src/shell/agents.js";
 
 const CONFIG = { agent_id: "agent-1", desktop_sessions: true, multi_session: true, self_registration_enabled: false };
@@ -13,17 +13,17 @@ const AGENT: Agent = {
   origin: "https://agent.example.com", agentId: "agent-1", name: "agent.example.com", desktopSessions: true, multiSession: true,
 };
 
-// A server as fetch meets it: *url* is where the request ended, after any redirect.
-function answering(body: unknown, url = "https://agent.example.com/api/v1/auth/config", status = 200) {
+// A server as the shell's GET meets it: *hops* are the redirects it sends, each told to the
+// caller before it is followed, and a hop the caller refuses ends the request with that refusal.
+function answering(body: unknown, hops: string[] = [], status = 200) {
   const asked: string[] = [];
-  const fetch = (requested: string) => {
+  const get: Get = async (requested, hop) => {
     asked.push(requested);
+    for (const to of hops) hop(to);
     // A string is the body itself, as a page that is not JSON serves it.
-    const response = new Response(typeof body === "string" ? body : JSON.stringify(body), { status });
-    Object.defineProperty(response, "url", { value: url });
-    return Promise.resolve(response);
+    return new Response(typeof body === "string" ? body : JSON.stringify(body), { status });
   };
-  return { asked, fetch };
+  return { asked, get };
 }
 
 let dir: string;
@@ -45,7 +45,7 @@ describe("an agent's address", () => {
     ["https://agent.example.com:443", "https://agent.example.com"],
     ["https://agent.example.com:8443/", "https://agent.example.com:8443"],
     ["http://localhost:8000", "http://localhost:8000"],
-    ["http://surogates.k8s.localhost", "http://surogates.k8s.localhost"],
+    ["https://surogates.k8s.localhost", "https://surogates.k8s.localhost"],
     ["http://127.0.0.1:5173", "http://127.0.0.1:5173"],
     ["http://[::1]:8000", "http://[::1]:8000"],
   ])("%s is the origin %s", (input, origin) => {
@@ -56,6 +56,8 @@ describe("an agent's address", () => {
     ["not a url at all", "That is not a web address"],
     ["https://user:pass@agent.example.com", "An address with a user name or password in it is refused"],
     ["http://agent.example.com", "Use an https:// address: http:// is only for this computer's own servers"],
+    // The link's resolver may ask the network for a name under .localhost.
+    ["http://surogates.k8s.localhost", "Use an https:// address: http:// is only for this computer's own servers"],
     ["ftp://agent.example.com", "Use an https:// address: http:// is only for this computer's own servers"],
   ])("%s is refused", (input, message) => {
     expect(() => canonicalOrigin(input)).toThrow(message);
@@ -102,10 +104,10 @@ describe("connecting to the agent", () => {
   });
 
   it("asks the server who it is, confirms the new origin, and keeps it as the one agent", async () => {
-    const { asked, fetch } = answering(CONFIG);
+    const { asked, get } = answering(CONFIG);
     const confirmed: Array<[string, string]> = [];
     const agent = await connectAgent("agent.example.com", {
-      fetch, store, confirm: (found, typed) => {
+      get, store, confirm: (found, typed) => {
         confirmed.push([found.origin, typed]);
         return Promise.resolve(true);
       },
@@ -117,16 +119,16 @@ describe("connecting to the agent", () => {
   });
 
   it("keeps nothing when the user declines", async () => {
-    const { fetch } = answering(CONFIG);
-    expect(await connectAgent("agent.example.com", { fetch, store, confirm: () => Promise.resolve(false) })).toBeNull();
+    const { get } = answering(CONFIG);
+    expect(await connectAgent("agent.example.com", { get, store, confirm: () => Promise.resolve(false) })).toBeNull();
     expect(store.get()).toBeNull();
   });
 
   it("confirms the origin a redirect ended on, and keeps that one", async () => {
-    const { fetch } = answering(CONFIG, "https://agents.example.org/api/v1/auth/config");
+    const { get } = answering(CONFIG, ["https://agent.example.com/v2/auth/config", "https://agents.example.org/api/v1/auth/config"]);
     const confirmed: Array<[string, string]> = [];
     const agent = await connectAgent("agent.example.com", {
-      fetch, store, confirm: (found, typed) => {
+      get, store, confirm: (found, typed) => {
         confirmed.push([found.origin, typed]);
         return Promise.resolve(true);
       },
@@ -137,17 +139,22 @@ describe("connecting to the agent", () => {
   });
 
   it("reads an older server's missing desktop_sessions as no local folders, and a single conversation as such", async () => {
-    const { fetch } = answering({ agent_id: "agent-1", multi_session: false });
-    const agent = await connectAgent("agent.example.com", { fetch, store, confirm: () => Promise.resolve(true) });
+    const { get } = answering({ agent_id: "agent-1", multi_session: false });
+    const agent = await connectAgent("agent.example.com", { get, store, confirm: () => Promise.resolve(true) });
     expect(agent).toMatchObject({ desktopSessions: false, multiSession: false });
   });
 
   it.each([
-    ["a redirect off the agent's path", answering(CONFIG, "https://agent.example.com/login"),
+    ["a redirect off the agent's path", answering(CONFIG, ["https://agent.example.com/login"]),
       "agent.example.com sent Surogate to https://agent.example.com/login, which is not an agent"],
-    ["a redirect to plain http", answering(CONFIG, "http://agent.example.com/api/v1/auth/config"),
+    ["a redirect to plain http", answering(CONFIG, ["http://agent.example.com/api/v1/auth/config"]),
       "Use an https:// address: http:// is only for this computer's own servers"],
-    ["an error", answering({}, undefined, 404), "No Surogate agent answers at https://agent.example.com (HTTP 404)"],
+    // Back on https at the end, but an http hop on the way could have chosen where it ended.
+    ["a plain http hop on the way", answering(CONFIG, ["http://evil.example/x", "https://agents.example.org/api/v1/auth/config"]),
+      "Use an https:// address: http:// is only for this computer's own servers"],
+    ["too many redirects", answering(CONFIG, Array.from({ length: 6 }, (_, n) => `https://agent.example.com/hop/${n}`)),
+      "agent.example.com redirects Surogate too many times"],
+    ["an error", answering({}, [], 404), "No Surogate agent answers at https://agent.example.com (HTTP 404)"],
     ["no agent id", answering({ firebase: null }), "https://agent.example.com is not a Surogate agent"],
     ["no JSON", answering("<html>"), "https://agent.example.com is not a Surogate agent"],
   ])("refuses %s", async (_name, server, message) => {
@@ -158,8 +165,15 @@ describe("connecting to the agent", () => {
 
   it("says when the server cannot be reached", async () => {
     await expect(connectAgent("agent.example.com", {
-      fetch: () => Promise.reject(new TypeError("fetch failed")), store, confirm: () => Promise.resolve(true),
+      get: () => Promise.reject(new TypeError("fetch failed")), store, confirm: () => Promise.resolve(true),
     })).rejects.toThrow("Could not reach https://agent.example.com: fetch failed");
+  });
+
+  it("gives up on a server that never answers", async () => {
+    const silent: Get = (_url, _hop, signal) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason));
+    });
+    await expect(readAgent("https://agent.example.com", silent, 50)).rejects.toThrow("Could not reach https://agent.example.com: no answer within 0.05 s");
   });
 });
 

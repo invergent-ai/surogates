@@ -9,6 +9,7 @@ resource module, so they live here instead of being copied verbatim.
 from __future__ import annotations
 
 import logging
+import time
 
 from fastapi import HTTPException, Request, status
 
@@ -159,3 +160,23 @@ async def resolve_system_bundle(request):
             exc_info=True,
         )
         return None
+
+
+#: How recent a sign-in must be to add or restore a computer: a stolen
+#: session that only refreshes cannot give itself a device.
+RECENT_SIGN_IN_S = 10 * 60
+#: How far ahead of this server's clock a sign-in's time may be, for the clocks: no further.
+SIGN_IN_CLOCK_SKEW_S = 60
+
+
+def require_recent_sign_in(tenant: TenantContext) -> None:
+    """Raise 403 ``recent_sign_in_required`` unless the user signed in within RECENT_SIGN_IN_S."""
+    age = None if tenant.auth_time is None else time.time() - tenant.auth_time
+    if age is None or age > RECENT_SIGN_IN_S or age < -SIGN_IN_CLOCK_SKEW_S:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "recent_sign_in_required",
+                "message": "Sign in again: adding or restoring a computer needs a sign-in from the last 10 minutes.",
+            },
+        )

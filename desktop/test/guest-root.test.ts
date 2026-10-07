@@ -307,6 +307,123 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
   });
 });
 
+describe("a root's socket to the host proxy", { timeout: 20_000 }, () => {
+  it("is made with the root's uid before its namespaces, and closed with everything of the root: torn down, lost, or never started", async () => {
+    const said: string[] = [];
+    const own: ChildProcess[] = [];
+    let fail = false;
+    const withTunnels = new Roots({
+      start: () => {
+        said.push("start");
+        if (fail) throw new Error("no runner");
+        const child = bare();
+        own.push(child);
+        return child;
+      },
+      uid: () => 10_001,
+      kill: () => void own.at(-1)?.kill("SIGKILL"),
+      tunnels: async (root, uid) => {
+        said.push(`listen ${root} ${uid}`);
+        return () => void said.push(`close ${root}`);
+      },
+    });
+    await withTunnels.setup("root-2", base, R1, user);
+    await withTunnels.teardown("root-2", R1);
+    fail = true;
+    await expect(withTunnels.setup("root-3", base, R1, user)).rejects.toThrow("no runner");
+    fail = false;
+    await withTunnels.setup("root-4", base, R1, user);
+    // Its runner goes by itself: the root is lost.
+    own.at(-1)?.kill("SIGKILL");
+    await until(() => said.includes("close root-4"));
+    expect(said).toEqual([
+      "listen root-2 10001", "start", "close root-2",
+      "listen root-3 10001", "start", "close root-3",
+      "listen root-4 10001", "start", "close root-4",
+    ]);
+  });
+
+  // Roots whose kill waits for the test, which kills the root's latest runner, as a cgroup's kill
+  // ends whatever runs in the root's cgroup then; and the runners they start, exiting before
+  // they are ready while *exiting* says so.
+  function ending() {
+    const said: string[] = [];
+    const own: ChildProcess[] = [];
+    const state = { exiting: false, killed: () => {} };
+    const ends = new Roots({
+      start: () => {
+        said.push("start");
+        const child = state.exiting ? spawn(process.execPath, ["-e", "process.exit(1)"], { stdio: ["pipe", "pipe", "pipe"] }) : bare();
+        own.push(child);
+        return child;
+      },
+      uid: () => 10_001,
+      kill: () => new Promise<void>((resolve) => {
+        said.push("kill");
+        state.killed = () => {
+          own.at(-1)?.kill("SIGKILL");
+          resolve();
+        };
+      }),
+      // It takes a while, as a share's unmount can.
+      unmount: () => new Promise<void>((resolve) => setTimeout(() => resolve(void said.push("unmount")), 50)),
+      tunnels: async (root) => {
+        said.push(`listen ${root}`);
+        return () => void said.push(`close ${root}`);
+      },
+    });
+    return { ends, said, state };
+  }
+  const which = (target: Roots, root: string) => target.perform(root, "which", { name: "sh" }, new AbortController().signal, "op-21");
+
+  it("sets a root up again only once its teardown under way has ended, its socket, its processes and its mount, and refuses a second setup meanwhile", async () => {
+    const { ends, said, state } = ending();
+    await ends.setup("root-5", base, R1, user);
+    const tearing = ends.teardown("root-5", R1);
+    await until(() => said.includes("kill"));
+    const setting = ends.setup("root-5", base, R1, user);
+    await expect(ends.setup("root-5", base, R1, user)).rejects.toThrow("This chat's sandbox is already set up");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(said).toEqual(["listen root-5", "start", "kill"]);
+    state.killed();
+    await tearing;
+    await setting;
+    expect(said).toEqual(["listen root-5", "start", "kill", "close root-5", "unmount", "listen root-5", "start"]);
+    expect(await which(ends, "root-5")).toEqual({ ok: true });
+  });
+
+  it("sets a root up again only once the end of a runner that went before it was ready has ended", async () => {
+    const { ends, said, state } = ending();
+    state.exiting = true;
+    await expect(ends.setup("root-6", base, R1, user)).rejects.toThrow("the session runner exited");
+    state.exiting = false;
+    const setting = ends.setup("root-6", base, R1, user);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(said).toEqual(["listen root-6", "start", "kill", "close root-6"]);
+    state.killed();
+    await setting;
+    expect(said).toEqual(["listen root-6", "start", "kill", "close root-6", "close root-6", "listen root-6", "start"]);
+    expect(await which(ends, "root-6")).toEqual({ ok: true });
+  });
+
+  it("tears down a setup that waits for a teardown under way, once it is set up", async () => {
+    const { ends, said, state } = ending();
+    await ends.setup("root-7", base, R1, user);
+    const tearing = ends.teardown("root-7", R1);
+    await until(() => said.includes("kill"));
+    const setting = ends.setup("root-7", base, R1, user);
+    const again = ends.teardown("root-7", R1);
+    state.killed();
+    await tearing;
+    await setting;
+    await until(() => said.filter((line) => line === "kill").length === 2);
+    state.killed();
+    await again;
+    expect(said).toEqual(["listen root-7", "start", "kill", "close root-7", "unmount", "listen root-7", "start", "kill", "close root-7", "unmount"]);
+    expect(await which(ends, "root-7")).toEqual(NOT_SET_UP);
+  });
+});
+
 describe("a root's background processes", { timeout: 20_000 }, () => {
   type Answer = { ok?: any; error?: { type: string; message: string } };
   const signal = () => new AbortController().signal;
@@ -546,7 +663,7 @@ describe("a root's inputs", () => {
 });
 
 describe("a root's environment", () => {
-  it("is the cloud's layout under the root's own HOME, with the user's names", () => {
+  it("is the cloud's layout under the root's own HOME, with the user's names and the runner's proxies", () => {
     const layout = [
       "PATH=/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:/usr/bin:/bin",
       "PYTHONUSERBASE=/home/sandbox/.local",
@@ -557,6 +674,14 @@ describe("a root's environment", () => {
       PATH: "/home/ana/.npm-global/bin:/home/ana/.local/bin:/opt/venv/bin:/usr/bin:/bin",
       PYTHONUSERBASE: "/home/ana/.local",
       PIP_USER: "1",
+      HTTP_PROXY: "http://127.0.0.1:3128",
+      HTTPS_PROXY: "http://127.0.0.1:3128",
+      ALL_PROXY: "http://127.0.0.1:3128",
+      http_proxy: "http://127.0.0.1:3128",
+      https_proxy: "http://127.0.0.1:3128",
+      all_proxy: "http://127.0.0.1:3128",
+      NO_PROXY: "localhost,127.0.0.1,::1,0.0.0.0,surogate",
+      no_proxy: "localhost,127.0.0.1,::1,0.0.0.0,surogate",
       HOME: "/home/ana",
       USER: "ana",
       LOGNAME: "ana",
@@ -575,6 +700,12 @@ describe("a root's environment", () => {
       GIT_CONFIG_VALUE_0: "*",
       GIT_CONFIG_KEY_1: "core.checkStat",
       GIT_CONFIG_VALUE_1: "minimal",
+    });
+  });
+
+  it("keeps the runner's proxies whatever the layout says", () => {
+    expect(rootEnvironment("HTTPS_PROXY=http://elsewhere:8080\nNO_PROXY=*\n", { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" })).toMatchObject({
+      HTTPS_PROXY: "http://127.0.0.1:3128", NO_PROXY: "localhost,127.0.0.1,::1,0.0.0.0,surogate",
     });
   });
 

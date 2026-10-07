@@ -8,8 +8,8 @@ const SESSION = "0b6f3c1e-8a2d-4c5e-9f10-1a2b3c4d5e6f";
 const ACCOUNT = { name: "Flavius", email: "f@example.com", userId: "u", orgId: "o" };
 function calls(): BridgeCalls & Record<string, ReturnType<typeof vi.fn>> {
   return {
-    getDevice: vi.fn(() => ({ device: null, computerName: "thinkpad", localFolders: true })),
-    registerDevice: vi.fn(() => Promise.resolve({ deviceId: "d", name: "thinkpad" })),
+    getDevice: vi.fn(() => ({ device: null, localFolders: true })),
+    webSignIn: vi.fn(() => Promise.resolve({ code: "web-code" })),
     prepareFolder: vi.fn(() => Promise.resolve(null)),
     bindSession: vi.fn(() => Promise.resolve()),
     getAppearance: vi.fn(() => ({ theme: "dark", textSize: "medium", transcriptWidth: "medium", motion: "system" })),
@@ -29,18 +29,15 @@ describe("the bridge", () => {
     const made = calls();
     const handlers = bridgeHandlers(ORIGIN, made);
     await expect(handlers.getDevice!(frame as SenderFrame | null, "7")).rejects.toThrow("Not the agent's web client");
-    await expect(handlers.registerDevice!(frame as SenderFrame | null, "7", "surg_dev_".padEnd(53, "a")))
-      .rejects.toThrow("Not the agent's web client");
+    await expect(handlers.webSignIn!(frame as SenderFrame | null, "7")).rejects.toThrow("Not the agent's web client");
     expect(made.getDevice).not.toHaveBeenCalled();
-    expect(made.registerDevice).not.toHaveBeenCalled();
+    expect(made.webSignIn).not.toHaveBeenCalled();
   });
 
   it("passes each well-formed call on, with the window it came from", async () => {
     const made = calls();
     const handlers = bridgeHandlers(ORIGIN, made);
-    const token = `surg_dev_${"a".repeat(44)}`;
-    expect(await handlers.registerDevice!(TOP, "7", token)).toEqual({ deviceId: "d", name: "thinkpad" });
-    expect(made.registerDevice).toHaveBeenCalledWith(token);
+    expect(await handlers.webSignIn!(TOP, "7")).toEqual({ code: "web-code" });
     await handlers.prepareFolder!(TOP, "7", "pick");
     expect(made.prepareFolder).toHaveBeenCalledWith("pick", "7");
     await handlers.bindSession!(TOP, "7", SESSION, "b".repeat(43));
@@ -49,8 +46,6 @@ describe("the bridge", () => {
   });
 
   it.each([
-    ["registerDevice", ["surg_sk_123"], "Not a device token"],
-    ["registerDevice", ["surg_dev_ab\r\nX-Evil: 1"], "Not a device token"],
     ["prepareFolder", ["new"], "Not a folder choice"],
     ["bindSession", ["not-a-session", "b".repeat(43)], "Not a chat"],
     ["bindSession", [SESSION, "short"], "Not a folder confirmation"],

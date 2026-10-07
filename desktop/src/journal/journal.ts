@@ -234,6 +234,20 @@ export class OperationJournal {
     return rows.map((row) => ({ id: row.id, digest: row.digest, outcome: JSON.parse(row.outcome) as Outcome }));
   }
 
+  /**
+   * The agent ended this device's token: it closed every operation the device held, so none is
+   * sent or run again. The transfers' chunks go, every operation not yet acknowledged is cancelled
+   * and its outcome dropped, and the bindings stay, for a restore.
+   */
+  retire(): void {
+    this.transaction(() => {
+      this.db.exec("DELETE FROM chunks");
+      this.db
+        .prepare(`UPDATE operations SET state = 'cancelled', outcome = NULL, updated_at = ? WHERE state IN ('received', 'started', 'finished')`)
+        .run(this.now());
+    });
+  }
+
   /** Drop the payload of outcomes acknowledged more than RETAIN_MS ago; the record stays. */
   prune(): number {
     const result = this.db

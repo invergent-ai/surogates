@@ -390,3 +390,35 @@ describe("the bindings", () => {
     journal.close();
   });
 });
+
+describe("a device the agent revoked", () => {
+  it("keeps nothing to send or run: its chunks go, what was unfinished is cancelled, and its bindings stay", () => {
+    const journal = new OperationJournal(path);
+    const outcome = { ok: { transfer: { size: 11, sha256: "f".repeat(64) } } };
+    for (const id of ["sent", "finished", "started", "received"]) journal.receive(operation(id));
+    for (const id of ["sent", "finished", "started"]) journal.start(id);
+    journal.finish("sent", { ok: "done" });
+    journal.acknowledge("sent");
+    journal.finish("finished", outcome, [Buffer.from("first")]);
+    journal.bindings.add({ root: "r1", nonce: "n", folder: "/home/me/Report", dev: 1, ino: 2, boot: "b", mode: "free", boundAt: 1 });
+    journal.retire();
+    expect(journal.unsent()).toEqual([]);
+    expect(journal.openIds()).toEqual([]);
+    expect(journal.chunk("finished", 0)).toBeNull();
+    for (const id of ["finished", "started", "received"]) expect(journal.receive(operation(id))).toEqual({ action: "ignore" });
+    expect(journal.receive(operation("sent"))).toEqual({ action: "reply", outcome: { ok: "done" } });
+    expect(journal.bindings.folders()).toEqual(["/home/me/Report"]);
+    journal.close();
+  });
+
+  it("names each bound folder once, the first bound first", () => {
+    const journal = new OperationJournal(path);
+    const bind = (root: string, folder: string, boundAt: number) =>
+      journal.bindings.add({ root, nonce: `n-${root}`, folder, dev: 1, ino: 2, boot: "b", mode: "free", boundAt });
+    bind("r1", "/home/me/Budget", 3);
+    bind("r2", "/home/me/Report", 1);
+    bind("r3", "/home/me/Budget", 2);
+    expect(journal.bindings.folders()).toEqual(["/home/me/Report", "/home/me/Budget"]);
+    journal.close();
+  });
+});

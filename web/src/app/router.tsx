@@ -5,6 +5,7 @@ import { createRouter } from "@tanstack/react-router";
 import { Route as rootRoute } from "./routes/__root";
 import { Route as indexRoute } from "./routes/index";
 import { Route as loginRoute } from "./routes/login";
+import { Route as oauthAuthorizeRoute } from "./routes/oauth-authorize";
 import { chatRoute, chatSessionRoute } from "./routes/chat";
 import { Route as linkRoute } from "./routes/link";
 import { Route as settingsRoute } from "./routes/settings";
@@ -22,6 +23,7 @@ import {
 const routeTree = rootRoute.addChildren([
   indexRoute,
   loginRoute,
+  oauthAuthorizeRoute,
   linkRoute,
   settingsRoute,
   skillsRoute,
