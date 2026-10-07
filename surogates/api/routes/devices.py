@@ -21,6 +21,7 @@ from surogates.devices.presence import DevicePresence
 from surogates.devices.store import DeviceRecord, DeviceStore, IssuedDevice
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.tenant.auth.middleware import get_current_tenant
+from surogates.tenant.auth.oauth import OAuthTokens
 from surogates.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,12 @@ async def _notify(request: Request, device_id: UUID, message: str) -> None:
         logger.warning("could not notify device %s", device_id, exc_info=True)
 
 
+async def _bind_sign_in(request: Request, tenant: TenantContext, device_id: UUID) -> None:
+    """Bind the desktop's sign-in that added or restored the computer to it: revoking it ends both."""
+    if tenant.oauth_family_id is not None:
+        await OAuthTokens(request.app.state.session_factory).bind(tenant.oauth_family_id, device_id)
+
+
 def _out(device: DeviceRecord, *, online: bool) -> DeviceOut:
     return DeviceOut(
         id=device.id,
@@ -103,6 +110,7 @@ async def register_device(
     owner = _owner(tenant, ctx)
     require_recent_sign_in(tenant)
     issued = await _store(request).create(name=body.name, **owner)
+    await _bind_sign_in(request, tenant, issued.device.id)
     return _issued(issued)
 
 
@@ -133,6 +141,7 @@ async def reauthorize_device(
     issued = await _store(request).reauthorize(device_id, **owner)
     if issued is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such device.")
+    await _bind_sign_in(request, tenant, device_id)
     await _notify(request, device_id, f"rotated:{issued.device.credential_generation}")
     return _issued(issued)
 

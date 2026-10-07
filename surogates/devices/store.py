@@ -17,7 +17,7 @@ from uuid import UUID
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from surogates.db.models import Device, DeviceOperation
+from surogates.db.models import Device, DeviceOperation, OAuthRefreshToken
 from surogates.tenant.auth.service_account import hash_token
 
 TOKEN_PREFIX = "surg_dev_"
@@ -146,6 +146,13 @@ class DeviceStore:
                 .returning(Device)
             )).scalar_one_or_none()
             if row is not None:
+                # The sign-in that added or restored the computer ends with it:
+                # a lost laptop's copy of the app can no longer refresh.
+                await db.execute(
+                    update(OAuthRefreshToken)
+                    .where(OAuthRefreshToken.device_id == row.id)
+                    .values(revoked_at=func.coalesce(OAuthRefreshToken.revoked_at, func.now()))
+                )
                 # Revocation cancels the device's queued and running work, so a
                 # later reauthorization cannot run it.  Waiters see the outcome
                 # at their next recheck.
