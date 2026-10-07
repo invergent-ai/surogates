@@ -640,6 +640,23 @@ describe("a chat's mode", () => {
     expect(asked).toHaveLength(2);
     expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
   });
+
+  it("is true when the chat came to work freely while its confirmation was open, whatever that answers", async () => {
+    bind(ROOT, "ask");
+    const freeing = new Approvals({
+      bindings: journal.bindings,
+      prompts: {
+        approve: () => Promise.resolve("deny"),
+        // "Allow and stop asking" on the prompt it waited behind, then "Keep asking".
+        confirmFreeMode: () => {
+          journal.bindings.setMode(ROOT, "free");
+          return Promise.resolve(false);
+        },
+      },
+      agent: "Research assistant",
+    });
+    expect(await freeing.requestFreeMode(ROOT, never(), "page-1")).toBe(true);
+  });
 });
 
 describe("a page that asks for Work freely again", () => {
@@ -678,6 +695,31 @@ describe("a page that asks for Work freely again", () => {
     expect(await first).toBe(false);
     expect(await leaving.requestFreeMode(ROOT, never(), "page-1")).toBe(false);
     expect(asked).toHaveLength(2);
+  });
+
+  it("is asked again from another page that heard the confirmation dropped with the page that opened it", async () => {
+    bind(ROOT, "ask");
+    const gone = new AbortController();
+    const asked: ChatLabel[] = [];
+    const dropping = new Approvals({
+      bindings: journal.bindings,
+      prompts: {
+        approve: () => Promise.resolve("deny"),
+        confirmFreeMode: (chat) => {
+          asked.push(chat);
+          return asked.length === 1 ? new Promise(() => {}) : Promise.resolve(false);
+        },
+      },
+      agent: "Research assistant",
+    });
+    const both = [dropping.requestFreeMode(ROOT, gone.signal, "page-1"), dropping.requestFreeMode(ROOT, never(), "page-2")];
+    await vi.waitFor(() => expect(asked).toHaveLength(1));
+    gone.abort();
+    expect(await Promise.all(both)).toEqual([false, false]);
+    // Nobody answered it: page 2 is asked, and only its own "Keep asking" holds it.
+    expect(await dropping.requestFreeMode(ROOT, never(), "page-2")).toBe(false);
+    expect(asked).toHaveLength(2);
+    await expect(dropping.requestFreeMode(ROOT, never(), "page-2")).rejects.toThrow("The user chose to keep this chat asking");
   });
 });
 

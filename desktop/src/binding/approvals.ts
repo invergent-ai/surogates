@@ -155,8 +155,9 @@ export class Approvals {
   // ponytail: each background command's text by its chat and handle, kept for the app's life, one per
   // background command started: background processes end with the app.
   private readonly commands = new Map<string, string>();
-  // Each chat's open Work-freely confirmation: a second request hears its answer.
-  private readonly freeing = new Map<string, Promise<boolean>>();
+  // Each chat's open Work-freely confirmation: a second request hears its answer, undefined
+  // when it was dropped with the page that opened it.
+  private readonly freeing = new Map<string, Promise<boolean | undefined>>();
   // ponytail: the pages whose user kept a chat asking, by page and chat, for the app's life, one per
   // refusal: a page is asked no more for that chat, and a page once replaced never asks again.
   private readonly kept = new Set<string>();
@@ -309,16 +310,19 @@ export class Approvals {
     if (!open) {
       const chat = { agent: this.options.agent, root: sessionId, calling: sessionId, folder: binding.folder };
       open = settled(this.options.prompts.confirmFreeMode(chat, signal), signal).then((confirmed) => {
-        if (confirmed !== true || signal.aborted) return false;
+        // Dropped with its opener's page: nobody's answer.
+        if (signal.aborted) return undefined;
+        if (confirmed !== true) return false;
         this.options.bindings.setMode(sessionId, "free");
         return true;
       }).finally(() => this.freeing.delete(sessionId));
       this.freeing.set(sessionId, open);
     }
-    const freed = (await settled(open, signal)) ?? false;
-    // Kept asking: a page that went is replaced anyway.
-    if (!freed && !signal.aborted) this.kept.add(key);
-    return freed;
+    const freed = await settled(open, signal);
+    // Kept asking, by its user or by nobody in time: a page that went is replaced anyway.
+    if (freed === false && !signal.aborted) this.kept.add(key);
+    // Freed meanwhile all the same, by "Allow and stop asking" on a prompt its confirmation waited behind.
+    return freed === true || (!signal.aborted && this.bound(sessionId).mode === "free");
   }
 
   // The chat's binding, when this operation must be asked about now; otherwise its
