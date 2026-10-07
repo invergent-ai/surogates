@@ -75,8 +75,8 @@ let registering = false;
 let connecting = false;
 // Who waits for the threads working on this computer to finish: a quit that the user told to wait.
 const idle = new Set<() => void>();
-// What the web client tells once its user signed in, and the projects it serves.
-let account: DesktopAccount | null = null;
+// What the web client tells once its user signed in (undefined until it has said), and the projects it serves.
+let account: DesktopAccount | null | undefined;
 const projects = new PageProjects((message) => main?.webContents()?.send("desktop:projects", message));
 let served = false;
 // Settled once the page serves its projects: a project chosen while it loads waits for this.
@@ -328,8 +328,8 @@ function navigated(url: string): void {
 
 /**
  * Start the device for *credential*. It counts as this computer's device at once: the commands'
- * environment comes from a login shell, which can take seconds, and a page asking meanwhile must
- * not register a second device. A start that fails leaves no device.
+ * environment comes from a login shell, which can take seconds, and the shell shows it as
+ * connecting meanwhile. A start that fails leaves no device.
  */
 function startStack(agent: Agent, credential: Credential): Promise<DeviceStack> {
   const started = environment.then((env) => startDevice({
@@ -459,6 +459,7 @@ async function signIn(agent: Agent): Promise<void> {
     // The web client's session comes from this sign-in: whatever the window held before goes, and
     // the sign-in shows until the web client has loaded again.
     reloading = true;
+    changed();
     try {
       await clearWindow(agent);
       await main?.go("/");
@@ -599,7 +600,8 @@ function state() {
       text: describeAgent(agent, device && { status: device.status, computer: device.credential.name }),
       status: device?.status ?? null,
     },
-    account,
+    // Who the web client says is signed in, or until it has said, the app's own sign-in.
+    account: account === undefined ? signedIn?.account ?? null : account,
     view,
     overview: view.kind === "project" && overview?.project.id === view.id ? overview : null,
     projects: listed,

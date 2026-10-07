@@ -76,6 +76,8 @@ describe("the first run", () => {
     const again = await shellPage(app);
     await expect.poll(() => again.isVisible("#sign-in")).toBe(true);
     expect(await again.isVisible("#first-run")).toBe(false);
+    await webClient(app);
+    expect(await webShown(app)).toBe(false);
   });
 
   it("connects once when its address is sent twice", async () => {
@@ -107,6 +109,12 @@ describe("signing in", () => {
     await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
     expect(agent.registered).toEqual([{ name: hostname() }]);
     await expect.poll(() => webShown(shell)).toBe(true);
+    // The app's own sign-in, before the web client has said who it is.
+    expect(await page.textContent("#user-name")).toBe(ACCOUNT.name);
+    const hole = await page.evaluate(() => document.querySelector("#hole")!.getBoundingClientRect().toJSON() as DOMRect);
+    const bounds = await shell.evaluate(({ BrowserWindow }) =>
+      (BrowserWindow.getAllWindows()[0]!.contentView.children[0] as Electron.WebContentsView).getBounds());
+    expect(bounds).toEqual({ x: Math.round(hole.x), y: Math.round(hole.y), width: Math.round(hole.width), height: Math.round(hole.height) });
     // The basic store keeps the tokens as they are, and the shell says so.
     expect(await page.textContent("#notice")).toBe("Credentials on this computer are not encrypted: Linux has no secret store here");
     expect(JSON.parse(readFileSync(state("session.json"), "utf8"))).toMatchObject({ account: ACCOUNT, plain: "rt-1" });
@@ -148,7 +156,16 @@ describe("signing in", () => {
     const before = (await opened(shell)).length;
     await page.click("#device-action-button");
     await expect.poll(async () => (await opened(shell)).length).toBe(before + 1);
+    let release = () => {};
+    agent.pagesHeld = new Promise((resolve) => {
+      release = resolve;
+    });
     await agent.approve((await opened(shell))[before]!);
+    // The window, cleared, loads the web client again with the new session: the sign-in shows meanwhile.
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    expect(await webShown(shell)).toBe(false);
+    release();
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(false);
     await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
     expect(await page.isVisible("#device-action")).toBe(false);
   });
@@ -250,12 +267,12 @@ describe("the agent's web client", () => {
     await expect.poll(() => page.isVisible("#unreachable")).toBe(false);
   });
 
-  it("keeps the agent's sign-in pages out of the window: the password form is only ever in the browser", async () => {
+  it.each(["/oauth/authorize", "/OAuth/Authorize"])("keeps the agent's sign-in pages out of the window, at %s: the password form is only ever in the browser", async (path) => {
     const { shell, client } = await signedIn();
     const before = { url: client.url(), opened: (await opened(shell)).length };
-    await client.evaluate(() => {
-      location.href = "/oauth/authorize?client_id=surogate-desktop";
-    });
+    await client.evaluate((to) => {
+      location.href = `${to}?client_id=surogate-desktop`;
+    }, path);
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(client.url()).toBe(before.url);
     expect((await opened(shell)).length).toBe(before.opened);

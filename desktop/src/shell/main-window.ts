@@ -63,7 +63,9 @@ function confine(contents: WebContents, origin: string): void {
   contents.on("will-navigate", (event) => {
     if (sameOrigin(origin, event.url)) {
       // The agent's sign-in pages open only in the system browser: the window never shows a password form.
-      if (new URL(event.url).pathname.startsWith("/oauth/")) event.preventDefault();
+      // The web client routes paths whatever their case, so the refusal does too.
+      const path = new URL(event.url).pathname.toLowerCase();
+      if (path === "/oauth" || path.startsWith("/oauth/")) event.preventDefault();
       return;
     }
     event.preventDefault();
