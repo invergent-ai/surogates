@@ -51,6 +51,8 @@ interface Shell {
   state(): Promise<State>;
   connect(address: string): Promise<string | null>; // why it was refused, or null
   signIn(): Promise<void>;
+  signOut(): Promise<void>;
+  remove(): Promise<void>;
   go(path: string): Promise<void>;
   projects(): Promise<void>;
   project(id: string): Promise<void>;
@@ -348,6 +350,8 @@ for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-actio
   row.addEventListener("click", () => {
     menu(false);
     if (action === "settings") void shell.settings();
+    else if (action === "logout") void shell.signOut();
+    else if (action === "remove") void shell.remove();
     else if (row.dataset.link) void shell.link(action);
   });
 }

@@ -71,6 +71,15 @@ describe("the device credentials", () => {
     expect(store(secrets).unencrypted()).toBe(true);
   });
 
+  it("keep a revocation still owed beside a new device of the same identity, and forget each by its device", () => {
+    const credentials = store();
+    credentials.save({ ...CREDENTIAL, revoking: true });
+    credentials.save({ ...CREDENTIAL, deviceId: "d2", token: "surg_dev_new" });
+    expect(store().list()).toEqual([{ ...CREDENTIAL, revoking: true }, { ...CREDENTIAL, deviceId: "d2", token: "surg_dev_new" }]);
+    credentials.remove("d");
+    expect(store().list()).toEqual([{ ...CREDENTIAL, deviceId: "d2", token: "surg_dev_new" }]);
+  });
+
   it("kept as they are while there was no secret store are sealed once there is one", () => {
     store(new Secrets("basic_text")).save(CREDENTIAL);
     expect(store().list()).toEqual([CREDENTIAL]);

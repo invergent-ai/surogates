@@ -119,6 +119,15 @@ export class DeviceLink {
     return true;
   }
 
+  /**
+   * Revoke this device at the agent, on the welcomed connection (the link's revoke frame,
+   * scoped to the credentials it connected with): false when there is none. The agent then
+   * closes the link as revoked, which ends it as any revocation does.
+   */
+  revoke(): boolean {
+    return this.send({ type: "revoke" });
+  }
+
   // Status is display only: a callback that throws is reported, and the link goes on.
   private setStatus(status: LinkStatus): void {
     this.status = status;

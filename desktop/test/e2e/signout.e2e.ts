@@ -1,0 +1,159 @@
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+
+import type { ElectronApplication, Page } from "playwright-core";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { connect, FakeAgent, signIn, signedInAndAdded, webClient } from "./fake-agent.js";
+import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
+
+let home: string;
+let agent: FakeAgent;
+let origin: string;
+let host: string;
+let app: ElectronApplication | undefined;
+
+beforeEach(async () => {
+  home = dataHome();
+  agent = new FakeAgent();
+  origin = await agent.start();
+  host = origin.replace("http://", "");
+});
+
+afterEach(async () => {
+  await quit(app);
+  app = undefined;
+  await agent.stop();
+  await agent.link.stop();
+  rmSync(home, { recursive: true, force: true });
+});
+
+const state = (path: string) => join(home, "surogate", path);
+const credentials = () => (existsSync(state("credentials.json")) ? JSON.parse(readFileSync(state("credentials.json"), "utf8")) as Array<Record<string, unknown>> : []);
+const asked = (shell: ElectronApplication) =>
+  shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string; detail: string }> }).asked.map((options) => options.message));
+const revokes = () => agent.link.received.filter((frame) => frame.type === "revoke").length;
+
+// Launched with its state under home, signed in as ACCOUNT, and this computer added; the web client with something in its storage.
+async function signedIn(): Promise<{ shell: ElectronApplication; page: Page; client: Page }> {
+  const shell = await launch(home);
+  app = shell;
+  await stubNative(shell);
+  const page = await shellPage(shell);
+  if (await page.isVisible("#first-run")) await connect(page, origin);
+  await signedInAndAdded(shell, page, agent);
+  const client = await webClient(shell, origin);
+  await client.evaluate(() => localStorage.setItem("surogates_auth_token", "the page's own session"));
+  return { shell, page, client };
+}
+
+async function logOut(page: Page): Promise<void> {
+  await page.click("#user");
+  await page.click('[data-action="logout"]');
+}
+
+describe("logging out", () => {
+  it("revokes this computer at the agent, forgets its folders and the sign-in, and clears the window", async () => {
+    const { shell, page, client } = await signedIn();
+    await logOut(page);
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    expect(await asked(shell)).toContain(`Log out of ${host}?`);
+    expect(revokes()).toBe(1);
+    await expect.poll(() => agent.oauth.some((form) => form.token === "rt-1")).toBe(true);
+    expect(credentials()).toEqual([]);
+    expect(existsSync(state("session.json"))).toBe(false);
+    expect(existsSync(state("devices/d"))).toBe(false);
+    await expect.poll(() => client.evaluate(() => localStorage.getItem("surogates_auth_token"))).toBeNull();
+    // Signed out, the web client has nothing to give: the window asks for a sign-in.
+    expect(await client.evaluate(() => window.surogateDesktop!.webSignIn())).toBeNull();
+  });
+
+  it("is what the web client's own Log out asks for", async () => {
+    const { shell, page, client } = await signedIn();
+    void client.evaluate(() => window.surogateDesktop!.signOut()).catch(() => {});
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    expect(await asked(shell)).toContain(`Log out of ${host}?`);
+    expect(revokes()).toBe(1);
+  });
+
+  it("changes nothing when the user cancels", async () => {
+    const { shell, page } = await signedIn();
+    await shell.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    await logOut(page);
+    await expect.poll(() => asked(shell)).toContain(`Log out of ${host}?`);
+    expect(await page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    expect(revokes()).toBe(0);
+    expect(credentials()).toHaveLength(1);
+  });
+
+  it("revokes this computer once the agent can hear it, when it could not at the log out", async () => {
+    const { page } = await signedIn();
+    const port = Number(new URL(origin).port);
+    await agent.stop();
+    await expect.poll(() => page.getAttribute("#device", "title")).not.toBe("Connected as Laptop");
+    await logOut(page);
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    expect(credentials()).toEqual([expect.objectContaining({ deviceId: "d", revoking: true })]);
+    expect(existsSync(state("devices/d"))).toBe(false);
+    await agent.start(port);
+    await expect.poll(() => revokes(), { timeout: 15_000 }).toBe(1);
+    await expect.poll(() => credentials()).toEqual([]);
+  });
+});
+
+describe("removing the agent", () => {
+  it("logs out, forgets the agent, and asks for one again", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#user");
+    await page.click('[data-action="remove"]');
+    await expect.poll(() => page.isVisible("#first-run")).toBe(true);
+    expect(await asked(shell)).toContain(`Remove ${host} from Surogate?`);
+    expect(revokes()).toBe(1);
+    expect(existsSync(state("agent.json"))).toBe(false);
+    expect(await shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.contentView.children.length)).toBe(0);
+  });
+});
+
+describe("removing the agent while it cannot be reached", () => {
+  it("revokes this computer at the next launch, with no agent kept, and then forgets it", async () => {
+    const { shell, page } = await signedIn();
+    const port = Number(new URL(origin).port);
+    await agent.stop();
+    await expect.poll(() => page.getAttribute("#device", "title")).not.toBe("Connected as Laptop");
+    await page.click("#user");
+    await page.click('[data-action="remove"]');
+    await expect.poll(() => page.isVisible("#first-run")).toBe(true);
+    expect(credentials()).toEqual([expect.objectContaining({ deviceId: "d", revoking: true })]);
+    await quit(shell);
+    await agent.start(port);
+    app = await launch(home);
+    await expect.poll(() => revokes(), { timeout: 15_000 }).toBe(1);
+    await expect.poll(() => credentials()).toEqual([]);
+    expect(existsSync(state("agent.json"))).toBe(false);
+  });
+});
+
+describe("a second user of the agent on this computer", () => {
+  const OTHER = { name: "Bea Other", email: "bea@example.com", userId: "b", orgId: "o" };
+
+  it("ends the first one's access here once they agree, and this computer is added for them", async () => {
+    const first = await signedIn();
+    await quit(first.shell);
+    // The first user's sign-in ended (it expired): the next launch asks for one, while their device still runs.
+    rmSync(state("session.json"));
+    app = await launch(home);
+    await stubNative(app);
+    const page = await shellPage(app);
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    // Another user signs in at the agent's page, and the agent adds their own device.
+    agent.account = OTHER;
+    agent.link.identity = { ...agent.link.identity, device_id: "d2", user_id: "b" };
+    await signIn(app, page, agent);
+    await expect.poll(() => credentials().map((credential) => [credential.deviceId, credential.userId])).toEqual([["d2", "b"]]);
+    await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    expect(await asked(app)).toContain("Sign in as bea@example.com?");
+    expect(revokes()).toBe(1);
+    expect(existsSync(state("devices/d"))).toBe(false);
+  });
+});

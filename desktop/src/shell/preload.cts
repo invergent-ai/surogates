@@ -41,6 +41,7 @@ if (origin !== undefined && window.top === window && location.origin === origin)
     version: 1,
     getDevice: call("getDevice"),
     webSignIn: call("webSignIn"),
+    signOut: call("signOut"),
     prepareFolder: call("prepareFolder"),
     bindSession: call("bindSession"),
     getAppearance: call("getAppearance"),

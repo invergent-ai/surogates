@@ -76,10 +76,10 @@ describe("the user menu", () => {
     expect(await page.getAttribute("#user", "aria-expanded")).toBe("true");
     expect(await page.textContent("#user-email")).toBe("flavius@example.com");
     // An agent off surogate.ai has no console the app knows: no usage or billing.
-    expect(await texts(page, "#user-menu .menu-item")).toEqual(["SettingsCtrl+Shift+,", "Language", "Get help", "Log out"]);
+    expect(await texts(page, "#user-menu .menu-item")).toEqual(["SettingsCtrl+Shift+,", "Language", "Get help", "Log out", "Remove this agent…"]);
     // One divider above Log out: none is doubled where the console's rows are hidden.
     expect(await page.$$eval("#user-menu hr", (found) => found.filter((hr) => (hr as HTMLElement).offsetParent !== null).length)).toBe(1);
-    expect(await page.isDisabled('[data-action="logout"]')).toBe(true);
+    expect(await page.isDisabled('[data-action="logout"]')).toBe(false);
     expect(await page.isDisabled('[data-action="language"]')).toBe(true);
     const menu = await page.$eval("#user-menu", (found) => found.getBoundingClientRect().bottom);
     const row = await page.$eval("#user", (found) => found.getBoundingClientRect().top);

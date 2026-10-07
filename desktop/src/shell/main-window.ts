@@ -232,6 +232,16 @@ export class MainWindow {
     return contents;
   }
 
+  /** Take the web client out of the window, as removing its agent does: the next agent attaches its own. */
+  detach(): void {
+    const web = this.web;
+    if (!web) return;
+    this.web = null;
+    clearTimeout(web.retry);
+    this.window.contentView.removeChildView(web.view);
+    web.view.webContents.close();
+  }
+
   /** Open Settings over the window, with *preload*; *wire* registers its page's handlers. */
   openSettings(page: string, preload: string, wire: (contents: WebContents) => void): void {
     if (this.settingsView) {

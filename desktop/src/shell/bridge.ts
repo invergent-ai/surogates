@@ -18,6 +18,7 @@ export interface SenderFrame {
 export interface BridgeCalls {
   getDevice(): DesktopDeviceState;
   webSignIn(): Promise<{ code: string } | null>;
+  signOut(): Promise<void>;
   prepareFolder(choice: "last" | "pick", window: string): Promise<DesktopPreparedFolder | null>;
   bindSession(sessionId: string, token: string, window: string): Promise<void>;
   getAppearance(): DesktopAppearance;
@@ -50,6 +51,7 @@ export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<strin
   return {
     getDevice: checked(() => calls.getDevice()),
     webSignIn: checked(() => calls.webSignIn()),
+    signOut: checked(() => calls.signOut()),
     prepareFolder: checked((window, choice) => {
       if (choice !== "last" && choice !== "pick") throw new Error("Not a folder choice");
       return calls.prepareFolder(choice, window);

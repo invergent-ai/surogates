@@ -74,6 +74,33 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
   return { link, runner };
 }
 
+/**
+ * Revoke the device *token* belongs to, on a link of its own, as a sign-out made while the
+ * agent could not be reached must: it connects, with the link's backoff, until the agent hears
+ * the revoke frame. *done* settles once the agent has ended the token (revoked, or unknown).
+ */
+export function revokeDevice(url: string, token: string, delay?: (attempt: number) => number): { done: Promise<void>; stop(): Promise<void> } {
+  const { promise: done, resolve } = Promise.withResolvers<void>();
+  const link: DeviceLink = new DeviceLink({
+    url,
+    token,
+    delay,
+    openIds: () => [],
+    handlers: {
+      // Nothing is run for a device being revoked: what the agent sends behind the welcome is dropped with it.
+      onWelcome: () => void link.revoke(),
+      onOperation: () => {},
+      onCancel: () => {},
+      onAck: () => {},
+      onStatus: (status) => {
+        if (status === "revoked" || status === "unauthenticated") resolve();
+      },
+    },
+  });
+  link.start();
+  return { done, stop: () => link.stop() };
+}
+
 // How long verifyDevice waits for a welcome, retries included.
 export const VERIFY_TIMEOUT_MS = 15_000;
 

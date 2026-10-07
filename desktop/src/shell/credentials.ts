@@ -20,12 +20,15 @@ export interface Credential extends Identity {
   name: string; // the computer's name, as the agent registered it
   addedAt: string; // when this computer was registered with the agent, ISO 8601
   token: string;
+  // Signed out while the agent could not be reached: the token is kept only to revoke it there.
+  revoking?: boolean;
 }
 
 interface Stored extends Identity {
   origin: string;
   name: string;
   addedAt: string;
+  revoking?: boolean;
   sealed?: string; // base64 of what the secret store sealed
   plain?: string; // the token itself, where the store protects nothing
 }
@@ -66,8 +69,14 @@ export class CredentialStore {
   save(credential: Credential): void {
     const { token, ...identity } = credential;
     const entry: Stored = { ...identity, ...seal(this.secrets, token) };
-    const kept = this.stored().filter((other) => !sameIdentity(other, entry));
+    // A new device of the same identity replaces the old one; a revocation still owed stays until it is done.
+    const kept = this.stored().filter((other) => other.deviceId !== entry.deviceId && (other.revoking || !sameIdentity(other, entry)));
     writeState(this.path, [...kept, entry], 0o600);
+  }
+
+  /** Forget the credential of device *deviceId*. */
+  remove(deviceId: string): void {
+    writeState(this.path, this.stored().filter((entry) => entry.deviceId !== deviceId), 0o600);
   }
 
   list(): Credential[] {

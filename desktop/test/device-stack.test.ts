@@ -10,7 +10,7 @@ import type { Bindings } from "../src/journal/bindings.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { LinkStatus } from "../src/link/client.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
-import { APP_CLOSED } from "../src/operations/runner.js";
+import { ACCESS_ENDED, APP_CLOSED } from "../src/operations/runner.js";
 import { type DeviceStack, type DeviceStackOptions, startDevice, stopDevice, type ToolLayer } from "../src/shell/device-stack.js";
 import { FakeLinkServer } from "./fake-server.js";
 
@@ -163,6 +163,37 @@ describe("one agent's device", () => {
     } finally {
       journal.close();
     }
+  });
+
+  it("revokes itself on its own link: what runs ends as access ended, then it stops", async () => {
+    const device = await start();
+    await server.until(() => statuses.includes("connected"));
+    tools.hold = "until-aborted";
+    const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
+    server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce }, true));
+    await server.until(() => results("bind-1").length === 1);
+    server.send(op("run-1", "run", { command: "sleep 9", workdir: null, timeout: 10 }));
+    await server.until(() => tools.ran.length === 1);
+    expect(await device.revoke()).toBe(true);
+    expect(server.received.filter((frame) => frame.type === "revoke")).toHaveLength(1);
+    expect(statuses.at(-1)).toBe("revoked");
+    expect(order).toEqual(["aborted", "tools"]);
+    const journal = new OperationJournal(join(base, "data", "devices", "d", "journal.sqlite"));
+    try {
+      expect(journal.unsent().find((result) => result.id === "run-1")?.outcome).toEqual(ACCESS_ENDED);
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("says when the agent cannot hear the revocation, and stops all the same", async () => {
+    const device = await start();
+    await server.until(() => statuses.includes("connected"));
+    server.drop();
+    await server.until(() => statuses.at(-1) === "offline" || statuses.at(-1) === "connecting");
+    await server.stop();
+    expect(await device.revoke(200)).toBe(false);
+    expect(order).toEqual(["link", "tools"]);
   });
 
   it("counts the sessions whose operations its tools run, and says each time the count changes", async () => {

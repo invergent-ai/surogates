@@ -5,6 +5,7 @@
 // confirms it natively (spec, Section 7).
 
 import { createHash } from "node:crypto";
+import { rmSync } from "node:fs";
 import type { LinkStatus } from "../link/client.js";
 import { readState, writeState } from "./state-file.js";
 
@@ -69,6 +70,11 @@ export class AgentStore {
 
   set(agent: Agent): void {
     writeState(this.path, agent);
+  }
+
+  // The agent is removed: the app starts over at its first run.
+  clear(): void {
+    rmSync(this.path, { force: true });
   }
 }
 

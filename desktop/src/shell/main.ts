@@ -4,6 +4,7 @@
 // Readiness is awaited with then(), never a top-level await: an ES module main that
 // awaits app.whenReady() deadlocks.
 
+import { rmSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,7 +16,7 @@ import {
 
 import type { DesktopAccount } from "../../../web/src/lib/desktop-bridge-contract.js";
 import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow } from "../../../web/src/lib/projects-contract.js";
-import { verifyDevice } from "../device.js";
+import { revokeDevice, verifyDevice } from "../device.js";
 import { appEnvironment } from "../hosts/environment.js";
 import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../vm/client.js";
@@ -27,7 +28,7 @@ import { rebind, register } from "./computer.js";
 import { type Credential, CredentialStore } from "./credentials.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { letWindowClose, MainWindow, onSettingsKey } from "./main-window.js";
-import { type Fetch, OAuthError, signInWithBrowser, type Tokens } from "./oauth.js";
+import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
 import { ANSWER_TIMEOUT_MS, PageProjects } from "./projects.js";
 import { folderPrompts, refusingApprovals } from "./prompts.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
@@ -65,6 +66,9 @@ let signInAgain = false;
 let reloading = false;
 // The app's calls to the agent, through Chromium's network as the window's are.
 const apiFetch: Fetch = (url, init) => net.fetch(url, init);
+// Devices logged out while the agent could not hear it, by device: each revoked on a link of its own once it can.
+const revocations = new Map<string, { done: Promise<void>; stop(): Promise<void> }>();
+let signingOut = false;
 // The commands' environment, read from the login shell once.
 let environment: Promise<Record<string, string>>;
 // This computer's credential for the agent, as stored: what the page is told, and what keeps a second registration out.
@@ -397,6 +401,8 @@ async function registerComputer(agent: Agent): Promise<void> {
       save: (credential) => credentials.save(credential),
     });
     if (added === "sign-in-again") signInAgain = true;
+    // Logged out while it was being added: the device it made goes too.
+    else if (signedIn !== session) await endDevice(added);
     else kept = added;
   } catch (error) {
     // Nothing was kept: no device runs for it.
@@ -438,6 +444,97 @@ async function bindToComputer(agent: Agent): Promise<void> {
   }
 }
 
+/** Revoke *credential*'s device on a link of its own, with the link's backoff, until the agent hears it; then forget it. */
+function revokeLater(credential: Credential): void {
+  if (revocations.has(credential.deviceId)) return;
+  const revoking = revokeDevice(linkUrl(credential.origin), credential.token);
+  revocations.set(credential.deviceId, revoking);
+  void revoking.done.then(() => {
+    credentials.remove(credential.deviceId);
+    revocations.delete(credential.deviceId);
+  });
+}
+
+/**
+ * End this computer's access for *credential*'s user (spec, Section 7): what runs stops at once,
+ * the agent revokes the device (later, on a link of its own, when it cannot hear it now), and
+ * the folders it was given here go with its journal.
+ */
+async function endDevice(credential: Credential): Promise<void> {
+  const ending = device?.credential === credential ? device : null;
+  device = null;
+  kept = null;
+  const stack = await ending?.started.catch(() => null);
+  // A stop that fails still ends access here: the revocation is then owed, as when the agent could not hear it.
+  if (stack && await stack.revoke().catch((error: unknown) => {
+    report(error);
+    return false;
+  })) {
+    credentials.remove(credential.deviceId);
+  } else {
+    credentials.save({ ...credential, revoking: true });
+    revokeLater(credential);
+  }
+  rmSync(join(root, "devices", credential.deviceId), { recursive: true, force: true });
+}
+
+async function ask(options: Electron.MessageBoxOptions): Promise<boolean> {
+  const { response } = main ? await dialog.showMessageBox(main.window, options) : await dialog.showMessageBox(options);
+  return response === 0;
+}
+
+// "1 thread working on this computer stops." when one works: what a log out cuts off.
+function cutOff(): string {
+  const working = device?.stack?.working() ?? 0;
+  if (working === 0) return "";
+  return working === 1 ? " 1 thread working on this computer stops." : ` ${working} threads working on this computer stop.`;
+}
+
+/**
+ * Log out of the agent, or remove it (spec, Section 7), once the user confirms: this computer's
+ * access first, then the app's sign-in, then whatever the window held. Removing also forgets
+ * the agent, and the app starts over at its first run.
+ */
+async function signOut(agent: Agent, removing: boolean): Promise<void> {
+  if (signingOut) return;
+  const confirmed = await ask(removing
+    ? {
+      type: "warning", message: `Remove ${agent.name} from Surogate?`,
+      detail: `You are logged out, this computer's access to ${agent.name} ends, and the folders it was given here are forgotten. Surogate then asks for an agent again.${cutOff()}`,
+      buttons: ["Remove", "Cancel"], defaultId: 0, cancelId: 1, noLink: true,
+    }
+    : {
+      type: "warning", message: `Log out of ${agent.name}?`,
+      detail: `This computer's access to ${agent.name} ends, and the folders it was given here are forgotten.${cutOff()}`,
+      buttons: ["Log out", "Cancel"], defaultId: 0, cancelId: 1, noLink: true,
+    });
+  if (!confirmed) return;
+  signingOut = true;
+  try {
+    signingIn?.abort();
+    const ending = signedIn;
+    signedIn = null;
+    signInAgain = false;
+    sessionStore.clear();
+    if (kept) await endDevice(kept);
+    // Ended at the agent too, best effort: offline, the refresh token stays valid there until it expires.
+    void ending?.end().catch(report);
+    account = null;
+    forgetAccount();
+    await clearWindow(agent);
+    if (removing) {
+      agents.clear();
+      main?.detach();
+      withdrawProjects(true);
+    } else {
+      main?.go("/");
+    }
+  } finally {
+    signingOut = false;
+    changed();
+  }
+}
+
 /** Sign in to the agent in the system browser. A sign-in started again cancels the one under way. */
 async function signIn(agent: Agent): Promise<void> {
   signingIn?.abort();
@@ -450,6 +547,21 @@ async function signIn(agent: Agent): Promise<void> {
       origin: agent.origin, computer: hostname(), fetch: apiFetch, signal: attempt.signal, open: (url) => shell.openExternal(url),
     });
     const who = await accountOf(agent.origin, tokens.accessToken, apiFetch);
+    // This computer works for one account at a time: another's access here ends first, once the user agrees.
+    const previous = kept;
+    if (previous && (previous.orgId !== who.orgId || previous.userId !== who.userId)) {
+      const switching = await ask({
+        type: "warning", message: `Sign in as ${who.email}?`,
+        detail: `This computer works for another account of ${agent.name}. Signing in as ${who.email} ends that account's access here, and forgets the folders it was given.`,
+        buttons: ["Sign in", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
+      });
+      if (!switching) {
+        void revokeTokens(agent.origin, tokens.refreshToken, apiFetch).catch(report);
+        signInFailure = `Not signed in as ${who.email}: this computer keeps working for the account that added it`;
+        return;
+      }
+      await endDevice(previous);
+    }
     // The sign-in this one replaces ends at the agent: none is left valid with no copy here.
     void signedIn?.end().catch(report);
     const signedInNow: SignedIn = { origin: agent.origin, agentId: agent.agentId, account: who, authTime: tokens.authTime, refreshToken: tokens.refreshToken };
@@ -511,6 +623,7 @@ function bridge(contents: WebContents, agent: Agent): void {
       device: kept && !anotherAccount() ? { deviceId: kept.deviceId, name: kept.name } : null,
       localFolders: !anotherAccount() && agent.desktopSessions && agent.multiSession,
     }),
+    signOut: () => signOut(agent, false),
     // A one-time code for the web client's own session, from the app's sign-in.
     webSignIn: async () => {
       if (!signedIn) return null;
@@ -704,6 +817,14 @@ function wire(window: MainWindow, page: string): void {
     const agent = agents.get();
     if (agent) void signIn(agent);
   });
+  handle("shell:sign-out", () => {
+    const agent = agents.get();
+    if (agent) void signOut(agent, false);
+  });
+  handle("shell:remove", () => {
+    const agent = agents.get();
+    if (agent) void signOut(agent, true);
+  });
   handle("shell:go", (path) => {
     if (typeof path !== "string" || !webClientPath(path)) throw new Error("Not a page of the web client");
     choose();
@@ -819,8 +940,9 @@ async function quit(): Promise<void> {
       waiting = null;
     }
   }
-  // A sign-in under way closes its port in the browser's face.
+  // A sign-in under way closes its port in the browser's face; revocations still owed are tried at the next launch.
   signingIn?.abort();
+  await Promise.all([...revocations.values()].map((revoking) => revoking.stop()));
   // The device, then the VM, which stops even when the device's stop fails. A stop that
   // fails still quits: the next launch answers what it cut off.
   try {
@@ -868,6 +990,9 @@ if (!app.requestSingleInstanceLock()) {
     main = new MainWindow({ states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed });
     wire(main, page);
     main.window.on("focus", () => void refreshProjects());
+    // Revocations owed from an earlier run, whatever agent they were for: each keeps its agent's address, device and token.
+    const stored = credentials.list();
+    for (const owed of stored.filter((credential) => credential.revoking)) revokeLater(owed);
     const agent = agents.get();
     if (!agent) return;
     const remembered = sessionStore.get();
@@ -877,7 +1002,7 @@ if (!app.requestSingleInstanceLock()) {
     // A window no sign-in of the app's owns has nobody signed in: whatever an older one left there goes.
     const shown = main;
     void (signedIn ? Promise.resolve() : clearWindow(agent)).catch(report).then(() => open(shown, agent));
-    kept = credentials.list().find((stored) => stored.origin === agent.origin && stored.agentId === agent.agentId) ?? null;
+    kept = stored.find((credential) => !credential.revoking && credential.origin === agent.origin && credential.agentId === agent.agentId) ?? null;
     if (kept) void startStack(agent, kept).catch(report);
     // An earlier try to add this computer did not end in a device: try again, once.
     void registerComputer(agent);

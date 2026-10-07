@@ -57,6 +57,9 @@ export class FakeLinkServer {
           }
         } else if (frame.type === "ping" && this.options.pong !== false) {
           socket.send(JSON.stringify({ type: "pong" }));
+        } else if (frame.type === "revoke") {
+          // As surogates/devices/link.py answers it: the device is revoked, and its link closed.
+          socket.close(4403, "revoked");
         }
       });
     });

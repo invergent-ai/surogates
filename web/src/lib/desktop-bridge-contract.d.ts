@@ -43,6 +43,9 @@ export interface DesktopBridge {
   // session, which the page exchanges at POST /api/v1/auth/oauth/web-session. Null while nobody
   // is signed in to the app.
   webSignIn(): Promise<{ code: string } | null>;
+  // Log out of the app, after its own confirmation: this computer's access to the agent ends, its
+  // folders here are forgotten, and this page's session goes with the window's storage.
+  signOut(): Promise<void>;
   prepareFolder(choice: "last" | "pick"): Promise<DesktopPreparedFolder | null>;
   bindSession(sessionId: string, token: string): Promise<void>;
   getAppearance(): Promise<DesktopAppearance>;
