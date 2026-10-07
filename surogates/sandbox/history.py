@@ -358,7 +358,8 @@ class History:
             raise HistoryError(f"git {args[0]} timed out after {_GIT_TIMEOUT}s") from exc
         if result.returncode != 0:
             raise HistoryError(f"git {args[0]} failed: {result.stderr.strip()}")
-        return result.stdout.strip()
+        # Only the line end: a name may start or end with a space.
+        return result.stdout.removesuffix("\n")
 
 
 def _environ(env: dict[str, str]) -> dict[str, str]:
@@ -385,8 +386,8 @@ def _as(author: dict[str, str]) -> list[str]:
 
 
 def _block(trailers: list[list[str]]) -> str:
-    """A commit message's trailer paragraph."""
-    return "\n".join(f"{key}: {value}" for key, value in trailers)
+    """A commit message's trailer paragraph.  A line end in a value is spelt out: a name cannot add a trailer."""
+    return "\n".join(f"{key}: {value}".replace("\r", "\\r").replace("\n", "\\n") for key, value in trailers)
 
 
 def _blob(sha: str) -> str | None:

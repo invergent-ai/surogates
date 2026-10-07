@@ -469,3 +469,17 @@ def test_a_landing_of_sixteen_thousand_files_is_recorded(tmp_path, project):
     out = history.record(turn=turn, applied=applied, author=THREAD_A, trailers=trailers("landing"))
     files = git(history, "ls-tree", "-r", "-z", "--name-only", out["commit"]).split("\0")
     assert len([f for f in files if f.startswith("a folder")]) == 16_000 and "Report.docx" not in files
+
+
+def test_a_file_name_stays_whole_in_a_landings_trailers_and_lists(tmp_path, project):
+    name = "x\nSurogate-Kind: turn"
+    history = opened(tmp_path, project)
+    (history.copy / name).write_text("by A")
+    (project / name).write_text("by you")
+    (history.copy / " notes.tmp").write_text("scratch")
+    out = landed(history)
+    assert (out["overlapped"], out["excluded"]) == ([{"path": name}], [" notes.tmp"])
+    # A name cannot add a trailer: the landing is a landing, and names its file.
+    assert git(history, "log", "-1", "--format=%(trailers:key=Surogate-Kind,valueonly)", out["commit"]) == "landing"
+    not_merged = git(history, "log", "-1", "--format=%(trailers:key=Surogate-Not-Merged,valueonly)", out["commit"])
+    assert not_merged == "x\\nSurogate-Kind: turn"
