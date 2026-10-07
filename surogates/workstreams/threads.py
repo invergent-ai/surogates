@@ -74,10 +74,14 @@ async def start_thread(
     return thread
 
 
-async def reopen_if_thread(session: Session, *, session_factory: Any) -> None:
-    """The user's new work for a project's thread takes it out of Resolved."""
+async def reopen_if_thread(session: Session, *, app_state: Any) -> None:
+    """The user's new work for a project's thread takes it out of Resolved.
+
+    *app_state* is the API's ``app.state``; its ``session_factory`` is read
+    only for a thread, so a chat outside projects needs none.
+    """
     if is_project_thread(session.config):
-        await WorkstreamStore(session_factory).reopen_thread(session.id)
+        await WorkstreamStore(app_state.session_factory).reopen_thread(session.id)
 
 
 async def stop_thread(

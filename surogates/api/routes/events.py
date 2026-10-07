@@ -219,7 +219,7 @@ async def send_session_events(
             ) from exc
 
         # Out of Resolved before the goal is heard, as a typed message is.
-        await reopen_if_thread(session, session_factory=request.app.state.session_factory)
+        await reopen_if_thread(session, app_state=request.app.state)
         event_id = await store.emit_event(
             session_id,
             EventType.USER_DEFINE_OUTCOME,

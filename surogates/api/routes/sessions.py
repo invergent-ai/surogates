@@ -1068,7 +1068,7 @@ async def send_message(
     # that resumes the session must be a NORMAL message — converting it
     # into an answer would feed a consumer that no longer exists.
     was_active = session.status == "active"
-    await reopen_if_thread(session, session_factory=request.app.state.session_factory)
+    await reopen_if_thread(session, app_state=request.app.state)
     if session.status in ("failed", "paused", "completed"):
         await store.update_session_status(session_id, "active")
         await store.emit_event(session_id, EventType.SESSION_RESUME, {})
@@ -1753,7 +1753,7 @@ async def resume_session(
             detail=f"Cannot resume session in '{session.status}' state.",
         )
 
-    await reopen_if_thread(session, session_factory=request.app.state.session_factory)
+    await reopen_if_thread(session, app_state=request.app.state)
     # The status first, as a message's resume writes it: whoever hears the
     # resume then reads the session active.
     await store.resume_session(session_id)
@@ -1798,7 +1798,7 @@ async def retry_session(
             detail=f"Cannot retry session in '{session.status}' state.",
         )
 
-    await reopen_if_thread(session, session_factory=request.app.state.session_factory)
+    await reopen_if_thread(session, app_state=request.app.state)
     await store.resume_session(session_id, source="user_retry")
     await enqueue_session(
         request.app.state.redis,
