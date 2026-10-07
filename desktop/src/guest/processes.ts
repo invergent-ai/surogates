@@ -78,6 +78,8 @@ export interface ProcessesOptions {
   ended?: readonly ProcessHandle[];
   // Told each process's id once, when it has ended: what was kept for it can go.
   done?(id: string): void;
+  // How much of its processes' output it keeps together, in UTF-16 code units; unbounded without.
+  keep?: number;
   now?(): number; // seconds
 }
 
@@ -430,6 +432,35 @@ export class Processes {
     if (record.buffer.length > record.kept + MAX_OUTPUT_CHARS) {
       record.buffer = lastPoints(record.buffer, MAX_OUTPUT_CHARS);
       record.kept = record.buffer.length;
+    }
+    this.within();
+  }
+
+  // Its processes' output together within keep: past it, first what each holds beyond what
+  // it shows (a buffer holds up to twice MAX_OUTPUT_CHARS between its own cuts), then
+  // finished processes' output, the earliest ended first, then the running ones', the
+  // longest first, each down to what its handle keeps (HANDLE_CHARS).
+  private within(): void {
+    const { keep } = this.options;
+    if (keep === undefined) return;
+    const records = [...this.running.values(), ...this.finished.values()];
+    let total = 0;
+    for (const record of records) total += record.buffer.length;
+    if (total <= keep) return;
+    for (const record of records) {
+      if (record.buffer.length <= MAX_OUTPUT_CHARS) continue;
+      const before = record.buffer.length;
+      record.buffer = lastPoints(record.buffer, MAX_OUTPUT_CHARS);
+      record.kept = record.buffer.length;
+      total -= before - record.buffer.length;
+    }
+    const running = [...this.running.values()].sort((a, b) => b.buffer.length - a.buffer.length);
+    for (const record of [...this.finished.values(), ...running]) {
+      if (total <= keep) return;
+      const before = record.buffer.length;
+      record.buffer = lastPoints(record.buffer, HANDLE_CHARS);
+      record.kept = record.buffer.length;
+      total -= before - record.buffer.length;
     }
   }
 

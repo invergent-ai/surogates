@@ -7,10 +7,12 @@ import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
+import { MAX_SHARES } from "../guest/protocol.js";
+
 // Ubuntu's, whose AppArmor profile lets its namespace sandbox work under 24.04's restriction.
 export const VIRTIOFSD = "/usr/libexec/virtiofsd";
 // The guest's empty PCIe slots: one for each folder added while it runs.
-export const ROOT_PORTS = 8;
+export const ROOT_PORTS = MAX_SHARES;
 const MEMORY = "2G";
 
 export interface Disks {

@@ -310,6 +310,31 @@ describe("a root's background processes", { timeout: 20_000 }, () => {
     ]);
   });
 
+  it("keeps a root's processes' output within its share of what the agent keeps for every root, 2M characters", async () => {
+    // Eleven processes that each print more than one keeps: about 2.75M characters together.
+    const ids: string[] = [];
+    for (let n = 0; n < 11; n += 1) ids.push((await begin(roots, "root-1", "head -c 250000 /dev/zero | tr '\\0' x")).ok.session_id);
+    for (const session_id of ids) await until(async () => (await ask(roots, "root-1", "poll", { session_id })).ok.status === "exited");
+    const lengths: number[] = [];
+    for (const session_id of ids) lengths.push(((await ask(roots, "root-1", "read_output", { session_id, offset: 0, limit: 1 })).ok.output as string).length);
+    expect(lengths.reduce((sum, length) => sum + length, 0)).toBeLessThanOrEqual(2_000_000);
+    expect(lengths).toContain(200_000);
+    expect(lengths).toContain(2_000);
+  });
+
+  it("sets up no ninth root while eight keep their processes, and one once a root is torn down", async () => {
+    const runners = new Map<string, ChildProcess>();
+    const eight = new Roots({ start: (root) => {
+      const child = bare();
+      runners.set(root, child);
+      return child;
+    }, uid: () => 10_000, kill: (root) => void runners.get(root)?.kill("SIGKILL") });
+    for (let n = 1; n <= 8; n += 1) await eight.setup(`root-${n}`, base, R1, user);
+    await expect(eight.setup("root-9", base, R1, user)).rejects.toThrow("This computer's sandbox holds 8 chats already");
+    await eight.teardown("root-8");
+    await eight.setup("root-9", base, R1, user);
+  });
+
   it("asks the runner where a start's command runs, and answers as the cloud does where it cannot", async () => {
     writeFileSync(join(base, "file"), "");
     expect(await begin(roots, "root-1", "true", { workdir: "/etc" })).toMatchObject({

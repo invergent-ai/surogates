@@ -14,7 +14,7 @@ import { Failure } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
 import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STOPPED, supervise, timedOut } from "./command.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
-import type { Answer, HostUser, Question, Share } from "./protocol.js";
+import { type Answer, type HostUser, MAX_SHARES, type Question, type Share } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 
 // The sessions disk's folder of roots (vm/init), each named by its root session id.
@@ -44,11 +44,16 @@ const TAG = /^r[0-9]{1,3}$/;
 // Any name a passwd line can hold, as directories join AD users (ana@corp.example):
 // no ':', newline, NUL or '/', no leading '-', at most 256 characters.
 const NAME = /^(?!-)[^:\n\0/]{1,256}$/;
+// What the agent keeps of every root's background processes' output together, in UTF-16
+// code units: at most 32 MB, beside the agent's own memory in the 256 MiB the roots leave
+// it. Each root keeps its share: the guest holds at most MAX_SHARES roots at once.
+const OUTPUT_CHARS = 16_000_000;
 // The background process kinds, which a root's registry answers.
 const PROCESS_KINDS = new Set(["start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"]);
 
 export const NOT_SET_UP = { error: { type: "unavailable", message: "This computer's sandbox has not set up this chat" } } satisfies Outcome;
 const ALREADY = "This chat's sandbox is already set up";
+const FULL = `This computer's sandbox holds ${MAX_SHARES} chats already`;
 // The cloud sandbox's HOME, under which /etc/surogate/environment names the layout:
 // at the start of a path, in a value or a list of them.
 const CLOUD_HOME = /(?<=^|:)\/home\/sandbox(?=\/|:|$)/g;
@@ -381,6 +386,9 @@ export class Roots {
   // keeps of the root's processes, which a root new to this guest answers for.
   async setup(root: string, folder: string, share: Share, user: HostUser, ended: readonly ProcessHandle[] = []): Promise<void> {
     if (this.roots.has(root) || this.starting.has(root)) throw new Error(ALREADY);
+    // Each root set up keeps its processes' output: a share of OUTPUT_CHARS.
+    const held = new Set([...this.registries.keys(), ...this.starting.keys()]);
+    if (!held.has(root) && held.size >= MAX_SHARES) throw new Error(FULL);
     const started = this.start(root, folder, share, user, ended);
     this.starting.set(root, started);
     try {
@@ -443,6 +451,7 @@ export class Roots {
         };
       },
       done: (id) => cgroups?.end(id),
+      keep: OUTPUT_CHARS / MAX_SHARES,
       // The host's handles: one from before the app quit comes ended as the app quit,
       // so one still running ran in a guest that went.
       ended: lostWith(ended),

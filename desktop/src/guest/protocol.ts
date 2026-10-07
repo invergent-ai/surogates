@@ -13,6 +13,10 @@ export interface HostUser {
   home: string;
 }
 
+// The most folders a guest holds at once, one for each root set up in it: each OS's
+// backend has as many places for them (Linux's, its PCIe root ports).
+export const MAX_SHARES = 8;
+
 // How the guest mounts a root's folder, as the host's VM backend shared it. Each
 // kind names who maps the folder's owner to the root's guest uid. virtiofs: its
 // server on the host (Linux's virtiofsd), so the guest mounts it by its tag as it is.
