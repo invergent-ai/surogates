@@ -45,11 +45,20 @@ describe("an approval prompt", () => {
     expect(content.title).toBe("Run a command in notes?");
     expect(content.lead).toBe("acme.surogate.ai wants to run this on this computer.");
     expect(content.details).toEqual([
-      { label: "Command", value: "npm test\n\tx", code: true, keep: "\n\t" },
+      { label: "Command, 2 lines", value: "npm test\n\tx", code: true, keep: "\n\t" },
       { label: "In", value: "/home/me/notes/web", code: true, keep: "" },
     ]);
     expect([ids(content), allowing(content)]).toEqual([["deny", "stop_asking", "allow"], ["stop_asking", "allow"]]);
     expect([content.focus, content.cancel, content.enter]).toEqual(["deny", "deny", null]);
+  });
+
+  it.each([
+    ["one line", "npm test", "Command"],
+    ["blank lines", "a\n\n\nb", "Command, 4 lines"],
+    ["a thousand lines", `${"x\n".repeat(999)}x`, "Command, 1,000 lines"],
+  ])("says how many lines a command has, past its first: %s", (_name, text, label) => {
+    expect(approval({ ...command, command: text }).details[0]?.label).toBe(label);
+    expect(approval({ kind: "input", chat: CHAT, process: "proc_1", command: text, data: "y" }).details[0]?.label).toBe(label.replace("Command", "To the command"));
   });
 
   it("says a background command starts, and that a sub-agent asks", () => {

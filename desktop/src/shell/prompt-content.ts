@@ -48,6 +48,11 @@ export interface PromptContent {
 const button = (id: string, label: string, allows = false): PromptButton => ({ id, label, allows });
 const code = (label: string, value: string, keep = ""): PromptDetail => ({ label, value, code: true, keep });
 const named = (path: string) => basename(path) || path;
+// A command's label, with how many lines it has once it has more than one: what follows its first line can be out of view.
+const lined = (label: string, text: string) => {
+  const lines = text.split("\n").length;
+  return lines > 1 ? `${label}, ${lines.toLocaleString("en")} lines` : label;
+};
 
 // The two modes (spec, Section 4), as the sheet offers them.
 const MODES: Omit<PromptChoice, "value"> = {
@@ -129,7 +134,7 @@ export function approval(request: ApprovalRequest): PromptContent {
       ...OPERATION,
       title: request.background ? `Start a background command in ${folder}?` : `Run a command in ${folder}?`,
       lead: `${asker(chat)} wants to run this on this computer.`,
-      details: [code("Command", request.command, "\n\t"), ...(request.workdir === null ? [] : [code("In", request.workdir)])],
+      details: [code(lined("Command", request.command), request.command, "\n\t"), ...(request.workdir === null ? [] : [code("In", request.workdir)])],
       height: 380,
     };
   }
@@ -152,7 +157,7 @@ export function approval(request: ApprovalRequest): PromptContent {
   if (request.kind === "input") {
     const command: PromptDetail = request.command === null
       ? { label: "To the command", value: `A command Surogate did not start in this session (${request.process}).`, code: false, keep: "" }
-      : code("To the command", request.command, "\n\t");
+      : code(lined("To the command", request.command), request.command, "\n\t");
     return {
       ...OPERATION,
       title: "Type into a running command?",

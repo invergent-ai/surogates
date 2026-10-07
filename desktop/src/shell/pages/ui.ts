@@ -97,9 +97,33 @@ export function ago(when: string, now = Date.now(), form: "short" | "long" = "sh
 // paragraph separators, what draws nothing (the blank symbols among it), and every space but U+0020.
 const SPECIAL = /[\p{C}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\u2800\uFFFC\u{1D159}]|(?! )\p{Zs}/gu;
 
-/** *text* in runs: plain text, and each special character as its code point (U+202E). *keep* holds the special characters shown as themselves. */
-export function segments(text: string, keep = ""): Array<{ text: string; special: boolean }> {
-  const runs: Array<{ text: string; special: boolean }> = [];
+// Three or more line breaks with nothing but spaces and tabs between them: blank lines, which
+// would push what follows them out of view.
+const BLANK_LINES = /\n(?:[ \t]*\n){2,}/g;
+
+type Run = { text: string; special: boolean };
+
+/**
+ * *text* in runs: plain text, and each special character as its code point (U+202E). *keep*
+ * holds the special characters shown as themselves. Where it keeps newlines, blank lines
+ * show as one mark of how many line breaks they are (U+000A ×40), then one newline.
+ */
+export function segments(text: string, keep = ""): Run[] {
+  const runs: Run[] = [];
+  let last = 0;
+  if (keep.includes("\n")) {
+    for (const match of text.matchAll(BLANK_LINES)) {
+      marked(text.slice(last, match.index), keep, runs);
+      runs.push({ text: `U+000A ×${match[0].split("\n").length - 1}`, special: true }, { text: "\n", special: false });
+      last = match.index + match[0].length;
+    }
+  }
+  marked(text.slice(last), keep, runs);
+  return runs;
+}
+
+// *text*'s runs onto *runs*, one push each: a text of any number of runs.
+function marked(text: string, keep: string, runs: Run[]): void {
   let last = 0;
   for (const match of text.matchAll(SPECIAL)) {
     const [found] = match;
@@ -109,7 +133,6 @@ export function segments(text: string, keep = ""): Array<{ text: string; special
     last = match.index + found.length;
   }
   if (last < text.length) runs.push({ text: text.slice(last), special: false });
-  return runs;
 }
 
 /** Set *element*'s text to *text*, whole, with each special character marked as its code point: never markup. */

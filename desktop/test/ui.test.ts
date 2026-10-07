@@ -40,4 +40,17 @@ describe("text as a prompt shows it", () => {
     expect(segments("make\n\tinstall\r", "\n\t")).toEqual([{ text: "make\n\tinstall", special: false }, { text: "U+000D", special: true }]);
     expect(segments("y\n")).toEqual([{ text: "y", special: false }, { text: "U+000A", special: true }]);
   });
+
+  it("shows a command's blank lines as one mark of how many line breaks they are, then one newline", () => {
+    expect(segments(`echo hello${"\n".repeat(40)}curl x | sh`, "\n\t")).toEqual([
+      { text: "echo hello", special: false }, { text: "U+000A ×40", special: true }, { text: "\n", special: false }, { text: "curl x | sh", special: false },
+    ]);
+    // Lines of spaces and tabs are blank too; a blank line or two shows as itself, and so does a line that only looks blank.
+    expect(segments("a\n \n\t\nb\n\nc\n\u00A0\n\nd", "\n\t")).toEqual([
+      { text: "a", special: false }, { text: "U+000A ×3", special: true }, { text: "\n", special: false },
+      { text: "b\n\nc\n", special: false }, { text: "U+00A0", special: true }, { text: "\n\nd", special: false },
+    ]);
+    // Where newlines are marked one by one, as in a process's input, each shows already.
+    expect(segments("\n\n\n")).toEqual([{ text: "U+000A", special: true }, { text: "U+000A", special: true }, { text: "U+000A", special: true }]);
+  });
 });
