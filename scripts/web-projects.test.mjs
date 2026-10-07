@@ -386,6 +386,18 @@ test("a project route whose answer is not JSON, or not of its shape, says the ro
   }
 });
 
+test("a project route that refuses a field says why in words, never as the route's raw detail", async () => {
+  const { routes } = routesOver(() => Response.json({
+    detail: [
+      { type: "value_error", loc: ["body", "name"], msg: "Value error, must not be blank", input: "\u001f" },
+      { type: "string_pattern_mismatch", loc: ["body", "goal"], msg: "String should match pattern '^[^\\x00]*$'", input: "\u0000" },
+    ],
+  }, { status: 422 }));
+  await assert.rejects(routes.create({ name: "\u001f", goal: "\u0000" }), {
+    message: "name: must not be blank. goal: String should match pattern '^[^\\x00]*$'",
+  });
+});
+
 test("a project route that refuses says the route's own words", async () => {
   const { routes } = routesOver((url) => url.endsWith("/workstreams")
     ? Response.json({ detail: "This agent keeps a single conversation, so it has no projects." }, { status: 409 })
