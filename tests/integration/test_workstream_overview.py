@@ -3,13 +3,24 @@ and reopening, its stream, and starting a proposed thread from its card."""
 
 from __future__ import annotations
 
-from datetime import datetime
-from uuid import uuid4
+import asyncio
+import contextlib
+import json
+from datetime import datetime, timezone
+from uuid import UUID, uuid4
 
 import pytest
+from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 
+import surogates.api.routes.workstreams as workstreams_routes
+from surogates.db.models import InboxItem
 from surogates.session.events import EventType
-from surogates.workstreams.derive import SHELL_LIMITS
+from surogates.session.provisioning import create_child_session
+from surogates.session.store import SessionStore
+from surogates.workstreams import stream as project_stream
+from surogates.workstreams.derive import SHELL_LIMITS, derive_thread
+from surogates.workstreams.store import WorkstreamStore
 
 from .test_devices import add_user, api  # noqa: F401  (api is a fixture)
 from .test_workstream_threads import (
@@ -191,3 +202,189 @@ async def test_the_list_answers_no_more_projects_than_the_shell_takes(api, monke
         await create(api, name=name)
     listed = await api.client.get("/v1/workstreams", headers=api.auth())
     assert [summary["name"] for summary in listed.json()] == ["Audit", "Hiring"]
+
+
+def publishing(api, monkeypatch) -> None:
+    """The app's store, publishing as production's does: the fixture's has no Redis."""
+    state = api.app.state
+    monkeypatch.setattr(state, "session_store", SessionStore(state.session_factory, state.redis))
+
+
+def heard(api, monkeypatch) -> list[tuple[str, str, dict[str, str]]]:
+    """Each change published on a project's stream: the session, the kind, and
+    every thread's group as a client refetching at that moment reads it."""
+    publishing(api, monkeypatch)
+    changes: list[tuple[str, str, dict[str, str]]] = []
+    publish = project_stream.publish
+
+    async def recorded(redis, workstream_id, session_id, kind):
+        found = await WorkstreamStore(api.app.state.session_factory).thread_facts(UUID(str(workstream_id)))
+        now = datetime.now(timezone.utc)
+        changes.append((str(session_id), kind, {str(f.id): derive_thread(f, now=now)["group"] for f in found}))
+        await publish(redis, workstream_id, session_id, kind)
+
+    monkeypatch.setattr(project_stream, "publish", recorded)
+    return changes
+
+
+async def streamed(api, monkeypatch, project: dict, changes: int, act) -> list[tuple[str, dict]]:
+    """What the project's stream sends while *act* runs, up to its *changes*-th
+    change: the test client reads a response whole, so it must end."""
+    publishing(api, monkeypatch)
+
+    def respond(events):
+        async def ending():
+            seen = 0
+            async with contextlib.aclosing(events) as sent:
+                async for event in sent:
+                    yield f"event: {event['event']}\ndata: {event['data']}\n\n"
+                    seen += event["event"] == "change"
+                    if seen == changes:
+                        return
+
+        return StreamingResponse(ending(), media_type="text/event-stream")
+
+    monkeypatch.setattr(workstreams_routes, "EventSourceResponse", respond)
+    channel = f"surogates:workstream:{project['id']}"
+
+    async def acting():
+        while (await api.app.state.redis.pubsub_numsub(channel))[0][1] == 0:
+            await asyncio.sleep(0.01)
+        await act()
+
+    actor = asyncio.create_task(acting())
+    try:
+        async with asyncio.timeout(10):
+            response = await api.client.get(f"/v1/workstreams/{project['id']}/stream", headers=api.auth())
+            assert response.status_code == 200, response.text
+            await actor
+    finally:
+        actor.cancel()
+    return [
+        (event.removeprefix("event: "), json.loads(data.removeprefix("data: ")))
+        for event, data in (block.split("\n") for block in response.text.strip().split("\n\n"))
+    ]
+
+
+async def test_a_threads_question_and_its_turns_end_reach_the_projects_stream(api, monkeypatch):
+    project = await create(api)
+    thread = await start(api, await master_of(api, project))
+
+    async def act():
+        await api.app.state.session_store.emit_event(
+            thread.id, EventType.ITERATION_SUMMARY, {"summary": "Reading the brief"},
+        )
+        typed = await api.client.post(
+            f"/v1/sessions/{thread.id}/messages", json={"content": "Keep it to a page."}, headers=api.auth(),
+        )
+        assert typed.status_code == 202, typed.text
+        await asks(api, thread, "Which year?")
+        await answered(api, thread, "Drafted the memo.")
+        await turn_ends(api, thread)
+
+    sent = await streamed(api, monkeypatch, project, 6, act)
+    tid = str(thread.id)
+    assert sent == [
+        ("ready", {}),
+        ("change", {"thread_id": tid, "type": "iteration.summary"}),
+        ("change", {"thread_id": tid, "type": "user.message"}),
+        ("change", {"thread_id": tid, "type": "inbox.input_required"}),
+        ("change", {"thread_id": tid, "type": "turn.summary"}),
+        ("change", {"thread_id": tid, "type": "session.complete"}),
+        # The master's, after the thread's status: the change a client hears last.
+        ("change", {"thread_id": None, "type": "worker.complete"}),
+    ]
+
+
+async def test_the_last_change_of_a_turn_reads_its_end(api, monkeypatch):
+    project = await create(api)
+    thread = await start(api, await master_of(api, project))
+    changes = heard(api, monkeypatch)
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    *_, (_, kind, groups) = changes
+    assert (kind, groups[str(thread.id)]) == ("worker.complete", "idle")
+
+
+async def test_an_answer_on_the_questions_card_is_heard_once_its_wait_is_over(api, monkeypatch):
+    project = await create(api)
+    thread = await start(api, await master_of(api, project))
+    call_id = await asks(api, thread, "Which year?")
+    changes = heard(api, monkeypatch)
+    response = await api.client.post(
+        f"/v1/sessions/{thread.id}/ask_user_question/{call_id}/respond",
+        json={"responses": [{"question": "Which year?", "answer": "2025"}]}, headers=api.auth(),
+    )
+    assert response.status_code == 201, response.text
+    *_, (session_id, kind, groups) = changes
+    assert (session_id, kind, groups[str(thread.id)]) == (str(thread.id), "ask_user_question.response", "working")
+
+
+async def test_an_approval_answered_in_the_inbox_is_heard_once_its_wait_is_over(api, monkeypatch):
+    project = await create(api)
+    thread = await start(api, await master_of(api, project))
+    await api.app.state.session_store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, {
+        "title": "Send the draft to finance?", "action_type": "approval",
+    })
+    async with api.app.state.session_factory() as db:
+        item_id = await db.scalar(select(InboxItem.id).where(InboxItem.session_id == thread.id))
+    changes = heard(api, monkeypatch)
+    response = await api.client.post(f"/v1/inbox/{item_id}/respond", json={"completed": True}, headers=api.auth())
+    assert response.status_code == 200, response.text
+    *_, (session_id, kind, groups) = changes
+    assert (session_id, kind, groups[str(thread.id)]) == (str(thread.id), "user.message", "working")
+
+
+async def test_a_masters_own_work_is_heard_only_where_it_changes_a_count_or_a_card(api, monkeypatch):
+    project = await create(api)
+    master = await master_of(api, project)
+    changes = heard(api, monkeypatch)
+    store = api.app.state.session_store
+    for kind, data in (
+        (EventType.ITERATION_SUMMARY, {"summary": "Reading the brief"}),
+        (EventType.TODO_UPDATED, {"todos": []}),
+        (EventType.HARNESS_WAKE, {}),
+    ):
+        await store.emit_event(master.id, kind, data)
+    await asks(api, master, "Which quarter?")
+    assert [kind for _, kind, _ in changes] == ["inbox.input_required"]
+
+
+async def test_a_delegated_childs_approval_reaches_its_projects_stream(api, monkeypatch):
+    project = await create(api)
+    thread = await start(api, await master_of(api, project))
+    child = await create_child_session(store=api.app.state.session_store, parent=thread, channel="delegation")
+
+    async def act():
+        await api.app.state.session_store.emit_event(child.id, EventType.INBOX_ACTION_REQUIRED, {
+            "title": "Open the bank's site?", "action_type": "approval",
+        })
+
+    # A session under a thread is no row of its own: the client refetches the project's.
+    assert await streamed(api, monkeypatch, project, 1, act) == [
+        ("ready", {}), ("change", {"thread_id": None, "type": "inbox.action_required"}),
+    ]
+    [row] = await rows(api, project)
+    assert (row["group"], row["reason"]) == ("waiting", "approval")
+
+
+async def test_a_chat_outside_projects_publishes_on_no_projects_stream(api, monkeypatch):
+    publishing(api, monkeypatch)
+    chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    listener = api.app.state.redis.pubsub()
+    await listener.psubscribe("surogates:workstream:*")
+    try:
+        await api.app.state.session_store.emit_event(UUID(chat.json()["id"]), EventType.SESSION_COMPLETE, {})
+        assert await listener.get_message(ignore_subscribe_messages=True, timeout=0.5) is None
+    finally:
+        await listener.aclose()
+
+
+async def test_only_the_owner_hears_a_projects_stream_and_only_over_redis(api, session_factory, monkeypatch):
+    project = await create(api)
+    _, their_token = await add_user(session_factory, api.org_id)
+    response = await api.client.get(f"/v1/workstreams/{project['id']}/stream", headers=api.auth(their_token))
+    assert response.status_code == 404, response.text
+    monkeypatch.setattr(api.app.state, "redis", None)
+    response = await api.client.get(f"/v1/workstreams/{project['id']}/stream", headers=api.auth())
+    assert response.status_code == 503, response.text

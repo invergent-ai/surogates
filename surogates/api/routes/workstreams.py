@@ -7,6 +7,8 @@ capability: with it off, every web session but the canonical one is hidden.
 
 from __future__ import annotations
 
+import contextlib
+import json
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
@@ -14,6 +16,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints, model_validator
+from sse_starlette.sse import EventSourceResponse
 
 from surogates.api.routes.sessions import archive_session_tree
 from surogates.db.models import Workstream
@@ -22,6 +25,7 @@ from surogates.session.provisioning import create_agent_session
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.workstreams import master_config
+from surogates.workstreams import stream as project_stream
 from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread
 from surogates.workstreams.store import WorkstreamStore
 
@@ -242,3 +246,41 @@ async def list_threads(
     now = datetime.now(timezone.utc)
     found = await _store(request).thread_facts(project.id, thread_id=thread_id)
     return [derive_thread(facts, now=now) for facts in found[: SHELL_LIMITS["rows"]]]
+
+
+@router.get("/{workstream_id}/stream")
+async def stream_project(workstream_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant):
+    """The project's changes, as server-sent events: ``ready`` once
+    subscribed, so a client that connects again refetches what it missed,
+    then a ``change`` for each, naming the thread whose row changed, or
+    null when the change is the project's (its master's, or a session's
+    under a thread).  The client refetches what it names."""
+    project = await _project(request, workstream_id, tenant, ctx)
+    redis = getattr(request.app.state, "redis", None)
+    if redis is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Redis is required for a project's stream.")
+    threads = _store(request)
+
+    async def changes():
+        pubsub = redis.pubsub()
+        try:
+            await pubsub.subscribe(project_stream.channel(project.id))
+            yield {"event": "ready", "data": "{}"}
+            while not await request.is_disconnected():
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message is None:
+                    continue
+                data = message["data"]
+                session_id, _, kind = (data.decode() if isinstance(data, bytes) else data).partition(":")
+                thread = await threads.get_thread(UUID(session_id))
+                yield {"event": "change", "data": json.dumps({
+                    "thread_id": session_id if thread is not None and thread.workstream_id == project.id else None,
+                    "type": kind,
+                })}
+        finally:
+            with contextlib.suppress(Exception):
+                await pubsub.unsubscribe()
+            with contextlib.suppress(Exception):
+                await pubsub.aclose()
+
+    return EventSourceResponse(changes())

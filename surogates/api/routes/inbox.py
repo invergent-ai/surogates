@@ -30,6 +30,7 @@ from surogates.tenant.context import TenantContext
 from surogates.tools.builtin.ask_user_question import (
     ASK_USER_QUESTION_MAX_WAIT_SECONDS,
 )
+from surogates.workstreams import stream as project_stream
 
 router = APIRouter(prefix="/inbox")
 
@@ -501,5 +502,10 @@ async def respond_to_inbox_item(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
+    # The answer ends a project thread's wait only once the item is
+    # responded, after its message's own nudge: say so again.
+    await project_stream.publish_session(
+        request.app.state.redis, await store.get_session(item.session_id), EventType.USER_MESSAGE.value,
+    )
     await _wake_session_from_request(request, item.session_id)
     return _serialize_item(item, await _agent_fields_for(request, item.session_id))
