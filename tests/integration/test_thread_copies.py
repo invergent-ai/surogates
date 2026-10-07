@@ -951,3 +951,41 @@ async def test_a_threads_code_command_runs_no_coding_agent_on_a_copy_never_lande
     assert answer == "A thread can't start /code yet: do this step in the thread itself."
     assert (ran, pods.pods) == ([], {})
     assert (pods.project / "notes.txt").read_text() == "v1 notes\n"
+
+
+async def test_a_turn_after_a_held_landing_is_told_its_copy_lacks_that_work(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await open_pod(pool, second)  # B's copy is made before A lands
+    await a_turn(api, monkeypatch, first, [
+        calling(("terminal", {"command": "printf ' by A' >> Report.docx"})), _final_response("Edited it."),
+    ], pool=pool)
+    await a_turn(api, monkeypatch, second, [
+        calling(("terminal", {"command": "printf ' by B' >> Report.docx"})), _final_response("Edited it."),
+    ], pool=pool)
+    # B's docx was held, not merged: B's next copy lacks it, and B is told.
+    await store.emit_event(second.id, EventType.USER_MESSAGE, {"content": "Go on."})
+    await a_turn(api, monkeypatch, second, [
+        calling(("write_file", {"path": "x.md", "content": "x"})), _final_response("Done."),
+    ], pool=pool)
+    assert (await last_writes(store, second))[-1].startswith("[This thread's copy")
+
+
+async def test_a_turn_after_a_landing_that_failed_is_told_its_copy_lacks_that_work(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+
+    async def raising(**_):
+        raise RuntimeError("the lock's connection dropped")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(loop_artifact_completion, "land_turn", raising)
+        await a_turn(api, monkeypatch, thread, [
+            calling(("write_file", {"path": "a.md", "content": "a"})), _final_response("Done."),
+        ], pool=pool)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Try again."})
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "b.md", "content": "b"})), _final_response("Done."),
+    ], pool=pool)
+    assert (await last_writes(store, thread))[-1].startswith("[This thread's copy")

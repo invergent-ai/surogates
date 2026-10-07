@@ -298,3 +298,24 @@ async def test_a_slow_put_back_lets_go_only_the_pod_it_waited_on(pods, monkeypat
             await asyncio.sleep(0.01)
         await asyncio.sleep(0.05)
     assert set(pods.pods) == later and pool.holds_copy("t1")
+
+
+async def test_a_slow_put_back_that_found_no_pod_lets_go_of_none(pods, monkeypatch):
+    import asyncio
+
+    from surogates.harness import landing
+
+    monkeypatch.setattr(landing, "_PUT_BACK_BOUND", 0.05)
+    pool = SandboxPool(pods)
+    put_back = asyncio.get_running_loop().create_future()
+    monkeypatch.setitem(landing._PUTTING_BACK, "t1", put_back)
+    await landing._after_cancel(put_back, pool, "t1")  # deferred with no pod mapped
+    await pool.ensure("t1", SandboxSpec(env={"PROJECT_DIR": "/project", "HISTORY_THREAD": "t1", "USER_ID": "u1"}))
+    later = set(pods.pods)
+    put_back.set_result([])
+    async with asyncio.timeout(5):
+        while landing._TEARDOWNS or not put_back.done():
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+    # The pod mapped since is a later turn's: it stays.
+    assert set(pods.pods) == later and pool.holds_copy("t1")
