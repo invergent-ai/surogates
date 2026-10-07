@@ -718,6 +718,47 @@ async def test_a_recovery_that_lost_its_lock_stops_and_the_next_holder_finishes_
     assert pods.real_names() == ["C.md", "Report.docx", "notes.txt"]
 
 
+
+async def test_a_recovery_that_loses_its_lock_among_committed_put_backs_stops(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second, third = [await a_thread(api, name, master) for name in ("Draft A", "Draft B", "Draft C")]
+    pool = SandboxPool(pods)
+    await edited(pool, first, "for f in a b c d; do echo $f > $f.md; done")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply d.md")  # a, b, c committed; d pending
+    await edited(pool, second, "echo by B > B.md")
+    history, step, put_back = landing_module.compensate_history, landing_module.compensate_step, []
+
+    async def counted(owner, path):
+        put_back.append(path)
+        if owner == str(second.id) and len(put_back) == 2:
+            await lose_the_lock(api, second)
+
+    async def unsure(it, sandbox_pool, owner, **kwargs):
+        result = await history(it, sandbox_pool, owner, **kwargs)
+        await counted(owner, it.arguments["path"])
+        return result
+
+    async def committed(it, *, sandbox_pool, session_id):
+        result = await step(it, sandbox_pool=sandbox_pool, session_id=session_id)
+        if it.tool_name == "history.apply":
+            await counted(session_id, it.arguments["path"])
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "compensate_history", unsure)
+        patch.setattr(landing_module, "compensate_step", committed)
+        await ends(api, pool, second)
+    # The unsure d.md, then the committed c.md, then the lock goes: no put-back runs without it.
+    assert put_back == ["d.md", "c.md"]
+    [row] = await rows(api, first)
+    assert row.saga_state == "running"  # not escalated: the next holder finishes it
+
+    await edited(pool, third, "echo by C > C.md")
+    await ends(api, pool, third)
+    [row] = await rows(api, first)
+    assert row.saga_state == "compensated"
+    assert pods.real_names() == ["C.md", "Report.docx", "notes.txt"]
+
 async def test_a_project_over_the_cap_has_no_history_and_its_threads_work_on_the_real_files(api, monkeypatch, tmp_path):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
