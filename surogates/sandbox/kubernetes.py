@@ -68,6 +68,13 @@ class _PodEntry:
     # SSH remote-access resources reaped alongside the pod.
     ssh_secret_name: str | None = None
     ssh_netpol_name: str | None = None
+    # Seconds the pod is given to stop when it is deleted: its manifest's.
+    grace: int = 0
+
+
+#: A thread's pod is given this long to stop, so its geesefs sidecar can
+#: finish uploading the real files a landing wrote.  Any other pod goes at once.
+_THREAD_POD_GRACE = 30
 
 
 #: How long a RUNNING pod status is trusted without re-reading it from the
@@ -247,6 +254,7 @@ class K8sSandbox:
             token=executor_token,
             ssh_secret_name=ssh_secret_name,
             ssh_netpol_name=ssh_netpol_name,
+            grace=pod_manifest.spec.termination_grace_period_seconds or 0,
         )
         self._pods[sandbox_id] = entry
 
@@ -606,6 +614,7 @@ class K8sSandbox:
             spec=client.V1PodSpec(
                 service_account_name=self._service_account,
                 active_deadline_seconds=_DEFAULT_ACTIVE_DEADLINE,
+                termination_grace_period_seconds=_THREAD_POD_GRACE if fuse_path != "/workspace" else None,
                 restart_policy="Never",
                 automount_service_account_token=automount_sa_token,
                 security_context=pod_security_context,
@@ -924,7 +933,7 @@ class K8sSandbox:
         try:
             await api.delete_namespaced_pod(
                 entry.pod_name, entry.namespace,
-                grace_period_seconds=0,
+                grace_period_seconds=entry.grace,
             )
         except ApiException as exc:
             if exc.status != 404:

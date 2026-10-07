@@ -385,6 +385,24 @@ class TestThreadPodLayout:
         _, _, env, _ = await self.manifest(sandbox, "/workspace")
         assert not set(_NO_CACHE) & set(env)
 
+    @pytest.mark.parametrize(("mount_path", "grace"), [("/project", 30), ("/workspace", 0)])
+    async def test_a_thread_pod_goes_with_time_for_its_sidecar_to_finish(self, sandbox, mount_path, grace):
+        api = MagicMock()
+        api.create_namespaced_pod = AsyncMock()
+        api.delete_namespaced_pod = AsyncMock()
+        api.delete_namespaced_secret = AsyncMock()
+        pod = MagicMock()
+        pod.status.pod_ip = "10.42.0.7"
+        api.read_namespaced_pod = AsyncMock(return_value=pod)
+        spec = SandboxSpec(resources=[Resource(source_ref="s3://bucket/boundaries/w/workspace/", mount_path=mount_path)])
+        with patch.object(sandbox, "_get_api", AsyncMock(return_value=api)), \
+             patch.object(sandbox, "_create_s3_secret", AsyncMock()), \
+             patch.object(sandbox, "_wait_for_ready", AsyncMock()):
+            await sandbox.destroy(await sandbox.provision(spec))
+        manifest = api.create_namespaced_pod.await_args.args[1]
+        assert (manifest.spec.termination_grace_period_seconds or 0) == grace
+        assert api.delete_namespaced_pod.await_args.kwargs["grace_period_seconds"] == grace
+
     async def test_any_other_pod_mounts_the_files_at_workspace(self, sandbox):
         main, s3fs, env, volumes = await self.manifest(sandbox, "/workspace")
         assert main == {"/workspace": "workspace"}

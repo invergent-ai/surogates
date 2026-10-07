@@ -200,10 +200,11 @@ class History:
         if real != after:
             if real != before:
                 raise HistoryConflict(f"{path} changed since the thread started")
-            made = self._put(path, after)
             if after is None:
                 # A folder the deletion emptied goes with it, as git's own checkout takes it away.
-                self._take_away(takewhile(lambda f: f != self.project, (self.project / path).parents))
+                self._remove(path, takewhile(lambda f: f != self.project, (self.project / path).parents))
+            else:
+                made = self._put(path, after)
         return {"path": path, "before": before, "after": after, "made": made}
 
     def unapply(
@@ -220,9 +221,10 @@ class History:
         """
         real = self._real(path)
         if real != before:
-            if real == after:
+            if real == after and before is None:
+                self._remove(path, (self._inside(folder) for folder in made))
+            elif real == after:
                 self._put(path, before)
-                self._take_away(self._inside(folder) for folder in made)
             elif ran:
                 raise HistoryConflict(f"{path} changed after the landing wrote it")
         return {"path": path, "before": before, "after": after}
@@ -360,12 +362,14 @@ class History:
                 blob.update(chunk)
         return blob.hexdigest()
 
-    def _put(self, path: str, blob: str | None) -> list[str]:
-        """Make the real file at *path* blob *blob*, or remove it for None; the folders it made, deepest first."""
+    def _put(self, path: str, blob: str) -> list[str]:
+        """Make the real file at *path* blob *blob*, durable before it returns; the folders it made, deepest first.
+
+        geesefs uploads a file when it is fsynced, and a folder's changes
+        when the folder is: a landing answers only once the bucket has them,
+        and an fsync that fails fails the write.
+        """
         target = self._inside(path)
-        if blob is None:
-            target.unlink(missing_ok=True)
-            return []
         made = [
             str(folder.relative_to(self.project))
             for folder in takewhile(lambda f: f != self.project and not f.exists(), target.parents)
@@ -380,15 +384,24 @@ class History:
                     ["git", "cat-file", "blob", blob], stdout=out, stderr=subprocess.PIPE,
                     env=_environ({"GIT_DIR": str(self.repo)}), timeout=_GIT_TIMEOUT,
                 )
-            if result.returncode != 0:
-                raise HistoryError(f"git cat-file failed: {result.stderr.decode(errors='replace').strip()}")
+                if result.returncode != 0:
+                    raise HistoryError(f"git cat-file failed: {result.stderr.decode(errors='replace').strip()}")
+                os.fsync(out.fileno())
             os.replace(staged, target)
+            _sync(target.parent)
         except subprocess.TimeoutExpired as exc:
             raise HistoryError(f"git cat-file timed out after {_GIT_TIMEOUT}s") from exc
         finally:
             # Gone once renamed; whatever cut the write short, nothing is left beside the real file.
             staged.unlink(missing_ok=True)
         return made
+
+    def _remove(self, path: str, folders: Iterable[Path]) -> None:
+        """Remove the real file at *path*, then each of *folders* while it is empty; durable before it returns."""
+        target = self._inside(path)
+        target.unlink(missing_ok=True)
+        self._take_away(folders)
+        _sync(target.parent)
 
     @staticmethod
     def _take_away(folders: Iterable[Path]) -> None:
@@ -435,6 +448,17 @@ def _environ(env: dict[str, str]) -> dict[str, str]:
     """The pod's environment for a git with *env*: none of the pod's own git variables reach it."""
     inherited = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
     return {**inherited, **env, **_HERMETIC}
+
+
+def _sync(folder: Path) -> None:
+    """fsync *folder*, or the nearest folder above it still there: geesefs then uploads the changes in it."""
+    while not folder.is_dir():
+        folder = folder.parent
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _invalidate(path: Path) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import subprocess
@@ -592,3 +593,47 @@ def test_a_landings_check_reads_each_real_file_as_the_bucket_has_it(tmp_path, pr
     # geesefs checks the file with the bucket again, and the page cache does not answer for it.
     assert (str(project / "Report.docx"), ".invalidate") in asked
     assert dropped and set(dropped) == {os.POSIX_FADV_DONTNEED}
+
+
+def fsynced(monkeypatch, fail: str | None = None) -> list[str]:
+    """What each fsync made durable, by path; *fail* (``file`` or ``folder``) fails that kind."""
+    synced, sync = [], os.fsync
+
+    def fsync(fd):
+        path = os.readlink(f"/proc/self/fd/{fd}")
+        if fail == ("folder" if os.path.isdir(path) else "file"):
+            raise OSError(errno.EIO, "Input/output error")
+        synced.append(path)
+        sync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    return synced
+
+
+def test_a_landing_answers_only_once_its_writes_and_deletions_are_durable(tmp_path, project, monkeypatch):
+    history = opened(tmp_path, project)
+    (history.copy / "Report.docx").write_bytes(b"report v2")
+    (history.copy / "uploads" / "brief.pdf").unlink()
+    turn = history.commit_turn(author=THREAD_A, trailers=trailers("turn"))
+    synced = fsynced(monkeypatch)
+    for c in turn["changes"]:
+        history.apply(c["path"], c["before"], c["after"])
+    # The written file before it is renamed over the real one, then its
+    # folder; the deletion's folder, which went with it, through its parent.
+    assert [p.endswith(".landing~") for p in synced] == [True, False, False]
+    assert synced[1:] == [str(project), str(project)]
+
+
+@pytest.mark.parametrize("fail", ["file", "folder"])
+def test_a_write_that_cannot_be_made_durable_fails_its_apply_and_is_put_back(tmp_path, project, monkeypatch, fail):
+    history = opened(tmp_path, project)
+    (history.copy / "Report.docx").write_bytes(b"report v2")
+    [change] = history.commit_turn(author=THREAD_A, trailers=trailers("turn"))["changes"]
+    with monkeypatch.context() as patch:
+        fsynced(patch, fail=fail)
+        with pytest.raises(OSError):
+            history.apply(change["path"], change["before"], change["after"])
+    # Like any failed apply's, its file is put back where it may have been written.
+    history.unapply(change["path"], change["before"], change["after"], ran=False)
+    assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+    assert not list(project.rglob("*.landing~"))
