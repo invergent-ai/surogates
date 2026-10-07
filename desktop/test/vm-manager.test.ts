@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createInterface } from "node:readline";
+import { type ClientHttp2Session, connect as connectH2 } from "node:http2";
 import { type Duplex, duplexPair } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -53,14 +54,18 @@ async function withQemu(script: string, body: () => Promise<void>): Promise<void
   }
 }
 
-// The agent's end of the latest fake VM's control port, to say what the agent says unasked.
+// The agent's end of the latest fake VM's control port, to say what the agent says unasked,
+// and of its net port, where the agent opens its HTTP/2 session.
 let agent: Duplex | undefined;
+let agentNet: Duplex | undefined;
 
 // A VM whose control port reaches the guest's own Control on *roots*, with no QEMU:
 // what the agent is asked, and when. Without roots, an agent that never says hello.
 const fakeVm = (roots?: ControlRoots): BootVm => async () => {
   const [host, guest] = duplexPair();
   agent = guest;
+  const [net, guestNet] = duplexPair();
+  agentNet = guestNet;
   if (roots) {
     const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots);
     createInterface({ input: guest }).on("line", (line) => control.receive(line));
@@ -72,11 +77,13 @@ const fakeVm = (roots?: ControlRoots): BootVm => async () => {
   });
   return {
     control: host,
+    net,
     exited,
     share: async () => ({ kind: "virtiofs", tag: "r1" }),
     unshare: async () => {},
     kill: async () => {
       host.destroy();
+      net.destroy();
       gone("");
     },
   };
@@ -195,12 +202,13 @@ describe("the VM manager on the host", () => {
   });
 
   it("ends a VM whose monitor does not answer a share in time, so its guest is lost", async () => {
-    // A QEMU with its two sockets, whose monitor greets and takes its capabilities, then answers nothing.
+    // A QEMU with its three sockets, whose monitor greets and takes its capabilities, then answers nothing.
     const fake = join(dir, "qemu.cjs");
     writeFileSync(fake, [
       'const net = require("node:net");',
       "const run = process.argv[2];",
       'net.createServer(() => {}).listen(run + "/control.sock");',
+      'net.createServer(() => {}).listen(run + "/net.sock");',
       "net.createServer((socket) => {",
       '  socket.write(\'{"QMP": {"version": {}, "capabilities": []}}\\n\');',
       '  socket.once("data", () => socket.write(\'{"return": {}}\\n\'));',
@@ -224,7 +232,7 @@ describe("the VM manager on the host", () => {
     });
   });
 
-  // A QEMU with its two sockets, whose monitor takes every command, writes each to dir/commands,
+  // A QEMU with its three sockets, whose monitor takes every command, writes each to dir/commands,
   // and says a device it was asked to delete is deleted, but while dir/stuck is there. As QEMU
   // does, it refuses to delete a device a second time.
   const answering = () => {
@@ -234,6 +242,7 @@ describe("the VM manager on the host", () => {
       'const net = require("node:net");',
       "const run = process.argv[2];",
       'net.createServer(() => {}).listen(run + "/control.sock");',
+      'net.createServer(() => {}).listen(run + "/net.sock");',
       "const deleting = new Set();",
       "net.createServer((socket) => {",
       '  socket.write(\'{"QMP": {"version": {}, "capabilities": []}}\\n\');',
@@ -493,6 +502,62 @@ describe("a root's protected keys in the guest", () => {
       ["setup", "root-1"], ["protect", "root-1", KEYS], ["setup", "root-1"], ["bound", "root-1"],
       ["protect", "root-1", KEYS], ["bound", "root-1"], ["run", "root-1"], ["run", "root-1"],
     ]);
+    await manager.stop();
+  });
+});
+
+describe("a root's network, through the guest's net port", () => {
+  const roots: ControlRoots = {
+    uid: () => 10_000, setup: async () => {}, teardown: async () => {}, protect: async () => {},
+    perform: async () => ({ ok: { output: "done\n", returncode: 0, timed_out: false } }),
+  };
+  const run = (manager: VmManager, root = "root-1") => manager.perform({
+    id: `run-${Math.random()}`, root, folder: { path: dir, ...statSync(dir) }, kind: "run", args: {},
+  }, new AbortController().signal);
+  // A connection the agent opens for *root* in its one session on the net port, as its tunnels
+  // do: the status the host proxy answers, and its reason.
+  const connection = (session: ClientHttp2Session, authority: string, root = "root-1") => new Promise<[number, unknown]>((resolve) => {
+    const stream = session.request({ ":method": "CONNECT", ":authority": authority, "surogate-root": root });
+    stream.on("response", (headers) => resolve([Number(headers[":status"]), headers["surogate-reason"]]));
+  });
+
+  it("is judged by the host proxy, for the root the agent names, and told in that root's next run", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager(options(), fakeVm(roots), () => {}, { ask: async (root, request) => (asked.push([root, request]), false) });
+    expect(await run(manager)).toEqual({ ok: { output: "done\n", returncode: 0, timed_out: false } });
+    const session = connectH2("http://guest", { createConnection: () => agentNet as Duplex });
+    expect(await connection(session, "127.0.0.1:9")).toEqual([403, "own"]);
+    // TEST-NET-1: an address elsewhere, which the egress denies.
+    expect(await connection(session, "192.0.2.1:9")).toEqual([403, "denied"]);
+    // A root named that is no root id at all.
+    expect(await connection(session, "192.0.2.1:9", "../etc")).toEqual([403, "invalid"]);
+    expect(asked).toEqual([["root-1", { host: "192.0.2.1", port: 9, privateNetwork: false }]]);
+    expect(await run(manager)).toEqual({
+      ok: {
+        output: "done\n\nThis computer does not let a chat reach its own network services (127.0.0.1:9)\nThis computer did not allow network access to 192.0.2.1:9.",
+        returncode: 0,
+        timed_out: false,
+      },
+    });
+    await manager.stop();
+  });
+
+  it("starts a root set up again with nothing met, even by a connection that landed once it was torn down", async () => {
+    const manager = new VmManager(options(), fakeVm(roots));
+    await run(manager);
+    const session = connectH2("http://guest", { createConnection: () => agentNet as Duplex });
+    await manager.teardown("root-1");
+    // As a connection still in flight at the teardown lands.
+    expect(await connection(session, "127.0.0.1:9")).toEqual([403, "own"]);
+    expect(await run(manager)).toEqual({ ok: { output: "done\n", returncode: 0, timed_out: false } });
+    await manager.stop();
+  });
+
+  it("refuses every destination off the package hosts without an egress to ask", async () => {
+    const manager = new VmManager(options(), fakeVm(roots));
+    await run(manager);
+    const session = connectH2("http://guest", { createConnection: () => agentNet as Duplex });
+    expect(await connection(session, "192.0.2.1:9")).toEqual([403, "denied"]);
     await manager.stop();
   });
 });

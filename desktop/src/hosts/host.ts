@@ -27,6 +27,7 @@ import { GLOB, hideSrtTmp, quote, sandboxPolicy } from "./policy.js";
 import { appeared, extraDenies, GRANT_CHANGED, guestBinds, identity, protectedKeys, srtTargets } from "./restarts.js";
 import { CANCELLED, unenterable, workdir } from "../guest/command.js";
 import { destination, reach } from "../vm/egress.js";
+import { networkNotice, withNotice as appendNotice } from "../vm/proxy.js";
 import { Processes } from "../guest/processes.js";
 import type { BindMode, ProtectedKey } from "../guest/protocol.js";
 import type { SessionRunner } from "../guest/runner-process.js";
@@ -40,8 +41,6 @@ const STOP_COMMANDS_MS = 2_000;
 const WATCH_MS = 5_000;
 // A protected key that comes and goes restarts the runner at most once in this long; a restart asked for sooner waits.
 const RESTART_WINDOW_MS = 10_000;
-// How many destinations of a kind a notice names.
-const NOTICE_NAMES = 20;
 const PROCESS_KINDS = new Set(["start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"]);
 
 // A channel the app has closed is not an error: with no callback, Node would raise
@@ -623,30 +622,14 @@ async function restarted(signal: AbortSignal): Promise<void> {
 // srt does not say which command asked, so a command that ends first may carry another's.
 function withNotice(outcome: Outcome): Outcome {
   if (!("ok" in outcome)) return outcome;
-  const local = line(own, (names) => `This computer does not let a chat reach its own network services (${names})`);
-  // Neutral: a denial can also be a prompt that failed or was dismissed, or no one to ask.
-  const denied = line(refused, (names) => `This computer did not allow network access to ${names}.`);
   // Each open ask once: the agent learns that it waits, then, once answered, that it was refused.
   const untold = [...asks.values()].filter((ask) => !ask.told);
   for (const ask of untold) ask.told = true;
-  const waits = line(untold.map((ask) => ask.key), (names) => `Still waiting for this computer's user to allow network access to ${names}.`);
-  const lost = line(unknown, (names) => `This computer could not look up ${names}.`);
+  const network = networkNotice({ own, refused, waiting: untold.map((ask) => ask.key), unknown });
   own.clear();
   refused.clear();
   unknown.clear();
-  const notice = [local, denied, waits, lost, processes?.takeNotice()].filter(Boolean).join("\n");
-  if (!notice) return outcome;
-  const ok = outcome.ok as { output: string; returncode: number; timed_out: boolean };
-  return { ok: { ...ok, output: `${ok.output}${ok.output ? "\n" : ""}${notice}` } };
-}
-
-// A notice's line about *keys*, naming the first NOTICE_NAMES of them and then how many
-// more, so a sweep of ports cannot flood the agent's output; none for no keys.
-function line(keys: Iterable<string>, say: (names: string) => string): string | null {
-  const all = [...keys];
-  if (all.length === 0) return null;
-  const more = all.length > NOTICE_NAMES ? ` and ${all.length - NOTICE_NAMES} more` : "";
-  return say(`${all.slice(0, NOTICE_NAMES).join(", ")}${more}`);
+  return appendNotice(outcome, [network, processes?.takeNotice()].filter(Boolean).join("\n") || null);
 }
 
 function save(change: Partial<FolderRecord>): void {

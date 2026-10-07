@@ -15,7 +15,7 @@ import { inside } from "../files/paths.js";
 import type { Outcome } from "../link/protocol.js";
 import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STOPPED, supervise, timedOut } from "./command.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
-import { type Answer, type BindMode, type HostUser, MAX_SHARES, type ProtectedKey, type Question, type Share } from "./protocol.js";
+import { type Answer, type BindMode, type HostUser, MAX_SHARES, type ProtectedKey, type Question, ROOT_ID, type Share } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 
 // The sessions disk's folder of roots (vm/init), each named by its root session id.
@@ -48,7 +48,6 @@ const NAMED = 20;
 // The cloud's layout of the commands' environment, written by the image's build.
 const LAYOUT = "/etc/surogate/environment";
 const FIRST_UID = 10_000;
-const ROOT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 // A share's number in its guest is never used again there, so it grows with every folder added.
 const TAG = /^r[1-9][0-9]{0,8}$/;
 // Any name a passwd line can hold, as directories join AD users (ana@corp.example):
