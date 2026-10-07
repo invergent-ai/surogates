@@ -9,7 +9,7 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && mkdir -p dist/shell/pages && cp src/shell/pages/*.html src/shell/pages/*.css dist/shell/pages/",
+    "build": "tsc -p tsconfig.build.json && mkdir -p dist/shell/pages dist/browser/observe && cp src/shell/pages/*.html src/shell/pages/*.css dist/shell/pages/ && cp ../surogates/browser/observe/*.js dist/browser/observe/",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "electron:install": "node node_modules/electron/install.js",
     "start": "npm run build && npm run agent-disk && env -u ELECTRON_RUN_AS_NODE electron dist/shell/main.js",

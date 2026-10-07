@@ -50,6 +50,13 @@ const CHECK_MS = 15_000;
 export const PROXY_BYPASSED =
   "The agent's browser would not go through Surogate's proxy: its proxy settings are managed elsewhere on this computer, for example by a policy. So it is not used.";
 
+// What a page did that its agent could not see happen, at most this many to an answer.
+const MAX_NOTICES = 20;
+export const FILE_ASKED =
+  "The page asked for a file to upload. The agent's browser on this computer has no files to give it, so nothing was chosen.";
+export const downloaded = (name: string): string =>
+  `The page started a download (${JSON.stringify(name.slice(0, 200))}). This computer does not keep the agent's downloads, so it was not saved.`;
+
 const failed = (message: string): Outcome => ({ error: { type: "browser", message } });
 
 // A browser's error, its first line: Playwright's call log follows it.
@@ -209,15 +216,25 @@ export class BrowserHost {
     return { page, opened: true };
   }
 
-  // *page* is *session*'s, and so is every popup it opens. Service workers answer none of its
-  // requests, so one a page installs never answers another chat's tab (Playwright's own block
-  // replaces only navigator.serviceWorker.register).
+  // *page* is *session*'s, and so is every popup it opens. A file it asks for opens no dialog,
+  // and a download it starts is not kept; its agent is told of each with its next answer.
+  // Service workers answer none of its requests, so one a page installs never answers another
+  // chat's tab (Playwright's own block replaces only navigator.serviceWorker.register).
   private async adopt(session: string, page: Page): Promise<void> {
     this.tabs.get(session)?.push(page);
     page.on("popup", (popup) => void this.adopt(session, popup).catch(() => {}));
+    // With a listener, the browser opens no file dialog of its own: no path the agent did not get reaches a page.
+    page.on("filechooser", () => this.note(session, FILE_ASKED));
+    page.on("download", (download) => this.note(session, downloaded(download.suggestedFilename())));
     const protocol = await page.context().newCDPSession(page);
     await protocol.send("Network.enable");
     await protocol.send("Network.setBypassServiceWorker", { bypass: true });
+  }
+
+  private note(session: string, notice: string): void {
+    const notices = this.unseen.get(session) ?? [];
+    if (notices.length < MAX_NOTICES) notices.push(notice);
+    this.unseen.set(session, notices);
   }
 
   // A page that does not answer within the bound is closed: the call stuck on it ends, and its

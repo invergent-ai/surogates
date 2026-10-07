@@ -13,7 +13,7 @@ import { join } from "node:path";
 import type { BrowserContext } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { BrowserHost, type BrowserHostOptions, type Launch, PROXY_BYPASSED, WEAKENING } from "../src/browser/host.js";
+import { BrowserHost, type BrowserHostOptions, FILE_ASKED, type Launch, PROXY_BYPASSED, WEAKENING } from "../src/browser/host.js";
 import { isolated, notIsolated } from "./isolated.js";
 
 const EXECUTABLE = ["/opt/google/chrome/chrome", "/opt/microsoft/msedge/msedge"].find((path) => existsSync(path));
@@ -202,6 +202,66 @@ describe.skipIf(!run)("the browser host", () => {
     expect(await script(b, "return document.title;")).toBe("Second");
     // A's next operation opens a tab again.
     expect((await op(a, "browser.navigate", { url: "http://fixture.test/" })).ok?.opened).toBe(true);
+  });
+
+  it("finds the page's elements in every frame with their backend ids, and clicks one where it is now", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    const snapshot = (await op(a, "browser.observe", { script: "snapshot@1", params: { selector: null } })).ok;
+    expect(snapshot.title).toBe("Fixture");
+    const nodes = snapshot.frames.flatMap((frame: { x: number; nodes: unknown[] }) => frame.nodes.map((node) => ({ frame: frame.x, node })));
+    const go = nodes.find(({ node }: { node: { name: string } }) => node.name === "Go").node;
+    expect(go.role).toBe("button");
+    expect(typeof go.backend_node_id).toBe("number");
+    // The iframe's link, with its frame's origin.
+    expect(nodes.find(({ node }: { node: { name: string } }) => node.name === "Inner link").frame).toBe(300);
+    const place = (await op(a, "browser.observe", { script: "locate@1", params: { backend_node_id: go.backend_node_id, role: "button", name: "Go", nth: 0 } })).ok;
+    expect(place).toEqual({ x: 90, y: 55 });
+    // Found again by role and name when its id has gone.
+    expect((await op(a, "browser.observe", { script: "locate@1", params: { backend_node_id: 999_999, role: "button", name: "Go", nth: 0 } })).ok).toEqual(place);
+    expect((await op(a, "browser.observe", { script: "locate@1", params: { backend_node_id: null, role: "button", name: "Gone", nth: 0 } })).ok).toEqual({ missing: "gone" });
+    await op(a, "browser.mouse", { action: "click", x: place.x, y: place.y, button: "left", clicks: 1 });
+    expect(await script(a, "return document.title;")).toBe("clicked 1");
+    expect((await op(a, "browser.observe", { script: "nothing@1", params: {} })).error?.type).toBe("browser");
+  });
+
+  it("types, presses keys, scrolls, drags and takes its shot, with the labels drawn for it and gone after", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    await op(a, "browser.keyboard", { action: "type", text: "héllo", at: { x: 140, y: 112 }, delay: 0 });
+    await op(a, "browser.keyboard", { action: "press", keys: "Shift+Home", delay: 0 });
+    expect(await script(a, "const i = document.getElementById('name'); return [i.value, i.selectionStart, i.selectionEnd];")).toEqual(["héllo", 0, 5]);
+    const scrolled = (await op(a, "browser.mouse", { action: "wheel", x: 100, y: 100, delta_x: 0, delta_y: 600 })).ok;
+    expect(scrolled.scroll_y).toBeGreaterThan(0);
+    expect(scrolled.viewport_height).toBeGreaterThan(0);
+    expect((await op(a, "browser.mouse", { action: "drag", path: [[10, 10], [20, 20], [30, 30]], button: "left" })).ok).toEqual({ notices: [] });
+    const shot = (await op(a, "browser.screenshot", { clip: null, labels: [{ label: 1, x: 90, y: 55 }] })).ok as string;
+    expect(Buffer.from(shot, "base64").subarray(0, 8)).toEqual(Buffer.from("\x89PNG\r\n\x1a\n", "latin1"));
+    expect(await script(a, "return document.getElementById('surogates-overlay');")).toBeNull();
+  });
+
+  it("opens no file dialog for a file input, keeps no download, and tells the agent of each", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 })).ok.notices).toEqual([FILE_ASKED]);
+    const download = await op(a, "browser.mouse", { action: "click", x: 60, y: 255, button: "left", clicks: 1 });
+    await expect.poll(async () => {
+      const said = (await op(a, "browser.mouse", { action: "move", x: 1, y: 1 })).ok.notices as string[];
+      return [...download.ok.notices, ...said].join(" ");
+    }).toContain(`("report.txt")`);
+    expect(readdirSync(profile).some((name) => name.includes("report"))).toBe(false);
+  });
+
+  it("takes a popup a session's tab opens as the session's: its operations act there, and its close closes both", async () => {
+    const [a, b] = [session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    await op(b, "browser.navigate", { url: "http://fixture.test/second" });
+    await op(a, "browser.mouse", { action: "click", x: 50, y: 155, button: "left", clicks: 1 });
+    await expect.poll(() => script(a, "return document.title;")).toBe("Second");
+    expect(await pages()).toBe(3);
+    expect(await op(a, "browser.close")).toEqual({ ok: { closed: true } });
+    expect(await pages()).toBe(1);
+    expect(await script(b, "return document.title;")).toBe("Second");
   });
 
   it("launches again after its user closed it, in new tabs", async () => {
