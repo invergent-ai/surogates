@@ -630,3 +630,52 @@ async def test_the_locks_check_fails_once_its_block_has_ended(api):
     # A put-back that outlives the block is never told the lock is still its own.
     with pytest.raises(RuntimeError, match="let go"):
         await held()
+
+
+async def test_a_put_back_that_failed_before_its_worker_died_is_tried_again_by_the_next_landing(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo a > a.md && echo b > b.md && echo z > z.md")
+    call, compensate = landing_module._call, landing_module.compensate_step
+    save, touch = landing_module.save_landing, landing_module.touch_landing
+    killed = asyncio.Event()
+
+    async def z_fails(sandbox_pool, owner, action, **arguments):
+        if owner == str(first.id) and action == "apply" and arguments["path"] == "z.md":
+            raise landing_module.LandingStepError("the pod's step timed out")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    async def b_fails_then_the_worker_dies(it, *, sandbox_pool, session_id):
+        if session_id == str(first.id) and it.arguments.get("path") == "b.md":
+            raise landing_module.LandingStepError("the pod's step timed out")  # b.md stays as the turn wrote it
+        result = await compensate(it, sandbox_pool=sandbox_pool, session_id=session_id)
+        if session_id == str(first.id) and it.arguments.get("path") == "a.md":
+            killed.set()
+            raise asyncio.CancelledError  # before the row says escalated
+        return result
+
+    async def until_killed(write, *args, **kwargs):
+        if not killed.is_set():
+            await write(*args, **kwargs)
+
+    monkeypatch.setattr(landing_module, "_call", z_fails)
+    monkeypatch.setattr(landing_module, "compensate_step", b_fails_then_the_worker_dies)
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "save_landing", partial(until_killed, save))
+        patch.setattr(landing_module, "touch_landing", partial(until_killed, touch))
+        with pytest.raises(asyncio.CancelledError):
+            await ends(api, pool, first)
+    async with api.app.state.session_factory() as db:  # its lease runs out, as a dead worker's does
+        await db.execute(text("DELETE FROM session_leases WHERE session_id = :id"), {"id": first.id})
+        await db.commit()
+    [row] = await rows(api, first)
+    assert (row.saga_state, [s["state"] for s in row.steps]) == ("running", ["committed", "compensating", "compensation_failed", "failed"])
+    assert pods.real_names() == ["Report.docx", "b.md", "notes.txt"]
+
+    await edited(pool, second, "echo by B > B.md")
+    await ends(api, pool, second)
+    # b.md's put-back is tried again, and the landing is undone whole.
+    [row] = await rows(api, first)
+    assert row.saga_state == "compensated"
+    assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
