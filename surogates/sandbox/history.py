@@ -17,8 +17,9 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from itertools import takewhile
 from pathlib import Path, PurePosixPath
 
 from surogates.tools.utils.checkpoint_manager import DEFAULT_EXCLUDES
@@ -179,29 +180,37 @@ class History:
         """Write the turn's version of *path* into the real files, if the real file is still *before*.
 
         Safe to repeat: a real file that is already *after* is left as it
-        is, so a retry after a lost reply does not fail.
+        is, so a retry after a lost reply does not fail.  ``made`` are the
+        folders it made for the file, which its put-back takes away again.
         """
         real = self._real(path)
+        made: list[str] = []
         if real != after:
             if real != before:
                 raise HistoryConflict(f"{path} changed since the thread started")
-            self._put(path, after)
-        return {"path": path, "before": before, "after": after}
+            made = self._put(path, after)
+            if after is None:
+                # A folder the deletion emptied goes with it, as git's own checkout takes it away.
+                self._take_away(takewhile(lambda f: f != self.project, (self.project / path).parents))
+        return {"path": path, "before": before, "after": after, "made": made}
 
     def unapply(
-        self, path: str, before: str | None, after: str | None, *, ran: bool = True,
+        self, path: str, before: str | None, after: str | None, *, ran: bool = True, made: Iterable[str] = (),
     ) -> dict:
         """Put back *path*'s version from before the landing, where the real file is still the landing's.
 
         Safe to repeat: a real file that is already *before* is left as it
         is.  A real file that is neither is someone else's change: a
         conflict, unless the apply failed (*ran* false), and then it found
-        the file changed and wrote nothing.
+        the file changed and wrote nothing.  The folders the apply *made*
+        for its file go with it, if nothing else is in them; a folder that
+        was already there stays, empty or not.
         """
         real = self._real(path)
         if real != before:
             if real == after:
                 self._put(path, before)
+                self._take_away(self._inside(folder) for folder in made)
             elif ran:
                 raise HistoryConflict(f"{path} changed after the landing wrote it")
         return {"path": path, "before": before, "after": after}
@@ -317,20 +326,16 @@ class History:
         target = self._inside(path)
         return self._main("hash-object", "--", str(target)) if target.is_file() else None
 
-    def _put(self, path: str, blob: str | None) -> None:
-        """Make the real file at *path* blob *blob*, or remove it for None."""
+    def _put(self, path: str, blob: str | None) -> list[str]:
+        """Make the real file at *path* blob *blob*, or remove it for None; the folders it made, deepest first."""
         target = self._inside(path)
         if blob is None:
             target.unlink(missing_ok=True)
-            # A folder the removal emptied goes with it, as git's own checkout takes it away.
-            for folder in target.parents:
-                if folder == self.project:
-                    break
-                try:
-                    folder.rmdir()
-                except OSError:  # not empty
-                    break
-            return
+            return []
+        made = [
+            str(folder.relative_to(self.project))
+            for folder in takewhile(lambda f: f != self.project and not f.exists(), target.parents)
+        ]
         # Written beside the real file, then renamed over it: a write cut
         # short leaves the real file whole.  History leaves out the *~ name.
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -349,6 +354,16 @@ class History:
         finally:
             # Gone once renamed; whatever cut the write short, nothing is left beside the real file.
             staged.unlink(missing_ok=True)
+        return made
+
+    @staticmethod
+    def _take_away(folders: Iterable[Path]) -> None:
+        """Remove each of *folders*, deepest first, until one is not empty."""
+        for folder in folders:
+            try:
+                folder.rmdir()
+            except OSError:  # not empty, or gone
+                return
 
     # ------------------------------------------------------------------
     # Git

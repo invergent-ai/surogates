@@ -497,13 +497,6 @@ def test_a_turns_empty_folders_are_named_and_a_landing_takes_away_the_folders_it
     # History has no empty folder: they are not saved, and the report says so.
     assert out["excluded"] == ["Q1/", "Q2/"]
     assert not (project / "old").exists()
-    # Put back, a file the landing added takes its new folder with it.
-    (history.copy / "threads" / "A").mkdir(parents=True)
-    (history.copy / "threads" / "A" / "a.md").write_text("A's notes")
-    [change] = history.commit_turn(author=THREAD_A, trailers=trailers("turn"))["changes"]
-    history.apply(change["path"], change["before"], change["after"])
-    history.unapply(change["path"], change["before"], change["after"])
-    assert not (project / "threads").exists()
 
 
 def test_a_rename_with_an_edit_git_cannot_pair_keeps_the_draft_while_its_target_is_held(tmp_path, project):
@@ -558,3 +551,16 @@ def test_a_folder_deleted_and_cloned_into_keeps_its_files(tmp_path, project):
     out = landed(history)
     assert (out["repositories"], [o["path"] for o in out["overlapped"]]) == (["docs/"], ["docs/a.md", "docs/b.md"])
     assert sorted(p.name for p in (project / "docs").iterdir()) == ["a.md", "b.md"]
+
+
+def test_a_put_back_takes_away_only_the_folders_its_apply_made(tmp_path, project):
+    (project / "Reports").mkdir()  # the user's empty folder: history holds none
+    history = opened(tmp_path, project)
+    for name in ("Reports/q1.md", "Drafts/2026/a.md"):
+        (history.copy / name).parent.mkdir(parents=True, exist_ok=True)
+        (history.copy / name).write_text(name)
+    turn = history.commit_turn(author=THREAD_A, trailers=trailers("turn"))
+    for applied in [history.apply(c["path"], c["before"], c["after"]) for c in turn["changes"]]:
+        history.unapply(**applied)
+    assert sorted(p.name for p in project.iterdir() if p.is_dir()) == [".threads", "Reports", "node_modules", "uploads"]
+    assert not any((project / "Reports").iterdir())

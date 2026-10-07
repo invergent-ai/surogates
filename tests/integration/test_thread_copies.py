@@ -238,6 +238,26 @@ async def test_an_apply_that_fails_on_the_third_of_five_files_puts_the_first_two
     )
 
 
+async def test_a_rolled_back_landing_takes_away_the_folders_it_made_and_leaves_the_users(api, monkeypatch, pods):
+    (pods.project / "Reports").mkdir()  # the user's, still empty
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    apply = History.apply
+
+    def a_save_lands_first(self, path, before, after):
+        if path == "c.md":
+            (self.project / "c.md").write_text("saved by you just now")
+        return apply(self, path, before, after)
+
+    monkeypatch.setattr(History, "apply", a_save_lands_first)
+    await a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "mkdir -p Drafts/2026 Reports && echo a > Drafts/2026/a.md && echo q > Reports/q1.md && echo c > c.md"})),
+        _final_response("Wrote three notes."),
+    ], pool=SandboxPool(pods), saga_settings=QUICK)
+    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "Reports", "c.md", "notes.txt"]
+    assert not any((pods.project / "Reports").iterdir())
+
+
 class LosesAReply(SandboxPool):
     """A pool whose pod writes ``b.md``, but whose reply to that apply never comes back."""
 

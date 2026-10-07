@@ -126,8 +126,10 @@ async def compensate_history(
     """
     if step.tool_name != "history.apply":
         return None
+    # The folders the apply made for its file go with it; a failed apply's are not known.
+    made = step.execute_result.get("made", []) if isinstance(step.execute_result, dict) else []
     raw = await sandbox_pool.execute(
-        session_id, "_history", json.dumps({**step.arguments, "action": "unapply", "ran": ran}),
+        session_id, "_history", json.dumps({**step.arguments, "made": made, "action": "unapply", "ran": ran}),
     )
     result = json.loads(raw)
     if "error" in result:
