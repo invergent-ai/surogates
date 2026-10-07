@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { Failure } from "../src/files/answers.js";
-import { checkWrite, inFolderRefusal, protectedInFolder } from "../src/files/protect.js";
+import { checkWrite, inFolderRefusal, movesOutOfDependency, protectedInFolder } from "../src/files/protect.js";
 
 const home = "/home/tester";
 let folder: string;
@@ -186,5 +186,31 @@ describe("protectedInFolder", () => {
     expect(protectedInFolder(folder, `${folder}/src/.vscode`)).toBe(true);
     expect(protectedInFolder(folder, `${folder}/a.txt`)).toBe(false);
     expect(protectedInFolder(folder, folder)).toBe(false);
+  });
+
+  // Package managers unpack what packages ship, .idea and .vscode folders among it (iconv-lite's).
+  it.each([
+    "node_modules/iconv-lite/.idea/codeStyles/Project.xml", "a/node_modules/b/.vscode/settings.json", "NODE_MODULES/b/.mcp.json",
+    ".venv/lib/python3.12/site-packages/pkg/.vscode/settings.json", "usr/lib/python3/dist-packages/pkg/.bashrc",
+    "node_modules/pkg/.claude/commands/x.md", "node_modules/pkg/.claude/agents/y.md",
+  ])("leaves a shell's, editor's or agent's name below a dependency folder open: %s", (path) => {
+    expect(protectedInFolder(folder, `${folder}/${path}`)).toBe(false);
+  });
+
+  it.each([
+    "node_modules/pkg/.gitmodules", "site-packages/pkg/.gitconfig", "node_modules/pkg/.git", "node_modules/pkg/.git/hooks/pre-commit",
+    "node_modules/pkg/.git/config", ".vscode/node_modules/x", ".claude/commands/node_modules/x", "node_modules_old/.idea",
+  ])("still protects git's names below a dependency folder, and any name above one: %s", (path) => {
+    expect(protectedInFolder(folder, `${folder}/${path}`)).toBe(true);
+  });
+
+  // What a dependency folder holds goes unjudged: a directory moved out of one would carry it.
+  it.each([
+    ["node_modules/p", "planted", false, true], ["node_modules", "plain", false, true], ["a/site-packages/r", "a/r", false, true],
+    ["x/dist-packages", "x/y", false, true], ["Node_Modules/p", "p", false, true], ["plain", "node_modules/p", true, true],
+    ["node_modules/p", "node_modules/.p-retired", false, false], ["plain", "node_modules/p", false, false], ["a", "b", true, false],
+    ["node_modules/a/node_modules/b", "node_modules/b", false, false], ["site-packages/r", "dist-packages/r", true, false],
+  ])("judges a directory moved from %s to %s (exchange: %s): out of a dependency folder %s", (from, to, exchange, out) => {
+    expect(movesOutOfDependency(folder, `${folder}/${from}`, `${folder}/${to}`, exchange)).toBe(out);
   });
 });

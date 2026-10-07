@@ -10,7 +10,8 @@
 #            build without --target builds it.
 #   guest    the desktop VM's root filesystem: no geesefs, no claude-code or
 #            codex (switched off for local folders); the stub init, the pinned
-#            kernel's modules, iproute2, e2fsprogs and kmod.
+#            kernel's modules, the guest-kernel rule and bpftool, iproute2,
+#            e2fsprogs and kmod.
 #
 # Build (from repo root):
 #   docker build -t ghcr.io/invergent-ai/surogates-agent-sandbox:latest -f images/sandbox/Dockerfile .
@@ -171,12 +172,47 @@ ADD --checksum=sha256:9287a0b722a7dd0c94a412eda8e27de4742a7925fdf2d08375b2f60851
     https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-6.8.0-146-generic_6.8.0-146.146_amd64.deb /tmp/modules.deb
 RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel
 
+# ── The guest-kernel rule (BPF-LSM), compiled against the pinned kernel's BTF ──
+# The BTF is the pinned vmlinuz's own: its zstd payload is a vmlinux that keeps .BTF.
+FROM ubuntu:24.04 AS bpf
+ARG KERNEL
+RUN apt-get update && apt-get install -y --no-install-recommends clang llvm libbpf-dev linux-tools-${KERNEL} zstd \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=kernel /kernel/boot/vmlinuz-${KERNEL} /vmlinuz
+COPY desktop/vm/rule.bpf.c desktop/vm/rule-match.h /src/
+# zstd stops with an error at the bytes after the payload; bpftool refuses anything but a whole vmlinux.
+# Each lsm/<hook> program must take as many arguments as bpf_lsm_<hook> in the BTF (its FUNC_PROTO's vlen):
+# the verifier loads one that does not, which then reads the wrong ones, or the hook's return slot as one.
+# The check counts the commas of the BPF_PROG( line after each SEC, so it misjudges a declaration split
+# across lines, or one that also takes the optional trailing int ret: keep each on one line, without ret.
+RUN at=$(LC_ALL=C grep -aboP '\x28\xb5\x2f\xfd' /vmlinuz | head -1 | cut -d: -f1) \
+    && { tail -c +$((at + 1)) /vmlinuz | zstd -dcq > /vmlinux || true; } \
+    && { test -s /vmlinux || { echo "no vmlinux decompressed from /vmlinuz" >&2; exit 1; }; } \
+    && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format c > /src/vmlinux.h \
+    && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format raw | awk ' \
+        FNR == NR && $2 == "FUNC_PROTO" { for (i = 3; i <= NF; i++) if ($i ~ /^vlen=/) vlen[substr($1, 2, length($1) - 2)] = substr($i, 6); next; } \
+        FNR == NR && $2 == "FUNC" && $3 ~ /^.bpf_lsm_/ { proto[substr($3, 10, length($3) - 10)] = substr($4, 9); next; } \
+        FNR == NR { next; } \
+        hook != "" && !/BPF_PROG\(/ { print "lsm/" hook ": no BPF_PROG on the line after its SEC" > "/dev/stderr"; bad = 1; hook = ""; } \
+        hook != "" { args = $0; sub(/.*BPF_PROG\(/, "", args); sub(/\).*/, "", args); n = gsub(/,/, "", args); want = vlen[proto[hook]]; \
+          if (want == "") { print "lsm/" hook ": the pinned kernel has no bpf_lsm_" hook > "/dev/stderr"; bad = 1; } \
+          else if (n != want) { print "lsm/" hook ": its program takes " n " arguments, and bpf_lsm_" hook " in the pinned kernel takes " want > "/dev/stderr"; bad = 1; } \
+          checked++; hook = ""; } \
+        /^SEC\("lsm\// { hook = $0; sub(/^SEC\("lsm\//, "", hook); sub(/".*/, "", hook); } \
+        END { if (bad || !checked) exit 1; print checked " lsm programs take as many arguments as their hooks"; }' \
+        - /src/rule.bpf.c \
+    && clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I/src -c /src/rule.bpf.c -o /rule.bpf.o
+
 # ── Surogate Desktop's VM guest ─────────────────────────────────────
 FROM tools AS guest
 ARG KERNEL
+# libelf1, zlib1g, libcap2 and libzstd1 are bpftool's libraries.
 RUN apt-get update && apt-get install -y --no-install-recommends iproute2 e2fsprogs kmod \
+        libelf1 zlib1g libcap2 libzstd1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=kernel /kernel/lib/modules/ /usr/lib/modules/
+COPY --from=bpf /rule.bpf.o /usr/lib/surogate/rule.bpf.o
+COPY --from=bpf --chmod=0755 /usr/lib/linux-tools/${KERNEL}/bpftool /usr/sbin/bpftool
 COPY --chmod=0755 images/guest/surogate-init /usr/sbin/surogate-init
 # No setuid programs and no file capabilities: the image is mounted read-only,
 # so none comes back. /etc/surogate/environment is the commands' environment,

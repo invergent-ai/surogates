@@ -5,7 +5,7 @@
 // npm run agent-disk.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -132,10 +132,74 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     expect(await lint()).toEqual(ran("broken\n"));
     expect(await patch("def f():\n    return 1\n")).toEqual({ ok: null });
     expect(await lint()).toEqual(ran("clean\n"));
-    // The folder's git config is read-only in the guest: git there runs no code the agent wrote.
+    // The guest refuses a command's write to the folder's git config: git there runs no code the agent wrote.
     const config = readFileSync(join(first, ".git", "config"), "utf8");
-    expect(await run("(echo '[core]\n\tfsmonitor = ./evil' >> .git/config) 2>&1 | sed 's/.*: //'")).toEqual(ran("Read-only file system\n"));
+    expect(await run("(echo '[core]\n\tfsmonitor = ./evil' >> .git/config) 2>&1 | sed 's/.*: //'")).toEqual(ran("Operation not permitted\n"));
     expect(readFileSync(join(first, ".git", "config"), "utf8")).toBe(config);
+  });
+
+  it("refuses every way a command could plant a git hook or send the folder's git elsewhere, and lets git rebase, merge and cherry-pick finish", { timeout: 120_000 }, async () => {
+    const folder = join(home, "repo");
+    const upstream = join(home, "upstream");
+    // The user's repository, with a submodule, a linked worktree and a repository of its own in it, as git leaves them.
+    const made = spawnSync("bash", ["-c", [
+      "set -e",
+      `git init -q -b master "${upstream}" && git -C "${upstream}" -c user.email=a@b -c user.name=a commit -q --allow-empty -m up`,
+      `git init -q -b master "${folder}" && cd "${folder}" && git config user.email a@b && git config user.name a`,
+      "echo a > a.txt && git add a.txt && git commit -qm a",
+      `git -c protocol.file.allow=always submodule add -q "${upstream}" lib && git commit -qm lib`,
+      "git worktree add -q wt -b wt && git init -q inner",
+    ].join("\n")], { encoding: "utf8" });
+    expect(made.status, made.stderr).toBe(0);
+    const read = (path: string) => readFileSync(join(folder, path), "utf8");
+    const KEPT = [".git/config", ".git/modules/lib/config", ".git/worktrees/wt/commondir", "wt/.git"];
+    const hooks = () => [".git/hooks", ".git/modules/lib/hooks"].map((dir) => readdirSync(join(folder, dir)).sort());
+    const [kept, hooked, inner] = [KEPT.map(read), hooks(), read("inner/.git/config")];
+    await bound(folder);
+    const run = (command: string) => operation("run", { command, workdir: null, timeout: 60 });
+    const ran = (output: string) => ({ ok: { output, returncode: 0, timed_out: false } });
+
+    // Each refused by the guest's kernel, in its own words; an ordinary file and folder of the command's are its own.
+    const plants = [
+      ["a hook where there was none", "printf '#!/bin/sh\\n' > .git/hooks/pre-commit"],
+      ["a .git where there was none", "mkdir -p plain/.git/hooks"],
+      ["the .git renamed and remade", "mv .git aside && mkdir -p .git/hooks"],
+      ["a repository moved aside and its .git remade", "mv inner inner-old && mkdir -p inner/.git/hooks"],
+      ["a hard link", "ln evil .git/hooks/post-commit"],
+      ["a symlink", "ln -s ../../evil .git/hooks/pre-push"],
+      ["a gitdir-pointer file", "mkdir -p ptr && echo \"gitdir: $PWD/aside\" > ptr/.git"],
+      ["core.hooksPath through .git/config", "git config core.hooksPath evil-hooks"],
+      ["a submodule's config", "git -C lib config core.hooksPath ../evil-hooks"],
+      ["a submodule's hook", "printf '#!/bin/sh\\n' > .git/modules/lib/hooks/pre-commit"],
+      ["a linked worktree's commondir", "echo \"$PWD/aside\" > .git/worktrees/wt/commondir"],
+      ["a linked worktree's .git", "echo \"gitdir: $PWD/aside\" > wt/.git"],
+    ] as const;
+    expect(await run([
+      "printf '#!/bin/sh\\necho planted\\n' > evil && chmod +x evil && mkdir evil-hooks && cp evil evil-hooks/pre-commit",
+      ...plants.map(([name, command]) =>
+        `(${command}) >/tmp/out 2>&1 && echo "${name}: ran" || { grep -q 'Operation not permitted' /tmp/out && echo "${name}: refused" || { echo "${name}: failed"; cat /tmp/out; }; }`),
+    ].join("\n"))).toEqual(ran(plants.map(([name]) => `${name}: refused\n`).join("")));
+    expect([KEPT.map(read), hooks(), read("inner-old/.git/config")]).toEqual([kept, hooked, inner]);
+    for (const path of ["aside", "plain/.git", "inner/.git", "ptr/.git"]) expect(existsSync(join(folder, path)), path).toBe(false);
+    for (const at of [folder, join(folder, "lib")]) expect(spawnSync("git", ["-C", at, "config", "--get", "core.hooksPath"]).status).toBe(1);
+
+    // Git's own work in the repository, its transient state and all, is none of that.
+    expect(await run([
+      "git checkout -q -b feat && echo c > c.txt && git add c.txt && git commit -qm feat",
+      "git checkout -q master && echo d > d.txt && git add d.txt && git commit -qm master",
+      "git rebase -q master feat && echo rebased",
+      "git checkout -q master && git checkout -q -b f2 && echo e > a.txt && git commit -qam f2",
+      "git checkout -q master && echo f > a.txt && git commit -qam m2",
+      "git merge f2 >/dev/null 2>&1; test -e .git/MERGE_HEAD && echo conflicted",
+      "echo resolved > a.txt && git add a.txt && git commit -qm resolved && echo merged",
+      "git checkout -q -b f3 && echo g > g.txt && git add g.txt && git commit -qm g",
+      "git checkout -q master && git cherry-pick f3 >/dev/null && echo picked",
+    ].join("\n"))).toEqual(ran("rebased\nconflicted\nmerged\npicked\n"));
+    // And the host's git reads what it did, in the repository, its worktree and its submodule.
+    const git = (at: string, ...args: string[]) => spawnSync("git", ["-C", join(folder, at), ...args], { encoding: "utf8" }).stdout;
+    expect([git(".", "log", "-3", "--first-parent", "--format=%s"), git("wt", "branch", "--show-current"), git("lib", "log", "-1", "--format=%s")])
+      .toEqual(["g\nresolved\nm2\n", "wt\n", "up\n"]);
+    expect([KEPT.map(read), hooks()]).toEqual([kept, hooked]);
   });
 
   it("installs a package from PyPI in the VM with no prompt, and tells the agent what the app refused: its own services, and a site its prompts deny", async () => {

@@ -1,7 +1,6 @@
 // What the main process and a tool host say to each other, over the host's IPC channel.
 
 import type { ProcessHandle } from "../guest/processes.js";
-import type { ProtectedKey } from "../guest/protocol.js";
 import type { Outcome } from "../link/protocol.js";
 
 // A destination a command asked srt's proxy for: its host as srt compares it, and its port (policy.ts destination).
@@ -33,8 +32,6 @@ export interface HostStart {
   // The hosts the chat's user allowed for the chat past the package hosts, on every port: srt's allowedDomains entries.
   domains: string[];
   bwrapPath?: string;
-  // Name the folder's protected keys, for a guest root's read-only binds.
-  protect?: true;
 }
 
 export type ToHost =
@@ -47,10 +44,12 @@ export type ToHost =
   | { type: "answer"; id: number; allow: boolean; remember: boolean }
   // The hook guard around a command that runs in the VM: why it may not run, answered
   // {ok: null} when it may; then the look after it, answered with its outcome and the look's notice.
-  | { type: "refusal"; id: string }
+  // run: a run, which an after ends, not a start or input to a process.
+  | { type: "refusal"; id: string; run: boolean }
   | { type: "after"; id: string; outcome: Outcome }
   // The root's background processes in the VM, as the guest says: the folder's record keeps their handles.
-  | { type: "handles"; handles: ProcessHandle[] }
+  // live: how many of them are alive.
+  | { type: "handles"; handles: ProcessHandle[]; live: number }
   | { type: "stop" };
 
 export type FromHost =
@@ -61,9 +60,6 @@ export type FromHost =
   | { type: "result"; id: string; outcome: Outcome }
   // How many background processes are alive: a host with any is never idle.
   | { type: "processes"; live: number }
-  // With start's protect: the folder's protected keys whenever a look, or the refusal before
-  // a command, finds them changed.
-  | { type: "protected"; keys: ProtectedKey[] }
   // A command asked for a destination off the list, and its connection waits for the app's answer.
   // One at a time per destination: the connections asking meanwhile wait for the same answer.
   | { type: "ask"; id: number; host: string; port: number; privateNetwork: boolean };

@@ -7,7 +7,7 @@
 // rest. A Node child process with an IPC channel.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { isIP, type Server } from "node:net";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -24,12 +24,11 @@ import { type FolderRecord, lockFolder, presentIn, readRecord, removePlaceholder
 import { type Destination, FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { HookGuard } from "./hooks.js";
 import { GLOB, hideSrtTmp, quote, sandboxPolicy } from "./policy.js";
-import { appeared, extraDenies, GRANT_CHANGED, guestBinds, identity, protectedKeys, srtTargets } from "./restarts.js";
+import { appeared, extraDenies, GRANT_CHANGED, identity, protectedKeys, srtTargets } from "./restarts.js";
 import { CANCELLED, unenterable, workdir } from "../guest/command.js";
 import { destination, reach } from "../vm/egress.js";
 import { networkNotice, withNotice as appendNotice } from "../vm/proxy.js";
 import { Processes } from "../guest/processes.js";
-import type { BindMode, ProtectedKey } from "../guest/protocol.js";
 import type { SessionRunner } from "../guest/runner-process.js";
 import { type CommandContext, runCommand } from "./run.js";
 import { startRunner, stopRunner } from "./session-runner.js";
@@ -70,14 +69,25 @@ let processes: Processes | null = null;
 let runner: Promise<SessionRunner> | null = null;
 let liveRunner: SessionRunner | null = null;
 let watching: NodeJS.Timeout | null = null;
-// Once a command of this root's has run in the guest: what it left running there, or
-// a cancelled one still ending, can write a hook at any time, so the look every
+// Once a command of this root's may have run in the guest (from its refusal on): what it left
+// running there, or a cancelled one still ending, can write a hook at any time, so the look every
 // WATCH_MS goes on until the host stops.
 let guestCommands = false;
-// For a guest root's binds (HostStart.protect): what the latest look found to bind, each
-// with its inode when it was last named to the app.
-let naming = false;
-let named: ProtectedKey[] | null = null;
+// What of the root's can write the folder at any time, besides a command it runs.
+const alive = () => (processes?.live ?? 0) > 0 || liveRunner !== null || guestCommands;
+// The root's background processes alive in the guest, as the guest last said, and until when a guest
+// run answered before its processes went (cancelled, timed out) may still be ending. Its kill is sent
+// as it is answered.
+// ponytail: a fixed grace for that kill; the guest saying the run's cgroup went would replace it.
+let guestLive = 0;
+let endingUntil = 0;
+const ENDING_MS = 2_000;
+// What of the root's, besides its runs, can write the folder now: while nothing can, a look takes the
+// exec steps in paused rebases as the user's (HookGuard's writing).
+const writing = () => (processes?.live ?? 0) > 0 || liveRunner !== null || guestLive > 0 || performance.now() < endingUntil;
+// The root's runs from their refusal to the look after them, here or in the guest: while any is in
+// flight, the hook guard leaves paused rebases' todos alone, as a run's own rebase may be working through one.
+const runs = new Set<string>();
 // The live runner's protected keys, from a walk that started once it was up (performance.now()),
 // and each path its wrap denies writes to, as the wrap held it (restarts.ts identity).
 type Baseline = { keys: ReadonlySet<string>; since: number; targets: ReadonlyMap<string, string | null> };
@@ -128,6 +138,8 @@ process.on("message", (raw) => {
       else helper?.stdin?.write(`${JSON.stringify({ id: message.id, kind: message.kind, args: message.args })}\n`);
       break;
     case "cancel":
+      // A guest's run cancelled while its refusal was asked: no after comes for it. One here ends by itself.
+      if (!commands.has(message.id)) runs.delete(message.id);
       commands.get(message.id)?.controller.abort();
       helper?.stdin?.write(`${JSON.stringify({ cancel: message.id })}\n`);
       break;
@@ -135,15 +147,18 @@ process.on("message", (raw) => {
       // A command for a folder replaced since the start would run on the replacement.
       if (!sameFolder()) send({ type: "result", id: message.id, outcome: FOLDER_UNAVAILABLE });
       else {
+        guestCommands = true;
+        if (message.run) runs.add(message.id);
         void guard?.refusal().then((refused) => {
-          // A host program may have replaced one since the look, as git config renames a new file over the old.
-          if (naming && named) name(named.map(([path, , mode]) => [path, mode]));
+          if (refused) runs.delete(message.id);
           if (!failing) send({ type: "result", id: message.id, outcome: refused ?? { ok: null } });
         });
       }
       break;
     case "after":
       guestCommands = true;
+      runs.delete(message.id);
+      if (!("ok" in message.outcome) || (message.outcome.ok as { timed_out?: boolean } | null)?.timed_out) endingUntil = performance.now() + ENDING_MS;
       void guard?.after(message.outcome).then((outcome) => {
         watchHooks();
         if (!failing) send({ type: "result", id: message.id, outcome });
@@ -152,6 +167,7 @@ process.on("message", (raw) => {
     case "handles":
       // What the guest's processes can write, they write at any time: the look every WATCH_MS goes on, as after a command.
       guestCommands = true;
+      guestLive = message.live;
       try {
         save({ processes: message.handles });
       } catch {
@@ -211,7 +227,6 @@ async function start(message: HostStart): Promise<void> {
     throw new FolderUnavailable(`the folder ${message.folder} was replaced after it was confirmed for this chat`);
   }
   folder = { path, dev, ino };
-  naming = message.protect === true;
   // One host per folder. Then, if the host before this one was killed, what srt
   // left over the names that were absent when it started.
   const key = `${dev}-${ino}`;
@@ -247,7 +262,7 @@ async function start(message: HostStart): Promise<void> {
   // Its first look finds the user's own hooks, while srt starts. After a killed
   // host, that host's are the user's, and the look catches what its commands left.
   // Commands can write the folder and the session's temp folder: a hook linked into either is theirs.
-  guard = new HookGuard(path, { inherited, known: running, writable: [path, ...spellings(tmp)], seen });
+  guard = new HookGuard(path, { inherited, known: running, writable: [path, ...spellings(tmp)], seen, writing, running: () => runs.size > 0 });
   mkdirSync(tmp, { recursive: true });
   makeCaches(tmp);
   const env = commandEnvironment(message.env, tmp);
@@ -437,7 +452,6 @@ function answered(id: number, allow: boolean, remember: boolean): void {
 function watchHooks(): void {
   if (watching || !guard || stopping) return;
   const hooks = guard;
-  const alive = () => (processes?.live ?? 0) > 0 || liveRunner !== null || guestCommands;
   watching = setTimeout(() => void (async () => {
     // A folder replaced since the start is not this chat's: no look or runner goes over it.
     if (!sameFolder()) return void stop(1);
@@ -521,8 +535,6 @@ async function openRunner(ready: CommandContext, onLost: () => void): Promise<{ 
 // decides with its own look, and a restart then cuts the others. Until then background
 // processes can write the new path, as a command in a sandbox of its own can.
 function seen(keys: ReadonlySet<string>, startedAt: number, between: boolean): void {
-  // Past the most a guest can bind, this throws, and the guard refuses commands.
-  if (naming && folder) name(guestBinds(folder.path, keys));
   const known = baseline;
   if (!liveRunner || deferred || !folder || !known || startedAt < known.since || (between && runnerRuns > 0)) return;
   const root = folder.path;
@@ -534,38 +546,6 @@ function seen(keys: ReadonlySet<string>, startedAt: number, between: boolean): v
   const changed = [...known.targets].filter(([path, was]) => identity(path) !== was).map(([path]) => path);
   const first = [...added, ...changed].sort()[0];
   if (first) restart(appeared(relative(root, first)));
-}
-
-// *binds* told to the app with their inodes now, when any differs from what it was last told.
-// A link is named by what it leads to on the host, which the guest has at the same path. One
-// that leads out of the folder is named for nothing: no write in the guest reaches the host
-// there. One that leads to nothing in the folder is named itself, which the guest refuses: a
-// write through it would make what it names, there.
-function name(binds: ReadonlyArray<readonly [string, BindMode]>): void {
-  if (!folder) return;
-  const root = folder.path;
-  const found = new Map<string, ProtectedKey>();
-  for (const [path, mode] of binds) {
-    try {
-      const stats = lstatSync(path);
-      let at: [string, number] = [path, stats.ino];
-      if (stats.isSymbolicLink()) {
-        // Each link followed, as a write would; past one that leads nowhere, the name a write would make.
-        const target = realpath(path);
-        if (!target.loop && !inside(target.path, root)) continue;
-        const led = target.loop ? undefined : lstatSync(target.path, { throwIfNoEntry: false });
-        if (led) at = [target.path, led.ino];
-      }
-      // Two links to one file: read-only over a hold.
-      if (found.get(at[0])?.[2] !== "ro") found.set(at[0], [...at, mode]);
-    } catch {
-      // Gone since the look.
-    }
-  }
-  const keys = [...found.values()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  if (named && JSON.stringify(keys) === JSON.stringify(named)) return;
-  named = keys;
-  send({ type: "protected", keys });
 }
 
 // A new runner, wrapped from the folder as it is now: srt then sees a new .git as a
@@ -656,8 +636,10 @@ function command(id: string, args: Record<string, unknown>): void {
   const ready = context;
   const hooks = guard;
   const controller = new AbortController();
+  runs.add(id);
   const done = (async () => {
     const outcome = await commandOutcome(args, ready, hooks, controller.signal, id);
+    runs.delete(id);
     commands.delete(id);
     if (!failing) send({ type: "result", id, outcome });
   })();
@@ -682,6 +664,7 @@ async function commandOutcome(
   if (inRunner) runnerRuns += 1;
   const outcome = await runCommand(args, ready, signal, id, inRunner);
   if (inRunner) runnerRuns -= 1;
+  runs.delete(id);
   return withNotice(await hooks.after(outcome));
 }
 

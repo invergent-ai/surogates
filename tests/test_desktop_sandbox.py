@@ -197,3 +197,22 @@ async def test_a_call_names_its_computer_and_a_resumed_one_skips_the_document_ca
     # A hit would ask the computer for less than the first run did, and the call would read as interrupted.
     resumed = call(resumed=True).workspace_io
     assert (resumed.identity, resumed.caches_documents) == (computer, False)
+
+
+async def test_only_a_session_on_the_computer_is_told_what_git_cannot_do_in_its_folder():
+    from surogates.harness.tool_schemas import describe_for_device
+    from surogates.tools.builtin.terminal import DEVICE_GIT_NOTE, TERMINAL_TOOL_DESCRIPTION
+
+    tools = ToolRegistry()
+    ToolRuntime(tools).register_builtins()
+    schemas = tools.get_schemas()
+
+    def terminal(described: list[dict]) -> str:
+        return next(s["function"]["description"] for s in described if s["function"]["name"] == "terminal")
+
+    assert terminal(describe_for_device(schemas, device_session().config)) == f"{TERMINAL_TOOL_DESCRIPTION}{DEVICE_GIT_NOTE}\n"
+    assert "git init" in DEVICE_GIT_NOTE
+    for cloud in ({}, None, {"execution": {"kind": "cloud"}}):
+        assert terminal(describe_for_device(schemas, cloud)) == TERMINAL_TOOL_DESCRIPTION
+    # The registry's schema, which every session shares, keeps the cloud's text.
+    assert terminal(schemas) == TERMINAL_TOOL_DESCRIPTION

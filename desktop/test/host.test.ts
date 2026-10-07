@@ -274,3 +274,57 @@ describe("a tool host", { timeout: 30_000 }, () => {
     expect(await harness.exited).toBe(1);
   });
 });
+
+// A guest run is in flight from its refusal to its after, and the look leaves paused rebases' todos alone meanwhile.
+describe("a tool host's runs in the guest", { timeout: 30_000 }, () => {
+  const todo = () => join(folder, ".git", "rebase-merge", "git-rebase-todo");
+  const PLANTED = "exec touch pwned\n";
+  const COMMENTED = "# Surogate removed a step that appeared while the chat's commands could write: exec touch pwned\n";
+  const answer = (harness: Harness, id: string) => harness.until((messages) => {
+    const result = messages.find((message) => message.type === "result" && message.id === id);
+    return result?.type === "result" ? result.outcome : undefined;
+  });
+  const record = () => {
+    const { dev, ino } = statSync(folder);
+    return JSON.parse(readFileSync(join(start.dataDir, "folders", `${dev}-${ino}.json`), "utf8")) as { state: string };
+  };
+  beforeEach(() => {
+    mkdirSync(join(folder, ".git", "rebase-merge"), { recursive: true });
+    writeFileSync(join(folder, ".git", "HEAD"), "ref: refs/heads/main\n");
+  });
+
+  it("records a stop during a guest run as unclean, so the next host takes no exec step the run left as the user's", async () => {
+    const first = host();
+    await ready(first);
+    first.send({ type: "refusal", id: "r1", run: true });
+    expect(await answer(first, "r1")).toEqual({ ok: null });
+    writeFileSync(todo(), PLANTED);
+    first.send({ type: "stop" });
+    expect(await first.exited).toBe(0);
+    expect(readFileSync(todo(), "utf8")).toBe(PLANTED);
+    expect(record().state).toBe("running");
+    const second = host();
+    await ready(second);
+    second.send({ type: "refusal", id: "r2", run: false });
+    expect(await answer(second, "r2")).toEqual({ ok: null });
+    expect(readFileSync(todo(), "utf8")).toBe(COMMENTED);
+  });
+
+  it.each([
+    ["a start, which no after ends", (harness: Harness) => harness.send({ type: "refusal", id: "s1", run: false })],
+    ["a run cancelled while its refusal was asked", (harness: Harness) => {
+      harness.send({ type: "refusal", id: "c1", run: true });
+      harness.send({ type: "cancel", id: "c1" });
+    }],
+  ])("holds no look for %s", async (_name, begin) => {
+    const harness = host();
+    await ready(harness);
+    begin(harness);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    writeFileSync(todo(), PLANTED);
+    harness.send({ type: "stop" });
+    expect(await harness.exited).toBe(0);
+    expect(readFileSync(todo(), "utf8")).toBe(COMMENTED);
+    expect(record().state).toBe("stopped");
+  });
+});
