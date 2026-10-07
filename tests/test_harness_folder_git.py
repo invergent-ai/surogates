@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -13,6 +15,8 @@ import pytest
 from surogates.artifacts.models import ArtifactKind
 from surogates.artifacts.store import ArtifactStore
 from surogates.devices.workspace import DeviceWorkspaceIO
+from surogates.harness import loop_artifact_completion
+from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
 from surogates.storage.skill_staging import stage_in_folder
 from surogates.tools.builtin.browser import _screenshot_in_folder
 from surogates.tools.builtin.terminal import _spill_full_output
@@ -57,11 +61,23 @@ async def a_result_spill(files):
     )
 
 
+async def a_turn_mark(files):
+    @asynccontextmanager
+    async def the_folder(*_args, **_kwargs):
+        yield files
+
+    harness = SimpleNamespace(_storage=None, _session_factory=None, _redis=None)
+    with patch.object(loop_artifact_completion, "session_files", the_folder):
+        assert await ArtifactCompletionMixin._folder_cursor(harness, SimpleNamespace(id=uuid4())) is not None
+
+
 def git(folder: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=folder, capture_output=True, text=True, check=True).stdout
 
 
-@pytest.mark.parametrize("harness_write", [an_artifact, a_staged_skill, a_screenshot, a_terminal_spill, a_result_spill])
+@pytest.mark.parametrize(
+    "harness_write", [an_artifact, a_staged_skill, a_screenshot, a_terminal_spill, a_result_spill, a_turn_mark],
+)
 async def test_nothing_the_harness_keeps_in_a_folder_shows_in_its_git_status(tmp_path, harness_write):
     folder = tmp_path.resolve()
     git(folder, "init", "-q")

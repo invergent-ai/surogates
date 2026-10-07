@@ -831,3 +831,31 @@ async def test_a_computer_that_refuses_generated_media_or_its_input_says_so_in_i
     assert unsaved == {"error": "Local access to this computer was revoked"}
     assert client.last_create_kwargs is not None
     assert not (folder / "media").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_file_made_while_its_media_is_generated_is_kept_byte_for_byte(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler
+
+    folder = tmp_path.resolve()
+    target = folder / "art" / "logo.png"
+
+    class MadeMeanwhile(_FakeImageClient):
+        """The user saves a file by that name while the model draws."""
+
+        async def _create(self, **kwargs):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"the user's own logo")
+            return await super()._create(**kwargs)
+
+    client = MadeMeanwhile(images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}])
+    result = json.loads(await _generate_image_handler(
+        {"prompt": "a logo", "output_path": "art/logo.png"}, media_gen=_image_cfg(client), **_on_a_folder(folder),
+    ))
+
+    # Checked again at the write, in write_file's words.
+    assert result == {"error": (
+        "Refusing to overwrite 'art/logo.png': it already exists. "
+        "Name a new file for the generated media, or delete this one first."
+    )}
+    assert target.read_bytes() == b"the user's own logo"
