@@ -59,8 +59,10 @@ const subnets = (ranges: Array<[string, number]>) => {
   for (const [net, prefix] of ranges) list.addSubnet(net, prefix, isIP(net) === 6 ? "ipv6" : "ipv4");
   return list;
 };
-// Loopback, and the unspecified address, which connects to this computer on common stacks.
-const LOCAL = subnets([["127.0.0.0", 8], ["0.0.0.0", 8], ["::1", 128], ["::", 128]]);
+// Loopback, and the unspecified address, which connects to this computer on common stacks;
+// in IPv6 within IPv4-compatible addresses (::/96), and IPv4-translated ones (::ffff:0:0:0/96):
+// nothing dials these, and a stack that takes them can reach loopback by them.
+const LOCAL = subnets([["127.0.0.0", 8], ["0.0.0.0", 8], ["::", 96], ["::ffff:0:0:0", 96]]);
 // Cloud instance-metadata endpoints, which answer for the machine itself: the common
 // link-local one, and srt's CLOUD_METADATA_ADDRESSES (resolved-address-guard.js).
 const METADATA = subnets([

@@ -74,6 +74,8 @@ describe("where a destination leads", () => {
     "127.0.0.1", "127.8.9.10", "[::1]", "0.0.0.0", "[::]", "[::ffff:7f00:1]", "192.168.100.139", "[fe80::2d6:c59:8d66:3938]",
     "localhost", "dev.localhost", "sneaky.example", "mine.example", "mapped-lo.example", "mapped-lan.example",
     "169.254.169.254", "100.100.100.200", "168.63.129.16", "[fd00:ec2::254]",
+    // IPv4-compatible and IPv4-translated loopback, which no stack is trusted to refuse.
+    "[::127.0.0.1]", "[::ffff:0:7f00:1]", "[::ffff:0:c000:201]",
   ])("is this computer for %s", async (host) => {
     expect(await where(host)).toBe("own");
   });
@@ -85,7 +87,8 @@ describe("where a destination leads", () => {
     },
   );
 
-  it.each(["192.0.2.1", "[2001:db8::1]", "example.com"])("is elsewhere for %s", async (host) => {
+  // NAT64 is how an IPv6-only network reaches IPv4 sites.
+  it.each(["192.0.2.1", "[2001:db8::1]", "example.com", "[64:ff9b::c000:201]"])("is elsewhere for %s", async (host) => {
     expect(await where(host)).toBe("public");
   });
 
