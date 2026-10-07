@@ -22,16 +22,20 @@ from surogates.tenant.auth.jwt import create_service_account_session_token
 from surogates.workstreams import stream as project_stream
 from surogates.workstreams.derive import SHELL_LIMITS, derive_thread
 from surogates.workstreams.store import WorkstreamStore
+from tests.test_steer_loop import _final_response, _make_loop_harness
 
+from . import test_workstream_threads as threads_tests
 from .conftest import issue_service_account_token
 from .test_devices import add_user, api, next_control  # noqa: F401  (api is a fixture)
 from .test_workstream_threads import (
     PROPOSED,
+    TODO_CALL,
     answered,
     asks,
     call_tool,
     events_of,
     gives_up_asking,
+    live_turn,
     queued,
     quiet_for,
     resolve,
@@ -595,3 +599,58 @@ async def test_a_session_token_reaches_no_projects_route(api, session_factory, m
 async def test_a_master_leaves_proposed_threads_to_their_cards(api):
     prompt = await system_prompt(api, await master_of(api, await create(api)))
     assert "A proposed thread is started from its card" in prompt
+
+
+async def coordinator_with_a_report(api):
+    """A chat outside projects whose worker reported after the user's request."""
+    chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    store = api.app.state.session_store
+    parent = await store.get_session(UUID(chat.json()["id"]))
+    await store.emit_event(parent.id, EventType.USER_MESSAGE, {"content": "Check the Q3 figures."})
+    worker = await create_child_session(store=store, parent=parent, channel="worker")
+    await answered(api, worker, "Checked the figures.")
+    await turn_ends(api, worker)
+    return parent, worker
+
+
+def harnesses(monkeypatch) -> list:
+    """The harness each ``live_turn`` makes, so its turn's end can be read."""
+    made = []
+
+    def harness(**options):
+        made.append(_make_loop_harness(**options))
+        return made[-1]
+
+    monkeypatch.setattr(threads_tests, "_make_loop_harness", harness)
+    return made
+
+
+async def test_a_turns_summary_takes_the_users_request_not_a_report(api, monkeypatch):
+    # A coordinator outside projects reads its worker's report after the
+    # user's message; the summary is judged against what the user asked.
+    parent, worker = await coordinator_with_a_report(api)
+    made = harnesses(monkeypatch)
+    [request] = await live_turn(api, monkeypatch, parent, [_final_response("The figures add up.")])
+    assert request[-1]["content"] == f"[Worker {worker.id} completed]\nChecked the figures."
+    assert made[0]._complete_session.await_args.kwargs["user_message"] == "Check the Q3 figures."
+
+
+async def test_a_turn_steered_after_a_report_is_summed_up_against_the_steer(api, monkeypatch):
+    parent, _ = await coordinator_with_a_report(api)
+    made = harnesses(monkeypatch)
+
+    async def steered():
+        await api.app.state.session_store.emit_event(
+            parent.id, EventType.USER_MESSAGE, {"content": "Use the Q4 figures instead."},
+        )
+
+    await live_turn(api, monkeypatch, parent, [TODO_CALL, _final_response("Q4 adds up.")], during_tool=steered)
+    assert made[0]._complete_session.await_args.kwargs["user_message"] == "Use the Q4 figures instead."
+
+
+async def test_a_turn_out_of_iterations_is_summed_up_against_the_users_request(api, monkeypatch):
+    parent, _ = await coordinator_with_a_report(api)
+    made = harnesses(monkeypatch)
+    await live_turn(api, monkeypatch, parent, [TODO_CALL, _final_response("So far, Q3 adds up.")], budget=1)
+    ended = made[0]._complete_session.await_args.kwargs
+    assert (ended["reason"], ended["user_message"]) == ("budget_exhausted", "Check the Q3 figures.")
