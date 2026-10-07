@@ -481,7 +481,9 @@ class Host {
   // nothing of the root runs (a lookup that outlasted its command), with no prompt.
   ask(asked: NetworkAsk): Promise<NetworkAnswer> {
     if (this.running === 0 && this.live === 0) return Promise.resolve("deny");
-    return Promise.resolve().then(() => this.askUser(asked, this.prompts.signal)).catch(() => "deny" as const);
+    // The prompts' signal as it was checked: an end of the root's last process that comes before the prompt dismisses it.
+    const { signal } = this.prompts;
+    return Promise.resolve().then(() => this.askUser(asked, signal)).catch(() => "deny" as const);
   }
 
   private leave(): void {
