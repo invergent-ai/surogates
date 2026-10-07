@@ -233,3 +233,12 @@ def test_a_landing_after_another_moved_main_goes_on_top_of_it(tmp_path, project)
     assert git(project / "_history", "rev-parse", f"{by_b}^1") == by_a
     # B's landing keeps A's: it is B's files on main as A left it.
     assert git(project / "_history", "ls-tree", "--name-only", by_b).splitlines() == ["A.md", "B.md", "Report.docx", "notes.txt"]
+
+
+def test_the_first_look_says_whether_main_carries_a_landings_saga(tmp_path, project):
+    history = a_pod(tmp_path, project)
+    (history.copy / "Report.docx").write_bytes(b"PK\x03\x04 report v2")
+    landed = land(history, "saga:mine")
+    looked = history.fetch(saga="saga:mine")
+    assert (looked["main"], looked["has_saga"]) == (landed["commit"], True)
+    assert history.fetch(saga="saga:another")["has_saga"] is False

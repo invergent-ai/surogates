@@ -490,18 +490,24 @@ async def test_two_landings_at_once_take_turns(api, monkeypatch, pods):
     async def the_first_is_landing():
         return (pods.root / f"commit {first.id}").exists()
 
-    async def the_second_waits_for_the_lock():
+    async def project_locks() -> tuple[int, int]:
+        """The project's lock as Postgres has it: held, and waited for."""
         async with api.app.state.session_factory() as db:
-            waiting = await db.execute(text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"))
-            return waiting.scalar() > 0
+            held = await db.execute(text(
+                "SELECT count(*) FILTER (WHERE granted), count(*) FILTER (WHERE NOT granted) FROM pg_locks "
+                "WHERE locktype = 'advisory' AND objid::text::bigint = (hashtext(:key)::bigint & 4294967295)"
+            ), {"key": f"workstream:{first.config['workstream_id']}"})
+            return tuple(held.one())
 
     monkeypatch.setattr(History, "commit_turn", the_first_holds_its_commit)
     landing = asyncio.create_task(turn_end(api, pool, first))
     await until(the_first_is_landing)
     waiting = asyncio.create_task(turn_end(api, pool, second))
     try:
-        await until(the_second_waits_for_the_lock)
+        await asyncio.sleep(2)  # four tries for the lock
         assert not (pods.root / f"commit {second.id}").exists()
+        # The second tries the lock and waits on no connection: none sits blocked in Postgres.
+        assert await project_locks() == (1, 0)
     finally:
         release.touch()
     await asyncio.gather(landing, waiting)

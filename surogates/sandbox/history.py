@@ -349,11 +349,16 @@ class History:
             self._keep_index(landing)
         return {"commit": landing}
 
-    def fetch(self, commits: Iterable[str] = ()) -> dict:
-        """``main`` in the durable history now, fetched with *commits*: a landing's first look, under the project's lock."""
+    def fetch(self, commits: Iterable[str] = (), saga: str | None = None) -> dict:
+        """``main`` in the durable history now, fetched with *commits*: a landing's first look, under the project's lock.
+
+        ``has_saga`` says whether ``main`` is the landing of *saga*: the only
+        proof that a landing pushed.
+        """
         main = self._durable_refs().get(MAIN)
         self._fetch(main, *commits)
-        return {"main": main}
+        has_saga = main is not None and saga is not None and f"Surogate-Saga: {saga}" in self._message(main)
+        return {"main": main, "has_saga": has_saga}
 
     # ------------------------------------------------------------------
     # The durable history

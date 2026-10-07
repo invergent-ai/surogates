@@ -13,7 +13,10 @@ A file the real files changed since the thread's branch point is left out
 by decision, not by failure: the newer file stays, and the thread's
 version is kept in history as the landing's second parent.
 
-The saga lives in the worker's memory for the turn.
+The saga's durable record is its ``workstream_history`` row, written as it
+runs.  The record step is the push of the project's history, the moment a
+landing counts: a landing counts only once ``main`` in the history carries
+its saga, and one that does is never put back.
 """
 
 from __future__ import annotations
@@ -24,12 +27,11 @@ import logging
 from functools import partial
 from typing import Any
 
-from sqlalchemy import func, select
-
 from surogates.governance.saga import SagaOrchestrator, SagaState, SagaStep, StepState, compensate_step
 from surogates.governance.saga.compensator import compensate_history
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.events import EventType
+from surogates.workstreams.history import project_lock, save_landing, start_landing, touch_landing
 
 logger = logging.getLogger(__name__)
 
@@ -89,23 +91,22 @@ async def land_turn(
     ``not_merged``; *repositories* are the folders inside a git repository
     the turn wrote into, which never land.
 
-    The whole saga runs under the project's lock, a Postgres advisory
-    transaction lock keyed by ``workstream:<id>``: one landing at a time per
+    The whole saga runs under the project's lock: one landing at a time per
     project, so a landing that starts after another sees its files as
-    changed rather than rolling back over them.  It frees itself if the
-    worker's connection drops.
+    changed rather than rolling back over them.  The lock frees itself if
+    its connection drops, so the landing asks it before each apply and the
+    record, and stops when it is gone.
     """
     owner = sandbox_session_key(session)
     if not sandbox_pool.holds_copy(owner):
         return None
     # Read before the lock: its holder must not wait on a second connection.
     calls = await store.get_events(session.id, after=after_event_id, types=[EventType.TOOL_CALL])
+    workstream = session.config["workstream_id"]
     outcome = None
     try:
-        async with session_factory() as db, db.begin():
-            key = f"workstream:{session.config['workstream_id']}"
-            await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(key))))
-            outcome = await _land(sandbox_pool, session, owner, saga_settings, tool_saga_id, calls)
+        async with project_lock(session_factory, workstream) as held:
+            outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
     except Exception:
         if outcome is None:
             raise
@@ -114,17 +115,21 @@ async def land_turn(
     return outcome
 
 
-async def _land(
-    sandbox_pool: Any, session: Any, owner: str,
-    saga_settings: Any, tool_saga_id: str | None, calls: list,
-) -> dict:
-    orchestrator = SagaOrchestrator(**(
+def _orchestrator(saga_settings: Any) -> SagaOrchestrator:
+    return SagaOrchestrator(**(
         {
             "default_step_timeout": saga_settings.default_step_timeout,
             "default_max_retries": saga_settings.default_max_retries,
             "retry_delay": saga_settings.retry_delay,
         } if saga_settings is not None else {}
     ))
+
+
+async def _land(
+    session_factory: Any, sandbox_pool: Any, session: Any, owner: str,
+    saga_settings: Any, tool_saga_id: str | None, calls: list, held: Any,
+) -> dict:
+    orchestrator = _orchestrator(saga_settings)
     saga = orchestrator.create_saga(session.id, kind="landing")
     thread = {"name": session.title or "Thread", "email": f"thread:{session.id}@surogate"}
     audit = [
@@ -136,6 +141,12 @@ async def _land(
         *([["Surogate-Tool-Saga", tool_saga_id]] if tool_saga_id else []),
         *([["Surogate-Events", f"{calls[0].id}-{calls[-1].id}"]] if calls else []),
     ]
+    row = await start_landing(
+        session_factory, saga, workstream_id=session.config["workstream_id"], thread_id=session.id,
+        agent_id=str(session.agent_id), user_id=session.user_id, tool_saga_id=tool_saga_id,
+        events=(calls[0].id, calls[-1].id) if calls else None,
+    )
+    save = partial(save_landing, session_factory, row, saga)
 
     def step(name: str, **arguments: Any) -> SagaStep:
         return orchestrator.add_step(
@@ -143,10 +154,16 @@ async def _land(
         )
 
     async def run(it: SagaStep) -> dict:
+        # Each try marks the row alive first: another lock holder's fence runs from here.
+        await touch_landing(session_factory, row)
         return await _call(sandbox_pool, owner, it.tool_name.removeprefix("history."), **it.arguments)
 
     async def execute(it: SagaStep) -> dict:
-        return await orchestrator.execute_step(saga.saga_id, it.step_id, lambda: run(it))
+        try:
+            return await orchestrator.execute_step(saga.saga_id, it.step_id, lambda: run(it))
+        finally:
+            # Each step's state, as it ends, in the saga's row.
+            await save()
 
     outcome: dict[str, Any] = {
         "saga": saga.saga_id, "state": "completed", "commit": None,
@@ -163,22 +180,29 @@ async def _land(
         outcome.update(overlapped=turn["overlapped"], excluded=turn["excluded"], repositories=turn["repositories"])
         if turn["commit"] is not None:
             applies = [step("apply", **change) for change in changes]
+            await save()
             for it in applies:
+                # A lock lost unseen frees the project: this landing stops, and is put back.
+                await held()
                 await execute(it)
             landed = [it.execute_result for it in applies]
-            recorded = await execute(step(
+            record = step(
                 "record", turn=turn["commit"], applied=landed, author=thread, main=main,
                 trailers=[
                     *audit, ["Surogate-Kind", "landing"],
                     *(["Surogate-Not-Merged", o["path"]] for o in turn["overlapped"]),
                 ],
-            ))
+            )
+            await save()
+            await held()
+            recorded = await execute(record)
             outcome.update(commit=recorded["commit"], landed=landed)
         saga.transition(SagaState.COMPLETED)
+        await save(state="completed", commit=outcome["commit"], files=_row_files(saga, "completed"))
     except BaseException as exc:
-        logger.warning("Landing of session %s rolled back", session.id, exc_info=True)
+        logger.warning("Landing of session %s did not finish", session.id, exc_info=True)
         # Kept, and shielded: a cancel never cuts a put-back short.
-        put_back = asyncio.ensure_future(_put_back(saga, orchestrator, sandbox_pool, owner))
+        put_back = asyncio.ensure_future(_settle(saga, orchestrator, sandbox_pool, owner, save))
         _PUTTING_BACK[owner] = put_back
         put_back.add_done_callback(lambda done: _PUTTING_BACK.pop(owner, None) if _PUTTING_BACK.get(owner) is done else None)
         if not isinstance(exc, Exception):
@@ -187,11 +211,14 @@ async def _land(
             await _after_cancel(put_back, sandbox_pool, owner)
             raise
         try:
-            failed = await asyncio.shield(put_back)
+            state, pushed = await asyncio.shield(put_back)
         except asyncio.CancelledError:
             await _after_cancel(put_back, sandbox_pool, owner)
             raise
-        outcome.update(state="escalated" if failed else "compensated")
+        outcome.update(state=state)
+        if pushed is not None:
+            # The push happened though its answer was lost: the landing counts.
+            outcome.update(commit=pushed, landed=[s.execute_result for s in saga.steps if s.tool_name == "history.apply"])
     applied = {c["path"]: c for c in outcome["landed"]}
     reasons = {o["path"]: o["reason"] for o in outcome["overlapped"]}
     paths = sorted({c["path"] for c in changes} | set(reasons))
@@ -207,6 +234,41 @@ async def _land(
         for path in paths
     ]
     return outcome
+
+
+def _row_files(saga: Any, state: str) -> list[dict]:
+    """A landing row's files: each it landed, and each it left out, with its two versions; none unless it completed."""
+    if state != "completed":
+        return []
+    commit = next((s.execute_result for s in saga.steps if s.tool_name == "history.commit"), None) or {}
+    landed = [s.execute_result for s in saga.steps if s.tool_name == "history.apply" and s.state is StepState.COMMITTED]
+    return [
+        *({"path": c["path"], "before": c["before"], "after": c["after"], "merged": True} for c in landed),
+        *({"path": o["path"], "before": o["before"], "after": o["after"], "merged": False} for o in commit.get("overlapped", [])),
+    ]
+
+
+async def _settle(
+    saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str, save: Any,
+) -> tuple[str, str | None]:
+    """End a landing that did not finish: ``completed`` with its commit when it pushed, else put back.
+
+    It pushed only when ``main`` in the history carries its saga.  ``main``
+    moved without it means another landing went first, with this one's lock
+    lost, or a command rewrote the history: never that this one pushed.
+    """
+    record = next((s for s in saga.steps if s.tool_name == "history.record"), None)
+    if record is not None and record.state is not StepState.PENDING:
+        looked = await _call(sandbox_pool, owner, "fetch", saga=saga.saga_id)
+        if looked["has_saga"]:
+            if saga.state is SagaState.RUNNING:
+                saga.transition(SagaState.COMPLETED)
+            await save(state="completed", commit=looked["main"], files=_row_files(saga, "completed"))
+            return "completed", looked["main"]
+    failed = await _put_back(saga, orchestrator, sandbox_pool, owner, save)
+    state = "escalated" if failed else "compensated"
+    await save(state=state)
+    return state, None
 
 
 async def _after_cancel(put_back: asyncio.Future, sandbox_pool: Any, owner: str) -> None:
@@ -238,11 +300,12 @@ async def _destroy_if_still(sandbox_pool: Any, owner: str, sandbox_id: str | Non
         await sandbox_pool.destroy_released(released, owner)
 
 
-async def _put_back(saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str) -> list[SagaStep]:
+async def _put_back(saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str, save: Any) -> list[SagaStep]:
     """Put back what a landing applied; the steps that could not be put back.
 
     An apply that failed, or that was cut off, may still have written its
     file: its reply was lost, or it ran out of time.  It is put back first.
+    The saga's row follows each put-back.
     """
     failed: list[SagaStep] = []
     for it in saga.steps:
@@ -252,7 +315,13 @@ async def _put_back(saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any
             except Exception:
                 logger.warning("Could not put back %s", it.arguments.get("path"), exc_info=True)
                 failed.append(it)
-    failed += await orchestrator.compensate(
-        saga.saga_id, partial(compensate_step, sandbox_pool=sandbox_pool, session_id=owner),
-    )
+            await save()
+
+    async def compensate(it: SagaStep) -> Any:
+        try:
+            return await compensate_step(it, sandbox_pool=sandbox_pool, session_id=owner)
+        finally:
+            await save()
+
+    failed += await orchestrator.compensate(saga.saga_id, compensate)
     return failed
