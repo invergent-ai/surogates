@@ -13,8 +13,9 @@ import type { Duplex } from "node:stream";
 
 // The roots' sockets, the agent's own: each root's namespace has its own bound at /run/surogate/net.sock.
 const TUNNELS = "/run/surogate/net";
-// A destination line: a host, as a command spelled it and the host proxy judges it, and a port.
-const DESTINATION = /^[^\s/]{1,255}:\d{1,5}$/;
+// A destination line: a host, as a command spelled it and the host proxy judges it, in visible
+// ASCII but '/', and a port.
+const DESTINATION = /^[\x21-\x2e\x30-\x7e]{1,255}:\d{1,5}$/;
 // A destination line's bound: its bytes, and the time it has to end.
 const MAX_LINE = 512;
 const LINE_MS = 5_000;
@@ -40,7 +41,13 @@ export class Network {
     mkdirSync(this.folder, { recursive: true, mode: 0o700 });
     const path = this.path(root);
     rmSync(path, { force: true });
-    const server = createServer({ allowHalfOpen: true }, (socket) => this.tunnel(root, socket));
+    // Its connections, which end with it.
+    const open = new Set<Socket>();
+    const server = createServer({ allowHalfOpen: true }, (socket) => {
+      open.add(socket);
+      socket.on("close", () => open.delete(socket));
+      this.tunnel(root, socket);
+    });
     server.maxConnections = MAX_TUNNELS;
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -51,6 +58,7 @@ export class Network {
     chmodSync(path, 0o600);
     return () => {
       server.close();
+      for (const socket of open) socket.destroy();
       rmSync(path, { force: true });
     };
   }

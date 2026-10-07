@@ -87,6 +87,23 @@ describe("the agent's network", () => {
     expect(existsSync(path)).toBe(false);
   });
 
+  it("ends a root's open connections with its socket", async () => {
+    const unlisten = await network.listen(ROOT, uid);
+    const closed = await new Promise<string>((done) => {
+      const socket = connect({ path: network.path(ROOT), allowHalfOpen: true });
+      let said = "";
+      socket.on("error", () => {});
+      socket.on("data", (chunk: Buffer) => {
+        said += chunk.toString();
+        if (said === "200\n") unlisten();
+      });
+      socket.on("end", () => done(said));
+      setTimeout(() => done("still open"), 2_000);
+      socket.write("echo.example:80\n");
+    });
+    expect(closed).toBe("200\n");
+  });
+
   it("names the root whose socket a connection came on, whatever the connection says", async () => {
     await network.listen(OTHER, uid);
     expect(await through(network.path(OTHER), "echo.example:443")).toMatchObject({ status: "200" });
@@ -103,6 +120,9 @@ describe("the agent's network", () => {
     await network.listen(ROOT, uid);
     expect(await through(network.path(ROOT), "a b:80")).toEqual({ status: "403 invalid", reply: "" });
     expect(await through(network.path(ROOT), "http://echo.example:80")).toEqual({ status: "403 invalid", reply: "" });
+    // A control character, and a byte past ASCII: never handed to the HTTP/2 layer.
+    expect(await through(network.path(ROOT), "echo\x01.example:80")).toEqual({ status: "403 invalid", reply: "" });
+    expect(await through(network.path(ROOT), "\u00e9cho.example:80")).toEqual({ status: "403 invalid", reply: "" });
     const closed = await new Promise<boolean>((done) => {
       const socket = connect(network.path(ROOT));
       socket.on("error", () => {});
