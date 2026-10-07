@@ -23,12 +23,16 @@ export function saidBy(error: unknown): string {
   return message.replace(/^Error invoking remote method '[^']*': (?:Error: )?/, "");
 }
 
-/** The agent's /auth/config, as the page keeps it: local folders only where it says true. An older server says nothing. */
-export function desktopSessionsOf(config: { desktop_sessions?: unknown }): boolean {
-  return config.desktop_sessions === true;
+/**
+ * The agent's /auth/config, as the page keeps it: local folders only where it says true. An older
+ * server says nothing. Null where it could not be read: fetchAuthConfig's fallback names no agent,
+ * and every server's answer does.
+ */
+export function desktopSessionsOf(config: { agent_id?: unknown; desktop_sessions?: unknown }): boolean | null {
+  return config.agent_id === undefined ? null : config.desktop_sessions === true;
 }
 
-/** What the agent's /auth/config says; null until it has been read. */
+/** What the agent's /auth/config says; null until it has been read, and where it could not be. */
 export interface LocalCapabilities {
   desktopSessions: boolean | null;
   multiSession: boolean | null;
@@ -65,10 +69,14 @@ export function newChatPlace(
   return { local: false, text: "Surogate can't work on folders of this computer for this account, so this chat works in the cloud." };
 }
 
-/** What a new chat needs of the agent: to make it, on a folder of this computer or in the cloud, and whether it hears this computer now. */
+/**
+ * What a new chat needs of the agent: to make it, on a folder of this computer or in the cloud,
+ * whether it hears this computer now, and its config read again.
+ */
 export interface NewChatApi<T> {
   create(execution?: LocalExecution): Promise<T>;
   online(deviceId: string): Promise<boolean>;
+  capabilities(): Promise<LocalCapabilities>;
 }
 
 /**
@@ -85,9 +93,15 @@ export async function createChat<T extends { id: string }>(
   choice: "last" | "pick",
   api: NewChatApi<T>,
 ): Promise<T> {
-  const state = desktop ? await desktop.getDevice() : null;
-  const device = state?.device;
-  if (!desktop || !device || !newChatPlace(state, agent, choice).local) return api.create();
+  if (!desktop) return api.create();
+  // Unread, the line said nothing: a chat in the cloud would go there unsaid.
+  const known = agent.desktopSessions === null ? await api.capabilities() : agent;
+  if (known.desktopSessions === null) {
+    throw new Error("Surogate could not read the agent's settings, so this chat was not made. Send it again.");
+  }
+  const state = await desktop.getDevice();
+  const device = state.device;
+  if (!device || !newChatPlace(state, known, choice).local) return api.create();
   // Its binding reaches this computer through the agent: one the agent does not hear would wait in silence.
   if (!(await api.online(device.deviceId))) {
     throw new Error(`${device.name} is not connected to the agent right now, so this chat was not made. Send it again once it is.`);

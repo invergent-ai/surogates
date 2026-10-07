@@ -223,6 +223,10 @@ export function ChatPage() {
         const rawSession = await createChat(getDesktop(), useAppStore.getState(), composer.current.folderChoice, {
           create: (execution) => sessionsApi.createSession({ ...fields, execution }),
           online: async (deviceId) => (await listDevices()).some((row) => row.id === deviceId && row.online),
+          capabilities: async () => {
+            await useAppStore.getState().fetchCapabilities();
+            return useAppStore.getState();
+          },
         }).catch((error: unknown) => {
           // A chat made whose folder could not be set up is listed all the same.
           void fetchSessions();

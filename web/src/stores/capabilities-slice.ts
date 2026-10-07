@@ -24,8 +24,8 @@ export type CapabilitiesSlice = {
   // browser affordances shown); ``false`` hides them.
   browserEnabled: boolean | null;
   // "Local folders" capability: a chat can work on a folder of the user's computer through
-  // Surogate Desktop. ``null`` = not read yet; ``false`` = this server has none, or says
-  // nothing of them, as an older one.
+  // Surogate Desktop. ``null`` = not read yet, or the read failed; ``false`` = this server has
+  // none, or says nothing of them, as an older one.
   desktopSessions: boolean | null;
   // Messaging channels an end-user can link their identity to. ``null`` =
   // unknown (not loaded); an array (possibly empty) is authoritative — an

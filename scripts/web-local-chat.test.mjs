@@ -9,6 +9,7 @@ const PREPARED = { folder: "/home/flavius/notes", mode: "ask", nonce: "n".repeat
 const THIS_COMPUTER = { device: { deviceId: "d-1", name: "Flavius's ThinkPad" }, localFolders: true };
 const NONE = { device: null, localFolders: false };
 const AGENT = { desktopSessions: true, multiSession: true };
+const UNREAD = { desktopSessions: null, multiSession: null };
 
 function bridge({ device = THIS_COMPUTER, prepared = PREPARED, bind = async () => {} } = {}) {
   const calls = [];
@@ -34,18 +35,25 @@ function bridge({ device = THIS_COMPUTER, prepared = PREPARED, bind = async () =
   return desktop;
 }
 
-// The agent, as the page reaches it: what it was asked to make, and whether it hears this computer now.
-function agent({ online = true, refuse = null } = {}) {
+// The agent, as the page reaches it: what it was asked to make, whether it hears this computer now,
+// and its config as a read of it again finds it.
+function agent({ online = true, refuse = null, config = AGENT } = {}) {
   const made = [];
-  return {
+  const server = {
     made,
+    reads: 0,
     create: async (execution) => {
       if (refuse) throw new Error(refuse);
       made.push(execution);
       return { id: "s-1" };
     },
     online: async (deviceId) => online && deviceId === "d-1",
+    capabilities: async () => {
+      server.reads += 1;
+      return config;
+    },
   };
+  return server;
 }
 
 test("confirms the folder on this computer, makes the chat with it, then binds it, and never sends the server the token", async () => {
@@ -97,6 +105,22 @@ test("lets the confirmation go when the chat cannot be made, and says why in the
   assert.equal(desktop.calls.some(([name]) => name === "bindSession"), false);
 });
 
+test("reads the agent's config again at the first message when it could not be read, and makes no chat while it still cannot be", async () => {
+  const read = agent();
+  await createChat(bridge(), UNREAD, "last", read);
+  assert.deepEqual([read.reads, read.made], [1, [{ kind: "device", device_id: "d-1", folder: "/home/flavius/notes", nonce: "n".repeat(43) }]]);
+  const desktop = bridge();
+  const unread = agent({ config: UNREAD });
+  await assert.rejects(createChat(desktop, UNREAD, "last", unread), {
+    message: "Surogate could not read the agent's settings, so this chat was not made. Send it again.",
+  });
+  assert.deepEqual([unread.made, desktop.calls], [[], []]);
+  // A browser offers no folder: its chat is made in the cloud, the config read or not.
+  const browser = agent({ config: UNREAD });
+  await createChat(undefined, UNREAD, "last", browser);
+  assert.deepEqual([browser.reads, browser.made], [0, [undefined]]);
+});
+
 test("makes no chat when the user cancels the folder sheet", async () => {
   const server = agent();
   await assert.rejects(createChat(bridge({ prepared: null }), AGENT, "last", server), { message: NO_FOLDER });
@@ -117,15 +141,18 @@ test("says plainly that the chat was made when its folder could not be set up, a
   assert.equal(saidBy(new Error("The folder /home/f/notes is not there")), "The folder /home/f/notes is not there");
 });
 
-test("reads local folders as the agent's config says them: only true is true, and an older server says nothing", () => {
+test("reads local folders as the agent's config says them: only true is true, an older server says nothing, and a failed read is unread", () => {
   assert.deepEqual(
-    [{ desktop_sessions: true }, { desktop_sessions: false }, {}, { desktop_sessions: "yes" }].map(desktopSessionsOf),
+    [{ desktop_sessions: true }, { desktop_sessions: false }, {}, { desktop_sessions: "yes" }]
+      .map((config) => desktopSessionsOf({ agent_id: "a-1", ...config })),
     [true, false, false, false],
   );
+  // What fetchAuthConfig answers when the read fails: every server's answer names its agent.
+  assert.equal(desktopSessionsOf({ self_registration_enabled: false, firebase: null }), null);
 });
 
 test("says where a new chat works: on a folder of this computer, or in the cloud and why", () => {
-  const older = { desktopSessions: desktopSessionsOf({}), multiSession: true };
+  const older = { desktopSessions: desktopSessionsOf({ agent_id: "a-1" }), multiSession: true };
   const cases = [
     [null, AGENT, "last", { local: false, text: null }],
     [THIS_COMPUTER, AGENT, "last", { local: true, text: "Works in a folder on this computer: the one you used last, or a new one. You confirm it when you send." }],
