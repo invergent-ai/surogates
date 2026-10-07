@@ -10,7 +10,8 @@
 #            build without --target builds it.
 #   guest    the desktop VM's root filesystem: no geesefs, no claude-code or
 #            codex (switched off for local folders); the stub init, the pinned
-#            kernel's modules, iproute2, e2fsprogs and kmod.
+#            kernel's modules, the guest-kernel rule and bpftool, iproute2,
+#            e2fsprogs and kmod.
 #
 # Build (from repo root):
 #   docker build -t ghcr.io/invergent-ai/surogates-agent-sandbox:latest -f images/sandbox/Dockerfile .
@@ -163,20 +164,39 @@ ENV PATH="/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:$
     XDG_CACHE_HOME="/home/sandbox/.cache"
 
 # ── The guest's kernel ──────────────────────────────────────────────
-# The kernel pin: KERNEL above and these two .debs, their version and hashes, change together.
+# The kernel pin: KERNEL above and these three .debs, their version and hashes, change together.
+# The dbgsym's unstripped vmlinux is the BTF the guest-kernel rule compiles against;
+# only it is unpacked, not the modules' debug info.
 FROM python:3.12-slim AS kernel
 ADD --checksum=sha256:5ff8d86009ba6c30a6aacfe47a5176969bbb6591438c913d29881032d071e83f \
     https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-6.8.0-146-generic_6.8.0-146.146_amd64.deb /tmp/image.deb
 ADD --checksum=sha256:9287a0b722a7dd0c94a412eda8e27de4742a7925fdf2d08375b2f608516e6ab4 \
     https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-6.8.0-146-generic_6.8.0-146.146_amd64.deb /tmp/modules.deb
-RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel
+ADD --checksum=sha256:caf8acf5d55f5b6b933b0d87c77149ae65d2d4c085d3004bfd75c3873ffec09b \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-unsigned-6.8.0-146-generic-dbgsym_6.8.0-146.146_amd64.ddeb /tmp/dbgsym.ddeb
+RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel \
+    && dpkg-deb --fsys-tarfile /tmp/dbgsym.ddeb | tar -x -C /kernel ./usr/lib/debug/boot/
+
+# ── The guest-kernel rule (BPF-LSM), compiled against the pinned kernel's BTF ──
+FROM ubuntu:24.04 AS bpf
+ARG KERNEL
+RUN apt-get update && apt-get install -y --no-install-recommends clang llvm libbpf-dev linux-tools-${KERNEL} \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=kernel /kernel/usr/lib/debug/boot/ /dbg/
+COPY desktop/vm/rule.bpf.c desktop/vm/rule-match.h /src/
+RUN /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /dbg/vmlinux-${KERNEL} format c > /src/vmlinux.h \
+    && clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I/src -c /src/rule.bpf.c -o /rule.bpf.o
 
 # ── Surogate Desktop's VM guest ─────────────────────────────────────
 FROM tools AS guest
 ARG KERNEL
+# libelf1, zlib1g, libcap2 and libzstd1 are bpftool's libraries.
 RUN apt-get update && apt-get install -y --no-install-recommends iproute2 e2fsprogs kmod \
+        libelf1 zlib1g libcap2 libzstd1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=kernel /kernel/lib/modules/ /usr/lib/modules/
+COPY --from=bpf /rule.bpf.o /usr/lib/surogate/rule.bpf.o
+COPY --from=bpf --chmod=0755 /usr/lib/linux-tools/${KERNEL}/bpftool /usr/sbin/bpftool
 COPY --chmod=0755 images/guest/surogate-init /usr/sbin/surogate-init
 # No setuid programs and no file capabilities: the image is mounted read-only,
 # so none comes back. /etc/surogate/environment is the commands' environment,
