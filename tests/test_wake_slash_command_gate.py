@@ -169,7 +169,7 @@ async def test_enabled_command_reaches_handler(monkeypatch):
     assert _llm_responses(store) == []
 
 
-@pytest.mark.parametrize("command", ["loop", "mission", "auto-research", "deep-research"])
+@pytest.mark.parametrize("command", ["loop", "mission", "auto-research", "deep-research", "code"])
 def test_a_project_thread_refuses_a_command_that_starts_helpers(command):
     harness = _harness(AsyncMock(), _permissive())
     thread = _session()

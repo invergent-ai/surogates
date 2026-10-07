@@ -903,3 +903,23 @@ async def test_a_turn_after_a_landing_that_rolled_back_is_told_its_copy_lacks_th
         calling(("write_file", {"path": "x.md", "content": "x"})), _final_response("Done."),
     ], pool=pool)
     assert (await last_writes(store, thread))[-1].startswith("[This thread's copy")
+
+
+async def test_a_threads_code_command_runs_no_coding_agent_on_a_copy_never_landed(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "/code claude Add a line to notes.txt."})
+    ran: list = []
+
+    async def a_coding_run(session, cmd, lease, all_events):  # the CLI's edit, through the pod
+        ran.append(cmd)
+        await open_pod(pool, session)
+        await pool.execute(sandbox_session_key(session), "terminal", json.dumps({"command": "echo by the agent >> notes.txt"}))
+
+    harness = a_waking_thread_harness(api, monkeypatch, pool, AsyncMock())
+    harness._run_code_agent = a_coding_run
+    await asyncio.wait_for(harness.wake(thread.id), 60)
+    [answer] = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
+    assert answer.startswith("A thread can't"), answer
+    assert (ran, pods.pods) == ([], {})
+    assert (pods.project / "notes.txt").read_text() == "v1 notes\n"

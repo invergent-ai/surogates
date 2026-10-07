@@ -362,10 +362,10 @@ _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
     "goal", "mission", "auto-research", "code", "deep-research",
 })
 
-# The commands that start sessions from a project's thread, which starts
-# none: a routine's runs, a mission's tasks, a research's experiments and
-# helpers would all edit a copy the thread never lands.
-_PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "mission", "auto-research", "deep-research"})
+# The commands a project's thread refuses: a routine's runs, a mission's
+# tasks, a research's experiments and helpers would all edit a copy the
+# thread never lands, and so would a coding agent, whose turn never lands.
+_PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "mission", "auto-research", "deep-research", "code"})
 
 
 #: A first-person intention to act, sitting at the very end of the message:
