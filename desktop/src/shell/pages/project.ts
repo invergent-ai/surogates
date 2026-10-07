@@ -55,15 +55,27 @@ async function render(): Promise<void> {
     byId<HTMLSelectElement>("coordinator-tier").value = project.coordinatorTier ?? "";
     byId<HTMLSelectElement>("thread-tier").value = project.threadTier ?? "";
   }
-  byId<HTMLInputElement>("name").focus();
+  if (refused === null) return byId("name").focus();
+  // Nothing to change: only Cancel is left, with the focus.
+  for (const field of document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input, textarea, select")) {
+    field.disabled = true;
+  }
+  byId("cancel").focus();
 }
 
-// One request at a time: the fields wait for its answer, which is said, or closes the dialog. The
-// name has the focus back, which the fields' wait took from it, for the user to go on.
-async function asked(request: () => Promise<string | null>): Promise<void> {
+// One request at a time: the fields wait for its answer, which is said, or closes the dialog. A save
+// says it is under way, as *busy*, on its button. The name has the focus back, which the fields'
+// wait took from it, for the user to go on.
+async function asked(request: () => Promise<string | null>, busy?: string): Promise<void> {
   const fields = byId<HTMLFieldSetElement>("fields");
   if (fields.disabled) return;
   fields.disabled = true;
+  const save = byId("save");
+  const idle = save.textContent;
+  if (busy) {
+    save.textContent = busy;
+    byId("form").setAttribute("aria-busy", "true");
+  }
   byId("error").textContent = "";
   try {
     byId("error").textContent = (await request()) ?? "";
@@ -71,6 +83,8 @@ async function asked(request: () => Promise<string | null>): Promise<void> {
     byId("error").textContent = error instanceof Error ? error.message : String(error);
   } finally {
     fields.disabled = false;
+    save.textContent = idle;
+    byId("form").removeAttribute("aria-busy");
     byId("name").focus();
   }
 }
@@ -83,7 +97,7 @@ byId<HTMLFormElement>("form").addEventListener("submit", (event) => {
   if (editing) {
     Object.assign(fields, { instructions: value("instructions"), coordinatorTier: tier("coordinator-tier"), threadTier: tier("thread-tier") });
   }
-  void asked(() => dialog.save(fields));
+  void asked(() => dialog.save(fields), editing ? "Saving…" : "Creating…");
 });
 byId("archive").addEventListener("click", () => void asked(() => dialog.archive()));
 byId("cancel").addEventListener("click", () => void dialog.close());

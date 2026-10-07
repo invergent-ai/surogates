@@ -506,6 +506,11 @@ describe("the project dialog", () => {
       expect(await dialog.textContent("#error")).toBe(said);
       expect(await dialog.isVisible("#save")).toBe(false);
       expect(await dialog.isVisible("#archive")).toBe(false);
+      // Nothing to change: only Cancel is left, with the focus.
+      for (const field of ["#name", "#goal", "#instructions", "#coordinator-tier", "#thread-tier"]) {
+        expect(await dialog.isEnabled(field), field).toBe(false);
+      }
+      expect(await dialog.evaluate(() => document.activeElement?.id)).toBe("cancel");
       await dialog.click("#cancel");
       await expect.poll(() => dialogOpen(shell)).toBe(false);
     });
@@ -546,6 +551,36 @@ describe("the project dialog", () => {
     await dialog.click("#save");
     await expect.poll(() => dialog.textContent("#error")).toBe("Name the project.");
     expect(await dialog.evaluate(() => document.activeElement?.id)).toBe("name");
+  });
+
+  it("says a create or a save is under way while the agent answers it", async () => {
+    const { shell, page, client } = await signedIn();
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { lag: number } }).fakeProjects.lag = 1_500;
+    });
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    let dialog = await projectDialog(shell);
+    await dialog.fill("#name", "  ");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error")).toBe("Name the project.");
+    expect([await dialog.textContent("#save"), await dialog.getAttribute("#form", "aria-busy")]).toEqual(["Create project", null]);
+    await dialog.fill("#name", "Busy");
+    await dialog.click("#save");
+    expect([await dialog.textContent("#save"), await dialog.getAttribute("#form", "aria-busy")]).toEqual(["Creating…", "true"]);
+    await expect.poll(() => dialogOpen(shell), { timeout: 5_000 }).toBe(false);
+    await expect.poll(() => page.textContent("#title")).toBe("Busy");
+    // The new project's conversation is a load of its own: its page is as slow again.
+    await client.waitForLoadState();
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { lag: number } }).fakeProjects.lag = 1_500;
+    });
+    await page.click("#project-settings");
+    dialog = await projectDialog(shell);
+    await dialog.fill("#name", "Busier");
+    await dialog.click("#save");
+    expect([await dialog.textContent("#save"), await dialog.getAttribute("#form", "aria-busy")]).toEqual(["Saving…", "true"]);
+    await expect.poll(() => dialogOpen(shell), { timeout: 5_000 }).toBe(false);
   });
 
   it("makes one project for a Create clicked twice before the agent answers", async () => {
