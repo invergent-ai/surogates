@@ -10,7 +10,8 @@ import type { AgentChatAdapter, AgentChatThreadRow } from "../../types";
  * The rows of *projectId*'s threads, by id: read whole when the stream says it
  * is ready (again, after a reconnect) or a change is project-wide, and one row
  * when a change names its thread. One read runs at a time; changes heard during
- * it are read after it. Empty without a project, or with an adapter that reads none.
+ * it are read after it, and a read that failed is read again with the next
+ * change. Empty without a project, or with an adapter that reads none.
  */
 export function useProjectThreads(
   adapter: AgentChatAdapter,
@@ -20,46 +21,54 @@ export function useProjectThreads(
 
   useEffect(() => {
     setRows({});
-    const { listProjectThreads, openProjectStream } = adapter;
-    if (!projectId || !listProjectThreads || !openProjectStream) return;
+    if (!projectId || !adapter.listProjectThreads || !adapter.openProjectStream) return;
     let closed = false;
     let reading = false;
     let wanted = new Set<string | null>();
+    const failed = new Set<string | null>();
 
+    const readOne = async (threadId: string | null) => {
+      if (threadId === null) {
+        const all = await adapter.listProjectThreads!({ projectId });
+        if (!closed) setRows(Object.fromEntries(all.map((row) => [row.id, row])));
+        return;
+      }
+      const [row] = await adapter.listProjectThreads!({ projectId, threadId });
+      if (!closed) setRows(({ [threadId]: _gone, ...rest }) => (row ? { ...rest, [threadId]: row } : rest));
+    };
     const read = async () => {
       if (reading) return;
       reading = true;
-      try {
-        while (wanted.size > 0 && !closed) {
-          const asked = wanted;
-          wanted = new Set();
-          if (asked.has(null)) {
-            const all = await listProjectThreads({ projectId });
-            if (!closed) setRows(Object.fromEntries(all.map((row) => [row.id, row])));
-            continue;
-          }
-          for (const threadId of asked as Set<string>) {
-            const [row] = await listProjectThreads({ projectId, threadId });
-            if (closed) return;
-            setRows(({ [threadId]: _gone, ...rest }) => (row ? { ...rest, [threadId]: row } : rest));
+      while (wanted.size > 0 && !closed) {
+        const asked = wanted;
+        wanted = new Set();
+        // A full read answers every one-row read asked with it.
+        for (const threadId of asked.has(null) ? [null] : asked) {
+          if (closed) break;
+          try {
+            await readOne(threadId);
+          } catch {
+            failed.add(threadId);
           }
         }
-      } catch {
-        // The stream's next change, or its next ready, reads again.
-      } finally {
-        reading = false;
       }
+      reading = false;
     };
     const want = (threadId: string | null) => {
       wanted.add(threadId);
+      for (const again of failed) wanted.add(again);
+      failed.clear();
       void read();
     };
 
-    const stream = openProjectStream({ projectId });
+    const stream = adapter.openProjectStream({ projectId });
     // The stream opens itself again after a failure, and ends only when the
-    // project is gone: its cards then show what their events said.
+    // project is gone: its cards then show what their events said, and a read
+    // still on its way is dropped.
     stream.onerror = () => {
-      if (!closed) setRows({});
+      if (closed) return;
+      closed = true;
+      setRows({});
     };
     stream.addEventListener("ready", () => want(null));
     stream.addEventListener("change", (event) => {

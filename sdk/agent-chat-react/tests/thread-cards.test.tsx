@@ -69,11 +69,32 @@ describe("the reducer's thread cards", () => {
     expect(failed.messages[0]?.worker).toMatchObject({ state: "failed", report: "recovery_loop" });
   });
 
+  it("draws nothing for a report from a worker it has no card for, as a delegated task's", () => {
+    const before = applied({ type: "llm.response", data: { message: { content: "I delegated it." } } });
+    for (const report of [
+      { type: "worker.complete" as const, data: { worker_id: THREAD, result: "Done." } },
+      { type: "worker.failed" as const, data: { worker_id: THREAD, error: "recovery_loop" } },
+    ]) {
+      const after = applyAgentChatEvent(before, { ...report, eventId: 2 });
+      expect(after.messages).toEqual(before.messages);
+    }
+  });
+
   it("keeps the loop's control markup out of a mission worker's report", () => {
     const state = applied(spawned(), { type: "worker.complete", data: {
       worker_id: THREAD, result: 'Checked the figures.\n<next_action complexity="low">done</next_action>',
     } });
     expect(state.messages[0]?.worker?.report).toBe("Checked the figures.");
+  });
+
+  it("keeps only a report's files and artifacts on its card, as a thread's row does", () => {
+    const state = applied(spawned(), { type: "worker.complete", data: { worker_id: THREAD, result: "Done.", files: [
+      { kind: "file", label: "A.docx", ref: "threads/Draft A/A.docx" },
+      { kind: "url", label: "https://example.com", ref: "https://example.com" },
+      { kind: "command", label: "rm -rf build", ref: "rm -rf build" },
+      { kind: "artifact", label: "Outlook", ref: "a-1" },
+    ] } });
+    expect(state.messages[0]?.worker?.files.map((file) => file.kind)).toEqual(["file", "artifact"]);
   });
 
   it("names a coordinator's worker by its goal", () => {
@@ -115,16 +136,22 @@ function adapterStub(overrides: Partial<AgentChatAdapter> = {}): AgentChatAdapte
   } as unknown as AgentChatAdapter;
 }
 
-function mount(node: ReactElement, adapter: AgentChatAdapter, context: { projectId?: string; onOpenSession?: (id: string) => void } = {}) {
+type CardContext = { projectId?: string; onOpenSession?: (id: string) => void };
+
+function provided(node: ReactElement, adapter: AgentChatAdapter, context: CardContext) {
+  return (
+    <AgentChatAdapterProvider value={{ adapter, sessionId: "master", ...context }}>
+      <TooltipProvider>{node}</TooltipProvider>
+    </AgentChatAdapterProvider>
+  );
+}
+
+function mount(node: ReactElement, adapter: AgentChatAdapter, context: CardContext = {}) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
-    root?.render(
-      <AgentChatAdapterProvider value={{ adapter, sessionId: "master", ...context }}>
-        <TooltipProvider>{node}</TooltipProvider>
-      </AgentChatAdapterProvider>,
-    );
+    root?.render(provided(node, adapter, context));
   });
   return container;
 }
@@ -157,29 +184,39 @@ describe("the cards in the conversation", () => {
       const state = applied(
         spawned({ title: "Draft A‮" }),
         { type: "llm.response", data: { message: { content: "Started it." } } },
-        { type: "worker.complete", data: { worker_id: THREAD, result: "Drafted the memo.", files: [
-          { kind: "file", label: "A.docx", ref: "threads/Draft A/A.docx" },
-        ] } },
+        { type: "worker.complete", data: {
+          worker_id: THREAD,
+          result: "## Summary\n\n**Drafted** the `A` memo, __twice__.\nThen checked it.",
+          files: [{ kind: "file", label: "A.docx", ref: "threads/Draft A/A.docx" }],
+        } },
       );
       const dom = mount(thread(state, viewMode), adapterStub(), { onOpenSession: opened });
       const card = dom.querySelector('[data-testid="worker-card"]')!;
-      // A title's bidi control stays inside its own isolate.
-      expect(card.querySelector("bdi")?.textContent).toBe("Draft A‮");
+      // Each field's bidi control stays inside its own isolate. The status line is
+      // the report's first line that is not a heading, without its marks.
+      const fields = ["Draft A‮", "Drafted the A memo, twice.", "A.docx"];
+      expect([...card.querySelectorAll("bdi")].map((bdi) => bdi.textContent)).toEqual(fields);
+      // A field cut short keeps its whole text in reach.
+      expect([...card.querySelectorAll("[title]")].map((node) => node.getAttribute("title"))).toEqual(fields);
       expect(card.querySelector('[data-testid="worker-card-status"]')?.textContent).toBe("Reported");
-      expect(card.textContent).toContain("Drafted the memo.");
-      expect(card.textContent).toContain("A.docx");
-      act(() => button(dom, "View thread", card).click());
+      const view = button(dom, "View thread", card);
+      expect(view.getAttribute("aria-label")).toBe("View thread Draft A‮");
+      act(() => view.click());
       expect(opened).toHaveBeenCalledWith(THREAD);
     });
   }
 
-  it("starts a proposed thread from its card, and all the cloud ones at once", async () => {
+  it("starts a proposed thread from its card, and offers Start all no more once one cloud thread waits", async () => {
     const startProposedThread = vi.fn(async ({ key }: { key: string }) => ({
       id: `thread-${key}`, title: "", group: "working" as const, reason: null, statusLine: null, progress: null, files: [],
     }));
     const dom = mount(thread(applied(proposed), "simple"), adapterStub({ startProposedThread }), { projectId: "project-1" });
     const cards = [...dom.querySelectorAll('[data-testid="proposed-thread"]')];
-    expect(cards.map((card) => card.querySelector("bdi")?.textContent)).toEqual(["Draft A", "Summarise B", "Check the totals"]);
+    expect(cards.map((card) => [...card.querySelectorAll("bdi")].map((bdi) => bdi.textContent))).toEqual([
+      ["Draft A", "Draft the A memo as A.docx."],
+      ["Summarise B", "Summarise B.pdf."],
+      ["Check the totals", "Check the totals in Budget.xlsx."],
+    ]);
     // A thread on the user's computer is not started from the cloud's card.
     expect(cards[2]?.querySelector("button")).toBeNull();
     expect(cards[2]?.textContent).toContain("Works in a folder on your computer");
@@ -191,6 +228,52 @@ describe("the cards in the conversation", () => {
     await act(async () => button(dom, "Start", cards[1]).click());
     expect(startProposedThread).toHaveBeenCalledTimes(2);
     expect(dom.textContent).not.toContain("Start all");
+  });
+
+  for (const viewMode of ["simple", "expert"] as const) {
+    it(`${viewMode}: a proposal's card starts its threads once the master writes on below it`, async () => {
+      const startProposedThread = vi.fn(async ({ key }: { key: string }) => ({
+        id: `thread-${key}`, title: "", group: "working" as const, reason: null, statusLine: null, progress: null, files: [],
+      }));
+      const state = applied(proposed, { type: "llm.response", data: { message: { content: "Start the ones you want." } } });
+      const dom = mount(thread(state, viewMode), adapterStub({ startProposedThread }), { projectId: "project-1" });
+      expect(dom.textContent).toContain("Start the ones you want.");
+      const card = dom.querySelector('[data-testid="proposed-thread"]')!;
+      await act(async () => button(dom, "Start", card).click());
+      expect(startProposedThread).toHaveBeenCalledWith({ projectId: "project-1", proposalId: PROPOSAL, key: "1" });
+      expect(card.textContent).toContain("Started");
+    });
+  }
+
+  it("names the thread each button acts on, says it is starting, and gives focus to the started card", async () => {
+    const finish: Record<string, () => void> = {};
+    const startProposedThread = vi.fn(({ key }: { key: string }) => new Promise<AgentChatThreadRow>((resolve) => {
+      finish[key] = () => resolve({ id: `thread-${key}`, title: "", group: "working", reason: null, statusLine: null, progress: null, files: [] });
+    }));
+    const dom = mount(thread(applied(proposed), "simple"), adapterStub({ startProposedThread }), {
+      projectId: "project-1", onOpenSession: vi.fn(),
+    });
+    const cards = () => [...dom.querySelectorAll('[data-testid="proposed-thread"]')];
+    const start = button(dom, "Start", cards()[0]);
+    expect(start.getAttribute("aria-label")).toBe("Start Draft A");
+    start.focus();
+    await act(async () => start.click());
+    expect(start.textContent).toBe("Starting…");
+    expect(start.getAttribute("aria-label")).toBe("Starting Draft A");
+    expect(start.disabled).toBe(true);
+
+    await act(async () => finish["1"]!());
+    expect(cards()[0]?.querySelector('[role="status"]')?.textContent).toBe("Started");
+    const view = button(dom, "View thread", cards()[0]);
+    expect(view.getAttribute("aria-label")).toBe("View thread Draft A");
+    // Its Start went with the focus on it: focus moves to its View thread.
+    expect(document.activeElement).toBe(view);
+
+    // Focus the user put elsewhere stays there.
+    await act(async () => button(dom, "Start", cards()[1]).click());
+    await act(async () => finish["2"]!());
+    expect(button(dom, "View thread", cards()[1])).toBeTruthy();
+    expect(document.activeElement).toBe(view);
   });
 
   it("offers Start all while two cloud threads wait", async () => {
@@ -246,6 +329,24 @@ describe("the cards in the conversation", () => {
     const card = dom.querySelector('[data-testid="proposed-thread"]')!;
     await act(async () => button(dom, "Start", card).click());
     expect(card.querySelector('[role="alert"]')?.textContent).toBe("This thread was already started.");
+  });
+
+  it("shows a card started elsewhere as Started, with no alert for its own start refused", async () => {
+    let refuse: () => void = () => {};
+    const startProposedThread = vi.fn(() => new Promise<AgentChatThreadRow>((_resolve, reject) => {
+      refuse = () => reject(new Error("This thread was already started."));
+    }));
+    const adapter = adapterStub({ startProposedThread });
+    const context = { projectId: "project-1" };
+    const dom = mount(thread(applied(proposed), "simple"), adapter, context);
+    await act(async () => button(dom, "Start", dom.querySelector('[data-testid="proposed-thread"]')!).click());
+    // Another device started it: its thread's event arrives before this start's refusal.
+    const startedElsewhere = applied(proposed, spawned({ started_by: "user", proposal_id: PROPOSAL, key: "1" }));
+    act(() => root?.render(provided(thread(startedElsewhere, "simple"), adapter, context)));
+    await act(async () => refuse());
+    const card = dom.querySelector('[data-testid="proposed-thread"]')!;
+    expect(card.textContent).toContain("Started");
+    expect(card.querySelector('[role="alert"]')).toBeNull();
   });
 
   it("offers no Start outside a project's master", () => {

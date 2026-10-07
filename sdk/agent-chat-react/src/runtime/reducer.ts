@@ -927,7 +927,10 @@ function applyWorkerSpawned(
   })];
 }
 
-/** A report updates its worker's card where the card is: the conversation reads on below it. */
+/**
+ * A report updates its worker's card where the card is: the conversation reads on below it.
+ * A worker with no card, a delegated task's, which reports with no ``worker.spawned``, draws none.
+ */
 function applyWorkerReport(
   messages: AgentChatMessage[],
   event: AgentChatRuntimeEvent,
@@ -935,17 +938,18 @@ function applyWorkerReport(
   const id = stringValue(event.data.worker_id);
   const failed = event.type === "worker.failed";
   const index = messages.findIndex((message) => message.worker?.id === id);
-  const worker: AgentChatWorker = index === -1
-    ? { id, title: stringValue(event.data.title) || null, goal: "", state: "working", report: null, files: [] }
-    : messages[index]!.worker!;
+  if (index === -1) return messages;
+  const worker = messages[index]!.worker!;
   const reported: AgentChatWorker = {
     ...worker,
     state: failed ? "failed" : "reported",
     // A mission worker's result can carry the loop's control markup, which never reaches the UI.
     report: stripMissionControlMarkup(stringValue(failed ? event.data.error : event.data.result)) || null,
-    files: failed ? worker.files : parseTurnArtifacts(event.data.files),
+    // A card lists files, as a thread's row does: not the URLs and commands a turn names.
+    files: failed
+      ? worker.files
+      : parseTurnArtifacts(event.data.files).filter((file) => file.kind === "file" || file.kind === "artifact"),
   };
-  if (index === -1) return [...messages, workerMessage(reported)];
   const next = [...messages];
   next[index] = { ...next[index]!, worker: reported };
   return next;

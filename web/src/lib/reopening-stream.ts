@@ -31,10 +31,48 @@ export const INBOX_REOPENING: Reopening = { delayMs: () => 3_000, stop: (failure
 
 /**
  * A project's: three seconds after the first failure and twice as long after each next one, at
- * most a minute apart. It never gives up until *gone* says the project is gone.
+ * most a minute apart. Each wait is cut by up to half at random (*random* in [0, 1]), so that
+ * the streams an API restart drops do not all come back at once. It never gives up until *gone*
+ * says the project is gone.
  */
-export function projectReopening(gone: () => boolean): Reopening {
-  return { delayMs: (failures) => Math.min(3_000 * 2 ** (failures - 1), 60_000), stop: () => gone() };
+export function projectReopening(gone: () => boolean, random: () => number = Math.random): Reopening {
+  return {
+    delayMs: (failures) => Math.min(3_000 * 2 ** (failures - 1), 60_000) * (1 - random() / 2),
+    stop: () => gone(),
+  };
+}
+
+type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+/**
+ * Whether a project's route answered that the project is gone: its own 404. An ingress with no
+ * ready pod answers 404 too, in plain text, and an API pod without the route a 404 of its own;
+ * those are an outage, retried like any other.
+ */
+export async function projectGone(response: Response): Promise<boolean> {
+  if (response.status !== 404) return false;
+  try {
+    return ((await response.clone().json()) as { detail?: unknown }).detail === "No such project.";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A project's stream, each connection opened by *open* over *fetchFn*. It opens itself again
+ * after any failure, and ends, with ``onerror``, only once its route says the project is gone.
+ */
+export function projectStream<T extends string>(
+  open: (fetchFn: Fetch) => EventStreamLike<T>,
+  fetchFn: Fetch,
+): EventStreamLike<T> {
+  let gone = false;
+  const watched: Fetch = async (input, init) => {
+    const response = await fetchFn(input, init);
+    gone = await projectGone(response);
+    return response;
+  };
+  return reopeningStream(() => open(watched), projectReopening(() => gone));
 }
 
 export function reopeningStream<T extends string>(
@@ -53,6 +91,18 @@ export function reopeningStream<T extends string>(
     listener(event);
   };
 
+  // The wait before the next try, which the network coming back ends at once. While a
+  // connection is open, its own watchdog listens for the network.
+  let waiting: ReturnType<typeof setTimeout> | undefined;
+  function stopWaiting(): void {
+    clearTimeout(waiting);
+    globalThis.removeEventListener?.("online", reopen);
+  }
+  function reopen(): void {
+    stopWaiting();
+    connect();
+  }
+
   function connect(): void {
     if (closed) return;
     const next = open();
@@ -69,7 +119,8 @@ export function reopeningStream<T extends string>(
         surfaced?.();
         return;
       }
-      setTimeout(connect, reopening.delayMs(failures));
+      waiting = setTimeout(reopen, reopening.delayMs(failures));
+      globalThis.addEventListener?.("online", reopen);
     };
   }
 
@@ -84,6 +135,7 @@ export function reopeningStream<T extends string>(
     },
     close() {
       closed = true;
+      stopWaiting();
       source?.close();
       source = null;
     },

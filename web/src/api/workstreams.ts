@@ -4,7 +4,7 @@
 // The project routes (/v1/workstreams), for the cards of a project's master and for the
 // desktop's ProjectsSource: the rows, starting a proposed thread, and the project's stream.
 
-import { type EventStreamLike, projectReopening, reopeningStream } from "@/lib/reopening-stream";
+import { type EventStreamLike, projectStream } from "@/lib/reopening-stream";
 import type { ThreadRow } from "@/lib/projects";
 import { type ThreadRowResponse, threadRowOf } from "@/lib/projects-wire";
 import { FetchSseEventStream } from "@invergent/agent-chat-react";
@@ -33,17 +33,11 @@ export async function startThread(projectId: string, proposalId: string, key: st
 /**
  * The project's stream, ``ready`` then a ``change`` for each change. It opens itself again
  * after any failure, and ends, with ``onerror``, only when the project is gone: its route
- * answers 404 once the project is archived or is not the user's.
+ * answers its own 404 once the project is archived or is not the user's.
  */
 export function openProjectStream(projectId: string): EventStreamLike<"ready" | "change"> {
-  let gone = false;
-  const fetchFn: typeof authFetch = async (input, init) => {
-    const response = await authFetch(input, init);
-    gone = response.status === 404;
-    return response;
-  };
-  return reopeningStream<"ready" | "change">(
-    () => new FetchSseEventStream(`/api/v1/workstreams/${projectId}/stream`, { fetchFn }),
-    projectReopening(() => gone),
+  return projectStream<"ready" | "change">(
+    (fetchFn) => new FetchSseEventStream(`/api/v1/workstreams/${projectId}/stream`, { fetchFn }),
+    authFetch,
   );
 }
