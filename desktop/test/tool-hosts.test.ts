@@ -112,7 +112,7 @@ describe("a command elsewhere (the VM), under the hook guard", { timeout: 30_000
     expect([outcome, ran]).toEqual([{
       error: {
         type: "sandbox",
-        message: "Blocked: .idea is a link to missing in this folder. .mcp.json is a link to mcp.json in this folder. Make each a file, or point it outside the folder, to run commands here.",
+        message: "Blocked: .idea is a link to missing in this folder. .mcp.json is a link to mcp.json in this folder. Make each a file or folder of its own, or point it outside the folder or at a protected name, to run commands here.",
       },
     }, 0]);
   });

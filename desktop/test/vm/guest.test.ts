@@ -1443,7 +1443,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
       // A look sees the link the host made, at the host's start or after this command: commands are refused from the next one.
       await command("true");
       expect(await command("touch ran")).toEqual({
-        error: { type: "sandbox", message: "Blocked: .mcp.json is a link to mcp.json in this folder. Make it a file, or point it outside the folder, to run commands here." },
+        error: { type: "sandbox", message: "Blocked: .mcp.json is a link to mcp.json in this folder. Make it a file or folder of its own, or point it outside the folder or at a protected name, to run commands here." },
       });
       expect(existsSync(join(folder, "ran"))).toBe(false);
       rmSync(join(folder, ".mcp.json"));
@@ -1485,7 +1485,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
       try {
         await command("true");
         expect(await command("touch ran")).toEqual({
-          error: { type: "sandbox", message: `Blocked: ${linked} in this folder. Make it a file, or point it outside the folder, to run commands here.` },
+          error: { type: "sandbox", message: `Blocked: ${linked} in this folder. Make it a file or folder of its own, or point it outside the folder or at a protected name, to run commands here.` },
         });
         expect(existsSync(join(folder, "ran"))).toBe(false);
         clear();

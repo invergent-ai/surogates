@@ -366,7 +366,7 @@ describe("the guard", () => {
 // The guest's rule judges a write by the path it reaches, not by a link's name on the way: a link
 // the user made at a protected name, to a path in the folder that is not protected, lets a command write it.
 describe("a protected name linked into the folder", () => {
-  const LINKED = "Make it a file, or point it outside the folder, to run commands here.";
+  const LINKED = "Make it a file or folder of its own, or point it outside the folder or at a protected name, to run commands here.";
   const refused = (message: string) => ({ error: { type: "sandbox", message } });
 
   it("refuses commands while it is a link, and lets them run once it is a file", async () => {
@@ -392,7 +392,7 @@ describe("a protected name linked into the folder", () => {
     expect(await new HookGuard(folder).refusal()).toEqual(refused([
       "Blocked: .gitconfig is a link to cfg in this folder.", ".idea/workspace.xml is a link to workspace.xml in this folder.",
       ".vscode is a link to scripts in this folder.", ".zshrc is a link to missing in this folder.",
-      "Make each a file, or point it outside the folder, to run commands here.",
+      "Make each a file or folder of its own, or point it outside the folder or at a protected name, to run commands here.",
     ].join(" ")));
   });
 

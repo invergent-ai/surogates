@@ -443,7 +443,7 @@ export class HookGuard {
       : null;
     const links = [...scan.links].map(([path, to]) => `${relative(this.folder, path)} is a link to ${relative(this.folder, to) || "."} in this folder.`).sort();
     const linked = links.length > 0
-      ? `Blocked: ${links.join(" ")} Make ${links.length > 1 ? "each" : "it"} a file, or point it outside the folder, to run commands here.`
+      ? `Blocked: ${links.join(" ")} Make ${links.length > 1 ? "each" : "it"} a file or folder of its own, or point it outside the folder or at a protected name, to run commands here.`
       : null;
     const unremoved = unstrippable.length > 0
       ? `Blocked: the computer could not remove the steps that appeared in ${listed(this.folder, unstrippable)} while this chat's commands could write there, which git would run outside the sandbox. Abort that rebase or cherry-pick, or remove those exec lines, to run commands here.`
