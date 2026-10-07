@@ -507,6 +507,14 @@ def create_app(
             preview = json.dumps(args, default=str)[:200]
             logger.info("→ %s %s", name, preview)
 
+        if name == "_history" and history is not None and require_fuse and not workspace_mounted(mount, mounts_path):
+            # The sidecar went, and /project is an empty folder: a landing
+            # written there would never reach the bucket.
+            return Response(
+                content=json.dumps({"error": f"The project's files are not mounted at {mount}"}),
+                media_type="application/json",
+            )
+
         async with sem:
             result = await execute_in_child(name, args, workspace, timeout, history)
         logger.info("← %s (%d bytes)", name, len(result))

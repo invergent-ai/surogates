@@ -237,3 +237,23 @@ async def test_a_pod_writes_a_file_whose_name_is_near_the_limit(pods):
     written = await call(pods, pod, "_file", action="write", path=name, content_b64=base64.b64encode(b"contrat").decode())
     assert written == {"ok": True, "bytes": 7}
     assert (pods.copies["t1"] / name).read_bytes() == b"contrat"
+
+
+async def test_a_pod_whose_real_files_came_unmounted_lands_nothing(tmp_path):
+    project, copy, mounts = tmp_path / "project", tmp_path / "workspace", tmp_path / "mounts"
+    project.mkdir()
+    copy.mkdir()
+    (project / "Report.docx").write_bytes(b"report v1")
+    history = History(
+        repo=_shadow_repo_path(str(project), base=tmp_path / "home"), project=project, copy=copy, thread="t1", user="u1",
+    )
+    app = executor_server.create_app(token="t", workspace=str(copy), mounts_path=str(mounts), history=history)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://pod") as client:
+        mounts.write_text(f"geesefs {project} fuse.geesefs rw 0 0\n")
+        assert (await client.get("/healthz")).status_code == 200
+        (copy / "new.md").write_text("new")
+        # The sidecar went and /project is an empty folder: nothing written there would reach the bucket.
+        mounts.write_text("")
+        step = {"action": "commit", "author": THREAD, "trailers": [["Surogate-Kind", "turn"]]}
+        answer = (await client.post("/execute", json={"name": "_history", "args": step}, headers=AUTH)).json()
+    assert list(answer) == ["error"] and "not mounted" in answer["error"]
