@@ -425,24 +425,23 @@ async def _put_back(
     file: its reply was lost, or it ran out of time.  It is put back first,
     only where the real file is the turn's version.  A *recovered*
     landing's apply still ``pending`` may have too: the kill came before its
-    state was written.  The saga's row follows each put-back.
+    state was written.  The saga's row is written before each put-back, the
+    step already ``compensating``: a worker killed in one leaves it to run again.
     """
     unsure = (StepState.FAILED, StepState.EXECUTING, *((StepState.PENDING,) if recovered else ()))
     failed: list[SagaStep] = []
     for it in saga.steps:
         if it.tool_name == "history.apply" and it.state in unsure:
+            await _written(save)
             try:
                 await asyncio.wait_for(compensate_history(it, sandbox_pool, owner, ran=False), it.timeout_seconds)
             except Exception:
                 logger.warning("Could not put back %s", it.arguments.get("path"), exc_info=True)
                 failed.append(it)
-            await _written(save)
 
     async def compensate(it: SagaStep) -> Any:
-        try:
-            return await compensate_step(it, sandbox_pool=sandbox_pool, session_id=owner)
-        finally:
-            await _written(save)
+        await _written(save)
+        return await compensate_step(it, sandbox_pool=sandbox_pool, session_id=owner)
 
     failed += await orchestrator.compensate(saga.saga_id, compensate)
     return failed

@@ -330,7 +330,7 @@ async def test_a_worker_killed_while_putting_back_is_put_back_again_by_the_next_
     async def dies_before_a(it, *, sandbox_pool, session_id):
         if session_id == str(first.id) and it.arguments.get("path") == "a.md":
             killed.set()
-            raise asyncio.CancelledError  # notes.txt is put back, and its row still says compensating
+            raise asyncio.CancelledError  # notes.txt is put back; the row says a.md's put-back is under way
         if it.tool_name == "history.apply":
             put_back.append((session_id, it.arguments["path"]))
         return await compensate(it, sandbox_pool=sandbox_pool, session_id=session_id)
@@ -352,16 +352,16 @@ async def test_a_worker_killed_while_putting_back_is_put_back_again_by_the_next_
     [row] = await rows(api, first)
     assert row.saga_state == "running"
     assert [(s["tool_name"], s["arguments"].get("path"), s["state"]) for s in row.steps] == [
-        ("history.commit", None, "committed"), ("history.apply", "a.md", "committed"),
-        ("history.apply", "notes.txt", "compensating"), ("history.apply", "z.md", "failed"),
+        ("history.commit", None, "committed"), ("history.apply", "a.md", "compensating"),
+        ("history.apply", "notes.txt", "compensated"), ("history.apply", "z.md", "failed"),
     ]
     assert pods.real_names() == ["Report.docx", "a.md", "notes.txt"]
     assert (pods.project / "notes.txt").read_text() == "v1 notes\n"
 
     await edited(pool, second, "echo by B > B.md")
     await ends(api, pool, second)
-    # notes.txt is put back a second time, as it already is: no conflict, and the landing is undone whole.
-    assert put_back == [(str(first.id), "notes.txt"), (str(second.id), "notes.txt"), (str(second.id), "a.md")]
+    # The put-back the kill cut off runs again, and the one done does not: the landing is undone whole.
+    assert put_back == [(str(first.id), "notes.txt"), (str(second.id), "a.md")]
     [row] = await rows(api, first)
     assert row.saga_state == "compensated"
     assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
@@ -561,3 +561,28 @@ async def test_a_row_write_that_fails_once_never_fails_a_put_back_that_worked(ap
     assert row.saga_state == "compensated"
     assert {s["state"] for s in row.steps if s["tool_name"] == "history.apply"} == {"compensated", "pending"}
     assert putting_back[:2] == [True, False]  # the write after a.md's put-back failed
+
+
+async def test_each_put_back_is_in_the_row_before_it_runs(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md && echo b > b.md && echo c > c.md")
+    call, compensate, seen = landing_module._call, landing_module.compensate_step, []
+
+    async def c_fails(sandbox_pool, owner, action, **arguments):
+        if action == "apply" and arguments["path"] == "c.md":
+            raise landing_module.LandingStepError("the pod's step timed out")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    async def watched(it, **kwargs):
+        if it.tool_name == "history.apply":
+            [row] = await rows(api, thread)  # from another connection, as the next lock holder reads it
+            seen.append(next((s["arguments"]["path"], s["state"]) for s in row.steps if s["step_id"] == it.step_id))
+        return await compensate(it, **kwargs)
+
+    monkeypatch.setattr(landing_module, "_call", c_fails)
+    monkeypatch.setattr(landing_module, "compensate_step", watched)
+    await ends(api, pool, thread)
+    # A put-back the row shows done is done: a worker killed in one leaves it compensating, to run again.
+    assert seen == [("b.md", "compensating"), ("a.md", "compensating")]
