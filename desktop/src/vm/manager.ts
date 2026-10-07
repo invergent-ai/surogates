@@ -13,7 +13,7 @@ import { Worker } from "node:worker_threads";
 import { BOOT_ID } from "../binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED, timedOut } from "../guest/command.js";
 import type { ProcessHandle } from "../guest/processes.js";
-import type { FromAgent, HostUser, Share } from "../guest/protocol.js";
+import { type FromAgent, HELD, type HostUser, type Share } from "../guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { Backoff } from "./backoff.js";
@@ -391,8 +391,8 @@ export class Guest {
     if (!answer) return this.lose();
     // What of the root would not end, waiting on a share that stalled, still holds the share,
     // and its removal would wait on the guest for good: it stays, its place taken, until the
-    // VM stops. The root's next setup gets a share of its own.
-    if (answer.type === "failed") return;
+    // VM stops. The root's next setup gets a share of its own. Any other failure lets it go.
+    if (answer.type === "failed" && answer.message === HELD) return;
     await this.vm.unshare(share, performance.now() + this.shareMs).catch(() => this.lose());
   }
 

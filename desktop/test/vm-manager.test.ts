@@ -410,6 +410,33 @@ describe("a root torn down", () => {
     await manager.stop();
   });
 
+  it("lets the share of a root go when its teardown fails for any other reason, and loses no guest for it", async () => {
+    const asked: unknown[] = [];
+    const roots: ControlRoots = {
+      uid: () => 10_000,
+      setup: async () => {},
+      teardown: async () => {
+        throw new Error("not a share tag: ../r1");
+      },
+      perform: async () => ({ ok: true }),
+    };
+    let boots = 0;
+    const boot: BootVm = async (...args) => {
+      boots += 1;
+      const vm = await fakeVm(roots)(...args);
+      return { ...vm, unshare: async (share) => void asked.push(["unshare", share]) };
+    };
+    const manager = new VmManager(options(), boot);
+    const on = (root: string) => manager.perform({ id: `which-${Math.random()}`, root, folder: { path: dir, ...statSync(dir) }, kind: "which", args: {} }, new AbortController().signal);
+    expect(await on("root-1")).toEqual({ ok: true });
+    // Another root keeps the guest running.
+    expect(await on("root-2")).toEqual({ ok: true });
+    await manager.teardown("root-1");
+    expect(asked).toEqual([["unshare", R1]]);
+    expect(boots).toBe(1);
+    await manager.stop();
+  });
+
   it("loses a guest that does not let its folder go, and boots a new one for the next operation", async () => {
     const asked: unknown[] = [];
     const manager = new VmManager(options(), recording(asked, async () => {

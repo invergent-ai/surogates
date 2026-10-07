@@ -16,7 +16,7 @@ import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STO
 import { PROXY_URL } from "./listeners.js";
 import { socketOf } from "./network.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
-import { type Answer, type HostUser, MAX_SHARES, type Question, ROOT_ID, type Share } from "./protocol.js";
+import { type Answer, HELD, type HostUser, MAX_SHARES, type Question, ROOT_ID, type Share } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 
 // The sessions disk (vm/init), and its folder of roots, each named by its root session id.
@@ -62,7 +62,6 @@ const PROCESS_KINDS = new Set(["start", "poll", "read_output", "wait", "kill", "
 
 export const NOT_SET_UP = { error: { type: "unavailable", message: "This computer's sandbox has not set up this chat" } } satisfies Outcome;
 const ALREADY = "This chat's sandbox is already set up";
-const HELD = "What this chat ran is waiting on its folder, which does not answer";
 const FULL = `This computer's sandbox holds ${MAX_SHARES} chats already`;
 // The cloud sandbox's HOME, under which /etc/surogate/environment names the layout:
 // at the start of a path, in a value or a list of them.
