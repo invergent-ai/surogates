@@ -26,6 +26,12 @@ export interface DesktopPreparedFolder {
   token: string; // for bindSession only: never sent to the server
 }
 
+// A chat's folder on this computer, as its binding holds it.
+export interface DesktopBinding {
+  folder: string; // as the folder sheet showed it, and the agent was told
+  mode: "free" | "ask";
+}
+
 export interface DesktopAppearance {
   theme: "light" | "dark"; // the theme in effect
   textSize: "small" | "medium" | "large";
@@ -65,6 +71,23 @@ export interface DesktopBridge {
   requestFreeMode(sessionId: string): Promise<boolean>;
   // Drops a folder confirmed with prepareFolder whose chat was never created.
   cancelPrepared(token: string): Promise<void>;
+  // The three calls about a chat's folder came after version 1's first desktops, which have none of
+  // them: the page looks for each before it calls it.
+  // The chat's folder on this computer, and whether it asks; null for a chat with no folder here.
+  // Rejects as every call about a chat does: on a page of another account's, or of nobody's, with
+  // "This computer is registered with the agent for another account", and while this computer is
+  // not registered with the agent, or its access was revoked.
+  getBinding?(sessionId: string): Promise<DesktopBinding | null>;
+  // Shows the chat's folder in the file manager, selected in its parent. Rejects as getBinding
+  // does; with "Surogate shows a chat's folder only when its user asks, with a click" but at a
+  // click of its user's, once for each, within 5 s of it; with "Surogate is still showing a folder"
+  // while this window's last one is being shown; with "Surogate is still looking for …" while a
+  // look at this folder, or at two others, has not returned; and once the folder is not there,
+  // does not answer within 5 s, or was replaced after it was confirmed for the chat.
+  revealFolder?(sessionId: string): Promise<void>;
+  // Hears each chat bound on this computer, each change of a chat's mode, and each chat's folder
+  // forgotten here, as for a deleted chat, by the chat's id.
+  onBindingChanged?(listener: (sessionId: string) => void): () => void;
   getAppearance(): Promise<DesktopAppearance>;
   onAppearanceChanged(listener: (appearance: DesktopAppearance) => void): () => void;
   // Who is signed in; null once nobody is.

@@ -261,6 +261,7 @@ class SignInOut(BaseModel):
     id: UUID
     created_at: datetime
     last_used_at: datetime
+    device_id: UUID | None
     device_name: str | None
 
 
@@ -278,7 +279,10 @@ async def list_sign_ins(request: Request, ctx: AgentRuntime, tenant: Tenant) -> 
     found = await OAuthTokens(request.app.state.session_factory).sign_ins(
         org_id=tenant.org_id, user_id=user_id, agent_id=ctx.agent_id,
     )
-    return [SignInOut(id=s.id, created_at=s.created_at, last_used_at=s.last_used_at, device_name=s.device_name) for s in found]
+    return [
+        SignInOut(id=s.id, created_at=s.created_at, last_used_at=s.last_used_at, device_id=s.device_id, device_name=s.device_name)
+        for s in found
+    ]
 
 
 @router.delete("/sign-ins/{sign_in_id}", status_code=status.HTTP_204_NO_CONTENT)

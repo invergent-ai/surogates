@@ -45,6 +45,7 @@ class DeviceRecord:
     created_at: datetime
     last_seen_at: datetime | None
     revoked_at: datetime | None
+    reauthorized_at: datetime | None
     credential_generation: int
 
 
@@ -67,6 +68,7 @@ def _record(row: Device) -> DeviceRecord:
         created_at=row.created_at,
         last_seen_at=row.last_seen_at,
         revoked_at=row.revoked_at,
+        reauthorized_at=row.reauthorized_at,
         credential_generation=row.credential_generation,
     )
 
@@ -201,6 +203,7 @@ class DeviceStore:
                     token_hash=hash_token(token),
                     token_prefix=token[:_DISPLAY_PREFIX_LEN],
                     revoked_at=None,
+                    reauthorized_at=func.now(),
                     credential_generation=Device.credential_generation + 1,
                 )
                 .returning(Device)

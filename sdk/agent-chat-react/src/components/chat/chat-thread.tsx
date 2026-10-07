@@ -4,7 +4,7 @@
 // Custom chat thread — uses ai-elements Conversation + Message
 // with a compact, Claude Code-inspired layout.
 //
-import { useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import {
   Conversation,
   ConversationContent,
@@ -91,6 +91,7 @@ import {
   FileTextIcon,
   FolderIcon,
   GlobeIcon,
+  LaptopIcon,
   LibraryIcon,
   ListIcon,
   MessageSquareIcon,
@@ -102,6 +103,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type {
+  AgentChatDeviceWaitState,
   AgentChatImageAttachment,
   AgentChatPendingAttachment,
   AgentChatResearchSource,
@@ -218,6 +220,10 @@ interface ChatThreadProps {
   // ``agentId`` scopes the connection lookup. Both omitted -> no band.
   agentId?: string;
   onOpenIntegrations?: () => void;
+  // A chat on a folder of the user's computer whose work waits for that computer.
+  deviceWait?: AgentChatDeviceWaitState | null;
+  // What the host says under the composer, as where a new chat will work.
+  composerFooter?: ReactNode;
 }
 
 // ── Timeline item types ──────────────────────────────────────────────
@@ -1971,6 +1977,8 @@ export function ChatThread({
   hideTurnSummary = false,
   agentId,
   onOpenIntegrations,
+  deviceWait = null,
+  composerFooter,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
   const activeAssistantId = useMemo(() => {
@@ -2081,6 +2089,19 @@ export function ChatThread({
 
   const composerArea = (
     <div className="mx-auto w-full max-w-4xl px-3 sm:px-6 pb-3 sm:pb-5 pt-3">
+      {/* There before it speaks, so that a screen reader hears it when it does. */}
+      <div
+        role="status"
+        data-testid="device-wait"
+        className={deviceWait ? "mb-2 flex items-center gap-2 rounded-lg border border-line bg-card px-3 py-2 text-sm text-muted-foreground" : undefined}
+      >
+        {deviceWait && (
+          <>
+            <LaptopIcon className="size-4 shrink-0" aria-hidden="true" />
+            {`Waiting for ${deviceWait.deviceName || "your computer"}. The chat goes on once it is back online.`}
+          </>
+        )}
+      </div>
       {retryIndicator && (
         <div className="mb-2">
           <RetryBanner indicator={retryIndicator} />
@@ -2169,6 +2190,7 @@ export function ChatThread({
         goalsEnabled={goalsEnabled}
         compressEnabled={compressEnabled}
       />
+      {composerFooter}
       {onOpenIntegrations && (
         <IntegrationsBandSlot
           agentId={agentId}

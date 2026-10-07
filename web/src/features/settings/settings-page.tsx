@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   ChevronRightIcon,
   Code2Icon,
   CreditCardIcon,
   GlobeIcon,
+  LaptopIcon,
   LinkIcon,
   Loader2Icon,
   type LucideIcon,
@@ -20,6 +21,7 @@ import { toast } from "sonner";
 import { CodingAgentsPanel } from "@invergent/agent-chat-react";
 import { surogatesWebChatAdapter } from "@/features/chat";
 import { BrowserProfilesTab } from "./browser-profiles-tab";
+import { DevicesTab } from "./devices-tab";
 import { PlanUsageTab } from "./plan-usage-tab";
 import { PasswordSection } from "./password-section";
 import { useAppStore } from "@/stores/app-store";
@@ -68,7 +70,8 @@ type TabId =
   | "channels"
   | "plan"
   | "coding-agents"
-  | "browser-profiles";
+  | "browser-profiles"
+  | "devices";
 
 const TAB_META: Record<
   TabId,
@@ -98,6 +101,11 @@ const TAB_META: Record<
     label: "Browser Profiles",
     blurb: "Saved logins its browser can reuse",
     Icon: GlobeIcon,
+  },
+  devices: {
+    label: "Devices",
+    blurb: "Computers that can work on your folders",
+    Icon: LaptopIcon,
   },
 };
 
@@ -175,6 +183,8 @@ export function SettingsPage() {
   // (not yet loaded / older backend) also hides it, since we cannot
   // claim a channel exists.
   const channelsEnabled = (linkableChannels?.length ?? 0) > 0;
+  // Devices only where the agent says it has local folders: an older one says nothing, and has no computers.
+  const devicesEnabled = useAppStore((s) => s.desktopSessions) === true;
 
   // Load sidebar + capability data.
   useEffect(() => {
@@ -198,6 +208,7 @@ export function SettingsPage() {
     "plan",
     ...(codingAgentsEnabled ? (["coding-agents"] as const) : []),
     ...(browserProfilesEnabled ? (["browser-profiles"] as const) : []),
+    ...(devicesEnabled ? (["devices"] as const) : []),
   ];
 
   // ── Profile tab state ──────────────────────────────────────────────
@@ -262,6 +273,15 @@ export function SettingsPage() {
     [channels.length, loadChannels],
   );
 
+  // Opened at a section, as the "computer added" notice's Review opens Devices.
+  const { tab: asked } = useSearch({ strict: false }) as { tab?: string };
+  // Not on selectTab, which changes as Channels loads: opening Channels must not bring the user back here.
+  useEffect(() => {
+    if (asked === "devices" && devicesEnabled) {
+      selectTab("devices");
+    }
+  }, [asked, devicesEnabled]);
+
   const handleUnlink = useCallback(async () => {
     if (!unlinkTarget) return;
     try {
@@ -306,6 +326,9 @@ export function SettingsPage() {
                 <TabsTrigger value="browser-profiles">
                   Browser Profiles
                 </TabsTrigger>
+              )}
+              {devicesEnabled && (
+                <TabsTrigger value="devices">Devices</TabsTrigger>
               )}
             </TabsList>
 
@@ -504,6 +527,11 @@ export function SettingsPage() {
                 <BrowserProfilesTab />
               </TabsContent>
             )}
+              {devicesEnabled && (
+                <TabsContent value="devices">
+                  <DevicesTab />
+                </TabsContent>
+              )}
             </div>
           </Tabs>
         </div>

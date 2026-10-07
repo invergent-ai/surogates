@@ -86,6 +86,7 @@ async def create_agent_session(
     idempotency_key: str | None = None,
     session_id: UUID | None = None,
     device_id: UUID | None = None,
+    device_name: str | None = None,
     folder: str | None = None,
 ) -> Session:
     sid = session_id or uuid4()
@@ -116,7 +117,8 @@ async def create_agent_session(
         # After the cloud stamp, so the folder on the computer is the
         # workspace.  The storage fields stay for create_child_session;
         # nothing may read or write them for a session on a device.
-        merged_config["execution"] = {"kind": "device", "device_id": str(device_id)}
+        # The computer's name rides with it, so every list of chats names the computer.
+        merged_config["execution"] = {"kind": "device", "device_id": str(device_id), "device_name": device_name}
         merged_config["workspace_path"] = folder
     if service_account_id is not None:
         merged_config["service_account_id"] = str(service_account_id)

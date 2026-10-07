@@ -5,7 +5,7 @@
 // its shape. What the page sends is copied field by field. No call answers an approval.
 
 import type {
-  DesktopAccount, DesktopAppearance, DesktopDeviceState, DesktopPreparedFolder,
+  DesktopAccount, DesktopAppearance, DesktopBinding, DesktopDeviceState, DesktopPreparedFolder,
 } from "../../../web/src/lib/desktop-bridge-contract.js";
 import { sameOrigin } from "./window-policy.js";
 
@@ -27,6 +27,10 @@ export interface BridgeCalls {
   requestFreeMode(sessionId: string, window: string): Promise<boolean>;
   // A folder confirmed in this window whose chat was never created: its bind is refused from now on.
   cancelPrepared(token: string, window: string): Promise<void>;
+  // What the page may know of a chat's folder here; null for a chat with none on this computer.
+  getBinding(sessionId: string): Promise<DesktopBinding | null>;
+  // The chat's folder shown in the file manager, while it is still the one its user confirmed.
+  revealFolder(sessionId: string): Promise<void>;
   getAppearance(): DesktopAppearance;
   setAccount(account: DesktopAccount | null): void;
   // The page registered its projects source (true), or withdrew it; the source stays in the page's preload.
@@ -52,9 +56,9 @@ function accountOf(value: unknown): DesktopAccount | null {
 export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<string, Handler> {
   // One question of each kind at a time for a window: a page cannot pile prompts up behind the one it has open.
   const asking = new Set<string>();
-  const alone = <T>(kind: string, window: string, ask: () => Promise<T>): Promise<T> => {
+  const alone = <T>(kind: string, window: string, ask: () => Promise<T>, busy = "Surogate is already asking"): Promise<T> => {
     const key = `${kind}\0${window}`;
-    if (asking.has(key)) return Promise.reject(new Error("Surogate is already asking"));
+    if (asking.has(key)) return Promise.reject(new Error(busy));
     asking.add(key);
     return Promise.resolve().then(ask).finally(() => asking.delete(key));
   };
@@ -87,6 +91,14 @@ export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<strin
     cancelPrepared: checked((window, token) => {
       if (typeof token !== "string" || !PREPARED.test(token)) throw new Error("Not a folder confirmation");
       return calls.cancelPrepared(token, window);
+    }),
+    getBinding: checked((_window, sessionId) => {
+      if (typeof sessionId !== "string" || !UUID.test(sessionId)) throw new Error("Not a chat");
+      return calls.getBinding(sessionId);
+    }),
+    revealFolder: checked((window, sessionId) => {
+      if (typeof sessionId !== "string" || !UUID.test(sessionId)) throw new Error("Not a chat");
+      return alone("show folder", window, () => calls.revealFolder(sessionId), "Surogate is still showing a folder");
     }),
     getAppearance: checked(() => calls.getAppearance()),
     setAccount: checked((_window, account) => calls.setAccount(accountOf(account))),
