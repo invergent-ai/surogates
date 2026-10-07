@@ -19,12 +19,13 @@ if (origin !== undefined && window.top === window && location.origin === origin)
   const subscriptions = new Map<number, () => void>();
   // Calls that reach this page before it serves its projects, as one sent while its load
   // commits does: answered once it serves them, or refused once it says it serves none. One
-  // whose deadline has passed by then was refused by the main process already: it never runs,
-  // and goes from the hold as the next call comes.
+  // with under a second left by then would answer after the main process refused it: it never
+  // runs. One whose deadline has passed goes from the hold as the next call comes.
   let early: Array<Extract<ToPage, { type: "call" }>> = [];
   // The page said it serves none (registerProjects(null)): a call is refused at once, not held.
   let servesNone = false;
   const NONE = "The agent's page serves no projects";
+  const LAST_SECOND_MS = 1_000;
   // A source's methods, which must be its own: what the page hands over is a copy, and keeps no prototype.
   const METHODS = ["list", "get", "create", "update", "archive", "threads", "resolve", "reopen", "library", "routines", "subscribe"] as const;
   const answer = (id: number, outcome: { ok: unknown } | { error: string }) => ipcRenderer.send("desktop:projects-answer", id, outcome);
@@ -81,7 +82,7 @@ if (origin !== undefined && window.top === window && location.origin === origin)
       const held = early;
       early = [];
       for (const message of held) {
-        if (Date.now() >= message.deadline) continue;
+        if (message.deadline - Date.now() < LAST_SECOND_MS) continue;
         if (source) called(source, message);
         else answer(message.id, { error: NONE });
       }
