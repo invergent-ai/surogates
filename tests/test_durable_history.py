@@ -633,3 +633,46 @@ def test_git_never_runs_in_the_buckets_history(tmp_path, project, monkeypatch):
     there = [args for args, repo, cwd in gits if any(str(durable) in str(v) for v in (*args, repo, cwd))]
     assert there == [] and not list(tmp_path.glob("ran*"))
     assert (project / "b.md").read_text() == "b"
+
+
+@pytest.mark.parametrize("name", ["packed-refs", "HEAD", "shallow", "index", "a pack"])
+def test_a_history_file_made_a_link_is_refused_and_the_refusal_quotes_nothing(tmp_path, project, name):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first, "saga:1")
+    durable = project / "_history"
+    # A file of the pod's own, which a link in the bucket would have it read.
+    secret = tmp_path / "token"
+    secret.write_text("eyJhbGciOiJSUzI1NiJ9.a-pod-token\n")
+    link = durable / "objects" / "pack" / f"pack-{'2' * 40}.pack" if name == "a pack" else durable / name
+    link.unlink(missing_ok=True)
+    link.symlink_to(secret)
+    with pytest.raises(HistoryError, match="refused the project's history") as refused:
+        a_pod(tmp_path, project, "t2")
+    assert "eyJ" not in str(refused.value) and "token" not in str(refused.value)
+
+
+def test_a_crafted_commit_puts_nothing_of_its_own_on_gits_command_line(tmp_path, project, monkeypatch):
+    first = a_pod(tmp_path, project, "early")
+    (first.copy / "start.md").write_text("x")
+    land(first, "saga:start")
+    durable = project / "_history"
+    main = git(durable, "rev-parse", "refs/heads/main")
+    # A parent line after the committer: no parent to git, but a line a careless read takes for one.
+    body = (
+        f"tree {git(durable, 'rev-parse', f'{main}^{{tree}}')}\nparent {main}\n"
+        "author X <x@x> 1700000000 +0000\ncommitter X <x@x> 1700000000 +0000\nparent --upload-pack=touch${IFS}ran\n\nc\n"
+    )
+    crafted = git(durable, "hash-object", "-t", "commit", "--literally", "-w", "--stdin", input=body)
+    (durable / "packed-refs").write_text(f"# pack-refs with: peeled fully-peeled sorted \n{crafted} refs/heads/main\n")
+    git(durable, "repack", "-q", "-d")
+    slow = a_pod(tmp_path, project, "slow")  # opens on the crafted main, its depth-1 boundary
+    other = a_pod(tmp_path, project, "o1")
+    (other.copy / "o.md").write_text("o")
+    land(other, "saga:o1", author={"name": "O", "email": "thread:o1@surogate"})
+    run, argv = subprocess.run, []
+    monkeypatch.setattr(subprocess, "run", lambda args, **kwargs: (argv.extend(args), run(args, **kwargs))[1])
+    (slow.copy / "slow.md").write_text("slow")
+    slow.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:slow"], ["Surogate-Kind", "turn"]])
+    # Its boundary's parents are read to push it: only the ones git reads, each a commit id.
+    assert not [a for a in argv if "upload-pack" in a]

@@ -20,6 +20,7 @@ at depth 1, and the project's lock holder pushes by writing a pack, then
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import os
 import re
@@ -198,9 +199,12 @@ class History:
                 # another pod's landing would hide that landing's files.
                 for folder in {"", *self._main("ls-tree", "-r", "-d", "-z", "--name-only", MAIN).split("\0")}:
                     _invalidate(self.project / folder)
-                if (self.durable / "index").is_file():
+                if (fd := _opened(self.durable / "index", "index")) is not None:
+                    with open(fd, "rb") as kept, open(self.repo / "index", "wb") as out:
+                        shutil.copyfileobj(kept, out, 1 << 20)
+                        dated = os.fstat(fd)
                     # Its own time: git reads again an entry no older than the index.
-                    shutil.copy2(self.durable / "index", self.repo / "index")
+                    os.utime(self.repo / "index", ns=(dated.st_atime_ns, dated.st_mtime_ns))
                 # The index made main's: an entry that matches keeps its size and time.
                 try:
                     self._main("read-tree", "-m", "-i", MAIN)
@@ -480,7 +484,8 @@ class History:
         refs = self._durable_refs()
         marker = self.durable / "pruned"
         _invalidate(marker if os.path.lexists(marker) else self.durable)
-        if MAIN not in refs or marker.is_file() and now - marker.stat().st_mtime < _PRUNE_EVERY:
+        marked = os.lstat(marker) if os.path.lexists(marker) else None
+        if MAIN not in refs or marked and stat.S_ISREG(marked.st_mode) and now - marked.st_mtime < _PRUNE_EVERY:
             return {"pruned": False}
         self._put_durable("pruned", b"")
         self._sweep()
@@ -574,8 +579,10 @@ class History:
         taken = self._taken
         if not (taken / "HEAD").exists():
             self._git(["init", "-q", "--bare", "-b", "main", str(taken)], env={}, cwd=self.repo)
-        refs, shallow = self._durable_refs(), self._durable_shallow()
         folder, packs = self.durable / "objects" / "pack", taken / "objects" / "pack"
+        if any(f.is_symlink() for f in (self.durable, folder.parent, folder)):
+            raise HistoryError("refused the project's history: a folder of it is a link")
+        refs, shallow = self._durable_refs(), self._durable_shallow()
         _invalidate(folder)
         try:
             names = {n for n in os.listdir(folder) if n.endswith((".pack", ".idx"))}
@@ -586,8 +593,11 @@ class History:
             (packs / gone).unlink()
         # Each pack before its index: git reads a pack only through it.
         for name in sorted(names - here, key=lambda n: n.endswith(".idx")):
+            if (fd := _opened(folder / name, "a pack")) is None:
+                continue  # gone since the listing: a pruning's
             staged = packs / f".~{name}"
-            shutil.copyfile(folder / name, staged)
+            with open(fd, "rb") as pack, open(staged, "wb") as out:
+                shutil.copyfileobj(pack, out, 1 << 20)
             os.replace(staged, packs / name)
         _replace(taken / "packed-refs", _packed(refs))
         if shallow:
@@ -600,39 +610,33 @@ class History:
         """The durable history's refs as the bucket has them now, every one in ``packed-refs``."""
         target = self.durable / "packed-refs"
         _invalidate(target if os.path.lexists(target) else self.durable)
-        try:
-            fd = os.open(target, os.O_RDONLY | os.O_CLOEXEC)
-        except (FileNotFoundError, NotADirectoryError):
+        if (data := _read(target, "packed-refs")) is None:
             return {}
-        with open(fd, "rb") as file:
-            # Past the page cache: another pod may have rewritten it.
-            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-            text = file.read().decode(errors="replace")
+        text = data.decode(errors="replace")
         refs = {}
         for line in text.splitlines():
             if line.startswith("#") or not line:
                 continue
             sha, _, ref = line.partition(" ")
             if sha.startswith("^"):
-                _checked_id(sha[1:], "packed-refs")
+                _checked_id(sha[1:], "its packed-refs")
                 continue
-            refs[_checked_ref(ref, "packed-refs")] = _checked_id(sha, "packed-refs")
+            refs[_checked_ref(ref, "its packed-refs")] = _checked_id(sha, "its packed-refs")
         return refs
 
     def _check_durable(self) -> None:
         """Refuse a history whose ``HEAD`` or ``shallow`` is not one the platform writes: git reads both."""
-        head = self.durable / "HEAD"
-        if head.is_file():
-            text = head.read_text(errors="replace")
+        if (head := _read(self.durable / "HEAD", "HEAD")) is not None:
+            text = head.decode(errors="replace")
             if not (text.startswith("ref: ") and text.endswith("\n")):
-                raise HistoryError(f"refused the project's history: HEAD holds {text[:60]!r}")
-            _checked_ref(text[5:-1], "HEAD")
+                raise HistoryError("refused the project's history: its HEAD is not one the platform writes")
+            _checked_ref(text[5:-1], "its HEAD")
         self._durable_shallow()
 
     def _durable_shallow(self) -> list[str]:
         """The commits the durable history's ``shallow`` file names."""
-        shallow = self.durable / "shallow"
-        return [_checked_id(c, "shallow") for c in (shallow.read_text(errors="replace").split() if shallow.is_file() else [])]
+        data = _read(self.durable / "shallow", "shallow") or b""
+        return [_checked_id(c, "its shallow") for c in data.decode(errors="replace").split()]
 
     def _fetch(self, *commits: str | None) -> None:
         """*commits* from the durable history as last taken, at depth 1, where this repository lacks them."""
@@ -657,7 +661,7 @@ class History:
         moved = sorted(ref for ref, want in expect.items() if refs.get(ref) != want)
         if moved:
             raise HistoryConflict(f"{', '.join(moved)} moved in the project's history")
-        if (self.durable / "HEAD").exists():
+        if os.path.lexists(self.durable / "HEAD"):
             self._sweep()
         else:
             for folder in ("refs", "objects/pack"):
@@ -704,9 +708,9 @@ class History:
         return True
 
     def _parents(self, commit: str) -> list[str]:
-        """*commit*'s parents as its object names them, fetched or not."""
-        header = self._main("cat-file", "commit", commit).partition("\n\n")[0]
-        return [line.split()[1] for line in header.splitlines() if line.startswith("parent ")]
+        """*commit*'s parents as its object names them, fetched or not: the lines right after its tree, as git reads them."""
+        lines = self._main("cat-file", "commit", commit).split("\n")[1:]
+        return [_checked_id(line[7:], "a commit") for line in takewhile(lambda line: line.startswith("parent "), lines)]
 
     def _put_durable(self, name: str, source: bytes | Path) -> None:
         """Write *name* in the durable history whole, beside it then renamed over it; durable before it returns."""
@@ -962,6 +966,37 @@ def _sync(folder: Path) -> None:
         os.close(fd)
 
 
+def _opened(path: Path, what: str) -> int | None:
+    """*path* of the durable history opened to read as data, past the page cache; None when there is none.
+
+    Never through a link, and only a file: a thread's commands can make a
+    link to a file of the pod's.  A refusal names *what*, never the path or
+    anything read: it reaches the pod's logs.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise HistoryError(f"refused the project's history: its {what} is a link") from None
+        raise
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise HistoryError(f"refused the project's history: its {what} is not a file")
+    # Another pod may have rewritten it.
+    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    return fd
+
+
+def _read(path: Path, what: str) -> bytes | None:
+    """The bytes of *path* of the durable history, read as :func:`_opened` opens it; None when there is none."""
+    if (fd := _opened(path, what)) is None:
+        return None
+    with open(fd, "rb") as file:
+        return file.read()
+
+
 def _replace(target: Path, data: bytes) -> None:
     """Write *target* on the pod's disk anew, never in place: another repository may link the old file."""
     staged = target.with_name(f".~{target.name}")
@@ -998,16 +1033,16 @@ def _block(trailers: list[list[str]]) -> str:
 
 
 def _checked_id(value: str, where: str) -> str:
-    """*value*, a commit id read from *where*; refused when it is anything else."""
+    """*value*, a commit id read from *where*; refused when it is anything else, never quoted: it reaches the pod's logs."""
     if not _ID.fullmatch(value):
-        raise HistoryError(f"refused the project's history: {where} holds {value[:60]!r}, not a commit id")
+        raise HistoryError(f"refused the project's history: {where} holds what is not a commit id")
     return value
 
 
 def _checked_ref(value: str, where: str) -> str:
     """*value*, a ref of the history read from *where*; refused when it is anything else."""
     if not _REF.fullmatch(value) or ".." in value:
-        raise HistoryError(f"refused the project's history: {where} holds {value[:60]!r}, not one of its refs")
+        raise HistoryError(f"refused the project's history: {where} holds what is not one of its refs")
     return value
 
 
