@@ -16,27 +16,20 @@ from livekit.agents import Agent, ModelSettings, StopResponse, llm, stt
 
 from surogates.voice.lines import Lines, default_lines, lines_from_routing
 from surogates.voice.soundscape import SoundSettings
+from surogates.voice.speech import Slot
 from surogates.voice.text import caller_says_goodbye, is_echo, is_farewell, say_as, spoken_sentences
 
 LANGUAGE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$")  # a BCP 47 tag as Studio stores it: "ro", "en", "pt-BR"
 SENTENCE_PAUSE = 0.25  # Amami ends a sentence with almost no silence: without a breath, sentences run together
 ECHO_WINDOW = 20.0  # seconds: what we said this recently can come back through a speakerphone
 
-# Romanian is not in LiveKit's turn model: our STT's 640 ms pause ends the turn.
-TURN_HANDLING = {
-    "turn_detection": "stt",
-    "endpointing": {"min_delay": 0.05, "max_delay": 1.5},
-    "interruption": {"mode": "vad", "min_duration": 0.6, "min_words": 2,
-                     "resume_false_interruption": True, "false_interruption_timeout": 1.5},
-    "preemptive_generation": {"enabled": False},  # the agent runs tools: no speculative turns
-}
-
 
 @dataclass(frozen=True)
 class CallConfig:
     language: str = "ro"
     lines: Lines = default_lines("ro")
-    voice: str = "female"
+    hearing: Slot = Slot()
+    speaking: Slot = Slot()
     pronunciations: Mapping[str, str] = field(default_factory=dict)
     remember_callers: bool = False
     max_call_seconds: float = 600.0
@@ -59,7 +52,9 @@ class CallConfig:
                 if isinstance(pron, dict) else {})  # a non-text value would be spoken as "None" or "5"
         language = cfg["language"] if isinstance(cfg.get("language"), str) and LANGUAGE.match(cfg["language"]) else d.language
         return cls(language=language, lines=lines_from_routing(language, cfg),
-                   voice=cfg.get("voice") if cfg.get("voice") in ("female", "male") else d.voice, pronunciations=pron, remember_callers=cfg.get("remember_callers") is True,
+                   hearing=Slot.from_routing(cfg.get("hearing")),
+                   speaking=Slot.from_routing(cfg.get("speaking"), voice=cfg.get("voice")),  # "voice": before providers
+                   pronunciations=pron, remember_callers=cfg.get("remember_callers") is True,
                    max_call_seconds=seconds("max_call_seconds", 30, 3600),
                    idle_ask_seconds=seconds("idle_ask_seconds", 5, 300),
                    idle_hangup_seconds=seconds("idle_hangup_seconds", 5, 300),

@@ -39,7 +39,25 @@ LOUD = 300  # int16 RMS above which a frame is speech
 BUSY = 100  # RMS above which the background track is typing (the agent is still working); distant room events stay below
 
 
+# A line in another language (VOICE_QA_LANGUAGE=en…) needs a caller who speaks and understands it: ours
+# are Romanian only, so the caller then uses ElevenLabs (ELEVENLABS_API_KEY; a few credits per call).
+LANGUAGE = os.environ.get("VOICE_QA_LANGUAGE", "ro")
+EL = "https://api.elevenlabs.io/v1"
+EL_CALLER_VOICE = "JBFqnCBsd6RMkjVDRZzb"  # a premade male voice, unlike the agent's
+
+
+def _el_key() -> str:
+    return os.environ["ELEVENLABS_API_KEY"]
+
+
 async def speech(text: str, voice: str = "male") -> np.ndarray:
+    if LANGUAGE != "ro":
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(f"{EL}/text-to-speech/{EL_CALLER_VOICE}?output_format=pcm_24000",
+                             headers={"xi-api-key": _el_key()},
+                             json={"text": text, "model_id": "eleven_flash_v2_5", "language_code": LANGUAGE})
+            r.raise_for_status()
+            return np.frombuffer(r.content, "<i2")
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.post(TTS, json={"input": text, "voice": voice, "response_format": "pcm", "stream_format": "audio"})
         r.raise_for_status()
@@ -49,6 +67,18 @@ async def speech(text: str, voice: str = "male") -> np.ndarray:
 async def transcribe(pcm: np.ndarray) -> str:
     if not len(pcm):
         return ""
+    if LANGUAGE != "ro":
+        import io
+        import wave
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1), w.setsampwidth(2), w.setframerate(RATE), w.writeframes(pcm.astype("<i2").tobytes())
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(f"{EL}/speech-to-text", headers={"xi-api-key": _el_key()},
+                             data={"model_id": "scribe_v2", "language_code": LANGUAGE, "tag_audio_events": "false"},
+                             files={"file": ("agent.wav", buf.getvalue(), "audio/wav")})
+            r.raise_for_status()
+            return r.json().get("text", "")
     x = soxr.resample(pcm, RATE, 16000).astype("<i2").tobytes()
     finals = []
     async with connect(STT, max_size=None) as ws:

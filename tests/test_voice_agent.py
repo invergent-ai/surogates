@@ -6,7 +6,7 @@ from surogates.voice.lines import default_lines
 def test_call_config_reads_the_routing_row():
     cfg = CallConfig.from_routing({"greeting": "Salut, sunt Ana.", "voice": "male", "remember_callers": True,
                                    "pronunciations": {"Nvidia": "Envidia"}, "max_call_seconds": 300})
-    assert (cfg.lines.greeting, cfg.voice, cfg.remember_callers, dict(cfg.pronunciations), cfg.max_call_seconds) == \
+    assert (cfg.lines.greeting, cfg.speaking.voice, cfg.remember_callers, dict(cfg.pronunciations), cfg.max_call_seconds) == \
         ("Salut, sunt Ana.", "male", True, {"Nvidia": "Envidia"}, 300.0)
 
 
