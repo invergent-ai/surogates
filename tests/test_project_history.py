@@ -483,3 +483,23 @@ def test_a_file_name_stays_whole_in_a_landings_trailers_and_lists(tmp_path, proj
     assert git(history, "log", "-1", "--format=%(trailers:key=Surogate-Kind,valueonly)", out["commit"]) == "landing"
     not_merged = git(history, "log", "-1", "--format=%(trailers:key=Surogate-Not-Merged,valueonly)", out["commit"])
     assert not_merged == "x\\nSurogate-Kind: turn"
+
+
+def test_a_turns_empty_folders_are_named_and_a_landing_takes_away_the_folders_it_empties(tmp_path, project):
+    (project / "old").mkdir()
+    (project / "old" / "a.md").write_text("a")
+    history = opened(tmp_path, project)
+    for quarter in ("Q1", "Q2"):
+        (history.copy / quarter).mkdir()  # "make folders for each quarter"
+    shutil.rmtree(history.copy / "old")
+    out = landed(history)
+    # History has no empty folder: they are not saved, and the report says so.
+    assert out["excluded"] == ["Q1/", "Q2/"]
+    assert not (project / "old").exists()
+    # Put back, a file the landing added takes its new folder with it.
+    (history.copy / "threads" / "A").mkdir(parents=True)
+    (history.copy / "threads" / "A" / "a.md").write_text("A's notes")
+    [change] = history.commit_turn(author=THREAD_A, trailers=trailers("turn"))["changes"]
+    history.apply(change["path"], change["before"], change["after"])
+    history.unapply(change["path"], change["before"], change["after"])
+    assert not (project / "threads").exists()

@@ -283,7 +283,13 @@ class History:
         folders are left out.
         """
         out = self._copy("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory")
-        names = sorted(n for n in out.split("\0") if n and not n.startswith(PLATFORM_EXCLUDES))
+        # After an add, what is left untracked is the folders with no file in
+        # them: history has none, so they are not saved.  A folder the real
+        # files have is one the turn emptied, not made.
+        empty = self._copy("ls-files", "-z", "--others", "--exclude-standard", "--directory").split("\0")
+        made = {n for n in empty if n and not (self.project / n).is_dir()}
+        names = sorted({n for n in out.split("\0") if n} | made)
+        names = [n for n in names if not n.startswith(PLATFORM_EXCLUDES)]
         repositories = {
             n for n in names
             if n.endswith("/") and ((self.copy / n / ".git").exists() or (self.project / n / ".git").exists())
@@ -310,6 +316,14 @@ class History:
         target = self._inside(path)
         if blob is None:
             target.unlink(missing_ok=True)
+            # A folder the removal emptied goes with it, as git's own checkout takes it away.
+            for folder in target.parents:
+                if folder == self.project:
+                    break
+                try:
+                    folder.rmdir()
+                except OSError:  # not empty
+                    break
             return
         # Written beside the real file, then renamed over it: a write cut
         # short leaves the real file whole.  History leaves out the *~ name.
