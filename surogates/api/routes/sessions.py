@@ -73,8 +73,8 @@ from surogates.runtime import (
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.auth.service_account import ServiceAccountStore
 from surogates.tenant.context import TenantContext
-from surogates.workstreams import SERVER_OWNED_KEYS, is_project_master, is_project_thread
-from surogates.workstreams.store import WorkstreamStore
+from surogates.workstreams import SERVER_OWNED_KEYS, is_project_master
+from surogates.workstreams.threads import reopen_if_thread
 
 logger = logging.getLogger(__name__)
 
@@ -983,12 +983,6 @@ async def create_api_session(
     return session
 
 
-async def _reopen_if_thread(request: Request, session: Session) -> None:
-    """The user's new work for a project's thread takes it out of Resolved."""
-    if is_project_thread(session.config):
-        await WorkstreamStore(request.app.state.session_factory).reopen_thread(session.id)
-
-
 async def _resolve_pending_question(
     store, session_id: UUID, text: str,
 ) -> int | None:
@@ -1074,7 +1068,7 @@ async def send_message(
     # that resumes the session must be a NORMAL message — converting it
     # into an answer would feed a consumer that no longer exists.
     was_active = session.status == "active"
-    await _reopen_if_thread(request, session)
+    await reopen_if_thread(session, session_factory=request.app.state.session_factory)
     if session.status in ("failed", "paused", "completed"):
         await store.update_session_status(session_id, "active")
         await store.emit_event(session_id, EventType.SESSION_RESUME, {})
@@ -1759,7 +1753,7 @@ async def resume_session(
             detail=f"Cannot resume session in '{session.status}' state.",
         )
 
-    await _reopen_if_thread(request, session)
+    await reopen_if_thread(session, session_factory=request.app.state.session_factory)
     # The status first, as a message's resume writes it: whoever hears the
     # resume then reads the session active.
     await store.resume_session(session_id)
@@ -1804,7 +1798,7 @@ async def retry_session(
             detail=f"Cannot retry session in '{session.status}' state.",
         )
 
-    await _reopen_if_thread(request, session)
+    await reopen_if_thread(session, session_factory=request.app.state.session_factory)
     await store.resume_session(session_id, source="user_retry")
     await enqueue_session(
         request.app.state.redis,

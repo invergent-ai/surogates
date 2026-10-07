@@ -671,6 +671,25 @@ async def test_a_message_typed_into_a_resolved_thread_reopens_it(api):
     assert (row["group"], row["resolved_at"]) == ("working", None)
 
 
+async def test_a_goal_set_in_a_resolved_thread_reopens_it(api, monkeypatch):
+    project = await create(api)
+    thread = await start(api, await master_of(api, project))
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    await resolve(api, thread)
+    changes = heard(api, monkeypatch)
+    # The web composer sends "/goal <text>" as this event.
+    response = await api.client.post(f"/v1/sessions/{thread.id}/events", json={"events": [{
+        "type": "user.define_outcome", "description": "Add a chart.",
+        "rubric": {"type": "text", "content": "- the memo has a chart"},
+    }]}, headers=api.auth())
+    assert response.status_code == 202, response.text
+    [row] = await rows(api, project)
+    assert (row["group"], row["resolved_at"]) == ("working", None)
+    # Heard as it resumes, the thread already reads working.
+    assert [groups[str(thread.id)] for _, kind, groups in changes if kind == "session.resume"] == ["working"]
+
+
 @pytest.mark.parametrize("route, status", [("resume", "paused"), ("retry", "failed")])
 async def test_bringing_a_resolved_thread_back_reopens_it(api, monkeypatch, route, status):
     project = await create(api)

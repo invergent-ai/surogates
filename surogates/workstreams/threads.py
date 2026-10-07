@@ -11,7 +11,7 @@ from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_thread_session
-from surogates.workstreams import thread_config
+from surogates.workstreams import is_project_thread, thread_config
 from surogates.workstreams.store import WorkstreamStore
 
 
@@ -71,6 +71,12 @@ async def start_thread(
             redis, org_id=str(thread.org_id), agent_id=thread.agent_id, session_id=thread.id,
         )
     return thread
+
+
+async def reopen_if_thread(session: Session, *, session_factory: Any) -> None:
+    """The user's new work for a project's thread takes it out of Resolved."""
+    if is_project_thread(session.config):
+        await WorkstreamStore(session_factory).reopen_thread(session.id)
 
 
 async def stop_thread(

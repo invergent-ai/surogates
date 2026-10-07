@@ -24,6 +24,7 @@ from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.workstreams import is_project_master, master_refusal
+from surogates.workstreams.threads import reopen_if_thread
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +218,8 @@ async def send_session_events(
                 detail=str(exc),
             ) from exc
 
+        # Out of Resolved before the goal is heard, as a typed message is.
+        await reopen_if_thread(session, session_factory=request.app.state.session_factory)
         event_id = await store.emit_event(
             session_id,
             EventType.USER_DEFINE_OUTCOME,
