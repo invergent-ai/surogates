@@ -170,7 +170,7 @@ class TestSandboxPool:
             async def status(self, sandbox_id):
                 return SandboxStatus.RUNNING
 
-            async def execute(self, sandbox_id, name, input):
+            async def execute(self, sandbox_id, name, input, *, timeout=None):
                 await asyncio.sleep(0.3)
                 return "{}"
 

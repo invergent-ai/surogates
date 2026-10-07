@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from surogates.harness.turn_summarizer import is_platform_path
-from surogates.sandbox.history import History, HistoryConflict, HistoryError
+from surogates.sandbox.history import THREAD_POD_DEADLINE, History, HistoryConflict, HistoryError
 from surogates.tools.utils.checkpoint_manager import _shadow_repo_path
 
 A = {"name": "Draft A", "email": "thread:t1@surogate"}
@@ -434,3 +434,132 @@ def test_the_cap_counts_the_files_history_would_track():
         "proj/.git/HEAD": False, "Thumbs.db": False, "d/._x": False, ".threads/k/r": False, "coverage/a.docx": False,
     }
     assert {path: tracked(path) for path in cases} == cases
+
+
+#: A day and more after the landings: no pod alive then opened on any of them.
+LATER = THREAD_POD_DEADLINE + 3600
+
+
+def in_history(durable: Path, commit: str) -> bool:
+    return subprocess.run(["git", f"--git-dir={durable}", "cat-file", "-e", commit]).returncode == 0
+
+
+def test_pruning_keeps_the_window_and_cuts_at_the_size_rule_and_kept_ids_still_open(tmp_path, project):
+    live, gone = a_pod(tmp_path, project, "live"), a_pod(tmp_path, project, "gone")
+    for thread in (live, gone):
+        (thread.copy / f"{thread.thread}.md").write_text("unlanded")
+        thread.keep(author=A, trailers=KEPT, base=True)
+    landings = []
+    for n in range(40):
+        history = a_pod(tmp_path, project)
+        (history.copy / "Budget.xlsx").write_bytes(os.urandom(50_000))  # an office file: no delta between versions
+        landings.append(land(history, f"saga:{n}")["commit"])
+    durable = project / "_history"
+    out = a_pod(tmp_path, project).prune(keep=["refs/heads/threads/live", "refs/bases/live"], now=time.time() + LATER)
+    # All forty are inside 90 days, but forty versions are more than twice the files: cut, never below twenty.
+    assert (out["pruned"], out["commits"]) == (True, 20)
+    assert git(durable, "rev-list", "--first-parent", "--count", "refs/heads/main") == "20"
+    # The commits that stay keep their ids, and their files still open.
+    assert git(durable, "rev-parse", "refs/heads/main") == landings[-1]
+    assert git(durable, "cat-file", "-s", f"{landings[-20]}:Budget.xlsx") == "50000"
+    assert not in_history(durable, landings[0])
+    # A live thread's branch stays, with its base though it is older; an ended one's goes.
+    refs = git(durable, "for-each-ref", "--format=%(refname)").splitlines()
+    assert {"refs/heads/threads/live", "refs/bases/live"} <= set(refs) and "refs/heads/threads/gone" not in refs
+    assert len(list((durable / "objects" / "pack").glob("*.pack"))) == 1
+    assert git(durable, "fsck", "--no-dangling") == ""
+    # Pruned at most once a day; and pods go on fetching and landing.
+    assert a_pod(tmp_path, project).prune(keep=[], now=time.time()) == {"pruned": False}
+    pod = a_pod(tmp_path, project, "live")
+    assert (pod.copy / "live.md").read_text() == "unlanded"
+    land(pod, "saga:after")
+    assert git(durable, "fsck", "--no-dangling") == ""
+
+
+def test_pruning_keeps_ninety_days_when_they_are_small(tmp_path, project):
+    (project / "Annual report.pdf").write_bytes(os.urandom(2_000_000))  # the project is large, its edits small
+    for n in range(25):
+        history = a_pod(tmp_path, project)
+        (history.copy / "notes.txt").write_text(f"v{n}\n")
+        land(history, f"saga:{n}")
+    durable = project / "_history"
+    out = a_pod(tmp_path, project).prune(keep=[], now=time.time())
+    assert out["commits"] == 26  # every landing, and the project's first commit
+    later = a_pod(tmp_path, project).prune(keep=[], now=time.time() + 100 * 86_400)
+    assert (later["pruned"], later["commits"]) == (True, 20)
+    assert git(durable, "rev-list", "--first-parent", "--count", "refs/heads/main") == "20"
+
+
+def test_a_pod_open_across_a_pruning_lands_and_the_history_stays_whole(tmp_path, project):
+    durable = project / "_history"
+    first = a_pod(tmp_path, project, "early")
+    (first.copy / "start.md").write_text("x")
+    land(first, "saga:start")
+    slow = a_pod(tmp_path, project, "slow")  # a long turn: its pod opened on main as it was then
+    (slow.copy / "slow.md").write_text("the slow thread's work")
+    for n in range(25):  # other threads land meanwhile
+        other = a_pod(tmp_path, project, f"o{n}")
+        (other.copy / "Budget.xlsx").write_bytes(os.urandom(50_000))
+        land(other, f"saga:o{n}", author={"name": f"O{n}", "email": f"thread:o{n}@surogate"})
+    base = git(slow.repo, "rev-parse", "refs/bases/slow")
+    # While a pod opened on them may be alive, main's commits stay.
+    assert a_pod(tmp_path, project, "p1").prune(keep=[], now=time.time())["commits"] == 27
+    assert in_history(durable, base)
+    # Past that, a pruning cuts the slow pod's base; the pod, left alive, still lands.
+    assert a_pod(tmp_path, project, "p2").prune(keep=[], now=time.time() + LATER + 86_400)["commits"] == 20
+    assert not in_history(durable, base)
+    land(slow, "saga:slow")
+    assert (project / "slow.md").read_text() == "the slow thread's work"
+    # Its base joined the history's cut: the history reads whole, and prunes again.
+    assert git(durable, "fsck", "--no-dangling") == ""
+    assert a_pod(tmp_path, project, "p3").prune(keep=[], now=time.time() + LATER + 3 * 86_400)["pruned"] is True
+    assert git(durable, "fsck", "--no-dangling") == ""
+
+
+def test_a_pruning_cut_off_waits_a_day_and_writes_cut_off_are_swept(tmp_path, project, monkeypatch):
+    history = a_pod(tmp_path, project)
+    (history.copy / "a.md").write_text("a")
+    land(history, "saga:1")
+    durable = project / "_history"
+    left = [durable / ".~dead.landing~", durable / "objects" / "pack" / ".~dead.landing~"]
+    for path in left:
+        path.write_bytes(b"half a pack")
+
+    def cut_off(*_, **__):
+        raise TimeoutError("killed at its bound")
+
+    monkeypatch.setattr(History, "_cut", cut_off)
+    with pytest.raises(TimeoutError):
+        a_pod(tmp_path, project).prune(keep=[], now=time.time())
+    # Swept as it began; and marked before it pruned: not tried again the same day.
+    assert not any(path.exists() for path in left)
+    assert a_pod(tmp_path, project).prune(keep=[], now=time.time()) == {"pruned": False}
+    # A push sweeps them too.
+    for path in left:
+        path.write_bytes(b"half a pack")
+    pod = a_pod(tmp_path, project)
+    (pod.copy / "b.md").write_text("b")
+    land(pod, "saga:2")
+    assert not any(path.exists() for path in left)
+
+
+def test_a_pruning_whose_lock_was_lost_leaves_the_landing_made_meanwhile(tmp_path, project, monkeypatch):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first, "saga:1")
+    other = a_pod(tmp_path, project, "t2")
+    (other.copy / "b.md").write_text("b")
+    cut, landed = History._cut, []
+
+    def another_lands_meanwhile(self, *args, **kwargs):
+        packed = cut(self, *args, **kwargs)
+        # A failover freed the lock: its next holder lands while the pruning runs.
+        landed.append(land(other, "saga:2", author={"name": "Draft B", "email": "thread:t2@surogate"})["commit"])
+        return packed
+
+    monkeypatch.setattr(History, "_cut", another_lands_meanwhile)
+    with pytest.raises(HistoryConflict, match="moved while it was pruned"):
+        a_pod(tmp_path, project).prune(keep=[], now=time.time())
+    durable = project / "_history"
+    assert git(durable, "rev-parse", "refs/heads/main") == landed[0]
+    assert git(durable, "fsck", "--no-dangling") == ""

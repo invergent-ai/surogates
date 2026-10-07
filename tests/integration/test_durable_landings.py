@@ -745,3 +745,43 @@ async def test_a_project_over_the_cap_has_no_history_and_its_threads_work_on_the
     pool = SandboxPool(pods)
     await pool.ensure(str(thread.id), spec)
     assert not pool.holds_copy(str(thread.id))
+
+
+async def test_a_landing_prunes_the_history_at_most_once_a_day_keeping_live_threads(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    live, resolved, gone = [await a_thread(api, title, master) for title in ("Live", "Resolved", "Gone")]
+    pool = SandboxPool(pods)
+    for thread in (live, resolved, gone):
+        await edited(pool, thread, f"echo {thread.title} > '{thread.title}.md'")
+        await ends(api, pool, thread, failed=True)  # kept, unlanded, on its branch
+    async with api.app.state.session_factory() as db:
+        await db.execute(text(
+            "UPDATE workstream_threads SET resolved_at = now() - interval '10 days' WHERE session_id = :r"
+        ), {"r": resolved.id})
+        await db.execute(text(
+            "UPDATE workstream_threads SET resolved_at = now() - interval '100 days' WHERE session_id = :g"
+        ), {"g": gone.id})
+        await db.commit()
+    bounds = []
+    execute = pool.execute
+
+    async def watched(session_id, name, input, **kwargs):
+        if name == "_history" and json.loads(input)["action"] == "prune":
+            bounds.append(kwargs.get("timeout"))
+        return await execute(session_id, name, input, **kwargs)
+
+    monkeypatch.setattr(pool, "execute", watched)
+    lander = await a_thread(api, "Lander", master)
+    await edited(pool, lander, "echo landed > landed.md")
+    await ends(api, pool, lander)
+    # Its own bound, from the size of the history.
+    assert len(bounds) == 1 and bounds[0] >= landing_module._PRUNE_BOUND
+    durable = pods.project / "_history"
+    refs = git(durable, "for-each-ref", "--format=%(refname)").splitlines()
+    assert f"refs/heads/threads/{live.id}" in refs and f"refs/heads/threads/{resolved.id}" in refs
+    assert f"refs/heads/threads/{gone.id}" not in refs
+    assert len(list((durable / "objects" / "pack").glob("*.pack"))) == 1
+    pruned = (durable / "pruned").stat().st_mtime
+    await edited(pool, lander, "echo again > again.md")
+    await ends(api, pool, lander)
+    assert (durable / "pruned").stat().st_mtime == pruned  # not again the same day

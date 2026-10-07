@@ -285,7 +285,7 @@ class K8sSandbox:
         logger.info("Provisioned K8s sandbox %s (pod %s)", sandbox_id, pod_name)
         return sandbox_id
 
-    async def execute(self, sandbox_id: str, name: str, input: str) -> str:
+    async def execute(self, sandbox_id: str, name: str, input: str, *, timeout: float | None = None) -> str:
         """Execute a tool in the sandbox pod via the executor daemon.
 
         Delegates the HTTP transport to the shared client.  On a fatal
@@ -301,7 +301,7 @@ class K8sSandbox:
                 token=entry.token,
                 name=name,
                 args_str=input,
-                timeout=entry.spec.timeout,
+                timeout=timeout or entry.spec.timeout,
             )
         except SandboxUnavailableError:
             entry.status = SandboxStatus.FAILED

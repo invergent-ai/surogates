@@ -126,7 +126,7 @@ class SandboxPool:
             )
             return sandbox_id
 
-    async def execute(self, session_id: str, name: str, input: str) -> str:
+    async def execute(self, session_id: str, name: str, input: str, *, timeout: float | None = None) -> str:
         """Execute a command in the sandbox belonging to *session_id*.
 
         The session lock is held only while resolving the sandbox id —
@@ -136,6 +136,8 @@ class SandboxPool:
         ``destroy_for_session`` racing an in-flight call makes that call
         fail exactly like a pod dying mid-execution, which the caller
         already handles.
+
+        *timeout* bounds this call in place of the sandbox's own.
 
         Raises :class:`ValueError` if the session has no associated sandbox.
         """
@@ -152,7 +154,7 @@ class SandboxPool:
             raise ValueError(
                 f"No sandbox provisioned for session {session_id}"
             )
-        return await self._backend.execute(sandbox_id, name, input)
+        return await self._backend.execute(sandbox_id, name, input, timeout=timeout)
 
     def copy_fresh(self, session_id: str) -> bool:
         """Whether this pool has just made *session_id*'s copy from the real files; asked once."""

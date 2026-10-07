@@ -133,7 +133,7 @@ async def test_a_thread_sees_an_image_as_its_copy_has_it(thread):
 async def test_a_pods_answer_that_is_not_the_file_is_an_error(thread, monkeypatch, answer):
     pool, owner, pods = thread
 
-    async def answering(*_: object) -> str:
+    async def answering(*_: object, **__: object) -> str:
         if isinstance(answer, Exception):
             raise answer
         return json.dumps(answer)

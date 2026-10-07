@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from functools import partial
 from typing import Any
 
@@ -39,6 +40,7 @@ from surogates.governance.saga.orchestrator import (
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.events import EventType
 from surogates.workstreams.history import (
+    kept_refs,
     project_lock,
     running_landings,
     saga_of,
@@ -51,6 +53,10 @@ logger = logging.getLogger(__name__)
 
 #: How long a cancelled landing waits for its put-back before the cancel goes on.
 _PUT_BACK_BOUND = 300
+#: A pruning's bound: this, and _PRUNE_PER_GIB for each GiB of history, to
+#: clone it from the mount, repack it and write it back.
+_PRUNE_BOUND = 300
+_PRUNE_PER_GIB = 180
 #: Each thread's put-back still running, kept until done: a cancel never cuts one short.
 _PUTTING_BACK: dict[str, asyncio.Future] = {}
 #: A cancelled landing's pod going, once its slow put-back is done.
@@ -124,6 +130,8 @@ async def land_turn(
         async with project_lock(session_factory, workstream) as held:
             settled = await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
             outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
+            if outcome["state"] == "completed":
+                await _prune(session_factory, sandbox_pool, owner, workstream, outcome["packs"])
     except Exception as exc:
         if _cancelling():
             # The lock's dead connection failed the block's exit: the cancel goes on.
@@ -163,6 +171,20 @@ async def keep_copy(*, session_factory: Any, sandbox_pool: Any, session: Any, sa
     async with project_lock(session_factory, workstream) as held:
         await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
         return await _call(sandbox_pool, owner, "keep", author=author, trailers=trailers, base=True)
+
+
+async def _prune(session_factory: Any, sandbox_pool: Any, owner: str, workstream: Any, packs: int) -> None:
+    """Prune the project's history after a landing, under its lock: the pod prunes at most once a day."""
+    request = {"action": "prune", "keep": await kept_refs(session_factory, workstream), "now": time.time()}
+    try:
+        result = json.loads(await sandbox_pool.execute(
+            owner, "_history", json.dumps(request), timeout=_PRUNE_BOUND + _PRUNE_PER_GIB * packs / 2**30,
+        ))
+        if "error" in result or result.get("timed_out"):
+            raise LandingStepError(result.get("error") or "the pruning ran out of time")
+    except Exception:
+        # The landing stands; the history is pruned on a later day.
+        logger.warning("Could not prune the history of project %s", workstream, exc_info=True)
 
 
 def _fence(saga_settings: Any) -> float:
@@ -235,6 +257,8 @@ async def _land(
         # Whether the turn's work is in the history: its commit step pushed
         # it, and held no file, whose version the next copy would lack.
         "saved": False,
+        # The size of the history's packs, which a pruning's bound is sized from.
+        "packs": 0,
     }
     changes: list[dict] = []
     main: str | None = None
@@ -242,7 +266,9 @@ async def _land(
         commit = step("commit", author=thread, trailers=[*audit, ["Surogate-Kind", "turn"]])
         # The first look, outside the steps: it changes nothing, and under
         # the lock no one else moves main until this landing is done.
-        main = (await asyncio.wait_for(_call(sandbox_pool, owner, "fetch"), commit.timeout_seconds))["main"]
+        looked = await asyncio.wait_for(_call(sandbox_pool, owner, "fetch"), commit.timeout_seconds)
+        main = looked["main"]
+        outcome["packs"] = looked["packs"]
         turn = await execute(commit)
         changes = turn["changes"]
         outcome.update(

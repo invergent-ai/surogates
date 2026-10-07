@@ -54,10 +54,10 @@ class ThreadPods:
         self.copies[thread] = copy
         return sandbox_id
 
-    async def execute(self, sandbox_id: str, name: str, input: str) -> str:
+    async def execute(self, sandbox_id: str, name: str, input: str, *, timeout: float | None = None) -> str:
         response = await self.pods[sandbox_id].post(
             "/execute",
-            json={"name": name, "args": json.loads(input or "{}"), "timeout": 60},
+            json={"name": name, "args": json.loads(input or "{}"), "timeout": timeout or 60},
             headers={"Authorization": "Bearer t"},
         )
         return response.text

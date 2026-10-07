@@ -27,6 +27,7 @@ import time
 from collections.abc import Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass
+from functools import partial
 from itertools import takewhile
 from pathlib import Path, PurePosixPath
 
@@ -65,6 +66,11 @@ _TIMEOUT: ContextVar[int | None] = ContextVar("history_git_timeout", default=Non
 _ZERO = "0" * 40
 MAIN = "refs/heads/main"
 _PACKED = "# pack-refs with: peeled fully-peeled sorted \n"
+#: The pruning window: main's commits of this many days, never fewer than its last _PRUNE_LEAST.
+PRUNE_DAYS = 90
+_PRUNE_LEAST = 20
+#: A project's history is pruned at most this often.
+_PRUNE_EVERY = 86_400
 #: What the pod takes from the bucket's history, which a thread's commands
 #: can write: an id is 40 hex digits, and a ref one of the history's own.
 _ID = re.compile(r"[0-9a-f]{40}")
@@ -423,7 +429,8 @@ class History:
         main = self._durable_refs().get(MAIN)
         self._fetch(main, *(_checked_id(c, "a fetch") for c in commits))
         has_saga = main is not None and saga is not None and f"Surogate-Saga: {saga}" in self._message(main)
-        return {"main": main, "has_saga": has_saga}
+        packs = sum(p.stat().st_size for p in (self.durable / "objects" / "pack").glob("*.pack"))
+        return {"main": main, "has_saga": has_saga, "packs": packs}
 
     def keep(self, *, author: dict[str, str], trailers: list[list[str]], base: bool) -> dict:
         """Commit the copy on the thread's branch and push the branch; its base too when *base*, or when the history has none.
@@ -442,6 +449,117 @@ class History:
         )
         self._main("update-ref", self.synced, tip)
         return {"commit": tip}
+
+    def prune(self, *, keep: list[str], now: float) -> dict:
+        """Cut the durable history back to its window, at most once a day, under the project's lock.
+
+        Kept: ``main``'s commits of the last 90 days and never fewer than its
+        last 20, cut further while the history is more than twice the size
+        of ``main``'s files, never below those 20; every ``main`` a thread's
+        pod alive now may have opened on, those of a pod's deadline and the
+        one before them; and the refs in *keep*, each live thread's branch
+        and base, with their history inside the window.  Every other ref
+        goes.  The cut is git's ``shallow`` file, so the commits that stay
+        keep their ids.  The history is pruned in a full copy on the pod's
+        disk and goes back as one pack.  It is marked pruned first: one cut
+        off by its bound is tried again the next day, not at every landing.
+        """
+        # Its git has no bound of its own: its call's, sized from the history, cuts it off.
+        budget = _TIMEOUT.set(THREAD_POD_DEADLINE)
+        try:
+            return self._prune(keep=keep, now=now)
+        finally:
+            _TIMEOUT.reset(budget)
+
+    def _prune(self, *, keep: list[str], now: float) -> dict:
+        refs = self._durable_refs()
+        marker = self.durable / "pruned"
+        _invalidate(marker if os.path.lexists(marker) else self.durable)
+        if MAIN not in refs or marker.is_file() and now - marker.stat().st_mtime < _PRUNE_EVERY:
+            return {"pruned": False}
+        self._put_durable("pruned", b"")
+        self._sweep()
+        _invalidate(self.durable / "objects" / "pack")
+        packs = list((self.durable / "objects" / "pack").iterdir())
+        work = self.repo / "pruning.git"
+        shutil.rmtree(work, ignore_errors=True)
+        try:
+            self._mirror(work, refs, packs)
+            git = partial(self._in, work)
+            for ref in set(git("for-each-ref", "--format=%(refname)").splitlines()) - {MAIN, *keep}:
+                git("update-ref", "-d", ref)
+            mains = [line.split() for line in git("log", "--first-parent", "--format=%H %ct", MAIN).splitlines()]
+            # A pod lives at most THREAD_POD_DEADLINE: the main it opened on is one of these, or the one before.
+            least = max(_PRUNE_LEAST, 1 + sum(int(t) >= now - THREAD_POD_DEADLINE for _, t in mains))
+            kept = max(least, sum(int(t) >= now - PRUNE_DAYS * 86_400 for _, t in mains))
+            size = sum(int(e.split()[3]) for e in git("ls-tree", "-r", "-l", MAIN).splitlines() if e.split()[1] == "blob")
+            while True:
+                packed = self._cut(git, work, mains=[c for c, _ in mains], kept=kept)
+                if packed <= 2 * size or kept <= least:
+                    break
+                kept = max(least, kept // 2)
+            [name] = {p.stem for p in (work / "objects" / "pack").glob("pack-*.pack")}
+            for kind in ("pack", "idx"):
+                self._put_durable(f"objects/pack/{name}.{kind}", work / "objects" / "pack" / f"{name}.{kind}")
+            if (work / "shallow").is_file():
+                self._put_durable("shallow", work / "shallow")
+            git("pack-refs", "--all", "--prune")
+            if self._durable_refs() != refs:
+                # The lock was lost and a landing pushed meanwhile: its refs and packs stand.
+                raise HistoryConflict("the project's history moved while it was pruned")
+            self._put_durable("packed-refs", work / "packed-refs")
+            # Only now: until packed-refs names the new pack's commits, the old packs hold them.
+            for old in packs:
+                if old.name not in (f"{name}.pack", f"{name}.idx"):
+                    old.unlink(missing_ok=True)
+            _sync(self.durable / "objects" / "pack")
+            return {"pruned": True, "commits": min(kept, len(mains)), "size": packed, "files": size}
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _mirror(self, work: Path, refs: dict[str, str], packs: list[Path]) -> None:
+        """The durable history as *refs* and *packs*, in a repository at *work* on the pod's disk.
+
+        Its packs are copied whole, each read once in order: ``git clone``
+        of a history with a ``shallow`` file reads them object by object
+        instead, one request a read through geesefs (four minutes a GiB at
+        20 ms a request).  Its ``HEAD`` and config are its own, not the bucket's.
+        """
+        self._git(["init", "-q", "--bare", "-b", "main", str(work)], env={}, cwd=self.repo)
+        (work / "packed-refs").write_bytes(_packed(refs))
+        if shallow := self._durable_shallow():
+            (work / "shallow").write_text("".join(f"{c}\n" for c in shallow))
+        for pack in packs:
+            if pack.suffix in (".pack", ".idx"):
+                shutil.copyfile(pack, work / "objects" / "pack" / pack.name)
+
+    def _cut(self, git: Callable[..., str], work: Path, *, mains: list[str], kept: int) -> int:
+        """Cut *work*'s history to *mains*' newest *kept* and what only they reach; the size of its one pack after.
+
+        A commit older ``main`` reaches goes, whichever branch it is on; the
+        tip of every ref stays, however old.
+        """
+        tips = set(git("for-each-ref", "--format=%(objectname)").split())
+        parents = {line.split()[0]: line.split()[1:] for line in git("rev-list", "--all", "--parents").splitlines()}
+        stays = (set(git("rev-list", "--all", f"^{mains[kept]}").split()) if kept < len(mains) else set(parents)) | tips
+        # A commit already cut stays cut: git shows it with no parents.
+        was = set((work / "shallow").read_text().split()) if (work / "shallow").is_file() else set()
+        shallow = sorted({c for c in stays if any(p not in stays for p in parents[c])} | (was & stays))
+        if shallow:
+            (work / "shallow").write_text("".join(f"{c}\n" for c in shallow))
+        git("reflog", "expire", "--expire=now", "--all")
+        git("gc", "-q", "--prune=now")
+        return sum(p.stat().st_size for p in (work / "objects" / "pack").glob("pack-*.pack"))
+
+    def _in(self, repo: Path, *args: str) -> str:
+        """Git in the bare repository *repo*."""
+        return self._git(list(args), env={"GIT_DIR": str(repo)}, cwd=repo)
+
+    def _sweep(self) -> None:
+        """Delete what a write killed part way left, staged beside its file: only the lock holder writes here."""
+        for folder in (self.durable, self.durable / "objects" / "pack"):
+            for staged in folder.glob(".~*.landing~"):
+                staged.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # The durable history
@@ -509,7 +627,9 @@ class History:
         moved = sorted(ref for ref, want in expect.items() if refs.get(ref) != want)
         if moved:
             raise HistoryConflict(f"{', '.join(moved)} moved in the project's history")
-        if not (self.durable / "HEAD").exists():
+        if (self.durable / "HEAD").exists():
+            self._sweep()
+        else:
             for folder in ("refs", "objects/pack"):
                 (self.durable / folder).mkdir(parents=True, exist_ok=True)
             _sync(self.durable / "objects")
@@ -543,7 +663,7 @@ class History:
         if cut:
             self._put_durable("shallow", "".join(f"{c}\n" for c in sorted({*self._durable_shallow(), *cut})).encode())
         refs.update(updates)
-        self._put_durable("packed-refs", (_PACKED + "".join(f"{refs[r]} {r}\n" for r in sorted(refs) if refs[r])).encode())
+        self._put_durable("packed-refs", _packed(refs))
 
     def _in_durable(self, commit: str) -> bool:
         """Whether the durable history holds *commit*."""
@@ -852,6 +972,11 @@ def _checked_ref(value: str, where: str) -> str:
     if not _REF.fullmatch(value) or ".." in value:
         raise HistoryError(f"refused the project's history: {where} holds {value[:60]!r}, not one of its refs")
     return value
+
+
+def _packed(refs: dict[str, str | None]) -> bytes:
+    """A ``packed-refs`` file of *refs*, those set."""
+    return (_PACKED + "".join(f"{refs[r]} {r}\n" for r in sorted(refs) if refs[r])).encode()
 
 
 def _objects(index: Path) -> int:

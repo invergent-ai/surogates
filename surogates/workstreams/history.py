@@ -13,16 +13,17 @@ import asyncio
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from itertools import islice
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import Range
 
-from surogates.db.models import WorkstreamHistory
+from surogates.db.models import WorkstreamHistory, WorkstreamThread
 from surogates.governance.saga import Saga
-from surogates.sandbox.history import HISTORY_CAP, tracked
+from surogates.sandbox.history import HISTORY_CAP, PRUNE_DAYS, tracked
 from surogates.storage.tenant import boundary_workspace_prefix
 
 #: How long a landing waits between tries for its project's lock.
@@ -162,3 +163,14 @@ async def over_history_cap(storage: Any, session: Any) -> bool:
     answer = await asyncio.to_thread(over)
     _COUNTED[(bucket, prefix)] = (time.monotonic(), answer)
     return answer
+
+
+async def kept_refs(session_factory: Any, workstream_id: UUID | str) -> list[str]:
+    """The branches and bases a pruning keeps: each live thread's, and each resolved within the window."""
+    ended = WorkstreamThread.resolved_at > func.now() - timedelta(days=PRUNE_DAYS)
+    async with session_factory() as db:
+        threads = await db.execute(
+            select(WorkstreamThread.session_id)
+            .where(WorkstreamThread.workstream_id == workstream_id, or_(WorkstreamThread.resolved_at.is_(None), ended))
+        )
+        return [ref for thread in threads.scalars() for ref in (f"refs/heads/threads/{thread}", f"refs/bases/{thread}")]
