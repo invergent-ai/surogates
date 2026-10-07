@@ -46,6 +46,15 @@ function sent(method: string, body?: unknown): RequestInit {
   return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
 }
 
+// An id goes into a path as one segment, encoded: an id holding "/", "?" or "#" reaches no other
+// route with the user's token. A dot segment the URL would resolve away is no id at all.
+function segment(id: string, refusal: string): string {
+  if (id === "." || id === "..") throw new Error(refusal);
+  return encodeURIComponent(id);
+}
+const project = (id: string) => `/${segment(id, "No such project.")}`;
+const thread = (id: string) => `/${segment(id, "No such thread.")}`;
+
 /** The thread a change names, or null when it is project-wide or cannot be read. */
 function changedThread(data: string): string | null {
   try {
@@ -68,20 +77,20 @@ export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents): Workst
   const routes: WorkstreamRoutes = {
     list: async () =>
       (await asked<ProjectSummaryResponse[]>("", undefined, "Failed to fetch the projects")).map(projectSummaryOf),
-    get: async (projectId) => projectOf(await asked<ProjectResponse>(`/${projectId}`, undefined, "Failed to fetch the project")),
+    get: async (projectId) => projectOf(await asked<ProjectResponse>(project(projectId), undefined, "Failed to fetch the project")),
     create: async (input) => projectOf(await asked<ProjectResponse>("", sent("POST", input), "The project could not be created.")),
     update: async (projectId, change) =>
-      projectOf(await asked<ProjectResponse>(`/${projectId}`, sent("PATCH", projectChangeOf(change)), "The project could not be changed.")),
-    archive: (projectId) => asked<void>(`/${projectId}`, sent("DELETE"), "The project could not be archived."),
+      projectOf(await asked<ProjectResponse>(project(projectId), sent("PATCH", projectChangeOf(change)), "The project could not be changed.")),
+    archive: async (projectId) => asked<void>(project(projectId), sent("DELETE"), "The project could not be archived."),
     threads: async (projectId, threadId) => {
       const query = threadId ? `?${new URLSearchParams({ thread_id: threadId })}` : "";
-      const rows = await asked<ThreadRowResponse[]>(`/${projectId}/threads${query}`, undefined, "Failed to fetch the project's threads");
+      const rows = await asked<ThreadRowResponse[]>(`${project(projectId)}/threads${query}`, undefined, "Failed to fetch the project's threads");
       return rows.map(threadRowOf);
     },
-    resolve: (projectId, threadId) => row(`/${projectId}/threads/${threadId}/resolve`, sent("POST"), "The thread could not be resolved."),
-    reopen: (projectId, threadId) => row(`/${projectId}/threads/${threadId}/reopen`, sent("POST"), "The thread could not be reopened."),
+    resolve: async (projectId, threadId) => row(`${project(projectId)}/threads${thread(threadId)}/resolve`, sent("POST"), "The thread could not be resolved."),
+    reopen: async (projectId, threadId) => row(`${project(projectId)}/threads${thread(threadId)}/reopen`, sent("POST"), "The thread could not be reopened."),
     library: async (projectId) =>
-      (await asked<LibraryEntryResponse[]>(`/${projectId}/library`, undefined, "Failed to fetch the project's Library")).map(libraryEntryOf),
+      (await asked<LibraryEntryResponse[]>(`${project(projectId)}/library`, undefined, "Failed to fetch the project's Library")).map(libraryEntryOf),
     // The schedules the project's master made, of every status, as many as the shell takes.
     routines: async (projectId) => {
       const { masterSessionId } = await routes.get(projectId);
@@ -90,9 +99,12 @@ export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents): Workst
       if (!response.ok) return parseError(response, "Failed to fetch the project's routines");
       return ((await response.json()) as { items: RoutineResponse[] }).items.map(routineOf);
     },
-    start: (projectId, proposalId, key) =>
-      row(`/${projectId}/threads`, sent("POST", { proposal_id: proposalId, key }), "The thread could not be started."),
-    stream: (projectId) => projectStream((watched) => openEvents(`${ROUTE}/${projectId}/stream`, watched), fetchFn),
+    start: async (projectId, proposalId, key) =>
+      row(`${project(projectId)}/threads`, sent("POST", { proposal_id: proposalId, key }), "The thread could not be started."),
+    stream: (projectId) => {
+      const path = `${ROUTE}${project(projectId)}/stream`;
+      return projectStream((watched) => openEvents(path, watched), fetchFn);
+    },
     subscribe(projectId, onChange) {
       const events = routes.stream(projectId);
       // Ready again after a reconnect: whatever changed meanwhile is read again.

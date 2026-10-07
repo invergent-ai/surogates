@@ -312,6 +312,39 @@ test("each project route is asked at its own path, and answers the shell's types
   ]);
 });
 
+test("a project route puts each id in its path as one segment, so no id reaches another route", async () => {
+  const { asked, routes } = routesOver((url, init) => {
+    if (init.method === "DELETE") return new Response(null, { status: 204 });
+    if (url.endsWith("/library")) return Response.json([]);
+    if (url.includes("/threads")) return Response.json(init.method === "POST" ? ROW : []);
+    return Response.json(PROJECT);
+  });
+  await routes.get("../devices");
+  await routes.update("p/1", { name: "Q3" });
+  await routes.archive("p?1");
+  await routes.threads("p#1");
+  await routes.threads("p 1", "t&thread_id=2");
+  await routes.resolve("p%1", "t/../2");
+  await routes.reopen("p1", "t?2");
+  await routes.library("p/1");
+  await routes.start("p/1", "pr-1", "2");
+  assert.deepEqual(asked.map(([method, url]) => [method, url]), [
+    ["GET", "/api/v1/workstreams/..%2Fdevices"],
+    ["PATCH", "/api/v1/workstreams/p%2F1"],
+    ["DELETE", "/api/v1/workstreams/p%3F1"],
+    ["GET", "/api/v1/workstreams/p%231/threads"],
+    ["GET", "/api/v1/workstreams/p%201/threads?thread_id=t%26thread_id%3D2"],
+    ["POST", "/api/v1/workstreams/p%251/threads/t%2F..%2F2/resolve"],
+    ["POST", "/api/v1/workstreams/p1/threads/t%3F2/reopen"],
+    ["GET", "/api/v1/workstreams/p%2F1/library"],
+    ["POST", "/api/v1/workstreams/p%2F1/threads"],
+  ]);
+  // A dot segment the URL would resolve away is no id at all.
+  await assert.rejects(routes.archive(".."), { message: "No such project." });
+  await assert.rejects(routes.resolve("p1", "."), { message: "No such thread." });
+  assert.equal(asked.length, 9);
+});
+
 test("a project route that refuses says the route's own words", async () => {
   const { routes } = routesOver((url) => url.endsWith("/workstreams")
     ? Response.json({ detail: "This agent keeps a single conversation, so it has no projects." }, { status: 409 })
