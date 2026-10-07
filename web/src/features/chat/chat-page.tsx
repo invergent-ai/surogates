@@ -1,3 +1,4 @@
+import { listDevices } from "@/api/devices";
 import * as sessionsApi from "@/api/sessions";
 import {
   type TransparencyConfig,
@@ -6,6 +7,8 @@ import {
 import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
 import { TransparencyBanner } from "@/components/transparency-banner";
+import { type DesktopDeviceState, getDesktop } from "@/lib/desktop-bridge";
+import { createChat, newChatPlace } from "@/lib/local-chat";
 import { useAppStore } from "@/stores/app-store";
 import { slashCommandEnabled } from "@/stores/capabilities-slice";
 import {
@@ -19,6 +22,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 //
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getChatRouteState } from "./chat-route-state";
+import { NewChatPlace } from "./new-chat-place";
 import {
   surogatesWebChatAdapter,
   toAgentChatSession,
@@ -39,6 +43,7 @@ export function ChatPage() {
   const slashCommands = useAppStore((s) => s.slashCommands);
   const multiSession = useAppStore((s) => s.multiSession);
   const browserEnabled = useAppStore((s) => s.browserEnabled);
+  const desktopSessions = useAppStore((s) => s.desktopSessions);
   const sessions = useAppStore((s) => s.sessions);
 
   // Load initial data on mount
@@ -123,6 +128,40 @@ export function ChatPage() {
   const sessionId = chatRouteState.sessionId;
   const [chatMessages, setChatMessages] = useState<AgentChatMessage[]>([]);
 
+  // In Surogate Desktop a new chat works in a folder of this computer (Section 8). The line under
+  // the composer is read again for each chat opened, and whenever the window comes back: the
+  // computer may have been added, or its access ended, meanwhile. The chat itself goes where the
+  // desktop says when it is sent.
+  const [device, setDevice] = useState<DesktopDeviceState | null>(null);
+  const [folderChoice, setFolderChoice] = useState<"last" | "pick">("last");
+  useEffect(() => {
+    const desktop = getDesktop();
+    if (!desktop) return;
+    let live = true;
+    const read = () => {
+      void desktop.getDevice().then(
+        (state) => {
+          if (live) setDevice(state);
+        },
+        () => {
+          if (live) setDevice(null);
+        },
+      );
+    };
+    const shown = () => {
+      if (document.visibilityState === "visible") read();
+    };
+    read();
+    window.addEventListener("focus", read);
+    document.addEventListener("visibilitychange", shown);
+    return () => {
+      live = false;
+      window.removeEventListener("focus", read);
+      document.removeEventListener("visibilitychange", shown);
+    };
+  }, [sessionId]);
+  const place = newChatPlace(device, { desktopSessions, multiSession }, folderChoice);
+
   // Show disclosure banner when transparency is enabled and the user has not
   // yet accepted.  This covers two states:
   //   1. No session yet (landing screen) — keyed by PRE_SESSION_KEY
@@ -169,9 +208,18 @@ export function ChatPage() {
     () => ({
       ...surogatesWebChatAdapter,
       async createSession(input) {
-        const rawSession = await sessionsApi.createSession({
+        const fields = {
           system: input.system,
           browserProfileId: browserProfileId ?? undefined,
+        };
+        // On a folder of this computer, it is confirmed and bound before the first message and its attachments go.
+        const rawSession = await createChat(getDesktop(), { desktopSessions, multiSession }, folderChoice, {
+          create: (execution) => sessionsApi.createSession({ ...fields, execution }),
+          online: async (deviceId) => (await listDevices()).some((row) => row.id === deviceId && row.online),
+        }).catch((error: unknown) => {
+          // A chat made whose folder could not be set up is listed all the same.
+          void fetchSessions();
+          throw error;
         });
         upsertSession(rawSession);
         handleSessionChange(rawSession.id);
@@ -189,7 +237,7 @@ export function ChatPage() {
         return toAgentChatSession(rawSession);
       },
     }),
-    [handleSessionChange, upsertSession, browserProfileId],
+    [handleSessionChange, upsertSession, browserProfileId, desktopSessions, multiSession, folderChoice, fetchSessions],
   );
 
   const handleDisclosureConfirmed = useCallback(() => {
@@ -250,6 +298,15 @@ export function ChatPage() {
               onOpenIntegrations={() => void navigate({ to: "/integrations" })}
               browserProfileId={browserProfileId}
               onSelectBrowserProfile={setBrowserProfileId}
+              composerFooter={
+                !sessionId && place.text ? (
+                  <NewChatPlace
+                    place={{ local: place.local, text: place.text }}
+                    choice={folderChoice}
+                    onChoice={setFolderChoice}
+                  />
+                ) : undefined
+              }
               // Offer the browser-profile picker only when the agent has live
               // browser support (``browser_enabled`` from /auth/config). Only
               // an explicit false hides it; unknown (not yet loaded) fails

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+import type { LocalExecution } from "@/lib/local-chat";
+
 export interface Session {
   id: string;
   user_id: string;
@@ -23,6 +25,8 @@ export interface Session {
 
 export interface SessionCreateRequest {
   system?: string;
+  /** A folder of the user's computer, confirmed there, in place of a cloud workspace. */
+  execution?: LocalExecution;
   /** Saved browser profile to attach; sent as ``config.browser.profile_id``. */
   browserProfileId?: string;
   /**

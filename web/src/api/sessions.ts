@@ -70,7 +70,11 @@ export async function createSession(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!response.ok) throw new Error("Failed to create session");
+  if (!response.ok) {
+    // A chat on a folder of the user's computer is refused in the agent's words: a revoked computer, say.
+    const err = (await response.json().catch(() => null)) as { detail?: unknown } | null;
+    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to create session");
+  }
   return (await response.json()) as Session;
 }
 
