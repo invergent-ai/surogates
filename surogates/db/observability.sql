@@ -23,6 +23,20 @@ ALTER TABLE events
     ADD COLUMN IF NOT EXISTS org_id  uuid REFERENCES orgs(id),
     ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES users(id);
 
+-- When the device link first welcomed a device (``Device.connected_at``). A
+-- device seen before the column existed had connected: it counts as such, once,
+-- when the column is added, and never again, as later sightings need no welcome.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'devices' AND column_name = 'connected_at'
+    ) THEN
+        ALTER TABLE devices ADD COLUMN connected_at timestamptz;
+        UPDATE devices SET connected_at = last_seen_at WHERE last_seen_at IS NOT NULL;
+    END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_events_audit_type_time
     ON events (org_id, type, created_at);
 

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -21,6 +21,13 @@ class Secrets implements SecretStore {
   decryptString(sealed: Buffer): string {
     if (sealed.toString().startsWith("!")) throw new Error("the keyring is locked");
     return [...sealed.toString()].reverse().join("");
+  }
+}
+
+// A secret store that is there, but cannot seal: a locked keyring, or an encryption error.
+class Unsealing extends Secrets {
+  override encryptString(): Buffer {
+    throw new Error("the keyring is locked");
   }
 }
 
@@ -62,6 +69,45 @@ describe("the device credentials", () => {
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(store(secrets).list()).toEqual([CREDENTIAL]);
     expect(store(secrets).unencrypted()).toBe(true);
+  });
+
+  it("keep a revocation still owed beside a new device of the same identity, and forget each by its device", () => {
+    const credentials = store();
+    credentials.save({ ...CREDENTIAL, revoking: true });
+    credentials.save({ ...CREDENTIAL, deviceId: "d2", token: "surg_dev_new" });
+    expect(store().list()).toEqual([{ ...CREDENTIAL, revoking: true }, { ...CREDENTIAL, deviceId: "d2", token: "surg_dev_new" }]);
+    credentials.remove("d");
+    expect(store().list()).toEqual([{ ...CREDENTIAL, deviceId: "d2", token: "surg_dev_new" }]);
+  });
+
+  it("keep the identity of one the agent ended, with no token", () => {
+    store().save({ ...CREDENTIAL, token: null });
+    expect(readFileSync(path, "utf8")).not.toMatch(/sealed|plain/);
+    expect(store().list()).toEqual([{ ...CREDENTIAL, token: null }]);
+  });
+
+  it("kept as they are while there was no secret store are sealed once there is one", () => {
+    store(new Secrets("basic_text")).save(CREDENTIAL);
+    expect(store().list()).toEqual([CREDENTIAL]);
+    expect(readFileSync(path, "utf8")).not.toContain("surg_dev_secret");
+    expect(store().unencrypted()).toBe(false);
+  });
+
+  it.each([
+    ["the secret store cannot seal", () => new Unsealing(), () => {}],
+    ["the file cannot be written", () => new Secrets(), () => chmodSync(dir, 0o500)],
+  ])("kept as they are stay usable when sealing them fails because %s, which is said once, and are sealed at the next read", (_name, secrets, fail) => {
+    store(new Secrets("basic_text")).save(CREDENTIAL);
+    fail();
+    try {
+      expect(store(secrets()).list()).toEqual([CREDENTIAL]);
+      expect(errors).toHaveLength(1);
+      expect(store(secrets()).unencrypted()).toBe(true);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    expect(store().list()).toEqual([CREDENTIAL]);
+    expect(store().unencrypted()).toBe(false);
   });
 
   it("keep one per origin, organization, agent and user: a new device of the same identity replaces the old", () => {

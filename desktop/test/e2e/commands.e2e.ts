@@ -13,7 +13,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { vmOptions } from "../../src/vm/client.js";
-import { connect, FakeAgent, register, webClient } from "./fake-agent.js";
+import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
 const IMAGE = process.env.SUROGATE_VM_IMAGE ?? fileURLToPath(new URL("../../../images/guest/out", import.meta.url));
@@ -67,9 +67,10 @@ async function launched(): Promise<Page> {
   const origin = await agent.start();
   app = await launch(home, { XDG_RUNTIME_DIR: runtime, SUROGATE_VM_IMAGE: IMAGE });
   await stubNative(app);
-  await connect(await shellPage(app), origin);
+  const page = await shellPage(app);
+  await connect(page, origin);
+  await signedInAndAdded(app, page, agent);
   const client = await webClient(app, origin);
-  await register(client);
   return client;
 }
 

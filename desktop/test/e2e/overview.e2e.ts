@@ -4,7 +4,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { FIXTURE_IDS, type ProjectFixtures, projectFixtures } from "../../../web/src/lib/projects.js";
-import { ACCOUNT, connect, FakeAgent, webClient } from "./fake-agent.js";
+import { ACCOUNT, connect, FakeAgent, signIn, webClient } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
 const { report: REPORT, budget: BUDGET, question: QUESTION } = FIXTURE_IDS;
@@ -36,6 +36,7 @@ async function opened(project: string = REPORT): Promise<{ shell: ElectronApplic
   await stubNative(shell);
   const page = await shellPage(shell);
   await connect(page, origin);
+  await signIn(shell, page, agent);
   const client = await webClient(shell, origin);
   await client.evaluate((account) => window.surogateDesktop!.setAccount(account), ACCOUNT);
   await page.click(`#projects [data-project="${project}"] .project`);
@@ -279,7 +280,7 @@ describe("an account's projects", () => {
       await window.surogateDesktop!.registerProjects(null);
     });
     await expect.poll(() => page.textContent("#user-name")).toBe("Not signed in");
-    expect(await page.textContent("#user-email")).toBe("Sign in to the agent in the window");
+    expect(await page.textContent("#user-email")).toBe("Signing in…");
     expect(await page.textContent("#title")).toBe(new URL(origin).host);
     expect(await page.$$eval("#projects .project", (found) => found.length)).toBe(0);
     expect(await rows(page)).toBe(0);

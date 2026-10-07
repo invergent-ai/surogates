@@ -10,12 +10,14 @@ verifier correctness which lives in `tests/test_firebase_auth_runtime.py`.
 from __future__ import annotations
 
 import os
+import time
 import uuid
 
 import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
+from jose import jwt as jose_jwt
 from sqlalchemy import select
 
 from surogates.api import routes as routes_pkg  # noqa: F401  (registers routers)
@@ -187,8 +189,11 @@ async def test_firebase_exchange_creates_user_when_enabled(
             "sub": "uid-123",
             "email": "new-user@example.com",
             "email_verified": True,
+            "auth_time": signed_in,
         }
 
+    # When the user signed in to Firebase, which a fresh ID token of an old session still names.
+    signed_in = int(time.time()) - 3600
     monkeypatch.setattr(auth_routes, "verify_firebase_id_token", fake_verify)
 
     response = await auth_client.post(
@@ -198,8 +203,9 @@ async def test_firebase_exchange_creates_user_when_enabled(
 
     assert response.status_code == 200, response.text
     payload = response.json()
-    assert payload["access_token"]
-    assert payload["refresh_token"]
+    # Both tokens carry the Firebase sign-in's time, not the exchange's.
+    assert jose_jwt.get_unverified_claims(payload["access_token"])["auth_time"] == signed_in
+    assert jose_jwt.get_unverified_claims(payload["refresh_token"])["auth_time"] == signed_in
 
     async with session_factory() as session:
         user = await session.scalar(
@@ -210,6 +216,32 @@ async def test_firebase_exchange_creates_user_when_enabled(
     assert user is not None
     assert user.auth_provider == "firebase:builder-firebase"
     assert user.external_id == "uid-123"
+
+
+@pytest.mark.parametrize("auth_time", ["an hour ago", None])
+async def test_an_old_firebase_sign_in_cannot_add_a_computer(
+    auth_client, auth_app, session_factory, monkeypatch, auth_time,
+):
+    """A fresh ID token minted from a Firebase session of long ago is no recent sign-in."""
+    org_id = await create_org(session_factory)
+    _set_org(auth_app, org_id)
+    _set_firebase(auth_app, enabled=True)
+
+    async def fake_verify(token: str, project_id: str) -> dict:
+        claims = {"sub": f"uid-{uuid.uuid4()}", "email": f"{uuid.uuid4()}@example.com", "email_verified": True}
+        if auth_time is not None:
+            claims["auth_time"] = int(time.time()) - 3600
+        return claims
+
+    monkeypatch.setattr(auth_routes, "verify_firebase_id_token", fake_verify)
+    exchanged = await auth_client.post("/v1/auth/firebase/exchange", json={"id_token": "firebase-token"})
+    assert exchanged.status_code == 200, exchanged.text
+    access = exchanged.json()["access_token"]
+    response = await auth_client.post(
+        "/v1/devices", json={"name": "ThinkPad"}, headers={"Authorization": f"Bearer {access}"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "recent_sign_in_required"
 
 
 async def test_firebase_exchange_records_password_sign_in_provider(

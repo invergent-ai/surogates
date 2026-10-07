@@ -25,6 +25,7 @@ import { useTheme } from "next-themes";
 import { logout } from "@/api/auth";
 import { Button } from "@/components/ui/button";
 import { surogatesWebChatAdapter } from "@/features/chat";
+import { getDesktop } from "@/lib/desktop-bridge";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
 import { slashCommandEnabled } from "@/stores/capabilities-slice";
@@ -98,6 +99,12 @@ export function SessionSidebar() {
   }
 
   function handleLogout() {
+    // In Surogate Desktop the app logs out, this computer's access with it, and clears this page.
+    const desktop = getDesktop();
+    if (desktop) {
+      void desktop.signOut();
+      return;
+    }
     logout();
     void navigate({ to: "/login" });
   }

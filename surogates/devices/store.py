@@ -14,10 +14,10 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from surogates.db.models import Device, DeviceOperation
+from surogates.db.models import Device, DeviceOperation, OAuthRefreshToken
 from surogates.tenant.auth.service_account import hash_token
 
 TOKEN_PREFIX = "surg_dev_"
@@ -122,10 +122,18 @@ class DeviceStore:
         return _record(row) if row is not None else None
 
     async def revoke(
-        self, device_id: UUID, *, org_id: UUID, agent_id: str, user_id: UUID,
+        self, device_id: UUID, *, org_id: UUID, agent_id: str, user_id: UUID, by_sign_in: UUID | None = None,
     ) -> DeviceRecord | None:
-        """Revoke the user's device.  Revoking again keeps the first revocation time."""
-        return await self._revoke(Device.id == device_id, *_owned_by(org_id, agent_id, user_id))
+        """Revoke the user's device.  Revoking again keeps the first revocation time.
+
+        *by_sign_in* is the caller's OAuth sign-in, if any.  When it is the one
+        bound to a device the link never welcomed, it is unbound rather than
+        ended, and the device is deleted: the desktop taking back a computer it
+        could not keep stays signed in, and leaves no row behind.
+        """
+        return await self._revoke(
+            Device.id == device_id, *_owned_by(org_id, agent_id, user_id), by_sign_in=by_sign_in,
+        )
 
     async def revoke_by_id(self, device_id: UUID, generation: int) -> DeviceRecord | None:
         """Revoke a device at its own request, made over its authenticated link.
@@ -137,7 +145,7 @@ class DeviceStore:
             Device.id == device_id, Device.credential_generation == generation,
         )
 
-    async def _revoke(self, *where: Any) -> DeviceRecord | None:
+    async def _revoke(self, *where: Any, by_sign_in: UUID | None = None) -> DeviceRecord | None:
         async with self._sf() as db:
             row = (await db.execute(
                 update(Device)
@@ -146,6 +154,22 @@ class DeviceStore:
                 .returning(Device)
             )).scalar_one_or_none()
             if row is not None:
+                if by_sign_in is not None and row.connected_at is None:
+                    unbound = await db.execute(
+                        update(OAuthRefreshToken)
+                        .where(OAuthRefreshToken.family_id == by_sign_in, OAuthRefreshToken.device_id == row.id)
+                        .values(device_id=None)
+                    )
+                    # Never welcomed, so it ran nothing: its operations, if any, go with it.
+                    if unbound.rowcount:
+                        await db.execute(delete(Device).where(Device.id == row.id))
+                # The sign-in that added or restored the computer ends with it:
+                # a lost laptop's copy of the app can no longer refresh.
+                await db.execute(
+                    update(OAuthRefreshToken)
+                    .where(OAuthRefreshToken.device_id == row.id)
+                    .values(revoked_at=func.coalesce(OAuthRefreshToken.revoked_at, func.now()))
+                )
                 # Revocation cancels the device's queued and running work, so a
                 # later reauthorization cannot run it.  Waiters see the outcome
                 # at their next recheck.
@@ -197,6 +221,16 @@ class DeviceStore:
                 select(Device).where(Device.token_hash == hash_token(token))
             )).scalar_one_or_none()
         return _record(row) if row is not None else None
+
+    async def welcomed(self, device_id: UUID) -> None:
+        """Record that the link welcomed the device: from then on it has connected."""
+        async with self._sf() as db:
+            await db.execute(
+                update(Device)
+                .where(Device.id == device_id, Device.connected_at.is_(None))
+                .values(connected_at=func.now())
+            )
+            await db.commit()
 
     async def touch(self, device_id: UUID) -> DeviceRecord | None:
         """Record that the device was seen now; return its row, or None if it is gone."""

@@ -317,6 +317,9 @@ async def _tenant_context_from_token(
         user_preferences=user.preferences or {},
         permissions=frozenset(payload.get("permissions", [])),
         asset_root=asset_root,
+        auth_time=payload["auth_time"] if isinstance(payload.get("auth_time"), int) else None,
+        client_id=payload["client_id"] if isinstance(payload.get("client_id"), str) else None,
+        oauth_family_id=UUID(payload["sid"]) if isinstance(payload.get("sid"), str) else None,
     )
     return ctx
 

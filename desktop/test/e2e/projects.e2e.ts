@@ -4,7 +4,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { FIXTURE_IDS, type Project, type ProjectFixtures, projectFixtures } from "../../../web/src/lib/projects.js";
-import { connect, FakeAgent, webClient } from "./fake-agent.js";
+import { connect, FakeAgent, signIn, webClient } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
 const { report: REPORT, budget: BUDGET } = FIXTURE_IDS;
@@ -55,6 +55,7 @@ async function signedIn(): Promise<{ shell: ElectronApplication; page: Page; cli
   await stubNative(shell);
   const page = await shellPage(shell);
   await connect(page, origin);
+  await signIn(shell, page, agent);
   const client = await webClient(shell, origin);
   await page.waitForSelector("#projects .project");
   return { shell, page, client };
@@ -184,7 +185,8 @@ describe("the sidebar's projects", () => {
     await client.evaluate(() => {
       location.href = "https://checkout.example.com/pay";
     });
-    await expect.poll(() => shell.evaluate(() => (globalThis as unknown as { opened: string[] }).opened))
+    // After the sign-in's own address, which the system browser opened first.
+    await expect.poll(() => shell.evaluate(() => (globalThis as unknown as { opened: string[] }).opened.slice(1)))
       .toEqual(["https://checkout.example.com/pay"]);
     await page.click(row(BUDGET));
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${MASTERS[BUDGET]}`);
