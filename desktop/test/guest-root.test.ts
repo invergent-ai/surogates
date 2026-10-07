@@ -164,6 +164,20 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     expect(performance.now() - begun).toBeGreaterThan(1_650);
   });
 
+  it("forgets a run's backstop that waited to hear the host once the run ends", async () => {
+    const silent = new Roots({ start: bare, uid: () => 10_000, kill: killLatest(children), backstopMs: 0, hostSilenceMs: 0 });
+    await silent.setup("root-7", base, R1, user);
+    // Who waits to hear the host next.
+    const waiting = () => (silent as unknown as { hearing: Set<unknown> }).hearing.size;
+    const cancel = new AbortController();
+    const running = silent.perform("root-7", "run", { command: "sleep 5", workdir: null, timeout: 0.2 }, cancel.signal, "op-30");
+    // Due while the host is silent: it waits to hear it.
+    await until(() => waiting() === 1);
+    cancel.abort();
+    expect(await running).toEqual(CANCELLED);
+    expect(waiting()).toBe(0);
+  });
+
   it("answers a run's cancel at once while its runner is stopped", async () => {
     const runner = children[0] as ChildProcess;
     const cancel = new AbortController();

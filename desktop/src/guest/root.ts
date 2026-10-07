@@ -367,7 +367,8 @@ function first<T>(answer: Promise<T>, signal: AbortSignal, late?: Promise<"timeo
 // What a run's backstop knows of the host: how long it has said nothing, and when it next speaks.
 export interface HostHeard {
   silentFor(): number;
-  next(): Promise<void>;
+  // Resolves when the host next speaks; *stop* takes the waiter off its list.
+  next(stop: AbortSignal): Promise<void>;
 }
 
 /**
@@ -384,6 +385,7 @@ export class Backstop {
   private timer: NodeJS.Timeout | undefined;
   private fall: () => void = () => {};
   private ended = false;
+  private readonly stop = new AbortController();
 
   constructor(ms: number, private readonly margin: number, private readonly host: HostHeard | null, private readonly silence: number) {
     this.due = performance.now() + ms + margin;
@@ -401,6 +403,7 @@ export class Backstop {
   end(): void {
     this.ended = true;
     clearTimeout(this.timer);
+    this.stop.abort();
   }
 
   private arm(): void {
@@ -411,7 +414,7 @@ export class Backstop {
 
   private reached(): void {
     if (this.host && this.host.silentFor() > this.silence) {
-      void this.host.next().then(() => {
+      void this.host.next(this.stop.signal).then(() => {
         this.due = Math.max(this.due, performance.now() + this.margin);
         this.arm();
       });
@@ -548,7 +551,10 @@ export class Roots {
   private readonly hearing = new Set<() => void>();
   private readonly host: HostHeard = {
     silentFor: () => performance.now() - this.heardAt,
-    next: () => new Promise((resolve) => void this.hearing.add(resolve)),
+    next: (stop) => new Promise((resolve) => {
+      this.hearing.add(resolve);
+      stop.addEventListener("abort", () => this.hearing.delete(resolve), { once: true });
+    }),
   };
 
   constructor(private readonly options: RootsOptions) {}
