@@ -14,7 +14,7 @@ import {
 } from "electron";
 
 import type { DesktopAccount } from "../../../web/src/lib/desktop-bridge-contract.js";
-import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow } from "../../../web/src/lib/projects-contract.js";
+import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow, Tier } from "../../../web/src/lib/projects-contract.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
@@ -1098,6 +1098,112 @@ function settingsState() {
   };
 }
 
+// What the project dialog sends for a project: its name and goal, and, for one that exists, its
+// instructions and tiers. Lengths are the routes' own, in UTF-16 units as JavaScript counts them.
+interface ProjectFields {
+  name: string;
+  goal: string;
+  instructions?: string;
+  coordinatorTier?: Tier;
+  threadTier?: Tier;
+}
+
+const tierOf = (value: unknown): value is Tier => value === null || value === "basic" || value === "pro";
+
+function projectFields(value: unknown, editing: boolean): ProjectFields {
+  const { name, goal, instructions, coordinatorTier, threadTier } = (value ?? {}) as Record<string, unknown>;
+  const fits = (field: unknown, max: number) => typeof field === "string" && field.length <= max;
+  if (!fits(name, 256) || !fits(goal, 2_000)) throw new Error("Not a project's fields");
+  if (editing && !(fits(instructions, 16_000) && tierOf(coordinatorTier) && tierOf(threadTier))) throw new Error("Not a project's fields");
+  const named = { name: (name as string).trim(), goal: goal as string };
+  return editing
+    ? { ...named, instructions: instructions as string, coordinatorTier: coordinatorTier as Tier, threadTier: threadTier as Tier }
+    : named;
+}
+
+async function confirmArchive(name: string): Promise<boolean> {
+  if (!main) return false;
+  const { response } = await dialog.showMessageBox(main.window, {
+    type: "warning",
+    message: `Archive ${name}?`,
+    detail: "It leaves your projects, with its conversation and its threads. Its files and its memory are kept.",
+    buttons: ["Archive", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  });
+  return response === 0;
+}
+
+// The project dialog, over the window: a new project, or the open project's settings. Its page's
+// calls are answered on its own view only; each answers why it was refused, or null once done.
+function showProject(editing: Opened | null): void {
+  const page = join(PAGES, "project.html");
+  main?.openSettings(page, PAGES_PRELOAD, (contents) => {
+    const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
+      contents.ipc.handle(channel, (event, ...args: unknown[]) => {
+        if (!ownPage(event.senderFrame, page)) throw new Error("Not the project dialog's own page");
+        return handler(...args);
+      });
+    };
+    const refused = (error: unknown) => (error instanceof Error ? error.message : String(error));
+    // The project as the dialog showed it: its archive is asked under the name the user sees.
+    let shown: Project | null = null;
+    // A project that cannot be read, gone or out of reach, is said so, with nothing to save.
+    handle("project:state", async () => {
+      if (!editing) return { editing: false, project: null, refused: null };
+      try {
+        shown = await askServed(() => projects.get(editing.id));
+        return { editing: true, project: shown, refused: null };
+      } catch (error) {
+        return { editing: true, project: null, refused: refused(error) };
+      }
+    });
+    // Only this dialog: one the user closed meanwhile may have given its place to Settings, or another.
+    const close = () => {
+      if (main?.settingsContents() === contents) main.closeSettings();
+    };
+    handle("project:save", async (value) => {
+      const fields = projectFields(value, editing !== null);
+      if (fields.name === "") return "Name the project.";
+      try {
+        const project = editing
+          ? await projects.update(editing.id, fields)
+          : await projects.create({ name: fields.name, goal: fields.goal });
+        remember(project);
+        close();
+        // A new project opens on its conversation, as one chosen in the sidebar does.
+        if (!editing && webClientPath(`/chat/${project.masterSessionId}`)) {
+          choose();
+          show({ kind: "project", id: project.id, name: project.name, masterSessionId: project.masterSessionId, thread: null });
+          main?.showWeb(true);
+          main?.go(`/chat/${project.masterSessionId}`);
+        }
+        void refreshProjects();
+        return null;
+      } catch (error) {
+        return refused(error);
+      }
+    });
+    handle("project:archive", async () => {
+      if (!editing || !(await confirmArchive(shown?.name ?? editing.name))) return null;
+      try {
+        await projects.archive(editing.id);
+      } catch (error) {
+        return refused(error);
+      }
+      close();
+      if (view.kind === "project" && view.id === editing.id) {
+        show({ kind: "web" });
+        main?.go("/chat");
+      }
+      void refreshProjects();
+      return null;
+    });
+    handle("project:close", () => main?.closeSettings());
+  });
+}
+
 // Settings, over the window: its page's calls are answered on its own view only.
 function showSettings(): void {
   const page = join(PAGES, "settings.html");
@@ -1247,6 +1353,11 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:place", (hole) => window.place(bounds(hole)));
   handle("shell:menu", popup);
   handle("shell:settings", showSettings);
+  handle("shell:new-project", () => showProject(null));
+  handle("shell:project-settings", () => {
+    if (view.kind !== "project") throw new Error("No project is open");
+    showProject({ id: view.id, name: view.name, masterSessionId: view.masterSessionId });
+  });
   handle("shell:link", openLink);
 }
 

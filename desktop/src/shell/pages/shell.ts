@@ -66,6 +66,8 @@ interface Shell {
   place(hole: { x: number; y: number; width: number; height: number }): Promise<void>;
   menu(which: "app" | "project"): Promise<void>;
   settings(): Promise<void>;
+  newProject(): Promise<void>;
+  projectSettings(): Promise<void>;
   link(which: string): Promise<void>;
   onChanged(listener: () => void): () => void;
 }
@@ -255,6 +257,7 @@ async function render(): Promise<void> {
   // A thread open in the centre: its project, as the way back.
   byId("to-project").hidden = !open?.thread;
   byId("to-project").textContent = open?.thread ? (name ?? "") : "";
+  byId<HTMLButtonElement>("project-settings").disabled = !open;
   byId("overview-dot").hidden = !state.projects.some((project) => project.id === open?.id && project.waiting > 0);
   byId("projects").replaceChildren(...state.projects.map((project) => group(project, project.id === open?.id)));
   filterSidebar();
@@ -315,9 +318,9 @@ byId("device-action-button").addEventListener("click", () => {
 byId("search").addEventListener("input", filterSidebar);
 byId("project-search").addEventListener("input", renderCards);
 byId("sort").addEventListener("change", renderCards);
-// A new chat at the root is a new project: today's server keeps no projects of its own.
 byId("new").addEventListener("click", () => void shell.go("/chat"));
-byId("new-project").addEventListener("click", () => void shell.go("/chat"));
+byId("new-project").addEventListener("click", () => void shell.newProject());
+byId("project-settings").addEventListener("click", () => void shell.projectSettings());
 byId("open-projects").addEventListener("click", () => void shell.projects());
 byId("to-project").addEventListener("click", () => {
   if (last?.view.kind === "project") void shell.project(last.view.id);

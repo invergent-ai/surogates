@@ -30,8 +30,16 @@ if (location.protocol === "file:") {
     place: (hole: { x: number; y: number; width: number; height: number }) => ipcRenderer.invoke("shell:place", hole),
     menu: (which: "app" | "project") => ipcRenderer.invoke("shell:menu", which),
     settings: () => ipcRenderer.invoke("shell:settings"),
+    newProject: () => ipcRenderer.invoke("shell:new-project"),
+    projectSettings: () => ipcRenderer.invoke("shell:project-settings"),
     link: (which: string) => ipcRenderer.invoke("shell:link", which),
     onChanged: listen("shell:changed"),
+  });
+  contextBridge.exposeInMainWorld("surogateProject", {
+    state: () => ipcRenderer.invoke("project:state"),
+    save: (fields: unknown) => ipcRenderer.invoke("project:save", fields),
+    archive: () => ipcRenderer.invoke("project:archive"),
+    close: () => ipcRenderer.invoke("project:close"),
   });
   contextBridge.exposeInMainWorld("surogateSettings", {
     state: () => ipcRenderer.invoke("settings:state"),

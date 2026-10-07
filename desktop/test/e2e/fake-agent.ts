@@ -2,7 +2,8 @@
 // the app signs in with, /auth/me, device registration, the device link, and a page
 // standing for the web client at every other path. Tests drive that page as the web client
 // would, and stand in for the system browser on the authorize page. With projects set, the
-// page serves them on every load, as the web client serves its own.
+// page serves them on every load, as the web client serves its own, and keeps what it
+// changes of them here (PUT /fake/projects), as the agent's server keeps its projects.
 
 import { createHash } from "node:crypto";
 import { once } from "node:events";
@@ -149,6 +150,11 @@ export class FakeAgent {
       response.writeHead(204).end();
       return;
     }
+    if (request.method === "PUT" && path === "/fake/projects") {
+      this.projects = JSON.parse(await body(request)) as ProjectFixtures;
+      response.writeHead(204).end();
+      return;
+    }
     await this.pagesHeld;
     if (this.pagesRedirect && !path.startsWith("/api/")) {
       response.writeHead(302, { location: this.pagesRedirect }).end();
@@ -256,7 +262,9 @@ export async function signedInAndAdded(shell: ElectronApplication, page: Page, a
 // *delay* ms. The page keeps it as window.fakeProjects, whose changed() tells the source's subscribers,
 // whose lists counts the times the projects were listed, whose reads names each read of threads (a
 // thread's id, or null for them all), whose refusal, when set, is what a change of a project or a
-// thread answers, and whose register() registers the source.
+// thread answers, whose unreachable, when set, makes a project's read fail as the web client's
+// fetch does with the agent out of reach, and whose register() registers the source. What it
+// changes of a project it keeps at the fake agent, so the next load serves it.
 // The source's methods read it through this, as an object's own methods may.
 function serveProjects(data: ProjectFixtures, delay: number): void {
   const listeners = new Map<string, Set<(threadId: string | null) => void>>();
@@ -265,12 +273,15 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
     lists: 0,
     reads: [] as Array<string | null>,
     refusal: null as string | null,
+    unreachable: false,
     register: () => {},
     changed: (id: string, threadId: string | null) => {
       for (const listener of listeners.get(id) ?? []) listener(threadId);
     },
   };
-  const refuse = () => Promise.reject(new Error("The fake source changes nothing"));
+  const keep = async (served: ProjectFixtures) => {
+    await fetch("/fake/projects", { method: "PUT", body: JSON.stringify(served) });
+  };
   const source = {
     served: data,
     one(id: string) {
@@ -284,6 +295,7 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
         ({ id, name, icon, createdAt, updatedAt, waiting, working }));
     },
     async get(id: string) {
+      if (fake.unreachable) throw new Error("API server is not reachable.");
       return this.one(id);
     },
     async threads(id: string, threadId?: string) {
@@ -296,9 +308,29 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
     async routines(id: string) {
       return this.served.routines[this.one(id).id] ?? [];
     },
-    create: refuse,
-    update: refuse,
-    archive: refuse,
+    async create(input: { name: string; goal?: string; instructions?: string }) {
+      if (fake.refusal) throw new Error(fake.refusal);
+      const now = new Date().toISOString();
+      const made: Project = {
+        id: crypto.randomUUID(), name: input.name, icon: null, createdAt: now, updatedAt: now, waiting: 0, working: 0,
+        goal: input.goal || null, instructions: input.instructions ?? "", masterSessionId: crypto.randomUUID(),
+        coordinatorTier: null, threadTier: null,
+      };
+      this.served.projects.push(made);
+      await keep(this.served);
+      return made;
+    },
+    async update(id: string, change: Parameters<ProjectsSource["update"]>[1]) {
+      if (fake.refusal) throw new Error(fake.refusal);
+      const changed = Object.assign(this.one(id), change);
+      await keep(this.served);
+      return changed;
+    },
+    async archive(id: string) {
+      this.one(id);
+      this.served.projects = this.served.projects.filter((project) => project.id !== id);
+      await keep(this.served);
+    },
     // Resolved or reopened, the row is the same row, moved, as the route answers it.
     async resolve(id: string, threadId: string) {
       return this.moved(id, threadId, "resolved");

@@ -336,3 +336,128 @@ describe("the page's projects source", () => {
     await expect.poll(() => texts(page, "#cards .card .name")).toEqual(["Quarterly report", "Hiring plan", "Budget"]);
   });
 });
+
+// The project dialog's page, once it is open over the window and has drawn what it shows, which
+// can take *timeout* ms when it waits for the page to serve.
+async function projectDialog(shell: ElectronApplication, timeout = 1_000): Promise<Page> {
+  let found: Page | undefined;
+  await expect.poll(() => {
+    found = shell.windows().find((page) => page.url().endsWith("/project.html"));
+    return found !== undefined;
+  }).toBe(true);
+  await found!.waitForLoadState();
+  await expect.poll(() => found!.textContent("#heading"), { timeout }).not.toBe("");
+  return found!;
+}
+
+const dialogOpen = (shell: ElectronApplication) => shell.evaluate(({ BrowserWindow }) =>
+  BrowserWindow.getAllWindows()[0]!.contentView.children
+    .some((view) => (view as Electron.WebContentsView).webContents.getURL().endsWith("/project.html")));
+
+describe("the project dialog", () => {
+  it("makes a new project from its name and goal, lists it at once, and opens its conversation", async () => {
+    const { shell, page, client } = await signedIn();
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    expect(await dialog.textContent("#heading")).toBe("New project");
+    expect(await dialog.isVisible("#instructions")).toBe(false);
+    expect(await dialog.isVisible("#archive")).toBe(false);
+    await dialog.fill("#name", "  Hiring brief ");
+    await dialog.fill("#goal", "Hire two analysts by December.");
+    await dialog.click("#save");
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    const made = agent.projects!.projects.find((project) => project.name === "Hiring brief")!;
+    expect(made.goal).toBe("Hire two analysts by December.");
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${made.masterSessionId}`);
+    await expect.poll(() => page.textContent("#title")).toBe("Hiring brief");
+    expect(await page.getAttribute(row(made.id), "aria-current")).toBe("page");
+  });
+
+  it("changes the open project's name, instructions and tiers, then archives it", async () => {
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click("#project-settings");
+    let dialog = await projectDialog(shell);
+    expect(await dialog.textContent("#heading")).toBe("Project settings");
+    expect(await dialog.inputValue("#name")).toBe("Quarterly report");
+    await dialog.fill("#name", "Q3 report");
+    await dialog.fill("#instructions", "Write in French.");
+    await dialog.selectOption("#thread-tier", "pro");
+    await dialog.click("#save");
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    await expect.poll(() => page.textContent("#title")).toBe("Q3 report");
+    expect(agent.projects!.projects.find((project) => project.id === REPORT))
+      .toMatchObject({ name: "Q3 report", instructions: "Write in French.", coordinatorTier: null, threadTier: "pro" });
+    await page.click("#project-settings");
+    dialog = await projectDialog(shell);
+    await dialog.click("#archive");
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    const asked = await shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string }> }).asked);
+    expect(asked.at(-1)!.message).toBe("Archive Q3 report?");
+    await expect.poll(() => page.isVisible(`#projects [data-project="${REPORT}"]`)).toBe(false);
+    await expect.poll(() => client.url()).toBe(`${origin}/chat`);
+    expect(await page.textContent("#title")).toBe(new URL(origin).host);
+  });
+
+  for (const [why, cut, said] of [
+    ["archived on another device", "archived", "No such project"],
+    ["with the agent out of reach", "unreachable", "API server is not reachable."],
+    ["while the page has served nothing for ten seconds", "loading", "The agent's page did not serve its projects in time"],
+  ] as const) {
+    it(`says why a project's settings cannot open: ${why}`, async () => {
+      const { shell, page, client } = await signedIn();
+      await opened(page, client, REPORT);
+      if (cut === "loading") {
+        // The page loads again, and serves nothing this time.
+        agent.registerAfterMs = -1;
+        await client.reload();
+      } else {
+        await client.evaluate(([how, project]) => {
+          const fake = (window as unknown as { fakeProjects: { data: ProjectFixtures; unreachable: boolean } }).fakeProjects;
+          if (how === "unreachable") fake.unreachable = true;
+          else fake.data.projects = fake.data.projects.filter((found) => found.id !== project);
+        }, [cut, REPORT] as const);
+      }
+      await page.click("#project-settings");
+      const dialog = await projectDialog(shell, 15_000);
+      expect(await dialog.textContent("#heading")).toBe("Project settings");
+      expect(await dialog.textContent("#error")).toBe(said);
+      expect(await dialog.isVisible("#save")).toBe(false);
+      expect(await dialog.isVisible("#archive")).toBe(false);
+      await dialog.click("#cancel");
+      await expect.poll(() => dialogOpen(shell)).toBe(false);
+    });
+  }
+
+  it("asks for a name, says what the agent refused, and keeps a project when the archive is cancelled", async () => {
+    const { shell, page, client } = await signedIn();
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    let dialog = await projectDialog(shell);
+    await dialog.fill("#name", "   ");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error")).toBe("Name the project.");
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { refusal: string | null } }).fakeProjects.refusal = "This agent keeps a single conversation, so it has no projects.";
+    });
+    await dialog.fill("#name", "Hiring brief");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error")).toBe("This agent keeps a single conversation, so it has no projects.");
+    // The dialog goes on the key's way down, before its way up.
+    await dialog.press("#name", "Escape").catch(() => {});
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { refusal: string | null } }).fakeProjects.refusal = null;
+    });
+    await opened(page, client, REPORT);
+    await page.click("#project-settings");
+    dialog = await projectDialog(shell);
+    await shell.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    await dialog.click("#archive");
+    await expect.poll(() => shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string }> }).asked.at(-1)!.message))
+      .toBe("Archive Quarterly report?");
+    expect(await dialogOpen(shell)).toBe(true);
+    expect(agent.projects!.projects.some((project) => project.id === REPORT)).toBe(true);
+  });
+});

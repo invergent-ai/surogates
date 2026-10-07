@@ -958,6 +958,66 @@ body.settings-page {
   background: transparent;
 }
 
+/* The project dialog: a new project's name and goal, or a project's settings, in one column. */
+.dialog.project-dialog {
+  display: block;
+  width: min(560px, calc(100vw - 96px));
+  height: auto;
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+}
+
+.project-dialog fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 0;
+  padding: 28px 32px;
+  border: 0;
+}
+
+.project-dialog .field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.project-dialog .field .desc {
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.project-dialog input,
+.project-dialog textarea,
+.project-dialog select {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--raised);
+  color: inherit;
+  font: inherit;
+  user-select: text;
+}
+
+.project-dialog textarea {
+  resize: vertical;
+}
+
+.project-dialog .settings-only {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.project-dialog .settings-only[hidden] {
+  display: none;
+}
+
+.project-dialog .actions {
+  display: flex;
+  gap: 8px;
+}
+
 .backdrop {
   position: fixed;
   inset: 0;
