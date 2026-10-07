@@ -559,6 +559,21 @@ describe("a chat's mode, from the page", () => {
     expect(await promptsShown(app!)).toBe(0);
   });
 
+  it("closes its Work-freely confirmation once the page that asked loads again, and asks the new page afresh", async () => {
+    const client = await signedIn();
+    await bound(client, folder);
+    // Gone with its page: what it answered goes nowhere.
+    void client.evaluate((id) => window.surogateDesktop!.requestFreeMode(id), CHAT).catch(() => {});
+    await prompt(app!);
+    await client.reload();
+    await client.waitForFunction(() => window.surogateDesktop !== undefined);
+    await expect.poll(() => promptsShown(app!)).toBe(0);
+    // Not held for the new page: nobody answered the old one.
+    const freed = client.evaluate((id) => window.surogateDesktop!.requestFreeMode(id), CHAT);
+    await press(await prompt(app!), "free");
+    expect(await freed).toBe(true);
+  });
+
   it("asks one folder question and one Work-freely question at a time for a page", async () => {
     const client = await signedIn();
     await bound(client, folder);
