@@ -625,7 +625,7 @@ class History:
         return refs
 
     def _check_durable(self) -> None:
-        """Refuse a history whose ``HEAD`` or ``shallow`` is not one the platform writes: git reads both."""
+        """Refuse a history whose ``HEAD`` or ``shallow`` is not one the platform writes, as every reader of it should."""
         if (head := _read(self.durable / "HEAD", "HEAD")) is not None:
             text = head.decode(errors="replace")
             if not (text.startswith("ref: ") and text.endswith("\n")):
