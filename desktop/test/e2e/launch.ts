@@ -69,12 +69,33 @@ export async function secondLaunch(home: string, ...args: string[]): Promise<num
   return code;
 }
 
+/**
+ * Wait for the process group *pid* leads to end: an app a test started, with Electron's own children,
+ * which can write to its data home for a moment after it has exited. What is left of it after 10 s is
+ * killed, so no test leaves a process running, or a data home made again once it was removed.
+ */
+export async function gone(pid: number | undefined): Promise<void> {
+  if (pid === undefined) return;
+  const killAt = Date.now() + 10_000;
+  for (;;) {
+    try {
+      process.kill(-pid, Date.now() < killAt ? 0 : "SIGKILL");
+    } catch {
+      // ESRCH: nothing of it is left.
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 /** Close the app; one that does not close within 10 s is killed, so no failed test leaves it running. */
 export async function quit(shell: ElectronApplication | undefined): Promise<void> {
   if (!shell) return;
   const child = shell.process();
   await Promise.race([shell.close().catch(() => {}), new Promise((resolve) => setTimeout(resolve, 10_000))]);
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  // Playwright starts it as the leader of a process group of its own.
+  await gone(child.pid);
 }
 
 /**

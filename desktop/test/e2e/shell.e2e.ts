@@ -1,13 +1,13 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { ElectronApplication } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { dataHome, ELECTRON, launch, MAIN, quit, secondLaunch, shellEnv, shellPage } from "./launch.js";
+import { dataHome, ELECTRON, gone, launch, MAIN, quit, secondLaunch, shellEnv, shellPage } from "./launch.js";
 
 let home: string;
 let app: ElectronApplication | undefined;
@@ -127,7 +127,7 @@ describe("the shell", () => {
     await expect.poll(() => page.isVisible("#first-run")).toBe(true);
   });
 
-  it("exits with an error, rather than live on with no window, when it cannot start", async () => {
+  it("exits with an error, rather than live on with no window, when it cannot start, and leaves nothing behind", async () => {
     // The system's theme cannot be set: the start fails once the app is ready.
     const failing = join(home, "no-theme.cjs");
     writeFileSync(failing, [
@@ -135,13 +135,17 @@ describe("the shell", () => {
       'Object.defineProperty(nativeTheme, "themeSource", { get: () => "system", set: () => { throw new Error("No theme here"); } });',
     ].join("\n"));
     // Loaded before the main, as Playwright loads its own: under NODE_OPTIONS it would run before electron exists.
-    const started = spawn(ELECTRON, ["-r", failing, MAIN, "--password-store=basic"], { env: shellEnv(home), stdio: "ignore" });
+    const started = spawn(ELECTRON, ["-r", failing, MAIN, "--password-store=basic"], { env: shellEnv(home), stdio: "ignore", detached: true });
     try {
       const ended = once(started, "exit").then(([code]) => code as number | null);
       expect(await Promise.race([ended, new Promise((resolve) => setTimeout(resolve, 10_000, "still running"))])).toBe(1);
     } finally {
-      started.kill("SIGKILL");
+      await gone(started.pid);
     }
+    // Once it has gone, nothing of it writes to its data home again.
+    rmSync(home, { recursive: true, force: true });
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(existsSync(home)).toBe(false);
   });
 
   it("opens in the saved theme", async () => {
