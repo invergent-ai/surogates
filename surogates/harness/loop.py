@@ -76,6 +76,7 @@ from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
 from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
+from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams import is_project_master, master_refusal
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
@@ -101,7 +102,7 @@ if TYPE_CHECKING:
     from surogates.harness.context import ContextCompressor
     from surogates.harness.prompt import PromptBuilder
     from surogates.memory.manager import MemoryManager
-    from surogates.sandbox.pool import SandboxPool, sandbox_session_key
+    from surogates.sandbox.pool import SandboxPool
     from surogates.session.models import Session, SessionLease
     from surogates.session.store import SessionStore
     from surogates.tools.registry import ToolRegistry
@@ -1667,6 +1668,8 @@ class AgentHarness(
                     "retry_delay": self._saga_settings.retry_delay,
                 }
             saga = SagaOrchestrator(**saga_kwargs)
+            # Its turn's end completes it: _complete_session and _fail_session read it here.
+            self._turn_saga = saga
             # Reconstruct any in-progress saga from the event log.
             if all_events:
                 saga_events = [
@@ -3257,11 +3260,6 @@ class AgentHarness(
             iteration_index=max(iteration - 1 - turn_base_iteration, 0),
         )
 
-        # --- Saga finalization ---
-        # Mark all active sagas as completed on normal loop exit.
-        if saga is not None:
-            await self._finalize_sagas(saga, session)
-
     # ------------------------------------------------------------------
     # Checkpoint injection
     # ------------------------------------------------------------------
@@ -3385,7 +3383,7 @@ class AgentHarness(
         """
         from functools import partial
 
-        from surogates.governance.events import saga_compensate_event
+        from surogates.governance.events import saga_compensate_event, saga_complete_event
         from surogates.governance.saga.compensator import compensate_step
         from surogates.governance.saga.state_machine import SagaState
 
@@ -3442,6 +3440,16 @@ class AgentHarness(
                         steps_rolled_back=committed_count - len(failed),
                         reason=reason,
                         failed_steps=failed_ids if failed_ids else None,
+                    ),
+                )
+                # The saga is over: a rebuilt one must not take later steps.
+                await self._store.emit_event(
+                    session.id,
+                    EventType.SAGA_COMPLETE,
+                    saga_complete_event(
+                        active.saga_id,
+                        status=active.state.value,
+                        steps_executed=len(active.steps),
                     ),
                 )
             except Exception:

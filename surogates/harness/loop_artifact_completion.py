@@ -147,6 +147,9 @@ async def announce_failure(store: Any, session: Any, *, error: str, summary: str
 
 
 class ArtifactCompletionMixin:
+    #: The turn's tool sagas, set when its loop starts; its end completes them.
+    _turn_saga: Any = None
+
     async def _promote_fenced_artifacts(
         self,
         session: Session,
@@ -914,6 +917,10 @@ class ArtifactCompletionMixin:
         ``TURN_SUMMARY`` event before ``SESSION_COMPLETE`` so the SDK
         sees the recap in the same event stream as the closing message.
         """
+        # The turn's tool saga ends with it: a later stop compensates only its own turn.
+        if self._turn_saga is not None:
+            await self._finalize_sagas(self._turn_saga, session)
+
         # Detach the sandbox now, delete the pod after.
         #
         # Deleting a pod is a round trip to the cluster, and it used to sit
@@ -1141,6 +1148,9 @@ class ArtifactCompletionMixin:
         dynamic loop is never rescheduled, and the failed prompt stays past
         the cursor where the stranded-message check resurrects it.
         """
+        if self._turn_saga is not None:
+            await self._finalize_sagas(self._turn_saga, session)
+
         fail_data: dict[str, Any] = {
             "reason": reason, "worker_id": self._worker_id, **data,
         }
