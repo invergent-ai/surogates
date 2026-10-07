@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
+from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
 from surogates.channels.constants import END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
@@ -1196,13 +1197,17 @@ class AgentHarness(
                 # A report has no user waiting on it: while the user's limit
                 # refuses the turn, the report waits for their next message,
                 # which the message route holds.
-                if (
-                    revived_by == "worker_report"
-                    and admitted_at_wake(session)
-                    and await self._admit_turn(session, "") is not None
-                ):
-                    logger.info("Session %s: the user's limit holds back a report", session_id)
-                    return
+                if revived_by == "worker_report" and admitted_at_wake(session):
+                    try:
+                        refused = await self._admit_turn(session, "")
+                    except (AllowanceReserveError, CommerceReserveError):
+                        # Closed without a crash: no turn ran, and the next
+                        # report or message wakes the master again.
+                        logger.warning("Session %s: a report waits while ops is unreachable", session_id, exc_info=True)
+                        return
+                    if refused is not None:
+                        logger.info("Session %s: the user's limit holds back a report", session_id)
+                        return
                 if revived_by is not None:
                     logger.info(
                         "Session %s: status is '%s' but %s is unprocessed — resuming",

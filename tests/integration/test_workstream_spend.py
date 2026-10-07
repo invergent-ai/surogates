@@ -326,6 +326,22 @@ async def test_a_paid_turn_a_refused_report_held_is_released(api, monkeypatch):
     assert (ran, ops.held) == ([], [("paid", "fb-flavius", "web"), ("allowance", str(api.user_id), "web")])
     assert ops.spent == [("paid", "hold-1", 0)]
     assert "commerce_reservations" not in (await api.app.state.session_store.get_session(master.id)).config
+    # The paid balance runs out and the allowance refills: the next report
+    # wake asks the paid plane again, which refuses it.
+    ops.allowance_left, ops.paid_left = True, False
+    await harness.wake(master.id)
+    assert (ran, ops.held[2:]) == ([], [("paid", "fb-flavius", "web")])
+
+
+async def test_an_ops_outage_at_a_report_wake_leaves_the_master_as_it_was(api, monkeypatch):
+    master = await reported(api)
+    harness, ran = worker(api, monkeypatch, CAPPED, Down())
+    await harness.wake(master.id)
+    # No turn runs unheld, and the next report or message wakes it again.
+    assert ran == []
+    assert (await api.app.state.session_store.get_session(master.id)).status == "completed"
+    assert await events_of(api, master.id, EventType.HARNESS_CRASH, EventType.SESSION_RESUME) == []
+    assert unread_reports(await api.app.state.session_store.get_events(master.id))
 
 
 async def test_a_refused_thread_wakes_the_master_at_most_once(api, monkeypatch):

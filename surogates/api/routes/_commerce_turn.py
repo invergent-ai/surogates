@@ -102,13 +102,15 @@ async def reserve_commerce(
     content: str,
     buyer: dict,
     channel: str | None,
+    record: bool = True,
 ) -> dict | None:
     """Channel-agnostic paid-turn reservation for one turn of a monetized
     agent (no HTTP request).
 
     Reserves the turn's estimate against *buyer*'s purchased tokens and
     pins the receipt on ``session.config`` for the worker to settle.
-    Returns the hold it pinned, None when the receipt carries none.
+    Returns the hold, None when the receipt carries none; with *record*
+    off it is left for the caller to pin.
     Raises :class:`~surogates.runtime.platform_client.CommercePaymentRequiredError`
     on 402 and :class:`CommerceReserveError` when the plane is unreachable.
     """
@@ -133,22 +135,23 @@ async def reserve_commerce(
         session.config,
         receipt.get("features"),
     )
-    if receipt.get("entitlement_id"):
+    if not receipt.get("entitlement_id"):
+        return None
+    hold = {
+        "entitlement_id": receipt["entitlement_id"],
+        "reserved_tokens": int(receipt.get("reserved_tokens") or 0),
+        "reservation_id": receipt.get("reservation_id") or "",
+    }
+    if record:
         if session_store is None:
             raise CommerceReserveError("session_store not wired")
-        hold = {
-            "entitlement_id": receipt["entitlement_id"],
-            "reserved_tokens": int(receipt.get("reserved_tokens") or 0),
-            "reservation_id": receipt.get("reservation_id") or "",
-        }
         # Appended, not overwritten: a second message can land while a
         # turn is still running, and each hold must survive until the
         # worker's settlement takes the whole list atomically.
         await session_store.append_session_config_list(
             session.id, "commerce_reservations", hold,
         )
-        return hold
-    return None
+    return hold
 
 
 class AllowanceReserveError(RuntimeError):

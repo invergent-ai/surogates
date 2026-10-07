@@ -922,37 +922,6 @@ class SessionStore:
             row.updated_at = func.now()
             await db.commit()
 
-    async def remove_session_config_list_item(
-        self, session_id: UUID, key: str, value: Any,
-    ) -> bool:
-        """Remove one ``value`` from the list at ``config[key]`` atomically.
-
-        False when it is not there: a take of the whole list has had it
-        since.  Under the row lock, as the append and the take are.
-        """
-        async with self._sf() as db:
-            result = await db.execute(
-                select(SessionRow)
-                .where(SessionRow.id == session_id)
-                .with_for_update()
-            )
-            row = result.scalar_one_or_none()
-            if row is None:
-                raise SessionNotFoundError(f"session {session_id} not found")
-            config = dict(row.config or {})
-            items = list(config.get(key) or [])
-            if value not in items:
-                return False
-            items.remove(value)
-            if items:
-                config[key] = items
-            else:
-                config.pop(key)
-            row.config = config
-            row.updated_at = func.now()
-            await db.commit()
-            return True
-
     async def pop_session_config_key(
         self, session_id: UUID, key: str,
     ) -> Any:

@@ -51,7 +51,8 @@ async def admit_turn(
     when it may run.
 
     Raises ``CommerceReserveError`` or ``AllowanceReserveError`` when a
-    plane cannot be reached, so the turn fails closed and is retried.
+    plane cannot be reached, so the turn fails closed and is retried; the
+    paid turn this call held goes back then too, and the retry holds again.
     """
     payload: dict = {}
     if runtime_config_cache is not None:
@@ -68,29 +69,33 @@ async def admit_turn(
             buyer = await buyer_identity(session_factory, org_id=session.org_id, user_id=session.user_id)
             # The builder's own people, with no buyer identity, pass unmetered.
             if buyer is not None:
+                # Recorded only once the allowance takes the turn too: a hold
+                # left listed is one the next wake trusts without asking.
                 paid = await reserve_commerce(
                     platform_client=platform_client, session_store=session_store, session=session,
-                    content=content, buyer=buyer, channel="web",
+                    content=content, buyer=buyer, channel="web", record=False,
                 )
-        if not config.get("allowance_reservations"):
-            await reserve_allowance(
-                platform_client=platform_client, runtime_payload=payload, session_store=session_store,
-                session_id=session.id, agent_id=session.agent_id, content=content,
-                end_user_id=str(session.user_id), channel="web", session_config=config,
-            )
-    except (AllowanceExhaustedError, CommercePaymentRequiredError) as exc:
+        try:
+            if not config.get("allowance_reservations"):
+                await reserve_allowance(
+                    platform_client=platform_client, runtime_payload=payload, session_store=session_store,
+                    session_id=session.id, agent_id=session.agent_id, content=content,
+                    end_user_id=str(session.user_id), channel="web", session_config=config,
+                )
+        except Exception:
+            if paid is not None:
+                await _release(platform_client, session, paid)
+            raise
         if paid is not None:
-            await _release(platform_client, session_store, session, paid)
+            await session_store.append_session_config_list(session.id, "commerce_reservations", paid)
+    except (AllowanceExhaustedError, CommercePaymentRequiredError) as exc:
         return limit_notice(exc.detail, payload.get("commerce_buy_url"))
     return None
 
 
-async def _release(platform_client: Any, session_store: Any, session: Any, hold: dict) -> None:
-    """Give back at nothing spent the paid *hold* a refused turn took, and no
-    other: another wake's hold may sit beside it.  Unless a settle has
-    taken it since, which spends it."""
-    if not await session_store.remove_session_config_list_item(session.id, "commerce_reservations", hold):
-        return
+async def _release(platform_client: Any, session: Any, hold: dict) -> None:
+    """Give back at nothing spent the paid *hold* this turn took and will
+    not run on."""
     try:
         await platform_client.commerce_debit(
             session.agent_id, entitlement_id=str(hold["entitlement_id"]),
