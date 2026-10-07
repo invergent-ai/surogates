@@ -13,6 +13,7 @@ export interface MenuActions {
   zoom(step: -1 | 0 | 1): void; // the agent's page; 0 is its own size
   devTools(which: "agent" | "window"): void;
   documentation(): void;
+  about(): void;
 }
 
 /** The app's menu; *developer* adds Developer, which a packaged app leaves out until it has a developer mode. */
@@ -58,6 +59,8 @@ export function appMenu(act: MenuActions, developer: boolean): MenuItemConstruct
       label: "Help",
       submenu: [
         { id: "documentation", label: "Documentation", click: () => act.documentation() },
+        { type: "separator" },
+        { id: "about", label: "About Surogate", click: () => act.about() },
       ],
     },
   ];

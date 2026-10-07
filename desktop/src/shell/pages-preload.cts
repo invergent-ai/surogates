@@ -48,6 +48,12 @@ if (location.protocol === "file:") {
     close: () => ipcRenderer.invoke("settings:close"),
     onChanged: listen("settings:changed"),
   });
+  contextBridge.exposeInMainWorld("surogateAbout", {
+    state: () => ipcRenderer.invoke("about:state"),
+    copy: () => ipcRenderer.invoke("about:copy"),
+    documentation: () => ipcRenderer.invoke("about:documentation"),
+    close: () => ipcRenderer.invoke("about:close"),
+  });
   contextBridge.exposeInMainWorld("surogatePrompt", {
     state: () => ipcRenderer.invoke("prompt:state"),
     answer: (button: string, choice: string | null) => ipcRenderer.invoke("prompt:answer", button, choice),

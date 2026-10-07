@@ -4,7 +4,7 @@
 // Readiness is awaited with then(), never a top-level await: an ES module main that
 // awaits app.whenReady() deadlocks.
 
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -22,6 +22,7 @@ import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../vm/client.js";
 import { VmExecutor } from "../vm/executor.js";
+import { openAbout } from "./about.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
@@ -41,6 +42,8 @@ import { type Bounds, WindowStates } from "./window-state.js";
 const PAGES = join(import.meta.dirname, "pages");
 const PAGES_PRELOAD = join(import.meta.dirname, "pages-preload.cjs");
 const BRIDGE_PRELOAD = join(import.meta.dirname, "preload.cjs");
+// The app's version, as its package names it.
+const VERSION = (JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf8")) as { version: string }).version;
 
 // Everything the app keeps lives under one root, Electron's own data too: the folder
 // guards refuse it as a chat's folder, so no agent reaches a device token through one.
@@ -1126,6 +1129,14 @@ const menuActions = {
   zoom: (step: -1 | 0 | 1) => main?.zoom(step),
   devTools: (which: "agent" | "window") => (which === "agent" ? main?.webContents() : main?.window.webContents)?.openDevTools({ mode: "detach" }),
   documentation: () => openLink("help"),
+  about: () => {
+    if (!main) return;
+    main.show();
+    openAbout({
+      parent: main.window, page: join(PAGES, "about.html"), preload: PAGES_PRELOAD, dark: theme.dark, version: VERSION,
+      documentation: () => openLink("help"),
+    });
+  },
 };
 
 function settingsState() {

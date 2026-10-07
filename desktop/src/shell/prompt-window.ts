@@ -54,6 +54,8 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
     title: "Surogate",
     webPreferences: { preload: options.preload, sandbox: true, contextIsolation: true, nodeIntegration: false },
   });
+  // Linux gives every window the app's menu: its keys would act on the agent's page behind the prompt.
+  window.removeMenu();
   const contents = window.webContents;
   lockPage(contents);
   const { promise, resolve, reject } = Promise.withResolvers<PromptAnswer | null>();

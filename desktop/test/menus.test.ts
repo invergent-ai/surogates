@@ -11,7 +11,7 @@ function recording(): { asked: unknown[][]; actions: MenuActions } {
     asked,
     actions: {
       newChat: record("newChat"), settings: record("settings"), quit: record("quit"), reload: record("reload"),
-      zoom: record("zoom"), devTools: record("devTools"), documentation: record("documentation"),
+      zoom: record("zoom"), devTools: record("devTools"), documentation: record("documentation"), about: record("about"),
     },
   };
 }
@@ -43,6 +43,7 @@ describe("the app's menu", () => {
         ["Developer", "Developer tools for the agent's page", null],
         ["Developer", "Developer tools for Surogate's window", null],
         ["Help", "Documentation", null],
+        ["Help", "About Surogate", null],
       ]);
   });
 
@@ -52,7 +53,7 @@ describe("the app's menu", () => {
     for (const item of items(menu)) (item.click as (() => void) | undefined)?.();
     expect(asked).toEqual([
       ["newChat"], ["settings"], ["quit"], ["reload"], ["zoom", 0], ["zoom", 1], ["zoom", 1], ["zoom", -1],
-      ["devTools", "agent"], ["devTools", "window"], ["documentation"],
+      ["devTools", "agent"], ["devTools", "window"], ["documentation"], ["about"],
     ]);
     // Electron's own reload, zoom and developer tools act on whatever page has the keyboard, the window's own included.
     expect(items(menu).map((item) => item.role).filter(Boolean)).toEqual(["close", "undo", "redo", "cut", "copy", "paste", "selectAll"]);
