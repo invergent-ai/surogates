@@ -64,6 +64,13 @@ describe("the device credentials", () => {
     expect(store(secrets).unencrypted()).toBe(true);
   });
 
+  it("kept as they are while there was no secret store are sealed once there is one", () => {
+    store(new Secrets("basic_text")).save(CREDENTIAL);
+    expect(store().list()).toEqual([CREDENTIAL]);
+    expect(readFileSync(path, "utf8")).not.toContain("surg_dev_secret");
+    expect(store().unencrypted()).toBe(false);
+  });
+
   it("keep one per origin, organization, agent and user: a new device of the same identity replaces the old", () => {
     const credentials = store();
     credentials.save(CREDENTIAL);

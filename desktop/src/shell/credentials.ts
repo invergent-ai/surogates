@@ -32,6 +32,20 @@ interface Stored extends Identity {
 
 const FIELDS = ["origin", "orgId", "agentId", "userId", "deviceId", "name", "addedAt"] as const;
 
+// A secret as this computer keeps it: sealed by the OS secret store, or as it is where the store protects nothing.
+export type Kept = { sealed: string } | { plain: string };
+
+/** Whether this computer's secret store protects anything: Linux's basic_text store does not. */
+export const seals = (secrets: SecretStore): boolean =>
+  secrets.isEncryptionAvailable() && secrets.getSelectedStorageBackend?.() !== "basic_text";
+
+export const seal = (secrets: SecretStore, plain: string): Kept =>
+  seals(secrets) ? { sealed: secrets.encryptString(plain).toString("base64") } : { plain };
+
+/** The secret *kept* holds; throws when the secret store cannot open it. */
+export const unseal = (secrets: SecretStore, kept: { sealed?: string; plain?: string }): string =>
+  kept.plain ?? secrets.decryptString(Buffer.from(kept.sealed ?? "", "base64"));
+
 // An entry of the store's own shape: anything else the file holds is said, then left out.
 function usable(entry: unknown): entry is Stored {
   const fields = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
@@ -51,20 +65,21 @@ export class CredentialStore {
 
   save(credential: Credential): void {
     const { token, ...identity } = credential;
-    const sealing = this.secrets.isEncryptionAvailable() && this.secrets.getSelectedStorageBackend?.() !== "basic_text";
-    const entry: Stored = sealing
-      ? { ...identity, sealed: this.secrets.encryptString(token).toString("base64") }
-      : { ...identity, plain: token };
+    const entry: Stored = { ...identity, ...seal(this.secrets, token) };
     const kept = this.stored().filter((other) => !sameIdentity(other, entry));
     writeState(this.path, [...kept, entry], 0o600);
   }
 
   list(): Credential[] {
+    const stored = this.stored();
+    // A token kept as it is while this computer had no secret store is sealed once it has one.
+    if (seals(this.secrets) && stored.some((entry) => entry.plain !== undefined)) {
+      writeState(this.path, stored.map(({ plain, ...entry }) => (plain === undefined ? entry : { ...entry, ...seal(this.secrets, plain) })), 0o600);
+    }
     const credentials: Credential[] = [];
-    for (const { sealed, plain, ...identity } of this.stored()) {
+    for (const { sealed, plain, ...identity } of stored) {
       try {
-        const token = plain ?? this.secrets.decryptString(Buffer.from(sealed ?? "", "base64"));
-        credentials.push({ ...identity, token });
+        credentials.push({ ...identity, token: unseal(this.secrets, { sealed, plain }) });
       } catch (error) {
         report(this.onError, error);
       }
