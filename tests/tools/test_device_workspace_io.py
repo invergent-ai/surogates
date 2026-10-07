@@ -29,7 +29,7 @@ from surogates.devices.workspace import (
 from surogates.tools.builtin import file_ops
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import FileStat, LinePage, LocalWorkspaceIO, RevisionConflict, RipgrepError
-from tests.fake_laptop import BAD_PAGE, CONFLICT, InProcessRunner, perform
+from tests.fake_laptop import BAD_PAGE, BAD_WALK, CONFLICT, InProcessRunner, perform
 
 
 @pytest.fixture
@@ -535,3 +535,81 @@ async def test_a_conflict_is_an_os_error_of_its_own(root):
     # An OSError, so a V4A patch reports it as that file's error and goes on with the others.
     assert isinstance(raised.value, OSError) and raised.value.errno is None
     assert str(raised.value) == "changed"
+
+
+async def test_a_walk_lists_the_files_under_a_folder_with_their_sizes(wio, root):
+    (root / "sub").mkdir()
+    (root / "a.txt").write_text("alpha")
+    (root / "sub" / "b.md").write_text("b")
+    (root / "node_modules" / "x").mkdir(parents=True)
+    (root / "node_modules" / "x" / "i.js").write_text("")
+    (root / "link").symlink_to(root / "a.txt")
+    walked = await wio.walk(await wio.resolve("."), skip={"node_modules"})
+    assert sorted(walked.files) == [("a.txt", 5), ("sub/b.md", 1)]
+    assert walked.truncated is False
+    assert walked.cursor.isdigit()
+    assert sorted((await wio.walk(str(root / "sub"), skip=())).files) == [("b.md", 1)]
+
+
+async def test_a_walk_since_a_cursor_lists_only_what_changed_after_it(wio, root):
+    (root / "old.txt").write_text("o")
+    # Past the cursor's margin, which covers a filesystem's coarser clock.
+    await asyncio.sleep(workspace.WALK_MARGIN_NS / 1e9 + 0.1)
+    first = await wio.walk(str(root), skip=())
+    (root / "new.txt").write_text("n")
+    assert (await wio.walk(str(root), skip=(), since=first.cursor)).files == [("new.txt", 1)]
+
+
+async def test_a_walk_enters_no_folder_the_tree_hides(wio, root):
+    for name in ("src", ".cache", ".github", "_whiteboard", "sub/_whiteboard", "node_modules"):
+        (root / name).mkdir(parents=True)
+        (root / name / "f.txt").write_text("x")
+    walked = await wio.walk(str(root), skip={"node_modules"}, skip_top={"_whiteboard"}, skip_hidden=True)
+    assert sorted(walked.files) == [(".github/f.txt", 1), ("src/f.txt", 1), ("sub/_whiteboard/f.txt", 1)]
+
+
+async def test_a_walk_leaves_out_a_name_that_is_not_utf_8_and_lists_its_decoded_twin_once(wio, root):
+    (root / "a.txt").write_text("a")
+    with open(os.path.join(os.fsencode(root), b"n\xff"), "wb") as fh:
+        fh.write(b"bytes")
+    (root / "n\ufffd").write_text("t")
+    assert sorted((await wio.walk(str(root), skip=())).files) == [("a.txt", 1), ("n\ufffd", 1)]
+
+
+async def test_a_walk_stops_at_its_cap_and_says_so(wio, root):
+    (root / "many").mkdir()
+    for name in range(workspace.MAX_WALK_FILES + 1):
+        (root / "many" / str(name)).touch()
+    walked = await wio.walk(str(root), skip=())
+    assert len(walked.files) == workspace.MAX_WALK_FILES
+    assert walked.truncated is True
+
+
+async def test_a_walk_fails_as_its_folder_does(wio, root):
+    (root / "a.txt").write_text("a")
+    with pytest.raises(NotADirectoryError):
+        await wio.walk(str(root / "a.txt"), skip=())
+    with pytest.raises(FileNotFoundError):
+        await wio.walk(str(root / "missing"), skip=())
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, [], {"files": [], "truncated": False}, {"files": [["a", "1"]], "truncated": False, "cursor": "1"},
+     {"files": [["a", -1]], "truncated": False, "cursor": "1"}, {"files": [["a"]], "truncated": False, "cursor": "1"},
+     {"files": [[1, 1]], "truncated": False, "cursor": "1"}, {"files": [], "truncated": 0, "cursor": "1"},
+     {"files": [], "truncated": False, "cursor": 1}],
+    ids=["null", "list", "no cursor", "size as text", "negative size", "no size", "path as number",
+         "truncated as number", "cursor as number"],
+)
+async def test_a_listing_that_is_not_one_is_an_error_not_a_wrong_tree(value):
+    with pytest.raises(DeviceOperationError, match="returned an invalid listing"):
+        await DeviceWorkspaceIO(_Answers(value), root="/").walk("/", skip=())
+
+
+async def test_the_reference_laptop_refuses_a_walk_it_cannot_take(root):
+    taken = {"key": str(root), "skip": [], "skip_top": [], "skip_hidden": False, "since": None}
+    for changes in ({"skip": "node_modules"}, {"skip_top": [1]}, {"skip_hidden": 1}, {"since": "yesterday"}):
+        assert await perform(LocalWorkspaceIO(str(root)), "walk", {**taken, **changes}) == {
+            "error": {"type": "value", "message": BAD_WALK},
+        }

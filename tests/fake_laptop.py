@@ -13,7 +13,9 @@ import base64
 import errno
 import hashlib
 import json
+import os
 import re
+import time
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -26,10 +28,15 @@ from surogates.devices.workspace import (
     MAX_NAMES,
     MAX_PAYLOAD_BYTES,
     MAX_READ_BYTES,
+    MAX_WALK_FILES,
+    MAX_WALK_LOOKS,
     MAX_WRITE_BYTES,
     OUTPUT_CAP_CHARS,
     READ_TOO_LARGE,
+    SHOWN_DOT_FOLDERS,
+    WALK_MARGIN_NS,
     WRITE_TOO_LARGE,
+    is_well_formed,
     transfer_of,
 )
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
@@ -58,6 +65,11 @@ CONFLICT = (
 BAD_PAGE = (
     "read_lines takes one of the encodings read_file picks, an offset from 1, an integer limit "
     f"and a max_bytes from 0 to {MAX_PAYLOAD_BYTES}"
+)
+# What a walk whose args the app does not take is answered, as the app answers it.
+BAD_WALK = (
+    "walk takes a key, the folder names it skips anywhere and directly under the key, whether it skips "
+    "hidden folders, and a since an earlier walk gave, or null"
 )
 
 
@@ -205,6 +217,8 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
         return None
     if kind == "list_dir":
         return (await folder.list_dir(a["key"]))[:MAX_NAMES]
+    if kind == "walk":
+        return _walk(a)
     if kind == "ripgrep":
         found = await folder.ripgrep(
             a["key"], mode=a["mode"], pattern=a["pattern"], glob=a["glob"], context=a["context"],
@@ -225,6 +239,60 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
             "timed_out": result.timed_out,
         }
     raise LookupError(f"unsupported operation {kind!r}")
+
+
+def _walk(a: dict[str, Any]) -> dict[str, Any]:
+    """As the app walks: depth first, each folder's entries as the operating system lists them."""
+    key, skip, top, hidden, since = (a.get(name) for name in ("key", "skip", "skip_top", "skip_hidden", "since"))
+    if (
+        not isinstance(key, str) or type(hidden) is not bool
+        or not all(isinstance(names, list) and all(isinstance(name, str) for name in names) for names in (skip, top))
+        or not (since is None or (isinstance(since, str) and since.isascii() and since.isdigit()))
+    ):
+        raise ValueError(BAD_WALK)
+    cursor = str(time.time_ns() - WALK_MARGIN_NS)
+    after = None if since is None else int(since)
+    files: list[list[Any]] = []
+    cost, looks, truncated = 2, 0, False
+    pending = [""]
+    while pending and not truncated:
+        rel = pending.pop()
+        try:
+            with os.scandir(os.path.join(key, rel) if rel else key) as listing:
+                entries = list(listing)
+        except OSError:
+            if not rel:
+                raise
+            continue
+        for entry in entries:
+            looks += 1
+            if looks > MAX_WALK_LOOKS:
+                truncated = True
+                break
+            path = f"{rel}/{entry.name}" if rel else entry.name
+            if not is_well_formed(path):
+                # As the app: a name that is not UTF-8 cannot be looked up by its decoded text.
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                hides = hidden and entry.name.startswith(".") and entry.name not in SHOWN_DOT_FOLDERS
+                if not (entry.name in skip or (not rel and entry.name in top) or hides):
+                    pending.append(path)
+                continue
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if after is not None and st.st_mtime_ns < after and st.st_ctime_ns < after:
+                continue
+            more = len(json.dumps(path)) + 24
+            if len(files) == MAX_WALK_FILES or cost + more > MAX_PAYLOAD_BYTES:
+                truncated = True
+                break
+            files.append([path, st.st_size])
+            cost += more
+    return {"files": files, "truncated": truncated, "cursor": cursor}
 
 
 async def _run_process(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:

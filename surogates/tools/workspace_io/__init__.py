@@ -11,6 +11,7 @@ from surogates.tools.workspace_io.base import (
     RevisionConflict,
     RipgrepError,
     RunResult,
+    Walk,
     WorkspaceIO,
 )
 from surogates.tools.workspace_io.local import LocalWorkspaceIO
@@ -22,6 +23,7 @@ __all__ = [
     "RevisionConflict",
     "RipgrepError",
     "RunResult",
+    "Walk",
     "WorkspaceIO",
     "workspace_io_from",
 ]

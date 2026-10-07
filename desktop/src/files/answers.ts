@@ -10,6 +10,12 @@ export const MAX_WRITE_BYTES = 50 * 1024 * 1024;
 export const MAX_MESSAGE_CHARS = 1536 * 1024;
 export const OUTPUT_CAP_CHARS = 256 * 1024;
 export const MAX_NAMES = 10_000;
+export const MAX_WALK_FILES = 5_000;
+export const MAX_WALK_LOOKS = 200_000;
+// The hidden folders the file panel's tree still shows: a walk that skips hidden ones enters these.
+export const SHOWN_DOT_FOLDERS: ReadonlySet<string> = new Set([".github", ".vscode"]);
+// How far a walk's cursor is set back: a filesystem stamps changes by a coarser clock, a FAT folder's in 2 s ticks.
+export const WALK_MARGIN_NS = 2_000_000_000n;
 export const READ_TOO_LARGE = "File too large to read from a local folder (over 50 MiB)";
 export const WRITE_TOO_LARGE = "File too large to write to a local folder (over 50 MiB)";
 

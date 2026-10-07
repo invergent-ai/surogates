@@ -60,6 +60,20 @@ class LinePage:
 
 
 @dataclass(frozen=True, slots=True)
+class Walk:
+    """The regular files under a folder: each one's path from that folder, and its size.
+
+    ``truncated`` says a cap stopped the walk before it saw everything.
+    ``cursor`` is where a later walk's ``since`` starts, by the clock of the
+    computer that holds the files; None where nothing keeps one.
+    """
+
+    files: list[tuple[str, int]]
+    truncated: bool
+    cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class RunResult:
     """A finished command.  ``output`` is stdout, then stderr."""
 

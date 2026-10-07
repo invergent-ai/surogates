@@ -10,16 +10,17 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  accessSync, type BigIntStats, closeSync, constants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync,
-  readdirSync, readSync, renameSync, type Stats, statSync, unlinkSync, writeSync,
+  accessSync, type BigIntStats, closeSync, constants, type Dirent, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync,
+  openSync, readdirSync, readSync, renameSync, type Stats, statSync, unlinkSync, writeSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import { isBase64, type Outcome } from "../link/protocol.js";
 import {
-  conflict, Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES,
-  OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE, sandboxError, valueError, WRITE_TOO_LARGE,
+  conflict, Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WALK_FILES,
+  MAX_WALK_LOOKS, MAX_WRITE_BYTES, OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE, sandboxError,
+  SHOWN_DOT_FOLDERS, valueError, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "./answers.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
@@ -41,6 +42,7 @@ const KINDS: Record<string, Kind> = {
   write,
   delete: remove,
   list_dir: listDir,
+  walk,
   ripgrep,
 };
 
@@ -56,6 +58,10 @@ const CODE_UNITS: Record<string, readonly [width: number, low: number]> = {
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 export const BAD_PAGE =
   `read_lines takes one of the encodings read_file picks, an offset from 1, an integer limit and a max_bytes from 0 to ${MAX_PAYLOAD_BYTES}`;
+export const BAD_WALK =
+  "walk takes a key, the folder names it skips anywhere and directly under the key, whether it skips hidden folders, "
+  + "and a since an earlier walk gave, or null";
+const names = (value: unknown): value is string[] => Array.isArray(value) && value.every((name) => typeof name === "string");
 
 export const RG_MISSING =
   "ripgrep (rg) not found on PATH -- install it (apt/brew/dnf install ripgrep) on this computer";
@@ -404,6 +410,74 @@ function makeDirs(dir: string): void {
 function listDir(args: Record<string, unknown>, { folder }: Context): string[] {
   const key = keyInFolder(folder, text(args, "key"));
   return io(key, () => readdirSync(key)).slice(0, MAX_NAMES);
+}
+
+// walk (surogates/devices/workspace.py): the regular files under the folder at the key, each as its path from it and
+// its size, depth first. No link is followed, and no folder the tree hides is entered: one named in skip, one directly
+// under the key named in skip_top, and with skip_hidden a dot-folder other than SHOWN_DOT_FOLDERS. A name that is not
+// UTF-8 is left out: read as bytes, it does not survive the round trip, and its decoded twin could be another file.
+// Since a cursor, only the files whose mtime or ctime is at or after it. The cursor is this computer's clock as the
+// walk began, less WALK_MARGIN_NS.
+function walk(args: Record<string, unknown>, { folder }: Context): { files: Array<[string, number]>; truncated: boolean; cursor: string } {
+  const key = keyInFolder(folder, text(args, "key"));
+  const { skip, skip_top: top, skip_hidden: hidden, since } = args;
+  if (
+    !names(skip) || !names(top) || typeof hidden !== "boolean"
+    || !(since === null || (typeof since === "string" && /^[0-9]+$/.test(since)))
+  ) {
+    throw valueError(BAD_WALK);
+  }
+  const cursor = String(BigInt(Date.now()) * 1_000_000n - WALK_MARGIN_NS);
+  const after = since === null ? null : BigInt(since);
+  const skipped = new Set<string>(skip);
+  const skippedTop = new Set<string>(top);
+  const files: Array<[string, number]> = [];
+  let cost = 2; // "[]"
+  let looks = 0;
+  let truncated = false;
+  const pending = [""];
+  while (pending.length > 0 && !truncated) {
+    const rel = pending.pop() as string;
+    let entries: Dirent<Buffer>[];
+    try {
+      entries = readdirSync(rel ? join(key, rel) : key, { withFileTypes: true, encoding: "buffer" });
+    } catch (error) {
+      // A folder under the key it cannot read is left out; the key's own failure is the answer.
+      if (!rel) io(key, () => { throw error; });
+      continue;
+    }
+    for (const entry of entries) {
+      looks += 1;
+      if (looks > MAX_WALK_LOOKS) {
+        truncated = true;
+        break;
+      }
+      const name = entry.name.toString("utf8");
+      if (!Buffer.from(name, "utf8").equals(entry.name)) continue;
+      const path = rel ? `${rel}/${name}` : name;
+      if (entry.isDirectory()) {
+        const hides = hidden && name.startsWith(".") && !SHOWN_DOT_FOLDERS.has(name);
+        if (!(skipped.has(name) || (!rel && skippedTop.has(name)) || hides)) pending.push(path);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      let st: BigIntStats;
+      try {
+        st = lstatSync(join(key, path), { bigint: true });
+      } catch {
+        continue;
+      }
+      if (after !== null && st.mtimeNs < after && st.ctimeNs < after) continue;
+      const more = pyJsonLength(path) + 24;
+      if (files.length === MAX_WALK_FILES || cost + more > MAX_PAYLOAD_BYTES) {
+        truncated = true;
+        break;
+      }
+      files.push([path, Number(st.size)]);
+      cost += more;
+    }
+  }
+  return { files, truncated, cursor };
 }
 
 // shutil.which: a name with a slash is checked as it is (relative to *cwd*);

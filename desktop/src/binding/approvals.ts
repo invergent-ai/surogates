@@ -20,8 +20,8 @@ import { report } from "../report.js";
 // What Ask every time never asks about: these only read, or make things safer (kill).
 // Every other kind asks (run, start, write, delete, write_stdin), and so does a new one.
 export const UNASKED: ReadonlySet<string> = new Set([
-  "resolve", "check_write", "stat", "read", "read_lines", "list_dir", "ripgrep", "which", "poll", "read_output", "wait",
-  "kill", "list_processes",
+  "resolve", "check_write", "stat", "read", "read_lines", "list_dir", "walk", "ripgrep", "which", "poll", "read_output",
+  "wait", "kill", "list_processes",
 ]);
 
 // The harness's own files: the terminal spills long output here.

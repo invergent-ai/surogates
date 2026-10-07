@@ -181,8 +181,8 @@ describe("a chat that asks every time", () => {
     bind(ROOT, "ask");
     user.auto = "deny";
     for (const kind of [
-      "resolve", "check_write", "stat", "read", "read_lines", "list_dir", "ripgrep", "which", "poll", "read_output",
-      "wait", "kill", "list_processes",
+      "resolve", "check_write", "stat", "read", "read_lines", "list_dir", "walk", "ripgrep", "which", "poll",
+      "read_output", "wait", "kill", "list_processes",
     ]) {
       expect(await approvals.admit(op(kind, { key: `${FOLDER}/a.txt` }), never())).toBeNull();
     }

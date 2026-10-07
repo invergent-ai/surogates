@@ -9,9 +9,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES, READ_TOO_LARGE, WRITE_TOO_LARGE,
+  MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WALK_FILES, MAX_WRITE_BYTES, READ_TOO_LARGE,
+  WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "../src/files/answers.js";
-import { BAD_PAGE, type Context, perform, revisionOf } from "../src/files/operations.js";
+import { BAD_PAGE, BAD_WALK, type Context, perform, revisionOf } from "../src/files/operations.js";
 import { inFolderRefusal } from "../src/files/protect.js";
 
 // The file helper's reads come back at most this long: some filesystems answer less than asked. And how many it made.
@@ -560,6 +561,70 @@ describe("list_dir", () => {
     expect(await run("list_dir", { key: `${folder}/long` })).toEqual({
       error: { type: "too_large", message: "The result of list_dir is too large" },
     });
+  });
+});
+
+describe("walk", () => {
+  type Walked = { ok: { files: Array<[string, number]>; truncated: boolean; cursor: string } };
+  const walk = async (args: Record<string, unknown> = {}) =>
+    (await run("walk", { key: folder, skip: [], skip_top: [], skip_hidden: false, since: null, ...args })) as Walked;
+  const listed = (walked: Walked) => [...walked.ok.files].sort();
+
+  it("lists the regular files under the key with their sizes, follows no link and enters no skipped folder", async () => {
+    writeFileSync(join(folder, "sub", "b.md"), "beta!");
+    mkdirSync(join(folder, "node_modules", "x"), { recursive: true });
+    writeFileSync(join(folder, "node_modules", "x", "i.js"), "");
+    symlinkSync(join(base, "outside"), join(folder, "out"));
+    const walked = await walk({ skip: ["node_modules"] });
+    expect(listed(walked)).toEqual([["a.txt", 6], ["sub/b.md", 5]]);
+    expect(walked.ok.truncated).toBe(false);
+    expect(walked.ok.cursor).toMatch(/^\d+$/);
+    expect(listed(await walk({ key: join(folder, "sub") }))).toEqual([["b.md", 5]]);
+  });
+
+  it("since a cursor, lists only the files changed after it, by mtime or ctime", async () => {
+    writeFileSync(join(folder, "old.txt"), "o");
+    // Past the cursor's margin, which covers a filesystem's coarser clock.
+    await new Promise((resolve) => setTimeout(resolve, Number(WALK_MARGIN_NS / 1_000_000n) + 100));
+    const first = await walk();
+    writeFileSync(join(folder, "new.txt"), "n");
+    // An mtime set back keeps a new ctime: changed all the same.
+    utimesSync(join(folder, "a.txt"), new Date(0), new Date(0));
+    expect(listed(await walk({ since: first.ok.cursor }))).toEqual([["a.txt", 6], ["new.txt", 1]]);
+  });
+
+  it("enters no folder the tree hides: a skipped name, one at the top, and a hidden one", async () => {
+    for (const name of ["src", ".cache", ".github", "_whiteboard", "sub/_whiteboard", "node_modules"]) {
+      mkdirSync(join(folder, name), { recursive: true });
+      writeFileSync(join(folder, name, "f.txt"), "x");
+    }
+    const walked = await walk({ skip: ["node_modules"], skip_top: ["_whiteboard"], skip_hidden: true });
+    expect(listed(walked)).toEqual([[".github/f.txt", 1], ["a.txt", 6], ["src/f.txt", 1], ["sub/_whiteboard/f.txt", 1]]);
+  });
+
+  it("leaves out a name that is not UTF-8, and lists its decoded twin once", async () => {
+    writeFileSync(Buffer.concat([Buffer.from(`${folder}/`), Buffer.from([0x6e, 0xff])]), "bytes");
+    writeFileSync(join(folder, "n\ufffd"), "t");
+    expect(listed(await walk())).toEqual([["a.txt", 6], ["n\ufffd", 1]]);
+  });
+
+  it("stops at its cap and says it did", async () => {
+    mkdirSync(join(folder, "many"));
+    for (let i = 0; i < MAX_WALK_FILES; i++) writeFileSync(join(folder, "many", String(i)), "");
+    const walked = await walk();
+    expect(walked.ok.files).toHaveLength(MAX_WALK_FILES);
+    expect(walked.ok.truncated).toBe(true);
+  });
+
+  it("fails as its folder does, and refuses a key or arguments it cannot take", async () => {
+    expect(await walk({ key: `${folder}/a.txt` })).toMatchObject({ error: { type: "os", code: "ENOTDIR" } });
+    expect(await walk({ key: `${folder}/missing` })).toMatchObject({ error: { type: "os", code: "ENOENT" } });
+    expect(await walk({ key: join(base, "outside") })).toMatchObject({ error: { type: "sandbox" } });
+    for (const args of [
+      { skip: "node_modules" }, { skip: [1] }, { skip_top: "_whiteboard" }, { skip_hidden: 1 }, { since: "yesterday" },
+    ]) {
+      expect(await walk(args)).toEqual({ error: { type: "value", message: BAD_WALK } });
+    }
   });
 });
 

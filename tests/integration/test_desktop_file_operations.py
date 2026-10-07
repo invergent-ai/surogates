@@ -116,6 +116,9 @@ def comparable(kind: str, args: dict, outcome: dict) -> dict:
             return {"ok": {"transfer": {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}}}
     if kind == "list_dir":
         return {"ok": sorted(outcome["ok"])}
+    if kind == "walk":
+        # Each side's own clock names its cursor.
+        return {"ok": {"files": sorted(outcome["ok"]["files"]), "truncated": outcome["ok"]["truncated"]}}
     if kind == "ripgrep":
         lines = outcome["ok"].splitlines()
         if args["mode"] == "json":
@@ -213,6 +216,15 @@ SAME = [
     ("list_dir", {"key": "{f}/sub"}),
     ("list_dir", {"key": "{f}/a.txt"}),
     ("list_dir", {"key": "{f}/missing"}),
+    ("walk", {"key": "{f}", "skip": [".git"], "skip_top": [], "skip_hidden": False, "since": None}),
+    ("walk", {"key": "{f}", "skip": [], "skip_top": [], "skip_hidden": False, "since": None}),
+    ("walk", {"key": "{f}", "skip": [], "skip_top": ["pages"], "skip_hidden": True, "since": None}),
+    ("walk", {"key": "{f}/sub", "skip": ["deep"], "skip_top": [], "skip_hidden": False, "since": None}),
+    ("walk", {"key": "{f}/a.txt", "skip": [], "skip_top": [], "skip_hidden": False, "since": None}),
+    ("walk", {"key": "{f}/missing", "skip": [], "skip_top": [], "skip_hidden": False, "since": None}),
+    ("walk", {"key": "{f}", "skip": "x", "skip_top": [], "skip_hidden": False, "since": None}),
+    ("walk", {"key": "{f}", "skip": [], "skip_top": [], "skip_hidden": "yes", "since": None}),
+    ("walk", {"key": "{f}", "skip": [], "skip_top": [], "skip_hidden": False, "since": "now"}),
     ("ripgrep", {"key": "{f}", "mode": "files", "pattern": "*.txt", "glob": None, "context": 0}),
     ("ripgrep", {"key": "{f}/sub", "mode": "count", "pattern": "gamma", "glob": None, "context": 0}),
     ("ripgrep", {"key": "{f}/sub", "mode": "json", "pattern": "beta", "glob": None, "context": 1}),
@@ -381,6 +393,27 @@ async def test_the_app_answers_as_the_cloud_does(built_client, laptop_rig, link_
             assert comparable(kind, args, got) == comparable(kind, args, want), (kind, args, got, want)
         # Nothing appeared or went: no temporary files.
         assert sorted(os.listdir(folder)) == prepared
+    finally:
+        await app.close()
+
+
+async def test_the_app_walks_a_name_that_is_not_utf_8_as_the_cloud_does(built_client, laptop_rig, link_url, tmp_path, journal_dir):
+    # Its own folder: prepare()'s also feeds the hard-link summary and the hook guard.
+    folder = (tmp_path / "names").resolve()
+    folder.mkdir()
+    (folder / "a.txt").write_text("a")
+    with open(os.path.join(os.fsencode(folder), b"n\xff"), "wb") as fh:
+        fh.write(b"bytes")
+    (folder / "n\ufffd").write_text("t")
+    args = {"key": str(folder), "skip": [], "skip_top": [], "skip_hidden": False, "since": None}
+    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)
+    try:
+        await app.until(connected)
+        got = await on_app(laptop_rig, "walk", args)
+        want = await perform(LocalWorkspaceIO(str(folder)), "walk", args)
+        assert comparable("walk", args, got) == comparable("walk", args, want) == {
+            "ok": {"files": [["a.txt", 1], ["n\ufffd", 1]], "truncated": False},
+        }
     finally:
         await app.close()
 
