@@ -98,6 +98,11 @@ export interface AgentChatProps {
    * billing route.
    */
   onOpenBilling?: () => void;
+  /**
+   * What the host says under the composer: where a new chat will work, as a
+   * folder of the user's computer. Omitted, nothing is shown there.
+   */
+  composerFooter?: React.ReactNode;
 }
 
 // CSS variable controlling the desktop right-stack width. Inlined as a style
@@ -142,6 +147,7 @@ export function AgentChat({
   compressEnabled = true,
   onOpenIntegrations,
   onOpenBilling,
+  composerFooter,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   // What the drawer shows — separate from the tree selection above, because
@@ -490,6 +496,8 @@ export function AgentChat({
               hideTurnSummary={hideTurnSummary}
               agentId={agentId}
               onOpenIntegrations={onOpenIntegrations}
+              deviceWait={runtime.state.deviceWait}
+              composerFooter={composerFooter}
             />
             )}
           </div>
