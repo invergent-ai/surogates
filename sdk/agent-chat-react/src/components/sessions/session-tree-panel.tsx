@@ -296,9 +296,9 @@ function TreeNodeRow({
           <div className="flex items-center gap-1 text-xs text-faint min-w-0">
             {entry.computer && (
               // A chat on a folder of the user's computer, in every list of chats, the browser's too.
-              <span data-testid="session-computer" title={`On ${entry.computer}`} className="inline-flex shrink-0 items-center gap-1">
-                <LaptopIcon className="w-3 h-3" aria-hidden="true" />
-                {entry.computer}
+              <span data-testid="session-computer" title={`On ${entry.computer}`} className="inline-flex min-w-0 max-w-[50%] items-center gap-1">
+                <LaptopIcon className="w-3 h-3 shrink-0" aria-hidden="true" />
+                <span className="truncate">{entry.computer}</span>
               </span>
             )}
             {entry.computer && subtitle && <span aria-hidden="true">·</span>}

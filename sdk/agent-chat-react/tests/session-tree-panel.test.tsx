@@ -360,6 +360,10 @@ describe("SessionTreePanel", () => {
     expect(marks("Tidy my notes")).toEqual([["Flavius's ThinkPad", true]]);
     expect(marks("Sort the receipts")).toEqual([["Flavius's ThinkPad", true]]);
     expect(marks("Plan the trip")).toEqual([]);
+    // A long name shrinks to half the row and is cut short; the label's title gives it whole.
+    const label = container!.querySelector('[data-testid="session-computer"]')!;
+    expect(["min-w-0", "max-w-[50%]", "shrink-0"].map((name) => label.classList.contains(name))).toEqual([true, true, false]);
+    expect(label.querySelector(".truncate")?.textContent).toBe("Flavius's ThinkPad");
   });
 
   it("keeps the session list visible while selecting another session refetches", async () => {
