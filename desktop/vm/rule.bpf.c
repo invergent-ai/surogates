@@ -48,7 +48,7 @@ static __noinline int judge(struct dentry *dentry, int dir)
 			break;
 		dentry = parent;
 	}
-	return 0;
+	return sg_end(&st);
 }
 
 static __noinline int share_sb(struct super_block *sb)

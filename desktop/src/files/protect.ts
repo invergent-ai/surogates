@@ -25,6 +25,12 @@ export const PROTECTED_NAMES: ReadonlySet<string> = new Set([
   ".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile",
   ".ripgreprc", ".mcp.json", ".vscode", ".idea",
 ]);
+// Git's, which count in a dependency folder too.
+export const GIT_NAMES: ReadonlySet<string> = new Set([".gitconfig", ".gitmodules"]);
+// The folders package managers fill, at any depth. What they unpack is no shell's, editor's or
+// agent's config for this folder, and packages ship .idea and .vscode folders (iconv-lite does):
+// below one of these, only git's names and .git count.
+export const DEPENDENCY_FOLDERS: ReadonlySet<string> = new Set(["node_modules", "site-packages", "dist-packages"]);
 export const PROTECTED_PAIRS: ReadonlyArray<readonly [string, string]> = [
   [".claude", "commands"], [".claude", "agents"], [".git", "hooks"], [".git", "config"],
 ];
@@ -61,14 +67,16 @@ export function checkWrite(folder: string, home: string, path: string): string |
 // at any depth, so are the config files (config, config.worktree, commondir),
 // anything under a hooks folder and anything under worktrees, where each
 // linked worktree keeps a config of its own and a commondir that redirects git.
-// The rest of a .git folder (HEAD, info, objects, refs, ...) is not.
+// The rest of a .git folder (HEAD, info, objects, refs, ...) is not. Below a
+// DEPENDENCY_FOLDERS folder, only git's names count.
 export function protectedInFolder(folder: string, key: string): boolean {
   if (key === folder || !inside(key, folder)) return false;
   const parts = key.slice(folder.length + 1).toLowerCase().split("/");
-  return parts.at(-1) === ".git" || parts.some(
-    (part, i) => PROTECTED_NAMES.has(part) || PROTECTED_PAIRS.some(([first, second]) => part === first && parts[i + 1] === second) ||
-      (part === ".git" && runsCode(parts.slice(i + 1))),
-  );
+  return parts.at(-1) === ".git" || parts.some((part, i) => {
+    const counts = part === ".git" || GIT_NAMES.has(part) || !parts.slice(0, i).some((above) => DEPENDENCY_FOLDERS.has(above));
+    return (counts && (PROTECTED_NAMES.has(part) || PROTECTED_PAIRS.some(([first, second]) => part === first && parts[i + 1] === second))) ||
+      (part === ".git" && runsCode(parts.slice(i + 1)));
+  });
 }
 
 // What lies after a .git component. A paused rebase or cherry-pick keeps a todo

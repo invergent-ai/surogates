@@ -187,4 +187,20 @@ describe("protectedInFolder", () => {
     expect(protectedInFolder(folder, `${folder}/a.txt`)).toBe(false);
     expect(protectedInFolder(folder, folder)).toBe(false);
   });
+
+  // Package managers unpack what packages ship, .idea and .vscode folders among it (iconv-lite's).
+  it.each([
+    "node_modules/iconv-lite/.idea/codeStyles/Project.xml", "a/node_modules/b/.vscode/settings.json", "NODE_MODULES/b/.mcp.json",
+    ".venv/lib/python3.12/site-packages/pkg/.vscode/settings.json", "usr/lib/python3/dist-packages/pkg/.bashrc",
+    "node_modules/pkg/.claude/commands/x.md", "node_modules/pkg/.claude/agents/y.md",
+  ])("leaves a shell's, editor's or agent's name below a dependency folder open: %s", (path) => {
+    expect(protectedInFolder(folder, `${folder}/${path}`)).toBe(false);
+  });
+
+  it.each([
+    "node_modules/pkg/.gitmodules", "site-packages/pkg/.gitconfig", "node_modules/pkg/.git", "node_modules/pkg/.git/hooks/pre-commit",
+    "node_modules/pkg/.git/config", ".vscode/node_modules/x", ".claude/commands/node_modules/x", "node_modules_old/.idea",
+  ])("still protects git's names below a dependency folder, and any name above one: %s", (path) => {
+    expect(protectedInFolder(folder, `${folder}/${path}`)).toBe(true);
+  });
 });

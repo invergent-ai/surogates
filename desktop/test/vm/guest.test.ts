@@ -1636,6 +1636,20 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
     expect(prompts).toEqual([]);
   });
 
+  // The rule leaves what package managers unpack alone: iconv-lite's tarball holds an .idea folder.
+  it("installs an npm package that ships an editor's folder into the shared folder, every file of it", async () => {
+    try {
+      const installed = await command("npm install --no-audit --no-fund --no-update-notifier --cache ~/npm-cache iconv-lite@0.6.3 2>&1; echo rc=$?", 180);
+      const { output } = (installed as { ok: { output: string } }).ok;
+      expect(output).toMatch(/added 2 packages[^]*\nrc=0\n$/);
+      expect(output).not.toMatch(/TAR_ENTRY_ERROR|EPERM|not permitted/);
+      expect(readdirSync(join(folder, "node_modules", "iconv-lite", ".idea"))).toContain("codeStyles");
+      expect(prompts).toEqual([]);
+    } finally {
+      for (const name of ["node_modules", "package.json", "package-lock.json"]) rmSync(join(folder, name), { recursive: true, force: true });
+    }
+  });
+
   it("asks once for a site's connections in flight, lets them through once allowed, and every port of a host allowed for the session", async () => {
     expect(await command(`${status("https://example.com/")} & ${status("https://example.com/")} & wait`)).toEqual({
       ok: { output: "200\n200\n", returncode: 0, timed_out: false },

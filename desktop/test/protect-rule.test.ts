@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
 // The oracle is protect.ts itself, as the source has it: a change to it shows here.
-import { GIT_CONFIGS, GIT_STATE, KEY_FOLDERS, PROTECTED_NAMES, PROTECTED_PAIRS, protectedInFolder } from "../src/files/protect.js";
+import {
+  DEPENDENCY_FOLDERS, GIT_CONFIGS, GIT_STATE, KEY_FOLDERS, PROTECTED_NAMES, PROTECTED_PAIRS, protectedInFolder,
+} from "../src/files/protect.js";
 
 const SG_WALK = 12; // rule-match.h: the components judged, from the target up
 const onHost = (p: string) => protectedInFolder("/f", `/f/${p}`);
@@ -32,18 +34,19 @@ function movedRefuses(p: string): boolean {
     parts.some((part, i) => part === ".git" && (parts[i + 1] === "modules" || parts[i + 1] === "worktrees"));
 }
 
-// Every path of up to four components over the names protect.ts acts on, and a filler.
-const NAMES = [...new Set([...PROTECTED_NAMES, ...PROTECTED_PAIRS.flat(), ...GIT_CONFIGS, ...GIT_STATE, "modules", "x"])];
-function corpus(depth: number): string[] {
+// Every path of up to four components over the names protect.ts acts on, and a filler; and,
+// deeper, every path of up to six over the names whose place counts, as a submodule's hooks do.
+const NAMES = [...new Set([...PROTECTED_NAMES, ...PROTECTED_PAIRS.flat(), ...GIT_CONFIGS, ...GIT_STATE, "modules", "node_modules", "x"])];
+function corpus(depth: number, names = NAMES): string[] {
   let all: string[] = [];
   let level = [""];
   for (let d = 0; d < depth; d++) {
-    level = level.flatMap((p) => NAMES.map((name) => (p ? `${p}/${name}` : name)));
+    level = level.flatMap((p) => names.map((name) => (p ? `${p}/${name}` : name)));
     all = all.concat(level);
   }
   return all;
 }
-const CORPUS = corpus(4);
+const CORPUS = [...corpus(4), ...corpus(6, [".git", "modules", "hooks", "config", "worktrees", "node_modules", ".vscode", "x"])];
 
 // The readable spec, beside the corpus.
 const probes = [
@@ -56,7 +59,14 @@ const probes = [
   ".gitconfig", ".gitmodules", ".bashrc", ".idea/x",
   ".git/modules/a/b/hooks/x", "deep/a/b/c/d/.git/config", ".git/objects/ab/cd", ".git/HEAD", ".git/index",
   ".GIT/config", ".Git/Hooks/pre-commit", ".GIT/MODULES/Foo/CONFIG", "a/.CLAUDE/Commands/x",
+  // A dependency folder: what packages ship goes in, git's names still do not.
+  "node_modules/iconv-lite/.idea/codeStyles/Project.xml", ".venv/lib/python3.12/site-packages/pkg/.vscode/settings.json",
+  "usr/lib/python3/dist-packages/pkg/.mcp.json", "node_modules/pkg/.claude/commands/x.md", "Node_Modules/pkg/.bashrc",
+  "a/node_modules/b/node_modules/c/.idea/x", "node_modules/pkg/.gitmodules", "site-packages/pkg/.gitconfig",
+  "node_modules/pkg/.git", "node_modules/pkg/.git/hooks/pre-commit", "node_modules/pkg/.git/config",
+  ".vscode/node_modules/x", ".claude/commands/node_modules/x", "node_modules_old/.idea", "x/site-packages.bak/.vscode",
 ];
+for (const name of DEPENDENCY_FOLDERS) probes.push(`${name}/pkg/.vscode/settings.json`, `${name}/.git/hooks/x`);
 // Paths protect.ts refuses only for git's transient state, which the rule allows.
 const GIT_STATE_ONLY = [
   ".git/rebase-merge/git-rebase-todo", ".git/sequencer/todo", ".git/rebase-apply/0001",
@@ -66,6 +76,9 @@ const GIT_STATE_ONLY = [
 const numbered = (n: number) => Array.from({ length: n }, (_, i) => String(i + 1));
 const WITHIN = [".vscode", ...numbered(SG_WALK - 2), "x"].join("/");
 const BEYOND = [".vscode", ...numbered(SG_WALK - 1), "x"].join("/");
+// And a dependency folder past it, above such a name: the rule cannot see it, so it refuses.
+const DEP_WITHIN = ["node_modules", ...numbered(SG_WALK - 3), ".vscode", "x"].join("/");
+const DEP_BEYOND = ["node_modules", ...numbered(SG_WALK - 2), ".vscode", "x"].join("/");
 // Directories moved (rename), refused and allowed.
 const MOVED_REFUSED = [
   ".claude", "sub/.CLAUDE", ".git", ".git/modules", ".git/modules/foo", ".git/modules/a/b",
@@ -115,6 +128,8 @@ describe("the guest rule mirrors protect.ts", () => {
     expect(GIT_STATE_ONLY.map((p) => [p, kernel[paths.indexOf(p)], onHost(p)])).toEqual(GIT_STATE_ONLY.map((p) => [p, false, true]));
     expect(verdicts(harness(), [WITHIN, BEYOND])).toEqual([true, false]);
     expect([onHost(WITHIN), onHost(BEYOND)]).toEqual([true, true]);
+    expect(verdicts(harness(), [DEP_WITHIN, DEP_BEYOND])).toEqual([false, true]);
+    expect([onHost(DEP_WITHIN), onHost(DEP_BEYOND)]).toEqual([false, false]);
   });
 
   withCc("refuses moving a directory to or from a key folder's place", () => {

@@ -21,7 +21,7 @@ static int refuses(char *path, int dir)
 		}
 		if (sg_step(&st, sg_classify(&nm, len))) return 1;
 	}
-	return 0;
+	return sg_end(&st);
 }
 
 int main(int argc, char **argv)
