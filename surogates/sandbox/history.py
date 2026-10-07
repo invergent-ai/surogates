@@ -15,6 +15,12 @@ own disk as data, and git runs in that copy under the pod's own config.  A
 pod opens by fetching ``main``, its thread's branch and base from the copy
 at depth 1, and the project's lock holder pushes by writing a pack, then
 ``packed-refs``, as files.
+
+A thread hands work to a helper through ``refs/handoff/<id>``: the thread's
+copy as it was when the helper started, with what helpers kept onto it
+since.  Each helper has a pod and a copy of its own, from the hand-off.
+The thread's copy takes the hand-off up, and its branch only at the turn's
+end, so a turn stopped after it handed work on lands none of it.
 """
 
 from __future__ import annotations
@@ -91,6 +97,8 @@ _HERMETIC = {
 #: A file's bytes are history's as they are: no project, home or system
 #: ``.gitattributes`` converts line endings or runs a filter on them.
 _ATTRIBUTES = "* -text -filter -ident -working-tree-encoding\n"
+#: Who commits what is the copy's own: a snapshot, a take-up.
+_CHECKPOINT = {"name": "Surogates Checkpoint", "email": "surogates@local"}
 
 
 
@@ -133,6 +141,7 @@ class History:
     copy: Path      # this thread's worktree
     thread: str
     user: str       # who started the thread: main's first commit is theirs
+    helper: str | None = None  # a thread's helper's own session: its pod and copy are its own
 
     @property
     def branch(self) -> str:
@@ -149,8 +158,33 @@ class History:
 
     @property
     def synced(self) -> str:
-        """The branch as the durable history had it when this copy last took it up or pushed it."""
+        """The branch as the durable history had it when this copy last pushed it; in a helper's pod, what its copy last handed back from."""
         return f"refs/synced/{self.thread}"
+
+    @property
+    def handoff(self) -> str:
+        """The thread's copy as it handed work on, with what its helpers kept onto it since."""
+        return f"refs/handoff/{self.thread}"
+
+    @property
+    def handoff_from(self) -> str:
+        """The hand-off's commit whose changes the thread has: what a take-up merges from."""
+        return f"refs/handoff-from/{self.thread}"
+
+    @property
+    def handed(self) -> str:
+        """In a thread's pod: the hand-off as its copy last took it up, for the commit step to push as ``handoff_from``."""
+        return f"refs/handed/{self.thread}"
+
+    @property
+    def gave(self) -> str:
+        """In a thread's pod: the hand-off this pod pushed, which a stop of its turn drops."""
+        return f"refs/gave/{self.thread}"
+
+    @property
+    def apart(self) -> str:
+        """A failed helper's copy, kept in history beside its thread's and merged onto nothing."""
+        return f"refs/helpers/{self.thread}/{self.helper}"
 
     # ------------------------------------------------------------------
     # The copy
@@ -167,6 +201,12 @@ class History:
         ``main``.  A branch whose files are its base's has nothing unlanded:
         it starts again at ``main``, and so does its base.  With no history
         yet, ``main``'s first commit is the real files as they are.
+
+        A helper's copy starts where its thread handed off, else at the
+        thread's branch, else at ``main``, each as the history has it: never
+        at a pickup of the real files of its own, which would bring other
+        threads' landings and your uploads in as its work.  A thread's copy
+        takes up what its helpers kept since it last did.
         """
         budget = _TIMEOUT.set(_OPEN_TIMEOUT)
         try:
@@ -191,9 +231,10 @@ class History:
                 (self.repo / "info" / "attributes").write_text(_ATTRIBUTES)
             refs = self._take()
             self._check_durable()
-            self._fetch(*(refs.get(r) for r in (MAIN, self.branch, self.base)))
+            start = (refs.get(self.handoff) or refs.get(self.branch) or refs.get(MAIN)) if self.helper else None
+            self._fetch(*((start,) if start else (refs.get(r) for r in (MAIN, self.branch, self.base))))
             you = {"name": self.user, "email": f"user:{self.user}@surogate"}
-            if MAIN in refs:
+            if not start and MAIN in refs:
                 self._main("update-ref", MAIN, refs[MAIN])
                 # geesefs trusts a listing for a second: one taken just before
                 # another pod's landing would hide that landing's files.
@@ -212,35 +253,42 @@ class History:
                     # A cache git cannot read: left out, every real file is read.
                     (self.repo / "index").unlink(missing_ok=True)
                     self._main("read-tree", MAIN)
-            self._add_all(self._main)
-            if self._ref(MAIN) is None:
-                self._main(*_as(you), "commit", "-q", "--allow-empty", "-m", "The project's files")
-            elif self._main("write-tree") != self._tree(MAIN):
-                self._main(*_as(you), "commit", "-q", "-m", "Your changes")
-            if (self.repo / "index").is_file():
-                # geesefs gives whole seconds: an entry from the second the
-                # open began may be saved again unseen, so git reads it again.
-                os.utime(self.repo / "index", (begun, begun))
+            if not start:
+                self._add_all(self._main)
+                if self._ref(MAIN) is None:
+                    self._main(*_as(you), "commit", "-q", "--allow-empty", "-m", "The project's files")
+                elif self._main("write-tree") != self._tree(MAIN):
+                    self._main(*_as(you), "commit", "-q", "-m", "Your changes")
+                if (self.repo / "index").is_file():
+                    # geesefs gives whole seconds: an entry from the second the
+                    # open began may be saved again unseen, so git reads it again.
+                    os.utime(self.repo / "index", (begun, begun))
         except Exception:
             if fresh:
                 # Half made (a read of the real files failed): the next
                 # readiness check makes it again.
                 shutil.rmtree(self.repo, ignore_errors=True)
             raise
-        main = self._main("rev-parse", MAIN)
-        branch, base = refs.get(self.branch), refs.get(self.base)
-        if branch is None or base is None or self._tree(branch) == self._tree(base):
-            branch = base = main
+        if start:
+            branch = base = start
+        else:
+            main = self._main("rev-parse", MAIN)
+            branch, base = refs.get(self.branch), refs.get(self.base)
+            if branch is None or base is None or self._tree(branch) == self._tree(base):
+                branch = base = main
         self._main("update-ref", self.branch, branch)
         self._main("update-ref", self.base, base)
-        if self.branch in refs:
-            self._main("update-ref", self.synced, refs[self.branch])
+        # A helper hands back what it changed since its start; a thread pushes over the branch it found.
+        if self.helper or self.branch in refs:
+            self._main("update-ref", self.synced, branch if self.helper else refs[self.branch])
         # --lock: git gc must not prune a worktree whose .git file is gone.
         self._git(
             ["worktree", "add", "-q", "--lock", str(self.copy), f"threads/{self.thread}"],
             env={"GIT_DIR": str(self.repo)}, cwd=self.repo,
         )
         (self.copy / ".git").unlink()
+        if not self.helper and refs.get(self.handoff) not in (None, refs.get(self.handoff_from)):
+            self.take_up()
 
     def snapshot(self, reason: str) -> str:
         """Commit the copy on the branch if it changed; the branch's tip."""
@@ -281,19 +329,24 @@ class History:
         The turn, its base and the branch are pushed before the first apply,
         so whoever puts a file back after a crash can read both its versions.
         Safe to repeat: a turn already committed and pushed is used again.
+        What helpers kept on the hand-off is taken up first, and lands with it.
         """
+        self.take_up()
         self._add_all(self._copy)
         excluded, repositories, wrote_left_out = self._excluded()
         left_out = {"excluded": excluded, "repositories": repositories}
         base = self._main("rev-parse", self.base)
         if not self._copy("diff", "--cached", "--name-only", base):
+            if (taken := self._taken_up()) and self._durable_refs().get(self.handoff_from) != taken[self.handoff_from]:
+                # What it took up and threw away stays away: the next take-up merges from here.
+                self._push(taken, expect={})
             return {"commit": None, "base": base, "changes": [], "overlapped": [], **left_out}
         saga = f"Surogate-Saga: {dict(map(tuple, trailers))['Surogate-Saga']}"
         if self._copy("diff", "--cached", "--name-only", "HEAD") or saga not in self._copy("log", "-1", "--format=%B").splitlines():
             self._copy(*_as(author), "commit", "-q", "--allow-empty", "-m", "Turn", "-m", _block(trailers))
         turn = self._copy("rev-parse", "HEAD")
         if self._durable_refs().get(self.branch) != turn:
-            self._push({self.branch: turn, self.base: base}, expect={self.branch: self._ref(self.synced)})
+            self._push({self.branch: turn, self.base: base, **self._taken_up()}, expect={self.branch: self._ref(self.synced)})
             self._main("update-ref", self.synced, turn)
         versions, renames = self._diff(base, turn)
         # A file and a folder of one name land together, as a rename's two sides do.
@@ -446,18 +499,95 @@ class History:
 
         A failed turn's work, kept for the thread's next landing.
         """
-        self._add_all(self._copy)
-        if self._copy("diff", "--cached", "--name-only", "HEAD"):
-            self._copy(*_as(author), "commit", "-q", "-m", "Kept", "-m", _block(trailers))
-        tip = self._copy("rev-parse", "HEAD")
+        tip = self._commit_copy(author, "Kept", trailers)
         # A branch never reaches the history without its base: the overlap check is against it.
         moves_base = base or self.base not in self._durable_refs()
         self._push(
-            {self.branch: tip, **({self.base: self._ref(self.base)} if moves_base else {})},
+            {self.branch: tip, **({self.base: self._ref(self.base)} if moves_base else {}), **self._taken_up()},
             expect={self.branch: self._ref(self.synced)},
         )
         self._main("update-ref", self.synced, tip)
         return {"commit": tip}
+
+    def hand_off(self, *, author: dict[str, str], trailers: list[list[str]]) -> dict:
+        """Put the thread's copy on its hand-off, for a helper about to start from it; the branch stays as it was.
+
+        What helpers kept there comes into the copy first.  Only the turn's
+        end moves the branch: a turn stopped after this lands none of it.
+        """
+        not_taken = self.take_up()["not_taken"]
+        tip = self._commit_copy(author, "Handed on", trailers)
+        self._push({self.handoff: tip, self.handoff_from: tip}, expect={self.handoff: self._durable_refs().get(self.handoff)})
+        for ref in (self.handed, self.gave):
+            self._main("update-ref", ref, tip)
+        return {"commit": tip, "not_taken": not_taken}
+
+    def hand_back(self, *, author: dict[str, str], trailers: list[list[str]]) -> dict:
+        """Merge a helper's copy onto its thread's hand-off, file by file.
+
+        Where another helper, or the thread, changed a file first, theirs
+        stays: this copy's version is kept in history, as the merge's second
+        parent, and named in ``not_kept``.  With no hand-off, as after its
+        thread's turn was stopped, the copy is the hand-off, from where it
+        started.
+        """
+        tip = self._commit_copy(author, "Kept", trailers)
+        since = self._ref(self.synced)
+        durable = self._take().get(self.handoff)
+        if tip == since:
+            return {"commit": durable or tip, "not_kept": []}
+        not_kept: list[str] = []
+        if durable is None:
+            updates = {self.handoff: tip, self.handoff_from: since}
+        elif durable == since:
+            updates = {self.handoff: tip}
+        else:
+            self._fetch(durable)
+            tree, not_kept = self._merged(since, winner=durable, loser=tip)
+            updates = {self.handoff: self._commit(tree, durable, tip, author, "Kept", trailers)}
+        self._push(updates, expect={self.handoff: durable})
+        # Its own tip: what it hands back next is what it changed since.
+        self._main("update-ref", self.synced, tip)
+        return {"commit": updates[self.handoff], "not_kept": not_kept}
+
+    def keep_apart(self, *, author: dict[str, str], trailers: list[list[str]]) -> dict:
+        """Keep a failed helper's copy on a ref of its own, merged onto nothing: its files may be half made.
+
+        ``left`` names the files it changed, which its thread is told are there.
+        """
+        tip = self._commit_copy(author, "Kept apart", trailers)
+        since = self._ref(self.synced)
+        left = sorted(self._diff(since, tip)[0]) if tip != since else []
+        if left:
+            self._push({self.apart: tip}, expect={})
+        return {"commit": tip, "left": left}
+
+    def take_up(self) -> dict:
+        """Bring into the thread's copy what its helpers kept on the hand-off since the copy last had it.
+
+        Where both changed a file, the copy keeps its own version, named in
+        ``not_taken``; the helper's stays in history.  The branch takes it up
+        at the turn's end, with the commit step.
+        """
+        refs = self._take()
+        durable = refs.get(self.handoff)
+        since = self._ref(self.handed) or refs.get(self.handoff_from)
+        if durable is None or durable == since:
+            return {"not_taken": []}
+        self._fetch(durable, since)
+        tip = self.snapshot("before taking up a helper's work")
+        tree, not_taken = self._merged(since, winner=tip, loser=durable)
+        self._switch(tip, self._commit(tree, tip, durable, _CHECKPOINT, "Taken up", []))
+        self._main("update-ref", self.handed, durable)
+        return {"not_taken": not_taken}
+
+    def drop_hand_off(self) -> dict:
+        """Delete the hand-off this pod made, as its turn is stopped, so none of that turn's work lands later."""
+        if self._ref(self.gave) is None:
+            return {"dropped": False}
+        self._push({self.handoff: None, self.handoff_from: None}, expect={})
+        self._main("update-ref", "-d", self.gave)
+        return {"dropped": True}
 
     def prune(self, *, keep: list[str], now: float) -> dict:
         """Cut the durable history back to its window, at most once a day, under the project's lock.
@@ -497,8 +627,10 @@ class History:
             # Linked, not copied: git never writes a file in place, and the cut writes its shallow anew.
             shutil.copytree(self._taken, work, copy_function=os.link)
             git = partial(self._in, work)
-            for ref in set(git("for-each-ref", "--format=%(refname)").splitlines()) - {MAIN, *keep}:
-                git("update-ref", "-d", ref)
+            for ref in git("for-each-ref", "--format=%(refname)").splitlines():
+                # A kept name ending in / keeps every ref under it: a thread's helpers' copies kept apart.
+                if ref != MAIN and ref not in keep and not any(ref.startswith(k) for k in keep if k.endswith("/")):
+                    git("update-ref", "-d", ref)
             mains = [line.split() for line in git("log", "--first-parent", "--format=%H %ct", MAIN).splitlines()]
             # A pod lives at most THREAD_POD_DEADLINE: the main it opened on is one of these, or the one before.
             least = max(_PRUNE_LEAST, 1 + sum(int(t) >= now - THREAD_POD_DEADLINE for _, t in mains))
@@ -549,6 +681,68 @@ class History:
     def _in(self, repo: Path, *args: str) -> str:
         """Git in the bare repository *repo*."""
         return self._git(list(args), env={"GIT_DIR": str(repo)}, cwd=repo)
+
+    def _commit_copy(self, author: dict[str, str], title: str, trailers: list[list[str]]) -> str:
+        """Commit the copy, if it changed, on its branch; the branch's tip."""
+        self._add_all(self._copy)
+        if self._copy("diff", "--cached", "--name-only", "HEAD"):
+            self._copy(*_as(author), "commit", "-q", "-m", title, "-m", _block(trailers))
+        return self._copy("rev-parse", "HEAD")
+
+    def _taken_up(self) -> dict[str, str]:
+        """The hand-off as this copy took it up, for the branch's push: what the next take-up merges from."""
+        handed = self._ref(self.handed)
+        return {self.handoff_from: handed} if handed else {}
+
+    def _merged(self, base: str, *, winner: str, loser: str) -> tuple[str, list[str]]:
+        """*winner*'s tree with each change *loser* made since *base* that *winner* did not make otherwise.
+
+        Also the paths of *loser*'s changes it could not take: changed both
+        ways, or a file where the other has a folder, or the reverse.  File
+        by file, as a landing's overlap check is: an office file has no lines
+        to merge.
+        """
+        won, _ = self._diff(base, winner)
+        lost, _ = self._diff(base, loser)
+        files = {n for n in self._main("ls-tree", "-r", "-z", "--name-only", winner).split("\0") if n}
+        folders = {str(f) for n in files for f in PurePosixPath(n).parents}
+        modes = {}
+        for entry in self._main("ls-tree", "-r", "-z", loser).split("\0"):
+            meta, _, path = entry.partition("\t")
+            if path in lost:
+                modes[path] = meta.split(" ")[0]
+        held = {
+            path for path, (_, after) in lost.items()
+            if (path in won and won[path][1] != after)
+            or (after is not None and (path in folders or any(str(f) in files for f in PurePosixPath(path).parents)))
+        }
+        # A file and a folder of one name go together: the change that made one removed the other.
+        held |= {p for p in lost if any(p.startswith(f"{h}/") or h.startswith(f"{p}/") for h in held)}
+        entries = [
+            f"0 {_ZERO}\t{path}\0" if after is None else f"{modes[path]} {after}\t{path}\0"
+            for path, (_, after) in sorted(lost.items()) if path not in held
+        ]
+        index = self.repo / "merge.index"
+        index.unlink(missing_ok=True)
+        env = {"GIT_DIR": str(self.repo), "GIT_INDEX_FILE": str(index)}
+        try:
+            self._git(["read-tree", winner], env=env, cwd=self.repo)
+            self._git(["update-index", "-z", "--index-info"], env=env, cwd=self.repo, input="".join(entries))
+            return self._git(["write-tree"], env=env, cwd=self.repo), sorted(held)
+        finally:
+            index.unlink(missing_ok=True)
+
+    def _commit(self, tree: str, first: str, second: str, author: dict[str, str], title: str, trailers: list[list[str]]) -> str:
+        return self._git(
+            [*_as(author), "commit-tree", tree, "-p", first, "-p", second, "-F", "-"],
+            env={"GIT_DIR": str(self.repo)}, cwd=self.repo, input=f"{title}\n\n{_block(trailers)}\n",
+        )
+
+    def _switch(self, old: str, new: str) -> str:
+        """Move the copy and its branch from *old* to *new*; *new*."""
+        self._copy("read-tree", "-u", "-m", old, new)
+        self._main("update-ref", self.branch, new)
+        return new
 
     def _sweep(self) -> None:
         """Delete what a write killed part way left, staged beside its file: only the lock holder writes here."""

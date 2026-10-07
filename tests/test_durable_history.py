@@ -694,3 +694,118 @@ def test_a_crafted_commit_puts_nothing_of_its_own_on_gits_command_line(tmp_path,
     slow.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:slow"], ["Surogate-Kind", "turn"]])
     # Its boundary's parents are read to push it: only the ones git reads, each a commit id.
     assert not [a for a in argv if "upload-pack" in a]
+
+
+def a_helper(tmp_path, project, helper="h1"):
+    """A helper's pod: its own copy, of its thread t1's hand-off."""
+    return a_pod(tmp_path, project, "t1", helper=helper)
+
+
+def test_a_helpers_work_reaches_its_threads_copy_through_the_hand_off(tmp_path, project):
+    thread = a_pod(tmp_path, project)
+    (thread.copy / "outline.md").write_text("the thread's outline")
+    thread.hand_off(author=A, trailers=KEPT)
+    # The hand-off moves no branch: a turn stopped now lands none of it.
+    assert subprocess.run(["git", f"--git-dir={project / '_history'}", "rev-parse", "-q", "--verify", "refs/heads/threads/t1"],
+                          capture_output=True).returncode != 0
+    helper = a_helper(tmp_path, project)
+    assert (helper.copy / "outline.md").read_text() == "the thread's outline"
+    (helper.copy / "notes.txt").write_text("v1 notes, sourced by the helper\n")
+    (helper.copy / "sources.md").write_text("sources")
+    assert helper.hand_back(author=A, trailers=KEPT)["not_kept"] == []
+
+    assert thread.take_up() == {"not_taken": []}
+    assert (thread.copy / "sources.md").read_text() == "sources"
+    assert (thread.copy / "notes.txt").read_text() == "v1 notes, sourced by the helper\n"
+    land(thread)
+    assert (project / "sources.md").read_text() == "sources"
+    # The thread's next pod has it all, and takes up nothing twice.
+    pod = a_pod(tmp_path, project)
+    assert pod.take_up() == {"not_taken": []} and (pod.copy / "sources.md").read_text() == "sources"
+
+
+def test_two_helpers_that_change_one_file_keep_the_first_and_name_it_to_the_second(tmp_path, project):
+    thread = a_pod(tmp_path, project)
+    thread.hand_off(author=A, trailers=KEPT)
+    first, second = a_helper(tmp_path, project, "h1"), a_helper(tmp_path, project, "h2")
+    (first.copy / "notes.txt").write_text("by the first\n")
+    (second.copy / "notes.txt").write_text("by the second\n")
+    (second.copy / "second.md").write_text("the second's own")
+    first.hand_back(author=A, trailers=KEPT)
+    assert second.hand_back(author=A, trailers=KEPT)["not_kept"] == ["notes.txt"]
+    thread.take_up()
+    assert (thread.copy / "notes.txt").read_text() == "by the first\n"
+    assert (thread.copy / "second.md").read_text() == "the second's own"
+
+
+def test_a_thread_keeps_its_own_version_of_a_file_a_helper_also_changed(tmp_path, project):
+    thread = a_pod(tmp_path, project)
+    thread.hand_off(author=A, trailers=KEPT)
+    helper = a_helper(tmp_path, project)
+    (helper.copy / "notes.txt").write_text("by the helper\n")
+    (helper.copy / "Report.docx").unlink()
+    (helper.copy / "Report.docx").mkdir()  # a folder where the thread keeps its file
+    (helper.copy / "Report.docx" / "x.md").write_text("x")
+    helper.hand_back(author=A, trailers=KEPT)
+    (thread.copy / "notes.txt").write_text("by the thread meanwhile\n")
+    (thread.copy / "Report.docx").write_bytes(b"PK\x03\x04 report by the thread")
+    assert thread.take_up() == {"not_taken": ["Report.docx", "Report.docx/x.md", "notes.txt"]}
+    assert (thread.copy / "notes.txt").read_text() == "by the thread meanwhile\n"
+    assert (thread.copy / "Report.docx").read_bytes() == b"PK\x03\x04 report by the thread"
+
+
+def test_a_helpers_file_the_thread_threw_away_stays_away_at_its_next_turn(tmp_path, project):
+    thread = a_pod(tmp_path, project)
+    thread.hand_off(author=A, trailers=KEPT)
+    helper = a_helper(tmp_path, project)
+    (helper.copy / "h.md").write_text("the helper's draft")
+    helper.hand_back(author=A, trailers=KEPT)
+    thread.take_up()
+    (thread.copy / "h.md").unlink()
+    # The turn changed nothing since its base, but what it took up is taken: the next take-up merges from there.
+    assert thread.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "turn"]])["commit"] is None
+    assert not (a_pod(tmp_path, project).copy / "h.md").exists()
+
+
+def test_a_stopped_turns_hand_off_is_dropped_and_none_of_it_lands_later(tmp_path, project):
+    thread = a_pod(tmp_path, project)
+    (thread.copy / "draft.md").write_text("the stopped turn's draft")
+    thread.hand_off(author=A, trailers=KEPT)
+    assert thread.drop_hand_off() == {"dropped": True}
+    refs = git(project / "_history", "for-each-ref", "--format=%(refname)").splitlines()
+    assert not any("handoff" in ref or "threads/t1" in ref for ref in refs)
+    pod = a_pod(tmp_path, project)
+    assert not (pod.copy / "draft.md").exists()
+    # A pod that handed nothing off drops nothing: the hand-off is another turn's.
+    assert pod.drop_hand_off() == {"dropped": False}
+
+
+def test_a_helper_starts_where_its_thread_handed_off_never_from_a_pickup_of_its_own(tmp_path, project):
+    thread = a_pod(tmp_path, project, "t1")
+    other = a_pod(tmp_path, project, "t2")  # another thread lands meanwhile
+    (other.copy / "notes.txt").write_text("by another thread\n")
+    land(other, "saga:other", author={"name": "B", "email": "thread:t2@surogate"})
+    (project / "uploads" / "late.pdf").write_bytes(b"%PDF uploaded after the thread started")
+    helper = a_helper(tmp_path, project)  # the thread handed nothing off: the helper starts at main, as the history has it
+    assert not (helper.copy / "uploads" / "late.pdf").exists()
+    (helper.copy / "h.md").write_text("the helper's work")
+    helper.hand_back(author=A, trailers=KEPT)
+    thread.take_up()
+    turn = thread.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:t1"], ["Surogate-Kind", "turn"]])
+    # Only the helper's own change comes with the thread's turn: not another's landing, not your upload.
+    assert [c["path"] for c in turn["changes"]] == ["h.md"]
+
+
+def test_a_failed_helpers_copy_is_kept_apart_and_never_handed_back(tmp_path, project):
+    thread = a_pod(tmp_path, project)
+    thread.hand_off(author=A, trailers=KEPT)
+    helper = a_helper(tmp_path, project)
+    (helper.copy / "Budget.xlsx").write_bytes(b"PK\x03\x04 half made")
+    (helper.copy / "outline.md").write_text("half an outline")
+    assert helper.keep_apart(author=A, trailers=KEPT)["left"] == ["Budget.xlsx", "outline.md"]
+    durable = project / "_history"
+    assert git(durable, "ls-tree", "--name-only", "refs/helpers/t1/h1").splitlines() == [
+        "Budget.xlsx", "Report.docx", "notes.txt", "outline.md",
+    ]
+    assert thread.take_up() == {"not_taken": []}
+    assert not (thread.copy / "Budget.xlsx").exists()
