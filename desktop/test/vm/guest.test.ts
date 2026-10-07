@@ -388,13 +388,13 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       const stats = lstatSync(join(repo, path), { throwIfNoEntry: false });
       return stats && { ino: stats.ino, nlink: stats.nlink, mode: stats.mode, bytes: stats.isFile() ? readFileSync(join(repo, path), "utf8") : null };
     };
-    const inRepo = async (command: string) => ((await run(`cd repo; ${command}`, RULE)) as { ok: { output: string } }).ok.output;
+    const inRepo = async (command: string, at = "repo") => ((await run(`cd ${at}; ${command}`, RULE)) as { ok: { output: string } }).ok.output;
 
     beforeAll(async () => {
       shared = join(dir, "rule");
       repo = join(shared, "repo");
       mkdirSync(repo, { recursive: true });
-      expect(spawnSync("bash", ["-c", "git init -q && git add -A && git -c user.email=a@b -c user.name=a commit -q --allow-empty -m a && git init -q sub"], { cwd: repo }).status).toBe(0);
+      expect(spawnSync("bash", ["-c", "git init -q -b master && git config user.email a@b && git config user.name a && echo a > a.txt && git add -A && git commit -qm a && git init -q sub"], { cwd: repo }).status).toBe(0);
       // A submodule's git folder, a linked worktree's, and the user's own hook, which is not executable.
       for (const [path, text] of [
         [".git/modules/foo/config", "[core]\n"], [".git/worktrees/wt/commondir", "../..\n"], [".git/worktrees/wt/HEAD", "ref: refs/heads/wt\n"], [".git/hooks/post-merge", "#!/bin/sh\n"],
@@ -414,6 +414,14 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     it("refuses: a hard link out of .git/config, so a write through the link leaves the host's config as it was", async () => {
       const config = state(".git/config");
       expect(await inRepo("ln .git/config cfg-link 2>&1; echo '[core] hooksPath = ../evil' >> cfg-link")).toContain("Operation not permitted");
+      expect(state(".git/config")).toEqual(config);
+    });
+
+    // git config on the host renames a new file over the old one: the rule judges the path, whichever file is there.
+    it("refuses: a write to a .git/config the host's git config replaced since", async () => {
+      expect(spawnSync("git", ["-C", repo, "config", "core.editor", "true"]).status).toBe(0);
+      const config = state(".git/config");
+      expect(await inRepo("echo '[alias] x = !evil' >> .git/config 2>&1")).toContain("Operation not permitted");
       expect(state(".git/config")).toEqual(config);
     });
 
@@ -491,6 +499,92 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
         expect(await inRepo(`{ ${command}; } 2>&1; echo rc=$?`)).toBe("rc=0\n");
       });
     }
+
+    // Git's own work in a repository the user has: its transient state, and the folders and files it
+    // moves, are none the rule refuses. A new repository, or a linked worktree's admin files, are.
+    describe("git's transient state", () => {
+      let upstream: string;
+      // A superproject the user set up on the host, with its submodule one commit behind what it records,
+      // and a linked worktree beside it in the share.
+      const WORKTREE = () => join(shared, "work-wt");
+      beforeAll(() => {
+        upstream = join(dir, "rule-upstream");
+        const made = spawnSync("bash", ["-c", [
+          "set -e",
+          `git init -q -b master "${upstream}" && cd "${upstream}" && git config user.email a@b && git config user.name a`,
+          "echo 1 > f && git add f && git commit -qm one && echo 2 > f && git commit -qam two",
+          'cd "$0" && git init -q -b master work && cd work && git config user.email a@b && git config user.name a',
+          "echo w > w.txt && git add w.txt && git commit -qm w",
+          `git -c protocol.file.allow=always submodule add -q "${upstream}" lib && git commit -qm lib`,
+          "git -C lib checkout -q HEAD~1",
+          `git worktree add -q "${WORKTREE()}" -b wtb`,
+        ].join("\n"), shared], { encoding: "utf8" });
+        expect(made.status, made.stderr).toBe(0);
+      });
+
+      afterAll(() => rmSync(upstream, { recursive: true, force: true }));
+
+      it("lets git rebase, merge-with-conflict and cherry-pick finish in an existing repo", async () => {
+        const s = `rm -rf .git/rebase-merge
+          git checkout -q -b feat && echo c > c.txt && git add c.txt && git commit -qm feat
+          git checkout -q master && echo d > d.txt && git add d.txt && git commit -qm master
+          git rebase -q master feat && echo REBASE_OK
+          git checkout -q master
+          git checkout -q -b f2 && echo e > a.txt && git commit -qam f2
+          git checkout -q master && echo f > a.txt && git commit -qam m2
+          git merge f2 >/dev/null 2>&1; test -e .git/MERGE_HEAD && echo CONFLICTED
+          echo resolved > a.txt && git add a.txt && git commit -qm resolved && echo MERGE_OK
+          git checkout -q -b f3 && echo g > g.txt && git add g.txt && git commit -qm g
+          git checkout -q master && git cherry-pick f3 && echo CHERRY_OK`;
+        const r = await inRepo(s);
+        for (const m of ["REBASE_OK", "CONFLICTED", "MERGE_OK", "CHERRY_OK"]) expect(r).toContain(m);
+        expect(state(".git/rebase-merge")).toBeUndefined();
+      });
+
+      it("refuses git init / clone of a new repo in the share", async () => {
+        expect(await inRepo("git init -q new 2>&1; echo rc=$?; git clone -q . cloned 2>&1; echo rc=$?")).toMatch(
+          /Operation not permitted[\s\S]*rc=[1-9]\d*\n[\s\S]*Operation not permitted[\s\S]*rc=[1-9]\d*\n$/,
+        );
+        expect([state("new/.git"), state("cloned/.git")]).toEqual([undefined, undefined]);
+        // The agent makes its own repositories in its home, which the rule does not guard.
+        expect(await inRepo('git init -q "$HOME/own" && echo made; rm -rf "$HOME/own"')).toBe("made\n");
+      });
+
+      it("lets git gc, in a repository and in its submodule's git folder, and git worktree move finish in an existing repo", async () => {
+        expect(await inRepo("git -C lib gc -q 2>&1; echo rc=$?; git gc -q 2>&1; echo rc=$?", "work")).toBe("rc=0\nrc=0\n");
+        const moved = `${WORKTREE()}-moved`;
+        expect(await inRepo(`git worktree move "${WORKTREE()}" "${moved}" 2>&1; git -C "${moved}" rev-parse --abbrev-ref HEAD`, "work")).toBe("wtb\n");
+        expect(readFileSync(join(shared, "work", ".git", "worktrees", "work-wt", "gitdir"), "utf8")).toBe(`${moved}/.git\n`);
+        expect(spawnSync("git", ["-C", moved, "status", "--porcelain"], { encoding: "utf8" })).toMatchObject({ status: 0, stdout: "" });
+      });
+
+      // Ceilings, each at a file that sends git to a config. git submodule update rewrites the submodule's
+      // core.worktree, renaming its config.lock over .git/modules/<name>/config; a new linked worktree needs
+      // its .git file and its commondir, and a removed one loses them.
+      it("refuses git submodule update, worktree add and worktree remove, at the files that send git to a config", async () => {
+        const work = join(shared, "work");
+        const config = readFileSync(join(work, ".git", "modules", "lib", "config"), "utf8");
+        expect(await inRepo([
+          "git submodule update --init 2>&1; echo rc=$?; git -C lib log -1 --format=%s",
+          // Its lock is git's to make; the rename over the config is what the rule refuses.
+          "touch .git/modules/lib/config.lock && echo locked; mv .git/modules/lib/config.lock .git/modules/lib/config 2>&1; rm .git/modules/lib/config.lock",
+          `git worktree add -q "${shared}/wt-new" -b wt-new 2>&1; echo rc=$?`,
+          'git worktree add -q "$HOME/wt-home" -b wt-home 2>&1; echo rc=$?; rm -rf "$HOME/wt-home"',
+          `git worktree remove --force "${WORKTREE()}-moved" 2>&1; echo rc=$?`,
+        ].join("; "), "work")).toBe([
+          `error: could not write config file ${work}/.git/modules/lib/config: Operation not permitted`,
+          "fatal: could not set 'core.worktree' to '../../../lib'", "rc=128", "one",
+          "locked", "mv: cannot move '.git/modules/lib/config.lock' to '.git/modules/lib/config': Operation not permitted",
+          `fatal: could not open '${shared}/wt-new/.git' for writing: Operation not permitted`, "rc=128",
+          "fatal: could not open '.git/worktrees/wt-home/commondir' for writing: Operation not permitted", "rc=128",
+          `error: failed to delete '${WORKTREE()}-moved': Operation not permitted`,
+          "error: failed to delete '.git/worktrees/work-wt': Operation not permitted", "rc=255", "",
+        ].join("\n"));
+        expect(readFileSync(join(work, ".git", "modules", "lib", "config"), "utf8")).toBe(config);
+        expect([`${WORKTREE()}-moved/.git`, join(work, ".git", "worktrees", "work-wt", "commondir"), `${shared}/wt-new/.git`].map((path) => existsSync(path)))
+          .toEqual([true, true, false]);
+      });
+    });
   });
 
   it("holds its tools in the folders a chat's folder may not be, hold or lie in, and in no other", async () => {
@@ -1139,27 +1233,6 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     expect(await executor.run(operation("poll", { session_id }), signal())).toMatchObject({
       ok: { status: "exited", exit_code: null, note: "The process ended because the computer's sandbox stopped" },
     });
-  });
-
-  it("refuses a command's write to a git config a command made, a rename to make it again, and a write to one a host program replaced since", async () => {
-    const folder = join(dir, "folder");
-    const evil = (config: string) => `(echo '[alias] x = !evil' >> ${config}) 2>&1 | sed 's/.*: //'`;
-    // What a command can do in one go: move the repository's git folder aside, make it again, and write its config.
-    const rebuild = (git: string) => `(mv ${git} ${git}-old && mkdir ${git} && cp -a ${git}-old/. ${git}/ && echo '[core] fsmonitor = ./evil' >> ${git}/config) 2>&1 | sed 's/.*: //'`;
-    try {
-      // The look after a command finds the repository it made: read-only from the next command on.
-      expect(await command("git init -q . && git init -q sub && mkdir sub/.vscode && echo made")).toMatchObject({ ok: { output: "made\n" } });
-      expect(await command(`${evil(".git/config")}; ${evil("sub/.git/config")}`)).toMatchObject({ ok: { output: "Read-only file system\nRead-only file system\n" } });
-      expect(await command(`${rebuild(".git")}; ${rebuild("sub/.git")}; (mv sub/.vscode vscode-old) 2>&1 | sed 's/.*: //'`)).toMatchObject({
-        ok: { output: "Device or resource busy\nDevice or resource busy\nDevice or resource busy\n" },
-      });
-      // git config on the host renames a new file over the old one, which takes the guest's bind with it.
-      expect(spawnSync("git", ["-C", folder, "config", "core.editor", "true"]).status).toBe(0);
-      expect(await command(evil(".git/config"))).toMatchObject({ ok: { output: "Read-only file system\n" } });
-      for (const config of [join(folder, ".git", "config"), join(folder, "sub", ".git", "config")]) expect(readFileSync(config, "utf8")).not.toContain("evil");
-    } finally {
-      for (const name of [".git", "sub", ".git-old", "vscode-old"]) rmSync(join(folder, name), { recursive: true, force: true });
-    }
   });
 
   it("leaves git's own state unbound, so a slow rebase, a cherry-pick sequence and a merge complete, and one stopped for a conflict goes on or is aborted in the next command", { timeout: 120_000 }, async () => {
