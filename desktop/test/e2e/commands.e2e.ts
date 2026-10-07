@@ -143,7 +143,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
       "print(db.execute('pragma journal_mode').fetchone()[0])",
       "EOF",
     ].join("\n");
-    // A shared mapping of the folder's file fails, as the model's note says: WAL fails plainly, and a rollback journal works.
+    // A shared mapping of the folder's file fails, as the model's note says: WAL fails plainly, and a rollback journal works
+    // while nothing on this computer has the database open (it is read here only after the command has ended).
     expect(await operation("run", { command: databases, workdir: null, timeout: 30 })).toEqual(ran("wal: disk I/O error\ndelete\n"));
     // The file tools, on this computer, read what the script wrote; the user's own sqlite reads the database.
     expect(await operation("read", { key: join(folder, "config.status"), max_bytes: null })).toEqual({ ok: Buffer.from("PREFIX=/usr/local\n").toString("base64") });
