@@ -31,10 +31,15 @@ export const INBOX_REOPENING: Reopening = { delayMs: () => 3_000, stop: (failure
 
 /**
  * A project's: three seconds after the first failure and twice as long after each next one, at
- * most a minute apart. It never gives up until *gone* says the project is gone.
+ * most a minute apart. Each wait is cut by up to half at random (*random* in [0, 1]), so that
+ * the streams an API restart drops do not all come back at once. It never gives up until *gone*
+ * says the project is gone.
  */
-export function projectReopening(gone: () => boolean): Reopening {
-  return { delayMs: (failures) => Math.min(3_000 * 2 ** (failures - 1), 60_000), stop: () => gone() };
+export function projectReopening(gone: () => boolean, random: () => number = Math.random): Reopening {
+  return {
+    delayMs: (failures) => Math.min(3_000 * 2 ** (failures - 1), 60_000) * (1 - random() / 2),
+    stop: () => gone(),
+  };
 }
 
 type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -86,6 +91,18 @@ export function reopeningStream<T extends string>(
     listener(event);
   };
 
+  // The wait before the next try, which the network coming back ends at once. While a
+  // connection is open, its own watchdog listens for the network.
+  let waiting: ReturnType<typeof setTimeout> | undefined;
+  function stopWaiting(): void {
+    clearTimeout(waiting);
+    globalThis.removeEventListener?.("online", reopen);
+  }
+  function reopen(): void {
+    stopWaiting();
+    connect();
+  }
+
   function connect(): void {
     if (closed) return;
     const next = open();
@@ -102,7 +119,8 @@ export function reopeningStream<T extends string>(
         surfaced?.();
         return;
       }
-      setTimeout(connect, reopening.delayMs(failures));
+      waiting = setTimeout(reopen, reopening.delayMs(failures));
+      globalThis.addEventListener?.("online", reopen);
     };
   }
 
@@ -117,6 +135,7 @@ export function reopeningStream<T extends string>(
     },
     close() {
       closed = true;
+      stopWaiting();
       source?.close();
       source = null;
     },

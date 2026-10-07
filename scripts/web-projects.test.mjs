@@ -45,7 +45,8 @@ function opened(reopening) {
 
 test("a project's stream opens again after four failures, sooner first, and is live again", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const { stream, connections, surfaced } = opened(projectReopening(() => false));
+  // With no random part, each wait is the whole of its delay.
+  const { stream, connections, surfaced } = opened(projectReopening(() => false, () => 0));
   const heard = [];
   stream.addEventListener("ready", (event) => heard.push(event.data));
   for (const [failed, wait] of [3_000, 6_000, 12_000, 24_000].entries()) {
@@ -74,6 +75,52 @@ test("a project's stream waits at most a minute between tries", (t) => {
     t.mock.timers.tick(60_000);
   }
   assert.equal(connections.length, 11);
+});
+
+test("a project's stream waits between half and all of each delay, at random", () => {
+  const delays = [3_000, 6_000, 12_000, 24_000, 48_000, 60_000, 60_000];
+  for (const [failed, delay] of delays.entries()) {
+    assert.equal(projectReopening(() => false, () => 0).delayMs(failed + 1), delay);
+    assert.equal(projectReopening(() => false, () => 1).delayMs(failed + 1), delay / 2);
+    for (let i = 0; i < 100; i++) {
+      const wait = projectReopening(() => false).delayMs(failed + 1);
+      assert.ok(wait >= delay / 2 && wait <= delay, `${wait} is not within ${delay / 2}..${delay}`);
+    }
+  }
+});
+
+// Node's globalThis has no addEventListener; a browser's window does.
+function withOnline(t) {
+  const target = new EventTarget();
+  globalThis.addEventListener = target.addEventListener.bind(target);
+  globalThis.removeEventListener = target.removeEventListener.bind(target);
+  t.after(() => {
+    globalThis.addEventListener = undefined;
+    globalThis.removeEventListener = undefined;
+  });
+  return () => target.dispatchEvent(new Event("online"));
+}
+
+test("a stream waiting to open again opens at once when the network comes back", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const online = withOnline(t);
+  const { stream, connections } = opened(projectReopening(() => false, () => 0));
+  // Open, it leaves the network to its watchdog.
+  online();
+  assert.equal(connections.length, 1);
+  connections[0].onerror();
+  online();
+  assert.equal(connections.length, 2);
+  // Its wait is over: neither the wait's end nor the network opens it again.
+  t.mock.timers.tick(3_000);
+  online();
+  assert.equal(connections.length, 2);
+  // Closed while it waits, it opens no more.
+  connections[1].onerror();
+  stream.close();
+  online();
+  t.mock.timers.tick(60_000);
+  assert.equal(connections.length, 2);
 });
 
 test("a project's stream stops when the project is gone, and says so", (t) => {
