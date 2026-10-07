@@ -175,6 +175,15 @@ describe("the chat the window shows, followed", () => {
       expect([agent.streams.length, agent.streams[0]!.signal.aborted], reason).toEqual([1, true]);
     }
   });
+
+  it("follows no more, and says nothing of, a chat the agent does not have when its stream opens", async () => {
+    const agent = new FakeAgent();
+    agent.status = 404;
+    const errors: string[] = [];
+    followChat({ api: agent.api, agentId: "a", onError: (error) => errors.push(String(error)), delayMs: () => 0, sessionId: CHAT, onTurnEnd: () => {} });
+    await settle();
+    expect([agent.streams.length, errors]).toEqual([0, []]);
+  });
 });
 
 describe("a burst of inbox items", () => {

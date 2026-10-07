@@ -132,7 +132,13 @@ export function followChat(options: FollowOptions & { sessionId: string; onTurnE
       options.onError(error);
     }
   };
-  const stop = follow(options, () => `/api/v1/sessions/${options.sessionId}/events?after=${after}&watch=1`, (event) => {
+  // A chat the agent does not have as its stream opens, deleted or another organisation's, is gone too.
+  const api: Api = async (path, init) => {
+    const response = await options.api(path, init);
+    if (response.status === 404) stop();
+    return response;
+  };
+  const stop = follow({ ...options, api }, () => `/api/v1/sessions/${options.sessionId}/events?after=${after}&watch=1`, (event) => {
     if (event.id !== null && /^\d+$/.test(event.id)) after = Number(event.id);
     if (event.type === "session.complete") void told();
     else if (event.type === "session.done" && GONE.has(parsed(event.data)?.reason)) stop();
