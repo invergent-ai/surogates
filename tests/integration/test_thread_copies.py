@@ -19,6 +19,9 @@ from surogates.harness import loop_artifact_completion, tool_exec
 from surogates.harness.loop_context_replay import worker_note
 from surogates.harness.tool_exec import _build_session_sandbox_spec
 from surogates.sandbox.history import History
+from surogates.sandbox.base import SandboxSpec
+from surogates.session.provisioning import create_child_session
+from surogates.tools.utils import checkpoint_manager
 from surogates.sandbox.pool import SandboxPool, sandbox_session_key
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry
@@ -484,3 +487,38 @@ async def test_a_reports_excluded_files_and_repositories_are_cut_at_ten_and_say_
         "Not landed, because they are inside a git repository: "
         + ", ".join(f"r{i:02}/" for i in range(10)) + ", and 1 more"
     )
+
+
+async def test_a_thread_never_works_on_or_restores_its_real_files(api, monkeypatch, pods, tmp_path):
+    (pods.project / "Budget.xlsx").write_bytes(b"budget v1")
+    monkeypatch.setattr(checkpoint_manager, "CHECKPOINT_BASE", tmp_path / "checkpoints")
+    thread = await a_thread(api)
+    pool = SandboxPool(pods)
+    # Under the thread's key, a pod with the real files at /workspace, as a
+    # helper's own spec made it before.
+    await pool.ensure(str(thread.id), SandboxSpec(env={}))
+
+    async def the_user_saves_then_stops(harness):
+        (pods.project / "Budget.xlsx").write_bytes(b"budget v2, saved by you")
+        harness.interrupt("stopped by the user")
+
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "Report.docx", "content": "report by the thread"})),
+        calling(("memory", {"action": "add", "content": "Name: Ana"})),
+        _final_response("Done."),
+    ], pool=pool, during=the_user_saves_then_stops)
+    # Its step was refused there, and its Stop restored nothing over the real files.
+    assert (pods.project / "Budget.xlsx").read_bytes() == b"budget v2, saved by you"
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+
+
+async def test_a_threads_helper_on_another_worker_makes_the_threads_own_copy(api, pods):
+    thread = await a_thread(api)
+    store = api.app.state.session_store
+    helper = await create_child_session(store=store, parent=thread, channel="api")
+    owner = sandbox_session_key(helper)
+    spec = await _build_session_sandbox_spec(helper, SimpleNamespace(org_id=helper.org_id, user_id=helper.user_id), owner)
+    # The pod follows its root, the thread: whoever provisions it, it holds the thread's copy.
+    other_worker = SandboxPool(pods)
+    await other_worker.ensure(owner, spec)
+    assert (owner, other_worker.holds_copy(owner), spec.env["HISTORY_THREAD"]) == (str(thread.id), True, str(thread.id))

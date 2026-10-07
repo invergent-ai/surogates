@@ -120,8 +120,11 @@ async def _build_session_sandbox_spec(
     storage_bucket = session.config.get("storage_bucket", "")
     # A project's thread works on its own copy: its pod mounts the real
     # files at /project, and /workspace, the path the model and the tools
-    # know, is the copy.
-    copy = bool(storage_bucket) and is_project_thread(session.config)
+    # know, is the copy.  The layout is the pod's root's: a thread's helper
+    # makes the thread's pod, if it is the first to need it.
+    copy = bool(storage_bucket) and (
+        is_project_thread(session.config) or bool(session.config.get("sandbox_root_thread"))
+    )
     mount_path = PROJECT_MOUNT if copy else _WORKSPACE_MOUNT_PATH
     has_workspace_mount = any(
         r.mount_path == mount_path for r in sandbox_spec.resources
@@ -191,6 +194,9 @@ async def _snapshot_copy(
     try:
         spec = await _build_session_sandbox_spec(session, tenant, owner, credential_vault=credential_vault)
         await sandbox_pool.ensure(owner, spec)
+        # Only a copy is snapshotted: a restore never reaches the real files.
+        if not sandbox_pool.holds_copy(owner):
+            return None
         taken = json.loads(await sandbox_pool.execute(
             owner, "_checkpoint", json.dumps({"action": "take", "reason": reason}),
         ))

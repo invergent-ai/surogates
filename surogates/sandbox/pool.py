@@ -11,7 +11,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from surogates.sandbox.base import SandboxSpec, SandboxStatus
+from surogates.sandbox.base import SandboxSpec, SandboxStatus, SandboxUnavailableError
 
 if TYPE_CHECKING:
     from surogates.sandbox.base import Sandbox
@@ -76,6 +76,10 @@ class SandboxPool:
 
         If the existing sandbox is not healthy (status != ``RUNNING``), it is
         destroyed and a fresh one is provisioned.
+
+        A *spec* for a thread's copy is refused a pod that holds none: a
+        thread's steps never run on, and its Stop never restores over, the
+        real files.
         """
         # Imported here: surogates.devices.sandbox imports this module.
         from surogates.devices.sandbox import DEVICE_SANDBOX_ID, is_device_owner
@@ -93,6 +97,10 @@ class SandboxPool:
                 # Health-check the existing sandbox.
                 status = await self._backend.status(sandbox_id)
                 if status == SandboxStatus.RUNNING:
+                    if "PROJECT_DIR" in spec.env and not self.holds_copy(session_id):
+                        raise SandboxUnavailableError(
+                            "This thread's sandbox holds no copy of the project's files, so its steps cannot run there",
+                        )
                     return sandbox_id
                 # Stale or failed -- clean up and reprovision.
                 logger.warning(

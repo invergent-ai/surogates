@@ -34,6 +34,11 @@ class ThreadPods:
 
     async def provision(self, spec: SandboxSpec) -> str:
         sandbox_id = uuid4().hex
+        if "HISTORY_THREAD" not in spec.env:
+            # A pod with the plain layout: the real files at its workspace.
+            app = executor_server.create_app(token="t", workspace=str(self.project), require_fuse=False)
+            self.pods[sandbox_id] = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://pod")
+            return sandbox_id
         copy = self.root / sandbox_id / "workspace"
         copy.mkdir(parents=True)
         thread = spec.env["HISTORY_THREAD"]
