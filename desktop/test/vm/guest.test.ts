@@ -184,6 +184,29 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     });
   });
 
+  it("stops a command at its timeout, and at a cancel, with everything it started, a process that left its session and its environment too", async () => {
+    const leaving = (seconds: number) =>
+      `env -i /usr/bin/setsid /usr/bin/nohup /usr/bin/sleep ${seconds} < /dev/null > /dev/null 2>&1 & (sleep ${seconds + 1} &); exec sleep ${seconds + 2}`;
+    expect(await run(leaving(311), ROOT, 1)).toEqual({ ok: { output: "Command timed out after 1 seconds", returncode: 124, timed_out: true } });
+    const cancel = new AbortController();
+    const cancelled = guest.op(ROOT, "run", { command: leaving(321), workdir: null, timeout: 60 }, cancel.signal);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    cancel.abort();
+    expect(await cancelled).toEqual(CANCELLED);
+    expect(await run("for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -x sleep > /dev/null || break; sleep 0.1; done; pgrep -c -x sleep || true")).toMatchObject({
+      ok: { output: "0\n" },
+    });
+  });
+
+  it("reaches nothing of this computer past its root's folder: what lies beside it, the user's ~/.ssh, or a write beside it", async () => {
+    expect(await run([
+      `ls -A "${dir}"`,
+      "ls ~/.ssh 2>&1 | sed 's/.*: //'",
+      `(echo x > "${dir}/outside.txt") 2>&1 | sed 's/.*: //'`,
+    ].join("; "))).toEqual({ ok: { output: "my folder's\nNo such file or directory\nPermission denied\n", returncode: 0, timed_out: false } });
+    expect(existsSync(join(dir, "outside.txt"))).toBe(false);
+  });
+
   it("kills a background process with everything it started, and notes one the guest ended for memory", async () => {
     const begin = async (command: string) => ((await guest.op(ROOT, "start", background(command), signal())) as { ok: { session_id: string } }).ok.session_id;
     const session_id = await begin("env -i /usr/bin/setsid /usr/bin/nohup /usr/bin/sleep 304 < /dev/null > /dev/null 2>&1 & exec sleep 305");
@@ -1607,9 +1630,12 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
   // Every prompt the chat's user was shown, and what they answer each network one, after a moment.
   let prompts: ApprovalRequest[];
   let answer: (request: Extract<ApprovalRequest, { kind: "network" }>) => ApprovalAnswer;
+  // Whether the chat's user leaves each network prompt open until it is dismissed.
+  let held: boolean;
   const user: ApprovalPrompts = {
-    approve: async (request) => {
+    approve: async (request, dismissed) => {
       prompts.push(request);
+      if (held && request.kind === "network") return new Promise((resolve) => dismissed.addEventListener("abort", () => resolve("deny"), { once: true }));
       await new Promise((resolve) => setTimeout(resolve, 300));
       return request.kind === "network" ? answer(request) : "allow";
     },
@@ -1648,6 +1674,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
   beforeEach(() => {
     prompts = [];
     answer = () => "allow";
+    held = false;
   });
 
   afterAll(async () => {
@@ -1719,6 +1746,18 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
       ok: { output: "403\n\nThis computer did not allow network access to 10.255.255.1:9.", returncode: 0, timed_out: false },
     });
     expect(networkPrompts()).toEqual([{ host: "10.255.255.1", port: 9, privateNetwork: true }]);
+  });
+
+  it("times a command out at its own timeout while a connection of it waits for its user, and says it still waits", async () => {
+    held = true;
+    expect(await command("curl -sS -o /dev/null http://192.0.2.1:9/ 2>/dev/null; echo done", 3)).toEqual({
+      ok: { output: "Command timed out after 3 seconds\nStill waiting for this computer's user to allow network access to 192.0.2.1:9.", returncode: 124, timed_out: true },
+    });
+    expect(networkPrompts()).toEqual([{ host: "192.0.2.1", port: 9, privateNetwork: false }]);
+    // Once nothing of the chat runs its prompt is dismissed, a denial the next command is told of.
+    expect(await command("echo next")).toEqual({
+      ok: { output: "next\n\nThis computer did not allow network access to 192.0.2.1:9.", returncode: 0, timed_out: false },
+    });
   });
 
   it("shows a command no network device but its own loopback, and no name server", async () => {

@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
+import { readRecord } from "../src/hosts/folder-record.js";
 import { FOLDER_UNAVAILABLE, type HostStart } from "../src/hosts/messages.js";
 import { bound, Harness, PACKAGE } from "./host-harness.js";
 
@@ -20,8 +21,9 @@ let start: HostStart;
 let harnesses: Harness[];
 
 // Bound to its folder as that folder is now, unless the test says otherwise.
-function host(overrides: Partial<HostStart> = {}, cwd?: string): Harness {
-  const harness = new Harness(cwd);
+// *env* is the host's own environment; omitted, it is this process's.
+function host(overrides: Partial<HostStart> = {}, cwd?: string, env?: NodeJS.ProcessEnv): Harness {
+  const harness = new Harness(cwd, env);
   harnesses.push(harness);
   harness.send({ ...start, expect: bound(overrides.folder ?? start.folder), ...overrides });
   return harness;
@@ -35,6 +37,38 @@ async function refusal(harness: Harness): Promise<string> {
   return said.type === "failed" ? said.message : `it answered ${said.type}`;
 }
 const REFUSED = /home folder or the app's own data/;
+// The answer to the request with *id*.
+const result = (harness: Harness, id: string) => harness.until((messages) => {
+  const found = messages.find((message) => message.type === "result" && message.id === id);
+  return found?.type === "result" ? found.outcome : undefined;
+});
+// The folder srt keeps its sockets in for this test's folder, the processes whose command line
+// names it (its socat bridges), and the folder's record.
+const srtTmp = () => {
+  const { dev, ino } = statSync(folder);
+  return join(start.dataDir, "srt", `${dev}-${ino}`);
+};
+const sockets = () => readdirSync(srtTmp()).filter((name) => name.endsWith(".sock"));
+const bridges = () => spawnSync("pgrep", ["-f", `${srtTmp()}/`], { encoding: "utf8" }).stdout.split("\n").filter(Boolean).map(Number);
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const recordOf = () => {
+  const { dev, ino } = statSync(folder);
+  return join(start.dataDir, "folders", `${dev}-${ino}.json`);
+};
+async function until(check: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error("timed out");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
 
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), "host-")));
@@ -326,5 +360,147 @@ describe("a tool host's runs in the guest", { timeout: 30_000 }, () => {
     expect(await harness.exited).toBe(0);
     expect(readFileSync(todo(), "utf8")).toBe(COMMENTED);
     expect(record().state).toBe("stopped");
+  });
+});
+
+describe("a tool host's own sandbox", { timeout: 30_000 }, () => {
+  it("never runs a program from the folder outside its sandbox", async () => {
+    const proof = join(base, "ran-outside");
+    // Anything in the folder may be a command's. srt looks up which and rg through the
+    // host's own PATH: neither a folder entry nor a relative one may count.
+    mkdirSync(join(folder, "bin"));
+    for (const name of ["which", "rg"]) {
+      writeFileSync(join(folder, "bin", name), `#!/bin/sh\ntouch '${proof}'\nexec /usr/bin/${name} "$@"\n`, { mode: 0o755 });
+    }
+    const harness = host({}, folder, { ...process.env, PATH: `${folder}/bin:bin:${process.env.PATH ?? ""}` });
+    await ready(harness);
+    expect(await harness.op("1", "ripgrep", { key: folder, mode: "files", pattern: "*.txt", glob: null, context: 0 })).toEqual({ ok: `${folder}/a.txt\n` });
+    expect(existsSync(proof)).toBe(false);
+  });
+
+  it("never reads the user's shell startup files outside its sandbox", async () => {
+    // srt's outer bash runs out here. With a socket for stdin, as the helper's is, bash
+    // takes itself for a remote shell and reads ~/.bashrc; its output would also spoil
+    // the helper's handshake.
+    const home = join(base, "home");
+    mkdirSync(home);
+    const marker = join(base, "bashrc-ran");
+    writeFileSync(join(home, ".bashrc"), `echo Welcome to my shell\ntouch '${marker}'\n`);
+    const harness = host({ env: { ...start.env, HOME: home } });
+    await ready(harness);
+    expect(await harness.op("1", "resolve", { path: "a.txt" })).toEqual({ ok: `${folder}/a.txt` });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("answers a second host for the same folder, however it is spelled, that another chat has it", async () => {
+    await ready(host());
+    symlinkSync(folder, join(base, "link"));
+    const second = host({ folder: join(base, "link"), tmp: join(base, "data", "tmp", "other") });
+    const said = await second.until((messages) => messages.find((message) => message.type === "failed" || message.type === "ready"), 20_000);
+    expect(said).toEqual({ type: "failed", message: expect.stringMatching(/another chat on this computer is working in this folder/) });
+    expect(await second.exited).toBe(1);
+  });
+
+  it("keeps srt's sockets in the app's data, and a new host ends the bridges a killed one left", async () => {
+    const first = host();
+    await ready(first);
+    const before = sockets();
+    expect(before.length).toBeGreaterThan(0);
+    const left = bridges();
+    expect(left.length).toBeGreaterThan(0);
+    // Killed alone, as when the app dies with it: its sandbox goes with it
+    // (die-with-parent), its socat bridges, outside the sandbox, go on.
+    process.kill(first.child.pid ?? 0, "SIGKILL");
+    await first.exited;
+    expect(left.some(alive)).toBe(true);
+    await ready(host());
+    await until(() => left.filter(alive).length === 0);
+    expect(sockets().filter((name) => before.includes(name))).toEqual([]);
+  });
+
+  it("leaves no socket behind when its helper dies", async () => {
+    const harness = host();
+    await ready(harness);
+    expect(sockets().length).toBeGreaterThan(0);
+    execFileSync("pkill", ["-KILL", "-P", String(harness.child.pid)]);
+    expect(await harness.exited).toBe(1);
+    expect(sockets()).toEqual([]);
+  });
+
+  it("stops cleanly when the app's channel closes", async () => {
+    const harness = host();
+    await ready(harness);
+    harness.child.disconnect();
+    const code = await harness.exited;
+    // Its final look and srt's reset ran: the way out every stop takes.
+    expect({ code, sockets: sockets(), state: readRecord(recordOf())?.state }).toEqual({ code: 0, sockets: [], state: "stopped" });
+  });
+
+  it("says so when the app's data folder's path is too long for srt's sockets", async () => {
+    const harness = host({ dataDir: join(base, "d".repeat(90)), tmp: join(base, "d".repeat(90), "tmp", "root") });
+    expect(await refusal(harness)).toMatch(/too long for the sandbox's sockets/);
+    expect(await harness.exited).toBe(1);
+  });
+
+  it("leaves the user's folder as it was when it is killed, and when the next host starts", async () => {
+    mkdirSync(join(folder, ".git"));
+    const before = readdirSync(folder).sort();
+    const first = host({}, folder);
+    await ready(first);
+    first.killGroup();
+    await first.exited;
+    expect(readdirSync(folder).sort()).toEqual(before);
+    await ready(host({}, folder));
+    expect([readdirSync(folder).sort(), readdirSync(join(folder, ".git"))]).toEqual([before, []]);
+  });
+});
+
+describe("a tool host's record of its folder", { timeout: 30_000 }, () => {
+  const planted = () => join(folder, "sub", ".git", "hooks", "pre-commit");
+  // What a command in the guest leaves through the folder's share: an executable hook.
+  const plant = () => {
+    mkdirSync(dirname(planted()), { recursive: true });
+    writeFileSync(planted(), "#!/bin/sh\n", { mode: 0o755 });
+  };
+  // The refusal before a run in the guest, as the VmExecutor asks it.
+  const before = async (harness: Harness, id: string) => {
+    harness.send({ type: "refusal", id, run: true });
+    return result(harness, id);
+  };
+
+  it("makes the hooks left while a killed host held the folder non-executable before the next host lets a command run, and keeps the user's own", async () => {
+    mkdirSync(join(folder, ".git", "hooks"), { recursive: true });
+    writeFileSync(join(folder, ".git", "hooks", "pre-push"), "#!/bin/sh\n", { mode: 0o755 });
+    const first = host();
+    await ready(first);
+    expect(await before(first, "first")).toEqual({ ok: null });
+    plant();
+    first.killGroup();
+    await first.exited;
+    const second = host();
+    await ready(second);
+    expect(await before(second, "second")).toEqual({ ok: null });
+    expect(statSync(planted()).mode & 0o111).toBe(0);
+    expect(statSync(join(folder, ".git", "hooks", "pre-push")).mode & 0o111).not.toBe(0);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("keeps the record of a host that stopped without seeing the whole folder", async () => {
+    const first = host();
+    await ready(first);
+    expect(await before(first, "first")).toEqual({ ok: null });
+    plant();
+    chmodSync(join(folder, "sub"), 0);
+    try {
+      await first.stop();
+      // Stopped, not killed by the harness: the record stays because of the look.
+      expect(await first.exited).toBe(0);
+    } finally {
+      // The user does what the refusal asked, and a new host starts. Also lets afterEach remove the folder.
+      chmodSync(join(folder, "sub"), 0o755);
+    }
+    const second = host();
+    await ready(second);
+    expect(await before(second, "second")).toEqual({ ok: null });
+    expect(statSync(planted()).mode & 0o111).toBe(0);
   });
 });

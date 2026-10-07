@@ -719,3 +719,17 @@ describe("a paused rebase's or cherry-pick's todo", () => {
     expect(await guard.refusal()).toBeNull();
   });
 });
+
+describe("the guard, in a folder holding a name that is not valid UTF-8", () => {
+  it("refuses commands, naming it as the walk reads it back, and lets them run once it is gone", async () => {
+    // The walk reads the name back with U+FFFD, and no path it can build reaches it.
+    const named = Buffer.concat([Buffer.from(`${folder}/`), Buffer.from([0xff])]);
+    mkdirSync(named);
+    const guard = new HookGuard(folder);
+    expect(await guard.refusal()).toEqual({
+      error: { type: "sandbox", message: expect.stringContaining("Blocked: the computer cannot read � in this folder") },
+    });
+    rmSync(named, { recursive: true });
+    expect(await guard.refusal()).toBeNull();
+  });
+});
