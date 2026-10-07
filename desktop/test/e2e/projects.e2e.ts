@@ -430,9 +430,10 @@ async function projectDialog(shell: ElectronApplication, timeout = 1_000): Promi
   return found!;
 }
 
-const dialogOpen = (shell: ElectronApplication) => shell.evaluate(({ BrowserWindow }) =>
+const overlayOpen = (shell: ElectronApplication, page: string) => shell.evaluate(({ BrowserWindow }, file) =>
   BrowserWindow.getAllWindows()[0]!.contentView.children
-    .some((view) => (view as Electron.WebContentsView).webContents.getURL().endsWith("/project.html")));
+    .some((view) => (view as Electron.WebContentsView).webContents.getURL().endsWith(file)), page);
+const dialogOpen = (shell: ElectronApplication) => overlayOpen(shell, "/project.html");
 
 describe("the project dialog", () => {
   it("makes a new project from its name and goal, lists it at once, and opens its conversation", async () => {
@@ -524,6 +525,28 @@ describe("the project dialog", () => {
       .toBe("The agent's page did not answer create in time: the project may have been made");
     expect(await dialog.inputValue("#name")).toBe("Late");
     await expect.poll(() => texts(page, "#projects .project .name")).toContain("Late");
+  });
+
+  it("opens nothing for a create that lands after its dialog closed, and leaves Settings opened since", async () => {
+    const { shell, page, client } = await signedIn();
+    const before = client.url();
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { lag: number } }).fakeProjects.lag = 1_500;
+    });
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    await dialog.fill("#name", "Escaped");
+    await dialog.click("#save");
+    // Closed while the create is under way, and Settings opened in its place.
+    await dialog.keyboard.press("Escape").catch(() => {});
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    await page.evaluate(() => (window as unknown as { surogateShell: { settings(): Promise<void> } }).surogateShell.settings());
+    await expect.poll(() => overlayOpen(shell, "/settings.html")).toBe(true);
+    await expect.poll(() => texts(page, "#projects .project .name"), { timeout: 5_000 }).toContain("Escaped");
+    expect(await overlayOpen(shell, "/settings.html")).toBe(true);
+    expect(await page.isVisible("#projects-page")).toBe(true);
+    expect(client.url()).toBe(before);
   });
 
   it("saves only what the user changed, and keeps what was changed elsewhere meanwhile", async () => {

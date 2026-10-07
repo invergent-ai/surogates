@@ -1217,9 +1217,11 @@ function showProject(editing: Opened | null): void {
           ? await projects.update(editing.id, change)
           : await projects.create({ name: fields.name, goal: fields.goal });
         remember(project);
+        // A new project opens on its conversation, as one chosen in the sidebar does, unless its dialog
+        // was closed meanwhile: the user has gone on to something else, which a late answer leaves alone.
+        const opening = !editing && main?.settingsContents() === contents;
         close();
-        // A new project opens on its conversation, as one chosen in the sidebar does.
-        if (!editing && webClientPath(`/chat/${project.masterSessionId}`)) {
+        if (opening && webClientPath(`/chat/${project.masterSessionId}`)) {
           choose();
           show({ kind: "project", id: project.id, name: project.name, masterSessionId: project.masterSessionId, thread: null });
           main?.showWeb(true);
