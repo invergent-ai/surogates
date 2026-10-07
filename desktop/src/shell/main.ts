@@ -1697,6 +1697,8 @@ async function quit(): Promise<void> {
   // stops in its order, and nothing brings the window back. Before ready there is nothing to close.
   leaving = true;
   main?.window.hide();
+  // Every other window of the app's goes with it: About, a prompt, the Composio sign-in.
+  for (const window of BrowserWindow.getAllWindows()) if (window !== main?.window) window.close();
   tray?.destroy();
   tray = null;
   notifications?.closeAll();

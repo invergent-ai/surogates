@@ -331,6 +331,24 @@ export async function signIn(shell: ElectronApplication, page: Page, agent: Fake
   return tab;
 }
 
+/**
+ * Quit, and hold the quit once it has gone on, past the window's hide: a sign-in under way, held at who
+ * signed in, keeps the app stopping until the returned release. *page* is the window's own.
+ */
+export async function quitHeld(shell: ElectronApplication, page: Page, agent: FakeAgent): Promise<() => void> {
+  const release = agent.hold("me");
+  const asking = agent.asked.me;
+  const before = (await opened(shell)).length;
+  await page.evaluate(() => (window as unknown as { surogateShell: { signIn(): Promise<void> } }).surogateShell.signIn());
+  await expect.poll(async () => (await opened(shell)).length).toBe(before + 1);
+  void agent.approve((await opened(shell))[before]!).catch(() => {});
+  await expect.poll(() => agent.asked.me).toBe(asking + 1);
+  void shell.evaluate(({ app: electron }) => electron.quit()).catch(() => {});
+  // The quit went on: the inbox is followed no more.
+  await expect.poll(() => agent.inboxStreams.size).toBe(0);
+  return release;
+}
+
 // Signed in as ACCOUNT, and this computer added as Laptop: what most tests start from.
 export async function signedInAndAdded(shell: ElectronApplication, page: Page, agent: FakeAgent): Promise<void> {
   await signIn(shell, page, agent);

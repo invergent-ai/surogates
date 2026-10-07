@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { connect, FakeAgent, opened, signedInAndAdded, webClient } from "./fake-agent.js";
+import { connect, FakeAgent, opened, quitHeld, signedInAndAdded, webClient } from "./fake-agent.js";
 import { dataHome, launch, prompt, quit, shellPage, stubNative } from "./launch.js";
 
 let home: string;
@@ -140,6 +140,22 @@ describe("the app's menu", () => {
     // Escape closes the window before Playwright sends the key up.
     await about!.keyboard.press("Escape").catch(() => {});
     await expect.poll(() => shell.windows().some((page) => page.url().endsWith("/about.html"))).toBe(false);
+  });
+
+  it("closes About with the window when a quit goes on", async () => {
+    const { shell } = await signedIn();
+    const page = await shellPage(shell);
+    await pick(shell, "about");
+    const shown = () => shell.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows().filter((window) => window.isVisible()).map((window) => window.webContents.getURL().split("/").at(-1)).sort());
+    await expect.poll(shown).toEqual(["about.html", "shell.html"]);
+    const release = await quitHeld(shell, page, agent);
+    // While the app still stops, nothing of it is left on the screen.
+    await expect.poll(shown).toEqual([]);
+    const closed = shell.waitForEvent("close");
+    release();
+    await closed;
+    app = undefined;
   });
 
   it("leaves the agent's page as it was on Ctrl+R from a prompt or About, whose windows have no menu", async () => {

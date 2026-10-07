@@ -7,7 +7,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { FIXTURE_IDS, projectFixtures } from "../../../web/src/lib/projects.js";
-import { ACCOUNT, connect, FakeAgent, opened, signedInAndAdded, webClient } from "./fake-agent.js";
+import { ACCOUNT, connect, FakeAgent, quitHeld, signedInAndAdded, webClient } from "./fake-agent.js";
 import { clickNotice, dataHome, launch, notices, press, prompt, promptsShown, quit, shellPage, stubNative, stubNotifications } from "./launch.js";
 
 let home: string;
@@ -62,24 +62,6 @@ async function focus(shell: ElectronApplication): Promise<void> {
     window.focus();
   });
   await expect.poll(() => shell.evaluate(({ BrowserWindow }) => BrowserWindow.getFocusedWindow() !== null)).toBe(true);
-}
-
-/**
- * Quit, and hold the quit once it has gone on, past the window's hide: a sign-in under way, held at who
- * signed in, keeps the app stopping until the returned release. *page* is the window's own.
- */
-async function quitHeld(shell: ElectronApplication, page: Page): Promise<() => void> {
-  const release = agent.hold("me");
-  const asking = agent.asked.me;
-  const before = (await opened(shell)).length;
-  await page.evaluate(() => (window as unknown as { surogateShell: { signIn(): Promise<void> } }).surogateShell.signIn());
-  await expect.poll(async () => (await opened(shell)).length).toBe(before + 1);
-  void agent.approve((await opened(shell))[before]!).catch(() => {});
-  await expect.poll(() => agent.asked.me).toBe(asking + 1);
-  void shell.evaluate(({ app: electron }) => electron.quit()).catch(() => {});
-  // The quit went on: the inbox is followed no more.
-  await expect.poll(() => agent.inboxStreams.size).toBe(0);
-  return release;
 }
 
 // The held quit released, and the app gone.
@@ -195,7 +177,7 @@ describe("the app's notifications", () => {
     await hide(app!);
     await expect.poll(() => agent.inboxStreams.size).toBe(1);
     await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(1);
-    const release = await quitHeld(app!, page);
+    const release = await quitHeld(app!, page, agent);
     // The inbox and the chat are followed no more: what comes now raises nothing.
     await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(0);
     agent.tell({ kind: "input_required", title: "Which report should I start from?", session_id: OTHER });
@@ -214,7 +196,7 @@ describe("the app's notifications", () => {
     const read = agent.hold("item");
     agent.tell({ kind: "input_required", title: "Which report should I start from?", session_id: OTHER });
     await expect.poll(() => agent.asked.item).toBe(1);
-    const release = await quitHeld(app!, page);
+    const release = await quitHeld(app!, page, agent);
     read();
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(await notices(app!)).toEqual([]);
@@ -232,7 +214,7 @@ describe("the app's notifications", () => {
     const read = agent.hold("title");
     agent.turnEnds(CHAT);
     await expect.poll(() => agent.asked.title).toBe(1);
-    const release = await quitHeld(app!, page);
+    const release = await quitHeld(app!, page, agent);
     read();
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(await notices(app!)).toEqual([]);
@@ -243,7 +225,7 @@ describe("the app's notifications", () => {
     const client = await signedIn();
     const page = await shellPage(app!);
     await hide(app!);
-    const release = await quitHeld(app!, page);
+    const release = await quitHeld(app!, page, agent);
     // The web client still runs while the app stops, and asks for a folder over the hidden window.
     void client.evaluate(() => window.surogateDesktop!.prepareFolder("pick")).catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -259,7 +241,7 @@ describe("the app's notifications", () => {
     agent.tell({ kind: "input_required", title: "Which report should I start from?", session_id: CHAT });
     await expect.poll(async () => (await notices(app!)).length).toBe(1);
     const before = client.url();
-    const release = await quitHeld(app!, page);
+    const release = await quitHeld(app!, page, agent);
     await clickNotice(app!, 0);
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect([await shown(app!), client.url()]).toEqual([false, before]);
