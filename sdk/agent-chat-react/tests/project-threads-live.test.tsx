@@ -23,12 +23,13 @@ import type {
 
 const THREAD = "2d8a5e3a-ac4f-4e7a-9b32-3c4d5e6f7081";
 
-class FakeProjectStream implements AgentChatProjectStream {
+// A project's stream, or a session's, whose events carry their ids.
+class FakeStream implements AgentChatProjectStream {
   onerror: (() => void) | null = null;
   closed = false;
   private readonly listeners = new Map<string, Array<(event: AgentChatInboxStreamEvent) => void>>();
 
-  addEventListener(type: "ready" | "change", listener: (event: AgentChatInboxStreamEvent) => void): void {
+  addEventListener(type: string, listener: (event: AgentChatInboxStreamEvent) => void): void {
     this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
   }
 
@@ -36,8 +37,9 @@ class FakeProjectStream implements AgentChatProjectStream {
     this.closed = true;
   }
 
-  emit(type: "ready" | "change", data: Record<string, unknown> = {}): void {
-    for (const listener of this.listeners.get(type) ?? []) listener({ data: JSON.stringify(data) });
+  emit(type: string, data: Record<string, unknown> = {}, eventId?: number): void {
+    const event = { data: JSON.stringify(data), lastEventId: eventId === undefined ? undefined : String(eventId) };
+    for (const listener of this.listeners.get(type) ?? []) listener(event);
   }
 }
 
@@ -45,7 +47,7 @@ function row(overrides: Partial<AgentChatThreadRow> = {}): AgentChatThreadRow {
   return { id: THREAD, title: "Draft A", group: "working", reason: null, statusLine: null, progress: null, files: [], ...overrides };
 }
 
-function project(stream: FakeProjectStream, rows: () => AgentChatThreadRow[]) {
+function project(stream: FakeStream, rows: () => AgentChatThreadRow[]) {
   return {
     listProjectThreads: vi.fn(async ({ threadId }: { projectId: string; threadId?: string }) =>
       rows().filter((found) => threadId === undefined || found.id === threadId)),
@@ -84,7 +86,7 @@ async function settle(): Promise<void> {
 
 describe("a thread's card, live", () => {
   it("moves from working to waiting on a question, to idle, to resolved, as the stream tells it", async () => {
-    const stream = new FakeProjectStream();
+    const stream = new FakeStream();
     let current = row({ statusLine: "Writing the outlook", progress: { done: 1, total: 2 } });
     const live = project(stream, () => [current]);
     const adapter = { ...NO_BROWSER_ADAPTER, ...live } as unknown as AgentChatAdapter;
@@ -131,13 +133,61 @@ describe("a thread's card, live", () => {
     expect(status()).toBe("Working");
   });
 
+  it("gives a master's cards, through AgentChat, their rows, their Start and their View thread", async () => {
+    const PROPOSAL = "5d1c0e7a-3f42-4b8e-9a61-2c7d8e9f0a1b";
+    const events = new FakeStream();
+    const projectStream = new FakeStream();
+    const live = project(projectStream, () => [row({ group: "waiting", reason: "question", statusLine: "Which year?" })]);
+    const startProposedThread = vi.fn(async ({ key }: { key: string }) => row({ id: `thread-${key}` }));
+    const onSessionChange = vi.fn();
+    const adapter = {
+      ...NO_BROWSER_ADAPTER,
+      ...live,
+      startProposedThread,
+      listSessions: async () => ({ sessions: [], total: 0 }),
+      getSession: async ({ sessionId }: { sessionId: string }) => ({
+        id: sessionId, status: "completed", config: { workstream_role: "coordinator", workstream_id: "project-1" },
+      }),
+      openEventStream: () => events,
+    } as unknown as AgentChatAdapter;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="master" onSessionChange={onSessionChange} />);
+    });
+    await settle();
+    act(() => {
+      events.emit("thread.proposed", { proposal_id: PROPOSAL, threads: [
+        { key: "1", title: "Draft A", goal: "Draft the A memo.", where: "cloud" },
+        { key: "2", title: "Summarise B", goal: "Summarise B.pdf.", where: "cloud" },
+      ] }, 1);
+      events.emit("worker.spawned", {
+        worker_id: THREAD, title: "Draft A", goal: "Draft the A memo.", started_by: "user", proposal_id: PROPOSAL, key: "1",
+      }, 2);
+    });
+    projectStream.emit("ready");
+    await settle();
+
+    const workerCard = container.querySelector('[data-testid="worker-card"]')!;
+    expect(workerCard.querySelector('[data-testid="worker-card-status"]')?.textContent).toBe("Waiting on you");
+    expect(workerCard.textContent).toContain("Which year?");
+
+    act(() => [...workerCard.querySelectorAll("button")].find((found) => found.textContent === "View thread")?.click());
+    expect(onSessionChange).toHaveBeenLastCalledWith(THREAD);
+
+    const second = container.querySelectorAll('[data-testid="proposed-thread"]')[1]!;
+    await act(async () => [...second.querySelectorAll("button")].find((found) => found.textContent === "Start")?.click());
+    expect(startProposedThread).toHaveBeenCalledWith({ projectId: "project-1", proposalId: PROPOSAL, key: "2" });
+  });
+
   it("follows the project of a master's conversation, and only a master's", async () => {
     for (const [config, followed] of [
       [{ workstream_role: "coordinator", workstream_id: "project-1" }, true],
       [{ workstream_role: "thread", workstream_id: "project-1" }, false],
       [{}, false],
     ] as const) {
-      const stream = new FakeProjectStream();
+      const stream = new FakeStream();
       const live = project(stream, () => []);
       const adapter = {
         ...NO_BROWSER_ADAPTER,
