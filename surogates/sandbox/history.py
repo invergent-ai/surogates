@@ -19,7 +19,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from surogates.tools.utils.checkpoint_manager import DEFAULT_EXCLUDES, _git_env
+from surogates.tools.utils.checkpoint_manager import DEFAULT_EXCLUDES
 
 #: Where a thread's pod mounts the project's real files.
 PROJECT_MOUNT = "/project"
@@ -39,10 +39,16 @@ HISTORY_EXCLUDES = [e for e in DEFAULT_EXCLUDES if e != "*.log"] + [
 
 _GIT_TIMEOUT = 120
 _ZERO = "0" * 40
-#: Only the repository's own config: none from the pod's home, where a
-#: thread's commands can write, and none from the system.  Paths are read
-#: as spelt: a file may be named ``:notes.md``.
-_HERMETIC = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_LITERAL_PATHSPECS": "1"}
+#: Only the repository's own config, ignores and attributes: none from the
+#: pod's home, where a thread's commands can write, and none from the
+#: system.  Paths are read as spelt: a file may be named ``:notes.md``.
+_HERMETIC = {
+    "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_ATTR_NOSYSTEM": "1",
+    "XDG_CONFIG_HOME": "/dev/null/none", "GIT_LITERAL_PATHSPECS": "1",
+}
+#: A file's bytes are history's as they are: no project, home or system
+#: ``.gitattributes`` converts line endings or runs a filter on them.
+_ATTRIBUTES = "* -text -filter -ident -working-tree-encoding\n"
 
 
 class HistoryError(RuntimeError):
@@ -83,6 +89,7 @@ class History:
                 self._main("config", "user.email", "surogates@local")
                 (self.repo / "info").mkdir(exist_ok=True)
                 (self.repo / "info" / "exclude").write_text("\n".join(HISTORY_EXCLUDES) + "\n")
+                (self.repo / "info" / "attributes").write_text(_ATTRIBUTES)
                 self._main("add", "-A")
                 name, email = self.user, f"user:{self.user}@surogate"
                 self._main(
@@ -100,7 +107,7 @@ class History:
         # --lock: git gc must not prune a worktree whose .git file is gone.
         self._git(
             ["worktree", "add", "-q", "--lock", str(self.copy), f"threads/{self.thread}"],
-            env={"GIT_DIR": str(self.repo)}, cwd=self.repo, unset=("GIT_WORK_TREE",),
+            env={"GIT_DIR": str(self.repo)}, cwd=self.repo,
         )
         (self.copy / ".git").unlink()
 
@@ -255,7 +262,7 @@ class History:
         with open(staged, "wb") as out:
             result = subprocess.run(
                 ["git", "cat-file", "blob", blob], stdout=out, stderr=subprocess.PIPE,
-                env={**_git_env(self.repo, str(self.project)), **_HERMETIC}, timeout=_GIT_TIMEOUT,
+                env=_environ({"GIT_DIR": str(self.repo)}), timeout=_GIT_TIMEOUT,
             )
         if result.returncode != 0:
             staged.unlink()
@@ -278,16 +285,10 @@ class History:
         """Git in the copy, on the thread's branch."""
         return self._git(list(args), env={"GIT_DIR": str(self._admin), "GIT_WORK_TREE": str(self.copy)}, cwd=self.copy)
 
-    def _git(
-        self, args: list[str], *, env: dict[str, str], cwd: Path, unset: tuple[str, ...] = (),
-    ) -> str:
-        full = _git_env(Path(env["GIT_DIR"]), env.get("GIT_WORK_TREE", str(cwd)))
-        full.update(env, **_HERMETIC)
-        for name in unset:
-            full.pop(name, None)
+    def _git(self, args: list[str], *, env: dict[str, str], cwd: Path) -> str:
         try:
             result = subprocess.run(
-                ["git", *args], capture_output=True, text=True, env=full, cwd=cwd,
+                ["git", *args], capture_output=True, text=True, env=_environ(env), cwd=cwd,
                 timeout=_GIT_TIMEOUT,
             )
         except subprocess.TimeoutExpired as exc:
@@ -295,6 +296,12 @@ class History:
         if result.returncode != 0:
             raise HistoryError(f"git {args[0]} failed: {result.stderr.strip()}")
         return result.stdout.strip()
+
+
+def _environ(env: dict[str, str]) -> dict[str, str]:
+    """The pod's environment for a git with *env*: none of the pod's own git variables reach it."""
+    inherited = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    return {**inherited, **env, **_HERMETIC}
 
 
 def _as(author: dict[str, str]) -> list[str]:

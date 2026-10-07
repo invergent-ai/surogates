@@ -282,3 +282,43 @@ def test_the_first_thread_of_an_empty_project_lands(tmp_path):
     out = landed(history)
     assert [c["path"] for c in out["changes"]] == ["Plan.docx"]
     assert (empty / "Plan.docx").read_bytes() == b"plan"
+
+
+def test_a_projects_gitattributes_never_change_a_files_bytes(tmp_path, project):
+    docx = b"PK\x03\x04\r\n\x00 report v1\r\n"
+    (project / ".gitattributes").write_text("* eol=lf\n")
+    (project / "Report.docx").write_bytes(docx)
+    history = opened(tmp_path, project)
+    assert (history.copy / "Report.docx").read_bytes() == docx
+    # A thread that changes the rules lands them too, with the files after them.
+    (history.copy / ".gitattributes").write_text("* text=auto eol=crlf\n")
+    (history.copy / "Report.docx").write_bytes(docx + b"edited\r\n")
+    out = landed(history)
+    assert out["overlapped"] == []
+    assert (project / "Report.docx").read_bytes() == docx + b"edited\r\n"
+    assert (project / ".gitattributes").read_text() == "* text=auto eol=crlf\n"
+
+
+def test_the_pods_own_git_settings_never_reach_the_history(tmp_path, project, monkeypatch):
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "post-commit").write_text(f"#!/bin/sh\ntouch '{tmp_path / 'hook ran'}'\n")
+    (hooks / "post-commit").chmod(0o755)
+    (tmp_path / "xdg" / "git").mkdir(parents=True)
+    (tmp_path / "xdg" / "git" / "ignore").write_text("*.xlsx\n")
+    (tmp_path / "xdg" / "git" / "attributes").write_text("* eol=lf\n")
+    (project / "Budget.xlsx").write_bytes(b"budget\r\n")
+    for name, value in {
+        "GIT_AUTHOR_NAME": "Someone Else", "GIT_AUTHOR_EMAIL": "else@example.com",
+        "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": str(hooks),
+        "XDG_CONFIG_HOME": str(tmp_path / "xdg"),
+    }.items():
+        monkeypatch.setenv(name, value)
+    history = opened(tmp_path, project)
+    assert (history.copy / "Budget.xlsx").read_bytes() == b"budget\r\n"
+    (history.copy / "Report.docx").write_bytes(b"report v2")
+    out = landed(history)
+    assert git(history, "log", "-1", "--format=%an <%ae>", f"{out['commit']}^1") == "u1 <user:u1@surogate>"
+    for commit in (out["turn"], out["commit"]):
+        assert git(history, "log", "-1", "--format=%an <%ae>", commit) == "Draft A <thread:t1@surogate>"
+    assert not (tmp_path / "hook ran").exists()
