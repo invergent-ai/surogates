@@ -14,8 +14,9 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from surogates.db.engine import async_engine_from_settings
 from surogates.harness.budget import IterationBudget
 from surogates.harness.context import ContextCompressor
 from surogates.harness.loop import AgentHarness
@@ -1241,22 +1242,10 @@ async def run_worker(settings: Settings) -> None:
     # hits disk for prompt prose.
     default_prompt_library().validate()
 
-    # 1. Database
-    # asyncpg's prepared-statement cache must be off behind PgBouncer
-    # transaction-mode pooling — cached plans are bound to backends that
-    # get swapped between transactions. Harmless on a direct PG connection.
-    db_connect_args: dict = {}
-    if "asyncpg" in settings.db.url:
-        db_connect_args = {
-            "statement_cache_size": 0,
-            "prepared_statement_cache_size": 0,
-        }
-    engine = create_async_engine(
-        settings.db.url,
-        pool_size=settings.db.pool_size,
-        max_overflow=settings.db.pool_overflow,
-        connect_args=db_connect_args,
-    )
+    # 1. Database: the API's engine, safe behind PgBouncer, and pre-pinged:
+    # a project's lock lost with its connection leaves that connection dead
+    # in the pool, and a pinged pool never lends it.
+    engine = async_engine_from_settings(settings.db)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     # 2. Redis
