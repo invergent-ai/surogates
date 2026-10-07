@@ -342,6 +342,34 @@ async def test_only_the_chats_own_user_pauses_it_or_answers_its_question(api, se
     assert theirs.status_code == 200, theirs.text
 
 
+async def test_only_the_chats_own_user_reads_what_it_is(api, session_factory):
+    device = await register(api)
+    store = api.app.state.session_store
+    session_id = await local_chat(api, device["id"])
+    child = await create_child_session(store=store, parent=await store.get_session(UUID(session_id)), channel="worker")
+    _member_id, member = await add_user(session_factory, api.org_id)
+    routes = ("/v1/sessions/{}", "/v1/sessions/{}/tree", "/v1/sessions/{}/children")
+    for route in routes:
+        refused = await api.client.get(route.format(session_id), headers=api.auth(member))
+        # Neither its computer's name nor its folder's path: what a stranger gets.
+        assert refused.status_code == 404, (route, refused.text)
+    # Its own user reads it, and its tree still lists its sub-agent's chat.
+    mine = await api.client.get(f"/v1/sessions/{session_id}", headers=api.auth())
+    assert mine.status_code == 200, mine.text
+    tree = await api.client.get(f"/v1/sessions/{session_id}/tree", headers=api.auth())
+    assert tree.status_code == 200, tree.text
+    assert [node["id"] for node in tree.json()["nodes"]] == [session_id, str(child.id)]
+    children = await api.client.get(f"/v1/sessions/{session_id}/children", headers=api.auth())
+    assert children.status_code == 200, children.text
+    assert [node["id"] for node in children.json()["children"]] == [str(child.id)]
+    # A cloud chat stays the org's, as before.
+    cloud = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    assert cloud.status_code == 201, cloud.text
+    for route in routes:
+        theirs = await api.client.get(route.format(cloud.json()["id"]), headers=api.auth(member))
+        assert theirs.status_code == 200, (route, theirs.text)
+
+
 async def test_a_sub_agents_chat_is_its_roots_users(api, session_factory):
     device = await register(api)
     store = api.app.state.session_store

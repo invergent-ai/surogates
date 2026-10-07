@@ -1478,7 +1478,10 @@ async def get_session(
 ) -> Session:
     """Retrieve metadata for a single session."""
     _require_service_account_api_route(request, tenant)
-    return await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
+    # A local-folder chat names its user's computer and folder: theirs to read.
+    await require_device_access(request, session, tenant, bound=False)
+    return session
 
 
 def _tree_node_from_row(row: dict) -> SessionTreeNode:
@@ -1549,7 +1552,9 @@ async def get_session_tree(
     ``session.config.agent_type``) so the frontend can display badges
     for sub-agent types without extra lookups.
     """
-    await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
+    # A local-folder chat's tree names its user's computer: theirs to read. Its sessions are its root's user's.
+    await require_device_access(request, session, tenant, bound=False)
 
     session_factory = request.app.state.session_factory
     agent_id = agent_runtime.agent_id
@@ -1616,7 +1621,9 @@ async def get_session_children(
     Authorization: the parent session must belong to this tenant and
     agent; child rows inherit tenancy.
     """
-    await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
+    # A local-folder chat's children name its user's computer: theirs to read.
+    await require_device_access(request, session, tenant, bound=False)
 
     session_factory = request.app.state.session_factory
     agent_id = agent_runtime.agent_id
