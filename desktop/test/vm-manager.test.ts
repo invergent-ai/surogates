@@ -15,7 +15,7 @@ import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { bootLinux, sweep } from "../src/vm/linux.js";
-import { type BootVm, bootFor, type Folder, Guest, type ProcessesChange, type VmBackend, VmManager, type VmOptions } from "../src/vm/manager.js";
+import { type BootVm, bootFor, type Folder, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions } from "../src/vm/manager.js";
 import { VIRTIOFSD } from "../src/vm/qemu.js";
 
 let dir: string;
@@ -829,6 +829,26 @@ describe("a guest's lifecycle", () => {
     expect(await which(manager)).toEqual({ ok: true });
     expect(performance.now() - begun).toBeGreaterThan(900);
     await manager.stop();
+  });
+
+  it("answers what waits out a crashed guest's backoff as stopping, at once, when it is stopped", async () => {
+    const events: string[] = [];
+    const vms: VmBackend[] = [];
+    const boot: BootVm = async (...args) => {
+      const vm = await counted(events)(...args);
+      vms.push(vm);
+      return vm;
+    };
+    const manager = new VmManager(options(), boot);
+    expect(await which(manager)).toEqual({ ok: true });
+    vms[0]?.control.destroy();
+    await until(() => events.includes("gone"));
+    const waiting = which(manager);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const stopped = manager.stop();
+    expect(await within(waiting, 500)).toEqual(unavailable("is stopping"));
+    expect(await within(stopped, 500)).toBeUndefined();
+    expect(events).toEqual(["boot", "gone"]);
   });
 
   it("boots again on a new sessions disk when the guest could not check its own, and keeps the old one beside it", async () => {
