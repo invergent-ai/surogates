@@ -59,9 +59,14 @@ export function qemuArgs(disks: Disks, run: string, console: string, cpus = gues
 // One folder's daemon, in its namespace sandbox, which can reach nothing outside the
 // folder: it maps the host user to the root's guest uid, so the root's files are its
 // own in the guest and the host user's on the host.
+// Uncached (spec, Section 11, Folders): the guest keeps no name or attribute, so a command
+// sees at once what the file tools or the user wrote, and forgets each file it is done
+// with. Unprivileged, the daemon holds a descriptor for each file the guest keeps, up to
+// the user's hard limit; with cache=auto the guest kept every file it had looked at, and a
+// 150 000-file node_modules ran it out of them.
 export function virtiofsdArgs(folder: string, socket: string, guestUid: number, host: { uid: number; gid: number }): string[] {
   return [
-    `--shared-dir=${folder}`, `--socket-path=${socket}`, "--sandbox=namespace", "--cache=auto",
+    `--shared-dir=${folder}`, `--socket-path=${socket}`, "--sandbox=namespace", "--cache=never",
     `--uid-map=:${guestUid}:${host.uid}:1:`, `--gid-map=:${guestUid}:${host.gid}:1:`,
   ];
 }

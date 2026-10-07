@@ -49,9 +49,9 @@ describe("QEMU's command line", () => {
     expect([1, 2, 3, 8, 20].map((threads) => guestCpus(threads))).toEqual([1, 1, 1, 4, 4]);
   });
 
-  it("maps the host user to the root's guest uid in its folder's virtiofsd", () => {
+  it("maps the host user to the root's guest uid in its folder's virtiofsd, which the guest does not cache", () => {
     expect(virtiofsdArgs("/home/ana/My folder's", "/run/vm/vfs-1.sock", 10_001, { uid: 1000, gid: 1001 })).toEqual([
-      "--shared-dir=/home/ana/My folder's", "--socket-path=/run/vm/vfs-1.sock", "--sandbox=namespace", "--cache=auto",
+      "--shared-dir=/home/ana/My folder's", "--socket-path=/run/vm/vfs-1.sock", "--sandbox=namespace", "--cache=never",
       "--uid-map=:10001:1000:1:", "--gid-map=:10001:1001:1:",
     ]);
   });

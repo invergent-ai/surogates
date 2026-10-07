@@ -72,6 +72,12 @@ const newestDaemon = (run: string) => {
   const newest = Math.max(...readdirSync(run).map((name) => Number(/^vfs-(\d+)\.pid$/.exec(name)?.[1] ?? 0)));
   return Number(readFileSync(join(run, `vfs-${newest}.pid`), "utf8"));
 };
+// How many descriptors the newest share's virtiofsd holds, its child that serves the share included.
+const descriptors = (run: string) => {
+  const daemon = newestDaemon(run);
+  const children = spawnSync("pgrep", ["-P", String(daemon)], { encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean).map(Number);
+  return [daemon, ...children].reduce((sum, pid) => sum + readdirSync(`/proc/${pid}/fd`).length, 0);
+};
 const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
 
 // The agent disk from the built agent, into *dir*.
@@ -540,6 +546,69 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     );
   });
 
+  it("takes a folder of 150 000 files, as a node_modules is, with descriptors to spare", { timeout: 900_000 }, async () => {
+    const big = join(dir, "big");
+    // 1 500 packages of 100 files each, tracked by git, as the host made them.
+    for (let p = 0; p < 1_500; p += 1) {
+      mkdirSync(join(big, "node_modules", `p${p}`), { recursive: true });
+      writeFileSync(join(big, "node_modules", `p${p}`, "package.json"), "{}\n");
+      for (let f = 0; f < 99; f += 1) writeFileSync(join(big, "node_modules", `p${p}`, `f${f}.js`), "");
+    }
+    expect(spawnSync("bash", ["-c", "git init -q && git add -A && git -c user.email=a@b -c user.name=a commit -qm init"], { cwd: big }).status).toBe(0);
+    const timed = async (command: string) => {
+      const begun = performance.now();
+      const outcome = await guest.op("root-big", "run", { command, workdir: null, timeout: 600 }, signal()) as { ok: { output: string; returncode: number } };
+      return { ...outcome.ok, ms: performance.now() - begun };
+    };
+    try {
+      expect(await guest.ready("root-big", folderOf(big))).toBeNull();
+      // The first rehashes every file: the guest's owner is not the one the host's index holds.
+      const first = await timed("git status --porcelain 2>&1 | wc -l");
+      const again = await timed("git status --porcelain 2>&1 | wc -l");
+      const walk = await timed("find node_modules -type f 2>&1 | wc -l");
+      // What an install writes: a file at a time, 150 000 of them.
+      const write = await timed("python3 -c 'import os\nfor p in range(1500):\n    os.makedirs(f\"made/p{p}\")\n    for f in range(100): open(f\"made/p{p}/f{f}.js\", \"w\").close()' 2>&1; find made -type f | wc -l");
+      const held = descriptors(options.run);
+      console.log(
+        `M9: git status ${(first.ms / 1000).toFixed(1)} s first, ${(again.ms / 1000).toFixed(1)} s again; find ${(walk.ms / 1000).toFixed(1)} s; ` +
+        `150 000 files written ${(write.ms / 1000).toFixed(1)} s; virtiofsd holds ${held} descriptors`,
+      );
+      expect([first.output, again.output, walk.output, write.output]).toEqual(["0\n", "0\n", "150000\n", "150000\n"]);
+      expect(held).toBeLessThan(1_000);
+    } finally {
+      await guest.teardown("root-big");
+      rmSync(big, { recursive: true, force: true });
+    }
+  });
+
+  it("maps a folder's file for one process's own use, and refuses to share a mapping of it, as virtiofsd 1.10 serves an uncached file", async () => {
+    const mapped = await run([
+      "python3 - <<'EOF'",
+      "import mmap, sqlite3",
+      "with open('mapped', 'w+b') as f:",
+      "    f.write(b'x' * 4096)",
+      "    f.flush()",
+      "    try:",
+      "        mmap.mmap(f.fileno(), 4096, mmap.MAP_SHARED)",
+      "        print('shared')",
+      "    except OSError as error:",
+      "        print('shared', error.errno)",
+      "    mmap.mmap(f.fileno(), 4096, mmap.MAP_PRIVATE)",
+      "    print('private')",
+      "try:",
+      "    db = sqlite3.connect('wal.db')",
+      "    db.execute('pragma journal_mode=wal')",
+      "    db.execute('create table t (x)')",
+      "    print('wal')",
+      "except sqlite3.Error as error:",
+      "    print('wal', error)",
+      "EOF",
+      "rm -f mapped wal.db wal.db-wal wal.db-shm",
+    ].join("\n"));
+    // A shared mapping of a file opened for direct I/O needs virtiofsd's --allow-mmap, which 1.10 has not; SQLite's WAL maps its index so.
+    expect(mapped).toEqual({ ok: { output: "shared 19\nprivate\nwal disk I/O error\n", returncode: 0, timed_out: false } });
+  });
+
   it("repairs a sessions disk the quick check cannot, and keeps the homes on it", async () => {
     expect(await run("echo kept > ~/kept; touch ~/victim; sync")).toEqual({ ok: { output: "", returncode: 0, timed_out: false } });
     await guest.stop();
@@ -976,6 +1045,28 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     } finally {
       for (const name of [".git", "sub", ".git-old", "vscode-old"]) rmSync(join(folder, name), { recursive: true, force: true });
     }
+  });
+
+  it("shows a command what the file tools wrote just before it, each time, with nothing to wait for", async () => {
+    const folder = join(dir, "folder");
+    const key = join(folder, "lint.py");
+    const write = (text: string) => executor.run(operation("write", { key, data: Buffer.from(text).toString("base64") }), signal());
+    let stale = 0;
+    let begun = performance.now();
+    for (let i = 0; i < 1_000; i += 1) {
+      expect(await write(`x = ${i}\n`)).toEqual({ ok: null });
+      if ((await command("cat lint.py") as { ok: { output: string } }).ok.output !== `x = ${i}\n`) stale += 1;
+    }
+    const seen = (performance.now() - begun) / 1_000;
+    // A patch, then its lint, fifty times: the lint sees each patch.
+    begun = performance.now();
+    for (let i = 0; i < 50; i += 1) {
+      expect(await write(i % 2 ? `x = ${i}\n` : "x = (\n")).toEqual({ ok: null });
+      expect(await command("python3 -m py_compile lint.py 2>/dev/null && echo clean || echo broken")).toMatchObject({ ok: { output: i % 2 ? "clean\n" : "broken\n" } });
+    }
+    console.log(`M4: ${stale} of 1000 commands right after a write saw the old file; a write and the command after it ${seen.toFixed(1)} ms, a patch and its lint ${((performance.now() - begun) / 50).toFixed(0)} ms`);
+    expect(stale).toBe(0);
+    rmSync(key, { force: true });
   });
 
   it("ends what a command left running once the chat's file host lets its folder go", async () => {
