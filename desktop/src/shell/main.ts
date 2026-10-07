@@ -18,14 +18,15 @@ import type { DesktopAccount } from "../../../web/src/lib/desktop-bridge-contrac
 import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow } from "../../../web/src/lib/projects-contract.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { appEnvironment } from "../hosts/environment.js";
+import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../vm/client.js";
 import { VmExecutor } from "../vm/executor.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, linksFor, linkUrl, partitionFor } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
-import { rebind, register } from "./computer.js";
-import { type Credential, CredentialStore } from "./credentials.js";
+import { reauthorize, rebind, register } from "./computer.js";
+import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { letWindowClose, MainWindow, onSettingsKey } from "./main-window.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
@@ -69,6 +70,15 @@ const apiFetch: Fetch = (url, init) => net.fetch(url, init);
 // Devices logged out while the agent could not hear it, by device: each revoked on a link of its own once it can.
 const revocations = new Map<string, { done: Promise<void>; stop(): Promise<void> }>();
 let signingOut = false;
+// A device the agent revoked, being cleaned up: a restore waits for it.
+let retiring: Promise<void> = Promise.resolve();
+let restoring = false;
+let restoreFailure: string | null = null;
+// A kept computer whose token a later sign-in rotates: the agent closes its old link as revoked, which retires nothing.
+let rotating: Credential | null = null;
+
+// A credential whose token the agent still takes: one a device can start on.
+const live = (credential: Credential | null): credential is LiveCredential => credential?.token != null;
 // The commands' environment, read from the login shell once.
 let environment: Promise<Record<string, string>>;
 // This computer's credential for the agent, as stored: what the page is told, and what keeps a second registration out.
@@ -335,7 +345,7 @@ function navigated(url: string): void {
  * environment comes from a login shell, which can take seconds, and the shell shows it as
  * connecting meanwhile. A start that fails leaves no device.
  */
-function startStack(agent: Agent, credential: Credential): Promise<DeviceStack> {
+function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceStack> {
   const started = environment.then((env) => startDevice({
     journalPath: join(root, "devices", credential.deviceId, "journal.sqlite"),
     url: linkUrl(agent.origin),
@@ -348,6 +358,8 @@ function startStack(agent: Agent, credential: Credential): Promise<DeviceStack> 
     approvalPrompts: refusingApprovals,
     onStatus: (status) => {
       if (device?.credential === credential) device.status = status;
+      // The agent ended this token while it is this computer's: cleaned up here, its folders kept for a restore.
+      if ((status === "revoked" || status === "unauthenticated") && kept === credential && rotating !== credential) void retire(credential);
       changed();
     },
     onWorking: (count) => {
@@ -423,7 +435,9 @@ async function registerComputer(agent: Agent): Promise<void> {
 async function bindToComputer(agent: Agent): Promise<void> {
   const session = signedIn;
   const credential = kept;
-  if (!session || !credential || credential.orgId !== session.account.orgId || credential.userId !== session.account.userId) return;
+  // A revoked computer stays unbound until the user restores it, which binds the sign-in it uses.
+  if (!session || !live(credential) || credential.orgId !== session.account.orgId || credential.userId !== session.account.userId) return;
+  rotating = credential;
   try {
     const restored = await rebind({
       agent, session, credential,
@@ -441,12 +455,14 @@ async function bindToComputer(agent: Agent): Promise<void> {
     if (signedIn === session) signedIn = null;
     await session.end().catch(report);
     throw new Error(`Surogate could not tie this sign-in to this computer, so it signed out: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    rotating = null;
   }
 }
 
 /** Revoke *credential*'s device on a link of its own, with the link's backoff, until the agent hears it; then forget it. */
 function revokeLater(credential: Credential): void {
-  if (revocations.has(credential.deviceId)) return;
+  if (revocations.has(credential.deviceId) || credential.token === null) return;
   const revoking = revokeDevice(linkUrl(credential.origin), credential.token);
   revocations.set(credential.deviceId, revoking);
   void revoking.done.then(() => {
@@ -464,17 +480,20 @@ async function endDevice(credential: Credential): Promise<void> {
   const ending = device?.credential === credential ? device : null;
   device = null;
   kept = null;
-  const stack = await ending?.started.catch(() => null);
-  // A stop that fails still ends access here: the revocation is then owed, as when the agent could not hear it.
-  if (stack && await stack.revoke().catch((error: unknown) => {
+  const stack = credential.token === null ? null : await ending?.started.catch(() => null);
+  // A token the agent already ended needs no revoking. A stop that fails still ends access here: the
+  // revocation is then owed, as when the agent could not hear it.
+  if (credential.token === null || (stack && await stack.revoke().catch((error: unknown) => {
     report(error);
     return false;
-  })) {
+  }))) {
     credentials.remove(credential.deviceId);
   } else {
     credentials.save({ ...credential, revoking: true });
     revokeLater(credential);
   }
+  // A revoked device still being cleaned up has its journal open.
+  await retiring;
   rmSync(join(root, "devices", credential.deviceId), { recursive: true, force: true });
 }
 
@@ -531,6 +550,87 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
     }
   } finally {
     signingOut = false;
+    changed();
+  }
+}
+
+/**
+ * The agent revoked this computer, or no longer knows its token (spec, Section 8): the token goes,
+ * the device stops, and its journal keeps nothing to send or run. The identity and its folders
+ * stay, for a restore by the same user.
+ */
+function retire(credential: Credential): Promise<void> {
+  const retired: Credential = { ...credential, token: null };
+  kept = retired;
+  credentials.save(retired);
+  const ending = device?.credential === credential ? device : null;
+  retiring = (async () => {
+    const stack = await ending?.started.catch(() => null);
+    await stack?.retire();
+  })().catch(report);
+  return retiring;
+}
+
+// The folders a device's chats are bound to, from its journal, which nothing else holds open.
+function foldersOf(credential: Credential): string[] {
+  const journal = new OperationJournal(join(root, "devices", credential.deviceId, "journal.sqlite"));
+  try {
+    return journal.bindings.folders();
+  } finally {
+    journal.close();
+  }
+}
+
+/**
+ * Restore the revoked computer's access for the same user, once they confirm its folders natively
+ * (spec, Section 8). It needs a recent sign-in, as adding does: the browser asks for one first.
+ */
+async function restore(agent: Agent): Promise<void> {
+  const credential = kept;
+  if (restoring || !credential || credential.token !== null || !signedIn) return;
+  restoreFailure = null;
+  await retiring;
+  const folders = foldersOf(credential);
+  const confirmed = await ask({
+    type: "question",
+    message: `Restore local access on ${credential.name}?`,
+    detail: folders.length > 0
+      ? `${agent.name} revoked this computer's access. Restoring it lets the chats on these folders work here again:\n${folders.map((folder) => `• ${folder}`).join("\n")}\nWork that was cancelled stays cancelled.`
+      : `${agent.name} revoked this computer's access. Restoring it lets ${agent.name} work on folders of this computer again.`,
+    buttons: ["Restore access", "Cancel"], defaultId: 0, cancelId: 1, noLink: true,
+  });
+  // Signed out while the user was asked: nothing to restore with.
+  if (!confirmed || !signedIn) return;
+  if (!signedIn.recent()) await signIn(agent);
+  const session = signedIn;
+  // The sign-in did not finish, or another account signed in, which ended this device.
+  if (!session || kept !== credential) return;
+  restoring = true;
+  changed();
+  try {
+    const restored = await reauthorize({
+      agent, session, credential,
+      verify: (token) => verifyDevice(linkUrl(agent.origin), token),
+      start: (made) => startStack(agent, made),
+      save: (made) => credentials.save(made),
+    });
+    if (restored === "gone") {
+      // The agent has no such device any more: its folders here go too, and this computer is added afresh.
+      kept = null;
+      device = null;
+      credentials.remove(credential.deviceId);
+      rmSync(join(root, "devices", credential.deviceId), { recursive: true, force: true });
+      await registerComputer(agent);
+    } else if (restored === "sign-in-again") {
+      restoreFailure = "The agent wants a newer sign-in: sign in again, then restore";
+    } else {
+      kept = restored;
+    }
+  } catch (error) {
+    if (kept === credential) device = null;
+    restoreFailure = error instanceof Error ? error.message : String(error);
+  } finally {
+    restoring = false;
     changed();
   }
 }
@@ -615,13 +715,15 @@ function bridge(contents: WebContents, agent: Agent): void {
   };
   const registered = (): DeviceStack => {
     if (anotherAccount()) throw new Error("This computer is registered with the agent for another account");
+    if (kept?.token === null) throw new Error("This computer's access to the agent was revoked: restore it from Surogate's window");
     if (!device?.stack) throw new Error("This computer is not registered with the agent");
     return device.stack;
   };
   const handlers = bridgeHandlers(agent.origin, {
     getDevice: () => ({
       device: kept && !anotherAccount() ? { deviceId: kept.deviceId, name: kept.name } : null,
-      localFolders: !anotherAccount() && agent.desktopSessions && agent.multiSession,
+      // A revoked computer binds no folder until it is restored.
+      localFolders: !anotherAccount() && live(kept) && agent.desktopSessions && agent.multiSession,
     }),
     signOut: () => signOut(agent, false),
     // A one-time code for the web client's own session, from the app's sign-in.
@@ -699,9 +801,20 @@ async function confirmAgent(agent: Agent, typed: string): Promise<boolean> {
 }
 
 // What the user can do about this computer, as the sidebar offers it.
-function deviceAction(agent: Agent | null): { text: string; button: string; action: "sign-in" } | null {
-  if (!agent || !signedIn || !signInAgain) return null;
-  return { text: `Sign in again to let ${agent.name} work on folders of this computer.`, button: "Sign in again", action: "sign-in" };
+function deviceAction(agent: Agent | null): { text: string; button: string; action: "sign-in" | "restore" } | null {
+  if (!agent || !signedIn) return null;
+  if (kept?.token === null) {
+    if (restoring) return { text: "Restoring local access…", button: "", action: "restore" };
+    return { text: restoreFailure ? `Local access revoked. ${restoreFailure}.` : "Local access revoked.", button: "Restore…", action: "restore" };
+  }
+  if (signInAgain) return { text: `Sign in again to let ${agent.name} work on folders of this computer.`, button: "Sign in again", action: "sign-in" };
+  return null;
+}
+
+// The device's line: its link's status, or revoked for a kept computer the agent ended.
+function deviceLine(agent: Agent): string {
+  if (device) return describeAgent(agent, { status: device.status, computer: device.credential.name });
+  return describeAgent(agent, kept?.token === null ? { status: "revoked", computer: kept.name } : null);
 }
 
 function state() {
@@ -710,8 +823,8 @@ function state() {
     first: agent === null,
     agent: agent && { name: agent.name },
     device: agent && {
-      text: describeAgent(agent, device && { status: device.status, computer: device.credential.name }),
-      status: device?.status ?? null,
+      text: deviceLine(agent),
+      status: device?.status ?? (kept?.token === null ? "revoked" : null),
     },
     // Who the web client says is signed in, or until it has said, the app's own sign-in.
     account: account === undefined ? signedIn?.account ?? null : account,
@@ -752,7 +865,7 @@ function settingsState() {
     account,
     computer: {
       name: hostname(),
-      connection: agent ? describeAgent(agent, device && { status: device.status, computer: device.credential.name }) : "",
+      connection: agent ? deviceLine(agent) : "",
       added: kept?.addedAt ?? null,
       organisation: account?.orgId ?? kept?.orgId ?? null,
       agents: agent ? [agent.name] : [],
@@ -820,6 +933,10 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:sign-out", () => {
     const agent = agents.get();
     if (agent) void signOut(agent, false);
+  });
+  handle("shell:restore", () => {
+    const agent = agents.get();
+    if (agent) void restore(agent).catch(report);
   });
   handle("shell:remove", () => {
     const agent = agents.get();
@@ -1003,7 +1120,7 @@ if (!app.requestSingleInstanceLock()) {
     const shown = main;
     void (signedIn ? Promise.resolve() : clearWindow(agent)).catch(report).then(() => open(shown, agent));
     kept = stored.find((credential) => !credential.revoking && credential.origin === agent.origin && credential.agentId === agent.agentId) ?? null;
-    if (kept) void startStack(agent, kept).catch(report);
+    if (live(kept)) void startStack(agent, kept).catch(report);
     // An earlier try to add this computer did not end in a device: try again, once.
     void registerComputer(agent);
   }).catch((error: unknown) => {

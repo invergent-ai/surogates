@@ -44,7 +44,7 @@ interface State {
   unreachable: string | null;
   notice: string | null;
   signIn: { needed: boolean; pending: boolean; failure: string | null }; // the app's own sign-in, in the system browser
-  deviceAction: { text: string; button: string; action: "sign-in" } | null; // what the user can do about this computer
+  deviceAction: { text: string; button: string; action: "sign-in" | "restore" } | null; // what the user can do about this computer
 }
 
 interface Shell {
@@ -53,6 +53,7 @@ interface Shell {
   signIn(): Promise<void>;
   signOut(): Promise<void>;
   remove(): Promise<void>;
+  restore(): Promise<void>;
   go(path: string): Promise<void>;
   projects(): Promise<void>;
   project(id: string): Promise<void>;
@@ -300,6 +301,7 @@ byId<HTMLFormElement>("connect").addEventListener("submit", (event) => {
 byId("sign-in-button").addEventListener("click", () => void shell.signIn());
 byId("device-action-button").addEventListener("click", () => {
   if (last?.deviceAction?.action === "sign-in") void shell.signIn();
+  else if (last?.deviceAction?.action === "restore") void shell.restore();
 });
 byId("search").addEventListener("input", filterSidebar);
 byId("project-search").addEventListener("input", renderCards);

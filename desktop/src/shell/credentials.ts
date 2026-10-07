@@ -19,10 +19,14 @@ export interface Credential extends Identity {
   origin: string;
   name: string; // the computer's name, as the agent registered it
   addedAt: string; // when this computer was registered with the agent, ISO 8601
-  token: string;
+  // Null once the agent ended it here (revoked, or no longer known): the identity and its folders stay, for a restore.
+  token: string | null;
   // Signed out while the agent could not be reached: the token is kept only to revoke it there.
   revoking?: boolean;
 }
+
+// A credential whose token the agent still takes: one a device can start on.
+export type LiveCredential = Credential & { token: string };
 
 interface Stored extends Identity {
   origin: string;
@@ -52,7 +56,8 @@ export const unseal = (secrets: SecretStore, kept: { sealed?: string; plain?: st
 // An entry of the store's own shape: anything else the file holds is said, then left out.
 function usable(entry: unknown): entry is Stored {
   const fields = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
-  return FIELDS.every((key) => typeof fields[key] === "string") && (typeof fields.sealed === "string" || typeof fields.plain === "string");
+  const secret = (value: unknown) => value === undefined || typeof value === "string";
+  return FIELDS.every((key) => typeof fields[key] === "string") && secret(fields.sealed) && secret(fields.plain);
 }
 
 const sameIdentity = (a: Stored, b: Stored): boolean =>
@@ -68,7 +73,7 @@ export class CredentialStore {
 
   save(credential: Credential): void {
     const { token, ...identity } = credential;
-    const entry: Stored = { ...identity, ...seal(this.secrets, token) };
+    const entry: Stored = token === null ? identity : { ...identity, ...seal(this.secrets, token) };
     // A new device of the same identity replaces the old one; a revocation still owed stays until it is done.
     const kept = this.stored().filter((other) => other.deviceId !== entry.deviceId && (other.revoking || !sameIdentity(other, entry)));
     writeState(this.path, [...kept, entry], 0o600);
@@ -94,7 +99,8 @@ export class CredentialStore {
     const credentials: Credential[] = [];
     for (const { sealed, plain, ...identity } of stored) {
       try {
-        credentials.push({ ...identity, token: unseal(this.secrets, { sealed, plain }) });
+        const token = sealed === undefined && plain === undefined ? null : unseal(this.secrets, { sealed, plain });
+        credentials.push({ ...identity, token });
       } catch (error) {
         report(this.onError, error);
       }

@@ -58,6 +58,8 @@ export interface DeviceStack {
   stop(): Promise<void>;
   /** Revoke this device on its own link, then stop: true once the agent confirmed, false when it could not hear it in time. */
   revoke(timeoutMs?: number): Promise<boolean>;
+  /** The agent ended this device's token: stop, and leave the journal with nothing to send or run, its bindings kept. */
+  retire(): Promise<void>;
 }
 
 export function startDevice(options: DeviceStackOptions): DeviceStack {
@@ -153,6 +155,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
   link.start();
 
   let stopping: Promise<void> | undefined;
+  let retiring = false;
   // The quit order: the link, so nothing new comes; what runs, recorded closed by the
   // app, within the deadline; the tools; the journal.
   const quit = async (): Promise<void> => {
@@ -170,7 +173,11 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     try {
       await tools.stop();
     } finally {
-      journal.close();
+      try {
+        if (retiring) journal.retire();
+      } finally {
+        journal.close();
+      }
     }
   };
   const stop = (): Promise<void> => {
@@ -181,6 +188,10 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     binder,
     working: () => running.size,
     stop,
+    retire: () => {
+      retiring = true;
+      return stop();
+    },
     revoke: async (timeoutMs = REVOKE_TIMEOUT_MS) => {
       let timer: NodeJS.Timeout | undefined;
       // The agent closes the link as revoked once it heard the frame, and suspends what runs here with it.

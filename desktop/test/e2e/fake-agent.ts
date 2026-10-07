@@ -47,6 +47,10 @@ export class FakeAgent {
   account = ACCOUNT;
   // False: the agent adds or restores a computer only on a more recent sign-in.
   recent = true;
+  // How long before the token exchange the user signed in, as the tokens' auth_time says.
+  signedInAgoS = 0;
+  // True: the agent has no device left to restore.
+  gone = false;
   readonly link = new FakeLinkServer({ token: TOKEN });
   readonly registered: unknown[] = [];
   readonly deleted: string[] = [];
@@ -83,7 +87,7 @@ export class FakeAgent {
       this.live.add(`rt-${this.issued}`);
       return json(response, 200, {
         access_token: `at-${this.issued}`, token_type: "Bearer", expires_in: 1800, refresh_token: `rt-${this.issued}`,
-        auth_time: Math.floor(Date.now() / 1000),
+        auth_time: Math.floor(Date.now() / 1000) - this.signedInAgoS,
       });
     }
     if (request.method === "POST" && path === "/api/v1/auth/oauth/revoke") {
@@ -105,9 +109,13 @@ export class FakeAgent {
     if (request.method === "GET" && path === "/api/v1/devices" && bearer) {
       return json(response, 200, [{ id: this.link.identity.device_id, name: "Laptop", revoked_at: null }]);
     }
-    if (request.method === "POST" && path === `/api/v1/devices/${this.link.identity.device_id}/reauthorize` && bearer) {
+    if (request.method === "POST" && /^\/api\/v1\/devices\/[^/]+\/reauthorize$/.test(path) && bearer) {
       this.reauthorized.push(request.headers.authorization ?? "");
+      if (!this.recent) return json(response, 403, { detail: { code: "recent_sign_in_required", message: "Sign in again" } });
+      if (this.gone || path.split("/")[4] !== this.link.identity.device_id) return json(response, 404, { detail: "No such device." });
       if (this.reauthorizeStatus !== 200) return json(response, this.reauthorizeStatus, {});
+      // A new token on the same device: the old one no longer connects, and its link is closed as revoked, as the agent's is.
+      this.link.close(4403);
       this.link.token = ROTATED;
       return json(response, 200, { id: this.link.identity.device_id, name: "Laptop", token: ROTATED });
     }

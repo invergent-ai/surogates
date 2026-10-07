@@ -80,6 +80,12 @@ describe("the device credentials", () => {
     expect(store().list()).toEqual([{ ...CREDENTIAL, deviceId: "d2", token: "surg_dev_new" }]);
   });
 
+  it("keep the identity of one the agent ended, with no token", () => {
+    store().save({ ...CREDENTIAL, token: null });
+    expect(readFileSync(path, "utf8")).not.toMatch(/sealed|plain/);
+    expect(store().list()).toEqual([{ ...CREDENTIAL, token: null }]);
+  });
+
   it("kept as they are while there was no secret store are sealed once there is one", () => {
     store(new Secrets("basic_text")).save(CREDENTIAL);
     expect(store().list()).toEqual([CREDENTIAL]);

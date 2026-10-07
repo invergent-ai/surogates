@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Welcome } from "../src/link/protocol.js";
 import type { Agent } from "../src/shell/agents.js";
-import { rebind, register, type Registration } from "../src/shell/computer.js";
+import { reauthorize, rebind, register, type Registration } from "../src/shell/computer.js";
 import type { Credential } from "../src/shell/credentials.js";
 import type { DeviceStack } from "../src/shell/device-stack.js";
 
@@ -144,6 +144,44 @@ describe("binding a new sign-in to the computer kept for its account", () => {
     const { order, restoring } = rebinding([{ id: "d", revoked_at: null }]);
     restoring.verify = async () => ({ ...WELCOME, deviceId: "d2" });
     await expect(rebind(restoring)).rejects.toThrow("connects as another device, agent or user");
+    expect(order).toEqual([]);
+  });
+});
+
+describe("restoring this computer's access", () => {
+  const REVOKED: Credential = { origin: AGENT.origin, orgId: "o", agentId: "a", userId: "u", deviceId: "d", name: "ThinkPad", addedAt: "2026-10-01T00:00:00.000Z", token: null };
+
+  function restoring(answer: { status: number; body: unknown }) {
+    const { asked, order, saved, options } = rig(answer);
+    options.session.api = async (path, init = {}) => {
+      asked.push({ path, method: init.method ?? "GET", body: undefined });
+      return new Response(JSON.stringify(answer.body), { status: answer.status });
+    };
+    return { asked, order, saved, options: { ...options, credential: REVOKED } };
+  }
+
+  it("rotates the token on the same device, checks it connects as that device, starts it and keeps it", async () => {
+    const { asked, order, saved, options } = restoring({ status: 200, body: { id: "d", token: TOKEN } });
+    const restored = await reauthorize(options);
+    expect(restored).toEqual({ ...REVOKED, token: TOKEN });
+    expect(asked).toEqual([{ path: "/api/v1/devices/d/reauthorize", method: "POST", body: undefined }]);
+    expect(order).toEqual(["verify true", "start", "save"]);
+    expect(saved).toEqual([restored]);
+  });
+
+  it.each([
+    [404, { detail: "No such device." }, "gone"],
+    [403, { detail: { code: "recent_sign_in_required", message: "Sign in again" } }, "sign-in-again"],
+  ])("answers %s with %o as %s, and starts nothing", async (status, body, outcome) => {
+    const { order, options } = restoring({ status, body });
+    expect(await reauthorize(options)).toBe(outcome);
+    expect(order).toEqual([]);
+  });
+
+  it("refuses a token that connects as another device", async () => {
+    const { order, options } = restoring({ status: 200, body: { id: "d", token: TOKEN } });
+    options.verify = async () => ({ ...WELCOME, deviceId: "d2" });
+    await expect(reauthorize(options)).rejects.toThrow("connects as another device");
     expect(order).toEqual([]);
   });
 });

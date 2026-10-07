@@ -5,7 +5,7 @@
 
 import type { Welcome } from "../link/protocol.js";
 import type { Agent } from "./agents.js";
-import type { Credential } from "./credentials.js";
+import type { Credential, LiveCredential } from "./credentials.js";
 import type { DeviceStack } from "./device-stack.js";
 
 // surogates/devices/store.py issues surg_dev_ plus token_urlsafe(33); it goes in a header, so nothing else passes.
@@ -22,7 +22,7 @@ export interface Registration {
   session: Session;
   computer: string; // the name it is registered under
   verify(token: string): Promise<Welcome>;
-  start(credential: Credential): Promise<DeviceStack>;
+  start(credential: LiveCredential): Promise<DeviceStack>;
   save(credential: Credential): void;
   now?: () => number;
 }
@@ -57,7 +57,7 @@ export async function register(options: Registration): Promise<Credential | "sig
     if (welcome.deviceId !== issued.id || welcome.agentId !== agent.agentId || welcome.orgId !== orgId || welcome.userId !== userId) {
       throw new Error("The agent's device token connects as another device, agent or user");
     }
-    const credential: Credential = {
+    const credential: LiveCredential = {
       origin: agent.origin, orgId, agentId: agent.agentId, userId, deviceId: welcome.deviceId, name: welcome.name,
       addedAt: new Date((options.now ?? Date.now)()).toISOString(), token: issued.token,
     };
@@ -101,7 +101,7 @@ export async function reauthorize(options: Restoring): Promise<Credential | "sig
   if (welcome.deviceId !== credential.deviceId || welcome.agentId !== agent.agentId || welcome.orgId !== orgId || welcome.userId !== userId) {
     throw new Error("The agent's device token connects as another device, agent or user");
   }
-  const restored: Credential = { ...credential, token: issued.token };
+  const restored: LiveCredential = { ...credential, token: issued.token };
   const stack = await options.start(restored);
   try {
     options.save(restored);

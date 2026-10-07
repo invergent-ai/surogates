@@ -186,6 +186,27 @@ describe("one agent's device", () => {
     }
   });
 
+  it("retires once the agent ended its token: it stops, and its journal keeps its bindings and nothing to send", async () => {
+    const device = await start();
+    await server.until(() => statuses.includes("connected"));
+    tools.hold = "until-aborted";
+    const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
+    server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce }, true));
+    await server.until(() => results("bind-1").length === 1);
+    server.send(op("run-1", "run", { command: "sleep 9", workdir: null, timeout: 10 }));
+    await server.until(() => tools.ran.length === 1);
+    server.close(4403);
+    await server.until(() => statuses.includes("revoked"));
+    await device.retire();
+    const journal = new OperationJournal(join(base, "data", "devices", "d", "journal.sqlite"));
+    try {
+      expect(journal.unsent()).toEqual([]);
+      expect(journal.bindings.folders()).toEqual([folder]);
+    } finally {
+      journal.close();
+    }
+  });
+
   it("says when the agent cannot hear the revocation, and stops all the same", async () => {
     const device = await start();
     await server.until(() => statuses.includes("connected"));
