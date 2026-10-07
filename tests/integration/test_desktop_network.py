@@ -82,6 +82,9 @@ async def test_refusals_reach_the_agent_through_the_terminal_tool(built_client, 
     app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder, vm=vm)
     try:
         session_id, bound, terminal_call = await chat_on(app, api, device, folder)
+        # The root's own name, which only the guest gives a command: this ran in the VM, not in srt.
+        named = await terminal_call("hostname")
+        assert (named["output"] == "surogate") == vm, named
         own = await terminal_call(status("http://127.0.0.1:9/"))
         assert own["output"] == "403\n\nThis computer does not let a chat reach its own network services (127.0.0.1:9)"
         away = await terminal_call(status(f"http://{AWAY}:9/"))
