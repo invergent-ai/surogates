@@ -1,13 +1,13 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { ElectronApplication } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { dataHome, ELECTRON, launch, MAIN, quit, shellEnv, shellPage } from "./launch.js";
+import { dataHome, ELECTRON, gone, launch, MAIN, quit, secondLaunch, shellEnv, shellPage } from "./launch.js";
 
 let home: string;
 let app: ElectronApplication | undefined;
@@ -21,6 +21,10 @@ afterEach(async () => {
   app = undefined;
   rmSync(home, { recursive: true, force: true });
 });
+
+// The app's keys are its menu's, which reach only the window with the focus, as the keyboard does.
+const focused = (shell: ElectronApplication) =>
+  expect.poll(() => shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isFocused())).toBe(true);
 
 // An agent kept from an earlier run, at an address nothing answers on, and its user's sign-in, as
 // the basic store keeps it: the window shows its three columns.
@@ -123,7 +127,7 @@ describe("the shell", () => {
     await expect.poll(() => page.isVisible("#first-run")).toBe(true);
   });
 
-  it("exits with an error, rather than live on with no window, when it cannot start", async () => {
+  it("exits with an error, rather than live on with no window, when it cannot start, and leaves nothing behind", async () => {
     // The system's theme cannot be set: the start fails once the app is ready.
     const failing = join(home, "no-theme.cjs");
     writeFileSync(failing, [
@@ -131,13 +135,17 @@ describe("the shell", () => {
       'Object.defineProperty(nativeTheme, "themeSource", { get: () => "system", set: () => { throw new Error("No theme here"); } });',
     ].join("\n"));
     // Loaded before the main, as Playwright loads its own: under NODE_OPTIONS it would run before electron exists.
-    const started = spawn(ELECTRON, ["-r", failing, MAIN, "--password-store=basic"], { env: shellEnv(home), stdio: "ignore" });
+    const started = spawn(ELECTRON, ["-r", failing, MAIN, "--password-store=basic"], { env: shellEnv(home), stdio: "ignore", detached: true });
     try {
       const ended = once(started, "exit").then(([code]) => code as number | null);
       expect(await Promise.race([ended, new Promise((resolve) => setTimeout(resolve, 10_000, "still running"))])).toBe(1);
     } finally {
-      started.kill("SIGKILL");
+      await gone(started.pid);
     }
+    // Once it has gone, nothing of it writes to its data home again.
+    rmSync(home, { recursive: true, force: true });
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(existsSync(home)).toBe(false);
   });
 
   it("opens in the saved theme", async () => {
@@ -159,17 +167,55 @@ describe("the shell", () => {
     await expect.poll(() => visible(app!)).toEqual([true]);
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.close());
     expect(await visible(app)).toEqual([false]);
-    const second = spawn(ELECTRON, [MAIN], { env: shellEnv(home), stdio: "ignore" });
-    const [code] = (await once(second, "exit")) as [number | null];
-    expect(code).toBe(0);
+    expect(await secondLaunch(home)).toBe(0);
     await expect.poll(() => visible(app!)).toEqual([true]);
+  });
+
+  it("hides when it is closed even when its place cannot be kept, and a second launch shows it again", async () => {
+    // A folder where the place's file goes: no write of it can land, as on a full disk.
+    mkdirSync(join(home, "surogate", "window-state.json", "taken"), { recursive: true });
+    app = await launch(home);
+    await app.firstWindow();
+    await expect.poll(() => visible(app!)).toEqual([true]);
+    // Kept here: Electron would otherwise draw an error dialog nobody answers.
+    await app.evaluate(() => {
+      const uncaught: string[] = [];
+      Object.assign(globalThis, { uncaught });
+      process.on("uncaughtException", (error) => uncaught.push(String(error)));
+    });
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.close());
+    expect(await visible(app)).toEqual([false]);
+    expect(await app.evaluate(() => (globalThis as unknown as { uncaught: string[] }).uncaught)).toEqual([]);
+    expect(await secondLaunch(home)).toBe(0);
+    await expect.poll(() => visible(app!)).toEqual([true]);
+  });
+
+  it("closes Settings while its page still loads, and leaves no failure unhandled", async () => {
+    app = await launch(home);
+    await (await app.firstWindow()).waitForLoadState();
+    await focused(app);
+    await app.evaluate(({ BrowserWindow }) => {
+      const rejections: string[] = [];
+      Object.assign(globalThis, { rejections });
+      process.on("unhandledRejection", (reason) => rejections.push(String(reason)));
+      BrowserWindow.getAllWindows()[0]!.webContents.sendInputEvent({ type: "keyDown", keyCode: ",", modifiers: ["control", "shift"] });
+    });
+    // Closed from its own page the moment there is one, before its load has finished.
+    const settings = await app.waitForEvent("window");
+    await settings.evaluate(() => (window as unknown as { surogateSettings: { close(): Promise<void> } }).surogateSettings.close()).catch(() => {});
+    await expect.poll(() => app!.evaluate(({ webContents }) =>
+      webContents.getAllWebContents().some((contents) => contents.getURL().endsWith("/settings.html")))).toBe(false);
+    // A rejection nobody handles is told within a turn of the main process's loop.
+    await app.evaluate(() => new Promise((resolve) => setTimeout(resolve, 100)));
+    expect(await app.evaluate(() => (globalThis as unknown as { rejections: string[] }).rejections)).toEqual([]);
   });
 
   it("quits on Ctrl+Q", async () => {
     app = await launch(home);
     await (await app.firstWindow()).waitForLoadState();
+    await focused(app);
     const closed = app.waitForEvent("close");
-    // As the keyboard sends it: Playwright's own key presses never reach before-input-event.
+    // As the keyboard sends it: Playwright's own key presses never reach the menu's accelerators.
     void app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]!.webContents.sendInputEvent({ type: "keyDown", keyCode: "Q", modifiers: ["control"] });
     }).catch(() => {});

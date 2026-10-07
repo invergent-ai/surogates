@@ -45,6 +45,7 @@ interface State {
   notice: string | null;
   signIn: { needed: boolean; pending: boolean; failure: string | null }; // the app's own sign-in, in the system browser
   deviceAction: { text: string; button: string; action: "sign-in" | "restore" } | null; // what the user can do about this computer
+  quitting: number | null; // while a quit waits for the threads working on this computer: how many
 }
 
 interface Shell {
@@ -68,6 +69,7 @@ interface Shell {
   settings(): Promise<void>;
   newProject(): Promise<void>;
   projectSettings(): Promise<void>;
+  quitNow(): Promise<void>;
   link(which: string): Promise<void>;
   onChanged(listener: () => void): () => void;
 }
@@ -289,6 +291,10 @@ async function render(): Promise<void> {
   byId("device-action-text").textContent = state.deviceAction?.text ?? "";
   byId("device-action-button").textContent = state.deviceAction?.button ?? "";
   byId("device-action-button").hidden = !state.deviceAction?.button;
+  // The quit's line is a live region that stays, empty, so that a screen reader hears it when it speaks.
+  byId("quit-now").hidden = state.quitting === null;
+  byId("quitting-text").textContent = state.quitting === null ? ""
+    : `Quitting once ${state.quitting === 1 ? "1 thread working on this computer finishes" : `${state.quitting} threads working on this computer finish`}.`;
   byId("unreachable").hidden = state.unreachable === null;
   byId("headline").textContent = state.agent ? `Couldn't connect to ${state.agent.name}` : "";
   byId("why").textContent = state.unreachable ?? "";
@@ -315,6 +321,7 @@ byId("device-action-button").addEventListener("click", () => {
   if (last?.deviceAction?.action === "sign-in") void shell.signIn();
   else if (last?.deviceAction?.action === "restore") void shell.restore();
 });
+byId("quit-now").addEventListener("click", () => void shell.quitNow());
 byId("search").addEventListener("input", filterSidebar);
 byId("project-search").addEventListener("input", renderCards);
 byId("sort").addEventListener("change", renderCards);
