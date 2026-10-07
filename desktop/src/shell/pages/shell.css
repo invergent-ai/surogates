@@ -1297,3 +1297,45 @@ body.prompt-page {
   opacity: 0.5;
   cursor: default;
 }
+
+/* About Surogate: a small window of its own, as Claude Desktop's, moved by any of its bare parts. */
+body.about-page {
+  height: 100vh;
+  background: var(--panel);
+  -webkit-app-region: drag;
+}
+
+.about {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 56px 40px 28px;
+  text-align: center;
+}
+
+.about h1 {
+  font: 400 26px/1.25 "Noto Serif", Georgia, serif;
+}
+
+.about .btn {
+  justify-content: center;
+  width: 100%;
+}
+
+.about #documentation {
+  margin-top: auto;
+}
+
+.about .mark {
+  display: inline-flex;
+}
+
+/* Empty, the waiting quit's line takes no room, and stays a live region. */
+#quitting:has(#quitting-text:empty) {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}

@@ -24,8 +24,9 @@ export const ROTATED = `surg_dev_${"r".repeat(44)}`;
 // The signed-in user, as /auth/me and the fake link's welcome name them.
 export const ACCOUNT = { name: "Flavius Burca", email: "flavius@example.com", userId: "u", orgId: "o" };
 
-// The routes a test can hold: who the agent is, who signed in, adding this computer, and reauthorizing it.
-type Held = "config" | "me" | "register" | "reauthorize";
+// The routes a test can hold: who the agent is, who signed in, adding this computer, reauthorizing it,
+// an inbox item's read and a chat's title.
+type Held = "config" | "me" | "register" | "reauthorize" | "item" | "title";
 
 function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
@@ -63,7 +64,7 @@ export class FakeAgent {
   revokedAt: string | null = null;
   // Routes that answer only once the test releases them, as a slow agent would, and how often each was asked.
   private readonly held = new Map<Held, Promise<void>>();
-  readonly asked: Record<Held, number> = { config: 0, me: 0, register: 0, reauthorize: 0 };
+  readonly asked: Record<Held, number> = { config: 0, me: 0, register: 0, reauthorize: 0, item: 0, title: 0 };
   readonly link = new FakeLinkServer({ token: TOKEN });
   readonly registered: unknown[] = [];
   readonly deleted: string[] = [];
@@ -81,6 +82,16 @@ export class FakeAgent {
   // Refresh tokens the agent still takes: a refresh spends one, as rotation does, and a revoke ends it.
   private readonly live = new Set<string>();
   private issued = 0;
+  // The user's inbox, by item id, and the inbox streams open on it.
+  readonly inbox = new Map<number, Record<string, unknown>>();
+  readonly inboxStreams = new Set<ServerResponse>();
+  // Each chat's title, the event streams open on each chat, what each asked for, and the last event id.
+  readonly titles = new Map<string, string>();
+  readonly chatStreams = new Map<string, Set<ServerResponse>>();
+  readonly chatsAsked: string[] = [];
+  // What a chat's event stream answers, when not the stream: an agent out of reach answers 503.
+  chatStatus = 200;
+  private lastEvent = 100;
   readonly server: Server = createServer((request, response) => void this.answer(request, response));
   private linked = false;
 
@@ -145,6 +156,48 @@ export class FakeAgent {
       this.link.token = ROTATED;
       return json(response, 200, { id: this.link.identity.device_id, name: "Laptop", token: ROTATED });
     }
+    const events = /^\/api\/v1\/sessions\/([^/?]+)\/events\?(.*)$/.exec(path);
+    if (events && bearer) {
+      const [, chat, query] = events as unknown as [string, string, string];
+      this.chatsAsked.push(`${chat}?${query}`);
+      if (this.chatStatus !== 200) return json(response, this.chatStatus, {});
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(": connected\r\n\r\n");
+      // A chat between its turns is completed, as the agent leaves one: a stream that does not watch ends there.
+      if (new URLSearchParams(query).get("watch") !== "1") {
+        response.end(`event: session.done\r\ndata: ${JSON.stringify({ reason: "completed", status: "completed" })}\r\n\r\n`);
+        return;
+      }
+      response.write(`id: ${this.lastEvent}\r\nevent: stream.start\r\ndata: {}\r\n\r\n`);
+      const open = this.chatStreams.get(chat) ?? new Set();
+      open.add(response);
+      this.chatStreams.set(chat, open);
+      response.on("close", () => open.delete(response));
+      return;
+    }
+    const chat = /^\/api\/v1\/sessions\/([^/?]+)\?agent_id=(.*)$/.exec(path);
+    if (chat && bearer) {
+      if (chat[2] !== this.config.agent_id) return json(response, 400, { detail: "no agent_id in request" });
+      await this.answered("title");
+      return json(response, 200, { id: chat[1], title: this.titles.get(chat[1]!) ?? null });
+    }
+    if (path.startsWith("/api/v1/inbox") && bearer) {
+      const asked = new URL(path, "http://agent");
+      // As the agent answers on an address with no subdomain of its own: the agent named, or none.
+      if (asked.searchParams.get("agent_id") !== this.config.agent_id) return json(response, 400, { detail: "no agent_id in request" });
+      if (asked.pathname === "/api/v1/inbox/stream") {
+        // As the agent opens it: what waits unread, then each item as it comes.
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        const unread = [...this.inbox.values()].filter((item) => item.status === "pending").map((item) => item.id);
+        response.write(`event: snapshot\r\ndata: ${JSON.stringify({ unread_ids: unread })}\r\n\r\n`);
+        this.inboxStreams.add(response);
+        response.on("close", () => this.inboxStreams.delete(response));
+        return;
+      }
+      await this.answered("item");
+      const found = this.inbox.get(Number(/^\/api\/v1\/inbox\/(\d+)$/.exec(asked.pathname)?.[1]));
+      return found ? json(response, 200, found) : json(response, 404, { detail: "Not found." });
+    }
     if (request.method === "DELETE" && path.startsWith("/api/v1/devices/") && bearer) {
       this.deleted.push(path.slice("/api/v1/devices/".length));
       response.writeHead(204).end();
@@ -162,6 +215,34 @@ export class FakeAgent {
     }
     const served =this.projects === null ? "" : `<script>(${serveProjects.toString()})(${JSON.stringify(this.projects).replace(/</g, "\\u003c")}, ${this.registerAfterMs})</script>`;
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(`<!doctype html><title>Fake agent</title><p>The web client</p>${served}`);
+  }
+
+  /** A new item in the user's inbox, as the agent makes one, told on every inbox stream open: its id. */
+  tell(item: { kind: string; title: string; session_id: string }): number {
+    const id = this.inbox.size + 1;
+    this.inbox.set(id, { id, status: "pending", ...item });
+    for (const stream of this.inboxStreams) stream.write(`event: item\r\ndata: ${JSON.stringify({ item_id: id, kind: item.kind })}\r\n\r\n`);
+    return id;
+  }
+
+  /** A turn of *chat* ends, as the agent tells it on the chat's watching streams. */
+  turnEnds(chat: string): void {
+    this.lastEvent += 1;
+    for (const stream of this.chatStreams.get(chat) ?? []) stream.write(`id: ${this.lastEvent}\r\nevent: session.complete\r\ndata: {}\r\n\r\n`);
+  }
+
+  /** End every chat's stream, as a restart of the agent does. */
+  dropChats(): void {
+    for (const open of this.chatStreams.values()) {
+      for (const stream of open) stream.end();
+      open.clear();
+    }
+  }
+
+  /** End every inbox stream, as a restart of the agent does. */
+  dropInbox(): void {
+    for (const stream of this.inboxStreams) stream.end();
+    this.inboxStreams.clear();
   }
 
   /** Hold *route*: it answers only once the returned release is called. */
@@ -247,9 +328,28 @@ export async function signIn(shell: ElectronApplication, page: Page, agent: Fake
     return authorize;
   }).not.toBe("");
   const tab = await agent.approve(authorize);
-  // The sign-in shows until the web client has loaded again, with the session it gave it.
-  await expect.poll(() => page.isVisible("#sign-in")).toBe(false);
+  // The sign-in shows until the web client has loaded again, with the session it gave it: on a busy
+  // machine that load can take seconds.
+  await expect.poll(() => page.isVisible("#sign-in"), { timeout: 10_000 }).toBe(false);
   return tab;
+}
+
+/**
+ * Quit, and hold the quit once it has gone on, past the window's hide: a sign-in under way, held at who
+ * signed in, keeps the app stopping until the returned release. *page* is the window's own.
+ */
+export async function quitHeld(shell: ElectronApplication, page: Page, agent: FakeAgent): Promise<() => void> {
+  const release = agent.hold("me");
+  const asking = agent.asked.me;
+  const before = (await opened(shell)).length;
+  await page.evaluate(() => (window as unknown as { surogateShell: { signIn(): Promise<void> } }).surogateShell.signIn());
+  await expect.poll(async () => (await opened(shell)).length).toBe(before + 1);
+  void agent.approve((await opened(shell))[before]!).catch(() => {});
+  await expect.poll(() => agent.asked.me).toBe(asking + 1);
+  void shell.evaluate(({ app: electron }) => electron.quit()).catch(() => {});
+  // The quit went on: the inbox is followed no more.
+  await expect.poll(() => agent.inboxStreams.size).toBe(0);
+  return release;
 }
 
 // Signed in as ACCOUNT, and this computer added as Laptop: what most tests start from.
