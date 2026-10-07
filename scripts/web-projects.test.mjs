@@ -348,6 +348,44 @@ test("a project route puts each id in its path as one segment, so no id reaches 
   assert.equal(asked.length, 9);
 });
 
+test("a project route whose answer is not JSON, or not of its shape, says the route's own words, and never succeeds hollow", async () => {
+  const words = {
+    list: "Failed to fetch the projects",
+    get: "Failed to fetch the project",
+    create: "The project could not be created.",
+    update: "The project could not be changed.",
+    threads: "Failed to fetch the project's threads",
+    resolve: "The thread could not be resolved.",
+    reopen: "The thread could not be reopened.",
+    library: "Failed to fetch the project's Library",
+    start: "The thread could not be started.",
+  };
+  for (const body of ["<!doctype html><p>Sign in</p>", "{}", "[{}]", "null", '[{"id": "t-1"}]', '{"id": "t-1"}']) {
+    const { routes } = routesOver(() => new Response(body, { headers: { "content-type": "application/json" } }));
+    const calls = {
+      list: () => routes.list(),
+      get: () => routes.get("p-1"),
+      create: () => routes.create({ name: "Q3" }),
+      update: () => routes.update("p-1", { name: "Q3" }),
+      threads: () => routes.threads("p-1", "t-1"),
+      resolve: () => routes.resolve("p-1", "t-1"),
+      reopen: () => routes.reopen("p-1", "t-1"),
+      library: () => routes.library("p-1"),
+      start: () => routes.start("p-1", "pr-1", "2"),
+    };
+    for (const [name, call] of Object.entries(calls)) {
+      await assert.rejects(call(), { message: words[name] }, `${name} answered ${body}`);
+    }
+  }
+  // The routines read the project first: a schedule list that is not one is the routines' own failure.
+  for (const body of ["<!doctype html>", "{}", '{"items": {}}', '{"items": [{}]}']) {
+    const { routes } = routesOver((url) => url.startsWith("/api/v1/scheduled-work")
+      ? new Response(body, { headers: { "content-type": "application/json" } })
+      : Response.json(PROJECT));
+    await assert.rejects(routes.routines("p-1"), { message: "Failed to fetch the project's routines" }, `routines answered ${body}`);
+  }
+});
+
 test("a project route that refuses says the route's own words", async () => {
   const { routes } = routesOver((url) => url.endsWith("/workstreams")
     ? Response.json({ detail: "This agent keeps a single conversation, so it has no projects." }, { status: 409 })

@@ -8,11 +8,6 @@
 
 import type { ProjectsSource, ThreadRow } from "../lib/projects-contract";
 import {
-  type LibraryEntryResponse,
-  type ProjectResponse,
-  type ProjectSummaryResponse,
-  type RoutineResponse,
-  type ThreadRowResponse,
   libraryEntryOf,
   projectChangeOf,
   projectOf,
@@ -65,39 +60,60 @@ function changedThread(data: string): string | null {
   }
 }
 
+// A route's answer read in its shape, or refused: an object whose named fields are strings, mapped,
+// or a list of them. Whatever else the body holds fails its mapping, which is refused the same way.
+const one = <T>(fields: string[], map: (body: never) => T) => (body: unknown): T => {
+  const record = (body ?? {}) as Record<string, unknown>;
+  if (typeof body !== "object" || Array.isArray(body) || fields.some((field) => typeof record[field] !== "string")) throw new TypeError("Not the route's shape");
+  return map(body as never);
+};
+const many = <T>(item: (body: unknown) => T) => (body: unknown): T[] => {
+  if (!Array.isArray(body)) throw new TypeError("Not a list");
+  return body.map(item);
+};
+const SUMMARY = one(["id", "name", "created_at", "updated_at"], projectSummaryOf);
+const PROJECT = one(["id", "name", "created_at", "updated_at", "master_session_id"], projectOf);
+const ROW = one(["id", "title", "group", "created_at", "updated_at"], threadRowOf);
+const ENTRY = one(["path", "origin"], libraryEntryOf);
+const ROUTINE = one(["id", "schedule_display", "status"], routineOf);
+const ROUTINES = (body: unknown) => many(ROUTINE)((body as { items?: unknown } | null)?.items);
+
 export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents): WorkstreamRoutes {
-  async function asked<T>(path: string, init: RequestInit | undefined, failure: string): Promise<T> {
-    const response = await fetchFn(`${ROUTE}${path}`, init);
+  // A body that is no JSON, or not the route's shape, is the route's own failure: never an
+  // engine's words, and never a success with nothing in it.
+  async function read<T>(url: string, init: RequestInit | undefined, failure: string, shape: (body: unknown) => T): Promise<T> {
+    const response = await fetchFn(url, init);
     if (!response.ok) return parseError(response, failure);
-    return (response.status === 204 ? undefined : await response.json()) as T;
+    try {
+      return shape(response.status === 204 ? undefined : await response.json());
+    } catch {
+      throw new Error(failure);
+    }
   }
-  const row = async (path: string, init: RequestInit, failure: string) =>
-    threadRowOf(await asked<ThreadRowResponse>(path, init, failure));
+  const asked = <T>(path: string, init: RequestInit | undefined, failure: string, shape: (body: unknown) => T) =>
+    read(`${ROUTE}${path}`, init, failure, shape);
+  const row = (path: string, init: RequestInit, failure: string) => asked(path, init, failure, ROW);
 
   const routes: WorkstreamRoutes = {
-    list: async () =>
-      (await asked<ProjectSummaryResponse[]>("", undefined, "Failed to fetch the projects")).map(projectSummaryOf),
-    get: async (projectId) => projectOf(await asked<ProjectResponse>(project(projectId), undefined, "Failed to fetch the project")),
-    create: async (input) => projectOf(await asked<ProjectResponse>("", sent("POST", input), "The project could not be created.")),
+    list: () => asked("", undefined, "Failed to fetch the projects", many(SUMMARY)),
+    get: async (projectId) => asked(project(projectId), undefined, "Failed to fetch the project", PROJECT),
+    create: (input) => asked("", sent("POST", input), "The project could not be created.", PROJECT),
     update: async (projectId, change) =>
-      projectOf(await asked<ProjectResponse>(project(projectId), sent("PATCH", projectChangeOf(change)), "The project could not be changed.")),
-    archive: async (projectId) => asked<void>(project(projectId), sent("DELETE"), "The project could not be archived."),
+      asked(project(projectId), sent("PATCH", projectChangeOf(change)), "The project could not be changed.", PROJECT),
+    // Archived, the route answers nothing: whatever body it sends is not read.
+    archive: async (projectId) => asked(project(projectId), sent("DELETE"), "The project could not be archived.", () => undefined),
     threads: async (projectId, threadId) => {
       const query = threadId ? `?${new URLSearchParams({ thread_id: threadId })}` : "";
-      const rows = await asked<ThreadRowResponse[]>(`${project(projectId)}/threads${query}`, undefined, "Failed to fetch the project's threads");
-      return rows.map(threadRowOf);
+      return asked(`${project(projectId)}/threads${query}`, undefined, "Failed to fetch the project's threads", many(ROW));
     },
     resolve: async (projectId, threadId) => row(`${project(projectId)}/threads${thread(threadId)}/resolve`, sent("POST"), "The thread could not be resolved."),
     reopen: async (projectId, threadId) => row(`${project(projectId)}/threads${thread(threadId)}/reopen`, sent("POST"), "The thread could not be reopened."),
-    library: async (projectId) =>
-      (await asked<LibraryEntryResponse[]>(`${project(projectId)}/library`, undefined, "Failed to fetch the project's Library")).map(libraryEntryOf),
+    library: async (projectId) => asked(`${project(projectId)}/library`, undefined, "Failed to fetch the project's Library", many(ENTRY)),
     // The schedules the project's master made, of every status, as many as the shell takes.
     routines: async (projectId) => {
       const { masterSessionId } = await routes.get(projectId);
       const query = new URLSearchParams({ created_from_session_id: masterSessionId, status: "all", limit: "200" });
-      const response = await fetchFn(`/api/v1/scheduled-work?${query}`);
-      if (!response.ok) return parseError(response, "Failed to fetch the project's routines");
-      return ((await response.json()) as { items: RoutineResponse[] }).items.map(routineOf);
+      return read(`/api/v1/scheduled-work?${query}`, undefined, "Failed to fetch the project's routines", ROUTINES);
     },
     start: async (projectId, proposalId, key) =>
       row(`${project(projectId)}/threads`, sent("POST", { proposal_id: proposalId, key }), "The thread could not be started."),
