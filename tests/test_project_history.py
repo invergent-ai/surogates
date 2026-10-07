@@ -637,3 +637,18 @@ def test_a_write_that_cannot_be_made_durable_fails_its_apply_and_is_put_back(tmp
     history.unapply(change["path"], change["before"], change["after"], ran=False)
     assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
     assert not list(project.rglob("*.landing~"))
+
+
+@pytest.mark.parametrize("target", [
+    "coverage/Policy 17.docx", "Policies/Policy 17.docx.tmp", "build/Policy 17.docx", ".threads/Policy 17.docx",
+])
+def test_a_move_into_a_path_history_leaves_out_keeps_its_source(tmp_path, project, target):
+    (project / "Policies").mkdir()
+    (project / "Policies" / "Policy 17.docx").write_bytes(b"policy 17")
+    history = opened(tmp_path, project)
+    (history.copy / target).parent.mkdir(parents=True, exist_ok=True)
+    (history.copy / "Policies" / "Policy 17.docx").rename(history.copy / target)
+    out = landed(history)
+    # The move's other half never lands, so its deletion waits too.
+    assert out["overlapped"] == [{"path": "Policies/Policy 17.docx", "reason": "with"}]
+    assert (project / "Policies" / "Policy 17.docx").read_bytes() == b"policy 17"

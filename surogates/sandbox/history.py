@@ -154,7 +154,7 @@ class History:
         git repository that the turn wrote into: they never land.
         """
         self._add_all(self._copy)
-        excluded, repositories = self._excluded()
+        excluded, repositories, wrote_left_out = self._excluded()
         left_out = {"excluded": excluded, "repositories": repositories}
         base = self._main("rev-parse", self.base)
         if not self._copy("diff", "--cached", "--name-only", base):
@@ -169,9 +169,10 @@ class History:
         changed = {p for p in real if real[p] not in versions[p]}
         shaped = (set(versions) - set(real)) | {p for pair in shapes for p in pair}
         held = _together(changed | (set(versions) - set(real)), links)
-        if repositories or any(versions[p][1] is not None for p in held):
+        if repositories or wrote_left_out or any(versions[p][1] is not None for p in held):
             # A move git cannot pair (an edited docx, a move onto a name that
-            # exists) reads as a deletion and a write: the deletion waits too.
+            # exists, or into a path history leaves out) reads as a deletion
+            # and a write that does not land: the deletion waits too.
             paired = {p for pair in renames for p in pair}
             unpaired = {p for p, (_, after) in versions.items() if after is None and p not in paired}
             held = _together(held | unpaired, links)
@@ -306,24 +307,25 @@ class History:
         git("add", "-A")
 
     def _excluded(self) -> tuple[list[str], list[str]]:
-        """The excluded files and folders in the copy, and its folders holding a git repository.
+        """The excluded files and folders in the copy, its folders holding a git repository, and whether it wrote any file history leaves out, the platform's folders included.
 
         A copy starts with none, so the turn made them.  The platform's own
         folders are left out.
         """
         out = self._copy("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory")
+        ignored = {n for n in out.split("\0") if n}
         # After an add, what is left untracked is the folders with no file in
         # them: history has none, so they are not saved.  A folder the real
         # files have is one the turn emptied, not made.
         empty = self._copy("ls-files", "-z", "--others", "--exclude-standard", "--directory").split("\0")
         made = {n for n in empty if n and not (self.project / n).is_dir()}
-        names = sorted({n for n in out.split("\0") if n} | made)
+        names = sorted(ignored | made)
         names = [n for n in names if not n.startswith(PLATFORM_EXCLUDES)]
         repositories = {
             n for n in names
             if n.endswith("/") and ((self.copy / n / ".git").exists() or (self.project / n / ".git").exists())
         }
-        return [n for n in names if n not in repositories], sorted(repositories)
+        return [n for n in names if n not in repositories], sorted(repositories), bool(ignored)
 
     def _inside(self, path: str) -> Path:
         """*path* in the real files; refused if it would leave them."""

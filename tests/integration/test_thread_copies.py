@@ -358,14 +358,29 @@ async def test_an_excluded_file_a_turn_made_is_named_in_its_report(api, monkeypa
         calling(("terminal", {"command": "echo scratch > notes.tmp && mkdir -p node_modules && echo x > node_modules/x.js && echo kept > kept.md && rm notes.txt"})),
         _final_response("Kept a note."),
     ], pool=SandboxPool(pods))
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "kept.md"]
+    # The deletion waits: the turn wrote files history leaves out, and it may be a move into one.
+    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "kept.md", "notes.txt"]
     [report] = await reports(api, master)
     assert report["excluded"] == ["node_modules/", "notes.tmp"]
-    # A deletion is named apart: the master must not read it as a file to open.
     assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
         "Files: kept.md\n"
-        "Deleted: notes.txt\n"
+        "Not merged, because they go with a change that was not merged (a move lands whole or not at all): notes.txt\n"
         "Not saved, because the project's history leaves them out: node_modules/, notes.tmp"
+    )
+
+
+async def test_a_landed_deletion_is_named_apart_in_its_report(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    await a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "echo kept > kept.md && rm notes.txt"})),
+        _final_response("Kept a note."),
+    ], pool=SandboxPool(pods))
+    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "kept.md"]
+    [report] = await reports(api, master)
+    # A deletion is named apart: the master must not read it as a file to open.
+    assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
+        "Files: kept.md\nDeleted: notes.txt"
     )
 
 
