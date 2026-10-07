@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { type ClientHttp2Session, connect as connectH2 } from "node:http2";
 import { type Duplex, duplexPair } from "node:stream";
@@ -381,6 +382,35 @@ describe("a root torn down", () => {
     await manager.stop();
   });
 
+  it("keeps the share of a root whose processes would not end in the guest, and loses no guest for it", async () => {
+    const asked: unknown[] = [];
+    const roots: ControlRoots = {
+      uid: () => 10_000,
+      setup: async (root) => void asked.push(["setup", root]),
+      // As the agent answers when something of the root waits on a share that stalled.
+      teardown: async (root) => {
+        if (root === "root-1") throw new Error("What this chat ran is waiting on its folder, which does not answer");
+      },
+      perform: async () => ({ ok: true }),
+    };
+    let boots = 0;
+    const boot: BootVm = async (...args) => {
+      boots += 1;
+      const vm = await fakeVm(roots)(...args);
+      return { ...vm, unshare: async (share) => void asked.push(["unshare", share]) };
+    };
+    const manager = new VmManager(options(), boot);
+    const on = (root: string) => manager.perform({ id: `which-${Math.random()}`, root, folder: { path: dir, ...statSync(dir) }, kind: "which", args: {} }, new AbortController().signal);
+    expect(await on("root-1")).toEqual({ ok: true });
+    // Another root keeps the guest running.
+    expect(await on("root-2")).toEqual({ ok: true });
+    await manager.teardown("root-1");
+    expect(await on("root-1")).toEqual({ ok: true });
+    expect(asked).toEqual([["setup", "root-1"], ["setup", "root-2"], ["setup", "root-1"]]);
+    expect(boots).toBe(1);
+    await manager.stop();
+  });
+
   it("loses a guest that does not let its folder go, and boots a new one for the next operation", async () => {
     const asked: unknown[] = [];
     const manager = new VmManager(options(), recording(asked, async () => {
@@ -609,6 +639,25 @@ describe("a chat's folder on a mount that does not answer", () => {
   });
 });
 
+describe("a chat's folder on a mount that does not answer, asked again and again", () => {
+  it("holds none of the threads this computer's other lookups need", async () => {
+    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+    const manager = new VmManager({ ...options(), shareMs: 200 }, fakeVm(roots));
+    const { folder, release } = stalledFolder();
+    try {
+      // libuv's pool has four threads: one look each would hold them all.
+      for (let n = 0; n < 4; n += 1) {
+        expect(await within(manager.perform({ id: `${n}`, root: `root-${n}`, folder, kind: "which", args: {} }, new AbortController().signal), 3_000))
+          .toMatchObject({ error: { type: "unavailable" } });
+      }
+      expect(await within(stat(dir).then(() => "answered"), 1_000)).toBe("answered");
+      await manager.stop();
+    } finally {
+      release();
+    }
+  });
+});
+
 describe("a guest's stop", () => {
   const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
 
@@ -815,6 +864,20 @@ describe("a guest's lifecycle", () => {
       error: { type: "unavailable", message: "This computer's sandbox did not start: QEMU exited: Could not access KVM kernel module: Permission denied" },
     });
     expect([readFileSync(sessions, "utf8"), existsSync(`${sessions}.unchecked`)]).toEqual(["the homes", false]);
+    await manager.stop();
+  });
+
+  it("stops a guest whose agent does not answer a setup, and boots another for the next operation", async () => {
+    const events: string[] = [];
+    let answer = false;
+    const stuck: ControlRoots = { ...roots, setup: () => (answer ? Promise.resolve() : new Promise<void>(() => {})) };
+    const manager = new VmManager({ ...options(), setupMs: 200 }, counted(events, stuck));
+    const begun = performance.now();
+    expect(await which(manager)).toEqual(SANDBOX_STOPPED);
+    expect(performance.now() - begun).toBeLessThan(1_000);
+    answer = true;
+    expect(await which(manager)).toEqual({ ok: true });
+    expect(events.slice(0, 3)).toEqual(["boot", "gone", "boot"]);
     await manager.stop();
   });
 });

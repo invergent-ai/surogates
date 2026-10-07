@@ -11,7 +11,7 @@ import { Control } from "./control.js";
 import { Network } from "./network.js";
 import { findPort, openPort } from "./port.js";
 import type { FromAgent } from "./protocol.js";
-import { CGROUPS, contain, enter, killRoot, powerOff, Roots, uidOf, unmountShare } from "./root.js";
+import { CGROUPS, contain, enter, flushRoot, killRoot, powerOff, Roots, uidOf, unmountShare } from "./root.js";
 
 // Anything the agent does not catch ends it at once, and with it tini and the guest
 // (vm/init). An exit would wait for each read of its ports in flight, which never returns,
@@ -48,7 +48,7 @@ const port = await openPort(await findPort("ai.surogate.control"));
 const network = new Network(await openPort(await findPort("ai.surogate.net")));
 const say = (message: FromAgent) => void port.write(`${JSON.stringify(message)}\n`);
 const roots = new Roots({
-  start: enter, uid: uidOf, kill: killRoot, contain, cgroups: CGROUPS, unmount: unmountShare,
+  start: enter, uid: uidOf, kill: killRoot, contain, cgroups: CGROUPS, unmount: unmountShare, flush: flushRoot,
   tunnels: (root, uid) => network.listen(root, uid),
   lost: (root) => say({ type: "lost", root }),
   handles: (root, handles, live) => say({ type: "handles", root, handles, live }),

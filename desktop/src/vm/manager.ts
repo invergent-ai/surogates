@@ -6,9 +6,9 @@
 // proxy on the guest's net port, and what a lost guest was running.
 
 import { readFileSync, renameSync, rmSync } from "node:fs";
-import { lstat, realpath } from "node:fs/promises";
 import type { Duplex } from "node:stream";
 import { setTimeout as wait } from "node:timers/promises";
+import { Worker } from "node:worker_threads";
 
 import { BOOT_ID } from "../binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
@@ -43,6 +43,7 @@ export interface VmOptions extends Disks {
   cpus?: number;
   pingMs?: number;
   shareMs?: number;
+  setupMs?: number;
   powerOffMs?: number;
 }
 
@@ -145,6 +146,45 @@ interface Root {
   setup: Promise<Outcome | null> | null; // null once set up, or why not
 }
 
+// What a look at a folder found: its identity, and its real path.
+interface Looked {
+  found: { directory: boolean; dev: number; ino: number } | null;
+  real: string | null;
+}
+
+// A folder's look, in a thread of its own (Worker): on a mount that does not answer it
+// never returns, and in libuv's pool it would hold one of the four threads the host
+// proxy's lookups need too. A look still waiting is the next one's, so a folder that
+// does not answer holds one thread, however often it is asked.
+const LOOK = `
+const { parentPort, workerData } = require("node:worker_threads");
+const { lstatSync, realpathSync } = require("node:fs");
+let found = null;
+let real = null;
+try {
+  const stat = lstatSync(workerData);
+  found = { directory: stat.isDirectory(), dev: stat.dev, ino: stat.ino };
+  real = realpathSync.native(workerData);
+} catch {}
+parentPort.postMessage({ found, real });
+`;
+const looking = new Map<string, Promise<Looked>>();
+
+function look(path: string): Promise<Looked> {
+  const known = looking.get(path);
+  if (known) return known;
+  const looked = new Promise<Looked>((resolve) => {
+    const worker = new Worker(LOOK, { eval: true, workerData: path });
+    // A look that never returns keeps no process alive.
+    worker.unref();
+    worker.once("message", (found: Looked) => resolve(found));
+    worker.once("error", () => resolve({ found: null, real: null }));
+  });
+  looking.set(path, looked);
+  void looked.then(() => looking.delete(path));
+  return looked;
+}
+
 // Without an Egress, every destination off the package hosts is refused.
 const REFUSING: Egress = { ask: () => Promise.resolve(false) };
 
@@ -157,6 +197,7 @@ export class Guest {
   private readonly roots = new Map<string, Root>();
   private keepalive: NodeJS.Timeout | undefined;
   private readonly shareMs: number;
+  private readonly setupMs: number;
   private readonly powerOffMs: number;
   private readonly proxy: NetProxy;
   // Its own stop, once asked: a guest that goes without one was lost.
@@ -195,6 +236,7 @@ export class Guest {
     }, options.pingMs ?? PING_MS);
     this.keepalive.unref();
     this.shareMs = options.shareMs ?? SHARE_MS;
+    this.setupMs = options.setupMs ?? SETUP_MS;
     this.powerOffMs = options.powerOffMs ?? POWER_OFF_MS;
     // Each connection a root's command makes, judged with the root the agent named.
     this.proxy = new NetProxy(vm.net, { egress });
@@ -264,7 +306,7 @@ export class Guest {
       // A namespace of its own, with nothing met yet: a connection of the one torn down can
       // land after its teardown.
       this.proxy.forget(root);
-      const answer = await this.request({ type: "setup", root, folder: folder.path, share, ended }, SETUP_MS);
+      const answer = await this.request({ type: "setup", root, folder: folder.path, share, ended }, this.setupMs);
       if (answer?.type === "done") return null;
       entry.setup = null;
       if (answer?.type === "failed") return unavailable(`could not set up this chat: ${answer.message}`);
@@ -284,16 +326,13 @@ export class Guest {
   async share(root: string, folder: Folder): Promise<Share> {
     const deadline = performance.now() + this.shareMs;
     // On a mount that does not answer, as a dead network or FUSE one, the look never
-    // returns, and Node cannot cancel it: it is given up on at the deadline, its thread still held.
-    const looked = await Promise.race([
-      (async () => [await lstat(folder.path).catch(() => null), await realpath(folder.path).catch(() => null)] as const)(),
-      late(deadline - performance.now()),
-    ]);
+    // returns, and Node cannot cancel it: it is given up on at the deadline, in a thread of its own.
+    const looked = await Promise.race([look(folder.path), late(deadline - performance.now())]);
     if (looked === "late") throw new Error(`it did not answer within ${this.shareMs / 1000} s`);
-    const [found, real] = looked;
+    const { found, real } = looked;
     // A reboot can renumber the folder's mount: after one, only the inode is compared, as the file host does.
     const rebooted = Boolean(folder.boot) && BOOT_ID !== "" && folder.boot !== BOOT_ID;
-    if (!found?.isDirectory() || (!rebooted && found.dev !== folder.dev) || found.ino !== folder.ino || real !== folder.path) throw new FolderGone();
+    if (!found?.directory || (!rebooted && found.dev !== folder.dev) || found.ino !== folder.ino || real !== folder.path) throw new FolderGone();
     const given = await this.request({ type: "uid", root }, Math.max(0, deadline - performance.now()));
     if (!given) {
       this.lose();
@@ -317,15 +356,20 @@ export class Guest {
     if (!entry) return;
     // A setup under way lands first: the teardown then ends what it set up. One that
     // does not land within SETUP_MS loses the guest, the root's processes with it.
-    if ((await Promise.race([entry.setup, late(SETUP_MS)])) === "late") return this.lose();
+    if ((await Promise.race([entry.setup, late(this.setupMs)])) === "late") return this.lose();
     entry.setup = null;
     // One that could not be added has left already.
     const share = await entry.share.catch(() => null);
     if (this.roots.get(root) === entry) this.roots.delete(root);
     this.proxy.forget(root);
     if (!share) return;
+    const answer = await this.request({ type: "teardown", root, share }, this.setupMs);
     // Unanswered: the agent is stuck, and the guest goes, the root's processes with it.
-    if (!(await this.request({ type: "teardown", root, share }, SETUP_MS))) return this.lose();
+    if (!answer) return this.lose();
+    // What of the root would not end, waiting on a share that stalled, still holds the share,
+    // and its removal would wait on the guest for good: it stays, its place taken, until the
+    // VM stops. The root's next setup gets a share of its own.
+    if (answer.type === "failed") return;
     await this.vm.unshare(share, performance.now() + this.shareMs).catch(() => this.lose());
   }
 

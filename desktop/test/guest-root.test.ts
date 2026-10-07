@@ -241,6 +241,59 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     expect(order).toEqual(["ended", "unmount r7", "unmount r8"]);
   });
 
+  it("says a root torn down still holds its share while what it ran cannot end, and lets the share's mount go all the same", async () => {
+    const order: string[] = [];
+    const held = new Roots({
+      start: bare,
+      uid: () => 10_000,
+      // Its cgroup never empties, as when a process of it waits on a share that stalled.
+      kill: async () => {
+        throw new Error("the processes of root-5 have not ended");
+      },
+      unmount: async (share) => void order.push(`unmount ${share.tag}`),
+    });
+    await held.setup("root-5", base, R1, user);
+    await expect(held.teardown("root-5", R1)).rejects.toThrow("What this chat ran is waiting on its folder, which does not answer");
+    expect(order).toEqual(["unmount r1"]);
+    // Not set up any more: nothing of it holds anything.
+    await held.teardown("root-5", R1);
+  });
+
+  it("writes out what a root torn down wrote, its share's only if its processes ended, and holds a root whose share does not answer its flush", async () => {
+    const asked: Array<[string, boolean]> = [];
+    let answers = true;
+    const flushing = new Roots({
+      start: bare,
+      uid: () => 10_000,
+      kill: () => void children.at(-1)?.kill("SIGKILL"),
+      flush: async (share, stalled) => {
+        asked.push([share.tag, stalled]);
+        return answers;
+      },
+    });
+    await flushing.setup("root-6", base, R1, user);
+    await flushing.teardown("root-6", R1);
+    await flushing.setup("root-6", base, R1, user);
+    answers = false;
+    await expect(flushing.teardown("root-6", R1)).rejects.toThrow("What this chat ran is waiting on its folder, which does not answer");
+    expect(asked).toEqual([["r1", false], ["r1", false]]);
+    const stuck = new Roots({
+      start: bare,
+      uid: () => 10_000,
+      kill: async () => {
+        throw new Error("the processes of root-7 have not ended");
+      },
+      flush: async (share, stalled) => {
+        asked.push([share.tag, stalled]);
+        return true;
+      },
+    });
+    await stuck.setup("root-7", base, R1, user);
+    await expect(stuck.teardown("root-7", R1)).rejects.toThrow("What this chat ran is waiting on its folder, which does not answer");
+    // Its share stalled: only the sessions disk is written out.
+    expect(asked.at(-1)).toEqual(["r1", true]);
+  });
+
   it("tells the host of a lost root once everything of it has ended, and of one that cannot be ended once its runner is stopped", async () => {
     const told: string[] = [];
     let empty = () => {};

@@ -1311,43 +1311,73 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     for (const root of [...busy, "fifth"]) await managers.at(-1)!.teardown(root);
   });
 
-  it("loses a guest that does not let a torn-down root's folder go, and boots a new one for the next operation", async () => {
+  it("keeps a torn-down root's share while a process of it waits on the share that stalled, and the guest and another root's process go on", async () => {
     // A removal's bound of its own: the share's. The manager before it stops first, so its guest has let the disks go.
     await managers.at(-1)?.stop();
     managers.push(new VmManager({ ...options, shareMs: 3_000 }));
-    const a = join(dir, "a");
+    const [a, b] = [join(dir, "a"), join(dir, "b")];
+    const other = await op(OTHER, b, "start", background("sleep 300")) as { ok: { session_id: string } };
     expect(await op(ROOT, a, "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
-    // Its folder's virtiofsd: the daemon, and the child that serves the share.
-    const daemon = newestDaemon(options.run);
-    const share = [daemon, ...spawnSync("pgrep", ["-P", String(daemon)], { encoding: "utf8" }).stdout.trim().split("\n").map(Number)];
+    const daemons = shareDaemons(options.run);
     const qemu = qemuPid();
-    // A process that looks in the folder once its share has stalled: the guest cannot let the share go while it waits.
-    const stuck = "env -i /usr/bin/setsid /usr/bin/nohup /bin/sh -c '/usr/bin/sleep 1; /usr/bin/stat ./stuck' < /dev/null > /dev/null 2>&1 & echo started";
-    expect(await op(ROOT, a, "start", background(stuck))).toMatchObject({ ok: { session_id: expect.any(String) } });
+    // A process that looks in the folder once its share has stalled: it cannot end while it waits.
+    expect(await op(ROOT, a, "start", background(STUCK))).toMatchObject({ ok: { session_id: expect.any(String) } });
     await new Promise((resolve) => setTimeout(resolve, 500));
-    for (const pid of share) process.kill(pid, "SIGSTOP");
+    for (const pid of daemons) process.kill(pid, "SIGSTOP");
     try {
       await new Promise((resolve) => setTimeout(resolve, 1_500));
       const begun = performance.now();
       await managers.at(-1)!.teardown(ROOT);
-      // The agent's 3 s for the root's processes to end, then the removal's 3 s.
-      expect(performance.now() - begun).toBeLessThan(10_000);
-      expect(() => process.kill(qemu, 0)).toThrow();
+      // The agent's 3 s for the root's processes to end, and no removal to wait on.
+      expect(performance.now() - begun).toBeLessThan(6_000);
+      expect(alive(qemu)).toBe(true);
+      expect(await op(OTHER, b, "poll", { session_id: other.ok.session_id })).toMatchObject({ ok: { status: "running" } });
     } finally {
-      for (const pid of share) {
+      for (const pid of daemons) process.kill(pid, "SIGCONT");
+    }
+    // Its share answers again, so what waited on it ends: the root is set up again, on a share of its own, in the same guest.
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(await op(ROOT, a, "run", { command: "echo back", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "back\n" } });
+    expect(qemuPid()).toBe(qemu);
+    // The tests after this one bound a share by the default 15 s.
+    await managers.at(-1)!.stop();
+    managers.push(new VmManager(options));
+    expect(await op(ROOT, a, "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+  });
+
+  it("tears another chat down while one chat's share stalls: what it wrote written out, its share let go, and kept through a power cut", async () => {
+    await managers.at(-1)?.stop();
+    managers.push(new VmManager({ ...options, shareMs: 3_000 }));
+    const [a, b] = [join(dir, "a"), join(dir, "b")];
+    // The chat whose share stalls, with a process that waits on it.
+    expect(await op(ROOT, a, "start", background(STUCK))).toMatchObject({ ok: { session_id: expect.any(String) } });
+    const stalled = shareDaemons(options.run);
+    expect(await op(OTHER, b, "run", { command: "echo durable > ~/durable", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+    const its = shareDaemons(options.run);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    for (const pid of stalled) process.kill(pid, "SIGSTOP");
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      const begun = performance.now();
+      // Its flush is of its own filesystems: sync(2) would wait for good on the stalled share.
+      await managers.at(-1)!.teardown(OTHER);
+      expect(performance.now() - begun).toBeLessThan(3_000);
+      // Its share removed: its virtiofsd ends.
+      await until(() => its.every((pid) => !alive(pid)));
+      // A power cut now keeps what the chat wrote before its teardown.
+      const qemu = qemuPid();
+      process.kill(qemu, "SIGKILL");
+      await until(() => !alive(qemu));
+    } finally {
+      for (const pid of stalled) {
         try {
-          process.kill(pid, "SIGCONT");
+          process.kill(pid, "SIGKILL");
         } catch {
           // Gone with its guest.
         }
       }
     }
-    expect(await op(ROOT, a, "run", { command: "echo back", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "back\n" } });
-    expect(qemuPid()).not.toBe(qemu);
-    // The tests after this one bound a share by the default 15 s, with a guest running.
-    await managers.at(-1)!.stop();
-    managers.push(new VmManager(options));
-    expect(await op(ROOT, a, "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+    expect(await op(OTHER, b, "run", { command: "cat ~/durable", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "durable\n" } });
   });
 
   it("powers its guest off once its last root has let its folder go, and boots another for the next operation", async () => {

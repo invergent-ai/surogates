@@ -41,6 +41,9 @@ const EMPTY_RETRY_MS = 10;
 // How long a shutdown waits for every root's processes, killed together, to end: inside the
 // host's 5 s from its shutdown to the guest's power-off.
 const KILLED_MS = 1_000;
+// How long a flush of a share waits for its server: one that has not answered by then stalled.
+// A teardown's fits the host's 15 s with EMPTY_MS; the stop's, its 5 s with KILLED_MS.
+const FLUSH_MS = 3_000;
 const ENTER_ROOT = "/run/surogate/agent/enter-root";
 // The cloud's layout of the commands' environment, written by the image's build.
 const LAYOUT = "/etc/surogate/environment";
@@ -59,6 +62,7 @@ const PROCESS_KINDS = new Set(["start", "poll", "read_output", "wait", "kill", "
 
 export const NOT_SET_UP = { error: { type: "unavailable", message: "This computer's sandbox has not set up this chat" } } satisfies Outcome;
 const ALREADY = "This chat's sandbox is already set up";
+const HELD = "What this chat ran is waiting on its folder, which does not answer";
 const FULL = `This computer's sandbox holds ${MAX_SHARES} chats already`;
 // The cloud sandbox's HOME, under which /etc/surogate/environment names the layout:
 // at the start of a path, in a value or a list of them.
@@ -182,6 +186,17 @@ function flush(path: string, ms = Infinity): Promise<boolean> {
       resolve(!error);
     });
   });
+}
+
+/**
+ * What a root torn down wrote, written out: its home's and /tmp's on the sessions disk, and its
+ * folder's through its share, if the share was mounted and its root's processes all ended. False
+ * when the share did not answer within FLUSH_MS: it stalled, and is held.
+ */
+export async function flushRoot(share: Share, stalled: boolean): Promise<boolean> {
+  const shared = !stalled && TAG.test(share.tag) && mounted.has(share.tag);
+  const [, answered] = await Promise.all([flush(SESSIONS_DISK), shared ? flush(join(SHARES, share.tag), FLUSH_MS) : true]);
+  return answered;
 }
 
 /**
@@ -437,6 +452,8 @@ export interface RootsOptions {
   cgroups?: string;
   // The mount of a share whose root was torn down goes (unmountShare).
   unmount?(share: Share): Promise<void>;
+  // What a root torn down wrote, written out, its share's too unless it *stalled*: false when the share did not answer (flushRoot).
+  flush?(share: Share, stalled: boolean): Promise<boolean>;
   // The root's socket for its connections to the host proxy, its guest user's, made before its namespaces (Network.listen); resolves with what closes it.
   tunnels?(root: string, uid: number): Promise<() => void>;
   questionMs?: number;
@@ -454,6 +471,8 @@ export class Roots {
   // teardown: set up again once its runner was lost, a root still answers for
   // what ended with that runner, and how.
   private readonly registries = new Map<string, Processes>();
+  // The roots whose end left something running that would not end.
+  private readonly held = new Set<string>();
 
   constructor(private readonly options: RootsOptions) {}
 
@@ -492,6 +511,8 @@ export class Roots {
       try {
         await this.options.kill(root);
       } catch {
+        // Something of it would not end: its share stays held until its teardown says so.
+        this.held.add(root);
         await runner.stop();
       }
       unlisten();
@@ -577,7 +598,12 @@ export class Roots {
         this.roots.delete(root);
         await target.end();
       }
+      // What it wrote, written out. A share that does not answer its own flush stalled, and is held too.
+      if (!((await this.options.flush?.(share, this.held.has(root))) ?? true)) this.held.add(root);
       await this.options.unmount?.(share);
+      // What of it would not end, a process waiting on a share that stalled, still holds the
+      // share: the host keeps it in the guest, which could not let it go.
+      if (this.held.delete(root)) throw new Error(HELD);
     })());
   }
 
