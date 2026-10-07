@@ -5,9 +5,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
-// The oracle is protect.ts itself, as built (npm run build): a change to it shows here.
-const { GIT_CONFIGS, GIT_STATE, KEY_FOLDERS, PROTECTED_NAMES, PROTECTED_PAIRS, protectedInFolder } =
-  (await import(new URL("../dist/files/protect.js", import.meta.url).href)) as typeof import("../src/files/protect.js");
+// The oracle is protect.ts itself, as the source has it: a change to it shows here.
+import { GIT_CONFIGS, GIT_STATE, KEY_FOLDERS, PROTECTED_NAMES, PROTECTED_PAIRS, protectedInFolder } from "../src/files/protect.js";
 
 const SG_WALK = 12; // rule-match.h: the components judged, from the target up
 const onHost = (p: string) => protectedInFolder("/f", `/f/${p}`);
