@@ -92,3 +92,17 @@ async def running_landings(session_factory: Any, workstream_id: UUID | str) -> l
             .order_by(WorkstreamHistory.id)
         )
         return [(row, float(seconds)) for row, seconds in rows.all()]
+
+
+def saga_of(row: WorkstreamHistory) -> Saga:
+    """The landing saga *row* records, rebuilt as it stood.
+
+    A put-back the kill cut off is run again: putting a file back is safe
+    to repeat.  A thread deleted since leaves no ``thread_id``, and the
+    saga's session is the nil id.
+    """
+    steps = [{**s, "state": "committed"} if s["state"] == "compensating" else s for s in row.steps]
+    return Saga.from_dict({
+        "saga_id": row.saga_id, "session_id": str(row.thread_id or UUID(int=0)), "kind": "landing", "state": "running",
+        "created_at": row.created_at.isoformat(), "completed_at": None, "error": None, "steps": steps,
+    })

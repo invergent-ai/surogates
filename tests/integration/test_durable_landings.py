@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select, text
 
 from surogates.db.models import WorkstreamHistory
+from surogates.governance.saga import SagaOrchestrator
 from surogates.harness import landing as landing_module
+from surogates.sandbox.history import History
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
 from surogates.workstreams import history as rows_module
@@ -153,3 +158,251 @@ async def test_a_landing_whose_main_moved_without_its_saga_is_put_back(api, monk
     assert pods.real_names() == ["Report.docx", "notes.txt"]
     [row] = await rows(api, thread)
     assert (row.saga_state, row.commit) == ("compensated", None)
+
+
+async def test_running_landings_are_the_projects_own_oldest_first_with_how_long_each_is_quiet(api):
+    master = await master_of(api, await create(api))
+    first, second, elsewhere = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master), await a_thread(api)
+    factory = api.app.state.session_factory
+
+    async def a_landing(thread) -> tuple[int, object]:
+        saga = SagaOrchestrator().create_saga(thread.id, kind="landing")
+        return await rows_module.start_landing(
+            factory, saga, workstream_id=thread.config["workstream_id"], thread_id=thread.id,
+            agent_id=str(thread.agent_id), user_id=thread.user_id, tool_saga_id=None, events=None,
+        ), saga
+
+    (older, _), (done, saga), (newer, _) = await a_landing(first), await a_landing(first), await a_landing(second)
+    await a_landing(elsewhere)  # another project's
+    await rows_module.save_landing(factory, done, saga, state="completed")
+    async with factory() as db:
+        await db.execute(text("UPDATE workstream_history SET updated_at = now() - interval '10 seconds' WHERE id = :id"), {"id": older})
+        await db.commit()
+    running = await rows_module.running_landings(factory, first.config["workstream_id"])
+    assert [row.id for row, _ in running] == [older, newer]
+    assert running[0][1] >= 10 > running[1][1]
+    await rows_module.touch_landing(factory, older)
+    [(_, quiet), _] = await rows_module.running_landings(factory, first.config["workstream_id"])
+    assert quiet < 10
+
+
+async def a_landing_killed(api, monkeypatch, pool, thread, *, after: str) -> None:
+    """*thread*'s landing as a SIGKILL leaves it, once the pod has answered *after*: nothing more written, nothing put back.
+
+    *after* is an action, or ``apply <path>``.
+    """
+    call, save, touch = landing_module._call, landing_module.save_landing, landing_module.touch_landing
+    killed = asyncio.Event()
+
+    async def dies(sandbox_pool, owner, action, **arguments):
+        result = await call(sandbox_pool, owner, action, **arguments)
+        if owner == str(thread.id) and after in (action, f"{action} {arguments.get('path')}"):
+            killed.set()
+            raise asyncio.CancelledError  # a kill the worker never comes back from
+        return result
+
+    async def until_killed(write, *args, **kwargs):
+        if not killed.is_set():
+            await write(*args, **kwargs)
+
+    async def never_settles(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "_call", dies)
+        patch.setattr(landing_module, "save_landing", partial(until_killed, save))
+        patch.setattr(landing_module, "touch_landing", partial(until_killed, touch))
+        patch.setattr(landing_module, "_settle", never_settles)
+        patch.setattr(landing_module, "_PUT_BACK_BOUND", 0.1)
+        with pytest.raises(asyncio.CancelledError):
+            await ends(api, pool, thread)
+    landing_module._PUTTING_BACK.pop(str(thread.id)).cancel()
+    async with api.app.state.session_factory() as db:  # its lease runs out, as a dead worker's does
+        await db.execute(text("DELETE FROM session_leases WHERE session_id = :id"), {"id": thread.id})
+        await db.commit()
+
+
+async def test_a_worker_killed_after_two_applies_is_put_back_by_the_next_landing(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "for f in a b c d; do echo $f > $f.md; done")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply b.md")
+    assert pods.real_names() == ["Report.docx", "a.md", "b.md", "notes.txt"]  # half landed
+    [row] = await rows(api, first)
+    # b.md was written, and the row still has its apply pending: the kill came before its state was.
+    assert row.saga_state == "running"
+    assert [s["state"] for s in row.steps if s["tool_name"] == "history.apply"] == ["committed", "pending", "pending", "pending"]
+
+    await edited(pool, second, "echo by B > B.md")
+    started = time.monotonic()
+    await ends(api, pool, second)
+    # The killed landing's row was waited out, then put back.
+    assert time.monotonic() - started >= FENCED.default_step_timeout
+    assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
+    [row] = await rows(api, first)
+    assert row.saga_state == "compensated"
+    # Its turn stays on its branch, to land with the thread's next turn.
+    assert git(pods.project / "_history", "ls-tree", "--name-only", f"refs/heads/threads/{first.id}").splitlines() == [
+        "Report.docx", "a.md", "b.md", "c.md", "d.md", "notes.txt",
+    ]
+
+
+async def test_a_worker_killed_right_after_its_push_is_completed_and_its_thread_told(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md")
+    await a_landing_killed(api, monkeypatch, pool, thread, after="record")
+    pushed = git(pods.project / "_history", "rev-parse", "refs/heads/main")
+    [row] = await rows(api, thread)
+    assert [(s["tool_name"], s["state"]) for s in row.steps][-1] == ("history.record", "pending")
+
+    # The thread's next turn, in a pod of its own, settles it first.
+    await edited(pool, thread, "echo more > more.md")
+    await ends(api, pool, thread)
+    killed, _ = await rows(api, thread)
+    assert (killed.saga_state, killed.commit) == ("completed", pushed)
+    assert [(f["path"], f["merged"]) for f in killed.files] == [("a.md", True)]
+    assert pods.real_names() == ["Report.docx", "a.md", "more.md", "notes.txt"]
+    [report] = await reports(api, master)
+    assert sorted((f["ref"], f["landing"]) for f in report["files"]) == [("a.md", "landed"), ("more.md", "landed")]
+
+
+async def test_a_worker_killed_while_putting_back_is_put_back_again_by_the_next_landing(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo a > a.md && echo more >> notes.txt && echo z > z.md")
+    call, compensate = landing_module._call, landing_module.compensate_step
+    save, touch = landing_module.save_landing, landing_module.touch_landing
+    killed = asyncio.Event()
+    put_back: list[tuple[str, str]] = []
+
+    async def z_fails(sandbox_pool, owner, action, **arguments):
+        if owner == str(first.id) and action == "apply" and arguments["path"] == "z.md":
+            raise landing_module.LandingStepError("the pod's step timed out")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    async def dies_before_a(it, *, sandbox_pool, session_id):
+        if session_id == str(first.id) and it.arguments.get("path") == "a.md":
+            killed.set()
+            raise asyncio.CancelledError  # notes.txt is put back, and its row still says compensating
+        if it.tool_name == "history.apply":
+            put_back.append((session_id, it.arguments["path"]))
+        return await compensate(it, sandbox_pool=sandbox_pool, session_id=session_id)
+
+    async def until_killed(write, *args, **kwargs):
+        if not killed.is_set():
+            await write(*args, **kwargs)
+
+    monkeypatch.setattr(landing_module, "_call", z_fails)
+    monkeypatch.setattr(landing_module, "compensate_step", dies_before_a)
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "save_landing", partial(until_killed, save))
+        patch.setattr(landing_module, "touch_landing", partial(until_killed, touch))
+        with pytest.raises(asyncio.CancelledError):
+            await ends(api, pool, first)
+    async with api.app.state.session_factory() as db:  # its lease runs out, as a dead worker's does
+        await db.execute(text("DELETE FROM session_leases WHERE session_id = :id"), {"id": first.id})
+        await db.commit()
+    [row] = await rows(api, first)
+    assert row.saga_state == "running"
+    assert [(s["tool_name"], s["arguments"].get("path"), s["state"]) for s in row.steps] == [
+        ("history.commit", None, "committed"), ("history.apply", "a.md", "committed"),
+        ("history.apply", "notes.txt", "compensating"), ("history.apply", "z.md", "failed"),
+    ]
+    assert pods.real_names() == ["Report.docx", "a.md", "notes.txt"]
+    assert (pods.project / "notes.txt").read_text() == "v1 notes\n"
+
+    await edited(pool, second, "echo by B > B.md")
+    await ends(api, pool, second)
+    # notes.txt is put back a second time, as it already is: no conflict, and the landing is undone whole.
+    assert put_back == [(str(first.id), "notes.txt"), (str(second.id), "notes.txt"), (str(second.id), "a.md")]
+    [row] = await rows(api, first)
+    assert row.saga_state == "compensated"
+    assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
+    assert (pods.project / "notes.txt").read_text() == "v1 notes\n"
+
+
+#: Both workers' saga settings: tries of a second, three retries; a fence of two seconds.
+RETRYING = SimpleNamespace(default_step_timeout=1, default_max_retries=3, retry_delay=0)
+#: Both workers' saga settings: one try of three seconds; a fence of four.
+SLOW = SimpleNamespace(default_step_timeout=3, default_max_retries=0, retry_delay=0)
+
+
+async def lose_the_lock(api, thread) -> None:
+    """*thread*'s project's lock lost unseen, as a failover or a pooler restart loses it: its connection ends."""
+    async with api.app.state.session_factory() as db:
+        await db.execute(text(
+            "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND granted "
+            "AND objid::text::bigint = (hashtext(:key)::bigint & 4294967295)"
+        ), {"key": f"workstream:{thread.config['workstream_id']}"})
+        await db.commit()
+
+
+async def test_a_landing_that_lost_its_lock_while_a_step_retried_is_waited_for_and_stops(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "for f in a b c d; do echo $f > $f.md; done")
+    await edited(pool, second, "echo by B > B.md")
+    call, put_back = landing_module._call, landing_module._put_back
+    tries, through = [], []
+
+    async def slow_to_answer(sandbox_pool, owner, action, **arguments):
+        if owner == str(first.id) and action == "apply" and arguments["path"] == "b.md" and len(tries) < 3:
+            tries.append(owner)
+            await asyncio.sleep(10)  # cut off by the try's timeout
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    async def watched(saga, orchestrator, sandbox_pool, owner, *args, **kwargs):
+        through.append(owner)
+        return await put_back(saga, orchestrator, sandbox_pool, owner, *args, **kwargs)
+
+    monkeypatch.setattr(landing_module, "_call", slow_to_answer)
+    monkeypatch.setattr(landing_module, "_put_back", watched)
+    a = asyncio.create_task(ends(api, pool, first, settings=RETRYING))
+    while not tries:
+        await asyncio.sleep(0.05)
+    await lose_the_lock(api, first)
+    await asyncio.wait_for(ends(api, pool, second, settings=RETRYING), 30)
+    await asyncio.wait_for(a, 30)
+    [a_row], [b_row] = await rows(api, first), await rows(api, second)
+    # A wrote its row at each try, so B waited; A found its lock gone, and put itself back.
+    assert len(tries) == 3 and through == [str(first.id)]
+    assert (a_row.saga_state, a_row.commit) == ("compensated", None)
+    assert b_row.created_at >= a_row.updated_at
+    assert (b_row.saga_state, pods.real_names()) == ("completed", ["B.md", "Report.docx", "notes.txt"])
+
+
+async def test_a_landing_that_lost_its_lock_never_writes_over_the_next_landing(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "printf ' by A' >> Report.docx && echo a > a.md")
+    await edited(pool, second, "printf ' by B' >> Report.docx")
+    stalled, release = pods.root / "stalled", pods.root / "release"
+    put = History._put
+
+    def stalls(self, path, blob):
+        # A's write of the report, slow after its check, as on a stalled mount: in the pod's own process.
+        if self.thread == str(first.id) and path == "Report.docx":
+            stalled.touch()
+            while not release.exists():
+                time.sleep(0.05)
+        return put(self, path, blob)
+
+    monkeypatch.setattr(History, "_put", stalls)
+    a = asyncio.create_task(ends(api, pool, first, settings=SLOW))
+    while not stalled.exists():
+        await asyncio.sleep(0.05)
+    await lose_the_lock(api, first)
+    b = asyncio.create_task(ends(api, pool, second, settings=SLOW))
+    await asyncio.sleep(0.5)
+    release.touch()  # within A's try
+    await asyncio.wait_for(asyncio.gather(a, b), 30)
+    [a_row], [b_row] = await rows(api, first), await rows(api, second)
+    assert (a_row.saga_state, a_row.commit) == ("compensated", None)
+    assert b_row.saga_state == "completed"
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by B"
