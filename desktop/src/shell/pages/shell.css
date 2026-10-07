@@ -1083,13 +1083,21 @@ body.prompt-page {
   overflow-wrap: anywhere;
 }
 
-/* ponytail: the whole title, lead and note, as prompts are English only; their names and paths in spans of their own once a prompt is translated. */
+/* ponytail: the whole title, lead, note and value, as prompts are English only; their names and paths in spans of their own once a prompt is translated. */
 .prompt h1,
 .prompt #prompt-lead,
 .prompt .note,
-.prompt .code {
+.prompt .value {
   direction: ltr;
   unicode-bidi: bidi-override;
+}
+
+/* A long name or host in them scrolls there: what the prompt asks about keeps its room below. */
+.prompt h1,
+.prompt #prompt-lead {
+  flex-shrink: 0;
+  max-height: 25vh;
+  overflow-y: auto;
 }
 
 .prompt #prompt-lead,

@@ -168,7 +168,7 @@ export function approval(request: ApprovalRequest): PromptContent {
   }
   return {
     title: `Connect to ${request.host}?`,
-    lead: `A command in ${folder} wants to connect to ${request.host} on port ${request.port}. Allow lets through the connections waiting now; later ones ask again.`,
+    lead: `A command in ${folder} wants to connect to this address. Allow lets through the connections waiting now; later ones ask again.`,
     details: [code("Address", `${request.host}:${request.port}`)],
     notes: request.privateNetwork ? ["This address is on a private network, such as a home or office network, or a VPN."] : [],
     choice: null,

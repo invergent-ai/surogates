@@ -342,6 +342,36 @@ async function bound(client: Page, picked: string, chat = CHAT, mode = "ask"): P
   expect(await outcome(send("bind", { folder: ready.folder, nonce: ready.nonce }, chat))).toEqual({ ok: null });
 }
 
+// *request*'s prompt, in a window of the app's own over the app's window, as its approvals open one: its answer.
+function approved(request: Record<string, unknown>): Promise<unknown> {
+  const shell = dirname(MAIN);
+  return app!.evaluate(({ BrowserWindow }, [window, content, page, preload, asked]) => {
+    // The app's own modules, as its main process loaded them: an evaluated function has no import().
+    const load = process.getBuiltinModule("node:module").createRequire(window);
+    const { openPrompt } = load(window) as typeof import("../../src/shell/prompt-window.js");
+    const { approval } = load(content) as typeof import("../../src/shell/prompt-content.js");
+    return openPrompt({
+      parent: BrowserWindow.getAllWindows()[0]!,
+      page,
+      preload,
+      content: approval(asked as unknown as Parameters<typeof approval>[0]),
+      queue: { waiting: () => 0, onChange: () => () => {} },
+      unseen: () => {},
+    }, new AbortController().signal);
+  }, [join(shell, "prompt-window.js"), join(shell, "prompt-content.js"), join(shell, "pages", "prompt.html"), join(shell, "pages-preload.cjs"), request] as const);
+}
+
+// How much of each of *selector*'s elements is in view in the prompt's body, and its height, in px; the
+// body's height; and whether the title starts in view.
+const inView = (page: Page, selector: string) => page.evaluate((chosen) => {
+  const body = document.querySelector(".prompt-body")!.getBoundingClientRect();
+  const details = [...document.querySelectorAll(chosen)].map((element) => {
+    const { top, bottom, height } = element.getBoundingClientRect();
+    return { seen: Math.max(0, Math.min(bottom, body.bottom) - Math.max(top, body.top)), height };
+  });
+  return { body: body.height, details, title: document.querySelector("#prompt-title")!.getBoundingClientRect().top >= 0 };
+}, selector);
+
 const write = (name: string, text: string, chat = CHAT, into = folder) =>
   send("write", { key: join(into, name), data: Buffer.from(text).toString("base64") }, chat);
 
@@ -402,6 +432,30 @@ describe("an approval prompt", () => {
     })).toBe(true);
     await press(asked, "deny");
     expect(await outcome(id)).toMatchObject({ error: { type: "sandbox" } });
+  });
+
+  it("keeps what it asks about in view under the longest name or host", async () => {
+    await bound(await signedIn(), folder);
+    // The longest name a file can have: 127 characters of two bytes each, each shown as its code point.
+    const id = write("\u0085".repeat(127), "hello\n");
+    const asked = await prompt(app!);
+    // The title starts in view, and so does the file; its new content is a scroll of the body away, never squeezed out.
+    const opened = await inView(asked, ".detail");
+    expect([opened.title, opened.body > 100, opened.details[0]!.seen > 0]).toEqual([true, true, true]);
+    await asked.evaluate(() => document.querySelectorAll(".detail")[1]!.scrollIntoView({ block: "end" }));
+    const content = (await inView(asked, ".detail")).details[1]!;
+    expect(content.seen).toBeCloseTo(content.height, 0);
+    await press(asked, "deny");
+    expect(await outcome(id)).toMatchObject({ error: { type: "os", code: "EACCES" } });
+    // The longest name a host can have, on a private network: its warning stays in view.
+    const host = `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(61)}`;
+    const answered = approved({ kind: "network", chat: { agent: "acme.surogate.ai", root: CHAT, calling: CHAT, folder }, host, port: 8080, privateNetwork: true });
+    const network = await prompt(app!);
+    const warned = await inView(network, ".note");
+    expect(warned.title).toBe(true);
+    expect(warned.details[0]!.seen).toBeCloseTo(warned.details[0]!.height, 0);
+    await press(network, "deny");
+    expect(await answered).toEqual({ button: "deny", choice: null });
   });
 
   it("lets the chat work freely once its user stops asking", async () => {

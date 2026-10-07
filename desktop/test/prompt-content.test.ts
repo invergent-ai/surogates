@@ -98,6 +98,9 @@ describe("an approval prompt", () => {
   it("asks about a destination with Allow, all its ports for the chat, and Deny, and says when it is private", () => {
     const content = approval({ kind: "network", chat: CHAT, host: "192.168.1.20", port: 8080, privateNetwork: true });
     expect(content.title).toBe("Connect to 192.168.1.20?");
+    // The host is named once in the title and once in its address: a long one leaves its warning room.
+    expect(content.lead).toBe("A command in notes wants to connect to this address. Allow lets through the connections waiting now; later ones ask again.");
+    expect(content.details).toEqual([{ label: "Address", value: "192.168.1.20:8080", code: true, keep: "" }]);
     expect(content.buttons).toEqual([
       { id: "deny", label: "Deny", allows: false },
       { id: "allow_session", label: "Allow all its ports for this chat", allows: true },
