@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
@@ -535,6 +536,23 @@ async def test_a_delegated_childs_approval_reaches_its_projects_stream(api, monk
     ]
     [row] = await rows(api, project)
     assert (row["group"], row["reason"]) == ("waiting", "approval")
+
+
+async def test_a_malformed_change_is_skipped_and_the_stream_stays_open(api, monkeypatch, caplog):
+    project = await create(api)
+    thread = await start(api, await master_of(api, project))
+
+    async def act():
+        # Only the server publishes here, but Redis takes anyone's.
+        await api.app.state.redis.publish(f"surogates:workstream:{project['id']}", b"not-a-session:x")
+        await api.app.state.session_store.emit_event(
+            thread.id, EventType.ITERATION_SUMMARY, {"summary": "Reading the brief"},
+        )
+
+    with caplog.at_level(logging.WARNING, logger=workstreams_routes.__name__):
+        sent = await streamed(api, monkeypatch, project, 1, act)
+    assert sent == [("ready", {}), ("change", {"thread_id": str(thread.id), "type": "iteration.summary"})]
+    assert "not-a-session:x" in caplog.text
 
 
 async def test_a_chat_outside_projects_publishes_on_no_projects_stream(api, monkeypatch):

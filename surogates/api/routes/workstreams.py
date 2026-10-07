@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
@@ -29,6 +30,8 @@ from surogates.workstreams import stream as project_stream
 from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread
 from surogates.workstreams.store import WorkstreamStore
 from surogates.workstreams.threads import start_thread, stop_thread
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/workstreams")
 
@@ -283,8 +286,14 @@ async def stream_project(workstream_id: UUID, request: Request, ctx: AgentRuntim
                 if message is None:
                     continue
                 data = message["data"]
-                session_id, _, kind = (data.decode() if isinstance(data, bytes) else data).partition(":")
-                thread = await threads.get_thread(UUID(session_id))
+                try:
+                    session_id, _, kind = (data.decode() if isinstance(data, bytes) else data).partition(":")
+                    changed = UUID(session_id)
+                except ValueError:
+                    # Only the server publishes here, but Redis takes anyone's.
+                    logger.warning("Skipped a malformed change on project %s: %r", project.id, data)
+                    continue
+                thread = await threads.get_thread(changed)
                 yield {"event": "change", "data": json.dumps({
                     "thread_id": session_id if thread is not None and thread.workstream_id == project.id else None,
                     "type": kind,
