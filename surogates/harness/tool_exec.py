@@ -1290,13 +1290,13 @@ async def _run_single_tool(
     # In a project's thread every saga step starts from a snapshot of its
     # copy, taken right before it runs: a stop puts the copy back however
     # the step changed it.  A call refused below for not being offered or
-    # allowed never runs, so it takes none.
+    # allowed, or for arguments that are not JSON, never runs, so it takes none.
     allowed = session.config.get("tool_allow_list")
     if (
         saga is not None and replay_of is None and not on_device and sandbox_pool is not None
         and tool_name not in SAGA_EXCLUDED_TOOLS and is_project_thread(session.config)
         and (offered_tools is None or tool_name in offered_tools)
-        and (not allowed or tool_name in allowed)
+        and (not allowed or tool_name in allowed) and parse_error is None
     ):
         checkpoint_hash = await _snapshot_copy(
             session, tenant, sandbox_pool, credential_vault, reason=f"before {tool_name}",

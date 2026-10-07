@@ -77,8 +77,11 @@ async def test_a_call_refused_before_it_runs_takes_no_snapshot(monkeypatch):
 
     monkeypatch.setattr(tool_exec, "_snapshot_copy", snapshot)
     call = {"id": "c1", "function": {"name": "write_file", "arguments": json.dumps({"path": "a.md", "content": "a"})}}
-    # Not offered to the model, or not on the session's allow-list.
-    for config, offered in (({}, frozenset({"terminal"})), ({"tool_allow_list": ["terminal"]}, None)):
+    malformed = {"id": "c2", "function": {"name": "write_file", "arguments": '{"path": "a.md", "content": '}}
+    # Not offered to the model, not on the session's allow-list, or its arguments not JSON.
+    for call, config, offered in (
+        (call, {}, frozenset({"terminal"})), (call, {"tool_allow_list": ["terminal"]}, None), (malformed, {}, None),
+    ):
         await tool_exec._run_single_tool(
             call, session=SimpleNamespace(id=uuid4(), config={"workstream_role": "thread", **config}),
             lease=MagicMock(), store=AsyncMock(), tools=ToolRegistry(), tenant=MagicMock(),
