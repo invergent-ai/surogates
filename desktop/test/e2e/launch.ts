@@ -2,13 +2,13 @@
 
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { _electron, type ElectronApplication, type Page } from "playwright-core";
-import { expect } from "vitest";
+import { afterAll, expect } from "vitest";
 
 // The electron package's main is the path of its binary.
 export const ELECTRON = createRequire(import.meta.url)("electron") as string;
@@ -16,6 +16,14 @@ export const MAIN = join(import.meta.dirname, "..", "..", "dist", "shell", "main
 
 // Short, under /tmp: a tool host's socket path under the state root must stay within 107 bytes.
 export const dataHome = (): string => mkdtempSync("/tmp/sd-");
+
+// Each data home's runtime folder, made once: short, under /tmp, as QEMU's control socket under it must
+// stay within 108 bytes. They go with the test file, once its apps have quit.
+const runtimes = new Map<string, string>();
+afterAll(() => {
+  for (const runtime of runtimes.values()) rmSync(runtime, { recursive: true, force: true });
+  runtimes.clear();
+});
 
 // What a test app takes of the caller's environment, and nothing else: no agent, keyring, session or
 // desktop of the user's reaches it. VS Code's ELECTRON_RUN_AS_NODE, which would start Electron as plain
@@ -39,12 +47,14 @@ export function shellEnv(home: string): Record<string, string> {
     const value = process.env[name];
     if (value) env[name] = value;
   }
-  // Short names: the VM's sockets live under the runtime folder, within 107 bytes.
-  const [own, runtime, config, cache, state] = ["h", "r", "c", "k", "s"].map((name) => join(home, name));
-  for (const folder of [own, runtime, config, cache, state]) mkdirSync(folder!, { recursive: true, mode: 0o700 });
+  const [own, config, cache, state] = ["h", "c", "k", "s"].map((name) => join(home, name));
+  for (const folder of [own, config, cache, state]) mkdirSync(folder!, { recursive: true, mode: 0o700 });
+  // 0700, as mkdtemp makes it.
+  const runtime = runtimes.get(home) ?? mkdtempSync("/tmp/rt-");
+  runtimes.set(home, runtime);
   return {
     ...env,
-    HOME: own!, XDG_RUNTIME_DIR: runtime!, XDG_CONFIG_HOME: config!, XDG_CACHE_HOME: cache!, XDG_STATE_HOME: state!, XDG_DATA_HOME: home,
+    HOME: own!, XDG_RUNTIME_DIR: runtime, XDG_CONFIG_HOME: config!, XDG_CACHE_HOME: cache!, XDG_STATE_HOME: state!, XDG_DATA_HOME: home,
     DBUS_SESSION_BUS_ADDRESS: "disabled:", NO_AT_BRIDGE: "1", XDG_SESSION_TYPE: "x11", GDK_BACKEND: "x11",
   };
 }

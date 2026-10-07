@@ -53,6 +53,8 @@ describe("the tests' own session", () => {
       for (const name of ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"]) {
         expect(environment[name]?.startsWith(`${home}/`), name).toBe(true);
       }
+      // Short, under /tmp, and the user's alone: QEMU's control socket under it stays within 108 bytes.
+      expect(environment.XDG_RUNTIME_DIR).toMatch(/^\/tmp\/rt-[^/]{6}$/);
       expect(statSync(environment.XDG_RUNTIME_DIR!).mode & 0o777).toBe(0o700);
       // xvfb's display and its authority, never the desktop's.
       expect(environment.DISPLAY).toMatch(/^:\d+$/);
