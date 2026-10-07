@@ -170,6 +170,14 @@ class HarnessAPIClient:
             data = await self._get(f"/v1/skills/{name}", params=params or None)
         return json.dumps({"success": True, **data}, ensure_ascii=False)
 
+    async def skill_file_bytes(self, name: str, path: str) -> bytes:
+        """A skill's linked file as the skill stores it: what a local folder's ``skill_view`` puts in the folder."""
+        resp = await self._client.get(
+            f"/v1/skills/{name}/file", params=self._merge_params({"path": path, "raw": "true"}),
+        )
+        resp.raise_for_status()
+        return resp.content
+
     async def get_skill(self, name: str) -> dict[str, Any] | None:
         """Fetch a skill's full detail as a structured dict (bundle-aware).
 

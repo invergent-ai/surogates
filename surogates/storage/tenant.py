@@ -367,6 +367,10 @@ class TenantStorage:
         """Read a supporting file from a skill directory."""
         return await self._backend.read_text(self._bucket, f"{key_prefix}/{file_path}")
 
+    async def read_skill_bytes(self, key_prefix: str, file_path: str) -> bytes:
+        """Read a supporting file from a skill directory, as stored."""
+        return await self._backend.read(self._bucket, f"{key_prefix}/{file_path}")
+
     async def write_skill_file(self, key_prefix: str, file_path: str, content: str) -> None:
         """Write a supporting file to a skill directory."""
         await self._backend.write_text(self._bucket, f"{key_prefix}/{file_path}", content)

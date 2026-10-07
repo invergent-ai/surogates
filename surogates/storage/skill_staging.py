@@ -20,14 +20,19 @@ LocalBackend directory (dev), and the LLM runs them by relative path.
 The staging is idempotent: a ``.staged`` marker file inside the staged tree
 short-circuits re-uploads on subsequent ``skill_view`` calls within the same
 session.
+
+A chat on a local folder has its skills' files put in the folder instead, by
+the ``skill_view`` tool call that views the skill (:func:`stage_in_folder`),
+so the writes are journaled under that call.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, AsyncIterator, Final
 from uuid import UUID
 
@@ -35,9 +40,12 @@ from surogates.storage.backend import StorageBackend
 from surogates.storage.keys import prefixed
 from surogates.storage.tenant import session_workspace_key
 from surogates.tools.builtin.skill_validation import GRAPH_FILE
+from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
+
+    from surogates.tools.workspace_io import WorkspaceFiles
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +55,10 @@ STAGING_DIR: Final[str] = ".skills"
 
 #: Zero-byte marker written once a skill has been fully staged.
 STAGING_MARKER: Final[str] = ".staged"
+
+#: Where a chat on a local folder has its skills' files: among the harness's
+#: own files in the folder, which Ask every time does not ask about.
+FOLDER_STAGING_DIR: Final[str] = f"{WORKSPACE_STORAGE_DIR}/skills"
 
 #: Redis key prefix for per-skill staging locks.  Scoped by session_id so two
 #: sessions staging the same skill never contend; scoped by skill_name so a
@@ -366,6 +378,72 @@ class SkillStager:
     ) -> str:
         """Return the workspace-visible path for a single file within a staged skill."""
         return self.workspace_path_for(session_id, skill_name) + file_path.lstrip("/")
+
+
+def staging_preamble(skill_name: str, staged_at: str, *, workdir: str = "/workspace") -> str:
+    """Return a directive preamble that tells the LLM how to address staged files.
+
+    Prepending this to the SKILL.md body lets authors write relative paths
+    (``scripts/foo.py``) without knowing about staging.  The preamble is
+    phrased as a direct instruction (not a passive statement) because the
+    sandbox CWD is *workdir* (``/workspace``, or a local folder's own path),
+    not the skill directory -- the LLM must actively prepend ``staged_at``
+    to every relative path the skill body mentions or the command will fail
+    with "No such file or directory".
+    """
+    base = staged_at.rstrip("/")
+    return (
+        f"> **Skill staging.** This skill's files live at `{base}/` "
+        f"inside the sandbox.  The sandbox working directory is "
+        f"`{workdir}`, NOT the skill directory, so every relative path "
+        f"that appears below MUST be prefixed with `{base}/` when you "
+        f"invoke it.  For example, `scripts/foo.py` in this document "
+        f"means `{base}/scripts/foo.py` on the command line; "
+        f"`assets/template.pptx` means `{base}/assets/template.pptx`. "
+        f"Do not `cd` into the skill directory -- prefix the paths.\n\n"
+    )
+
+
+def _refuse_leaving_the_folder(skill_name: str, linked_files: list[str]) -> None:
+    """ValueError for a skill name or a linked file that would not stay in the skill's own folder."""
+    if not skill_name or "/" in skill_name or skill_name.startswith("."):
+        raise ValueError(f"A skill named {skill_name!r} cannot be put in the folder")
+    for path in linked_files:
+        if PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts:
+            raise ValueError(f"The skill's file {path!r} cannot be put in the folder")
+
+
+async def stage_in_folder(
+    files: "WorkspaceFiles",
+    *,
+    skill_name: str,
+    linked_files: list[str],
+    fetch: Callable[[str], Awaitable[bytes]],
+    owner: str,
+) -> str:
+    """Put *skill_name*'s files in a local folder through *files*; return the folder they are in, from its top.
+
+    *fetch* gives a file's bytes as the skill stores them.  A name or a
+    linked file that would leave the skill's folder raises ValueError before
+    anything is written.  The folder
+    outlives the chat, so the marker names the chat that put them there
+    (*owner*, its root session): its sub-agents and its next views find
+    them, and a later chat on the same folder puts them there afresh, in
+    case the skill changed.  One after another: each write is an operation
+    of the tool call, numbered in the order it asks for them.
+    """
+    _refuse_leaving_the_folder(skill_name, linked_files)
+    base = f"{FOLDER_STAGING_DIR}/{skill_name}"
+    marker = await files.resolve(f"{base}/{STAGING_MARKER}")
+    try:
+        if await files.read(marker) == owner.encode():
+            return base
+    except FileNotFoundError:
+        pass
+    for path in linked_files:
+        await files.write(await files.resolve(f"{base}/{path}"), await fetch(path))
+    await files.write(marker, owner.encode())
+    return base
 
 
 def has_stageable_assets(linked_files: dict[str, list[str]] | list[str] | None) -> bool:
