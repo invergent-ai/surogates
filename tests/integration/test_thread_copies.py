@@ -723,3 +723,29 @@ async def test_a_threads_loop_starts_no_run_to_edit_a_copy_never_landed(api, mon
         runs = (await db.execute(text("SELECT count(*) FROM sessions WHERE parent_id = :id"), {"id": thread.id})).scalar()
     assert (runs, pods.pods) == (0, {})
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+
+
+def a_waking_thread_harness(api, monkeypatch, pool, turn):
+    """A worker whose wake runs for real over *pool*, its turn *turn*."""
+    monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
+    harness = a_waking_harness(api.app.state.session_store, SlashCommandConfig())
+    harness._compressor.prune_stale_browser_states.side_effect = lambda messages: messages
+    harness._redis, harness._session_factory, harness._sandbox_pool = api.app.state.redis, api.app.state.session_factory, pool
+    harness._run_loop = turn
+    return harness
+
+
+async def test_a_retried_wake_that_ends_normally_keeps_its_copy(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Edit the report."})
+
+    async def ends_keeping_its_pod(session, *_, **__):  # as a turn the provider failed does
+        await open_pod(pool, session)
+
+    harness = a_waking_thread_harness(api, monkeypatch, pool, ends_keeping_its_pod)
+    try:
+        raise RuntimeError("the first attempt crashed")
+    except RuntimeError:
+        await harness.wake(thread.id)  # the dispatcher retries inside its handler
+    assert pool.holds_copy(str(thread.id))

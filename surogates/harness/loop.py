@@ -21,7 +21,6 @@ import json
 import re
 import logging
 import os
-import sys
 import traceback
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -1147,6 +1146,9 @@ class AgentHarness(
         lease: Any | None = None
         renewal_task: asyncio.Task[None] | None = None
         device_token: Token[frozenset[str]] | None = None
+        # Set when this turn itself is cut off, by a crash or a cancel: an
+        # exception a caller is handling around this wake is not this turn's.
+        cut_off = False
 
         try:
             # Connection health: proactively clean up dead connections
@@ -1578,6 +1580,7 @@ class AgentHarness(
             await self._run_loop(session, messages, system_prompt, lease, cost_tracker=cost_tracker, all_events=all_events)
 
         except Exception as _harness_exc:
+            cut_off = True
             logger.exception("Harness crash for session %s", session_id)
             info = classify_harness_error(_harness_exc)
             try:
@@ -1601,6 +1604,9 @@ class AgentHarness(
             # The parent hears of a crash only when the dispatcher stops
             # retrying it (``Orchestrator._report_failure_to_parent``).
             raise
+        except BaseException:  # a cancel: the lease went to another worker, or the worker stops
+            cut_off = True
+            raise
         finally:
             leave_device_session(device_token)
 
@@ -1608,7 +1614,7 @@ class AgentHarness(
             # crash, leaves a copy that never landed: its pod goes, so no
             # later turn on this worker goes on with that copy.
             if (
-                sys.exc_info()[0] is not None and session is not None
+                cut_off and session is not None
                 and is_project_thread(session.config) and self._sandbox_pool is not None
             ):
                 owner = sandbox_session_key(session)
