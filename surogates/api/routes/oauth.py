@@ -27,6 +27,7 @@ import hmac
 import json
 import re
 import secrets
+from datetime import datetime
 from typing import Annotated, Literal
 from urllib.parse import urlencode
 from uuid import UUID
@@ -254,3 +255,39 @@ async def web_session(body: WebCode, request: Request, response: Response, ctx: 
         access_token=create_access_token(org_id, user_id, USER_PERMISSIONS, **signed_in),
         refresh_token=create_refresh_token(org_id, user_id, **signed_in),
     )
+
+
+class SignInOut(BaseModel):
+    id: UUID
+    created_at: datetime
+    last_used_at: datetime
+    device_name: str | None
+
+
+def _recent_user(tenant: TenantContext, ctx: AgentRuntimeContext) -> UUID:
+    # The user's own token, signed in recently, as adding a computer needs: a stolen session cannot sign them out everywhere.
+    user_id = _user_of(tenant, ctx)
+    require_recent_sign_in(tenant)
+    return user_id
+
+
+@router.get("/sign-ins", response_model=list[SignInOut])
+async def list_sign_ins(request: Request, ctx: AgentRuntime, tenant: Tenant) -> list[SignInOut]:
+    """The user's Surogate Desktop sign-ins at this agent that still last, each with the computer bound to it, if any."""
+    user_id = _recent_user(tenant, ctx)
+    found = await OAuthTokens(request.app.state.session_factory).sign_ins(
+        org_id=tenant.org_id, user_id=user_id, agent_id=ctx.agent_id,
+    )
+    return [SignInOut(id=s.id, created_at=s.created_at, last_used_at=s.last_used_at, device_name=s.device_name) for s in found]
+
+
+@router.delete("/sign-ins/{sign_in_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def end_sign_in(sign_in_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant) -> Response:
+    """End one of the user's desktop sign-ins, bound to a computer or not, and the window's sessions made from it."""
+    user_id = _recent_user(tenant, ctx)
+    ended = await OAuthTokens(request.app.state.session_factory).end(
+        sign_in_id, org_id=tenant.org_id, user_id=user_id, agent_id=ctx.agent_id,
+    )
+    if not ended:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such sign-in.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

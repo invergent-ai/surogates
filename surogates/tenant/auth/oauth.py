@@ -23,7 +23,7 @@ from sqlalchemy import exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
-from surogates.db.models import OAuthRefreshToken
+from surogates.db.models import Device, OAuthRefreshToken
 from surogates.tenant.auth.service_account import hash_token
 
 REFRESH_PREFIX = "surg_rt_"
@@ -42,6 +42,16 @@ class RefreshGrant:
     auth_time: int
     family_id: UUID
     refresh_token: str
+
+
+@dataclass(frozen=True, slots=True)
+class SignIn:
+    """One of a user's desktop sign-ins: its family, when it was made and last used, and the computer bound to it."""
+
+    id: UUID
+    created_at: datetime
+    last_used_at: datetime
+    device_name: str | None
 
 
 def _new_token() -> str:
@@ -140,6 +150,50 @@ class OAuthTokens:
                 .values(revoked_at=func.coalesce(OAuthRefreshToken.revoked_at, func.now()))
             )
             await db.commit()
+
+    async def sign_ins(self, *, org_id: UUID, user_id: UUID, agent_id: str) -> list[SignIn]:
+        """The user's sign-ins at *agent_id* that still last, last used first.
+
+        Each refresh issues its family's next row, so the newest row says when it was last used.
+        """
+        async with self._sf() as db:
+            rows = (await db.execute(
+                select(
+                    OAuthRefreshToken.family_id,
+                    func.min(OAuthRefreshToken.created_at),
+                    func.max(OAuthRefreshToken.created_at),
+                    func.max(Device.name),
+                )
+                .outerjoin(Device, Device.id == OAuthRefreshToken.device_id)
+                .where(
+                    OAuthRefreshToken.org_id == org_id,
+                    OAuthRefreshToken.user_id == user_id,
+                    OAuthRefreshToken.agent_id == agent_id,
+                )
+                .group_by(OAuthRefreshToken.family_id)
+                .having(
+                    ~func.bool_or(OAuthRefreshToken.revoked_at.is_not(None)),
+                    func.min(OAuthRefreshToken.auth_time) > int(time.time() - FAMILY_LIFETIME.total_seconds()),
+                )
+                .order_by(func.max(OAuthRefreshToken.created_at).desc())
+            )).all()
+        return [SignIn(*row) for row in rows]
+
+    async def end(self, family_id: UUID, *, org_id: UUID, user_id: UUID, agent_id: str) -> bool:
+        """End the user's sign-in *family_id* at *agent_id*, as signing out does. False when they have no such sign-in."""
+        async with self._sf() as db:
+            ended = await db.execute(
+                update(OAuthRefreshToken)
+                .where(
+                    OAuthRefreshToken.family_id == family_id,
+                    OAuthRefreshToken.org_id == org_id,
+                    OAuthRefreshToken.user_id == user_id,
+                    OAuthRefreshToken.agent_id == agent_id,
+                )
+                .values(revoked_at=func.coalesce(OAuthRefreshToken.revoked_at, func.now()))
+            )
+            await db.commit()
+        return ended.rowcount > 0
 
     @staticmethod
     def _row(

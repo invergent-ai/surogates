@@ -7,7 +7,7 @@ import hashlib
 import secrets
 import time
 from urllib.parse import parse_qs, urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from jose import jwt as jose_jwt
@@ -18,10 +18,11 @@ from surogates.db.agent_users import purge_user_account
 from surogates.db.models import Device
 from surogates.devices.store import DeviceStore
 from surogates.runtime import agent_runtime_context_dep, build_agent_runtime_context
-from surogates.tenant.auth.jwt import create_access_token
+from surogates.tenant.auth.jwt import create_access_token, create_service_account_session_token
 from surogates.tenant.auth.oauth import OAuthTokens
 
-from .test_devices import AGENT_ID, api, eventually, link_url, linked  # noqa: F401  (fixtures)
+from .conftest import issue_service_account_token
+from .test_devices import AGENT_ID, add_user, api, eventually, link_url, linked  # noqa: F401  (fixtures)
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -401,3 +402,55 @@ async def test_a_later_sign_in_the_app_binds_to_its_computer_ends_with_it_and_so
     assert (await api.client.delete(f"/v1/devices/{device_id}", headers=api.auth())).status_code == 204
     assert (await refresh(api, second["refresh_token"])).json() == {"error": "invalid_grant"}
     assert (await api.client.post("/v1/auth/refresh", json={"refresh_token": web["refresh_token"]})).status_code == 401
+
+
+SIGN_INS = "/v1/auth/oauth/sign-ins"
+
+
+async def test_a_user_sees_their_desktop_sign_ins_and_ends_one_as_for_a_lost_laptop(api):
+    bound = await signed_in(api)
+    await add_computer(api, bound["access_token"])
+    loose = await signed_in(api)
+    renewed = (await refresh(api, loose["refresh_token"])).json()
+    web = await window_session(api, renewed["access_token"])
+    listed = await api.client.get(SIGN_INS, headers=api.auth())
+    assert listed.status_code == 200, listed.text
+    sign_ins = {sign_in["id"]: sign_in for sign_in in listed.json()}
+    family = {name: claims(tokens["access_token"])["sid"] for name, tokens in {"bound": bound, "loose": loose}.items()}
+    assert set(sign_ins) == set(family.values())
+    assert sign_ins[family["bound"]]["device_name"] == "ThinkPad"
+    assert sign_ins[family["loose"]]["device_name"] is None
+    assert sign_ins[family["loose"]]["last_used_at"] >= sign_ins[family["loose"]]["created_at"]
+    # A sign-in bound to no computer can be ended too: the desktop and its window are both signed out.
+    assert (await api.client.delete(f"{SIGN_INS}/{family['loose']}", headers=api.auth())).status_code == 204
+    assert (await refresh(api, renewed["refresh_token"])).json() == {"error": "invalid_grant"}
+    assert (await api.client.post("/v1/auth/refresh", json={"refresh_token": web["refresh_token"]})).status_code == 401
+    left = (await api.client.get(SIGN_INS, headers=api.auth())).json()
+    assert [sign_in["id"] for sign_in in left] == [family["bound"]]
+    assert (await refresh(api, bound["refresh_token"])).status_code == 200
+
+
+async def test_another_users_sign_ins_are_not_theirs_to_see_or_end(api, session_factory):
+    mine = await signed_in(api)
+    _, theirs = await add_user(session_factory, api.org_id)
+    assert (await api.client.get(SIGN_INS, headers=api.auth(theirs))).json() == []
+    ended = await api.client.delete(f"{SIGN_INS}/{claims(mine['access_token'])['sid']}", headers=api.auth(theirs))
+    assert ended.status_code == 404
+    assert (await refresh(api, mine["refresh_token"])).status_code == 200
+
+
+@pytest.mark.parametrize("bearer", ["a sign-in of eleven minutes ago", "a service account's key", "a service account's session"])
+async def test_only_a_recent_sign_in_of_the_user_sees_or_ends_their_sign_ins(api, session_factory, bearer):
+    mine = await signed_in(api)
+    if bearer == "a sign-in of eleven minutes ago":
+        token = create_access_token(api.org_id, api.user_id, {"sessions:read"}, auth_time=int(time.time()) - 11 * 60)
+    else:
+        account = await issue_service_account_token(session_factory, api.org_id)
+        token = account.token if bearer == "a service account's key" else create_service_account_session_token(api.org_id, account.id, uuid4())
+    family = claims(mine["access_token"])["sid"]
+    for response in (
+        await api.client.get(SIGN_INS, headers=api.auth(token)),
+        await api.client.delete(f"{SIGN_INS}/{family}", headers=api.auth(token)),
+    ):
+        assert response.status_code == 403, response.text
+    assert (await refresh(api, mine["refresh_token"])).status_code == 200
