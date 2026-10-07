@@ -22,7 +22,7 @@ from surogates.harness.loop_tool_recovery import collapse_repeated_tool_rounds
 from surogates.harness.sanitize import strip_budget_warnings
 from surogates.harness.tool_exec import _WORKSPACE_TOKEN
 from surogates.session.events import EventType
-from surogates.session.files import HARNESS_WITHIN_S, session_files
+from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_files
 
 logger = logging.getLogger(__name__)
 
@@ -630,8 +630,11 @@ class ContextReplayMixin:
                 session, storage=self._storage, session_factory=self._session_factory, redis=self._redis,
             ) as files:
                 return True, await load_folder_context(files)
-        except Exception:
-            logger.info("Session %s: its folder's project context could not be read", session.id, exc_info=True)
+        except Exception as exc:
+            logger.log(
+                gave_up_level(exc), "Session %s: its folder's project context could not be read", session.id,
+                exc_info=True,
+            )
             return False, None
 
     async def _build_system_prompt(self, session: Session) -> str:

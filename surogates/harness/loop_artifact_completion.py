@@ -33,7 +33,7 @@ from surogates.harness.loop_messages import (
 )
 from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
-from surogates.session.files import HARNESS_WITHIN_S, session_files
+from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_files
 from surogates.devices.workspace import WALK_MARGIN_NS
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 from surogates.session.inbox_payload import raises_completion_inbox_item
@@ -798,8 +798,10 @@ class ArtifactCompletionMixin:
                 return await files.walk(
                     await files.resolve(""), skip=_SKIP_DIRS, skip_top=_TOP_HIDDEN, skip_hidden=True, since=since,
                 )
-        except Exception:
-            logger.info("Session %s: its folder's files could not be listed", session.id, exc_info=True)
+        except Exception as exc:
+            logger.log(
+                gave_up_level(exc), "Session %s: its folder's files could not be listed", session.id, exc_info=True,
+            )
             return None
 
     async def _folder_cursor(self, session: Any) -> str | None:
@@ -816,8 +818,10 @@ class ArtifactCompletionMixin:
                 mark = await files.resolve(_TURN_MARK)
                 await files.write(mark, b"")
                 stamped = await files.stat(mark)
-        except Exception:
-            logger.info("Session %s: its folder's clock could not be read", session.id, exc_info=True)
+        except Exception as exc:
+            logger.log(
+                gave_up_level(exc), "Session %s: its folder's clock could not be read", session.id, exc_info=True,
+            )
             return None
         if stamped is None:
             return None

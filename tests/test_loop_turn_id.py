@@ -9,7 +9,9 @@ carries the per-turn correlator the Simple chat view consumes.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -21,6 +23,7 @@ import pytest
 from surogates.harness.budget import IterationBudget
 from surogates.harness.loop import AgentHarness
 from surogates.session.events import EventType
+from surogates.session.files import ComputerAway
 from surogates.session.models import Session
 
 
@@ -405,3 +408,34 @@ async def test_a_local_folders_turn_takes_where_it_begins_before_its_first_model
 
     assert order == (["cursor", "model"] if asked else ["model"])
     assert harness._turn_cursor == ("1700000000000000000" if asked else None)
+
+
+@pytest.mark.parametrize(("raised", "level"), [
+    # Offline, or silent past its bound: expected, and said at info.
+    (ComputerAway("the laptop", revoked=False), logging.INFO),
+    (TimeoutError(), logging.INFO),
+    # Anything else is a fault worth a warning.
+    (RuntimeError("no session factory"), logging.WARNING),
+])
+@pytest.mark.asyncio
+async def test_a_folders_harness_request_that_gives_up_logs_by_why(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, raised: Exception, level: int,
+) -> None:
+    from surogates.harness import loop_artifact_completion, loop_context_replay
+    from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
+    from surogates.harness.loop_context_replay import ContextReplayMixin
+
+    @asynccontextmanager
+    async def files_that_fail(*_args: Any, **_kwargs: Any):
+        raise raised
+        yield
+
+    monkeypatch.setattr(loop_context_replay, "session_files", files_that_fail)
+    monkeypatch.setattr(loop_artifact_completion, "session_files", files_that_fail)
+    harness, session = SimpleNamespace(_storage=None, _session_factory=None, _redis=None), SimpleNamespace(id=uuid4())
+    caplog.set_level(logging.INFO, logger="surogates.harness")
+
+    assert await ContextReplayMixin._read_folder_context(harness, session) == (False, None)
+    assert await ArtifactCompletionMixin._folder_cursor(harness, session) is None
+    assert await ArtifactCompletionMixin._walk_folder(harness, session, since="1") is None
+    assert [record.levelno for record in caplog.records] == [level] * 3

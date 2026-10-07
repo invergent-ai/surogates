@@ -52,6 +52,15 @@ class ComputerAway(Exception):
         )
 
 
+def gave_up_level(exc: BaseException) -> int:
+    """The level a harness request outside a tool call logs giving up at.
+
+    Info for a computer that is offline, or silent past ``HARNESS_WITHIN_S``:
+    that is expected.  Warning for anything else.
+    """
+    return logging.INFO if isinstance(exc, (ComputerAway, TimeoutError)) else logging.WARNING
+
+
 @dataclass(frozen=True, slots=True)
 class DeviceAccess:
     """What ``surogates.api.session_guards.require_device_access`` returns once it let a caller in.
