@@ -164,6 +164,7 @@ def _file_label(label: str) -> str:
 _NOT_LANDED = {
     "compensated": "Not landed, and the project's files are as they were",
     "escalated": "Could not finish landing these; check them",
+    "failed": "Not saved, because the landing failed",
 }
 #: What a report says of a thread's files a landing left out, by why it left them out.
 _NOT_MERGED = {
@@ -178,8 +179,10 @@ def _landing_lines(data: dict, kept: list, deleted: list) -> str:
     not land, the excluded files it made, and the folders inside a git
     repository it wrote into."""
     lines = f"\nDeleted: {_listed(deleted)}" if deleted else ""
-    if kept and data.get("landing") in _NOT_LANDED:
-        lines += f"\n{_NOT_LANDED[data['landing']]}: {_listed(kept)}"
+    if data.get("landing") in _NOT_LANDED:
+        # Said even when no file is known: the master must hear the turn did not land.
+        named = _listed(kept) if kept else "the turn's files could not be read"
+        lines += f"\n{_NOT_LANDED[data['landing']]}: {named}"
     elif kept:
         # A report from before reasons were given says the file changed.
         why: dict[str, list] = {reason: [] for reason in _NOT_MERGED}

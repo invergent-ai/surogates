@@ -936,6 +936,8 @@ class ArtifactCompletionMixin:
                 )
             except Exception:
                 logger.exception("Landing failed for %s", session.id)
+                # The master hears it: the report names the turn's files as not saved.
+                landing = {"state": "failed", "files": [], "excluded": [], "repositories": []}
 
         # The turn's tool saga ends with it: a later stop compensates only its own turn.
         if self._turn_saga is not None:
@@ -1016,7 +1018,11 @@ class ArtifactCompletionMixin:
 
         if landing is not None:
             # A thread's files are its landing's; artifacts still come from its summary.
-            files = landing["files"] + [a for a in files or [] if a.get("kind") != "file"]
+            landed = landing["files"]
+            if not landed and landing["state"] != "completed":
+                # A landing that never knew its files: the turn's own list names them, none landed.
+                landed = [{**f, "landing": "not_merged"} for f in files or [] if f.get("kind") == "file"]
+            files = landed + [a for a in files or [] if a.get("kind") != "file"]
 
         complete_data: dict[str, Any] = {
             "reason": reason,

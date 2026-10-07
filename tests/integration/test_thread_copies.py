@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy import text
 
 from surogates.governance.saga import SagaOrchestrator
-from surogates.harness import tool_exec
+from surogates.harness import loop_artifact_completion, tool_exec
 from surogates.harness.loop_context_replay import worker_note
 from surogates.harness.tool_exec import _build_session_sandbox_spec
 from surogates.sandbox.history import History
@@ -307,6 +307,45 @@ async def test_a_cancelled_landing_puts_its_files_back(api, monkeypatch, pods):
         await turn
     # a.md and b.md were applied, and c.md written before its reply was read: all go back.
     assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "notes.txt"]
+
+
+class FailsToCommit(SandboxPool):
+    """A pool whose pod cannot commit the turn: the landing knows no file of it."""
+
+    async def execute(self, session_id, name, input):
+        if name == "_history" and json.loads(input or "{}").get("action") == "commit":
+            return json.dumps({"error": "git add failed: Input/output error"})
+        return await super().execute(session_id, name, input)
+
+
+async def landing_told(api, monkeypatch, pool) -> tuple[dict, str]:
+    """A thread's turn that writes a.md, ended through *pool*: its report and the master's note."""
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "a.md", "content": "a"})),
+        _final_response("I wrote a.md."),
+    ], pool=pool, saga_settings=QUICK)
+    [report] = await reports(api, master)
+    return report, worker_note(EventType.WORKER_COMPLETE.value, report)["content"]
+
+
+async def test_a_landing_that_never_knew_its_files_still_tells_the_master(api, monkeypatch, pods):
+    report, note = await landing_told(api, monkeypatch, FailsToCommit(pods))
+    assert report["landing"] == "compensated"
+    assert note.endswith("Files: none\nNot landed, and the project's files are as they were: a.md")
+    assert not (pods.project / "a.md").exists()
+
+
+async def test_a_landing_that_raised_tells_the_master_it_failed(api, monkeypatch, pods):
+    async def raising(**_):
+        raise RuntimeError("the lock's connection dropped")
+
+    monkeypatch.setattr(loop_artifact_completion, "land_turn", raising)
+    report, note = await landing_told(api, monkeypatch, SandboxPool(pods))
+    assert report["landing"] == "failed"
+    assert note.endswith("Files: none\nNot saved, because the landing failed: a.md")
+    assert not (pods.project / "a.md").exists()
 
 
 async def test_an_excluded_file_a_turn_made_is_named_in_its_report(api, monkeypatch, pods):
