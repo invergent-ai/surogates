@@ -97,6 +97,8 @@ async def test_a_landings_row_is_its_saga_written_as_it_runs(api, monkeypatch, p
     await ends(api, pool, thread)
     # Before the first apply, the steps as fixed; then each step's state as it changes.
     assert seen[:2] == [("running", ["committed"]), ("running", ["committed", "pending", "pending"])]
+    # The record, fixed before its first try.
+    assert ("running", ["committed", "committed", "committed", "pending"]) in seen
     assert seen[-1][0] == "completed"
     [row] = await rows(api, thread)
     assert (row.kind, row.saga_state, str(row.workstream_id)) == ("landing", "completed", thread.config["workstream_id"])

@@ -505,10 +505,15 @@ async def test_two_landings_at_once_take_turns(api, monkeypatch, pods):
     await until(the_first_is_landing)
     waiting = asyncio.create_task(turn_end(api, pool, second))
     try:
-        await asyncio.sleep(2)  # four tries for the lock
+        engine, checked_out = api.app.state.session_factory.kw["bind"], []
+        for _ in range(40):  # four tries for the lock
+            checked_out.append(engine.pool.checkedout())
+            await asyncio.sleep(0.05)
         assert not (pods.root / f"commit {second.id}").exists()
-        # The second tries the lock and waits on no connection: none sits blocked in Postgres.
+        # The second tries the lock and waits on no connection: none sits blocked in Postgres,
+        # and between its tries the pool lends out the holder's alone.
         assert await project_locks() == (1, 0)
+        assert checked_out.count(1) > len(checked_out) // 2, checked_out
     finally:
         release.touch()
     await asyncio.gather(landing, waiting)
