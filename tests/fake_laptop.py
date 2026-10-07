@@ -54,6 +54,8 @@ DISMISSED = {"error": {
     "type": "cancelled", "message": "This computer's link dropped before this was allowed, so it did not run",
 }}
 _REQUEST = "request:"
+# What the app answers a change its user denied (desktop/src/binding/approvals.ts).
+CHANGE_DENIED = {"error": {"type": "os", "code": "EACCES", "message": "The user denied this change on this computer"}}
 # No file handle left, in the process or the system: what a walk has not reached is unknown.
 _OUT_OF_HANDLES = {errno.EMFILE, errno.ENFILE}
 
@@ -472,12 +474,15 @@ class FakeLaptop:
         # connection's tasks still end at disconnect().
         self._tasks += [asyncio.create_task(self._read(ws)), asyncio.create_task(self._ping(ws))]
 
-    async def release(self) -> None:
-        """Its user allows what it holds asked about: each runs now, and is answered on this connection."""
+    async def release(self, answer: dict[str, Any] | None = None) -> None:
+        """Its user answers what it holds asked about, on this connection: allowed, each runs now; or each is
+        answered *answer*, as a denial, without running."""
         self.hold_asked = False
         asked, self._asked = self._asked, {}
         for frame in asked.values():
             if frame["id"] not in self.cancelled and self._ws is not None:
+                if answer is not None:
+                    self.outcomes[frame["id"]] = answer
                 await self._answer(frame, self._ws)
 
     def prepare(self, nonce: str, folder: str) -> None:

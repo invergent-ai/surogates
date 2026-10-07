@@ -16,7 +16,7 @@ from surogates.devices.operations import DeviceOperations, OperationRequest
 from surogates.devices.workspace import MAX_WALK_FILES
 from surogates.session.provisioning import create_child_session
 from surogates.tools.workspace_io import LocalWorkspaceIO
-from tests.fake_laptop import FakeLaptop
+from tests.fake_laptop import CHANGE_DENIED, FakeLaptop
 
 from .conftest import issue_service_account_token
 from .test_device_sessions import is_bound, local_chat
@@ -570,3 +570,26 @@ async def test_ten_attachments_in_ask_every_time_all_land_and_their_message_is_s
         headers=api.auth(),
     )
     assert message.status_code == 202, message.text
+
+
+@pytest.mark.parametrize("ends", ["denied", "dismissed"])
+async def test_an_upload_sent_again_by_its_digest_says_its_computer_did_not_run_it(api, chat, monkeypatch, ends):
+    monkeypatch.setattr(workspace_routes, "CHANGE_WITHIN_S", 0.5)
+    chat.laptop.hold_asked = True
+    waiting = await upload(api, chat, "notes.txt", b"draft", request_id="upload-000000000070")
+    assert waiting.status_code == 202, waiting.text
+    if ends == "denied":
+        await chat.laptop.release(CHANGE_DENIED)
+    else:
+        # The link drops while its user is still asked: the app answers it not run.
+        await chat.laptop.disconnect()
+        chat.laptop.hold_asked = False
+        await chat.laptop.connect()
+    monkeypatch.setattr(workspace_routes, "CHANGE_WITHIN_S", 5.0)
+    again = await sent_again(api, chat, waiting.json()["change"], "upload-000000000070")
+    said = {
+        "denied": (403, "The user denied this change on this computer"),
+        "dismissed": (502, "This computer's link dropped before this was allowed, so it did not run"),
+    }[ends]
+    assert (again.status_code, again.json()["detail"]) == said, again.text
+    assert not (chat.folder / "notes.txt").exists()
