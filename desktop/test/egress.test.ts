@@ -3,7 +3,7 @@ import { networkInterfaces } from "node:os";
 
 import { describe, expect, it } from "vitest";
 
-import { destination, judge, PACKAGE_HOSTS, packageHost, reach } from "../src/vm/egress.js";
+import { destination, judge, LOOKUP_MS, PACKAGE_HOSTS, packageHost, reach } from "../src/vm/egress.js";
 
 // This computer's own addresses, as its interfaces would give them.
 const local = () => ["127.0.0.1", "::1", "192.168.100.139", "fe80::2d6:c59:8d66:3938"];
@@ -12,6 +12,11 @@ const names: Record<string, string[]> = {
   "example.com": ["93.184.215.14", "2606:2800:21f:cb07:6820:80da:af6b:8b2c"],
   "sneaky.example": ["93.184.215.14", "127.0.0.1"],
   "mine.example": ["192.168.100.139"],
+  // This computer's own, as a resolver can give them: IPv4-mapped.
+  "mapped-lo.example": ["::ffff:127.0.0.1"],
+  "mapped-lan.example": ["::ffff:192.168.100.139"],
+  // A public address and a private one.
+  "mixed.example": ["93.184.215.14", "10.0.0.1"],
   "odd.example": ["not an address"],
   "pypi.org": ["151.101.0.223"],
   "evil.pypi.org": ["127.0.0.1"],
@@ -41,6 +46,10 @@ describe("a destination", () => {
   it.each([
     ["Example.COM.", 443, "example.com"],
     ["127.1", 8080, "127.0.0.1"],
+    // Decimal, octal and hex, as WHATWG URL reads them.
+    ["2130706433", 80, "127.0.0.1"],
+    ["0177.0.0.1", 80, "127.0.0.1"],
+    ["0x7f.1", 80, "127.0.0.1"],
     ["::1", 3000, "[::1]"],
     ["[::1]", 3000, "[::1]"],
     ["::ffff:127.0.0.1", 80, "127.0.0.1"],
@@ -63,13 +72,13 @@ describe("where a destination leads", () => {
 
   it.each([
     "127.0.0.1", "127.8.9.10", "[::1]", "0.0.0.0", "[::]", "[::ffff:7f00:1]", "192.168.100.139", "[fe80::2d6:c59:8d66:3938]",
-    "localhost", "dev.localhost", "sneaky.example", "mine.example",
+    "localhost", "dev.localhost", "sneaky.example", "mine.example", "mapped-lo.example", "mapped-lan.example",
     "169.254.169.254", "100.100.100.200", "168.63.129.16", "[fd00:ec2::254]",
   ])("is this computer for %s", async (host) => {
     expect(await where(host)).toBe("own");
   });
 
-  it.each(["10.1.2.3", "172.16.0.1", "192.168.1.1", "100.101.2.3", "169.254.1.1", "[fd00::1]", "[fe80::1]", "printer.lan"])(
+  it.each(["10.1.2.3", "172.16.0.1", "192.168.1.1", "100.101.2.3", "169.254.1.1", "[fd00::1]", "[fe80::1]", "printer.lan", "mixed.example"])(
     "is a private network for %s",
     async (host) => {
       expect(await where(host)).toBe("private");
@@ -103,6 +112,8 @@ describe("where a destination leads", () => {
     const started = performance.now();
     expect(await reach("slow.example", { local, resolve: () => new Promise(() => {}), timeoutMs: 50 })).toBeNull();
     expect(performance.now() - started).toBeLessThan(1_000);
+    // Unless told otherwise, as the host proxy is not.
+    expect(LOOKUP_MS).toBe(2_000);
   });
 
   // An address of this computer's own interfaces, other than loopback.
@@ -123,6 +134,9 @@ describe("a connection, judged", () => {
   it("refuses this computer's own before the package hosts: a package host's name that leads here is refused", async () => {
     expect(await judged("evil.pypi.org", 443)).toEqual({ refused: "own", key: "evil.pypi.org:443" });
     expect(await judged("127.1", 9)).toEqual({ refused: "own", key: "127.0.0.1:9" });
+    expect(await judged("2130706433", 9)).toEqual({ refused: "own", key: "127.0.0.1:9" });
+    expect(await judged("0x7f.1", 9)).toEqual({ refused: "own", key: "127.0.0.1:9" });
+    expect(await judged("mapped-lo.example", 9)).toEqual({ refused: "own", key: "mapped-lo.example:9" });
     expect(await judged("Sneaky.Example.", 443)).toEqual({ refused: "own", key: "sneaky.example:443" });
   });
 
@@ -131,6 +145,10 @@ describe("a connection, judged", () => {
       key: "example.com:443", dial: ["93.184.215.14", "2606:2800:21f:cb07:6820:80da:af6b:8b2c"], ask: { host: "example.com", port: 443, privateNetwork: false },
     });
     expect(await judged("printer.lan", 631)).toEqual({ key: "printer.lan:631", dial: ["192.168.1.20"], ask: { host: "printer.lan", port: 631, privateNetwork: true } });
+    // A public address and a private one: asked as a private network, both kept for the dial.
+    expect(await judged("mixed.example", 443)).toEqual({
+      key: "mixed.example:443", dial: ["93.184.215.14", "10.0.0.1"], ask: { host: "mixed.example", port: 443, privateNetwork: true },
+    });
     expect(await judged("fd00::1", 22)).toEqual({ key: "[fd00::1]:22", dial: ["fd00::1"], ask: { host: "[fd00::1]", port: 22, privateNetwork: true } });
   });
 
