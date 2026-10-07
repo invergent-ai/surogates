@@ -9,6 +9,7 @@ from sqlalchemy import func, select, update
 
 from surogates.db.models import Event, InboxItem
 from surogates.session.events import EventType
+from surogates.workstreams import stream as project_stream
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +297,13 @@ async def expire_input_request(
             .values(status="expired", updated_at=func.now()),
         )
         await db.commit()
-    return bool(getattr(result, "rowcount", 0))
+    expired = bool(getattr(result, "rowcount", 0))
+    if expired:
+        # A wait that ended changes its project's counts, and a thread's row.
+        await project_stream.publish_session(
+            getattr(store, "_redis", None), await store.get_session(session_id), project_stream.EXPIRED,
+        )
+    return expired
 
 
 async def response_event_exists(

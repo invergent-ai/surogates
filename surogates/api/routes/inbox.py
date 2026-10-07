@@ -407,6 +407,10 @@ async def delete_inbox_item(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Inbox item not found.",
         )
+    # A dismissed wait is over: its project's counts, or a thread's row, change.
+    await project_stream.publish_session(
+        request.app.state.redis, await store.get_session(item.session_id), project_stream.EXPIRED,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

@@ -19,6 +19,7 @@ from surogates.config import DatabaseSettings
 from surogates.db.models import InboxItem
 from surogates.jobs.inbox_expire import expire_inbox_items
 from surogates.session.events import EventType
+from surogates.session.interactive_input import expire_input_request
 from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_service_account_session_token
@@ -443,6 +444,44 @@ async def test_a_wait_the_sweeper_expires_is_heard_once_it_is_over(api, monkeypa
     }
     assert ours[str(thread.id)][1][str(thread.id)] == "idle"
     assert (await summary_of(api, project))["waiting"] == 0
+
+
+async def test_a_question_the_master_gives_up_on_is_heard_once_it_no_longer_counts(api, monkeypatch):
+    project = await create(api)
+    master = await master_of(api, project)
+    call_id = await asks(api, master, "Which quarter?")
+    publishing(api, monkeypatch)
+    # The master has no row: what a client reads at each change is whether it waits.
+    asking = []
+    publish = project_stream.publish
+
+    async def recorded(redis, workstream_id, session_id, kind):
+        [(_, waits)] = (await WorkstreamStore(api.app.state.session_factory).masters([master.id])).values()
+        asking.append((str(session_id), kind, waits))
+        await publish(redis, workstream_id, session_id, kind)
+
+    monkeypatch.setattr(project_stream, "publish", recorded)
+    # ``ask_user_question``'s wait ends with no answer.
+    assert await expire_input_request(api.app.state.session_store, session_id=master.id, tool_call_id=call_id)
+    assert asking == [(str(master.id), "inbox.expired", False)]
+    assert (await summary_of(api, project))["waiting"] == 0
+
+
+async def test_an_approval_dismissed_from_the_inbox_is_heard_once_its_wait_is_over(api, monkeypatch):
+    project = await create(api)
+    thread = await start(api, await master_of(api, project))
+    await api.app.state.session_store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, {
+        "title": "Send the draft to finance?", "action_type": "approval",
+    })
+    async with api.app.state.session_factory() as db:
+        item_id = await db.scalar(select(InboxItem.id).where(InboxItem.session_id == thread.id))
+    changes = heard(api, monkeypatch)
+    response = await api.client.delete(f"/v1/inbox/{item_id}", headers=api.auth())
+    assert response.status_code == 204, response.text
+    tid = str(thread.id)
+    assert [(kind, groups[tid]) for session_id, kind, groups in changes if session_id == tid] == [
+        ("inbox.expired", "working"),
+    ]
 
 
 async def test_a_masters_own_work_is_heard_only_where_it_changes_a_count_or_a_card(api, monkeypatch):
