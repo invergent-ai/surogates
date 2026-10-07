@@ -1,6 +1,8 @@
 // Launching the built shell under Playwright, with its state in a folder of the test's own.
 
-import { mkdtempSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
@@ -16,15 +18,37 @@ export const dataHome = (): string => mkdtempSync("/tmp/sd-");
 
 // VS Code's terminals export ELECTRON_RUN_AS_NODE, and Electron then starts as plain Node.
 // In a Wayland session Electron would draw on the user's desktop: as an X11 session it
-// draws on xvfb's display.
-const DROPPED = ["ELECTRON_RUN_AS_NODE", "WAYLAND_DISPLAY"];
+// draws on xvfb's display. The desktop's session manager is none of a test's business.
+const DROPPED = ["ELECTRON_RUN_AS_NODE", "WAYLAND_DISPLAY", "SESSION_MANAGER"];
 
+/**
+ * The environment of every app a test launches: a session of its own under *home*, the test's
+ * data home. It has no session bus, so it reaches and starts no keyring daemon, portal, gvfsd or
+ * at-spi; its own home, runtime, config, cache and state folders; and X11, on xvfb's display.
+ */
 export function shellEnv(home: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(process.env)) {
     if (value !== undefined && !DROPPED.includes(name)) env[name] = value;
   }
-  return { ...env, XDG_SESSION_TYPE: "x11", GDK_BACKEND: "x11", XDG_DATA_HOME: home };
+  // Short names: the VM's sockets live under the runtime folder, within 107 bytes.
+  const [own, runtime, config, cache, state] = ["h", "r", "c", "k", "s"].map((name) => join(home, name));
+  for (const folder of [own, runtime, config, cache, state]) mkdirSync(folder!, { recursive: true, mode: 0o700 });
+  return {
+    ...env,
+    HOME: own!, XDG_RUNTIME_DIR: runtime!, XDG_CONFIG_HOME: config!, XDG_CACHE_HOME: cache!, XDG_STATE_HOME: state!, XDG_DATA_HOME: home,
+    DBUS_SESSION_BUS_ADDRESS: "disabled:", NO_AT_BRIDGE: "1", XDG_SESSION_TYPE: "x11", GDK_BACKEND: "x11",
+  };
+}
+
+/**
+ * A second launch with *args*, as the system's link handler starts one: in the test's session,
+ * with the basic store, it hands the running app its arguments and exits. Its exit code.
+ */
+export async function secondLaunch(home: string, ...args: string[]): Promise<number | null> {
+  const second = spawn(ELECTRON, [MAIN, "--password-store=basic", ...args], { env: shellEnv(home), stdio: "ignore" });
+  const [code] = (await once(second, "exit")) as [number | null];
+  return code;
 }
 
 /** Close the app; one that does not close within 10 s is killed, so no failed test leaves it running. */

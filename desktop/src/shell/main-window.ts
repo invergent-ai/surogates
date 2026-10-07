@@ -153,7 +153,12 @@ export class MainWindow {
     keys(this.window.webContents);
     this.window.webContents.once("did-finish-load", () => this.show());
     this.window.on("close", (event) => {
-      options.states.save("main", this.window.getNormalBounds(), this.window.isMaximized());
+      // A place that cannot be kept, as on a full disk, is said, and the window still only hides.
+      try {
+        options.states.save("main", this.window.getNormalBounds(), this.window.isMaximized());
+      } catch (error) {
+        console.error(error);
+      }
       if (closing) return;
       event.preventDefault();
       this.window.hide();
@@ -270,7 +275,12 @@ export class MainWindow {
     keys(view.webContents);
     wire(view.webContents);
     this.settingsView = view;
-    void view.webContents.loadFile(page).then(() => view.webContents.focus());
+    // Closed while its page still loads, the load ends with it, and nothing is left to say.
+    void view.webContents.loadFile(page).then(() => {
+      if (this.settingsView === view) view.webContents.focus();
+    }, (error: unknown) => {
+      if (this.settingsView === view) console.error(error);
+    });
   }
 
   /** Close Settings, and give the keyboard back to what had it, or else to the window's page. */

@@ -1,13 +1,13 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { ElectronApplication } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { dataHome, ELECTRON, launch, MAIN, quit, shellEnv, shellPage } from "./launch.js";
+import { dataHome, ELECTRON, launch, MAIN, quit, secondLaunch, shellEnv, shellPage } from "./launch.js";
 
 let home: string;
 let app: ElectronApplication | undefined;
@@ -39,6 +39,31 @@ const visible = (shell: ElectronApplication) =>
   shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map((window) => window.isVisible()));
 
 describe("the shell", () => {
+  it("runs in a session of the test's own: no bus, its own folders, X11 on xvfb, and the basic store, a second launch too", async () => {
+    const own = (environment: Record<string, string | undefined>) => {
+      expect(environment).toMatchObject({ DBUS_SESSION_BUS_ADDRESS: "disabled:", XDG_SESSION_TYPE: "x11", GDK_BACKEND: "x11", XDG_DATA_HOME: home });
+      for (const name of ["HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"]) {
+        expect(environment[name]?.startsWith(`${home}/`), name).toBe(true);
+      }
+      expect(statSync(environment.XDG_RUNTIME_DIR!).mode & 0o777).toBe(0o700);
+      expect(environment.WAYLAND_DISPLAY).toBeUndefined();
+      // xvfb's display, never the desktop's.
+      expect(environment.DISPLAY).toMatch(/^:\d+$/);
+      expect(environment.DISPLAY).not.toBe(":0");
+    };
+    // Checked before anything launches: an app started without it would reach the desktop's session.
+    own(shellEnv(home));
+    app = await launch(home);
+    await app.firstWindow();
+    own(await app.evaluate(() => ({ ...process.env })));
+    expect(await app.evaluate(() => process.argv)).toContain("--password-store=basic");
+    const handed = app.evaluate(({ app: electron }) => new Promise<string[]>((resolve) => {
+      electron.once("second-instance", (_event, argv) => resolve(argv));
+    }));
+    expect(await secondLaunch(home)).toBe(0);
+    expect(await handed).toContain("--password-store=basic");
+  });
+
   it("opens its window in its sandbox, with its state under one root", async () => {
     app = await launch(home);
     const page = await app.firstWindow();
@@ -159,10 +184,46 @@ describe("the shell", () => {
     await expect.poll(() => visible(app!)).toEqual([true]);
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.close());
     expect(await visible(app)).toEqual([false]);
-    const second = spawn(ELECTRON, [MAIN], { env: shellEnv(home), stdio: "ignore" });
-    const [code] = (await once(second, "exit")) as [number | null];
-    expect(code).toBe(0);
+    expect(await secondLaunch(home)).toBe(0);
     await expect.poll(() => visible(app!)).toEqual([true]);
+  });
+
+  it("hides when it is closed even when its place cannot be kept, and a second launch shows it again", async () => {
+    // A folder where the place's file goes: no write of it can land, as on a full disk.
+    mkdirSync(join(home, "surogate", "window-state.json", "taken"), { recursive: true });
+    app = await launch(home);
+    await app.firstWindow();
+    await expect.poll(() => visible(app!)).toEqual([true]);
+    // Kept here: Electron would otherwise draw an error dialog nobody answers.
+    await app.evaluate(() => {
+      const uncaught: string[] = [];
+      Object.assign(globalThis, { uncaught });
+      process.on("uncaughtException", (error) => uncaught.push(String(error)));
+    });
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.close());
+    expect(await visible(app)).toEqual([false]);
+    expect(await app.evaluate(() => (globalThis as unknown as { uncaught: string[] }).uncaught)).toEqual([]);
+    expect(await secondLaunch(home)).toBe(0);
+    await expect.poll(() => visible(app!)).toEqual([true]);
+  });
+
+  it("closes Settings while its page still loads, and leaves no failure unhandled", async () => {
+    app = await launch(home);
+    await (await app.firstWindow()).waitForLoadState();
+    await app.evaluate(({ BrowserWindow }) => {
+      const rejections: string[] = [];
+      Object.assign(globalThis, { rejections });
+      process.on("unhandledRejection", (reason) => rejections.push(String(reason)));
+      BrowserWindow.getAllWindows()[0]!.webContents.sendInputEvent({ type: "keyDown", keyCode: ",", modifiers: ["control", "shift"] });
+    });
+    // Closed from its own page the moment there is one, before its load has finished.
+    const settings = await app.waitForEvent("window");
+    await settings.evaluate(() => (window as unknown as { surogateSettings: { close(): Promise<void> } }).surogateSettings.close()).catch(() => {});
+    await expect.poll(() => app!.evaluate(({ webContents }) =>
+      webContents.getAllWebContents().some((contents) => contents.getURL().endsWith("/settings.html")))).toBe(false);
+    // A rejection nobody handles is told within a turn of the main process's loop.
+    await app.evaluate(() => new Promise((resolve) => setTimeout(resolve, 100)));
+    expect(await app.evaluate(() => (globalThis as unknown as { rejections: string[] }).rejections)).toEqual([]);
   });
 
   it("quits on Ctrl+Q", async () => {
