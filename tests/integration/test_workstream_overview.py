@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 import surogates.api.routes.workstreams as workstreams_routes
 from surogates.db.models import InboxItem
@@ -181,6 +181,39 @@ async def test_a_project_counts_its_threads_waiting_on_the_user_and_working(api)
     assert (summary["waiting"], summary["working"]) == (4, 2)
 
 
+async def test_each_project_counts_only_its_own_threads(api):
+    report = await create(api, name="Quarterly report")
+    await threads_in_every_state(api, await master_of(api, report))
+    budget = await create(api, name="Budget")
+    master = await master_of(api, budget)
+    await start(api, master, title="Draft the budget", goal="Draft the budget.")
+    # A delegated child's approval is its thread's wait.
+    invoices = await start(api, master, title="Check the invoices", goal="Check the invoices.")
+    child = await create_child_session(store=api.app.state.session_store, parent=invoices, channel="delegation")
+    await api.app.state.session_store.emit_event(child.id, EventType.INBOX_ACTION_REQUIRED, {
+        "title": "Open the bank's site?", "action_type": "approval",
+    })
+    # A question that expired waits until the user replies.
+    year = await start(api, master, title="Pick the year", goal="Pick the year.")
+    await asks(api, year, "Which year?")
+    await gives_up_asking(api, year)
+    typed = await api.client.post(f"/v1/sessions/{year.id}/messages", json={"content": "2025"}, headers=api.auth())
+    assert typed.status_code == 202, typed.text
+    # A resolved thread counts for nothing, though it still asks, or it failed.
+    room = await start(api, master, title="Book the room", goal="Book the room.")
+    await asks(api, room, "Which floor?")
+    await resolve(api, room)
+    old = await start(api, master, title="Convert the old budget", goal="Convert the old budget.")
+    await api.app.state.session_store.update_session_status(old.id, "failed")
+    await resolve(api, old)
+    for project, counts in ((report, (4, 2)), (budget, (1, 2))):
+        summary = await summary_of(api, project)
+        assert (summary["waiting"], summary["working"]) == counts
+        # The counts are the rows' groups.
+        groups = [row["group"] for row in await rows(api, project)]
+        assert (groups.count("waiting"), groups.count("working")) == counts
+
+
 async def test_an_open_question_in_the_master_counts_as_waiting(api):
     project = await create(api)
     master = await master_of(api, project)
@@ -191,6 +224,13 @@ async def test_an_open_question_in_the_master_counts_as_waiting(api):
     })
     assert (await summary_of(api, project))["waiting"] == 0
     await asks(api, master, "Which quarter?")
+    assert (await summary_of(api, project))["waiting"] == 1
+    # A question the master gave up on is answered in the conversation.
+    await gives_up_asking(api, master)
+    assert (await summary_of(api, project))["waiting"] == 0
+    await store.emit_event(master.id, EventType.INBOX_ACTION_REQUIRED, {
+        "title": "Share the report with finance?", "action_type": "approval",
+    })
     assert (await summary_of(api, project))["waiting"] == 1
 
 
@@ -206,14 +246,44 @@ async def test_a_project_is_as_recent_as_its_latest_activity(api):
     assert [summary["id"] for summary in listed][:2] == [budget["id"], hiring["id"]]
     [row] = await rows(api, budget)
     assert listed[0]["updated_at"] == row["updated_at"]
+    # So is work in the master.
+    await answered(api, await master_of(api, hiring), "Drafted the job ad.")
+    listed = (await api.client.get("/v1/workstreams", headers=api.auth())).json()
+    assert [summary["id"] for summary in listed][:2] == [hiring["id"], budget["id"]]
 
 
 async def test_the_list_answers_no_more_projects_than_the_shell_takes(api, monkeypatch):
     monkeypatch.setitem(SHELL_LIMITS, "rows", 2)
-    for name in ("Budget", "Hiring", "Audit"):
-        await create(api, name=name)
+    budget, *_ = [await create(api, name=name) for name in ("Budget", "Hiring", "Audit")]
+    # The oldest is the latest active: the list is cut once it is ordered.
+    await answered(api, await master_of(api, budget), "Drafted the budget.")
     listed = await api.client.get("/v1/workstreams", headers=api.auth())
-    assert [summary["name"] for summary in listed.json()] == ["Audit", "Hiring"]
+    assert [summary["name"] for summary in listed.json()] == ["Budget", "Audit"]
+
+
+async def test_a_project_with_more_threads_than_a_statement_binds_still_answers(api):
+    project = await create(api)
+    master = await master_of(api, project)
+    # Past asyncpg's 32,767 bind parameters, made in one statement.
+    async with api.app.state.session_factory() as db:
+        await db.execute(text("""
+            WITH made AS (
+              INSERT INTO sessions (id, user_id, org_id, agent_id, channel, status, title, parent_id, config)
+              SELECT gen_random_uuid(), :user_id, :org_id, :agent_id, 'worker', 'active', 'Draft ' || n, :master_id,
+                     '{"workstream_role": "thread"}'::jsonb
+              FROM generate_series(1, 33000) n
+              RETURNING id, title
+            )
+            INSERT INTO workstream_threads (session_id, workstream_id, title)
+            SELECT id, :project_id, title FROM made
+        """), {
+            "user_id": master.user_id, "org_id": master.org_id, "agent_id": master.agent_id,
+            "master_id": master.id, "project_id": project["id"],
+        })
+        await db.commit()
+    summary = await summary_of(api, project)
+    assert (summary["waiting"], summary["working"]) == (0, 33000)
+    assert len(await rows(api, project)) == SHELL_LIMITS["rows"]
 
 
 def publishing(api, monkeypatch) -> None:

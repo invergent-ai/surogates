@@ -44,7 +44,6 @@ class ThreadFacts:
     """What a thread's row is derived from, as the store reads it."""
 
     id: UUID
-    workstream_id: UUID
     title: str
     status: str  # sessions.status
     created_at: datetime
@@ -77,7 +76,10 @@ def derive_thread(facts: ThreadFacts, *, now: datetime) -> dict[str, Any]:
 
 
 def _state(facts: ThreadFacts, latest: dict[str, Any], now: datetime) -> tuple[str, str | None, str | None]:
-    """The thread's group, reason and status line: the first rule that matches wins."""
+    """The thread's group, reason and status line: the first rule that matches wins.
+
+    ``WorkstreamStore.thread_counts`` counts the groups by these rules in SQL.
+    """
     if facts.resolved_at is not None:
         return "resolved", None, _quiet_line(latest)
     waiting = _waiting(facts, latest)

@@ -7,7 +7,9 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, any_, bindparam, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import Event, InboxItem, Workstream, WorkstreamThread
@@ -15,6 +17,12 @@ from surogates.db.models import Session as SessionRow
 from surogates.session.events import EventType
 from surogates.workstreams import master_instructions
 from surogates.workstreams.derive import LATEST_TYPES, WAITING_KINDS, ThreadFacts
+
+
+def _any(ids: Any) -> Any:
+    """*ids* bound as one array, however many: asyncpg takes at most 32,767
+    parameters a statement, and an ``IN`` list binds one per id."""
+    return any_(bindparam(None, list(ids), type_=ARRAY(PG_UUID(as_uuid=True))))
 
 
 def _owned(workstream_id: UUID | None, *, org_id: UUID, agent_id: str, user_id: UUID) -> tuple[Any, ...]:
@@ -136,9 +144,9 @@ class WorkstreamStore:
             await db.commit()
 
     async def thread_facts(
-        self, *workstream_ids: UUID, thread_id: UUID | None = None, with_files: bool = True,
+        self, workstream_id: UUID, *, thread_id: UUID | None = None, with_files: bool = True,
     ) -> list[ThreadFacts]:
-        """What the rows of the projects' threads are derived from, or only
+        """What the rows of the project's threads are derived from, or only
         *thread_id*'s.  A deleted thread is left out.
 
         Without files, only each thread's newest turn summary is read, for
@@ -148,7 +156,7 @@ class WorkstreamStore:
         query = (
             select(WorkstreamThread, SessionRow.status, SessionRow.updated_at)
             .join(SessionRow, SessionRow.id == WorkstreamThread.session_id)
-            .where(WorkstreamThread.workstream_id.in_(workstream_ids), SessionRow.status != "archived")
+            .where(WorkstreamThread.workstream_id == workstream_id, SessionRow.status != "archived")
         )
         if thread_id is not None:
             query = query.where(WorkstreamThread.session_id == thread_id)
@@ -159,7 +167,7 @@ class WorkstreamStore:
                 return []
             # A thread's delegated children wait on the user for it, so every
             # session under a thread counts as the thread's.
-            tree = select(SessionRow.id, SessionRow.id.label("thread_id")).where(SessionRow.id.in_(ids))
+            tree = select(SessionRow.id, SessionRow.id.label("thread_id")).where(SessionRow.id == _any(ids))
             tree = tree.cte("tree", recursive=True)
             tree = tree.union_all(
                 select(SessionRow.id, tree.c.thread_id).join(tree, SessionRow.parent_id == tree.c.id)
@@ -167,7 +175,7 @@ class WorkstreamStore:
             thread_of = dict((await db.execute(select(tree.c.id, tree.c.thread_id))).all())
             # Pending items, and the expired questions the rules read.
             items = await db.scalars(select(InboxItem).where(
-                InboxItem.session_id.in_(thread_of),
+                InboxItem.session_id == _any(thread_of),
                 InboxItem.kind.in_(WAITING_KINDS),
                 or_(
                     InboxItem.status == "pending",
@@ -180,12 +188,12 @@ class WorkstreamStore:
             types = LATEST_TYPES if with_files else (*LATEST_TYPES, EventType.TURN_SUMMARY.value)
             newest = (
                 select(func.max(Event.id))
-                .where(Event.session_id.in_(ids), Event.type.in_(types))
+                .where(Event.session_id == _any(ids), Event.type.in_(types))
                 .group_by(Event.session_id, Event.type)
             )
             latest = await db.scalars(select(Event).where(Event.id.in_(newest)))
             summaries = await db.scalars(select(Event).where(
-                Event.session_id.in_(ids), Event.type == EventType.TURN_SUMMARY.value,
+                Event.session_id == _any(ids), Event.type == EventType.TURN_SUMMARY.value,
             )) if with_files else ()
             items_of, events_of = defaultdict(list), defaultdict(list)
             for item in items:
@@ -194,7 +202,7 @@ class WorkstreamStore:
                 events_of[event.session_id].append(event)
         return [
             ThreadFacts(
-                id=thread.session_id, workstream_id=thread.workstream_id, title=thread.title, status=status,
+                id=thread.session_id, title=thread.title, status=status,
                 created_at=thread.created_at, updated_at=updated_at, resolved_at=thread.resolved_at,
                 # Every thread works in the cloud until local-folder threads.
                 place={"kind": "cloud"},
@@ -202,6 +210,70 @@ class WorkstreamStore:
             )
             for thread, status, updated_at in sorted(threads, key=lambda found: found[2], reverse=True)
         ]
+
+    async def thread_counts(self, workstream_ids: list[UUID]) -> dict[UUID, tuple[datetime, int, int]]:
+        """Each project's latest thread activity, and its threads waiting on
+        the user and working, as ``derive_thread`` groups them; a project with
+        no live thread is left out.
+
+        Counted in SQL over the threads not resolved, the only ones that can
+        count, so a list costs the user's open work, not every thread they
+        ever started.  The quiet rule only moves an idle thread, which counts
+        for nothing, so it is not read.
+        """
+        live = (
+            select(
+                WorkstreamThread.workstream_id, WorkstreamThread.session_id.label("id"),
+                WorkstreamThread.resolved_at, SessionRow.status, SessionRow.updated_at,
+            )
+            .join(SessionRow, SessionRow.id == WorkstreamThread.session_id)
+            .where(WorkstreamThread.workstream_id == _any(workstream_ids), SessionRow.status != "archived")
+            .cte("live")
+        )
+        # As ``thread_facts`` reads them: every session under a thread is the thread's.
+        tree = select(live.c.id, live.c.id.label("thread_id")).where(live.c.resolved_at.is_(None))
+        tree = tree.cte("tree", recursive=True)
+        tree = tree.union_all(select(SessionRow.id, tree.c.thread_id).join(tree, SessionRow.parent_id == tree.c.id))
+        replied = (
+            select(func.coalesce(func.max(Event.id), 0))
+            .where(Event.session_id == tree.c.thread_id, Event.type == EventType.USER_MESSAGE.value)
+            .scalar_subquery()
+        )
+        # A pending item, or a question that expired with no message after it.
+        asking = (
+            select(tree.c.thread_id)
+            .join(InboxItem, InboxItem.session_id == tree.c.id)
+            .where(
+                InboxItem.kind.in_(WAITING_KINDS),
+                or_(
+                    InboxItem.status == "pending",
+                    and_(
+                        InboxItem.status == "expired", InboxItem.kind == "input_required",
+                        InboxItem.source_event_id > replied,
+                    ),
+                ),
+            )
+            .distinct()
+            .cte("asking")
+        )
+        unresolved, asks = live.c.resolved_at.is_(None), asking.c.thread_id.is_not(None)
+        query = (
+            select(
+                live.c.workstream_id,
+                func.max(live.c.updated_at),
+                func.count().filter(unresolved & (asks | (live.c.status == "failed"))),
+                func.count().filter(unresolved & ~asks & (live.c.status == "active")),
+            )
+            .select_from(live.outerjoin(asking, asking.c.thread_id == live.c.id))
+            .group_by(live.c.workstream_id)
+        )
+        async with self._sf() as db:
+            # The walk's row estimate is far above what it finds, which would
+            # have the planner compile a read of a few milliseconds for longer
+            # than it runs.
+            await db.execute(text("SET LOCAL jit = off"))
+            found = await db.execute(query)
+            return {project: (latest, waiting, working) for project, latest, waiting, working in found}
 
     async def masters(self, master_ids: list[UUID]) -> dict[UUID, tuple[datetime, bool]]:
         """Each master's last activity, and whether it waits on the user: a
@@ -217,7 +289,7 @@ class WorkstreamStore:
         )
         async with self._sf() as db:
             found = await db.execute(
-                select(SessionRow.id, SessionRow.updated_at, asking).where(SessionRow.id.in_(master_ids))
+                select(SessionRow.id, SessionRow.updated_at, asking).where(SessionRow.id == _any(master_ids))
             )
             return {master_id: (updated_at, asks) for master_id, updated_at, asks in found}
 

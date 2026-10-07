@@ -55,7 +55,7 @@ def facts(thread_id: str, title: str, minutes: float, status: str, *, events=(),
           resolved_at=None, place=CLOUD) -> ThreadFacts:
     # sessions.updated_at is naive UTC; the row's times are aware.
     return ThreadFacts(
-        id=UUID(thread_id), workstream_id=UUID(REPORT), title=title, status=status,
+        id=UUID(thread_id), title=title, status=status,
         created_at=ago(minutes + 60), updated_at=ago(minutes).replace(tzinfo=None),
         resolved_at=resolved_at, place=place, items=tuple(items), events=tuple(events),
     )
@@ -73,7 +73,6 @@ def row(thread_id: str, title: str, minutes: float, *, group: str, reason=None, 
 
 
 # The shell's FIXTURE_IDS.
-REPORT = "0b6f3c1e-8a2d-4c5e-9f10-1a2b3c4d5e6f"
 QUESTION = "4fac7a5c-ce6b-4a9c-9d54-5e6f708192a3"
 APPROVAL = "5abd8b6d-df7c-4bad-8e65-6f708192a3b4"
 FAILED = "6bce9c7e-e08d-4cbe-9f76-708192a3b4c5"

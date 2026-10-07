@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
@@ -154,21 +153,16 @@ async def _described(request: Request, projects: list[Workstream]) -> list[Proje
     if not projects:
         return []
     store = _store(request)
-    threads = defaultdict(list)
-    for facts in await store.thread_facts(*(project.id for project in projects), with_files=False):
-        threads[facts.workstream_id].append(facts)
+    threads = await store.thread_counts([project.id for project in projects])
     masters = await store.masters([project.master_session_id for project in projects])
-    now = datetime.now(timezone.utc)
     described = []
     for project in projects:
         seen, asking = masters[project.master_session_id]
-        groups = [derive_thread(facts, now=now)["group"] for facts in threads[project.id]]
+        latest, waiting, working = threads.get(project.id, (None, 0, 0))
         described.append(ProjectOut.model_validate(project).model_copy(update={
-            "waiting": groups.count("waiting") + asking,
-            "working": groups.count("working"),
-            "updated_at": max(aware(moment) for moment in (
-                project.updated_at, seen, *(facts.updated_at for facts in threads[project.id]),
-            )),
+            "waiting": waiting + asking,
+            "working": working,
+            "updated_at": max(aware(moment) for moment in (project.updated_at, seen, latest) if moment is not None),
         }))
     return sorted(described, key=lambda project: project.updated_at, reverse=True)
 
