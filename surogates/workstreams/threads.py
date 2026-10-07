@@ -1,4 +1,5 @@
-"""Starting a project's thread: its session, its row, its goal and its queue."""
+"""A project's threads: starting one (its session, its row, its goal and its
+queue), stopping one, and reopening one the user gives new work."""
 
 from __future__ import annotations
 
@@ -82,14 +83,15 @@ async def reopen_if_thread(session: Session, *, session_factory: Any) -> None:
 async def stop_thread(
     thread: Session, *, reason: str, interrupt: str, session_store: Any, session_factory: Any, redis: Any,
 ) -> bool:
-    """Stop *thread* as the pause route stops a chat; whether it was working.
+    """Pause *thread* if it is working, and interrupt its turn; whether it was working.
 
     The status first, so the thread reads as stopped, then the interrupt
     that ends its turn.  A thread already paused is interrupted again: its
-    turn may not have heard the first time.  *reason* goes into its
-    ``session.pause``; *interrupt* is always the server's words, never a
-    model's, because the dispatcher reads some reasons as commands
-    (``_SESSION_GONE_REASONS``).
+    turn may not have heard the first time.  Unlike the pause route, it
+    leaves the device operations of the thread's tree alone.  *reason*
+    goes into its ``session.pause``; *interrupt* is always the server's
+    words, never a model's, because the dispatcher reads some reasons as
+    commands (``_SESSION_GONE_REASONS``).
     """
     stopped = await WorkstreamStore(session_factory).pause_thread(thread.id)
     if stopped:

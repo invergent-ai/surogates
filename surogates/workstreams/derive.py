@@ -20,8 +20,9 @@ GROUPS = ("waiting", "working", "idle", "resolved")
 REASONS = ("question", "approval", "failed", "computer")
 #: The inbox kinds a thread waits on the user for, and the reason each gives.
 WAITING_KINDS = {"input_required": "question", "action_required": "approval", "governance_gate": "approval"}
-#: The event types the rules read the latest of.  Every ``turn.summary`` is
-#: read too, for the files.
+#: The event types the rules read the latest of.  Turn summaries are read
+#: too: every one for a row's files, or only the newest when the files are
+#: not read (``WorkstreamStore.thread_facts``).
 LATEST_TYPES = tuple(t.value for t in (
     EventType.USER_MESSAGE, EventType.LLM_RESPONSE, EventType.TODO_UPDATED,
     EventType.ITERATION_SUMMARY, EventType.SESSION_FAIL, EventType.DEVICE_WAITING,
@@ -52,7 +53,8 @@ class ThreadFacts:
     place: dict[str, Any]
     #: Its inbox items of ``WAITING_KINDS`` that are pending or expired.
     items: tuple[Any, ...]
-    #: Its latest event of each of ``LATEST_TYPES``, and every ``turn.summary``.
+    #: Its latest event of each of ``LATEST_TYPES``, and its turn summaries:
+    #: every one, or only the newest when its files are not read.
     events: tuple[Any, ...]
 
 

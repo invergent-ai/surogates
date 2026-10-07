@@ -115,7 +115,7 @@ class ProjectSummaryOut(BaseModel):
     icon: str | None
     created_at: datetime
     updated_at: datetime
-    # Threads waiting on the user, plus one for an open question in the master.
+    # Threads waiting on the user, plus one for a question or approval open in the master.
     waiting: int = 0
     working: int = 0
 
