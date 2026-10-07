@@ -191,6 +191,8 @@ async def a_saga_left_open(api, chat, *, compensating: bool) -> str:
     (False, EventType.SESSION_FAIL, "completed"),  # the dispatcher gave up on the turn itself
     (False, EventType.SESSION_COMPLETE, "completed"),  # the turn's saga.complete was lost
     (True, EventType.SESSION_FAIL, "escalated"),  # lost while it was being put back
+    (True, EventType.SESSION_PAUSE, "escalated"),  # a stop's, lost once it was put back
+    (True, EventType.SESSION_STOPPED, "escalated"),  # a channel stop's
 ])
 async def test_a_saga_a_turn_left_open_is_closed_before_the_next_turn_starts_its_own(
     api, monkeypatch, compensating, end, status,

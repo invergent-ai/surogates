@@ -3308,14 +3308,18 @@ class AgentHarness(
         """Close each active saga started before the log's last turn end.
 
         A turn the dispatcher failed itself, or whose ``saga.complete`` was
-        lost, leaves its saga open; the next turn must start its own.  It is
-        closed ``completed`` if it was running, as a failed turn's is, and
-        ``escalated`` if it was being put back.
+        lost, leaves its saga open; the next turn must start its own.  A
+        stop's pause, or a channel stop's ``session.stopped``, ends a turn
+        too.  It is closed ``completed`` if it was running, as a failed
+        turn's is, and ``escalated`` if it was being put back.
         """
         from surogates.governance.events import saga_complete_event
         from surogates.governance.saga.state_machine import SagaState
 
-        ends = (EventType.SESSION_COMPLETE.value, EventType.SESSION_FAIL.value)
+        ends = (
+            EventType.SESSION_COMPLETE.value, EventType.SESSION_FAIL.value,
+            EventType.SESSION_PAUSE.value, EventType.SESSION_STOPPED.value,
+        )
         ended = max((e.id for e in events if e.type in ends), default=None)
         if ended is None:
             return
