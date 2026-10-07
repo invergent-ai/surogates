@@ -50,6 +50,9 @@ type CardStart =
 const cardStarts = new WeakMap<AgentChatAdapter, Map<string, CardStart>>();
 const startListeners = new Set<() => void>();
 let startsChanged = 0;
+// How many cards of each proposal are drawn now: a start that finishes while none is owes no focus,
+// which would otherwise jump to its View thread whenever the card is drawn again.
+const drawnCards = new Map<string, number>();
 
 function setCardStart(adapter: AgentChatAdapter, card: string, start: CardStart): void {
   const starts = cardStarts.get(adapter) ?? new Map<string, CardStart>();
@@ -154,8 +157,17 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
   const starting = (key: string) => startOf(key)?.state === "starting";
   const canStart = !!projectId && !!adapter.startProposedThread;
   // A card started here gives its View thread the focus its Start took away with it,
-  // unless the user has put the focus elsewhere meanwhile; a card drawn anew owes it still.
+  // unless the user has put the focus elsewhere meanwhile; a card drawn anew owes it still,
+  // when one was drawn as the start finished.
   const viewButtons = useRef<Record<string, HTMLButtonElement | null>>({});
+  useEffect(() => {
+    drawnCards.set(proposal.proposalId, (drawnCards.get(proposal.proposalId) ?? 0) + 1);
+    return () => {
+      const left = (drawnCards.get(proposal.proposalId) ?? 1) - 1;
+      if (left > 0) drawnCards.set(proposal.proposalId, left);
+      else drawnCards.delete(proposal.proposalId);
+    };
+  }, [proposal.proposalId]);
   useEffect(() => {
     for (const { key } of proposal.threads) {
       const start = startOf(key);
@@ -169,7 +181,7 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
     told(key, { state: "starting" });
     try {
       const row = await adapter.startProposedThread!({ projectId: projectId!, proposalId: proposal.proposalId, key });
-      told(key, { state: "started", threadId: row.id, focus: true });
+      told(key, { state: "started", threadId: row.id, focus: drawnCards.has(proposal.proposalId) });
     } catch (error) {
       told(key, { state: "failed", error: error instanceof Error ? error.message : "The thread could not be started." });
     }

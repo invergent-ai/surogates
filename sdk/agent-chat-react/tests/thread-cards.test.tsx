@@ -298,6 +298,27 @@ describe("the cards in the conversation", () => {
     expect(startProposedThread).toHaveBeenCalledTimes(1);
   });
 
+  it("owes no focus for a start that finished while its card was not drawn", async () => {
+    let finish: () => void = () => {};
+    const startProposedThread = vi.fn(() => new Promise<AgentChatThreadRow>((resolve) => {
+      finish = () => resolve({ id: "thread-1", title: "", group: "working", reason: null, statusLine: null, progress: null, files: [] });
+    }));
+    const adapter = adapterStub({ startProposedThread });
+    const context = { projectId: "project-1", onOpenSession: vi.fn() };
+    const state = applied(proposed);
+    const dom = mount(thread(state, "simple"), adapter, context);
+    const card = () => dom.querySelector('[data-testid="proposed-thread"]')!;
+    const start = button(dom, "Start", card());
+    start.focus();
+    await act(async () => start.click());
+    // The user went elsewhere: the conversation, with its card, is not drawn when the start finishes.
+    act(() => root?.render(provided(<p>Another session</p>, adapter, context)));
+    await act(async () => finish());
+    act(() => root?.render(provided(thread(state, "simple"), adapter, context)));
+    expect(button(dom, "View thread", card())).toBeTruthy();
+    expect(document.activeElement).toBe(document.body);
+  });
+
   it("says Started in a status region that was there before it", async () => {
     const startProposedThread = vi.fn(async () => (
       { id: "thread-1", title: "", group: "working" as const, reason: null, statusLine: null, progress: null, files: [] }
