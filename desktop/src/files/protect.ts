@@ -28,6 +28,9 @@ const PROTECTED_NAMES = new Set([
 const PROTECTED_PAIRS: ReadonlyArray<readonly [string, string]> = [
   [".claude", "commands"], [".claude", "agents"], [".git", "hooks"], [".git", "config"],
 ];
+// The folders that hold protected names: renamed away and made again, each would hand a
+// command its keys anew.
+export const KEY_FOLDERS: ReadonlySet<string> = new Set(PROTECTED_PAIRS.map(([first]) => first));
 // Inside a .git folder, at any depth (a submodule's git folder lies in its
 // parent's .git/modules): the config files git reads, in the folder or through
 // commondir, and the hooks. A config can name a program that git runs on its
@@ -69,8 +72,8 @@ export function protectedInFolder(folder: string, key: string): boolean {
 }
 
 // What lies after a .git component. A paused rebase or cherry-pick keeps a todo
-// whose exec lines git runs on --continue.
-const GIT_STATE = new Set(["worktrees", "rebase-merge", "rebase-apply", "sequencer"]);
+// whose exec lines git runs on --continue. Git makes and removes each as it works.
+export const GIT_STATE: ReadonlySet<string> = new Set(["worktrees", "rebase-merge", "rebase-apply", "sequencer"]);
 
 // In the git folder itself, hooks and configs count only directly under it:
 // elsewhere (refs, logs) the names are a branch's or a tag's. A submodule's git

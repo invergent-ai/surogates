@@ -12,7 +12,7 @@ import type { Duplex } from "node:stream";
 import { BOOT_ID } from "../binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
 import type { ProcessHandle } from "../guest/processes.js";
-import type { FromAgent, HostUser, Share } from "../guest/protocol.js";
+import type { FromAgent, HostUser, ProtectedKey, Share } from "../guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { ControlLink, type Request } from "./control.js";
@@ -60,6 +60,15 @@ export interface VmBackend {
    * and so does one that leaves the VM unable to share again: it rejects once the VM has gone.
    */
   share(folder: string, uid: number, deadline: number): Promise<Share>;
+  /**
+   * *share*, as share gave it, out of the running guest once the guest has let it go, and
+   * its folder served no more: its place takes the next share. Rejects with why not by
+   * *deadline* (performance.now()), once the VM has gone: a guest that does not let a
+   * folder go is given no other. The agent's unmount is lazy, so the guest may still hold
+   * the share when this is asked, until the deadline. Whether a tag comes again is the
+   * backend's: Linux's never does within a boot, and one whose places are fixed may.
+   */
+  unshare(share: Share, deadline: number): Promise<void>;
   /** Ends the VM at once; settles once all of it has gone. Its runtime files go at the next boot, or with the manager. */
   kill(): Promise<void>;
 }
@@ -98,6 +107,8 @@ export interface VmOperation {
   args: Record<string, unknown>;
   // The handles the host keeps of the root's background processes: a root new to the guest answers for them.
   ended?: ProcessHandle[];
+  // For a kind that runs a command: its folder's protected keys, read-only in the root's namespace before it runs.
+  protect?: ProtectedKey[];
 }
 
 export const unavailable = (why: string): Outcome => ({ error: { type: "unavailable", message: `This computer's sandbox ${why}` } });
@@ -120,6 +131,9 @@ const aborted = (signal: AbortSignal) => new Promise<"aborted">((resolve) => {
 interface Root {
   share: Promise<Share>; // how the agent mounts its folder, once added
   setup: Promise<Outcome | null> | null; // null once set up, or why not
+  // The protected keys read-only in its namespace since its setup, as last asked, and the ask under way.
+  bound: string;
+  binding: Promise<Outcome | null>;
 }
 
 // One boot of the guest, until it goes.
@@ -199,12 +213,13 @@ export class Guest {
 
   /**
    * Null once *root* is set up, its folder added, its processes' *ended* handles
-   * given; otherwise the answer that says why not, and the next asks again.
+   * given, and *protect*'s keys read-only; otherwise the answer that says why not,
+   * and the next asks again.
    */
-  ready(root: string, folder: Folder, ended: ProcessHandle[] = []): Promise<Outcome | null> {
+  ready(root: string, folder: Folder, ended: ProcessHandle[] = [], protect?: ProtectedKey[]): Promise<Outcome | null> {
     let known = this.roots.get(root);
     if (!known) {
-      const entry: Root = { share: this.share(root, folder), setup: null };
+      const entry: Root = { share: this.share(root, folder), setup: null, bound: "", binding: Promise.resolve(null) };
       // A share that could not be added is tried again by the next operation.
       entry.share.catch(() => {
         if (this.roots.get(root) === entry) this.roots.delete(root);
@@ -223,6 +238,8 @@ export class Guest {
         if (this.left) return SANDBOX_STOPPED;
         return error instanceof FolderGone ? FOLDER_UNAVAILABLE : unavailable(`could not add this chat's folder: ${describe(error)}`);
       }
+      // A namespace of its own, with nothing bound in it yet.
+      entry.bound = "";
       const answer = await this.request({ type: "setup", root, folder: folder.path, share, ended }, SETUP_MS);
       if (answer?.type === "done") return null;
       entry.setup = null;
@@ -231,7 +248,40 @@ export class Guest {
       this.lose();
       return SANDBOX_STOPPED;
     })();
-    return entry.setup;
+    const { setup } = entry;
+    if (!protect) return setup;
+    return setup.then(async (failure) => {
+      if (failure) return failure;
+      const refused = await this.protect(root, protect);
+      // Set up again meanwhile, its runner lost: the keys go to the new namespace before the command does.
+      return refused ?? (entry.setup === setup ? null : this.ready(root, folder, ended, protect));
+    });
+  }
+
+  /**
+   * *keys* read-only in *root*'s namespace, once it is set up: null once they are, or
+   * the answer that refuses its command. Asked in turn, and only when they differ from
+   * what its namespace was last given; a root not set up has nothing to bind them in.
+   */
+  protect(root: string, keys: ProtectedKey[]): Promise<Outcome | null> {
+    const entry = this.roots.get(root);
+    const setup = entry?.setup;
+    if (!entry || !setup) return Promise.resolve(null);
+    const asked = JSON.stringify(keys);
+    entry.binding = entry.binding.then(async () => {
+      // Not set up, or set up again since: its next command brings them.
+      if ((await setup) !== null || entry.setup !== setup || entry.bound === asked) return null;
+      const answer = await this.request({ type: "protect", root, keys }, SETUP_MS);
+      if (!answer) {
+        // The agent is stuck, and the guest goes with it.
+        this.lose();
+        return SANDBOX_STOPPED;
+      }
+      if (answer.type === "failed") return { error: { type: "sandbox", message: answer.message } };
+      if (entry.setup === setup) entry.bound = asked;
+      return null;
+    });
+    return entry.binding;
   }
 
   /**
@@ -266,7 +316,11 @@ export class Guest {
     return this.vm.share(folder.path, uid, deadline);
   }
 
-  /** Everything of *root* ends in the guest, its share left in place; its next operation sets it up again. */
+  /**
+   * Everything of *root* ends in the guest, then its folder leaves it; its next operation
+   * shares the folder and sets it up again. A guest that does not answer, or does not let
+   * the folder go, is lost, the root's processes with it.
+   */
   async teardown(root: string): Promise<void> {
     const entry = this.roots.get(root);
     if (!entry) return;
@@ -274,8 +328,13 @@ export class Guest {
     // does not land within SETUP_MS loses the guest, the root's processes with it.
     if ((await Promise.race([entry.setup, late(SETUP_MS)])) === "late") return this.lose();
     entry.setup = null;
+    // One that could not be added has left already.
+    const share = await entry.share.catch(() => null);
+    if (this.roots.get(root) === entry) this.roots.delete(root);
+    if (!share) return;
     // Unanswered: the agent is stuck, and the guest goes, the root's processes with it.
-    if (!(await this.request({ type: "teardown", root }, SETUP_MS))) this.lose();
+    if (!(await this.request({ type: "teardown", root, share }, SETUP_MS))) return this.lose();
+    await this.vm.unshare(share, performance.now() + this.shareMs).catch(() => this.lose());
   }
 
   // Settles once all of the VM has gone.
@@ -329,10 +388,16 @@ export class VmManager {
       return unavailable(this.stopping ? "is stopping" : `did not start: ${describe(error)}`);
     }
     if (guest === "aborted") return CANCELLED;
-    const failure = await Promise.race([guest.ready(operation.root, operation.folder, operation.ended), aborted(signal)]);
+    const failure = await Promise.race([guest.ready(operation.root, operation.folder, operation.ended, operation.protect), aborted(signal)]);
     if (failure === "aborted") return CANCELLED;
     if (failure) return this.stopping ? unavailable("is stopping") : failure;
     return guest.op(operation.root, operation.kind, operation.args, signal);
+  }
+
+  /** *keys*, found between *root*'s commands, read-only in its namespace if a guest has it set up. Never rejects. */
+  async protect(root: string, keys: ProtectedKey[]): Promise<void> {
+    const guest = await this.guest?.catch(() => null);
+    if (guest && !guest.ended) await guest.protect(root, keys);
   }
 
   /** Everything of *root* ends in the guest, if one runs: its folder is being let go. Never rejects. */

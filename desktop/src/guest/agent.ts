@@ -8,12 +8,12 @@ import { createInterface } from "node:readline";
 import { Control } from "./control.js";
 import { findPort, openPort } from "./port.js";
 import type { FromAgent } from "./protocol.js";
-import { contain, enter, killRoot, Roots, uidOf } from "./root.js";
+import { bindOver, CGROUPS, contain, enter, killRoot, Roots, uidOf, unmountShare } from "./root.js";
 
 const port = await openPort(await findPort("ai.surogate.control"));
 const say = (message: FromAgent) => void port.write(`${JSON.stringify(message)}\n`);
 const roots = new Roots({
-  start: enter, uid: uidOf, kill: killRoot, contain,
+  start: enter, uid: uidOf, kill: killRoot, contain, cgroups: CGROUPS, protect: bindOver, unmount: unmountShare,
   lost: (root) => say({ type: "lost", root }),
   handles: (root, handles, live) => say({ type: "handles", root, handles, live }),
 });

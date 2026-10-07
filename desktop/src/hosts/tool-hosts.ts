@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import type { FolderGuards } from "../binding/folder.js";
 import { lostWith, type ProcessHandle } from "../guest/processes.js";
+import type { ProtectedKey } from "../guest/protocol.js";
 import type { Binding } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
@@ -133,6 +134,10 @@ export interface ToolHostsOptions {
   // Waited for before a root's host lets its folder go, so what else holds the folder
   // lets it go first; told too when a host went by itself.
   release?(root: string): Promise<void>;
+  // Told the folder's protected keys each time its host finds them changed, for a guest
+  // root's read-only binds, once no command of the root's that it looks after runs. With it,
+  // each host names them, and guarded's work gets the latest.
+  protect?(root: string, keys: ProtectedKey[]): void;
 }
 
 export class ToolHosts implements Executor {
@@ -157,12 +162,12 @@ export class ToolHosts implements Executor {
    */
   guarded(
     operation: Operation, signal: AbortSignal, guard: Guard,
-    inner: (binding: BoundFolder, signal: AbortSignal, ended: ProcessHandle[]) => Promise<Outcome>,
+    inner: (binding: BoundFolder, signal: AbortSignal, ended: ProcessHandle[], keys: ProtectedKey[]) => Promise<Outcome>,
   ): Promise<Outcome> {
     if (this.stopping) return Promise.resolve(unavailable("the app is quitting"));
     const binding = SESSION_ID.test(operation.sessionId) ? this.options.bindingOf(operation.sessionId) : undefined;
     if (!binding) return Promise.resolve(FOLDER_UNAVAILABLE);
-    return this.hostFor(operation.sessionId, binding).guarded(operation, signal, guard, (aborted, ended) => inner(binding, aborted, ended));
+    return this.hostFor(operation.sessionId, binding).guarded(operation, signal, guard, (aborted, ended, keys) => inner(binding, aborted, ended, keys));
   }
 
   /** A root's background processes elsewhere (the VM) changed: its host keeps their handles, and stays while any lives. */
@@ -218,6 +223,7 @@ export class ToolHosts implements Executor {
       appDirs: this.options.appDirs ?? APP_DIRS,
       domains: [...(network?.granted(root) ?? [])],
       ...(bwrapPath ? { bwrapPath } : {}),
+      ...(this.options.protect ? { protect: true as const } : {}),
     };
     const ask = (asked: NetworkAsk, signal: AbortSignal): Promise<NetworkAnswer> =>
       network ? network.askNetwork(root, asked, signal) : Promise.resolve("deny");
@@ -228,6 +234,7 @@ export class ToolHosts implements Executor {
       },
       ask,
       () => this.options.release?.(root) ?? Promise.resolve(),
+      (keys) => this.options.protect?.(root, keys),
     );
     this.hosts.set(root, host);
     this.live.add(host);
@@ -254,6 +261,13 @@ class Host {
   private handles: ProcessHandle[] = [];
   // Once its file host said ready: what came of its root's processes before is not its own.
   private readied = false;
+  // Its folder's protected keys as its file host last named them.
+  private keys: ProtectedKey[] = [];
+  // Commands of its root in flight that it looks after, and whether keys named meanwhile wait
+  // for the last of them to answer: bound under a command, git's own work in it would stop
+  // halfway, as srt's runner was not restarted under a run.
+  private commands = 0;
+  private unpushed = false;
 
   constructor(
     private readonly process: HostProcess,
@@ -263,6 +277,7 @@ class Host {
     private readonly onGone: () => void,
     private readonly ask: (asked: NetworkAsk, signal: AbortSignal) => Promise<NetworkAnswer>,
     private readonly release: () => Promise<void>,
+    private readonly protect: (keys: ProtectedKey[]) => void,
   ) {
     this.started = new Promise((resolve) => {
       this.settleStart = (failure) => {
@@ -301,17 +316,27 @@ class Host {
    * a cancel's too, its look after, which no cancel stops; the outcome carries its notice.
    */
   guarded(
-    operation: Operation, signal: AbortSignal, guard: Guard, inner: (signal: AbortSignal, ended: ProcessHandle[]) => Promise<Outcome>,
+    operation: Operation, signal: AbortSignal, guard: Guard, inner: (signal: AbortSignal, ended: ProcessHandle[], keys: ProtectedKey[]) => Promise<Outcome>,
   ): Promise<Outcome> {
     return this.busy(async () => {
-      const failure = await this.ready(signal);
-      if (failure) return failure;
-      if (guard) {
-        const refused = await this.request({ type: "refusal", id: operation.id }, signal);
-        if (!("ok" in refused)) return refused;
+      if (guard === "around") this.commands += 1;
+      try {
+        const failure = await this.ready(signal);
+        if (failure) return failure;
+        if (guard) {
+          const refused = await this.request({ type: "refusal", id: operation.id }, signal);
+          if (!("ok" in refused)) return refused;
+        }
+        const outcome = await inner(signal, this.handles, this.keys);
+        return guard === "around" ? await this.request({ type: "after", id: operation.id, outcome }) : outcome;
+      } finally {
+        // Its after-look's keys came before its answer.
+        if (guard === "around") this.commands -= 1;
+        if (this.commands === 0 && this.unpushed) {
+          this.unpushed = false;
+          this.protect(this.keys);
+        }
       }
-      const outcome = await inner(signal, this.handles);
-      return guard === "around" ? this.request({ type: "after", id: operation.id, outcome }) : outcome;
     });
   }
 
@@ -427,6 +452,10 @@ class Host {
     } else if (message.type === "processes") {
       this.live = message.live;
       this.idle();
+    } else if (message.type === "protected") {
+      this.keys = message.keys;
+      if (this.commands > 0) this.unpushed = true;
+      else this.protect(message.keys);
     } else if (message.type === "ask") {
       this.asked(message.id, { host: message.host, port: message.port, privateNetwork: message.privateNetwork });
     } else {

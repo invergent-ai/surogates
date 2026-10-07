@@ -5,16 +5,17 @@
 // starts is reachable from the next.
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { chmodSync, chownSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { chmodSync, chownSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { chmod, chown, mkdir, readdir, readFile, rmdir, writeFile } from "node:fs/promises";
-import { join, posix } from "node:path";
+import { join, posix, relative } from "node:path";
 import { promisify } from "node:util";
 
 import { Failure } from "../files/answers.js";
+import { inside } from "../files/paths.js";
 import type { Outcome } from "../link/protocol.js";
 import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STOPPED, supervise, timedOut } from "./command.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
-import type { Answer, HostUser, Question, Share } from "./protocol.js";
+import { type Answer, type BindMode, type HostUser, MAX_SHARES, type ProtectedKey, type Question, type Share } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 
 // The sessions disk's folder of roots (vm/init), each named by its root session id.
@@ -22,7 +23,7 @@ export const SESSIONS = "/run/surogate/sessions/roots";
 // Each share's virtiofs mount, readable by root only.
 const SHARES = "/run/surogate/shares";
 // Each root's cgroup, under the one vm/init bounds below the guest's memory.
-const CGROUPS = "/sys/fs/cgroup/roots";
+export const CGROUPS = "/sys/fs/cgroup/roots";
 // How many processes one root may have of the guest's 32 768.
 const PIDS_MAX = 4096;
 // How many cgroups one root may have below its own: its runner's, its runs' and its
@@ -36,19 +37,33 @@ const CGROUPS_MAX = 256;
 const EMPTY_MS = 3_000;
 const EMPTY_RETRY_MS = 10;
 const ENTER_ROOT = "/run/surogate/agent/enter-root";
+// Binds a root's protected keys, and the folders above them, in its namespace: on the agent
+// disk, which the root's /run/surogate/agent shows too.
+const PROTECT = "/run/surogate/agent/protect";
+// About a millisecond a bind, measured: MAX_PROTECTED take about a second, well inside the
+// host's 15 s for the request.
+const PROTECT_MS = 10_000;
+// How many paths a refusal names.
+const NAMED = 20;
 // The cloud's layout of the commands' environment, written by the image's build.
 const LAYOUT = "/etc/surogate/environment";
 const FIRST_UID = 10_000;
 const ROOT_ID = /^[A-Za-z0-9_-]{1,64}$/;
-const TAG = /^r[0-9]{1,3}$/;
+// A share's number in its guest is never used again there, so it grows with every folder added.
+const TAG = /^r[1-9][0-9]{0,8}$/;
 // Any name a passwd line can hold, as directories join AD users (ana@corp.example):
 // no ':', newline, NUL or '/', no leading '-', at most 256 characters.
 const NAME = /^(?!-)[^:\n\0/]{1,256}$/;
+// What the agent keeps of every root's background processes' output together, in UTF-16
+// code units: at most 32 MB, beside the agent's own memory in the 256 MiB the roots leave
+// it. Each root keeps its share: the guest holds at most MAX_SHARES roots at once.
+const OUTPUT_CHARS = 16_000_000;
 // The background process kinds, which a root's registry answers.
 const PROCESS_KINDS = new Set(["start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"]);
 
 export const NOT_SET_UP = { error: { type: "unavailable", message: "This computer's sandbox has not set up this chat" } } satisfies Outcome;
 const ALREADY = "This chat's sandbox is already set up";
+const FULL = `This computer's sandbox holds ${MAX_SHARES} chats already`;
 // The cloud sandbox's HOME, under which /etc/surogate/environment names the layout:
 // at the start of a path, in a value or a list of them.
 const CLOUD_HOME = /(?<=^|:)\/home\/sandbox(?=\/|:|$)/g;
@@ -67,6 +82,10 @@ const QUESTION_MS = 10_000;
 const GRACE_MS = 2_000;
 
 // The commands' environment: the cloud's layout under the root's own HOME, and the user's names.
+// And git compares no owner, inode or sub-second time in its index (core.checkStat=minimal),
+// through git's own environment, after any the layout gives: the folder's files are the root's
+// uid in the guest and the user's on the host, so git in the guest would otherwise rehash every
+// file after any git on the host refreshed the index. The user's repository config is untouched.
 export function rootEnvironment(layout: string, user: HostUser): Record<string, string> {
   const env: Record<string, string> = {};
   for (const line of layout.split("\n")) {
@@ -74,7 +93,11 @@ export function rootEnvironment(layout: string, user: HostUser): Record<string, 
     // A function, so a '$' in the home is not read as a replacement pattern.
     if (at > 0) env[line.slice(0, at)] = line.slice(at + 1).replace(CLOUD_HOME, () => user.home);
   }
-  return { ...env, HOME: user.home, USER: user.name, LOGNAME: user.name, LANG: "C.UTF-8" };
+  const git = Number(env.GIT_CONFIG_COUNT ?? 0);
+  return {
+    ...env, HOME: user.home, USER: user.name, LOGNAME: user.name, LANG: "C.UTF-8",
+    GIT_CONFIG_COUNT: String(git + 1), [`GIT_CONFIG_KEY_${git}`]: "core.checkStat", [`GIT_CONFIG_VALUE_${git}`]: "minimal",
+  };
 }
 
 // The guest uid of *root*: given at its first ask, from FIRST_UID up, and kept
@@ -136,6 +159,16 @@ async function mountShare(tag: string): Promise<string> {
   return share;
 }
 
+// A share's mount goes, lazily: a process of its root's stuck in a share that stalled
+// keeps it until it lets go. The host removes the share from the guest next.
+export async function unmountShare(share: Share): Promise<void> {
+  if (!TAG.test(share.tag)) return;
+  mounted.delete(share.tag);
+  const path = join(SHARES, share.tag);
+  await execute("/usr/bin/umount", ["-l", path]).catch(() => {});
+  await rmdir(path).catch(() => {});
+}
+
 // The root's runner in its own namespaces: mount, PID, IPC, UTS, network and
 // cgroup, as util-linux's unshare makes them, and enter-root builds them. Ending
 // the runner's stdin ends the runner, then tini, the namespaces' PID 1, and
@@ -165,10 +198,11 @@ export async function enter(root: string, place: Place, share: Share, user: Host
   // No cgroup deeper than a command's, and at most CGROUPS_MAX.
   await writeFile(join(cgroup, "cgroup.max.descendants"), String(CGROUPS_MAX));
   await writeFile(join(cgroup, "cgroup.max.depth"), "2");
-  // Delegated to the root's user, so its runner can give each command a cgroup of its
-  // own in run or proc and move its processes between them; it sets none of the root's
-  // own limits, and makes no cgroup beside init, run and proc.
-  for (const path of [join(cgroup, "cgroup.procs"), join(cgroup, "run"), join(cgroup, "proc")]) await chown(path, uid, uid);
+  // Delegated to the root's user, so its runner can give each run a cgroup of its own in
+  // run and move its processes between the root's cgroups; it sets none of the root's own
+  // limits, and makes no cgroup beside init, run and proc, nor any in proc, whose cgroups
+  // the agent makes (ProcessCgroups).
+  for (const path of [join(cgroup, "cgroup.procs"), join(cgroup, "run")]) await chown(path, uid, uid);
   // In the root's cgroup before unshare runs, so it and everything it starts are
   // there, and the cgroup namespace it makes is rooted there. Each by its path:
   // never through the PATH made for the commands.
@@ -201,6 +235,46 @@ export async function contain(root: string, pid: number | undefined): Promise<vo
   await writeFile(join(cgroup, "proc", "cgroup.subtree_control"), "+memory");
 }
 
+/**
+ * The cgroups the agent makes for a root's background processes, in the root's proc
+ * folder (spec, Section 11, Cgroups), which only the agent writes. A memory cgroup a
+ * command made there and removed again would hold guest kernel memory that no limit
+ * counts, for as long as the page cache it charged lives. Each is the root's user's to
+ * enter and to end, through its cgroup.procs and cgroup.kill, which its runner writes;
+ * the agent removes it once nothing of it runs.
+ */
+export class ProcessCgroups {
+  // Ended processes whose cgroups still held what they left: tried again at each start.
+  private readonly ended = new Set<string>();
+
+  constructor(private readonly folder: string, private readonly uid: number) {}
+
+  // Made before the runner starts the process. Throws once the root has as many cgroups as it may.
+  make(id: string): void {
+    this.tidy();
+    const cgroup = join(this.folder, id);
+    mkdirSync(cgroup);
+    for (const file of ["cgroup.procs", "cgroup.kill"]) chownSync(join(cgroup, file), this.uid, this.uid);
+  }
+
+  // Once its process has ended: removed now, or once what it left has ended too.
+  end(id: string): void {
+    this.ended.add(id);
+    this.tidy();
+  }
+
+  private tidy(): void {
+    for (const id of this.ended) {
+      try {
+        rmdirSync(join(this.folder, id));
+        this.ended.delete(id);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") this.ended.delete(id);
+      }
+    }
+  }
+}
+
 // Everything of *root* ends at once, its runner and the namespaces' PID 1 among it,
 // whatever its uid or state. Resolves once its cgroup is empty, or rejects if it is not by EMPTY_MS.
 export async function killRoot(root: string): Promise<void> {
@@ -211,6 +285,48 @@ export async function killRoot(root: string): Promise<void> {
     if (Date.now() > deadline) throw new Error(`the processes of ${root} have not ended`);
     await new Promise((resolve) => setTimeout(resolve, EMPTY_RETRY_MS));
   }
+}
+
+// What became of each path a root's namespace was asked to bind: the inode it bound, or
+// absent (gone since the host looked), or failed (a link that leads nowhere).
+export type Bound = Map<string, number | "absent" | "failed">;
+
+/**
+ * Each of *binds*, in order, bound over itself as its mode says, in the mount namespace of
+ * the root whose unshare is *pid*, by vm/protect as the guest's root, in the root's own
+ * view. A bind follows a link, as srt's deny did: a link's target is what is bound.
+ */
+export function bindOver(pid: number, binds: ReadonlyArray<readonly [string, BindMode]>): Promise<Bound> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("/usr/bin/nsenter", ["--target", String(pid), "--mount", "--root", "--wd", "--", "/bin/bash", PROTECT], {
+      env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin" }, stdio: ["pipe", "pipe", "ignore"],
+    });
+    const chunks: Buffer[] = [];
+    let late = false;
+    const timer = setTimeout(() => {
+      late = true;
+      child.kill("SIGKILL");
+    }, PROTECT_MS);
+    child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.stdin.on("error", () => {});
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(new Error(late ? "it did not finish in time" : `it stopped (${code})`));
+      // Each path, then its inode, nothing when absent, or ! when it could not be bound.
+      const parts = Buffer.concat(chunks).toString().split("\0");
+      const bound: Bound = new Map();
+      for (let at = 0; at + 1 < parts.length; at += 2) {
+        const said = parts[at + 1] ?? "";
+        bound.set(parts[at] ?? "", said === "" ? "absent" : said === "!" ? "failed" : Number(said));
+      }
+      resolve(bound);
+    });
+    child.stdin.end(binds.map(([path, mode]) => `${mode}\0${path}\0`).join(""));
+  });
 }
 
 // *answer*, or the signal, or *ms* passing, whichever comes first: the runner's
@@ -230,15 +346,66 @@ function first<T>(answer: Promise<T>, signal: AbortSignal, ms?: number): Promise
   });
 }
 
+// The refusal of a root's commands while *paths* are not bound: named relative to *folder*, at most NAMED of them.
+function refusal(folder: string, paths: readonly string[], why: string): string {
+  const names = paths.map((path) => relative(folder, path)).sort();
+  const listed = names.length > NAMED ? `${names.slice(0, NAMED).join(", ")} and ${names.length - NAMED} more` : names.join(", ");
+  return `Blocked: the computer could not make these protected files read-only in its sandbox, so commands cannot run here: ${listed}. ${why}`;
+}
+
 export class Root {
   private asked = 0;
+  // Each path bound in its namespace, by the inode it had.
+  private readonly bound = new Map<string, number>();
+  private protecting: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly place: Place,
     readonly runner: SessionRunner,
     private readonly lose: () => Promise<void>,
     private readonly questionMs: number,
+    private readonly bind: ((binds: Array<[string, BindMode]>) => Promise<Bound>) | null = null,
   ) {}
+
+  /**
+   * *keys*, the host's list of its folder's protected keys and the folders above them now,
+   * bound in its namespace: each not bound yet, or bound with another inode, and all that
+   * lies in a folder bound again, since a bind of a folder holds none of the binds below
+   * it. A host program that replaces one, as git config renames a new file over the old,
+   * takes the bind with it. One after another; rejects with the refusal while one cannot be bound.
+   */
+  protect(keys: readonly ProtectedKey[]): Promise<void> {
+    const done = this.protecting.then(() => this.bindKeys(keys));
+    this.protecting = done.catch(() => {});
+    return done;
+  }
+
+  private async bindKeys(keys: readonly ProtectedKey[]): Promise<void> {
+    const { folder } = this.place;
+    // Only paths in its folder are the host's to name; a folder before what lies in it.
+    const named = keys.filter(([path]) => path !== folder && inside(path, folder)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const paths = new Set(named.map(([path]) => path));
+    for (const path of this.bound.keys()) if (!paths.has(path)) this.bound.delete(path);
+    const due: Array<[string, BindMode]> = [];
+    for (const [path, ino, mode] of named) {
+      if (this.bound.get(path) !== ino || due.some(([above]) => inside(path, above))) due.push([path, mode]);
+    }
+    if (!this.bind || due.length === 0) return;
+    const pathsDue = due.map(([path]) => path);
+    let bound: Bound;
+    try {
+      bound = await this.bind(due);
+    } catch {
+      throw new Error(refusal(folder, pathsDue, "Its sandbox did not finish binding them; the next command tries again."));
+    }
+    const stuck: string[] = [];
+    for (const path of pathsDue) {
+      const result = bound.get(path);
+      if (typeof result === "number") this.bound.set(path, result);
+      else if (result !== "absent") stuck.push(path);
+    }
+    if (stuck.length > 0) throw new Error(refusal(folder, stuck, "A link among them leads to nothing in this folder. Remove it, or make it lead to a file, to run commands here."));
+  }
 
   // Everything of the root ends; resolves once it has, and its runner has gone.
   async end(): Promise<void> {
@@ -315,6 +482,12 @@ export interface RootsOptions {
   lost?(root: string): void;
   // Told a root's process handles to keep, and how many of its processes live, each time they change.
   handles?(root: string, handles: ProcessHandle[], live: number): void;
+  // The roots' cgroups (CGROUPS): each background process gets one the agent makes in its root's proc.
+  cgroups?: string;
+  // Binds each path over itself as its mode says, in the namespace of the root whose unshare is *pid* (bindOver).
+  protect?(pid: number, binds: Array<[string, BindMode]>): Promise<Bound>;
+  // The mount of a share whose root was torn down goes (unmountShare).
+  unmount?(share: Share): Promise<void>;
   questionMs?: number;
 }
 
@@ -338,6 +511,9 @@ export class Roots {
   // keeps of the root's processes, which a root new to this guest answers for.
   async setup(root: string, folder: string, share: Share, user: HostUser, ended: readonly ProcessHandle[] = []): Promise<void> {
     if (this.roots.has(root) || this.starting.has(root)) throw new Error(ALREADY);
+    // Each root set up keeps its processes' output: a share of OUTPUT_CHARS.
+    const held = new Set([...this.registries.keys(), ...this.starting.keys()]);
+    if (!held.has(root) && held.size >= MAX_SHARES) throw new Error(FULL);
     const started = this.start(root, folder, share, user, ended);
     this.starting.set(root, started);
     try {
@@ -374,7 +550,9 @@ export class Roots {
       await runner.stop();
       throw error;
     }
-    listed = new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS);
+    const { protect } = this.options;
+    const pid = child.pid ?? 0;
+    listed = new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS, protect ? (binds) => protect(pid, binds) : null);
     if (!this.registries.has(root)) this.registries.set(root, this.registry(root, ended));
     this.roots.set(root, listed);
   }
@@ -386,9 +564,21 @@ export class Roots {
       if (!target) throw new Failure(NOT_SET_UP.error);
       return target;
     };
+    const cgroups = this.options.cgroups === undefined ? null : new ProcessCgroups(join(this.options.cgroups, root, "proc"), this.options.uid(root));
     const registry: Processes = new Processes({
       place: async (workdir, signal) => current().where(workdir, signal),
-      runner: async () => current().runner,
+      runner: async () => {
+        const { runner } = current();
+        // Its cgroup first: the runner moves the command's shell into it before the command runs.
+        return {
+          spawn: (request) => {
+            cgroups?.make(request.id);
+            return runner.spawn(request);
+          },
+        };
+      },
+      done: (id) => cgroups?.end(id),
+      keep: OUTPUT_CHARS / MAX_SHARES,
       // The host's handles: one from before the app quit comes ended as the app quit,
       // so one still running ran in a guest that went.
       ended: lostWith(ended),
@@ -400,17 +590,25 @@ export class Roots {
     return registry;
   }
 
-  // Everything of *root* ends and it is forgotten, its share left mounted: the host
-  // is letting its folder go. Its next operation sets it up again.
-  async teardown(root: string): Promise<void> {
+  // *keys* read-only in *root*'s namespace; a root not set up has none, and nothing to protect. Rejects with the refusal.
+  async protect(root: string, keys: readonly ProtectedKey[]): Promise<void> {
+    await this.roots.get(root)?.protect(keys);
+  }
+
+  // Everything of *root* ends and it is forgotten, then the mount of *share*, its folder's,
+  // goes: the host is letting the folder go, and removes the share next. Its next
+  // operation shares its folder and sets it up again.
+  async teardown(root: string, share: Share): Promise<void> {
     // A setup under way lands first, and what it set up ends with the rest.
     await this.starting.get(root)?.catch(() => {});
     this.registries.delete(root);
     const target = this.roots.get(root);
-    if (!target) return;
-    // Out of the list first: the end of its runner is no loss to tell.
-    this.roots.delete(root);
-    await target.end();
+    if (target) {
+      // Out of the list first: the end of its runner is no loss to tell.
+      this.roots.delete(root);
+      await target.end();
+    }
+    await this.options.unmount?.(share);
   }
 
   // One process operation's outcome. Never rejects. A root whose runner cannot answer

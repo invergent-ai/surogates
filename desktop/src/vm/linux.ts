@@ -18,6 +18,11 @@ import { Qmp, qemuArgs, ROOT_PORTS, VIRTIOFSD, virtiofsdArgs } from "./qemu.js";
 const SESSIONS_BYTES = 32 * 1024 ** 3;
 const RETRY_MS = 5;
 
+// Settles with "late" at *deadline* (performance.now()), its timer not holding the process.
+const late = (deadline: number) => new Promise<"late">((resolve) => {
+  setTimeout(() => resolve("late"), Math.max(0, deadline - performance.now())).unref();
+});
+
 /**
  * What a manager that died left running, where its pdeathsig did not reach. Each
  * pidfile this backend writes in *run* names a process, killed only when it is that
@@ -134,11 +139,25 @@ export const bootLinux: BootVm = async (options, signal, deadline) => {
   }
 };
 
+// A folder shared into the guest: its number, the root port it is on, and its virtiofsd.
+interface Shared {
+  n: number;
+  port: number;
+  daemon: ChildProcess;
+  // Its removal, once asked: its daemon's end is the removal's, not a loss.
+  removal: Promise<void> | null;
+}
+
 // One QEMU, and a virtiofsd for each folder shared into it.
 class LinuxVm implements VmBackend {
   readonly exited: Promise<string>;
   private readonly daemons: ChildProcess[] = [];
-  private port = 0;
+  // Each share in the guest, by its tag.
+  private readonly shares = new Map<string, Shared>();
+  // The root ports no share is on. A share's number, in its tag, ids, socket and pidfile,
+  // is never used again in this VM, so nothing of a share removed is taken for the next's.
+  private readonly free = new Set(Array.from({ length: ROOT_PORTS }, (_, n) => n + 1));
+  private made = 0;
   private killed: Promise<void> | null = null;
 
   constructor(
@@ -152,44 +171,97 @@ class LinuxVm implements VmBackend {
   }
 
   /**
-   * *folder* on a root port of its own, by *deadline*: its virtiofsd, which maps the
-   * host user to *uid* (so the guest mounts it as it is), then QMP's chardev-add and device_add.
+   * *folder* on a free root port, by *deadline*: its virtiofsd, which maps the host user
+   * to *uid* (so the guest mounts it as it is), then QMP's chardev-add and device_add.
+   * A share not added gives its port back.
    */
   async share(folder: string, uid: number, deadline: number): Promise<Share> {
     if (this.killed) throw new Error("the VM has gone");
-    if (this.port >= ROOT_PORTS) throw new Error(`it holds ${ROOT_PORTS} folders already, its most until the app restarts`);
-    this.port += 1;
-    const n = this.port;
+    const port = Math.min(...this.free);
+    if (port === Infinity) throw new Error(`it holds ${ROOT_PORTS} folders already, each of a chat at work`);
+    this.free.delete(port);
+    const n = (this.made += 1);
     const socket = join(this.options.run, `vfs-${n}.sock`);
+    const pidfile = join(this.options.run, `vfs-${n}.pid`);
     const { child: daemon, said } = launch([VIRTIOFSD, ...virtiofsdArgs(folder, socket, uid, this.options.user)]);
     this.daemons.push(daemon);
-    writeFileSync(join(this.options.run, `vfs-${n}.pid`), String(daemon.pid ?? ""));
-    while (!existsSync(socket)) {
-      if (ended(daemon) || performance.now() > deadline) {
-        daemon.kill("SIGKILL");
-        throw new Error(`virtiofsd did not start: ${said()}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, RETRY_MS));
-    }
+    writeFileSync(pidfile, String(daemon.pid ?? ""));
     try {
+      while (!existsSync(socket)) {
+        if (ended(daemon) || performance.now() > deadline) throw new Error(`virtiofsd did not start: ${said()}`);
+        await new Promise((resolve) => setTimeout(resolve, RETRY_MS));
+      }
       await this.qmp.execute("chardev-add", {
         id: `vfs${n}`, backend: { type: "socket", data: { addr: { type: "unix", data: { path: socket } }, server: false } },
       }, deadline);
-      await this.qmp.execute("device_add", { driver: "vhost-user-fs-pci", id: `fs${n}`, chardev: `vfs${n}`, tag: `r${n}`, bus: `rp${n}` }, deadline);
+      await this.qmp.execute("device_add", { driver: "vhost-user-fs-pci", id: `fs${n}`, chardev: `vfs${n}`, tag: `r${n}`, bus: `rp${port}` }, deadline)
+        .catch(async (error: unknown) => {
+          if (!this.qmp.gone) await this.qmp.execute("chardev-remove", { id: `vfs${n}` }, deadline).catch(() => {});
+          throw error;
+        });
     } catch (error) {
       // Not added: its daemon serves the folder to nobody.
       daemon.kill("SIGKILL");
+      rmSync(pidfile, { force: true });
       // A monitor that has gone, as at a command QEMU did not answer in time, adds
       // no folder again: the VM goes, and the share fails once it has, its guest lost.
       if (this.qmp.gone) {
         this.qemu.kill("SIGKILL");
         await this.exited;
+      } else {
+        this.free.add(port);
       }
       throw error;
     }
-    // The folder is the guest's now: a daemon that goes takes the VM with it.
-    void exited(daemon).then(() => this.qemu.kill("SIGKILL"));
+    const shared: Shared = { n, port, daemon, removal: null };
+    this.shares.set(`r${n}`, shared);
+    // The folder is the guest's now: a daemon that goes, but by its removal, takes the VM with it.
+    void exited(daemon).then(() => {
+      if (!shared.removal) this.qemu.kill("SIGKILL");
+    });
     return { kind: "virtiofs", tag: `r${n}` };
+  }
+
+  /**
+   * *share* out of the running guest once the guest has let it go: QMP's device_del and
+   * its DEVICE_DELETED, then chardev-remove, after which its virtiofsd ends by itself.
+   * Its root port takes the next share. A guest that does not let it go by *deadline*,
+   * such as one whose request to a stalled share is still waiting, ends the VM: the
+   * share would hold its port and its folder's daemon, half-removed.
+   */
+  unshare(share: Share, deadline: number): Promise<void> {
+    const shared = this.shares.get(share.tag);
+    if (!shared) return Promise.resolve();
+    // Asked twice, as by two teardowns of one root at once: the one removal answers both.
+    shared.removal ??= this.remove(share, shared, deadline);
+    return shared.removal;
+  }
+
+  private async remove(share: Share, shared: Shared, deadline: number): Promise<void> {
+    const { n, daemon } = shared;
+    let stop = () => {};
+    const deleted = new Promise<"deleted">((resolve) => {
+      stop = this.qmp.on("DEVICE_DELETED", (data) => {
+        if (data.device === `fs${n}`) resolve("deleted");
+      });
+    });
+    try {
+      await this.qmp.execute("device_del", { id: `fs${n}` }, deadline);
+      const letGo = await Promise.race([deleted, this.exited.then(() => "exited" as const), late(deadline)]);
+      if (letGo !== "deleted") throw new Error(letGo === "exited" ? "the VM has gone" : `the guest did not let ${share.tag} go in time`);
+      await this.qmp.execute("chardev-remove", { id: `vfs${n}` }, deadline);
+    } catch (error) {
+      this.qemu.kill("SIGKILL");
+      await this.exited;
+      throw error;
+    } finally {
+      stop();
+    }
+    // Its connection has gone: one that has not ended by the deadline is ended.
+    if ((await Promise.race([exited(daemon), late(deadline)])) === "late") daemon.kill("SIGKILL");
+    this.shares.delete(share.tag);
+    rmSync(join(this.options.run, `vfs-${n}.pid`), { force: true });
+    this.free.add(shared.port);
   }
 
   // A power cut: only the sessions disk is written, and it is journaled and checked at the next boot.

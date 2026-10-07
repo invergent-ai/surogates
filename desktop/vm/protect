@@ -1,0 +1,20 @@
+#!/bin/bash
+# A root's protected keys, and the folders above them, bound over themselves in its mount
+# namespace (root.ts, bindOver). nsenter runs this there as the guest's root, with the
+# root's own view, where the folder is at its own path. stdin: each bind's mode (ro or rw),
+# then its path, each ended by a NUL, a folder before what lies in it. stdout: each path,
+# then the inode bound, nothing when it is not there, or ! when it could not be bound (a
+# link that leads nowhere), each ended by a NUL. A bind follows a link, as srt's deny did:
+# a link's target is what is bound. A path bound is a mount point, which no command can
+# rename or remove.
+set -u
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+while IFS= read -r -d '' mode && IFS= read -r -d '' key; do
+  if ! ino=$(stat -c %i -- "$key" 2>/dev/null); then
+    printf '%s\0\0' "$key"
+  elif mount --bind -o "$mode" -- "$key" "$key" 2>/dev/null; then
+    printf '%s\0%s\0' "$key" "$ino"
+  else
+    printf '%s\0!\0' "$key"
+  fi
+done
