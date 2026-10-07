@@ -148,6 +148,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     });
     // Its own services are refused unasked; a site off the package hosts asks, in the desktop's own window.
     const refused = run(`${status("https://example.com/")}; ${status("http://127.0.0.1:9/", "--noproxy ''")}`);
+    // Asked once the host has looked the name up.
+    await expect.poll(() => promptsShown(app!), { timeout: 30_000 }).toBe(1);
     const asked = await prompt(app!);
     expect(await asked.textContent("#prompt-title")).toBe("Connect to example.com?");
     expect(await asked.textContent(".code")).toBe("example.com:443");
@@ -174,9 +176,12 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     expect(await asked.textContent("#prompt-title")).toBe("Connect to example.com?");
     expect(await asked.$$eval("#prompt-buttons button", (buttons) => buttons.map((button) => button.dataset.id))).toEqual(["deny", "allow_session", "allow"]);
     await press(asked, "allow_session");
-    expect(await reached).toEqual({ ok: { output: "200 200\n", returncode: 0, timed_out: false } });
-    // Its other ports too, for the rest of the chat, unasked.
-    expect(await run(status("http://example.com/"))).toEqual({ ok: { output: "200 000\n", returncode: 0, timed_out: false } });
+    // The app's part only, whatever the site answers: its proxy opened the tunnel, and told the agent of no refusal.
+    expect(await reached).toEqual({ ok: { output: expect.stringMatching(/^\d{3} 200\n$/), returncode: 0, timed_out: false } });
+    // Its other ports too, for the rest of the chat, unasked: the proxy refused nothing (403) on the way.
+    expect(await run(status("http://example.com/"))).toEqual({
+      ok: { output: expect.stringMatching(/^(?!403 )\d{3} 000\n$/), returncode: 0, timed_out: false },
+    });
     expect(await promptsShown(app!)).toBe(0);
   });
 
