@@ -70,8 +70,11 @@ function target(named: string | undefined): { host: string; port: number } | nul
   return { host: named.slice(0, at), port: Number(named.slice(at + 1)) };
 }
 
-// Each hop's own headers, which a proxy does not pass on (RFC 9110, 7.6.1).
-const HOP = new Set(["connection", "keep-alive", "proxy-connection", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"]);
+// Each hop's own headers, which a proxy does not pass on (RFC 9110, 7.6.1), and a proxy's
+// sign-in either way: a site's 407 must not open the browser's proxy sign-in dialog.
+const HOP = new Set([
+  "connection", "keep-alive", "proxy-connection", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade",
+]);
 const passed = (headers: IncomingMessage["headers"]) => Object.fromEntries(Object.entries(headers).filter(([name]) => !HOP.has(name)));
 
 export class BrowserProxy {
@@ -174,7 +177,11 @@ export class BrowserProxy {
     response.once("close", () => socket.destroy());
     // ponytail: one connection a request, none kept for the next; a pool if page loads ever show it.
     const upstream = httpRequest(
-      { createConnection: () => socket, method: request.method, path: `${url.pathname}${url.search}`, headers: passed(request.headers), setHost: false },
+      {
+        createConnection: () => socket, method: request.method, path: `${url.pathname}${url.search}`,
+        // The target's own host, as RFC 9112 (3.2.2) has a proxy send it, whatever the client's said.
+        headers: { ...passed(request.headers), host: url.host }, setHost: false,
+      },
       (answer) => {
         response.writeHead(answer.statusCode ?? 502, passed(answer.headers));
         answer.pipe(response);

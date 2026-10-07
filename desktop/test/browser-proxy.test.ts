@@ -1,4 +1,4 @@
-import { createServer as createHttp, request, type Server as HttpServer } from "node:http";
+import { createServer as createHttp, type IncomingHttpHeaders, request, type Server as HttpServer } from "node:http";
 import { connect as connectTcp, createServer, type Server, type Socket } from "node:net";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -68,6 +68,8 @@ beforeEach(async () => {
       return void res.once("close", () => clearInterval(streaming)).writeHead(200);
     }
     if (req.url === "/never") return;
+    // A site that asks for a proxy's sign-in, as only a proxy may.
+    if (req.url === "/sign-in") return void res.writeHead(407, { "proxy-authenticate": 'Basic realm="site"' }).end();
     res.writeHead(201, { "content-type": "text/plain" }).end("hello from the site");
   });
   // Reads all it is sent, and never closes, the browser's end or not.
@@ -222,6 +224,21 @@ describe("the browser's proxy", () => {
     expect(dialed).toEqual(["93.184.215.14:80"]);
     expect((await get("http://127.0.0.1:8080/", "127.0.0.1:8080")).status).toBe(403);
     expect((await get("http://lan.example/", "lan.example")).status).toBe(403);
+  });
+
+  it("sends a site the target's own host, and no proxy's sign-in either way", async () => {
+    const answer = await new Promise<{ status: number; headers: IncomingHttpHeaders }>((done, fail) => {
+      const headers = { host: "intranet.corp", "proxy-authorization": "Basic dXNlcjpwYXNz" };
+      const asked = request({ host: "127.0.0.1", port, path: "http://example.com:8080/sign-in", headers }, (answered) => {
+        answered.resume();
+        done({ status: answered.statusCode ?? 0, headers: answered.headers });
+      });
+      asked.on("error", fail);
+      asked.end();
+    });
+    expect(answer.status).toBe(407);
+    expect(answer.headers).not.toHaveProperty("proxy-authenticate");
+    expect(seen).toEqual([{ method: "GET", url: "/sign-in", host: "example.com:8080", headers: expect.not.arrayContaining(["proxy-authorization"]) }]);
   });
 
   it("answers a launch's check itself, at its own name and over the https upgrade's tunnel, and dials nothing for it", async () => {
