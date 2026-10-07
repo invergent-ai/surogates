@@ -116,7 +116,7 @@ async def land_turn(
     owner = sandbox_session_key(session)
     if not sandbox_pool.holds_copy(owner):
         return None
-    # Read before the lock: its holder must not wait on a second connection.
+    # Read before the lock, which is held for the landing alone.
     calls = await store.get_events(session.id, after=after_event_id, types=[EventType.TOOL_CALL])
     workstream = session.config["workstream_id"]
     outcome = None
@@ -336,7 +336,9 @@ async def _settle(
 
     It pushed only when ``main`` in the history carries its saga.  ``main``
     moved without it means another landing went first, with this one's lock
-    lost, or a command rewrote the history: never that this one pushed.  A
+    lost, or a command rewrote the history, and is taken for not pushed.  So
+    is a landing that pushed and was then landed over: that takes a lost lock
+    and a fence that fell short.  A
     *recovered* landing's steps are as its row last had them: a step it
     was in shows ``pending``.
     """
