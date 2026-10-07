@@ -318,6 +318,34 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     expect(asked.at(-1)).toEqual(["r1", true]);
   });
 
+  it("lets go of a root it held once it is set up again, what it ran having ended: its next teardown writes its share out and gives it back", async () => {
+    const asked: Array<[string, boolean]> = [];
+    const told: string[] = [];
+    let ends = false;
+    const recovering = new Roots({
+      start: bare,
+      uid: () => 10_000,
+      // What it ran would not end, as while its share stalled, until it does.
+      kill: async () => {
+        if (!ends) throw new Error("the processes of root-10 have not ended");
+        children.at(-1)?.kill("SIGKILL");
+      },
+      lost: (root) => told.push(root),
+      flush: async (share, stalled) => {
+        asked.push([share.tag, stalled]);
+        return true;
+      },
+    });
+    await recovering.setup("root-10", base, R1, user);
+    // Its runner goes while what it ran cannot end: the root is lost, and held.
+    children.at(-1)?.kill("SIGKILL");
+    await until(() => told.includes("root-10"));
+    ends = true;
+    await recovering.setup("root-10", base, R1, user);
+    await recovering.teardown("root-10", R1);
+    expect(asked).toEqual([["r1", false]]);
+  });
+
   it("tells the host of a lost root once everything of it has ended, and of one that cannot be ended once its runner is stopped", async () => {
     const told: string[] = [];
     let empty = () => {};

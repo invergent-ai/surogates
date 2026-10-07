@@ -643,6 +643,8 @@ export class Roots {
     listed = new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS, (ms) => this.backstop(ms));
     if (!this.registries.has(root)) this.registries.set(root, this.registry(root, ended));
     this.roots.set(root, listed);
+    // Set up again, what it ran before has ended: nothing of it holds its share any more.
+    this.held.delete(root);
   }
 
   // A root's registry, its processes in whichever runner the root has set up.
