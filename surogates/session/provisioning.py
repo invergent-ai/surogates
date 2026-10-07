@@ -169,6 +169,8 @@ async def create_child_session(
     merged_config = dict(config or {})
     # A child runs where its root runs: on the same computer, when it names one.
     merged_config.pop("execution", None)
+    # The package comes from the parent, never from the code making the child.
+    merged_config.pop("entitlements", None)
 
     parent_config = parent.config or {}
     missing = [f for f in _WORKSPACE_SHARING_FIELDS if f not in parent_config]
@@ -182,9 +184,18 @@ async def create_child_session(
     for field in _WORKSPACE_SHARING_FIELDS:
         merged_config[field] = parent_config[field]
 
+    # A boundary comes from the parent only: one named in *config* would
+    # reach another conversation's or project's memory.
     for field in _BOUNDARY_SHARING_FIELDS:
+        merged_config.pop(field, None)
         if field in parent_config:
             merged_config[field] = parent_config[field]
+    # The user's package, as the parent's last turn pinned it: a helper's
+    # turn, often its only one, runs inside it as the parent's does.  Not a
+    # routine run's: it is not held, so nothing would refresh the copy once
+    # the package lapses.  It runs on the agent's own tier.
+    if "entitlements" in parent_config and channel != "scheduled":
+        merged_config["entitlements"] = parent_config["entitlements"]
 
     if "execution" in parent_config:
         merged_config["execution"] = parent_config["execution"]
@@ -227,8 +238,8 @@ async def create_thread_session(
     sandbox root instead: ``sandbox_root_session_id`` is its own id, and the
     children it delegates to share its pod.  It keeps the master's workspace
     fields and boundaries, so every pod mounts the project's one workspace,
-    and the master's identity.  It takes no ``execution``: a cloud thread
-    runs in the cloud whatever the master does.
+    the master's identity and the user's package.  It takes no
+    ``execution``: a cloud thread runs in the cloud whatever the master does.
     """
     session_id = uuid4()
     merged_config = dict(config)
@@ -236,8 +247,13 @@ async def create_thread_session(
     for field in _WORKSPACE_SHARING_FIELDS:
         merged_config[field] = parent_config[field]
     for field in _BOUNDARY_SHARING_FIELDS:
+        merged_config.pop(field, None)
         if field in parent_config:
             merged_config[field] = parent_config[field]
+    # The user's package, as the master's last message pinned it: it bounds
+    # the thread's first turn, and its tier wins over the project's.
+    if "entitlements" in parent_config:
+        merged_config["entitlements"] = parent_config["entitlements"]
     merged_config["sandbox_root_session_id"] = str(session_id)
     return await store.create_session(
         session_id=session_id,

@@ -18,6 +18,7 @@ from typing import Any
 from uuid import uuid4
 
 from surogates.channels.constants import DIRECT_UI_CHANNELS
+from surogates.channels.memory_boundary import PROJECT_BOUNDARY_PREFIX
 from surogates.coding_agents.agents import CodeResult, build_invocation
 from surogates.coding_agents.credentials import (
     CodingAgentCredentials,
@@ -53,7 +54,7 @@ def _checkout_root(session: Any) -> str:
     hidden, so a clone is never taken for a deliverable.
     """
     config = getattr(session, "config", None) or {}
-    if not str(config.get("workspace_boundary") or "").startswith("workstream:"):
+    if not str(config.get("workspace_boundary") or "").startswith(PROJECT_BOUNDARY_PREFIX):
         return "/workspace"
     return f"/workspace/.threads/{sandbox_session_key(session)}"
 

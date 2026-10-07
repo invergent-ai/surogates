@@ -12,6 +12,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from surogates.channels.memory_boundary import PROJECT_BOUNDARY_PREFIX
 from surogates.session.events import EventType
 from surogates.workstreams import THREAD
 
@@ -43,8 +44,6 @@ RESOLVED = "thread.resolved"
 REOPENED = "thread.reopened"
 EXPIRED = "inbox.expired"
 
-_BOUNDARY = "workstream:"
-
 
 def channel(workstream_id: UUID | str) -> str:
     return f"surogates:workstream:{workstream_id}"
@@ -53,8 +52,8 @@ def channel(workstream_id: UUID | str) -> str:
 def project_of(workspace_boundary: Any) -> str | None:
     """The project a session works in, by its workspace boundary: the
     master's, its threads' and every session's under them."""
-    if isinstance(workspace_boundary, str) and workspace_boundary.startswith(_BOUNDARY):
-        return workspace_boundary[len(_BOUNDARY):]
+    if isinstance(workspace_boundary, str) and workspace_boundary.startswith(PROJECT_BOUNDARY_PREFIX):
+        return workspace_boundary[len(PROJECT_BOUNDARY_PREFIX):]
     return None
 
 

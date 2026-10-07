@@ -424,6 +424,23 @@ async def test_create_child_session_inherits_boundary_fields_from_parent():
 
 
 @pytest.mark.asyncio
+async def test_create_child_session_drops_a_boundary_its_parent_lacks():
+    parent = _make_session(
+        channel="web",
+        config={"storage_bucket": "tenant-bucket", "storage_key_prefix": "project/agent", "workspace_path": "/workspace"},
+    )
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+
+    await create_child_session(
+        store=store, parent=parent, channel="worker",
+        config={"memory_boundary": "workstream:x", "workspace_boundary": "workstream:x"},
+    )
+
+    cfg = store.create_session.await_args.kwargs["config"]
+    assert "memory_boundary" not in cfg and "workspace_boundary" not in cfg
+
+
+@pytest.mark.asyncio
 async def test_create_agent_session_stamps_device_execution_after_the_cloud_workspace():
     device_id = uuid4()
     store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
