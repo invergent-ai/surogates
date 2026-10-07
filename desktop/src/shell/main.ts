@@ -674,9 +674,29 @@ async function endDevice(credential: Credential): Promise<void> {
   trying(() => rmSync(join(root, "devices", credential.deviceId), { recursive: true, force: true }));
 }
 
+// The app's native message boxes up now. While one is, a link waits, the first that comes; it opens
+// once the last is answered, and after what answered it, a quit's included, has acted on the answer.
+let boxes = 0;
+let linkWaiting: OpenLink | null = null;
+
+/** A native message box, over *parent* when there is one: the button pressed. */
+async function messageBox(options: Electron.MessageBoxOptions, parent: BrowserWindow | undefined = main?.window): Promise<number> {
+  boxes += 1;
+  try {
+    const { response } = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+    return response;
+  } finally {
+    boxes -= 1;
+    const link = boxes === 0 ? linkWaiting : null;
+    if (link) {
+      linkWaiting = null;
+      setTimeout(() => void openDeepLink(link).catch(report), 0);
+    }
+  }
+}
+
 async function ask(options: Electron.MessageBoxOptions): Promise<boolean> {
-  const { response } = main ? await dialog.showMessageBox(main.window, options) : await dialog.showMessageBox(options);
-  return response === 0;
+  return (await messageBox(options)) === 0;
 }
 
 // "1 thread working on this computer stops." when one works: what a log out cuts off.
@@ -1028,6 +1048,8 @@ function open(window: MainWindow, agent: Agent): void {
 
 // A link being opened: one that comes meanwhile only shows the window.
 let linking = false;
+// A link handed before the window was made.
+let linkEarly: OpenLink | null = null;
 
 /** Connect to the agent at *address*, once the user confirms it natively: why it did not, or null. One connection at a time. */
 async function connectTo(address: string): Promise<string | null> {
@@ -1052,10 +1074,19 @@ async function connectTo(address: string): Promise<string | null> {
  * Connect is; another agent than the one added is said, and opened not: the app works for one agent.
  */
 async function openDeepLink(link: OpenLink): Promise<void> {
-  if (!main || leaving) return;
+  if (leaving) return;
+  // A second launch can hand one while the app still starts: it is opened once the window is there.
+  if (!main) {
+    linkEarly ??= link;
+    return;
+  }
   main.show();
   // One link at a time: one that comes while a link, or the first run's Connect, is asked only shows the window.
   if (linking || connecting) return;
+  if (boxes > 0) {
+    linkWaiting ??= link;
+    return;
+  }
   linking = true;
   try {
     const agent = agents.get();
@@ -1087,8 +1118,7 @@ async function confirmAgent(agent: Agent, typed: string): Promise<boolean> {
     cancelId: 1,
     noLink: true,
   };
-  const { response } = main ? await dialog.showMessageBox(main.window, options) : await dialog.showMessageBox(options);
-  return response === 0;
+  return (await messageBox(options)) === 0;
 }
 
 // What the user can do about this computer, as the sidebar offers it.
@@ -1363,7 +1393,7 @@ function changedFrom(shown: Project, fields: ProjectFields): Partial<ProjectFiel
 // character as its code point (U+202E), so none reorders or hides the question around it.
 async function confirmArchive(name: string): Promise<boolean> {
   if (!main) return false;
-  const { response } = await dialog.showMessageBox(main.window, {
+  const response = await messageBox({
     type: "warning",
     message: `Archive ${segments(name).map((run) => run.text).join("")}?`,
     detail: "It leaves your projects, with its conversation and its threads. Its files and its memory are kept.",
@@ -1623,8 +1653,7 @@ async function confirmQuit(working: number): Promise<"quit" | "wait" | "cancel">
     cancelId: 2,
     noLink: true,
   };
-  const shown = main?.window.isVisible() ? main.window : undefined;
-  const { response } = shown ? await dialog.showMessageBox(shown, options) : await dialog.showMessageBox(options);
+  const response = await messageBox(options, main?.window.isVisible() ? main.window : undefined);
   return (["quit", "wait", "cancel"] as const)[response] ?? "cancel";
 }
 
@@ -1648,9 +1677,7 @@ async function quitNow(): Promise<void> {
     cancelId: 1,
     noLink: true,
   };
-  const shown = main?.window.isVisible() ? main.window : undefined;
-  const { response } = shown ? await dialog.showMessageBox(shown, options) : await dialog.showMessageBox(options);
-  if (response === 0) waiting?.();
+  if ((await messageBox(options, main?.window.isVisible() ? main.window : undefined)) === 0) waiting?.();
 }
 
 async function quit(): Promise<void> {
@@ -1756,8 +1783,8 @@ if (!app.requestSingleInstanceLock()) {
       rmSync(join(root, "devices", owed.deviceId), { recursive: true, force: true });
       revokeLater(owed);
     }
-    // The link the app was started with, once its window can show it.
-    const launched = linkIn(process.argv);
+    // The link the app was started with, or one a second launch handed it meanwhile, once its window can show it.
+    const launched = linkIn(process.argv) ?? linkEarly;
     const agent = agents.get();
     if (!agent) {
       if (launched) void openDeepLink(launched).catch(report);

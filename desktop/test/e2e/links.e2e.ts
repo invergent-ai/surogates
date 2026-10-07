@@ -2,7 +2,8 @@
 // as the system's link handler starts the app. A link opens the agent it names, at a page of
 // its web client; one for an agent new to the app asks to connect first.
 
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -86,6 +87,47 @@ describe("a surogate:// link", () => {
     expect(await secondLaunch(home, "surogate://grant?folder=%2Fhome")).toBe(0);
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect([(await asked(shell)).length, client.url()]).toEqual([count, before]);
+  });
+
+  it("waits while one of the app's own questions is up, and opens once it is answered", async () => {
+    const { shell, client } = await signedIn();
+    await shell.evaluate(() => Object.assign(globalThis, { hold: true }));
+    // The web client's Log out asks first.
+    const asking = (await asked(shell)).length + 1;
+    void client.evaluate(() => window.surogateDesktop!.signOut()).catch(() => {});
+    await expect.poll(async () => (await asked(shell)).length).toBe(asking);
+    const before = client.url();
+    expect(await secondLaunch(home, link(`${origin}/chat/${CHAT}`))).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect([(await asked(shell)).length, client.url()]).toEqual([asking, before]);
+    // Cancelled: the link opens its chat, with no question of its own.
+    await shell.evaluate(() => {
+      const chosen = globalThis as unknown as { answer: number; release(): void };
+      chosen.answer = 1;
+      chosen.release();
+    });
+    await expect.poll(() => new URL(client.url()).pathname).toBe(`/chat/${CHAT}`);
+    expect((await asked(shell)).length).toBe(asking);
+  });
+
+  it("that a second launch hands the app before its window is there, is kept until it is", async () => {
+    // The app's start held, as a busy computer holds it, until the test lets it go on.
+    const holding = join(home, "hold-ready.cjs");
+    writeFileSync(holding, [
+      'const { app } = require("electron");',
+      "const ready = app.whenReady.bind(app);",
+      "const held = Promise.withResolvers();",
+      "Object.assign(globalThis, { releaseReady: held.resolve });",
+      "app.whenReady = () => held.promise.then(ready);",
+    ].join("\n"));
+    app = await launch(home, {}, [], [holding]);
+    await stubNative(app);
+    expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(0);
+    const handed = app.evaluate(({ app: electron }) => new Promise<void>((resolve) => electron.once("second-instance", () => resolve())));
+    expect(await secondLaunch(home, link(origin))).toBe(0);
+    await handed;
+    await app.evaluate(() => (globalThis as unknown as { releaseReady(): void }).releaseReady());
+    await expect.poll(async () => (await asked(app!)).map((options) => options.message)).toEqual([`Connect to ${new URL(origin).host}?`]);
   });
 
   it("asks about one link at a time: one that comes while a link, or the first run's Connect, is asked only shows the window", async () => {
