@@ -269,6 +269,22 @@ async def test_the_list_answers_no_more_projects_than_the_shell_takes(api, monke
     assert [summary["name"] for summary in listed.json()] == ["Budget", "Audit"]
 
 
+async def test_a_project_whose_master_goes_while_the_list_is_read_is_left_out(api, monkeypatch):
+    budget, hiring = await create(api, name="Budget"), await create(api, name="Hiring")
+    read = WorkstreamStore.masters
+
+    async def gone(self, master_ids):
+        # Deleted after the projects were read, as an operator's hard delete goes.
+        found = await read(self, master_ids)
+        return {key: value for key, value in found.items() if str(key) != budget["master_session_id"]}
+
+    monkeypatch.setattr(WorkstreamStore, "masters", gone)
+    listed = await api.client.get("/v1/workstreams", headers=api.auth())
+    assert listed.status_code == 200, listed.text
+    ids = [summary["id"] for summary in listed.json()]
+    assert hiring["id"] in ids and budget["id"] not in ids
+
+
 async def test_a_project_with_more_threads_than_a_statement_binds_still_answers(api):
     project = await create(api)
     master = await master_of(api, project)

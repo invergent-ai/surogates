@@ -160,6 +160,9 @@ async def _described(request: Request, projects: list[Workstream]) -> list[Proje
     masters = await store.masters([project.master_session_id for project in projects])
     described = []
     for project in projects:
+        if project.master_session_id not in masters:
+            # Deleted since the projects were read: its project went with it.
+            continue
         seen, asking = masters[project.master_session_id]
         latest, waiting, working = threads.get(project.id, (None, 0, 0))
         described.append(ProjectOut.model_validate(project).model_copy(update={
