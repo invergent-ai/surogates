@@ -157,7 +157,7 @@ def test_a_landing_leaves_out_a_file_the_real_files_changed_since_its_branch_poi
     assert (project / "threads" / "A" / "a.md").read_text() == "A's notes"
 
     b = landed(second, author={"name": "Draft B", "email": "thread:t2@surogate"})
-    assert b["overlapped"] == [{"path": "Report.docx"}, {"path": "uploads/brief.pdf"}]
+    assert b["overlapped"] == [{"path": "Report.docx", "reason": "changed"}, {"path": "uploads/brief.pdf", "reason": "with"}]
     assert [c["path"] for c in b["changes"]] == ["Budget.xlsx"]
     # The newer file stays, and B's other file lands.  B's deletion waits:
     # while a write of its turn is held, a deletion may be a move git could not see.
@@ -186,7 +186,7 @@ def test_a_thread_version_that_did_not_land_stays_reachable_from_main(tmp_path, 
     (history.copy / "Report.docx").write_bytes(b"report by A")
     (project / "Report.docx").write_bytes(b"report by you")
     out = landed(history)
-    assert out["overlapped"] == [{"path": "Report.docx"}]
+    assert out["overlapped"] == [{"path": "Report.docx", "reason": "changed"}]
     assert git(history, "log", "-1", "--format=%(trailers:key=Surogate-Not-Merged,valueonly)", out["commit"]) == "Report.docx"
     assert git(history, "show", f"{out['commit']}^2:Report.docx") == "report by A"
     assert (project / "Report.docx").read_bytes() == b"report by you"
@@ -276,7 +276,7 @@ def test_a_deletion_leaves_a_file_someone_changed_since(tmp_path, project):
     (history.copy / "Report.docx").unlink()
     (project / "Report.docx").write_bytes(b"saved by you")
     out = landed(history)
-    assert out["overlapped"] == [{"path": "Report.docx"}]
+    assert out["overlapped"] == [{"path": "Report.docx", "reason": "changed"}]
     assert (project / "Report.docx").read_bytes() == b"saved by you"
 
 
@@ -378,7 +378,7 @@ def test_a_rename_onto_a_name_someone_took_since_lands_neither_side(tmp_path, pr
     (history.copy / "Old.docx").rename(history.copy / "Archived.docx")
     (project / "Final.docx").write_bytes(b"your own final")
     out = landed(history)
-    assert out["overlapped"] == [{"path": "Draft.docx"}, {"path": "Final.docx"}]
+    assert out["overlapped"] == [{"path": "Draft.docx", "reason": "with"}, {"path": "Final.docx", "reason": "changed"}]
     # The draft survives; a rename nobody crossed lands whole.
     assert (project / "Draft.docx").read_bytes() == b"the draft"
     assert (project / "Final.docx").read_bytes() == b"your own final"
@@ -408,6 +408,7 @@ def test_a_change_of_shape_is_left_out_and_never_fails_the_landing(tmp_path, pro
     assert [o["path"] for o in out["overlapped"]] == [
         "linked", "linked/x.md", "notes", "notes/a.md", "plan.md", "plan.md/q1.md",
     ]
+    assert {o["reason"] for o in out["overlapped"]} == {"shape"}
     assert (project / "notes" / "a.md").read_text() == "a"
     assert (project / "plan.md").read_text() == "plan"
     assert (project / "Report.docx").read_bytes() == b"report v2"
@@ -479,7 +480,7 @@ def test_a_file_name_stays_whole_in_a_landings_trailers_and_lists(tmp_path, proj
     (project / name).write_text("by you")
     (history.copy / " notes.tmp").write_text("scratch")
     out = landed(history)
-    assert (out["overlapped"], out["excluded"]) == ([{"path": name}], [" notes.tmp"])
+    assert (out["overlapped"], out["excluded"]) == ([{"path": name, "reason": "changed"}], [" notes.tmp"])
     # A name cannot add a trailer: the landing is a landing, and names its file.
     assert git(history, "log", "-1", "--format=%(trailers:key=Surogate-Kind,valueonly)", out["commit"]) == "landing"
     not_merged = git(history, "log", "-1", "--format=%(trailers:key=Surogate-Not-Merged,valueonly)", out["commit"])

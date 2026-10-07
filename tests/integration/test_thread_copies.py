@@ -164,7 +164,9 @@ async def test_two_threads_change_one_docx_and_the_second_leaves_it_to_the_first
 
     a, b = await reports(api, master)
     assert [(f["ref"], f["landing"]) for f in a["files"]] == [("Report.docx", "landed"), ("threads/Draft A/sources.md", "landed")]
-    assert [(f["ref"], f["landing"]) for f in b["files"]] == [("Budget.xlsx", "landed"), ("Report.docx", "not_merged")]
+    assert [(f["ref"], f["landing"], f.get("reason")) for f in b["files"]] == [
+        ("Budget.xlsx", "landed", None), ("Report.docx", "not_merged", "changed"),
+    ]
     # The master reads that B's docx was not applied.
     note = worker_note(EventType.WORKER_COMPLETE.value, b)["content"]
     assert note.endswith(
@@ -386,3 +388,21 @@ async def test_two_landings_at_once_take_turns(api, monkeypatch, pods):
     assert [(f["ref"], f["landing"]) for f in a["files"]] == [("Report.docx", "landed")]
     assert [(f["ref"], f["landing"]) for f in b["files"]] == [("Report.docx", "not_merged")]
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A"
+
+
+async def test_a_report_says_why_each_file_was_not_merged():
+    def a(name: str, **more: str) -> dict:
+        return {"kind": "file", "label": name, "ref": name, "landing": "not_merged", **more}
+
+    files = [
+        {"kind": "file", "label": "kept.md", "ref": "kept.md", "landing": "landed"},
+        a("Final.docx", reason="changed"), a("Draft.docx", reason="with"), a("notes", reason="shape"),
+        a("old.docx"),  # a report from before reasons were given
+    ]
+    note = worker_note(EventType.WORKER_COMPLETE.value, {"worker_id": "w", "title": "Draft A", "result": "Done.", "files": files})
+    assert note["content"].endswith(
+        "Files: kept.md\n"
+        "Not merged, because the project's file changed after the thread started (the newer file was kept): Final.docx, old.docx\n"
+        "Not merged, because the project has a folder where the thread made a file, or a file where it made a folder: notes\n"
+        "Not merged, because they go with a change that was not merged (a move lands whole or not at all): Draft.docx"
+    )

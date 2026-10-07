@@ -163,13 +163,16 @@ async def _land(
         )
         outcome.update(state="escalated" if failed else "compensated")
     applied = {c["path"]: c for c in outcome["landed"]}
-    paths = sorted({c["path"] for c in changes} | {o["path"] for o in outcome["overlapped"]})
+    reasons = {o["path"]: o["reason"] for o in outcome["overlapped"]}
+    paths = sorted({c["path"] for c in changes} | set(reasons))
     outcome["files"] = [
         {
             "kind": "file", "label": path, "ref": path,
             "landing": "landed" if path in applied else "not_merged",
             # A landed deletion is no file to open: the report names it apart.
             **({"change": "deleted"} if path in applied and applied[path]["after"] is None else {}),
+            # Why a file was left out, for the report's line on it.
+            **({"reason": reasons[path]} if path in reasons else {}),
         }
         for path in paths
     ]

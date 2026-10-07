@@ -141,7 +141,8 @@ class History:
         file is still the base's version, or already the turn's.
         ``overlapped`` are those whose real file changed otherwise since, or
         that the real files cannot take as a file (a folder is there, or a
-        file where its folder would be): a landing leaves them out.  A
+        file where its folder would be): a landing leaves them out.  Each
+        says why: ``changed``, ``shape``, or ``with`` for one held with them.  A
         rename's two sides, and a file and a folder of one name, are left
         out together.  While any write of the turn is left out, or it wrote
         into a repository, every deletion git did not pair is too: it may be
@@ -159,9 +160,12 @@ class History:
         turn = self._copy("rev-parse", "HEAD")
         versions, renames = self._diff(base, turn)
         # A file and a folder of one name land together, as a rename's two sides do.
-        links = renames + [(p, str(f)) for p in versions for f in PurePosixPath(p).parents if str(f) in versions]
+        shapes = [(p, str(f)) for p in versions for f in PurePosixPath(p).parents if str(f) in versions]
+        links = renames + shapes
         real = {path: self._real(path) for path in versions if self._fits(path)}
-        held = _together({p for p, kept in versions.items() if p not in real or real[p] not in kept}, links)
+        changed = {p for p in real if real[p] not in versions[p]}
+        shaped = (set(versions) - set(real)) | {p for pair in shapes for p in pair}
+        held = _together(changed | (set(versions) - set(real)), links)
         if repositories or any(versions[p][1] is not None for p in held):
             # A move git cannot pair (an edited docx, a move onto a name that
             # exists) reads as a deletion and a write: the deletion waits too.
@@ -173,7 +177,12 @@ class History:
             {"path": path, "before": real[path], "after": versions[path][1]}
             for path in sorted(versions) if path not in held
         ]
-        overlapped = [{"path": path} for path in sorted(held)]
+        overlapped = [
+            # Why each waits: the real file changed since, it is a change of
+            # shape, or it goes with one of those.
+            {"path": path, "reason": "changed" if path in changed else "shape" if path in shaped else "with"}
+            for path in sorted(held)
+        ]
         return {"commit": turn, "changes": changes, "overlapped": overlapped, **left_out}
 
     def apply(self, path: str, before: str | None, after: str | None) -> dict:

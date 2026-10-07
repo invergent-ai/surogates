@@ -162,7 +162,12 @@ _NOT_LANDED = {
     "compensated": "Not landed, and the project's files are as they were",
     "escalated": "Could not finish landing these; check them",
 }
-_NOT_MERGED = "Not merged, because the project's file changed after the thread started (the newer file was kept)"
+#: What a report says of a thread's files a landing left out, by why it left them out.
+_NOT_MERGED = {
+    "changed": "Not merged, because the project's file changed after the thread started (the newer file was kept)",
+    "shape": "Not merged, because the project has a folder where the thread made a file, or a file where it made a folder",
+    "with": "Not merged, because they go with a change that was not merged (a move lands whole or not at all)",
+}
 
 
 def _landing_lines(data: dict, kept: list, deleted: list) -> str:
@@ -170,8 +175,14 @@ def _landing_lines(data: dict, kept: list, deleted: list) -> str:
     not land, the excluded files it made, and the folders inside a git
     repository it wrote into."""
     lines = f"\nDeleted: {_listed(deleted)}" if deleted else ""
-    if kept:
-        lines += f"\n{_NOT_LANDED.get(data.get('landing'), _NOT_MERGED)}: {_listed(kept)}"
+    if kept and data.get("landing") in _NOT_LANDED:
+        lines += f"\n{_NOT_LANDED[data['landing']]}: {_listed(kept)}"
+    elif kept:
+        # A report from before reasons were given says the file changed.
+        why: dict[str, list] = {reason: [] for reason in _NOT_MERGED}
+        for f in kept:
+            why[f.get("reason") if f.get("reason") in _NOT_MERGED else "changed"].append(f)
+        lines += "".join(f"\n{_NOT_MERGED[reason]}: {_listed(named)}" for reason, named in why.items() if named)
     for key, words in (
         ("excluded", "Not saved, because the project's history leaves them out"),
         ("repositories", "Not landed, because they are inside a git repository"),
