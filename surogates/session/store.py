@@ -1587,6 +1587,22 @@ class SessionStore:
             row = (await db.execute(stmt)).scalars().first()
         return Event.model_validate(row) if row is not None else None
 
+    async def has_event(
+        self, session_id: UUID, type: EventType, *,
+        after: int | None = None, before: int | None = None, with_key: str | None = None,
+    ) -> bool:
+        """Whether the session has a *type* event between *after* and *before*
+        (both exclusive) whose data has the key *with_key*: one row at most is read."""
+        stmt = select(EventRow.id).where(EventRow.session_id == session_id, EventRow.type == type.value)
+        if after is not None:
+            stmt = stmt.where(EventRow.id > after)
+        if before is not None:
+            stmt = stmt.where(EventRow.id < before)
+        if with_key is not None:
+            stmt = stmt.where(EventRow.data.has_key(with_key))
+        async with self._sf() as db:
+            return (await db.execute(stmt.limit(1))).first() is not None
+
     async def _restore_reasoning_counts(
         self, db: AsyncSession, session_id: UUID, events: list[Event],
     ) -> None:

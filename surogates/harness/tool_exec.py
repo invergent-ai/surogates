@@ -197,8 +197,10 @@ async def _copy_lost_work(store: Any, session_id: Any, before: int) -> bool:
     refused calls take none, and change nothing.
     """
     landed = await store.last_event(session_id, EventType.SESSION_COMPLETE, containing={"landed": True})
-    calls = await store.get_events(session_id, after=landed.id if landed else None, types=[EventType.TOOL_CALL])
-    return any(c.id < before and "checkpoint_hash" in (c.data or {}) for c in calls)
+    return await store.has_event(
+        session_id, EventType.TOOL_CALL,
+        after=landed.id if landed else None, before=before, with_key="checkpoint_hash",
+    )
 
 
 async def _snapshot_copy(
