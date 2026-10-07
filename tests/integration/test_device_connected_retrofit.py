@@ -1,8 +1,9 @@
-"""The ``devices.connected_at`` retrofit, against a database from before the column.
+"""The ``devices`` retrofits, against a database from before each column.
 
-A device that connected before the column existed must count as connected: one
-the desktop then takes back would otherwise be deleted with its history, and
-its sign-in unbound instead of ended.
+A device that connected before ``connected_at`` existed must count as connected:
+one the desktop then takes back would otherwise be deleted with its history, and
+its sign-in unbound instead of ended.  ``reauthorized_at`` comes empty: no
+reauthorization before it was dated.
 """
 
 from __future__ import annotations
@@ -76,3 +77,17 @@ async def test_a_device_seen_before_the_column_counts_as_connected_and_a_replay_
         await apply_observability_ddl(conn)
     async with engine.begin() as conn:
         assert await connected(conn, unseen) is None
+
+
+async def test_a_database_from_before_reauthorizations_were_dated_gains_the_column_empty(engine):
+    sessions = async_sessionmaker(engine)
+    org_id = await create_org(sessions)
+    user_id = await create_user(sessions, org_id)
+    async with engine.begin() as conn:
+        await conn.execute(text("ALTER TABLE devices DROP COLUMN reauthorized_at"))
+        seen = await device(conn, org_id, user_id, SEEN)
+    for _ in range(2):
+        async with engine.begin() as conn:
+            await apply_observability_ddl(conn)
+    async with engine.begin() as conn:
+        assert await conn.scalar(text("SELECT reauthorized_at FROM devices WHERE id = :id"), {"id": seen}) is None

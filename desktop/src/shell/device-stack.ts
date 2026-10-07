@@ -45,6 +45,8 @@ export interface DeviceStackOptions {
   prompts: FolderPrompts;
   approvalPrompts: ApprovalPrompts;
   onStatus(status: LinkStatus): void;
+  // Each chat bound here, each change of a chat's mode, and each chat's folder forgotten, by the chat's id, once it is written.
+  onBindingChanged?: (root: string) => void;
   onError(error: unknown): void;
   // How many sessions (a chat, and each of its sub-agents) have an operation running on the tools,
   // or a background process alive there, each time that changes: the quit asks first.
@@ -109,6 +111,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
   };
   const tools = options.tools(journal.bindings, network, tell);
   made.tools = tools;
+  if (options.onBindingChanged) journal.bindings.watch(options.onBindingChanged);
   const count = (session: string, change: number): void => {
     const left = (running.get(session) ?? 0) + change;
     if (left === 0) running.delete(session);

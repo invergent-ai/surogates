@@ -7,6 +7,7 @@ import type * as React from "react";
 import { useState } from "react";
 
 import { getAppRouteTitle } from "@/components/app-route-title";
+import { ComputerAddedBanner } from "@/components/computer-added-banner";
 import {
   Sheet,
   SheetClose,
@@ -117,6 +118,7 @@ export function AppShell({ sidebar, headerSlot, children }: AppShellProps) {
         </header>
 
         <main className="flex min-h-0 flex-1 min-w-0 flex-col overflow-hidden">
+          <ComputerAddedBanner />
           {children}
         </main>
       </div>

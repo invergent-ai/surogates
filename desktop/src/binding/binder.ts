@@ -8,6 +8,7 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdirSync, rmdirSync } from "node:fs";
+import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { NOT_BOUND } from "../hosts/tool-hosts.js";
@@ -16,11 +17,23 @@ import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
 import { report } from "../report.js";
 import { type ApprovalPrompts, Approvals } from "./approvals.js";
-import { BOOT_ID, checkFolder, type FolderGuards } from "./folder.js";
+import { BOOT_ID, checkFolder, confirmedFolder, type FolderGuards } from "./folder.js";
 import { type LinkSummary, scanLinks } from "./links.js";
 
 // How long a confirmed folder waits for its chat's bind operation.
 export const PREPARED_MS = 5 * 60_000;
+
+// How long Show folder waits for a look at the folder: a dead network or FUSE mount never answers.
+export const LOOK_MS = 5_000;
+
+// What a look at a folder answers: whether it is one, and its identity.
+export type FolderLook = { isDirectory(): boolean; dev: number; ino: number };
+
+// The chats whose folder Show folder looks at now, until the look returns, its deadline past or
+// not. Kept for the process, not the binder: a stack made again finds the looks still running.
+const looking = new Set<string>();
+// Looks at once, across chats: one dead mount can hold two of libuv's four threads, never more.
+const LOOKS_AT_ONCE = 2;
 
 // The server appends ". Start a new chat." to a binding refusal's message: none ends in ".".
 export const ALREADY_BOUND: Outcome = {
@@ -71,6 +84,9 @@ export interface BinderOptions {
   // and about a network destination off the package hosts in either mode.
   approvalPrompts: ApprovalPrompts;
   preparedMs?: number;
+  // How Show folder looks at a folder, and how long it waits; node:fs's lstat and LOOK_MS unless a test says.
+  look?: (path: string) => Promise<FolderLook>;
+  lookMs?: number;
   // A binding, a "Stop asking" or a host allowed for the session that could not be recorded,
   // or a network prompt that failed, and why.
   onError?: (error: unknown) => void;
@@ -172,6 +188,46 @@ export class Binder implements Executor {
       if (preparation) preparation.made = true;
       else if (made !== null) this.release(made);
     }
+  }
+
+  /** What the page may know of a chat's folder here: where it is, and whether it asks; null for a chat with none on this computer. */
+  bindingOf(sessionId: string): { folder: string; mode: Mode } | null {
+    const binding = this.options.bindings.get(sessionId);
+    // A mode it does not know asks, as the approvals take it.
+    return binding ? { folder: binding.folder, mode: binding.mode === "free" ? "free" : "ask" } : null;
+  }
+
+  /**
+   * The chat's folder, for the file manager to show, while it is still the folder its user
+   * confirmed: one replaced since, by another folder, a link or a file, is refused. The user waits
+   * LOOK_MS at most. Node cannot cancel a look, and one into a dead mount holds one of libuv's four
+   * threads until it returns, which the main process's other file calls and lookups then wait on: so
+   * a chat has one look at a time, and the process LOOKS_AT_ONCE.
+   */
+  async folderToShow(sessionId: string): Promise<string> {
+    const binding = this.options.bindings.get(sessionId);
+    if (!binding) throw new Error("This chat has no folder on this computer");
+    if (looking.has(sessionId)) throw new Error(`Surogate is still looking for ${binding.folder}`);
+    if (looking.size >= LOOKS_AT_ONCE) throw new Error("Surogate is still looking for another folder");
+    looking.add(sessionId);
+    // lstat: a link at its path is never the folder. The path was resolved when it was bound,
+    // so only its last name can have become a link since.
+    const look = (this.options.look ?? lstat)(binding.folder).then((found) => found, () => null);
+    void look.finally(() => looking.delete(sessionId));
+    const ms = this.options.lookMs ?? LOOK_MS;
+    let timer: NodeJS.Timeout | undefined;
+    const found = await Promise.race([
+      look,
+      new Promise<"late">((resolve) => {
+        timer = setTimeout(() => resolve("late"), ms).unref();
+      }),
+    ]).finally(() => clearTimeout(timer));
+    if (found === "late") throw new Error(`The folder ${binding.folder} did not answer within ${ms / 1000} s`);
+    if (!found) throw new Error(`The folder ${binding.folder} is not there`);
+    if (!found.isDirectory() || !confirmedFolder(binding, found)) {
+      throw new Error(`The folder ${binding.folder} was replaced after it was confirmed for this chat`);
+    }
+    return binding.folder;
   }
 
   /** Drop a folder confirmed in *window* whose chat was never created: its bind is refused from now on. A chat bound already keeps it. */

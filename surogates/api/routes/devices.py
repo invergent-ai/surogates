@@ -43,6 +43,7 @@ class DeviceOut(BaseModel):
     created_at: datetime
     last_seen_at: datetime | None
     revoked_at: datetime | None
+    reauthorized_at: datetime | None
     online: bool
 
 
@@ -94,6 +95,7 @@ def _out(device: DeviceRecord, *, online: bool) -> DeviceOut:
         created_at=device.created_at,
         last_seen_at=device.last_seen_at,
         revoked_at=device.revoked_at,
+        reauthorized_at=device.reauthorized_at,
         online=online,
     )
 

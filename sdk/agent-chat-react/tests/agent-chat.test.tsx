@@ -1113,6 +1113,54 @@ describe("AgentChat", () => {
     ).toBeNull();
   });
 
+  it("says the chat waits for its computer while its work waits on it, in a status region there before it speaks", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+    act(() => {
+      stream.emit("user.message", 1, { content: "Tidy my notes" });
+    });
+
+    const region = () => container!.querySelector('[data-testid="device-wait"]');
+    // Live before it speaks, so that a screen reader hears it when it does.
+    expect([region()?.getAttribute("role"), region()?.textContent]).toEqual(["status", ""]);
+    act(() => {
+      stream.emit("device.waiting", 2, { device_id: "d-1", device_name: "Flavius's ThinkPad", reason: "offline" });
+    });
+    expect(region()?.textContent).toBe("Waiting for Flavius's ThinkPad. The chat goes on once it is back online.");
+    act(() => {
+      stream.emit("device.resumed", 3, { device_id: "d-1" });
+    });
+    expect(region()?.textContent).toBe("");
+  });
+
+  it("shows what the host puts under the composer", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <AgentChat adapter={adapter} sessionId={null} composerFooter={<p data-testid="footer">On this computer</p>} />,
+      );
+      await Promise.resolve();
+    });
+
+    const footer = container.querySelector('[data-testid="footer"]');
+    const composer = container.querySelector("textarea");
+    expect(footer?.textContent).toBe("On this computer");
+    expect(composer!.compareDocumentPosition(footer!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("disables the composer and workspace upload when chat is disabled", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);

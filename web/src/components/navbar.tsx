@@ -5,6 +5,7 @@ import {
   MissionsPanel,
   ScheduledWorkPanel,
   SessionTreePanel,
+  sessionComputer,
   useChatViewMode,
   useInboxUnreadCount,
 } from "@invergent/agent-chat-react";
@@ -12,6 +13,7 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   BookOpenIcon,
   InboxIcon,
+  LaptopIcon,
   LogOutIcon,
   MessageSquareIcon,
   MoonIcon,
@@ -236,12 +238,16 @@ export function SessionSidebar() {
             <div className={hideOnExpanded}>
               {sessions.map((session) => {
                 const isActive = session.id === activeSessionId;
+                // A chat on a folder of the user's computer shows a laptop, and says which.
+                const computer = sessionComputer(session.config);
+                const Icon = computer ? LaptopIcon : MessageSquareIcon;
+                const title = session.title ?? "New session";
                 return (
                   <button
                     key={session.id}
                     type="button"
                     onClick={() => handleSelectSession(session.id)}
-                    aria-label={session.title ?? "New session"}
+                    aria-label={computer ? `${title}, on ${computer}` : title}
                     className={cn(
                       "flex items-center justify-center w-full py-2 transition-colors border-l-2",
                       isActive
@@ -249,7 +255,7 @@ export function SessionSidebar() {
                         : "bg-transparent text-subtle hover:bg-input hover:text-foreground border-l-transparent",
                     )}
                   >
-                    <MessageSquareIcon className="w-4 h-4 shrink-0" />
+                    <Icon className="w-4 h-4 shrink-0" />
                   </button>
                 );
               })}
