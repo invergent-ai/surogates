@@ -244,6 +244,13 @@ describe("a root's proxies", () => {
     // An HTTP/1.1 request's client gives up at its own timeout, as curl and Python do: a FIN.
     await curl("--max-time", "1", "-x", http(), "http://wait.example:446/");
     await vi.waitFor(() => expect(left).toContain("wait.example:446"), { timeout: 1_000 });
+    // A CONNECT's client resets its connection.
+    const reset = connect({ host: "127.0.0.1", port: portOf(proxies[0] as Server) });
+    reset.on("error", () => {});
+    reset.write("CONNECT wait.example:447 HTTP/1.1\r\nHost: wait.example:447\r\n\r\n");
+    await vi.waitFor(() => expect(lines).toContain("wait.example:447"), { timeout: 1_000 });
+    reset.resetAndDestroy();
+    await vi.waitFor(() => expect(left).toContain("wait.example:447"), { timeout: 1_000 });
   });
 
   it("keep a root's network open past 256 plain-HTTP clients that gave up while their ask waited", async () => {
@@ -295,11 +302,14 @@ describe("a root's proxies", () => {
   });
 
   it("let a plain-HTTP download whose client leaves mid-body go, at every hop to its destination", async () => {
-    // A body that never ends, and whether the destination's connection has closed.
+    // A body that never ends, from a destination that takes no FIN as its end; and whether
+    // its connection has closed.
     let closed = false;
-    const endless = createHttpServer((_req, res) => {
-      const drip = setInterval(() => res.write("x".repeat(1024)), 10);
-      res.on("close", () => {
+    const endless = createServer({ allowHalfOpen: true }, (socket) => {
+      socket.on("error", () => {});
+      socket.write("HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n\r\n");
+      const drip = setInterval(() => socket.write("x".repeat(1024)), 10);
+      socket.on("close", () => {
         clearInterval(drip);
         closed = true;
       });
@@ -324,7 +334,6 @@ describe("a root's proxies", () => {
       for (const server of runner) server.close();
       unlisten();
       proxy.close();
-      endless.closeAllConnections();
       endless.close();
     }
   });

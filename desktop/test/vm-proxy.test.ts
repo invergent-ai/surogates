@@ -25,6 +25,8 @@ const names: Record<string, string[][]> = {
   "dual.example": [["192.0.2.2", "2001:db8::1"]],
   "stalled.example": [["2001:db8::dead", "192.0.2.2"]],
   "v6-only.example": [["2001:db8::1"]],
+  // Its first address answers only after 400 ms, its second never.
+  "late.example": [["2001:db8::1:5", "2001:db8::dead"]],
 };
 const resolve = (name: string) => {
   const seen = (lookups[name] = (lookups[name] ?? 0) + 1);
@@ -74,6 +76,11 @@ beforeEach(async () => {
     connect: (address, port) => {
       dialed.push(`${address}:${port}`);
       if (address === "2001:db8::dead") return new Socket();
+      if (address === "2001:db8::1:5") {
+        const late = new Socket({ allowHalfOpen: true });
+        setTimeout(() => void (late.destroyed || late.connect(echoPort, "127.0.0.1")), 400);
+        return late;
+      }
       return connectTcp({ host: "127.0.0.1", port: ["192.0.2.1", "2001:db8::1"].includes(address) ? closedPort : echoPort, allowHalfOpen: true });
     },
   });
@@ -205,8 +212,11 @@ describe("the host proxy", () => {
   });
 
   it("tries each address it judged until one takes the connection, and answers 502 when none does", async () => {
+    const started = performance.now();
     const { status } = await tunnel("two.example:443");
     expect(status).toBe(200);
+    // The next at once once one refuses, not at the stagger.
+    expect(performance.now() - started).toBeLessThan(200);
     expect(dialed).toEqual(["192.0.2.1:443", "192.0.2.2:443"]);
     expect(await tunnel("nowhere.example:443")).toMatchObject({ status: 502, reason: "ECONNREFUSED" });
   });
@@ -228,6 +238,12 @@ describe("the host proxy", () => {
     expect(dialed).toEqual(["2001:db8::dead:443", "192.0.2.2:443"]);
   });
 
+  it("keeps an attempt that has not answered beside the next, so one that answers late still connects", async () => {
+    const opened = await Promise.race([tunnel("late.example:443"), new Promise((done) => setTimeout(() => done("no answer"), 2_000))]);
+    expect(opened).toMatchObject({ status: 200 });
+    expect(dialed).toEqual(["2001:db8::1:5:443", "2001:db8::dead:443"]);
+  });
+
   it("forgets what a torn-down root met", async () => {
     await tunnel("127.0.0.1:9");
     proxy.forget(ROOT);
@@ -243,13 +259,16 @@ describe("the host proxy", () => {
     const after = tunnel("example.com:443");
     await new Promise((done) => setTimeout(done, 50));
     expect(asked).toHaveLength(2);
-    answers[1]?.(false);
-    expect(await after).toMatchObject({ status: 403, reason: "denied" });
-    expect(proxy.takeNotice(ROOT)).toBe("This computer did not allow network access to example.com:443.");
     // The torn-down namespace's answer is its own connection's alone.
     answers[0]?.(true);
     expect(await before).toMatchObject({ status: 200 });
-    expect(proxy.takeNotice(ROOT)).toBeNull();
+    // The new namespace's next connection joins its ask, still open.
+    const third = tunnel("example.com:443");
+    await new Promise((done) => setTimeout(done, 50));
+    expect(asked).toHaveLength(2);
+    answers[1]?.(false);
+    expect(await Promise.all([after, third])).toMatchObject([{ status: 403, reason: "denied" }, { status: 403, reason: "denied" }]);
+    expect(proxy.takeNotice(ROOT)).toBe("This computer did not allow network access to example.com:443.");
   });
 
   it("asks no one about a connection gone before it was judged", async () => {

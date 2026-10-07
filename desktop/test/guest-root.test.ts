@@ -365,7 +365,8 @@ describe("a root's socket to the host proxy", { timeout: 20_000 }, () => {
           resolve();
         };
       }),
-      unmount: async () => void said.push("unmount"),
+      // It takes a while, as a share's unmount can.
+      unmount: () => new Promise<void>((resolve) => setTimeout(() => resolve(void said.push("unmount")), 50)),
       tunnels: async (root) => {
         said.push(`listen ${root}`);
         return () => void said.push(`close ${root}`);
