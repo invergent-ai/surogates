@@ -15,7 +15,6 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints, model_validator
-from sqlalchemy import text
 from sse_starlette.sse import EventSourceResponse
 
 from surogates.api.routes.sessions import archive_session_tree
@@ -67,6 +66,8 @@ Icon = _blank_is_none(64)
 Tier = Literal["basic", "pro"] | None
 # What a thread the user resolves while it works is stopped with.
 _RESOLVED_BY_USER = "resolved by the user"
+# How long a card's start holds its claim at most: a start takes about a second.
+_CARD_CLAIM_SECONDS = 60
 
 
 class ProjectCreate(BaseModel):
@@ -361,22 +362,29 @@ async def start_proposed_thread(
             status.HTTP_409_CONFLICT, "This thread works in a folder on your computer: start it from Surogate Desktop.",
         )
     state = request.app.state
-    async with state.session_factory() as db:
-        # A card started twice at once, by a double click or from two
-        # devices: the second does not wait for the first, it is refused.
-        held = await db.scalar(
-            text("SELECT pg_try_advisory_xact_lock(hashtextextended(:card, 0))"),
-            {"card": f"{body.proposal_id}:{body.key}"},
-        )
-        if not held or await store.started_from(project.master_session_id, body.proposal_id, body.key):
+    redis = getattr(state, "redis", None)
+    if redis is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Redis is required to start a thread.")
+    # A card started twice at once, by a double click or from two devices:
+    # the second does not wait for the first, it is refused.  The claim is
+    # in Redis, so no start holds a database connection while it waits for
+    # more of the pool, as Start all's every card at once would; the
+    # thread's ``worker.spawned`` refuses a later start.
+    claim = f"surogates:workstream:card:{project.id}:{body.proposal_id}:{body.key}"
+    if not await redis.set(claim, "1", nx=True, ex=_CARD_CLAIM_SECONDS):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This thread was already started.")
+    try:
+        if await store.started_from(project.master_session_id, body.proposal_id, body.key):
             raise HTTPException(status.HTTP_409_CONFLICT, "This thread was already started.")
         thread = await start_thread(
-            session_store=state.session_store, session_factory=state.session_factory, redis=state.redis,
+            session_store=state.session_store, session_factory=state.session_factory, redis=redis,
             master=await state.session_store.get_session(project.master_session_id), live_config=None,
             title=card["title"], goal=card["goal"], context="",
             proposal={"proposal_id": str(body.proposal_id), "key": body.key},
         )
-        await db.commit()
+    finally:
+        # Released however the start ends, so one that failed can be tried again.
+        await redis.delete(claim)
     if thread is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
     return await _row(request, project, thread.id)

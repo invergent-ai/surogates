@@ -12,8 +12,10 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import surogates.api.routes.workstreams as workstreams_routes
+from surogates.config import DatabaseSettings
 from surogates.db.models import InboxItem
 from surogates.jobs.inbox_expire import expire_inbox_items
 from surogates.session.events import EventType
@@ -662,6 +664,57 @@ async def test_a_card_started_twice_starts_one_thread(api):
     both = await asyncio.gather(*(start_card(api, project, proposal_id, "1") for _ in range(2)))
     assert sorted(response.status_code for response in both) == [201, 409]
     assert len(await events_of(api, master.id, EventType.WORKER_SPAWNED)) == 2
+
+
+async def test_start_all_on_a_large_proposal_starts_every_card(api, monkeypatch):
+    project = await create(api)
+    master = await master_of(api, project)
+    cards = [{"title": f"Draft {n}", "goal": f"Draft memo {n}.", "where": "cloud"} for n in range(1, 31)]
+    proposal_id = (await call_tool(api, master, "propose_threads", threads=cards))["proposal_id"]
+    # Production's pool, which a start must not hold while it waits for more of it.
+    production = DatabaseSettings()
+    engine = create_async_engine(
+        production.url, pool_size=production.pool_size, max_overflow=production.pool_overflow, pool_timeout=5,
+        connect_args={"statement_cache_size": 0},
+    )
+    pooled = async_sessionmaker(engine, expire_on_commit=False)
+    state = api.app.state
+    monkeypatch.setattr(state, "session_factory", pooled)
+    monkeypatch.setattr(state, "session_store", SessionStore(pooled, state.redis))
+    try:
+        # Start all sends every card's start at once.
+        started = await asyncio.gather(
+            *(start_card(api, project, proposal_id, str(n)) for n in range(1, 31)), return_exceptions=True,
+        )
+    finally:
+        await engine.dispose()
+    assert [getattr(response, "status_code", response) for response in started] == [201] * 30
+
+
+async def test_a_start_that_fails_can_be_tried_again(api, monkeypatch):
+    project = await create(api)
+    proposal_id = await proposed(api, await master_of(api, project))
+    real = workstreams_routes.start_thread
+    calls = []
+
+    async def fails_once(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise ConnectionError("the database went away")
+        return await real(**kwargs)
+
+    monkeypatch.setattr(workstreams_routes, "start_thread", fails_once)
+    with pytest.raises(ConnectionError):
+        await start_card(api, project, proposal_id, "1")
+    assert (await start_card(api, project, proposal_id, "1")).status_code == 201
+
+
+async def test_a_card_starts_only_over_redis(api, monkeypatch):
+    project = await create(api)
+    proposal_id = await proposed(api, await master_of(api, project))
+    monkeypatch.setattr(api.app.state, "redis", None)
+    response = await start_card(api, project, proposal_id, "1")
+    assert response.status_code == 503, response.text
 
 
 async def test_a_thread_on_the_users_computer_is_not_started_here(api):
