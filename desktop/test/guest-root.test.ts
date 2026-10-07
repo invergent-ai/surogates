@@ -342,6 +342,85 @@ describe("a root's socket to the host proxy", { timeout: 20_000 }, () => {
       "listen root-4 10001", "start", "close root-4",
     ]);
   });
+
+  // Roots whose kill waits for the test, which kills the root's latest runner, as a cgroup's kill
+  // ends whatever runs in the root's cgroup then; and the runners they start, exiting before
+  // they are ready while *exiting* says so.
+  function ending() {
+    const said: string[] = [];
+    const own: ChildProcess[] = [];
+    const state = { exiting: false, killed: () => {} };
+    const ends = new Roots({
+      start: () => {
+        said.push("start");
+        const child = state.exiting ? spawn(process.execPath, ["-e", "process.exit(1)"], { stdio: ["pipe", "pipe", "pipe"] }) : bare();
+        own.push(child);
+        return child;
+      },
+      uid: () => 10_001,
+      kill: () => new Promise<void>((resolve) => {
+        said.push("kill");
+        state.killed = () => {
+          own.at(-1)?.kill("SIGKILL");
+          resolve();
+        };
+      }),
+      unmount: async () => void said.push("unmount"),
+      tunnels: async (root) => {
+        said.push(`listen ${root}`);
+        return () => void said.push(`close ${root}`);
+      },
+    });
+    return { ends, said, state };
+  }
+  const which = (target: Roots, root: string) => target.perform(root, "which", { name: "sh" }, new AbortController().signal, "op-21");
+
+  it("sets a root up again only once its teardown under way has ended, its socket, its processes and its mount, and refuses a second setup meanwhile", async () => {
+    const { ends, said, state } = ending();
+    await ends.setup("root-5", base, R1, user);
+    const tearing = ends.teardown("root-5", R1);
+    await until(() => said.includes("kill"));
+    const setting = ends.setup("root-5", base, R1, user);
+    await expect(ends.setup("root-5", base, R1, user)).rejects.toThrow("This chat's sandbox is already set up");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(said).toEqual(["listen root-5", "start", "kill"]);
+    state.killed();
+    await tearing;
+    await setting;
+    expect(said).toEqual(["listen root-5", "start", "kill", "close root-5", "unmount", "listen root-5", "start"]);
+    expect(await which(ends, "root-5")).toEqual({ ok: true });
+  });
+
+  it("sets a root up again only once the end of a runner that went before it was ready has ended", async () => {
+    const { ends, said, state } = ending();
+    state.exiting = true;
+    await expect(ends.setup("root-6", base, R1, user)).rejects.toThrow("the session runner exited");
+    state.exiting = false;
+    const setting = ends.setup("root-6", base, R1, user);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(said).toEqual(["listen root-6", "start", "kill", "close root-6"]);
+    state.killed();
+    await setting;
+    expect(said).toEqual(["listen root-6", "start", "kill", "close root-6", "close root-6", "listen root-6", "start"]);
+    expect(await which(ends, "root-6")).toEqual({ ok: true });
+  });
+
+  it("tears down a setup that waits for a teardown under way, once it is set up", async () => {
+    const { ends, said, state } = ending();
+    await ends.setup("root-7", base, R1, user);
+    const tearing = ends.teardown("root-7", R1);
+    await until(() => said.includes("kill"));
+    const setting = ends.setup("root-7", base, R1, user);
+    const again = ends.teardown("root-7", R1);
+    state.killed();
+    await tearing;
+    await setting;
+    await until(() => said.filter((line) => line === "kill").length === 2);
+    state.killed();
+    await again;
+    expect(said).toEqual(["listen root-7", "start", "kill", "close root-7", "unmount", "listen root-7", "start", "kill", "close root-7", "unmount"]);
+    expect(await which(ends, "root-7")).toEqual(NOT_SET_UP);
+  });
 });
 
 describe("a root's background processes", { timeout: 20_000 }, () => {

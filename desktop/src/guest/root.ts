@@ -504,6 +504,9 @@ export class Roots {
   private readonly roots = new Map<string, Root>();
   // The setups under way, which a teardown waits for.
   private readonly starting = new Map<string, Promise<void>>();
+  // What of each root is ending, a teardown or a lost runner's end, to its last step: a
+  // setup waits for it, so none of it lands on what it sets up, its socket or its cgroup.
+  private readonly endings = new Map<string, Promise<void>>();
   // Each root's background processes, from its first setup in this guest to its
   // teardown: set up again once its runner was lost, a root still answers for
   // what ended with that runner, and how.
@@ -522,7 +525,9 @@ export class Roots {
     // Each root set up keeps its processes' output: a share of OUTPUT_CHARS.
     const held = new Set([...this.registries.keys(), ...this.starting.keys()]);
     if (!held.has(root) && held.size >= MAX_SHARES) throw new Error(FULL);
-    const started = this.start(root, folder, share, user, ended);
+    // Under way while it waits: a teardown waits for it, and a second setup is refused.
+    const ending = this.endings.get(root);
+    const started = ending ? ending.then(() => this.start(root, folder, share, user, ended)) : this.start(root, folder, share, user, ended);
     this.starting.set(root, started);
     try {
       await started;
@@ -540,7 +545,7 @@ export class Roots {
     // Everything of the root ends, once however often asked: its cgroup is killed
     // and emptied or, where it cannot be, its runner's stdin is ended. Only then is
     // a root still listed forgotten and the host told, so its setup again finds nothing of it running.
-    const lose = () => (ending ??= (async () => {
+    const lose = () => (ending ??= this.ends(root, (async () => {
       try {
         await this.options.kill(root);
       } catch {
@@ -551,7 +556,7 @@ export class Roots {
         this.roots.delete(root);
         this.options.lost?.(root);
       }
-    })());
+    })()));
     let child: ChildProcess;
     try {
       child = await this.options.start(root, place, share, user);
@@ -613,20 +618,31 @@ export class Roots {
     await this.roots.get(root)?.protect(keys);
   }
 
+  // *end*, what of *root* is ending, joins whatever of it already was.
+  private ends(root: string, end: Promise<void>): Promise<void> {
+    const all: Promise<void> = Promise.allSettled([this.endings.get(root), end]).then(() => {
+      if (this.endings.get(root) === all) this.endings.delete(root);
+    });
+    this.endings.set(root, all);
+    return end;
+  }
+
   // Everything of *root* ends and it is forgotten, then the mount of *share*, its folder's,
   // goes: the host is letting the folder go, and removes the share next. Its next
   // operation shares its folder and sets it up again.
-  async teardown(root: string, share: Share): Promise<void> {
-    // A setup under way lands first, and what it set up ends with the rest.
-    await this.starting.get(root)?.catch(() => {});
-    this.registries.delete(root);
-    const target = this.roots.get(root);
-    if (target) {
-      // Out of the list first: the end of its runner is no loss to tell.
-      this.roots.delete(root);
-      await target.end();
-    }
-    await this.options.unmount?.(share);
+  teardown(root: string, share: Share): Promise<void> {
+    return this.ends(root, (async () => {
+      // A setup under way lands first, and what it set up ends with the rest.
+      await this.starting.get(root)?.catch(() => {});
+      this.registries.delete(root);
+      const target = this.roots.get(root);
+      if (target) {
+        // Out of the list first: the end of its runner is no loss to tell.
+        this.roots.delete(root);
+        await target.end();
+      }
+      await this.options.unmount?.(share);
+    })());
   }
 
   // One process operation's outcome. Never rejects. A root whose runner cannot answer
