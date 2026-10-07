@@ -219,6 +219,17 @@ DEVICE_GIT_NOTE = (
     "and ask the user to run `git submodule update`, `git worktree add` and `git worktree remove` on their computer."
 )
 
+# Appended beside it: the guest serves a shared folder uncached, and refuses a shared
+# mapping of its files (ENODEV) rather than let either side lose the other's writes.
+DEVICE_MAPPING_NOTE = (
+    "A program that maps a file in a shared folder for shared use, such as SQLite in WAL mode, fails there "
+    "(SQLite says \"disk I/O error\"); keep such a database in your home folder. A database in a shared folder "
+    "may use a rollback journal only while nothing on the user's computer has it open: locks do not cross the "
+    "share, and writes from both sides at once are lost. A database already in WAL mode, including one a failed "
+    "attempt switched, cannot be opened there: convert it on the user's computer, or delete it if your command "
+    "just made it."
+)
+
 
 # ---------------------------------------------------------------------------
 # Tool schema (exposed to the LLM)

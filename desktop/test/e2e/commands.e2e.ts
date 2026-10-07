@@ -111,6 +111,47 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     expect(existsSync(vmRun())).toBe(false);
   });
 
+  it("runs the folder's own configure script, refuses SQLite's WAL there plainly, and keeps a database with a rollback journal that this computer reads", async () => {
+    const folder = join(home, "build");
+    mkdirSync(folder);
+    // A configure script as a project checks one in: made on this computer, executable, looking for its tools.
+    writeFileSync(join(folder, "configure"), [
+      "#!/bin/sh",
+      'for tool in python3 node; do command -v "$tool" >/dev/null || { echo "configure: $tool not found" >&2; exit 1; }; done',
+      "echo PREFIX=/usr/local > config.status",
+      "echo 'configure: wrote config.status'",
+    ].join("\n") + "\n", { mode: 0o755 });
+    await bound(folder);
+    const ran = (output: string) => ({ ok: { output, returncode: 0, timed_out: false } });
+    expect(await operation("run", { command: "./configure && cat config.status", workdir: null, timeout: 30 })).toEqual(
+      ran("configure: wrote config.status\nPREFIX=/usr/local\n"),
+    );
+    const databases = [
+      "python3 - <<'EOF'",
+      "import sqlite3",
+      "try:",
+      "    wal = sqlite3.connect('wal.db')",
+      "    wal.execute('pragma journal_mode=wal')",
+      "    wal.execute('create table t (x)')",
+      "    print('wal')",
+      "except sqlite3.Error as error:",
+      "    print('wal:', error)",
+      "db = sqlite3.connect('app.db')",
+      "db.execute('create table t (x)')",
+      "db.execute('insert into t values (7)')",
+      "db.commit()",
+      "print(db.execute('pragma journal_mode').fetchone()[0])",
+      "EOF",
+    ].join("\n");
+    // A shared mapping of the folder's file fails, as the model's note says: WAL fails plainly, and a rollback journal works
+    // while nothing on this computer has the database open (it is read here only after the command has ended).
+    expect(await operation("run", { command: databases, workdir: null, timeout: 30 })).toEqual(ran("wal: disk I/O error\ndelete\n"));
+    // The file tools, on this computer, read what the script wrote; the user's own sqlite reads the database.
+    expect(await operation("read", { key: join(folder, "config.status"), max_bytes: null })).toEqual({ ok: Buffer.from("PREFIX=/usr/local\n").toString("base64") });
+    const read = spawnSync("python3", ["-c", "import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute('select x from t').fetchone()[0])", join(folder, "app.db")], { encoding: "utf8" });
+    expect(read.stdout).toBe("7\n");
+  });
+
   it("runs two chats' commands in two folders at once, lints a patch it has just written, and refuses a command's write to the folder's git config", async () => {
     const [first, second] = [join(home, "first"), join(home, "second")];
     // Each a repository already, as most chats' folders are.
