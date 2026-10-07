@@ -1,17 +1,22 @@
 """Workspace file browsing for sessions.
 
-Exposes the session's workspace via ``StorageBackend`` so the web UI can
-display a workspace panel alongside the chat thread.  Works with both
-``LocalBackend`` (dev) and ``S3Backend`` (production, Garage/S3).
+Exposes the session's files so the web UI can display a workspace panel
+alongside the chat thread: a cloud session's workspace in object storage
+(``LocalBackend`` in dev, ``S3Backend`` in production), or the folder on the
+user's computer a local-folder chat works on, through that computer
+(``surogates.session.files``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import logging
 import mimetypes
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 from typing import Literal
 from uuid import UUID
@@ -25,15 +30,17 @@ from surogates.api.session_guards import (
     require_session_visible,
     require_user_writable_session,
 )
+from surogates.devices.operations import TooManyRequests
+from surogates.devices.workspace import SHOWN_DOT_FOLDERS, DeviceOperationError, DeviceWorkspaceIO
+from surogates.session.files import ComputerAway, session_files
 from surogates.session.models import Session
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.backend import StorageBackend
-from surogates.storage.tenant import (
-    boundary_workspace_key,
-    boundary_workspace_prefix,
-)
+from surogates.storage.tenant import boundary_workspace_key
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+from surogates.tools.workspace_io import RevisionConflict, WorkspaceFiles
 
 
 def _workspace_root_id(session: Session) -> str:
@@ -102,6 +109,10 @@ _MAX_PDF_BYTES = 25_000_000  # 25 MB
 
 _PDF_EXTENSIONS = frozenset({".pdf"})
 
+# How long a request waits for the computer a local-folder chat's files are
+# on.  A read still unanswered then is cancelled.
+READ_WITHIN_S = 60.0
+
 
 # Directories to skip when building the tree.
 _SKIP_DIRS = frozenset({
@@ -129,6 +140,12 @@ _RESERVED_PREFIXES: tuple[str, ...] = ("_artifacts/",)
 # A project thread's coding checkouts (``.threads/``) are hidden the same
 # way: a clone's thousands of files would count against the tree's limit.
 _HIDDEN_PREFIXES: tuple[str, ...] = ("_whiteboard/", ".threads/")
+
+# The tree's one rule for what it leaves out, which the computer's walk shares
+# so that it never enters them: at any depth a folder of _SKIP_DIRS, and a
+# dot-folder other than SHOWN_DOT_FOLDERS (_should_skip_dir); at the top, the
+# platform's own folders (_is_hidden).
+_TOP_HIDDEN: tuple[str, ...] = tuple(prefix.rstrip("/") for prefix in _RESERVED_PREFIXES + _HIDDEN_PREFIXES)
 
 
 def _is_reserved(key: str) -> bool:
@@ -269,15 +286,67 @@ async def _get_workspace_session_bucket_and_root(
     return session, bucket, _workspace_root_id(session)
 
 
-def _strip_session_prefix(session: Session, root_id: str, key: str) -> str:
-    """Strip the physical workspace prefix from a key so the viewer
-    sees session-relative paths (``sessions/{root}/`` is hidden, and so
-    is the agent ``storage_key_prefix`` when set).
+def _failure(status_code: int, error: str, message: str) -> HTTPException:
+    """A structured refusal: the web client shows its message."""
+    return HTTPException(status_code=status_code, detail={"error": error, "message": message})
+
+
+@asynccontextmanager
+async def workspace_files(request: Request, session: Session) -> AsyncIterator[WorkspaceFiles]:
+    """*session*'s files for one request, each failure answered as the file panel's.
+
+    A local-folder chat's computer that is offline, or whose access ended,
+    is said at once.  A read it does not answer within READ_WITHIN_S is said
+    too, and cancelled.  A cloud chat's files have no deadline here, as
+    before: object storage keeps no request to join.
     """
-    prefix = boundary_workspace_prefix(session.config, session, root_id)
-    if not key.startswith(prefix):
-        return key
-    return key[len(prefix):]
+    on_device = False
+    try:
+        async with session_files(
+            session,
+            storage=_get_storage(request),
+            session_factory=request.app.state.session_factory,
+            redis=request.app.state.redis,
+        ) as files:
+            on_device = isinstance(files, DeviceWorkspaceIO)
+            if not on_device:
+                yield files
+                return
+            async with asyncio.timeout(READ_WITHIN_S):
+                yield files
+    except ComputerAway as away:
+        if away.revoked:
+            raise _failure(status.HTTP_403_FORBIDDEN, "device_revoked", str(away)) from None
+        raise _failure(status.HTTP_503_SERVICE_UNAVAILABLE, "device_offline", str(away)) from None
+    except TimeoutError:
+        if not on_device:
+            raise
+        raise _failure(
+            status.HTTP_504_GATEWAY_TIMEOUT, "device_timeout",
+            "The computer this chat's folder is on did not answer in time. Try again.",
+        ) from None
+    except TooManyRequests as exc:
+        raise _failure(status.HTTP_429_TOO_MANY_REQUESTS, "device_busy", str(exc)) from None
+    except WorkspaceSandboxError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from None
+    except RevisionConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
+    except OSError as exc:
+        # As the computer worded it: a denial in its user's prompt, a path
+        # that is no file, a file over its cap.
+        said = exc.strerror or str(exc)
+        if isinstance(exc, PermissionError):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=said) from None
+        if isinstance(exc, (FileNotFoundError, NotADirectoryError, IsADirectoryError)):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=said) from None
+        if exc.errno == errno.EFBIG:
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=said) from None
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=said) from None
+    except DeviceOperationError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from None
+    except ValueError as exc:
+        # A path the computer, or the journal, cannot take: a NUL, a lone surrogate.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
 
 
 def _is_text_key(key: str) -> bool:
@@ -308,7 +377,7 @@ def _is_pdf_key(key: str) -> bool:
 
 def _should_skip_dir(dirname: str) -> bool:
     """Should this directory be skipped in the tree listing?"""
-    if dirname.startswith(".") and dirname not in (".github", ".vscode"):
+    if dirname.startswith(".") and dirname not in SHOWN_DOT_FOLDERS:
         return True
     return dirname in _SKIP_DIRS
 
@@ -403,19 +472,18 @@ async def get_workspace_tree(
     """Return the recursive file tree for a session's workspace."""
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    storage = _get_storage(request)
-    session, bucket, root_id = await _get_workspace_session_bucket_and_root(
+    session, bucket, _root_id = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant,
     )
+    await require_device_access(request, session, tenant)
 
-    prefix = boundary_workspace_prefix(session.config, session, root_id)
-    keys = await storage.list_keys(bucket, prefix=prefix)
-    relative_keys = [_strip_session_prefix(session, root_id, k) for k in keys]
+    async with workspace_files(request, session) as files:
+        walked = await files.walk(await files.resolve(""), skip=_SKIP_DIRS, skip_top=_TOP_HIDDEN, skip_hidden=True)
     # Drop keys living under reserved prefixes (artifact storage) so
     # internal server-side files don't leak into the workspace browser.
-    visible_keys = [k for k in relative_keys if k and not _is_hidden(k)]
+    visible_keys = [path for path, _size in walked.files if not _is_hidden(path)]
     entries = _build_tree(visible_keys)
-    truncated = len(visible_keys) >= _MAX_ENTRIES
+    truncated = walked.truncated or len(visible_keys) >= _MAX_ENTRIES
 
     return WorkspaceTreeResponse(
         root=bucket,
@@ -442,10 +510,10 @@ async def get_workspace_file(
     _require_service_account_api_route(request, tenant)
     _validate_path(path)
     store = _get_session_store(request)
-    storage = _get_storage(request)
-    session, bucket, root_id = await _get_workspace_session_bucket_and_root(
+    session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant,
     )
+    await require_device_access(request, session, tenant)
 
     is_text = _is_text_key(path)
     is_image = _is_image_key(path)
@@ -457,46 +525,42 @@ async def get_workspace_file(
             detail="Binary files cannot be viewed in the workspace panel.",
         )
 
-    try:
-        data = await storage.read(
-            bucket,
-            boundary_workspace_key(session.config, session, root_id, path),
-        )
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-    size = len(data)
     mime, _ = mimetypes.guess_type(path)
+    async with workspace_files(request, session) as files:
+        key = await files.resolve(path)
+        st = await files.stat(key)
+        if st is None or st.is_dir:
+            raise HTTPException(status_code=404, detail=f"File not found: {path}")
+        size = st.size
 
-    if is_image or is_pdf:
-        max_bytes = _MAX_PDF_BYTES if is_pdf else _MAX_IMAGE_BYTES
-        kind = "PDF" if is_pdf else "Image"
-        if size > max_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"{kind} too large to preview ({size} bytes, limit {max_bytes}).",
+        if is_image or is_pdf:
+            max_bytes = _MAX_PDF_BYTES if is_pdf else _MAX_IMAGE_BYTES
+            kind = "PDF" if is_pdf else "Image"
+            if size > max_bytes:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"{kind} too large to preview ({size} bytes, limit {max_bytes}).",
+                )
+            content = base64.b64encode(await files.read(key)).decode("ascii")
+            return FileContentResponse(
+                path=path,
+                content=content,
+                size=size,
+                mime_type=mime or ("application/pdf" if is_pdf else "application/octet-stream"),
+                encoding="base64",
+                truncated=False,
             )
-        content = base64.b64encode(data).decode("ascii")
-        return FileContentResponse(
-            path=path,
-            content=content,
-            size=size,
-            mime_type=mime or ("application/pdf" if is_pdf else "application/octet-stream"),
-            encoding="base64",
-            truncated=False,
-        )
 
-    # Text file path.
-    truncated = size > _MAX_READ_BYTES
-    content = data[:_MAX_READ_BYTES].decode("utf-8", errors="replace")
+        # Text file path.
+        data = await files.read(key, max_bytes=_MAX_READ_BYTES)
 
     return FileContentResponse(
         path=path,
-        content=content,
+        content=data.decode("utf-8", errors="replace"),
         size=size,
         mime_type=mime,
         encoding="utf-8",
-        truncated=truncated,
+        truncated=size > _MAX_READ_BYTES,
     )
 
 
@@ -568,27 +632,22 @@ async def download_file(
     _require_service_account_api_route(request, tenant)
     _validate_path(path)
     store = _get_session_store(request)
-    storage = _get_storage(request)
-    session, bucket, root_id = await _get_workspace_session_bucket_and_root(
+    session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant,
     )
+    await require_device_access(request, session, tenant)
 
-    storage_key = boundary_workspace_key(session.config, session, root_id, path)
-    if not await storage.exists(bucket, storage_key):
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-    try:
-        info = await storage.stat(bucket, storage_key)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-    if info["size"] > _MAX_DOWNLOAD_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="File too large to download.",
-        )
-
-    data = await storage.read(bucket, storage_key)
+    async with workspace_files(request, session) as files:
+        key = await files.resolve(path)
+        st = await files.stat(key)
+        if st is None or st.is_dir:
+            raise HTTPException(status_code=404, detail=f"File not found: {path}")
+        if st.size > _MAX_DOWNLOAD_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="File too large to download.",
+            )
+        data = await files.read(key)
     mime, _ = mimetypes.guess_type(path)
     filename = PurePosixPath(path).name
 

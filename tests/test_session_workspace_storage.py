@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from io import BytesIO
 from unittest.mock import AsyncMock
@@ -39,6 +40,12 @@ class _RecordingStorage:
         keys = set(self.keys.get(bucket, []))
         keys.update(k for b, k in self.objects if b == bucket)
         return sorted(k for k in keys if k.startswith(prefix))
+
+    async def list_entries(self, bucket: str, prefix: str = "") -> list[dict]:
+        return [
+            {"key": key, "size": len(self.objects.get((bucket, key), b""))}
+            for key in await self.list_keys(bucket, prefix)
+        ]
 
     async def delete(self, bucket: str, key: str) -> None:
         self.deleted_keys.append((bucket, key))
@@ -468,3 +475,36 @@ async def test_artifact_store_writes_under_session_prefix():
         "ops-agent-bucket",
         f"{session_id}/_artifacts/{meta.artifact_id}/v1.json",
     ) in storage.objects
+
+
+class _SlowStorage(_RecordingStorage):
+    """Object storage that takes its time, as a slow bucket does."""
+
+    async def read(self, bucket: str, key: str) -> bytes:
+        await asyncio.sleep(0.3)
+        return await super().read(bucket, key)
+
+    async def write(self, bucket: str, key: str, data: bytes) -> None:
+        await asyncio.sleep(0.3)
+        await super().write(bucket, key, data)
+
+
+def _slow_chat():
+    org_id = uuid4()
+    session_id = uuid4()
+    store = _Store(org_id)
+    store.session = SimpleNamespace(
+        id=session_id, org_id=org_id, agent_id="support-bot", status="active", channel="web",
+        config={"storage_bucket": "ops-agent-bucket"},
+    )
+    storage = _SlowStorage()
+    return session_id, storage, _request(store, storage, _Redis()), _tenant(org_id, uuid4())
+
+
+async def test_a_cloud_chats_slow_storage_is_read_as_before(monkeypatch):
+    # The deadlines are a computer's: object storage keeps no request to join.
+    monkeypatch.setattr(workspace_route, "READ_WITHIN_S", 0.05)
+    session_id, storage, request, tenant = _slow_chat()
+    storage.objects[("ops-agent-bucket", f"{session_id}/a.txt")] = b"slow"
+    content = await workspace_route.get_workspace_file(session_id, request, path="a.txt", tenant=tenant)
+    assert content.content == "slow"
