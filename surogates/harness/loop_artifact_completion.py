@@ -33,6 +33,7 @@ from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
 from surogates.session.inbox_payload import raises_completion_inbox_item
 from surogates.workstreams import is_project_master
+from surogates.workstreams.spend import admitted_at_wake
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,8 @@ def _should_take_reservations(session: Any, config_key: str) -> bool:
     the commerce and per-user allowance settlements."""
     if getattr(session, "channel", None) == "website":
         return True
-    return bool((session.config or {}).get(config_key))
+    # A project's turn is held at its wake, after the wake read the session.
+    return bool((session.config or {}).get(config_key)) or admitted_at_wake(session)
 
 
 def wants_turn_summary(session: Any, *, turn_id: str | None, reason: str) -> bool:
@@ -1146,6 +1148,12 @@ class ArtifactCompletionMixin:
         }
         if cost_tracker is not None:
             fail_data["cost_summary"] = cost_tracker.summary()
+        # A failed turn spent what it spent; its holds settle as a
+        # completed turn's do, rather than waiting for a reaper or a refill.
+        await asyncio.gather(
+            self._settle_commerce_reservation(session, cost_tracker),
+            self._settle_allowance_reservation(session, cost_tracker),
+        )
         fail_event_id = await self._store.emit_event(
             session.id, EventType.SESSION_FAIL, fail_data,
         )

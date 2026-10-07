@@ -77,6 +77,7 @@ from surogates.harness.structured_output import generate_structured, parse_json_
 from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.workstreams import is_project_master, master_refusal
+from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
     drop_unusable_tools,
@@ -492,6 +493,7 @@ class AgentHarness(
         agent_service_account_id: str | None = None,
         acting_principal: Any | None = None,
         platform_client: Any | None = None,
+        runtime_config_cache: Any | None = None,
         entitlement_excluded_tools: frozenset[str] = frozenset(),
         fallback_chain: tuple[Any, ...] = (),
     ) -> None:
@@ -551,6 +553,9 @@ class AgentHarness(
         # (``_settle_commerce_reservation``).  Optional: sessions
         # without a commerce reservation never touch it.
         self._platform_client = platform_client
+        # The agent's runtime config, for the planes a project's turn is
+        # held on at its wake (``admit_turn``).
+        self._runtime_config_cache = runtime_config_cache
         self._worker_id = worker_id
         self._budget = budget
         self._compressor = context_compressor
@@ -761,6 +766,17 @@ class AgentHarness(
             not (event.data or {}).get("synthetic") for event in events
         )
 
+    async def _admit_turn(self, session: Session, content: str) -> str | None:
+        """Hold this turn of a project's session (``admit_turn``): the
+        user's words when their limit refuses it, None when it may run."""
+        return await admit_turn(
+            session, content,
+            platform_client=self._platform_client,
+            runtime_config_cache=self._runtime_config_cache,
+            session_store=self._store,
+            session_factory=self._session_factory,
+        )
+
     async def _has_unread_report(self, session_id: UUID) -> bool:
         """Return True if a worker's report is newer than the session's last model request.
 
@@ -842,6 +858,7 @@ class AgentHarness(
         self,
         session: Session,
         saga: Any,
+        cost_tracker: SessionCostTracker | None = None,
     ) -> None:
         """Tear down sandbox + sagas and emit SESSION_PAUSE, then clear.
 
@@ -852,6 +869,12 @@ class AgentHarness(
         reason_msg = self._interrupt_message or "interrupted"
         if saga is not None and saga.active_sagas:
             await self._compensate_sagas(saga, session, "interrupt")
+        # A stopped turn spent what it spent: settle its holds now, or a
+        # session stopped for good, a resolved thread, keeps them reserved.
+        await asyncio.gather(
+            self._settle_commerce_reservation(session, cost_tracker),
+            self._settle_allowance_reservation(session, cost_tracker),
+        )
         if self._sandbox_pool is not None:
             try:
                 await self._sandbox_pool.destroy_for_session(str(session.id))
@@ -1246,6 +1269,20 @@ class AgentHarness(
                     cursor,
                 )
                 return
+
+            # 4'. A project's turn no route admitted (a thread's, a helper's,
+            # or a master's resumed or retried) is held against the user's
+            # allowance and paid turns, as a typed message is.
+            if revived_by != "worker_report" and admitted_at_wake(session):
+                refused = await self._admit_turn(session, _latest_user_event_text(all_events))
+                if refused is not None:
+                    # The turn never ran: a paid hold taken before the
+                    # allowance refused is released at nothing spent.
+                    await self._fail_session(
+                        session, [], lease, reason="usage_limit", cost_tracker=SessionCostTracker(),
+                        error_title=refused,
+                    )
+                    return
 
             # 5. Emit HARNESS_WAKE event.
             await self._store.emit_event(
@@ -1934,7 +1971,7 @@ class AgentHarness(
 
             # --- Interrupt check at the top of each iteration ---
             if self._check_interrupt():
-                await self._abort_iteration_with_pause(session, saga)
+                await self._abort_iteration_with_pause(session, saga, cost_tracker)
                 return
 
             # --- Mid-turn steering ---
@@ -2340,7 +2377,7 @@ class AgentHarness(
             # user turn at the next iteration boundary by the steer
             # injector, so the buffered response is delivered, not discarded.
             if self._check_interrupt():
-                await self._abort_iteration_with_pause(session, saga)
+                await self._abort_iteration_with_pause(session, saga, cost_tracker)
                 return
 
             response_data["turn_id"] = turn_id

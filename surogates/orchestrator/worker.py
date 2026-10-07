@@ -2176,6 +2176,9 @@ async def run_worker(settings: Settings) -> None:
             # Settlement of monetized website turns
             # (``commerce_reservation`` on the session config).
             platform_client=platform_client,
+            # A project's turns are held at their wake on the planes
+            # this config names.
+            runtime_config_cache=runtime_config_cache,
         )
         # Stash the bundle so the dispatcher can
         # aclose its four connection pools at session retirement.
