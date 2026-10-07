@@ -4,10 +4,13 @@ import { createServer as createHttpServer, type IncomingHttpHeaders, type Server
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { duplexPair } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { listen } from "../src/guest/listeners.js";
+import { Network } from "../src/guest/network.js";
+import { NetProxy } from "../src/vm/proxy.js";
 
 let dir: string;
 let agent: Server;
@@ -238,6 +241,41 @@ describe("a root's proxies", () => {
     await vi.waitFor(() => expect(lines).toContain("wait.example:445"), { timeout: 1_000 });
     client.resetAndDestroy();
     await vi.waitFor(() => expect(left).toEqual(["wait.example:443", "wait.example:444", "wait.example:445"]), { timeout: 1_000 });
+  });
+
+  it("let a plain-HTTP download whose client leaves mid-body go, at every hop to its destination", async () => {
+    // A body that never ends, and whether the destination's connection has closed.
+    let closed = false;
+    const endless = createHttpServer((_req, res) => {
+      const drip = setInterval(() => res.write("x".repeat(1024)), 10);
+      res.on("close", () => {
+        clearInterval(drip);
+        closed = true;
+      });
+    });
+    await new Promise<void>((done) => endless.listen(0, "127.0.0.1", done));
+    // The whole way: the runner's proxies, the agent's socket for the root, the host proxy.
+    const [host, guest] = duplexPair();
+    const proxy = new NetProxy(host, {
+      egress: { ask: async () => true },
+      resolve: async () => ["192.0.2.10"],
+      local: () => [],
+      connect: () => connect({ host: "127.0.0.1", port: (endless.address() as { port: number }).port, allowHalfOpen: true }),
+    });
+    const network = new Network(guest, join(dir, "net"));
+    const root = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
+    const unlisten = await network.listen(root, process.getuid?.() ?? 0);
+    const runner = await listen(network.path(root), { http: 0, socks: 0 });
+    try {
+      await curl("--max-time", "1", "-o", "/dev/null", "-x", `http://127.0.0.1:${portOf(runner[0] as Server)}`, "http://endless.example/big");
+      await vi.waitFor(() => expect(closed).toBe(true), { timeout: 2_000 });
+    } finally {
+      for (const server of runner) server.close();
+      unlisten();
+      proxy.close();
+      endless.closeAllConnections();
+      endless.close();
+    }
   });
 
   it("give an HTTP client a minute to finish its headers, though none to finish its request", () => {
