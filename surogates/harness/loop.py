@@ -68,6 +68,7 @@ from surogates.harness.sanitize import (
 )
 from surogates.harness.slash_skill import (
     build_deep_research_message,
+    expand_skill_again,
     expand_slash_skill,
     parse_deep_research_command,
 )
@@ -765,6 +766,28 @@ class AgentHarness(
         return any(
             not (event.data or {}).get("synthetic") for event in events
         )
+
+    async def _expand_last_skill_again(self, session: Session, messages: list[dict], all_events: list) -> None:
+        """Put back the skill the user's last message ran at its own wake,
+        in place of the raw command replay rebuilt.  Nothing when that
+        message ran no skill, or replay folded it into another."""
+        raw = _latest_user_event_text(all_events)
+        if not any(
+            event.type == EventType.SKILL_INVOKED.value and event.data.get("raw_message") == raw
+            for event in all_events
+        ):
+            return
+        data = _latest_user_event_data(all_events) or {}
+        replayed = build_user_message_dict(data)["content"]
+        message = next((m for m in reversed(messages) if m.get("role") == "user" and m.get("content") == replayed), None)
+        if message is None:
+            return
+        expanded = await expand_skill_again(
+            text=raw, tools=self._tools, tenant=self._tenant, session_id=str(session.id),
+            api_client=self._api_client, session_factory=self._session_factory, session_config=session.config,
+        )
+        if expanded is not None:
+            message["content"] = build_user_message_dict(data, base_content=expanded)["content"]
 
     async def _admit_turn(self, session: Session, content: str) -> str | None:
         """Hold this turn of a project's session (``admit_turn``): the
@@ -1521,6 +1544,13 @@ class AgentHarness(
                     # already emitted expert.delegation and (later) expert.result
                     # or expert.failure, so we intentionally skip the
                     # SKILL_INVOKED row here.
+
+            # A report wake replays the user's last message, which a skill
+            # may have expanded at its own wake.  Expanded again, the master
+            # keeps that skill's instructions, and the conversation the
+            # prompt cache holds.
+            elif revived_by == "worker_report":
+                await self._expand_last_skill_again(session, messages, all_events)
 
             # 11. Run the core LLM loop.
             await self._run_loop(session, messages, system_prompt, lease, cost_tracker=cost_tracker, all_events=all_events)

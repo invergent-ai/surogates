@@ -11,14 +11,17 @@ from uuid import UUID
 import pytest
 
 import surogates.api.routes.workspace as workspace_routes
+import surogates.harness.slash_skill as slash_skill
 from surogates.harness.prompt import PromptBuilder
 from surogates.harness.session_llm import build_session_llm_clients
+from surogates.harness.slash_skill import build_expanded_message
 from surogates.memory.manager import MemoryManager
 from surogates.memory.r2_store import R2MemoryStore
 from surogates.orchestrator.worker import _build_r2_memory_keys
 from surogates.runtime import build_agent_runtime_context
 from surogates.scheduled.schedule import parse_schedule
 from surogates.scheduled.store import ScheduledSessionStore
+from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
 from surogates.storage.tenant import boundary_workspace_key
 from surogates.tenant.context import TenantContext
@@ -26,7 +29,7 @@ from surogates.workstreams.derive import SHELL_LIMITS
 from tests.test_harness_resilience import _make_harness
 
 from .test_devices import add_user, api  # noqa: F401  (api is a fixture)
-from .test_workstream_threads import start, turn_ends
+from .test_workstream_threads import answered, start, turn_ends, turn_of_the_master_ends, waking
 from .test_workstreams import create, master_of, patch, runtime, system_prompt, turn_calling
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -399,3 +402,59 @@ async def test_the_library_is_its_owners(api, session_factory):
     project = await create(api)
     _, other = await add_user(session_factory, api.org_id)
     assert (await library(api, project, other)).status_code == 404
+
+
+BOARD_PACK = "Lay the pack out as the board likes it: one page per figure."
+
+
+async def reported_after(api, text: str, ran: tuple[EventType, dict] | None):
+    """A master whose last message was *text*, which its wake ran as *ran*
+    (an event and its data), and whose thread has reported since."""
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    store = api.app.state.session_store
+    await store.emit_event(master.id, EventType.USER_MESSAGE, {"content": text})
+    if ran is not None:
+        await store.emit_event(master.id, *ran)
+    await turn_of_the_master_ends(api, master)
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    return master
+
+
+def skills_answering(harness):
+    harness._tools.dispatch = AsyncMock(return_value=json.dumps({"success": True, "content": BOARD_PACK}))
+    return harness._tools.dispatch
+
+
+async def test_a_report_wake_reads_the_skill_the_users_last_message_ran(api, monkeypatch):
+    invoked = {"skill": "board-pack", "raw_message": "/board-pack Q3", "staged_at": None}
+    master = await reported_after(api, "/board-pack Q3", (EventType.SKILL_INVOKED, invoked))
+    # An expert of that name, made since, is not consulted: only the skill's path runs again.
+    expert = SimpleNamespace(name="board-pack", is_active_expert=True)
+    monkeypatch.setattr(slash_skill, "_load_skills_for_slash", AsyncMock(return_value=[expert]))
+    monkeypatch.setattr(slash_skill, "_expand_expert", consulted := AsyncMock(return_value=None))
+    harness, handed = waking(api, monkeypatch)
+    skill_view = skills_answering(harness)
+    await harness.wake(master.id)
+    consulted.assert_not_awaited()
+    [conversation] = handed
+    expanded = build_expanded_message(name="board-pack", args="Q3", skill_body=BOARD_PACK)
+    # As its own wake sent it, so the prompt cache still holds the conversation.
+    assert {"role": "user", "content": expanded} in conversation
+    assert {"role": "user", "content": "/board-pack Q3"} not in conversation
+    assert [call.args[:2] for call in skill_view.await_args_list] == [("skill_view", {"name": "board-pack"})]
+    assert len(await api.app.state.session_store.get_events(master.id, types=[EventType.SKILL_INVOKED])) == 1
+
+
+@pytest.mark.parametrize("text, ran", [
+    ("/cfo Check the Q3 margins", (EventType.EXPERT_DELEGATION, {"expert": "cfo"})),
+    ("Draft the Q3 pack", None),
+], ids=["expert", "plain"])
+async def test_a_report_wake_runs_nothing_the_users_last_message_asked_for(api, monkeypatch, text, ran):
+    master = await reported_after(api, text, ran)
+    harness, handed = waking(api, monkeypatch)
+    dispatch = skills_answering(harness)
+    await harness.wake(master.id)
+    dispatch.assert_not_awaited()
+    assert {"role": "user", "content": text} in handed[0]

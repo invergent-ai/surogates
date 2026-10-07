@@ -264,6 +264,29 @@ async def expand_slash_skill(
     )
 
 
+async def expand_skill_again(
+    *,
+    text: str,
+    tools: Any,
+    tenant: Any,
+    session_id: str,
+    api_client: Any | None,
+    session_factory: Any | None,
+    session_config: dict[str, Any] | None = None,
+) -> str | None:
+    """The body *text* expands to, for a later wake that replays a message
+    an earlier wake ran as a skill.  Only the skill's path: an expert's
+    consultation never runs twice."""
+    parsed = parse_slash_command(text)
+    if parsed is None:
+        return None
+    expansion = await _expand_skill(
+        name=parsed[0], args=parsed[1], tools=tools, tenant=tenant, session_id=session_id,
+        api_client=api_client, session_factory=session_factory, session_config=session_config,
+    )
+    return None if expansion is None else expansion[0]
+
+
 async def _expand_skill(
     *,
     name: str,
