@@ -23,6 +23,7 @@ from surogates.browser.client import KernelBrowserClient
 from surogates.browser.control import BrowserControlStore
 from surogates.browser.pool import BrowserPool
 from surogates.browser.serialize import render_markdown
+from surogates.sandbox.copy_files import write_copy, writes_to_copy
 
 from surogates.storage.tenant import (
     boundary_workspace_key,
@@ -966,6 +967,8 @@ async def _browser_screenshot_handler(
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
     storage: Any | None = None,
+    sandbox_pool: Any | None = None,
+    task_id: str | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -991,7 +994,9 @@ async def _browser_screenshot_handler(
         )
 
     relative_path = _new_screenshot_path()
-    browser_save_path = f"/workspace/{relative_path}" if workspace_path else None
+    # A thread's screenshot goes to its copy alone: the browser's own mount is the real files.
+    copy = writes_to_copy(sandbox_pool, task_id, session_config)
+    browser_save_path = f"/workspace/{relative_path}" if workspace_path and not copy else None
     result_path = _workspace_result_path(
         workspace_path=workspace_path,
         storage_bucket=storage_bucket,
@@ -1016,14 +1021,22 @@ async def _browser_screenshot_handler(
             )
 
     png_bytes = result["png_bytes"]
-    saved = await _save_screenshot_to_storage(
-        png_bytes,
-        storage=storage,
-        session_id=session_id,
-        session_config=session_config,
-        relative_path=relative_path,
-    )
-    if saved is None and not saved_in_browser:
+    if copy:
+        try:
+            await write_copy(sandbox_pool, task_id, relative_path, png_bytes)
+            saved = relative_path
+        except ValueError as exc:
+            logger.warning("Could not save browser screenshot to the thread's copy: %s", exc)
+            saved = None
+    else:
+        saved = await _save_screenshot_to_storage(
+            png_bytes,
+            storage=storage,
+            session_id=session_id,
+            session_config=session_config,
+            relative_path=relative_path,
+        )
+    if saved is None and not saved_in_browser and not copy:
         saved = _save_screenshot_to_workspace(
             png_bytes,
             workspace_path=workspace_path,

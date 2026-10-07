@@ -76,6 +76,7 @@ from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
 from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
+from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal
 from surogates.harness.tool_schemas import (
@@ -3264,6 +3265,10 @@ class AgentHarness(
                     session.id, path,
                 )
                 return None
+            owner = sandbox_session_key(session)
+            if has_copy(self._sandbox_pool, owner):
+                # A thread sees the image as its copy has it.
+                return await read_copy(self._sandbox_pool, owner, path) or None
             root_id = workspace_root_id(session)
             key = boundary_workspace_key(cfg, session, root_id, path)
             data = await self._storage.read(bucket, key)

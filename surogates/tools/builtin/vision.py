@@ -16,6 +16,7 @@ import httpx
 
 from surogates.harness.image_shrink import shrink_image_parts_in_messages
 from surogates.harness.message_utils import message_to_dict
+from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.storage.tenant import boundary_workspace_key, workspace_session_shim
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.url_safety import is_safe_url
@@ -111,6 +112,8 @@ async def _vision_analyze_handler(arguments: dict[str, Any], **kwargs: Any) -> s
             storage=kwargs.get("storage"),
             session_id=kwargs.get("session_id"),
             session_config=kwargs.get("session_config"),
+            sandbox_pool=kwargs.get("sandbox_pool"),
+            owner=kwargs.get("task_id"),
         )
     except ValueError as exc:
         return _json_error(str(exc))
@@ -204,6 +207,8 @@ async def _image_ref_to_data_url(
     storage: Any | None = None,
     session_id: Any | None = None,
     session_config: dict[str, Any] | None = None,
+    sandbox_pool: Any | None = None,
+    owner: Any | None = None,
 ) -> tuple[str, str]:
     if image_ref.startswith("data:image/"):
         return _validate_data_url(image_ref), "data_url"
@@ -230,7 +235,11 @@ async def _image_ref_to_data_url(
                 relative_path,
             )
             try:
-                data = await storage.read(storage_bucket, key)
+                if has_copy(sandbox_pool, owner):
+                    # A thread sees the image as its copy has it.
+                    data = await read_copy(sandbox_pool, owner, relative_path)
+                else:
+                    data = await storage.read(storage_bucket, key)
             except KeyError:
                 raise ValueError(f"Image file not found: {image_ref}") from None
             if len(data) > _MAX_IMAGE_BYTES:
