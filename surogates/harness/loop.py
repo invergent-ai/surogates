@@ -1624,11 +1624,7 @@ class AgentHarness(
                 # pod, and lets it go itself once it is done.
                 if await put_back_settled(owner):
                     try:
-                        held = self._sandbox_pool.holds_copy(owner)
                         await asyncio.shield(self._sandbox_pool.destroy_for_session(owner))
-                        # The turn's retry, if it comes here, is told its copy was made afresh.
-                        if held:
-                            self._sandbox_pool.mark_copy_remade(owner)
                     except BaseException:
                         logger.warning("Could not let the copy of %s go", session_id, exc_info=True)
 

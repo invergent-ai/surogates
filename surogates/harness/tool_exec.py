@@ -180,12 +180,20 @@ async def _build_session_sandbox_spec(
     return sandbox_spec
 
 
-#: The first tool result after a thread's pod was remade mid-turn.
+#: The first tool result on a thread's copy made afresh, when work it did
+#: since its last landing was in a copy that is gone.
 COPY_REMADE = (
     "[This thread's copy of the project's files was made again from the project's "
-    "files: its pod stopped.  The changes this turn made before now are gone; make "
-    "again any that are still needed.]"
+    "files: its pod stopped before the changes made since the thread last finished "
+    "a turn could land.  Those changes are gone; make again any that are still needed.]"
 )
+
+
+async def _copy_lost_work(store: Any, session_id: Any) -> bool:
+    """Whether the thread ran steps since its last turn end, the landing's: their changes were in a copy now gone."""
+    ends = await store.get_events(session_id, types=[EventType.SESSION_COMPLETE])
+    after = ends[-1].id if ends else None
+    return bool(await store.get_events(session_id, after=after, limit=1, types=[EventType.TOOL_RESULT]))
 
 
 async def _snapshot_copy(
@@ -1842,11 +1850,13 @@ async def _run_single_tool(
         maybe_persist_tool_result,
     )
 
-    # A thread is told once, by the next step's result whatever the tool,
-    # that its copy was made again: its pod stopped mid-turn.
+    # A thread on a copy just made is told, by that step's result whatever the
+    # tool, when the log says work since its last landing was in a copy now
+    # gone: its pod stopped mid-turn, or the turn was cut off and resumed, on
+    # this worker or another.
     if sandbox_pool is not None and is_project_thread(session.config):
         from surogates.sandbox.pool import sandbox_session_key
-        if sandbox_pool.copy_remade(sandbox_session_key(session)):
+        if sandbox_pool.copy_fresh(sandbox_session_key(session)) and await _copy_lost_work(store, session.id):
             result_content = f"{COPY_REMADE}\n\n{result_content}"
 
     spill_pool = device_call if device_call is not None else sandbox_pool

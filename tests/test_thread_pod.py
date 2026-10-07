@@ -264,12 +264,13 @@ async def test_a_pod_whose_real_files_came_unmounted_lands_nothing(tmp_path):
     assert list(answer) == ["error"] and "not mounted" in answer["error"]
 
 
-async def test_a_copy_remade_is_told_only_within_the_turn_whose_pod_it_was(pods):
+async def test_a_pool_says_once_that_it_made_a_copy_and_never_after_the_turn(pods):
     pool = SandboxPool(pods)
     spec = SandboxSpec(env={"PROJECT_DIR": "/project", "HISTORY_THREAD": "t1", "USER_ID": "u1"})
     await pool.ensure("t1", spec)
+    assert (pool.copy_fresh("t1"), pool.copy_fresh("t1")) == (True, False)
     await pods.destroy(next(iter(pods.pods)))  # its pod stops
     await pool.ensure("t1", spec)  # and its copy is made again
     await pool.release_for_session("t1")  # the turn ends untold
-    # A later turn on this worker is not told of an earlier turn's copy.
-    assert pool.copy_remade("t1") is False
+    # A later turn on this worker hears nothing of an earlier turn's copy.
+    assert pool.copy_fresh("t1") is False

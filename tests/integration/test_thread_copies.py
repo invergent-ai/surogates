@@ -687,6 +687,8 @@ async def test_a_crashed_turns_retry_is_told_its_copy_was_made_fresh(api, monkey
 
     async def crashes_after_its_first_step(session, *_, **__):
         await open_pod(pool, session)
+        (pods.copies[str(session.id)] / "a.md").write_text("a")
+        await store.emit_event(session.id, EventType.TOOL_RESULT, {"tool_call_id": "c1", "name": "write_file", "content": "{}"})
         raise RuntimeError("the worker crashed mid-step")
 
     harness._run_loop = crashes_after_its_first_step
@@ -697,7 +699,7 @@ async def test_a_crashed_turns_retry_is_told_its_copy_was_made_fresh(api, monkey
         calling(("write_file", {"path": "a.md", "content": "a"})),
         _final_response("Done."),
     ], pool=pool)
-    [first] = [e.data["content"] for e in await store.get_events(thread.id, types=[EventType.TOOL_RESULT])]
+    first = [e.data["content"] for e in await store.get_events(thread.id, types=[EventType.TOOL_RESULT])][-1]
     assert first.startswith("[This thread's copy of the project's files was made again"), first
 
 
@@ -781,3 +783,34 @@ async def test_a_cut_off_turns_slow_put_back_finishes_before_its_pod_goes(api, m
     # Every applied file was put back: no half-landed turn, and then the pod went.
     assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "notes.txt"]
     assert pods.pods == {}
+
+
+async def test_a_turn_resumed_on_another_worker_is_told_its_copy_is_fresh_and_a_later_turn_is_not(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store = api.app.state.session_store
+    first_worker, second_worker = SandboxPool(pods), SandboxPool(pods)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Edit the report."})
+
+    async def a_step_then_the_lease_goes(session, *_, **__):
+        await open_pod(first_worker, session)
+        (pods.copies[str(session.id)] / "a.md").write_text("a")
+        await store.emit_event(session.id, EventType.TOOL_RESULT, {"tool_call_id": "c1", "name": "write_file", "content": "{}"})
+        raise asyncio.CancelledError  # the lease went to another worker
+
+    with pytest.raises(asyncio.CancelledError):
+        await a_waking_thread_harness(api, monkeypatch, first_worker, a_step_then_the_lease_goes).wake(thread.id)
+
+    async def last_result() -> str:
+        return [e.data["content"] for e in await store.get_events(thread.id, types=[EventType.TOOL_RESULT])][-1]
+
+    # The worker that took the lease resumes the turn on a copy made afresh, and is told.
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "b.md", "content": "b"})), _final_response("Done."),
+    ], pool=second_worker)
+    assert (await last_result()).startswith("[This thread's copy of the project's files was made again")
+    # A later turn of the thread, on the first worker, has lost nothing, and is not told.
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Now the budget."})
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "c.md", "content": "c"})), _final_response("Done."),
+    ], pool=first_worker)
+    assert not (await last_result()).startswith("[This thread's copy")

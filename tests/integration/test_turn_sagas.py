@@ -145,7 +145,7 @@ async def test_a_stop_whose_sandbox_cannot_be_set_up_still_ends_its_saga(api, mo
     pool = SimpleNamespace(
         ensure=AsyncMock(side_effect=RuntimeError("the pod is gone")),
         destroy_for_session=AsyncMock(),
-        copy_remade=lambda key: False,
+        copy_fresh=lambda key: False,
     )
     await a_turn(api, monkeypatch, chat, [remember, _final_response("Noted.")], pool=pool, during=stop)
     pool.ensure.assert_awaited_once()

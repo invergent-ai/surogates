@@ -66,9 +66,9 @@ class SandboxPool:
         self._locks: dict[str, asyncio.Lock] = {}
         # Guard for mutating the dicts themselves.
         self._global_lock = asyncio.Lock()
-        # Threads whose copy was made again from the real files, since their
-        # pod died: the next tool result says so.
-        self._remade: set[str] = set()
+        # Threads whose copy this pool has just made from the real files,
+        # not yet asked about: whether that loses work is the session's log's to say.
+        self._fresh: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -95,7 +95,6 @@ class SandboxPool:
         lock = await self._session_lock(session_id)
         async with lock:
             sandbox_id = self._mapping.get(session_id)
-            remade = False
 
             if sandbox_id is not None:
                 # Health-check the existing sandbox.
@@ -113,7 +112,6 @@ class SandboxPool:
                     session_id,
                     status.value,
                 )
-                remade = self.holds_copy(session_id)
                 await self._backend.destroy(sandbox_id)
 
             # Provision a new sandbox.
@@ -121,8 +119,8 @@ class SandboxPool:
             async with self._global_lock:
                 self._mapping[session_id] = sandbox_id
                 self._specs[session_id] = spec
-                if remade and "PROJECT_DIR" in spec.env:
-                    self._remade.add(session_id)
+                if "PROJECT_DIR" in spec.env:
+                    self._fresh.add(session_id)
             logger.info(
                 "Session %s mapped to sandbox %s", session_id, sandbox_id
             )
@@ -156,15 +154,11 @@ class SandboxPool:
             )
         return await self._backend.execute(sandbox_id, name, input)
 
-    def mark_copy_remade(self, session_id: str) -> None:
-        """Note that *session_id*'s next copy is made afresh: its last one was let go mid-turn."""
-        self._remade.add(session_id)
-
-    def copy_remade(self, session_id: str) -> bool:
-        """Whether *session_id*'s copy was made again since its pod died; asked once."""
-        if session_id not in self._remade:
+    def copy_fresh(self, session_id: str) -> bool:
+        """Whether this pool has just made *session_id*'s copy from the real files; asked once."""
+        if session_id not in self._fresh:
             return False
-        self._remade.discard(session_id)
+        self._fresh.discard(session_id)
         return True
 
     def holds_copy(self, session_id: str) -> bool:
@@ -184,8 +178,7 @@ class SandboxPool:
         lock = await self._session_lock(session_id)
         async with lock:
             self._specs.pop(session_id, None)
-            # Its turn has ended: a copy made again is no later turn's news.
-            self._remade.discard(session_id)
+            self._fresh.discard(session_id)
             return self._mapping.pop(session_id, None)
 
     async def destroy_released(
