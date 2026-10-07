@@ -334,20 +334,21 @@ async def test_a_worker_killed_while_putting_back_is_put_back_again_by_the_next_
             raise landing_module.LandingStepError("the pod's step timed out")
         return await call(sandbox_pool, owner, action, **arguments)
 
-    async def dies_before_a(it, *, sandbox_pool, session_id):
-        if session_id == str(first.id) and it.arguments.get("path") == "a.md":
-            killed.set()
-            raise asyncio.CancelledError  # notes.txt is put back; the row says a.md's put-back is under way
+    async def dies_after_a(it, *, sandbox_pool, session_id):
         if it.tool_name == "history.apply":
             put_back.append((session_id, it.arguments["path"]))
-        return await compensate(it, sandbox_pool=sandbox_pool, session_id=session_id)
+        result = await compensate(it, sandbox_pool=sandbox_pool, session_id=session_id)
+        if session_id == str(first.id) and it.arguments.get("path") == "a.md":
+            killed.set()
+            raise asyncio.CancelledError  # a.md is put back, but the row still says its put-back is under way
+        return result
 
     async def until_killed(write, *args, **kwargs):
         if not killed.is_set():
             await write(*args, **kwargs)
 
     monkeypatch.setattr(landing_module, "_call", z_fails)
-    monkeypatch.setattr(landing_module, "compensate_step", dies_before_a)
+    monkeypatch.setattr(landing_module, "compensate_step", dies_after_a)
     with monkeypatch.context() as patch:
         patch.setattr(landing_module, "save_landing", partial(until_killed, save))
         patch.setattr(landing_module, "touch_landing", partial(until_killed, touch))
@@ -362,13 +363,13 @@ async def test_a_worker_killed_while_putting_back_is_put_back_again_by_the_next_
         ("history.commit", None, "committed"), ("history.apply", "a.md", "compensating"),
         ("history.apply", "notes.txt", "compensated"), ("history.apply", "z.md", "failed"),
     ]
-    assert pods.real_names() == ["Report.docx", "a.md", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
     assert (pods.project / "notes.txt").read_text() == "v1 notes\n"
 
     await edited(pool, second, "echo by B > B.md")
     await ends(api, pool, second)
-    # The put-back the kill cut off runs again, and the one done does not: the landing is undone whole.
-    assert put_back == [(str(first.id), "notes.txt"), (str(second.id), "a.md")]
+    # The put-back the kill cut off runs again, over a file already back; the one done does not run again.
+    assert put_back == [(str(first.id), "notes.txt"), (str(first.id), "a.md"), (str(second.id), "a.md")]
     [row] = await rows(api, first)
     assert row.saga_state == "compensated"
     assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
