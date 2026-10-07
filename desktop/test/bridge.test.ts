@@ -30,13 +30,13 @@ describe("the bridge", () => {
     ["a look-alike host", { url: "https://agent.example.com.evil.com/", parent: null }],
     ["plain http on the agent's host", { url: "http://agent.example.com/", parent: null }],
     ["a frame that has gone", null],
-  ])("refuses a call from %s, and does nothing", async (_name, frame) => {
+  ])("refuses every call from %s, and does nothing", async (_name, frame) => {
     const made = calls();
-    const handlers = bridgeHandlers(ORIGIN, made);
-    await expect(handlers.getDevice!(frame as SenderFrame | null, "7")).rejects.toThrow("Not the agent's web client");
-    await expect(handlers.webSignIn!(frame as SenderFrame | null, "7")).rejects.toThrow("Not the agent's web client");
-    expect(made.getDevice).not.toHaveBeenCalled();
-    expect(made.webSignIn).not.toHaveBeenCalled();
+    // Each handler the bridge has, a later one too, with arguments that would pass its own checks.
+    for (const [name, handler] of Object.entries(bridgeHandlers(ORIGIN, made))) {
+      await expect(handler(frame as SenderFrame | null, "7", SESSION, "ask"), name).rejects.toThrow("Not the agent's web client");
+    }
+    for (const call of Object.values(made)) expect(call).not.toHaveBeenCalled();
   });
 
   it("passes each well-formed call on, with the window it came from", async () => {
