@@ -74,15 +74,18 @@ enum sg_child { CC_OTHER, CC_HOOKS, CC_CONFIG, CC_CFGLEAF, CC_MODULES, CC_WORKTR
 
 // any_hooks: a hooks component below this one; hk1 and hk2 lag it by one and two
 // components, so at a .git, hk2 leaves out modules/<name's first part> as protect.ts does.
-struct sg_state { int i; int child; int any_hooks; int hk1; int hk2; int leaf_config; int refused; };
+// dir: 1 when the path is a directory being moved (rename), else 0; moved_key: the path
+// is one a moved directory may not take or leave.
+struct sg_state { int i; int child; int any_hooks; int hk1; int hk2; int leaf_config; int dir; int moved_key; int refused; };
 
-SG_INLINE void sg_init(struct sg_state *s)
+SG_INLINE void sg_init(struct sg_state *s, int dir)
 {
-	s->i = 0; s->child = CC_OTHER; s->any_hooks = 0; s->hk1 = 0; s->hk2 = 0; s->leaf_config = 0; s->refused = 0;
+	s->i = 0; s->child = CC_OTHER; s->any_hooks = 0; s->hk1 = 0; s->hk2 = 0; s->leaf_config = 0;
+	s->dir = dir; s->moved_key = 0; s->refused = 0;
 }
 
 // Feed one component's match bits (leaf-first; i == 0 is the target). Returns 1 the
-// moment the path is refused. Branch-free (bitwise | and & on 0/1 terms) so that,
+// moment the path is refused (for a moved directory, sg_init's dir, more is refused). Branch-free (bitwise | and & on 0/1 terms) so that,
 // walked on BPF, the unknown bits do not fork the verifier into a state explosion.
 SG_INLINE int sg_step(struct sg_state *s, int bits)
 {
@@ -97,6 +100,11 @@ SG_INLINE int sg_step(struct sg_state *s, int bits)
 			((i == 1) & (child == CC_CFGLEAF)) |                // .git/config.worktree|commondir
 			((child == CC_MODULES) & (i >= 3) & (s->hk2 | s->leaf_config)) | // submodule
 			((child == CC_WORKTREES) & (i >= 3) & s->leaf_config))); // linked worktree config
+	// A moved directory carries its whole tree, which neither of its paths names: it may
+	// not take or leave a .claude leaf, nor a place at or under .git/modules or .git/worktrees.
+	s->moved_key |= ((i == 0) & ((bits & SB_CLAUDE) != 0)) |
+		(d & ((child == CC_MODULES) | (child == CC_WORKTREES)));
+	refuse |= s->dir & s->moved_key;
 	if (i == 0)
 		s->leaf_config = (bits & (SB_CONFIG | SB_CFGLEAF)) != 0;
 	s->hk2 = s->hk1;

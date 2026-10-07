@@ -18,15 +18,18 @@ char LICENSE[] SEC("license") = "GPL";
 #define ATTR_UID (1 << 1)
 #define ATTR_GID (1 << 2)
 #define ATTR_SIZE (1 << 3)
+#define S_IFMT 00170000
+#define S_IFDIR 0040000
 
 // Walk from the target up to the mount root (leaf-first, the order sg_step wants),
-// judging each component. One bounded pass, no array: sg_classify is out-of-line and
-// sg_step branch-free, so the walk stays within the verifier's budget at SG_WALK=12.
-static __noinline int judge(struct dentry *dentry)
+// judging each component (dir: as a directory being moved). One bounded pass, no array:
+// sg_classify is out-of-line and sg_step branch-free, so the walk stays within the
+// verifier's budget at SG_WALK=12.
+static __noinline int judge(struct dentry *dentry, int dir)
 {
 	struct sg_name nm;
 	struct sg_state st;
-	sg_init(&st);
+	sg_init(&st, dir);
 	for (int i = 0; i < SG_WALK; i++) {
 		const unsigned char *name = BPF_CORE_READ(dentry, d_name.name);
 		int len = BPF_CORE_READ(dentry, d_name.len);
@@ -55,12 +58,18 @@ static __noinline int share_sb(struct super_block *sb)
 	return BPF_CORE_READ(sb, s_magic) == FUSE_SUPER_MAGIC;
 }
 
-static __noinline int judge_dentry(struct super_block *sb, struct dentry *dentry)
+static __noinline int judge_dentry(struct super_block *sb, struct dentry *dentry, int dir)
 {
 	__u32 uid = bpf_get_current_uid_gid();
 	if (uid < FIRST_UID || !dentry || !share_sb(sb))
 		return 0;
-	return judge(dentry);
+	return judge(dentry, dir);
+}
+
+// A negative dentry (a rename's new name, mostly) has no inode, and reads as no directory.
+static __always_inline int is_dir(struct dentry *dentry)
+{
+	return (BPF_CORE_READ(dentry, d_inode, i_mode) & S_IFMT) == S_IFDIR;
 }
 
 // judge_dentry returns 0 (allow) or 1 (refuse). The verifier does not range-track a
@@ -78,51 +87,53 @@ static __always_inline int deny(int r)
 SEC("lsm/inode_create")
 int BPF_PROG(on_create, struct inode *dir, struct dentry *dentry, umode_t mode)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(dir, i_sb), dentry));
+	return DENY(judge_dentry(BPF_CORE_READ(dir, i_sb), dentry, 0));
 }
 
 SEC("lsm/path_mkdir")
 int BPF_PROG(on_mkdir, const struct path *dir, struct dentry *dentry, umode_t mode)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry));
+	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
 }
 
 SEC("lsm/path_symlink")
 int BPF_PROG(on_symlink, const struct path *dir, struct dentry *dentry, const char *old)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry));
+	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
 }
 
 SEC("lsm/path_link")
 int BPF_PROG(on_link, struct dentry *old, const struct path *dir, struct dentry *dentry)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry));
+	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
 }
 
 SEC("lsm/path_unlink")
 int BPF_PROG(on_unlink, const struct path *dir, struct dentry *dentry)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry));
+	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
 }
 
 SEC("lsm/path_rmdir")
 int BPF_PROG(on_rmdir, const struct path *dir, struct dentry *dentry)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry));
+	return DENY(judge_dentry(BPF_CORE_READ(dir, dentry, d_sb), dentry, 0));
 }
 
 // ||, not |: the verifier then walks the new path only where the old one was allowed.
 // With |, it walks it once for each way the first walk returned, past its 1 M budget.
+// A directory moved (either one, as an exchange moves both) is judged as one on both paths.
 SEC("lsm/path_rename")
 int BPF_PROG(on_rename, const struct path *odir, struct dentry *od, const struct path *ndir, struct dentry *nd, unsigned int flags)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(od, d_sb), od) || judge_dentry(BPF_CORE_READ(nd, d_sb), nd));
+	int dir = is_dir(od) | is_dir(nd);
+	return DENY(judge_dentry(BPF_CORE_READ(od, d_sb), od, dir) || judge_dentry(BPF_CORE_READ(nd, d_sb), nd, dir));
 }
 
 SEC("lsm/path_truncate")
 int BPF_PROG(on_truncate, const struct path *path)
 {
-	return DENY(judge_dentry(BPF_CORE_READ(path, dentry, d_sb), BPF_CORE_READ(path, dentry)));
+	return DENY(judge_dentry(BPF_CORE_READ(path, dentry, d_sb), BPF_CORE_READ(path, dentry), 0));
 }
 
 SEC("lsm/file_open")
@@ -131,7 +142,7 @@ int BPF_PROG(on_open, struct file *file)
 	if (!(BPF_CORE_READ(file, f_mode) & FMODE_WRITE))
 		return 0;
 	struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
-	return DENY(judge_dentry(BPF_CORE_READ(dentry, d_sb), dentry));
+	return DENY(judge_dentry(BPF_CORE_READ(dentry, d_sb), dentry, 0));
 }
 
 SEC("lsm/inode_setattr")
@@ -140,5 +151,5 @@ int BPF_PROG(on_setattr, struct mnt_idmap *idmap, struct dentry *dentry, struct 
 	unsigned int valid = BPF_CORE_READ(attr, ia_valid);
 	if (!(valid & (ATTR_MODE | ATTR_UID | ATTR_GID | ATTR_SIZE)))
 		return 0;
-	return DENY(judge_dentry(BPF_CORE_READ(dentry, d_sb), dentry));
+	return DENY(judge_dentry(BPF_CORE_READ(dentry, d_sb), dentry, 0));
 }
