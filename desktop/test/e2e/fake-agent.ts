@@ -84,6 +84,11 @@ export class FakeAgent {
   // The user's inbox, by item id, and the inbox streams open on it.
   readonly inbox = new Map<number, Record<string, unknown>>();
   readonly inboxStreams = new Set<ServerResponse>();
+  // Each chat's title, the event streams open on each chat, what each asked for, and the last event id.
+  readonly titles = new Map<string, string>();
+  readonly chatStreams = new Map<string, Set<ServerResponse>>();
+  readonly chatsAsked: string[] = [];
+  private lastEvent = 100;
   readonly server: Server = createServer((request, response) => void this.answer(request, response));
   private linked = false;
 
@@ -148,6 +153,29 @@ export class FakeAgent {
       this.link.token = ROTATED;
       return json(response, 200, { id: this.link.identity.device_id, name: "Laptop", token: ROTATED });
     }
+    const events = /^\/api\/v1\/sessions\/([^/?]+)\/events\?(.*)$/.exec(path);
+    if (events && bearer) {
+      const [, chat, query] = events as unknown as [string, string, string];
+      this.chatsAsked.push(`${chat}?${query}`);
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(": connected\r\n\r\n");
+      // A chat between its turns is completed, as the agent leaves one: a stream that does not watch ends there.
+      if (new URLSearchParams(query).get("watch") !== "1") {
+        response.end(`event: session.done\r\ndata: ${JSON.stringify({ reason: "completed", status: "completed" })}\r\n\r\n`);
+        return;
+      }
+      response.write(`id: ${this.lastEvent}\r\nevent: stream.start\r\ndata: {}\r\n\r\n`);
+      const open = this.chatStreams.get(chat) ?? new Set();
+      open.add(response);
+      this.chatStreams.set(chat, open);
+      response.on("close", () => open.delete(response));
+      return;
+    }
+    const chat = /^\/api\/v1\/sessions\/([^/?]+)\?agent_id=(.*)$/.exec(path);
+    if (chat && bearer) {
+      if (chat[2] !== this.config.agent_id) return json(response, 400, { detail: "no agent_id in request" });
+      return json(response, 200, { id: chat[1], title: this.titles.get(chat[1]!) ?? null });
+    }
     if (path.startsWith("/api/v1/inbox") && bearer) {
       const asked = new URL(path, "http://agent");
       // As the agent answers on an address with no subdomain of its own: the agent named, or none.
@@ -189,6 +217,20 @@ export class FakeAgent {
     this.inbox.set(id, { id, status: "pending", ...item });
     for (const stream of this.inboxStreams) stream.write(`event: item\r\ndata: ${JSON.stringify({ item_id: id, kind: item.kind })}\r\n\r\n`);
     return id;
+  }
+
+  /** A turn of *chat* ends, as the agent tells it on the chat's watching streams. */
+  turnEnds(chat: string): void {
+    this.lastEvent += 1;
+    for (const stream of this.chatStreams.get(chat) ?? []) stream.write(`id: ${this.lastEvent}\r\nevent: session.complete\r\ndata: {}\r\n\r\n`);
+  }
+
+  /** End every chat's stream, as a restart of the agent does. */
+  dropChats(): void {
+    for (const open of this.chatStreams.values()) {
+      for (const stream of open) stream.end();
+      open.clear();
+    }
   }
 
   /** End every inbox stream, as a restart of the agent does. */

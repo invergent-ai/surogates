@@ -1,8 +1,9 @@
 // What the agent tells this computer's user while Surogate's window is away (spec, Section 8),
 // read in the main process on the app's own sign-in: each new item of their inbox, which is a
-// question, an approval, something to do, a check-in or a chat that finished. Each stream
-// reconnects with the device link's backoff, and one silent for longer than the agent's pings
-// leave between them is taken as dropped.
+// question, an approval, something to do, a check-in or a chat that finished, and the end of
+// each turn of the chat the window shows, which the agent leaves out of the inbox while a page
+// streams that chat. Each stream reconnects whenever it closes, with the device link's backoff,
+// and one silent for longer than the agent's pings leave between them is taken as dropped.
 
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -14,6 +15,8 @@ export type Api = (path: string, init?: RequestInit) => Promise<Response>;
 
 // sse-starlette pings every 15 s: a stream silent this long has dropped.
 export const SILENCE_MS = 45_000;
+// A stream held this long did its work: one that closes after it reconnects at once, one that closes sooner backs off.
+const HELD_MS = 30_000;
 
 export interface FollowOptions {
   api: Api;
@@ -40,6 +43,7 @@ export function follow(options: FollowOptions, path: () => string, onEvent: (eve
     while (!stopped.signal.aborted) {
       const dropped = new AbortController();
       let silence: NodeJS.Timeout | undefined;
+      let opened = 0;
       const heard = () => {
         clearTimeout(silence);
         silence = setTimeout(() => dropped.abort(), options.silenceMs ?? SILENCE_MS);
@@ -49,7 +53,7 @@ export function follow(options: FollowOptions, path: () => string, onEvent: (eve
         const asked = path();
         const response = await options.api(asked, { signal: AbortSignal.any([stopped.signal, dropped.signal]) });
         if (!response.ok || !response.body) throw new Error(`The agent did not open ${asked} (HTTP ${response.status})`);
-        attempt = 0;
+        opened = Date.now();
         await readEvents(response.body, onEvent, heard);
       } catch (error) {
         // A stop ends it; a silence is a drop, said by nothing more than the reconnection.
@@ -57,6 +61,7 @@ export function follow(options: FollowOptions, path: () => string, onEvent: (eve
         if (!dropped.signal.aborted) options.onError(error);
       } finally {
         clearTimeout(silence);
+        if (opened !== 0 && Date.now() - opened >= HELD_MS) attempt = 0;
       }
       await sleep((options.delayMs ?? reconnectDelayMs)(attempt++), undefined, { signal: stopped.signal }).catch(() => {});
     }
@@ -105,6 +110,34 @@ export function followInbox(options: FollowOptions & { onItem(item: InboxItem): 
       void tell(data!.item_id as number);
     }
   });
+}
+
+// What ends a chat's follow: the chat archived, or gone. Any other close is followed by a reconnection.
+const GONE: ReadonlySet<unknown> = new Set(["archived", "session_not_found"]);
+
+/**
+ * Follow chat *sessionId* across its turns (watch=1): *onTurnEnd* hears the chat's title each time one
+ * of its turns ends. It starts at the chat's newest event, and takes up after the last event it heard,
+ * stream.start's included, whenever its stream closes. Only a chat archived or gone ends it, short of
+ * the returned stop.
+ */
+export function followChat(options: FollowOptions & { sessionId: string; onTurnEnd(title: string): void }): () => void {
+  let after = -1;
+  const told = async (): Promise<void> => {
+    try {
+      const response = await options.api(`/api/v1/sessions/${options.sessionId}?agent_id=${encodeURIComponent(options.agentId)}`);
+      const { title } = response.ok ? (parsed(await response.text()) ?? {}) : {};
+      options.onTurnEnd(typeof title === "string" && title !== "" ? title : "A chat");
+    } catch (error) {
+      options.onError(error);
+    }
+  };
+  const stop = follow(options, () => `/api/v1/sessions/${options.sessionId}/events?after=${after}&watch=1`, (event) => {
+    if (event.id !== null && /^\d+$/.test(event.id)) after = Number(event.id);
+    if (event.type === "session.complete") void told();
+    else if (event.type === "session.done" && GONE.has(parsed(event.data)?.reason)) stop();
+  });
+  return stop;
 }
 
 // More than this many items close together are told as one notice: a night asleep, or an agent's own burst.

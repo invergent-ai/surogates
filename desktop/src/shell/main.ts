@@ -23,7 +23,7 @@ import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../vm/client.js";
 import { VmExecutor } from "../vm/executor.js";
 import { openAbout } from "./about.js";
-import { BURST, Burst, followInbox, type InboxItem } from "./agent-events.js";
+import { BURST, Burst, followChat, followInbox, type InboxItem } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
@@ -1018,6 +1018,11 @@ function open(window: MainWindow, agent: Agent): void {
   contents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
     if (isMainFrame) navigated(url);
   });
+  // The chat it shows, followed for the end of its turns while the window is away.
+  contents.on("did-navigate", (_event, url) => showing(url));
+  contents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
+    if (isMainFrame) showing(url);
+  });
 }
 
 async function confirmAgent(agent: Agent, typed: string): Promise<boolean> {
@@ -1114,9 +1119,26 @@ function tellItem(item: InboxItem): void {
   notifications?.show({ tag: "inbox", title: `${told.length} new items in your inbox`, body: "Open your inbox to see them.", open: () => openPage("/inbox") });
 }
 
-// What the agent tells, followed on the app's own sign-in, for whoever is signed in now: their inbox.
-// What comes for a sign-in that has ended meanwhile is told no more.
+function tellTurnEnd(sessionId: string, title: string): void {
+  if (!away()) return;
+  notifications?.show({ tag: `chat:${sessionId}`, title, body: "Finished.", open: () => openPage(`/chat/${sessionId}`) });
+}
+
+// The chat the web client shows: while the window is away, it is followed to the end of each turn,
+// which the agent leaves out of the inbox while the window's own page streams the chat.
+let chatShown: string | null = null;
+
+function showing(url: string): void {
+  const path = new URL(url).pathname;
+  chatShown = path.startsWith("/chat/") && webClientPath(path) ? path.slice("/chat/".length) : null;
+  followAgent();
+}
+
+// What the agent tells, followed on the app's own sign-in, for whoever is signed in now: their
+// inbox, and the chat the web client shows while the window is away. What comes for a sign-in that
+// has ended meanwhile is told no more.
 let inbox: { session: DesktopSession; stop(): void } | null = null;
+let chat: { session: DesktopSession; id: string; stop(): void } | null = null;
 
 function followAgent(): void {
   const session = signedIn;
@@ -1132,6 +1154,20 @@ function followAgent(): void {
         },
       }),
     };
+  }
+  const watched = session && away() ? chatShown : null;
+  if (chat?.session !== session || chat?.id !== watched) {
+    chat?.stop();
+    chat = session && watched !== null
+      ? {
+        session, id: watched,
+        stop: followChat({
+          api, agentId, onError: report, sessionId: watched, onTurnEnd: (title) => {
+            if (signedIn === session) tellTurnEnd(watched, title);
+          },
+        }),
+      }
+      : null;
   }
 }
 
@@ -1617,6 +1653,11 @@ if (!app.requestSingleInstanceLock()) {
     main = new MainWindow({ states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed });
     wire(main, page);
     main.window.on("focus", () => void refreshProjects());
+    // The window going away, or coming back, starts or ends the follow of the chat it shows.
+    app.on("browser-window-focus", () => followAgent());
+    app.on("browser-window-blur", () => followAgent());
+    main.window.on("show", () => followAgent());
+    main.window.on("hide", () => followAgent());
     // Revocations owed from an earlier run, whatever agent they were for: each keeps its agent's address, device and token.
     const stored = credentials.list();
     for (const owed of stored.filter((credential) => credential.revoking)) {

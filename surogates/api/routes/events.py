@@ -35,6 +35,9 @@ router = APIRouter()
 # Only truly terminal statuses close the SSE stream. "failed" is excluded
 # because users can retry by sending a new message (which resets to active).
 _TERMINAL_STATUSES = frozenset({"completed", "archived"})
+# What ends a watching stream (``watch=1``). A chat is ``completed`` between its
+# turns, and a watcher waits through that for the next turn.
+_WATCH_TERMINAL_STATUSES = frozenset({"archived"})
 
 # Maximum time (seconds) an SSE connection stays open before the server
 # closes it gracefully.  Clients are expected to reconnect.
@@ -280,13 +283,22 @@ async def stream_events(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
     after: int = 0,
+    watch: bool = False,
 ) -> EventSourceResponse:
     """Stream session events via Server-Sent Events.
 
     The client provides ``after`` (the last event ID it received) and the
-    server yields all subsequent events as they appear.  When the session
+    server yields all subsequent events as they appear.  ``after=-1`` starts
+    at the session's newest event, with none of its past.  When the session
     reaches a terminal status, a ``session.done`` event is emitted and the
     stream closes.
+
+    ``watch=1`` follows the session across its turns, as Surogate Desktop
+    follows the chat its window shows: only ``archived``, or a session gone,
+    ends it, and ``completed`` between two turns does not. Its first event,
+    ``stream.start``, carries the cursor it starts from as its id, so that a
+    watcher that reconnects, at ``stream.timeout`` or after a drop, takes up
+    there with ``after=<that id>``.
     """
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
@@ -314,7 +326,9 @@ async def stream_events(
     redis = getattr(request.app.state, "redis", None)
 
     async def event_generator():  # noqa: ANN202
-        cursor = after
+        # after=-1: from the session's newest event on, with nothing to replay.
+        from_now = after < 0
+        cursor = await asyncio.shield(store.last_event_id(session_id)) if from_now else after
         elapsed = 0.0
         # Drop llm.delta events while draining the backlog.  Deltas are
         # per-token chunks that exist only to animate live streaming; the
@@ -325,7 +339,8 @@ async def stream_events(
         # time) so the rows never leave the database.  Once we catch up
         # (first empty fetch), we switch to live mode and forward deltas
         # unmodified.
-        in_replay = True
+        in_replay = not from_now
+        terminal = _WATCH_TERMINAL_STATUSES if watch else _TERMINAL_STATUSES
         # Wide replay batch so catching up on a long conversation takes 1-2
         # DB round-trips instead of hundreds.  Live polling uses the narrow
         # batch since there's rarely more than a handful of pending events.
@@ -345,6 +360,8 @@ async def stream_events(
             # Send an immediate comment to establish the SSE connection
             # (browsers show the request as "pending" until first byte).
             yield {"comment": "connected"}
+            if watch:
+                yield {"id": str(cursor), "event": "stream.start", "data": "{}"}
             # Last time any byte was sent to the client. A research/mission
             # coordinator goes idle for minutes between wakes (dispatch ->
             # wait for executors -> harvest); without a periodic keepalive
@@ -401,7 +418,7 @@ async def stream_events(
                         }
                         return
 
-                    if session.status in _TERMINAL_STATUSES:
+                    if session.status in terminal:
                         # Race guard: a POST /messages currently in flight
                         # commits SESSION_RESUME and publishes on
                         # ``surogates:session:{id}``. We subscribed above so
@@ -447,7 +464,7 @@ async def stream_events(
                                 }
                                 return
 
-                        if session.status in _TERMINAL_STATUSES:
+                        if session.status in terminal:
                             yield {
                                 "event": "session.done",
                                 "data": json.dumps(

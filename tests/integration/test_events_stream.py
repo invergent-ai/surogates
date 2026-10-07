@@ -97,37 +97,52 @@ async def _create_completed_session(session_factory, session_store):
     return session, token
 
 
-async def _read_sse_events(response, *, until_types: set[str], deadline_s: float):
+async def _read_sse_events(
+    response,
+    *,
+    until_types: set[str],
+    deadline_s: float,
+    ids: list[str | None] | None = None,
+    comments: list[str] | None = None,
+):
     """Consume an SSE response and return a list of ``(event, data)`` pairs.
 
     Returns once **any** event in ``until_types`` has been observed (so the
     test can close the stream and assert), or once ``deadline_s`` has
     elapsed (so a hung handler still surfaces as a failure rather than
-    blocking forever).
+    blocking forever). ``ids``, when given, gets each event's id, and
+    ``comments`` each comment line's text.
     """
     received: list[tuple[str, str]] = []
     event_type = ""
+    event_id: str | None = None
     data_lines: list[str] = []
 
     async def _consume():
-        nonlocal event_type, data_lines
+        nonlocal event_type, event_id, data_lines
         async for line in response.aiter_lines():
             if line == "":
                 if event_type:
                     received.append((event_type, "\n".join(data_lines)))
+                    if ids is not None:
+                        ids.append(event_id)
                     if event_type in until_types:
                         return
                 event_type = ""
+                event_id = None
                 data_lines = []
                 continue
             if line.startswith(":"):
-                # SSE comment (e.g. ``: connected``) — ignore.
+                # SSE comment (e.g. ``: connected``): no event.
+                if comments is not None:
+                    comments.append(line[1:].strip())
                 continue
             if line.startswith("event:"):
                 event_type = line.split(":", 1)[1].strip()
             elif line.startswith("data:"):
                 data_lines.append(line.split(":", 1)[1].lstrip())
-            # id:/retry: are not needed for the assertions here.
+            elif line.startswith("id:"):
+                event_id = line.split(":", 1)[1].strip()
 
     try:
         await asyncio.wait_for(_consume(), timeout=deadline_s)
@@ -302,3 +317,111 @@ async def test_keepalive_comment_on_idle_active_session(
     assert any("keepalive" in line for line in lines), (
         f"expected a keepalive comment on an idle active session, got: {lines[:30]}"
     )
+
+
+async def _completed_chat(session_factory, store: SessionStore):
+    """A chat between its turns, as the harness leaves one: an earlier turn, and ``completed``.
+
+    Returns the session, a user token, and the id of the earlier turn's ``session.complete``.
+    """
+    org_id = await create_org(session_factory)
+    user_id = uuid.uuid4()
+    await create_user(session_factory, org_id, user_id=user_id)
+    token = create_access_token(org_id, user_id, {"sessions:read", "sessions:write"})
+    session = await store.create_session(user_id=user_id, org_id=org_id, agent_id="test-agent")
+    await store.emit_event(session.id, EventType.USER_MESSAGE, {"content": "an earlier turn"})
+    last = await store.emit_event(session.id, EventType.SESSION_COMPLETE, {})
+    await store.update_session_status(session.id, "completed")
+    return session, token, last
+
+
+async def test_watch_follows_a_chat_from_its_newest_event_across_its_turns(
+    session_factory,
+    app,
+    client,
+    monkeypatch,
+):
+    """``after=-1&watch=1`` follows a chat that sits ``completed`` between turns.
+
+    Surogate Desktop follows the chat its window shows this way, for the end
+    of the next turn: the agent leaves that turn out of the inbox while a page
+    streams the chat. The stream names its starting cursor first, keeps its
+    keepalives through the idle wait, and gives the next turn, which flips the
+    chat to ``active`` and back to ``completed``, with none of the earlier one.
+    As in the race test above, the stream is cut short so the buffered
+    response comes back.
+    """
+    import surogates.api.routes.events as events_module
+    monkeypatch.setattr(events_module, "_MAX_STREAM_DURATION", 3)
+    monkeypatch.setattr(events_module, "_KEEPALIVE_INTERVAL", 0.2)
+
+    redis_store: SessionStore = app.state.session_store
+    session, token, last = await _completed_chat(session_factory, redis_store)
+
+    async def _next_turn():
+        # Past the grace window in which a stream without watch closes on ``completed``.
+        await asyncio.sleep(1.0)
+        await redis_store.update_session_status(session.id, "active")
+        await redis_store.emit_event(session.id, EventType.USER_MESSAGE, {"content": "the next turn"})
+        await redis_store.emit_event(session.id, EventType.SESSION_COMPLETE, {})
+        await redis_store.update_session_status(session.id, "completed")
+
+    ids: list[str | None] = []
+    comments: list[str] = []
+    turn = asyncio.create_task(_next_turn())
+    try:
+        async with client.stream(
+            "GET",
+            f"/v1/sessions/{session.id}/events?after=-1&watch=1",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as response:
+            assert response.status_code == 200
+            events = await _read_sse_events(
+                response,
+                until_types={"session.complete"},
+                deadline_s=6.0,
+                ids=ids,
+                comments=comments,
+            )
+    finally:
+        await turn
+
+    assert events == [
+        ("stream.start", "{}"),
+        ("user.message", '{"content": "the next turn"}'),
+        ("session.complete", "{}"),
+    ]
+    assert ids[0] == str(last)
+    assert "keepalive" in comments
+
+
+async def test_watch_ends_on_an_archived_chat(session_factory, app, client):
+    """A watching stream ends as any other once the chat is archived."""
+    redis_store: SessionStore = app.state.session_store
+    session, token, _last = await _completed_chat(session_factory, redis_store)
+    await redis_store.update_session_status(session.id, "archived")
+
+    async with client.stream(
+        "GET",
+        f"/v1/sessions/{session.id}/events?after=-1&watch=1",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as response:
+        events = await _read_sse_events(response, until_types={"session.done"}, deadline_s=3.0)
+
+    assert events[-1] == ("session.done", '{"reason": "archived", "status": "archived"}')
+
+
+async def test_without_watch_a_completed_chat_still_ends_its_stream(session_factory, app, client):
+    """Every other caller is as before: ``after=-1`` alone, on a chat between
+    turns, ends with ``session.done`` within the grace window."""
+    redis_store: SessionStore = app.state.session_store
+    session, token, _last = await _completed_chat(session_factory, redis_store)
+
+    async with client.stream(
+        "GET",
+        f"/v1/sessions/{session.id}/events?after=-1",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as response:
+        events = await _read_sse_events(response, until_types={"session.done"}, deadline_s=3.0)
+
+    assert events == [("session.done", '{"reason": "completed", "status": "completed"}')]

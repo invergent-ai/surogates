@@ -1653,6 +1653,15 @@ class SessionStore:
             if counts.get(event.id, 0) > 0:
                 event.data = {**event.data, "reasoning_delta_count": counts[event.id]}
 
+    async def last_event_id(self, session_id: UUID) -> int:
+        """The id of *session_id*'s newest event, or 0 when it has none."""
+
+        async with self._sf() as db:
+            newest = await db.scalar(
+                select(func.max(EventRow.id)).where(EventRow.session_id == session_id)
+            )
+        return newest or 0
+
     async def last_event_at(
         self,
         session_id: UUID,

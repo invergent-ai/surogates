@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { type Api, Burst, followInbox, type InboxItem } from "../src/shell/agent-events.js";
+import { type Api, Burst, followChat, followInbox, type InboxItem } from "../src/shell/agent-events.js";
 
 // The agent's routes as the app reads them: each stream opened is kept, for the test to send on or end.
 class FakeAgent {
   readonly streams: Array<{ path: string; send(text: string): void; end(): void; signal: AbortSignal }> = [];
   readonly items = new Map<number, Record<string, unknown>>();
+  readonly titles = new Map<string, string>();
   status = 200; // what the next stream opens with
   readonly api: Api = async (path, init) => {
     const item = /^\/api\/v1\/inbox\/(\d+)\?agent_id=a$/.exec(path);
@@ -13,6 +14,8 @@ class FakeAgent {
       const found = this.items.get(Number(item[1]));
       return found ? Response.json(found) : new Response(null, { status: 404 });
     }
+    const chat = /^\/api\/v1\/sessions\/([^/?]+)\?agent_id=a$/.exec(path);
+    if (chat) return Response.json({ id: chat[1], title: this.titles.get(chat[1]!) ?? null });
     if (this.status !== 200) {
       const status = this.status;
       this.status = 200;
@@ -98,6 +101,24 @@ describe("the inbox, followed", () => {
     stop();
   });
 
+  it("backs off a stream that keeps closing as it opens", async () => {
+    const agent = new FakeAgent();
+    const waits: number[] = [];
+    const stop = followInbox({
+      api: agent.api, agentId: "a", onError: () => {}, onItem: () => {}, delayMs: (attempt) => {
+        waits.push(attempt);
+        return 0;
+      },
+    });
+    for (let n = 1; n <= 3; n++) {
+      await until(() => agent.streams.length === n);
+      agent.streams[n - 1]!.end();
+    }
+    await until(() => waits.length === 3);
+    expect(waits).toEqual([0, 1, 2]);
+    stop();
+  });
+
   it("stops for good", async () => {
     const agent = new FakeAgent();
     const { stop } = following(agent);
@@ -105,6 +126,54 @@ describe("the inbox, followed", () => {
     stop();
     await settle();
     expect([agent.streams.length, agent.streams[0]!.signal.aborted]).toEqual([1, true]);
+  });
+});
+
+describe("the chat the window shows, followed", () => {
+  const CHAT = "7d2e0f8a-2b3c-4d5e-9f60-718293a4b5c6";
+  const following = (agent: FakeAgent, ended: string[]) => followChat({
+    api: agent.api, agentId: "a", onError: () => {}, delayMs: () => 0, sessionId: CHAT, onTurnEnd: (title) => ended.push(title),
+  });
+
+  it("tells the chat's title at the end of each turn, from its newest event on, and takes up where it was whenever its stream closes", async () => {
+    const agent = new FakeAgent();
+    agent.titles.set(CHAT, "Quarterly report");
+    const ended: string[] = [];
+    const stop = following(agent, ended);
+    await until(() => agent.streams.length === 1);
+    agent.streams[0]!.send("id: 5\r\nevent: stream.start\r\ndata: {}\r\n\r\n");
+    // As the agent ends a stream at its longest: the follow takes up after the start's cursor.
+    agent.streams[0]!.send('event: stream.timeout\r\ndata: {"reason": "max_duration_exceeded"}\r\n\r\n');
+    agent.streams[0]!.end();
+    await until(() => agent.streams.length === 2);
+    agent.streams[1]!.send("id: 7\r\nevent: llm.response\r\ndata: {}\r\n\r\nid: 8\r\nevent: session.complete\r\ndata: {}\r\n\r\n");
+    await until(() => ended.length === 1);
+    // A chat between turns, as an agent without watch tells it, is no end of the follow.
+    agent.streams[1]!.send('event: session.done\r\ndata: {"reason": "completed", "status": "completed"}\r\n\r\n');
+    agent.streams[1]!.end();
+    await until(() => agent.streams.length === 3);
+    agent.titles.delete(CHAT);
+    agent.streams[2]!.send("id: 12\r\nevent: session.complete\r\ndata: {}\r\n\r\n");
+    await until(() => ended.length === 2);
+    expect(agent.streams.map((stream) => stream.path)).toEqual([
+      `/api/v1/sessions/${CHAT}/events?after=-1&watch=1`,
+      `/api/v1/sessions/${CHAT}/events?after=5&watch=1`,
+      `/api/v1/sessions/${CHAT}/events?after=8&watch=1`,
+    ]);
+    expect(ended).toEqual(["Quarterly report", "A chat"]);
+    stop();
+  });
+
+  it("follows a chat archived, or gone, no more", async () => {
+    for (const reason of ["archived", "session_not_found"]) {
+      const agent = new FakeAgent();
+      following(agent, []);
+      await until(() => agent.streams.length === 1);
+      agent.streams[0]!.send(`event: session.done\r\ndata: {"reason": "${reason}"}\r\n\r\n`);
+      agent.streams[0]!.end();
+      await settle();
+      expect([agent.streams.length, agent.streams[0]!.signal.aborted], reason).toEqual([1, true]);
+    }
   });
 });
 

@@ -49,6 +49,10 @@ const shown = (shell: ElectronApplication) => shell.evaluate(({ BrowserWindow })
   BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.isVisible());
 
 const CHAT = "7d2e0f8a-2b3c-4d5e-9f60-718293a4b5c6";
+const OTHER = "8e3f1a9b-3c4d-4e6f-a071-8293a4b5c6d7";
+
+// The web client moves to *path*, as its own links move it.
+const moveTo = (client: Page, path: string) => client.evaluate((to) => history.pushState(null, "", to), path);
 
 // The window in front, with the keyboard, as the user brings it there.
 async function focus(shell: ElectronApplication): Promise<void> {
@@ -127,5 +131,34 @@ describe("the app's notifications", () => {
     expect(await page.textContent("#title")).toBe("Check the revenue figures");
     expect(await page.textContent("#to-project")).toBe("Quarterly report");
     expect(await page.$$eval(".section .thread", (found) => found.length)).toBeGreaterThan(0);
+  });
+
+  it("tell of a turn that ends in the chat the window shows, followed across its turns only while the window is away", async () => {
+    const client = await signedIn();
+    agent.titles.set(CHAT, "Quarterly report");
+    await moveTo(client, `/chat/${CHAT}`);
+    await focus(app!);
+    // In front, the window's own page tells the user: the app follows nothing.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(agent.chatsAsked).toEqual([]);
+    await hide(app!);
+    // From the chat's newest event on, through the turns to come: none of its earlier turns is told.
+    await expect.poll(() => agent.chatsAsked).toEqual([`${CHAT}?after=-1&watch=1`]);
+    agent.turnEnds(CHAT);
+    await expect.poll(() => notices(app!)).toEqual([{ title: "Quarterly report", body: "Finished." }]);
+    // The agent restarts: the follow takes up after the last event it heard.
+    agent.dropChats();
+    await expect.poll(() => agent.chatsAsked.at(-1), { timeout: 10_000 }).toBe(`${CHAT}?after=101&watch=1`);
+    agent.turnEnds(CHAT);
+    await expect.poll(async () => (await notices(app!)).length).toBe(2);
+    // Another chat in the centre: the first is followed no more.
+    await moveTo(client, `/chat/${OTHER}`);
+    await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(0);
+    await expect.poll(() => agent.chatsAsked.at(-1)).toBe(`${OTHER}?after=-1&watch=1`);
+    // The window in front again: nothing is followed.
+    await focus(app!);
+    await expect.poll(() => agent.chatStreams.get(OTHER)?.size).toBe(0);
+    await clickNotice(app!, 1);
+    await expect.poll(() => new URL(client.url()).pathname).toBe(`/chat/${CHAT}`);
   });
 });
