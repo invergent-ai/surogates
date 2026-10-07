@@ -334,9 +334,11 @@ function withdrawProjects(signedOut: boolean): void {
   changed();
 }
 
-// The account's own: its projects, the masters its page named, the open project and its pane.
+// The account's own: its projects, the masters its page named, the open project and its pane, and
+// why what it last asked for did not happen.
 function forgetAccount(): void {
   listed = [];
+  failure = null;
   beforeProjects = { kind: "web" };
   masters.clear();
   overview = null;

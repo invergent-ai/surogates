@@ -387,6 +387,19 @@ describe("an account's projects", () => {
     expect(await page.textContent("#user-name")).toBe(OTHER.name);
   });
 
+  it("leave the next account no failure line of theirs", async () => {
+    const { page, client } = await opened();
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: Served }).fakeProjects.refusal = "No such thread.";
+    });
+    await page.hover(`[data-thread="${IDLE}"]`);
+    await page.click(`[data-act="${IDLE}"]`);
+    await expect.poll(() => page.textContent("#failure")).toBe("No such thread.");
+    await client.evaluate((account) => window.surogateDesktop!.setAccount(account), OTHER);
+    await expect.poll(() => page.textContent("#user-name")).toBe(OTHER.name);
+    expect(await page.isVisible("#failure")).toBe(false);
+  });
+
   it("are forgotten, the open one with them, when another account signs in on the same page", async () => {
     const { page, client } = await opened();
     await client.evaluate(([project, account]) => {
