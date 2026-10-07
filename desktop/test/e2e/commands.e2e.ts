@@ -134,7 +134,10 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     const processes = tree(main).flatMap((pid) => {
       try {
         // Chromium writes its processes' command lines over as one string: read as words.
-        return [{ pid, exe: readlinkSync(`/proc/${pid}/exe`), args: readFileSync(`/proc/${pid}/cmdline`, "utf8").split(/[\0 ]/) }];
+        return [{
+          pid, exe: readlinkSync(`/proc/${pid}/exe`), args: readFileSync(`/proc/${pid}/cmdline`, "utf8").split(/[\0 ]/),
+          environ: readFileSync(`/proc/${pid}/environ`, "utf8").split("\0"),
+        }];
       } catch {
         return []; // gone meanwhile
       }
@@ -143,6 +146,10 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     expect(onNode.sort()).toEqual(["files/helper.js", "hosts/host.js"]);
     // Neither opens an inspector on SIGUSR1: the app's node has no fuse to refuse it.
     expect(processes.filter(({ exe }) => exe === realpathSync(NODE)).map(({ args }) => args.includes("--disable-sigusr1"))).toEqual([true, true]);
+    // Nothing the app starts takes ELECTRON_RUN_AS_NODE from it: its main drops it before it starts any.
+    // The main's own /proc environ is the one it was started with, which keeps it.
+    const inheriting = processes.filter(({ pid, environ }) => pid !== main && environ.some((entry) => entry.startsWith("ELECTRON_RUN_AS_NODE=")));
+    expect(inheriting.map(({ exe, args }) => `${exe.split("/").at(-1)} ${args.find((arg) => arg.startsWith("--type=")) ?? ""}`.trim())).toEqual([]);
     const plainElectron = processes.filter(({ exe, args }) => exe === realpathSync(ELECTRON) && !args.some((arg) => arg.startsWith("--type=")));
     expect(plainElectron.map(({ pid }) => pid)).toEqual([main]);
   });
