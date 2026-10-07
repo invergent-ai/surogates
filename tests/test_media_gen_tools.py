@@ -859,3 +859,43 @@ async def test_a_file_made_while_its_media_is_generated_is_kept_byte_for_byte(tm
         "Name a new file for the generated media, or delete this one first."
     )}
     assert target.read_bytes() == b"the user's own logo"
+
+
+@pytest.mark.asyncio
+async def test_a_video_too_large_for_a_local_folder_stops_downloading_once_past_its_cap(tmp_path, monkeypatch):
+    import httpx as _httpx
+
+    from surogates.tools.builtin import media_gen
+
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    monkeypatch.setattr(media_gen, "MAX_WRITE_BYTES", 1_000)
+    sent: list[int] = []
+
+    async def chunks():
+        for _ in range(10):
+            sent.append(500)
+            yield b"x" * 500
+
+    def handler(request):
+        if request.method == "POST":
+            return _httpx.Response(202, json={
+                "id": "job-9", "status": "completed", "unsigned_urls": ["https://openrouter.ai/api/v1/videos/job-9/content"],
+            })
+        return _httpx.Response(200, content=chunks())
+
+    _patch_video_transport(monkeypatch, handler)
+    folder = tmp_path.resolve() / "laptop"
+    folder.mkdir()
+    refused = json.loads(await media_gen._generate_video_handler(
+        {"prompt": "a long clip"}, media_gen=_video_cfg(), **_on_a_folder(folder),
+    ))
+    # What the folder's computer takes in one write: no more is held, or fetched.
+    assert refused == {"error": "Video download exceeds 1000 bytes"}
+    assert sum(sent) < 5_000
+    assert not (folder / "media").exists()
+    # The cloud's cap is its own, as before.
+    sent.clear()
+    saved = json.loads(await media_gen._generate_video_handler(
+        {"prompt": "a long clip"}, media_gen=_video_cfg(), workspace_path=str(tmp_path),
+    ))
+    assert (tmp_path / saved["path"]).read_bytes() == b"x" * 5_000

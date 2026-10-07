@@ -31,7 +31,7 @@ from uuid import uuid4
 
 import httpx
 
-from surogates.devices.workspace import DeviceOperationError, said
+from surogates.devices.workspace import MAX_WRITE_BYTES, DeviceOperationError, said
 from surogates.harness.message_utils import message_to_dict
 from surogates.sandbox.copy_files import TooLargeForCopy, write_copy, writes_to_copy
 from surogates.tools.builtin.artifact import artifact_client
@@ -558,7 +558,10 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
                 return _json_error(
                     "Video job completed but returned no download URL"
                 )
-            data = await _download_video(client, str(urls[0]))
+            # A local folder's computer takes no more in one write: past
+            # that, nothing more is fetched, or held here.
+            limit = _MAX_VIDEO_BYTES if kwargs.get("workspace_io") is None else MAX_WRITE_BYTES
+            data = await _download_video(client, str(urls[0]), limit=limit)
     except httpx.HTTPStatusError as exc:
         if _is_insufficient_credits(exc):
             return _json_error(_MEDIA_BUDGET_ERROR)
@@ -710,16 +713,16 @@ def _first_generated_image_url(response: Any) -> str:
     return str(((first.get("image_url") or {}).get("url")) or "")
 
 
-async def _download_video(client: httpx.AsyncClient, url: str) -> bytes:
+async def _download_video(client: httpx.AsyncClient, url: str, *, limit: int = _MAX_VIDEO_BYTES) -> bytes:
     async with client.stream("GET", url) as response:
         response.raise_for_status()
         chunks: list[bytes] = []
         total = 0
         async for chunk in response.aiter_bytes():
             total += len(chunk)
-            if total > _MAX_VIDEO_BYTES:
+            if total > limit:
                 raise ValueError(
-                    f"Video download exceeds {_MAX_VIDEO_BYTES} bytes"
+                    f"Video download exceeds {limit} bytes"
                 )
             chunks.append(chunk)
         return b"".join(chunks)
