@@ -607,3 +607,18 @@ async def test_a_reports_excluded_files_are_capped_in_its_payload_and_counted(ap
     assert (len(report["excluded"]), report["excluded_count"]) == (200, 250)
     note = worker_note(EventType.WORKER_COMPLETE.value, report)["content"]
     assert note.endswith(", n010.tmp, and 240 more")
+
+
+async def test_a_thread_cannot_hand_work_to_a_helper_yet(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    await a_turn(api, monkeypatch, thread, [
+        calling(("delegate_task", {"goal": "Summarise the report."})),
+        _final_response("Summarised it myself."),
+    ], pool=SandboxPool(pods))
+    events = await api.app.state.session_store.get_events(thread.id, types=[EventType.TOOL_RESULT])
+    [answer] = [json.loads(e.data["content"]) for e in events if e.data["name"] == "delegate_task"]
+    assert answer == {"error": "A thread can't hand work to a helper yet: do this step in the thread itself."}
+    # No helper started, and no pod was set up for a call that never ran.
+    async with api.app.state.session_factory() as db:
+        helpers = (await db.execute(text("SELECT count(*) FROM sessions WHERE parent_id = :id"), {"id": thread.id})).scalar()
+    assert (helpers, pods.pods) == (0, {})

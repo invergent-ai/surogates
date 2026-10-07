@@ -31,6 +31,12 @@ def is_project_thread(config: dict[str, Any] | None) -> bool:
     return (config or {}).get("workstream_role") == THREAD
 
 
+#: Tools that start a helper's session.  A project's thread cannot use them
+#: yet: a helper's edits would stay in a copy its thread never lands.
+HELPER_TOOLS = frozenset({"delegate_task", "spawn_worker", "spawn_task"})
+THREAD_CANNOT_DELEGATE = "A thread can't hand work to a helper yet: do this step in the thread itself."
+
+
 def master_refusal(command: str) -> str:
     """What a master answers to a command that would do its work in place."""
     return (
