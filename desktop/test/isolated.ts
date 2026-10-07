@@ -68,6 +68,14 @@ export function notIsolated(env: Record<string, string | undefined> = process.en
   return missing;
 }
 
+/**
+ * The whole run's gate, as vitest's globalSetup: with the browser tests' flag set, no file runs
+ * unless the run is apart from the user's session, a headed file that forgot its own gate too.
+ */
+export default function setup(): void {
+  if (process.env.SUROGATE_BROWSER_TESTS === "1") isolated();
+}
+
 /** Throws, naming what is missing, unless *env* is apart from the user's session. */
 export function isolated(env: Record<string, string | undefined> = process.env): void {
   const missing = notIsolated(env);
