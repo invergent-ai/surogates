@@ -379,8 +379,9 @@ class TestThreadPodLayout:
         assert volumes["copy"].empty_dir is not None
 
     @pytest.mark.parametrize(("mount_path", "geesefs", "flags", "absent"), [
-        # A thread's pod: every look at /project asks the bucket, and no disk cache keeps an old version.
-        ("/project", {"GEESEFS_STAT_CACHE_TTL": "0s", "GEESEFS_CACHE_DIR": ""}, ["--stat-cache-ttl 0s"], ["--cache"]),
+        # A thread's pod: what geesefs saw of /project is trusted for a
+        # second at most, and no disk cache keeps an old version.
+        ("/project", {"GEESEFS_STAT_CACHE_TTL": "1s", "GEESEFS_CACHE_DIR": ""}, ["--stat-cache-ttl 1s"], ["--cache"]),
         # Any other pod: geesefs's own TTL, and the disk cache.
         ("/workspace", {}, ["--cache "], ["--stat-cache-ttl"]),
     ])

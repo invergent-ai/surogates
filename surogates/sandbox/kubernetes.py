@@ -502,10 +502,13 @@ class K8sSandbox:
         ]
         if fuse_path != "/workspace":
             # A thread's real files, which other pods and the Library
-            # change: each look asks the bucket, and no disk cache keeps an
-            # old version.  A landing's check must see a save made since.
+            # change: what geesefs saw of one is trusted for a second at most,
+            # and no disk cache keeps an old version.  A landing's check must
+            # see a save made since.  Not 0s: then every look costs a request
+            # to the bucket, and a large project's open outlasts its pod's
+            # ready timeout.
             s3fs_env += [
-                client.V1EnvVar(name="GEESEFS_STAT_CACHE_TTL", value="0s"),
+                client.V1EnvVar(name="GEESEFS_STAT_CACHE_TTL", value="1s"),
                 client.V1EnvVar(name="GEESEFS_CACHE_DIR", value=""),
             ]
 
