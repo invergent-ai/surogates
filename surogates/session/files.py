@@ -106,6 +106,8 @@ async def session_files(
         raise ComputerAway(device.name if device is not None else "your computer", revoked=True)
     if device_id not in await DevicePresence(redis).online([device_id]):
         if request_id is not None:
+            # The app answers what it still asks about not run, once its link ends.  The one
+            # exception: a change its user allowed just before is running, and may still land.
             await operations.cancel_invocation(session.id, invocation)
         raise ComputerAway(device.name, revoked=False)
     root = UUID(sandbox_session_key(session))

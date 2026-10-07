@@ -625,6 +625,47 @@ describe("an operation the executor admits before it starts", () => {
     expect(gate.ran).toEqual(["z"]);
   });
 
+  it("is answered not run when the server ends the link for a newer app while it waits", async () => {
+    const gate = new Gate(() => "hold");
+    const { journal } = await start(gate);
+    server.send({ ...opFrame("a", "write"), invocation_id: "request:upload-0001" });
+    await server.until(() => gate.asked.length === 1);
+    server.send({ type: "error", code: "unsupported_protocol", supported: [2] });
+    server.close(4400);
+    await server.until(() => link?.status === "update_required");
+    // Kept to send once the app is updated; allowed now, it must not run.
+    await server.until(() => journal.unsent().length === 1);
+    expect(journal.unsent()).toEqual([{ id: "a", digest: "digest-a", outcome: DISMISSED }]);
+    gate.release("a", null);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(gate.ran).toEqual([]);
+  });
+
+  it("is answered not run when the app stops the link for a failure while it waits", async () => {
+    // A journal that cannot start the tool call's operation: the device cannot go on, and its link stops.
+    class Failing extends OperationJournal {
+      override start(id: string): boolean {
+        if (id === "b") throw new Error("disk I/O error");
+        return super.start(id);
+      }
+    }
+    const failing = new Failing(join(dir, "journal.sqlite"));
+    journals.push(failing);
+    const errors: unknown[] = [];
+    const gate = new Gate((operation) => (operation.id === "a" ? "hold" : null));
+    await start(gate, failing, (error) => errors.push(error));
+    server.send({ ...opFrame("a", "write"), invocation_id: "request:upload-0001" });
+    await server.until(() => gate.asked.length === 1);
+    server.send(opFrame("b", "write"));
+    await server.until(() => link?.status === "stopped");
+    expect(errors.map(String)).toEqual(["Error: disk I/O error"]);
+    await server.until(() => failing.unsent().length === 1);
+    expect(failing.unsent()).toEqual([{ id: "a", digest: "digest-a", outcome: DISMISSED }]);
+    gate.release("a", null);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(gate.ran).toEqual([]);
+  });
+
   it("records nothing when suspended while it waits, and leaves it open to be asked again", async () => {
     const gate = new Gate(() => "hold");
     const { runner, journal } = await start(gate);

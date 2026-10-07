@@ -44,10 +44,11 @@ class Suspension {
 }
 
 // What the user's own request (surogates/devices/operations.py's "request:" invocations: an
-// upload or a delete from the file panel) is answered when the link drops while it is still
-// asked about: its caller is an HTTP request the server now answers "offline", so it must
-// never run once the link is back. Answered not run, as the server answers a cancel, at the
-// next welcome.
+// upload or a delete from the file panel) is answered when the link ends while it is still
+// asked about (it drops, the server ends it, or the app stops it for a failure): its caller is
+// an HTTP request the server now answers "offline", so it must never run later. Answered not
+// run, as the server answers a cancel, at the next welcome. The one exception is a request its
+// user already allowed: it is running, and finishes as any started operation does.
 export const DISMISSED: Outcome = {
   error: { type: "cancelled", message: "This computer's link dropped before this was allowed, so it did not run" },
 };
@@ -253,7 +254,7 @@ export class OperationRunner {
     this.running.get(id)?.abort();
   }
 
-  /** The link dropped: the user's own requests still asked about are answered not run. */
+  /** The link ended: the user's own requests still asked about are answered not run. */
   disconnected(): void {
     for (const id of this.requests) this.running.get(id)?.abort(new Dismissal());
   }
