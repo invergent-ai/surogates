@@ -1145,8 +1145,6 @@ function projectFields(value: unknown, editing: boolean): ProjectFields {
     : named;
 }
 
-// The archive asks under the project's name as 4c's prompts show text: a control, bidi or invisible
-// character as its code point (U+202E), so none reorders or hides the question around it.
 // What the dialog changed of *shown*, the project as it showed it: a change made elsewhere meanwhile
 // to a field the user left alone is kept. The goal it showed empty is a null one.
 function changedFrom(shown: Project, fields: ProjectFields): Partial<ProjectFields> {
@@ -1154,6 +1152,8 @@ function changedFrom(shown: Project, fields: ProjectFields): Partial<ProjectFiel
     value !== (key === "goal" ? shown.goal ?? "" : shown[key as keyof ProjectFields])));
 }
 
+// The archive asks under the project's name as the app's prompts show text: a control, bidi or invisible
+// character as its code point (U+202E), so none reorders or hides the question around it.
 async function confirmArchive(name: string): Promise<boolean> {
   if (!main) return false;
   const { response } = await dialog.showMessageBox(main.window, {
