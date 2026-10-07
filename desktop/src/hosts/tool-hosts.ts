@@ -102,9 +102,12 @@ export function forkHost(options: ForkOptions = {}): HostProcess {
     exited = true;
     for (const listener of listeners) listener();
   };
-  // A send to a host that has gone: its exit is what counts.
-  child.on("error", () => {
-    if (child.pid === undefined) gone();
+  // A send to a host that has gone: its exit is what counts. One that never spawned says why, once:
+  // a missing or broken bin/node answers every operation unavailable, and this line tells it.
+  child.on("error", (error) => {
+    if (child.pid !== undefined || exited) return;
+    process.stderr.write(`the file host could not start: ${error.message}\n`);
+    gone();
   });
   child.on("exit", gone);
   child.on("close", gone);

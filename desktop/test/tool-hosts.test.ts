@@ -501,6 +501,24 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     host.kill();
   });
 
+  it("says once why a host could not be spawned", async () => {
+    const written = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const host = forkHost({ execPath: "/nonexistent/node" });
+      let gone = false;
+      host.onExit(() => {
+        gone = true;
+      });
+      await until(() => gone, 2_000);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const said = written.mock.calls.map(([text]) => String(text)).filter((text) => text.startsWith("the file host"));
+      expect(said).toEqual(["the file host could not start: spawn /nonexistent/node ENOENT\n"]);
+      host.kill();
+    } finally {
+      written.mockRestore();
+    }
+  });
+
   it("tells a host's listeners once that it has gone, and signals no group after that", async () => {
     const script = join(base, "dies.js");
     writeFileSync(script, "process.exit(3);\n");
