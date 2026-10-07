@@ -74,9 +74,16 @@ export interface DesktopBridge {
   // The three calls about a chat's folder came after version 1's first desktops, which have none of
   // them: the page looks for each before it calls it.
   // The chat's folder on this computer, and whether it asks; null for a chat with no folder here.
+  // Rejects as every call about a chat does: on a page of another account's, or of nobody's, with
+  // "This computer is registered with the agent for another account", and while this computer is
+  // not registered with the agent, or its access was revoked.
   getBinding?(sessionId: string): Promise<DesktopBinding | null>;
-  // Shows the chat's folder in the file manager, selected in its parent; only at the user's click.
-  // Rejects once the folder is gone or was replaced.
+  // Shows the chat's folder in the file manager, selected in its parent. Rejects as getBinding
+  // does; with "Surogate shows a chat's folder only when its user asks, with a click" but at a
+  // click of its user's, once for each, within 5 s of it; with "Surogate is still showing a folder"
+  // while this window's last one is being shown; with "Surogate is still looking for …" while a
+  // look at this folder, or at two others, has not returned; and once the folder is not there,
+  // does not answer within 5 s, or was replaced after it was confirmed for the chat.
   revealFolder?(sessionId: string): Promise<void>;
   // Hears each chat bound on this computer, and each change of a chat's mode, by the chat's id.
   onBindingChanged?(listener: (sessionId: string) => void): () => void;
