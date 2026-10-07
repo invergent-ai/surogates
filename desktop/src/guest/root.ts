@@ -82,6 +82,10 @@ const QUESTION_MS = 10_000;
 const GRACE_MS = 2_000;
 
 // The commands' environment: the cloud's layout under the root's own HOME, and the user's names.
+// And git compares no owner, inode or sub-second time in its index (core.checkStat=minimal),
+// through git's own environment, after any the layout gives: the folder's files are the root's
+// uid in the guest and the user's on the host, so git in the guest would otherwise rehash every
+// file after any git on the host refreshed the index. The user's repository config is untouched.
 export function rootEnvironment(layout: string, user: HostUser): Record<string, string> {
   const env: Record<string, string> = {};
   for (const line of layout.split("\n")) {
@@ -89,7 +93,11 @@ export function rootEnvironment(layout: string, user: HostUser): Record<string, 
     // A function, so a '$' in the home is not read as a replacement pattern.
     if (at > 0) env[line.slice(0, at)] = line.slice(at + 1).replace(CLOUD_HOME, () => user.home);
   }
-  return { ...env, HOME: user.home, USER: user.name, LOGNAME: user.name, LANG: "C.UTF-8" };
+  const git = Number(env.GIT_CONFIG_COUNT ?? 0);
+  return {
+    ...env, HOME: user.home, USER: user.name, LOGNAME: user.name, LANG: "C.UTF-8",
+    GIT_CONFIG_COUNT: String(git + 1), [`GIT_CONFIG_KEY_${git}`]: "core.checkStat", [`GIT_CONFIG_VALUE_${git}`]: "minimal",
+  };
 }
 
 // The guest uid of *root*: given at its first ask, from FIRST_UID up, and kept

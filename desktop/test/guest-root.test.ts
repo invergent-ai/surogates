@@ -561,6 +561,20 @@ describe("a root's environment", () => {
       USER: "ana",
       LOGNAME: "ana",
       LANG: "C.UTF-8",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.checkStat",
+      GIT_CONFIG_VALUE_0: "minimal",
+    });
+  });
+
+  it("gives git its stat check after the layout's own git config", () => {
+    const layout = "GIT_CONFIG_COUNT=1\nGIT_CONFIG_KEY_0=safe.directory\nGIT_CONFIG_VALUE_0=*\n";
+    expect(rootEnvironment(layout, { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" })).toMatchObject({
+      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_KEY_0: "safe.directory",
+      GIT_CONFIG_VALUE_0: "*",
+      GIT_CONFIG_KEY_1: "core.checkStat",
+      GIT_CONFIG_VALUE_1: "minimal",
     });
   });
 

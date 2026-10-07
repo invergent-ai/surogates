@@ -360,7 +360,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
   it("gives a command the cloud's environment and the user's names, and nothing of how its root was made", async () => {
     expect(await run("env | cut -d= -f1 | sort | tr '\\n' ' '")).toEqual({
       ok: {
-        output: "HOME LANG LOGNAME NPM_CONFIG_PREFIX PATH PIP_USER PWD PYTHONDONTWRITEBYTECODE PYTHONUNBUFFERED PYTHONUSERBASE SHLVL " +
+        output: "GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 HOME LANG LOGNAME NPM_CONFIG_PREFIX PATH PIP_USER PWD PYTHONDONTWRITEBYTECODE " +
+          "PYTHONUNBUFFERED PYTHONUSERBASE SHLVL " +
           "USER UV_CACHE_DIR XDG_CACHE_HOME _ ",
         returncode: 0,
         timed_out: false,
@@ -570,7 +571,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     };
     try {
       expect(await guest.ready("root-big", folderOf(big))).toBeNull();
-      // The first rehashes every file: the guest's owner is not the one the host's index holds.
+      // The first rehashes none, though the host's index holds the host's owner: git in the guest does not compare it.
       const first = await timed("git status --porcelain 2>&1 | wc -l");
       const again = await timed("git status --porcelain 2>&1 | wc -l");
       const walk = await timed("find node_modules -type f 2>&1 | wc -l");
@@ -586,6 +587,34 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     } finally {
       await guest.teardown("root-big");
       rmSync(big, { recursive: true, force: true });
+    }
+  });
+
+  it("lets git in the guest take an index the host's git refreshed last, so its status after one on the host rehashes nothing", { timeout: 300_000 }, async () => {
+    const repo = join(dir, "repo");
+    // 20 000 files, tracked by git, as the host made them.
+    for (let p = 0; p < 200; p += 1) {
+      mkdirSync(join(repo, `p${p}`), { recursive: true });
+      for (let f = 0; f < 100; f += 1) writeFileSync(join(repo, `p${p}`, `f${f}.js`), `${p}.${f}\n`);
+    }
+    expect(spawnSync("bash", ["-c", "git init -q && git add -A && git -c user.email=a@b -c user.name=a commit -qm init"], { cwd: repo }).status).toBe(0);
+    const timed = async (command: string) => {
+      const begun = performance.now();
+      const outcome = await guest.op("root-git", "run", { command, workdir: null, timeout: 120 }, signal()) as { ok: { output: string } };
+      return { output: outcome.ok.output, ms: performance.now() - begun };
+    };
+    try {
+      expect(await guest.ready("root-git", folderOf(repo))).toBeNull();
+      // Git on the host refreshes the index last, with the host's owner in it.
+      expect(spawnSync("git", ["-C", repo, "status", "--porcelain"]).status).toBe(0);
+      const first = await timed("git status --porcelain 2>&1 | wc -l");
+      const again = await timed("git status --porcelain 2>&1 | wc -l");
+      console.log(`git status of 20 000 files in the guest after one on the host: ${first.ms.toFixed(0)} ms, then ${again.ms.toFixed(0)} ms`);
+      expect([first.output, again.output]).toEqual(["0\n", "0\n"]);
+      expect(first.ms).toBeLessThan(again.ms * 2 + 250);
+    } finally {
+      await guest.teardown("root-git");
+      rmSync(repo, { recursive: true, force: true });
     }
   });
 
