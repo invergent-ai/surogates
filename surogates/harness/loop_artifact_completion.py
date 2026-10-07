@@ -418,10 +418,13 @@ class ArtifactCompletionMixin:
         # is not a delivery, however convincing it looks in a prompt.
         manifest = reconcile(
             candidate_artifacts,
-            entries_by_path=entries_by_path,
+            entries_by_path=entries_by_path or {},
             turn_start=self._turn_started_at,
         )
-        manifest = check_terminal_claim(manifest, final_message)
+        if entries_by_path is not None:
+            # A folder that could not be listed is unseen, not empty: a claim
+            # of a file its commands made is no false claim.
+            manifest = check_terminal_claim(manifest, final_message)
         if manifest.rejected:
             logger.info(
                 "Turn %s: dropped %d candidate(s) the workspace does not "
@@ -523,7 +526,7 @@ class ArtifactCompletionMixin:
         *,
         session_id: UUID,
         turn_id: str,
-    ) -> tuple[list[Any], dict[str, dict[str, Any]]]:
+    ) -> tuple[list[Any], dict[str, dict[str, Any]] | None]:
         """Pull downloadable artifact candidates emitted during this turn.
 
         Returns the candidates and the workspace listing they were
@@ -829,13 +832,15 @@ class ArtifactCompletionMixin:
 
     async def _scan_folder_for_new_files(
         self, session: Any, already_seen_paths: set[str],
-    ) -> tuple[list[Any], dict[str, dict[str, Any]]]:
+    ) -> tuple[list[Any], dict[str, dict[str, Any]] | None]:
         """A local folder's turn's files: what changed there since the turn began, by the folder's own clock.
 
         Each is listed by its path from the folder's top, and by the folder's
         own path, as the agent may have named it.  No ``modified``: the
         folder's clock chose them, and the "stale" rule would compare the
-        server's.  A turn that began while its computer was away lists none.
+        server's.  A turn that began while its computer was away lists none,
+        and neither does one whose folder its computer did not list: their
+        entries are None, as nothing was seen.
         """
         from surogates.harness.turn_summarizer import (
             TurnArtifact,
@@ -847,10 +852,10 @@ class ArtifactCompletionMixin:
                 "Session %s: its computer did not say where this turn began, so the turn lists none of its folder's files",
                 session.id,
             )
-            return [], {}
+            return [], None
         walked = await self._walk_folder(session, since=self._turn_cursor)
         if walked is None:
-            return [], {}
+            return [], None
         root = session.config["workspace_path"].rstrip("/")
         out: list[TurnArtifact] = []
         entries_by_path: dict[str, dict[str, Any]] = {}

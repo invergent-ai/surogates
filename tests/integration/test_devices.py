@@ -3341,8 +3341,8 @@ async def test_a_turn_whose_computer_was_away_at_its_start_lists_no_files_and_ne
 
     found, entries = await turn._scan_workspace_for_new_files(session_id=rig.root, already_seen_paths=set())
 
-    # The chat's cloud prefix is metadata only: no permission to read it.
-    assert (found, entries, listing.listed) == ([], {}, [])
+    # The chat's cloud prefix is metadata only: no permission to read it.  Nothing was seen.
+    assert (found, entries, listing.listed) == ([], None, [])
     assert "did not say where this turn began" in caplog.text
 
 
