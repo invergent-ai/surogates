@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 
+from surogates.governance.saga import SagaOrchestrator
 from surogates.harness.streaming_executor import (
     StreamingToolExecutor,
 )
@@ -156,6 +157,25 @@ class TestConcurrentExecution:
 
 class TestSequentialExecution:
     """Tests that non-concurrent tools block the queue."""
+
+    @pytest.mark.asyncio
+    async def test_a_sagas_steps_run_one_at_a_time(self) -> None:
+        """Under a saga a side-effecting tool runs alone, as in the batch path."""
+        order: list[str] = []
+
+        async def mock_dispatch(name, args, **kwargs):
+            order.append(f"start {args['command']}")
+            await asyncio.sleep(0.01)
+            order.append(f"end {args['command']}")
+            return json.dumps({"ok": True})
+
+        tools = _make_registry("terminal")
+        tools.dispatch = mock_dispatch
+        executor = _make_executor(tools=tools, saga=SagaOrchestrator())
+        executor.add_tool(_make_tool_call("terminal", {"command": "a"}, call_id="tc_1"))
+        executor.add_tool(_make_tool_call("terminal", {"command": "b"}, call_id="tc_2"))
+        await executor.get_all_results()
+        assert order == ["start a", "end a", "start b", "end b"]
 
     @pytest.mark.asyncio
     async def test_non_concurrent_tool_runs_alone(self) -> None:

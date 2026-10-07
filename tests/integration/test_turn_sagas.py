@@ -11,6 +11,7 @@ from uuid import UUID
 import pytest
 
 import surogates.harness.loop as loop_module
+from surogates.harness import tool_exec
 from surogates.harness.budget import IterationBudget
 from surogates.harness.loop import AgentHarness
 from surogates.runtime import SlashCommandConfig
@@ -20,6 +21,8 @@ from surogates.tools.runtime import ToolRuntime
 from tests.test_steer_loop import _final_response, _make_loop_harness
 
 from .test_devices import api  # noqa: F401  (api is a fixture)
+from .test_workstream_threads import start
+from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -131,11 +134,12 @@ async def test_a_turn_end_completes_its_saga_so_a_stop_in_the_next_turn_undoes_o
 
 
 async def test_a_stop_whose_sandbox_cannot_be_set_up_still_ends_its_saga(api, monkeypatch):
-    chat = await a_chat(api)
+    # A thread's step starts from a snapshot of its copy, so a restore could undo it.
+    chat = await start(api, await master_of(api, await create(api)), goal="Work on the report.")
+    monkeypatch.setattr(tool_exec, "_snapshot_copy", AsyncMock(return_value="0" * 40))
     store = api.app.state.session_store
     await store.emit_event(chat.id, EventType.USER_MESSAGE, {"content": "Remember my name."})
     remember = calling(("memory", {"action": "add", "content": "Name: Ana"}))
-    remember[0]["tool_calls"][0]["_checkpoint_hash"] = "0" * 40  # a step a restore could undo
     pool = SimpleNamespace(
         ensure=AsyncMock(side_effect=RuntimeError("the pod is gone")),
         destroy_for_session=AsyncMock(),

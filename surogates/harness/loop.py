@@ -77,7 +77,7 @@ from surogates.harness.structured_output import generate_structured, parse_json_
 from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.pool import sandbox_session_key
-from surogates.workstreams import is_project_master, master_refusal
+from surogates.workstreams import is_project_master, is_project_thread, master_refusal
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
     drop_unusable_tools,
@@ -467,7 +467,6 @@ class AgentHarness(
         browser_pool: BrowserPool | None = None,
         browser_control: BrowserControlStore | None = None,
         storage: Any | None = None,
-        checkpoints_enabled: bool = False,
         saga_enabled: bool = False,
         saga_settings: Any | None = None,
         api_client: Any | None = None,
@@ -617,11 +616,6 @@ class AgentHarness(
         # during the current turn even when produced indirectly
         # (terminal scripts, execute_code).
         self._turn_started_at: datetime | None = None
-
-        # Checkpoint flag — when enabled, the harness tells the sandbox
-        # to take filesystem snapshots before file-mutating operations.
-        # The actual checkpoint logic runs inside the sandbox (not here).
-        self._checkpoints_enabled = checkpoints_enabled
 
         # Saga orchestration flag — when enabled, side-effecting tool
         # calls are tracked as saga steps with automatic compensation
@@ -1658,7 +1652,8 @@ class AgentHarness(
         """
         # --- Saga orchestrator ---
         saga = None
-        if self._saga_enabled:
+        # A project's thread always runs one: its steps are undone in its copy.
+        if self._saga_enabled or is_project_thread(session.config):
             from surogates.governance.saga import SagaOrchestrator
             saga_kwargs = {}
             if self._saga_settings is not None:
@@ -1965,16 +1960,6 @@ class AgentHarness(
             # message starts a new turn, while ``iteration`` keeps climbing
             # for budget/loop control.
             turn_iteration_index = iteration - 1 - turn_base_iteration
-
-            # --- Checkpoint: reset per-turn dedup in sandbox ---
-            if self._checkpoints_enabled and self._sandbox_pool:
-                try:
-                    await self._sandbox_pool.execute(
-                        sandbox_session_key(session), "_checkpoint",
-                        '{"action": "new_turn"}',
-                    )
-                except (ValueError, Exception):
-                    pass  # No sandbox provisioned yet — that's fine.
 
             # --- Memory manager: on_turn_start hook ---
             if self._memory_manager is not None:
@@ -2956,18 +2941,11 @@ class AgentHarness(
             messages.append(assistant_message)
 
             # 7. Execute tool calls.
-            # Checkpoint before file-mutating tools (write_file, patch).
-            # The checkpoint hash is stashed on the tool call dict so
-            # execute_single_tool can include it in the TOOL_CALL event,
-            # enabling the web UI to offer per-tool-call rollback.
-            await self._inject_checkpoint_hashes(tool_calls_raw, session)
-
             if use_streaming_exec:
                 # ── Streaming executor path ──────────────────────────
                 # Some or all tools started executing during LLM streaming.
-                # Checkpoint hashes were injected above — non-concurrent
-                # tools (write_file, patch) are still QUEUED at this point
-                # because they are never concurrency-safe.
+                # Non-concurrent tools (write_file, patch) are still QUEUED
+                # at this point because they are never concurrency-safe.
 
                 # Wait for all tools to complete (concurrent ones may
                 # already be done, sequential ones start now). Publish the
@@ -3258,55 +3236,6 @@ class AgentHarness(
             turn_id=turn_id,
             iteration_index=max(iteration - 1 - turn_base_iteration, 0),
         )
-
-    # ------------------------------------------------------------------
-    # Checkpoint injection
-    # ------------------------------------------------------------------
-
-    async def _inject_checkpoint_hashes(
-        self,
-        tool_calls: list[dict[str, Any]],
-        session: Session,
-    ) -> None:
-        """Stash checkpoint hashes on file-mutating tool call dicts.
-
-        Before ``write_file`` or ``patch`` execute, a filesystem snapshot
-        is taken via the sandbox's ``_checkpoint`` command.  The resulting
-        hash is stored on the tool call dict so ``execute_single_tool``
-        can include it in the ``TOOL_CALL`` event, enabling per-tool-call
-        rollback from the web UI.
-
-        No-op when checkpoints are disabled or no sandbox is available.
-        """
-        if not self._checkpoints_enabled or self._sandbox_pool is None:
-            return
-
-        import json as _json
-
-        for tc in tool_calls:
-            fn = tc.get("function", {})
-            tool_name = fn.get("name", "")
-            if tool_name not in ("write_file", "patch"):
-                continue
-            try:
-                args = _json.loads(fn.get("arguments", "{}"))
-                file_path = args.get("path", "")
-                if not file_path:
-                    continue
-                cp_input = _json.dumps({
-                    "action": "take",
-                    "reason": f"before {tool_name}",
-                    "file_path": file_path,
-                })
-                cp_result = await self._sandbox_pool.execute(
-                    sandbox_session_key(session), "_checkpoint", cp_input,
-                )
-                cp_data = _json.loads(cp_result)
-                cp_hash = cp_data.get("hash")
-                if cp_hash:
-                    tc["_checkpoint_hash"] = cp_hash
-            except Exception:
-                logger.debug("Checkpoint before %s failed", tool_name, exc_info=True)
 
     async def _read_workspace_image(
         self,

@@ -177,6 +177,29 @@ async def _build_session_sandbox_spec(
     return sandbox_spec
 
 
+async def _snapshot_copy(
+    session: Any, tenant: Any, sandbox_pool: Any, credential_vault: Any, *, reason: str,
+) -> str | None:
+    """A snapshot of the thread's copy, as a commit on its branch.
+
+    The pod is provisioned first if the turn has none yet.  None when the
+    snapshot cannot be taken: the step then runs without one.
+    """
+    from surogates.sandbox.pool import sandbox_session_key
+
+    owner = sandbox_session_key(session)
+    try:
+        spec = await _build_session_sandbox_spec(session, tenant, owner, credential_vault=credential_vault)
+        await sandbox_pool.ensure(owner, spec)
+        taken = json.loads(await sandbox_pool.execute(
+            owner, "_checkpoint", json.dumps({"action": "take", "reason": reason}),
+        ))
+    except Exception:
+        logger.warning("Snapshot %s failed for session %s", reason, session.id, exc_info=True)
+        return None
+    return taken.get("hash")
+
+
 async def _apply_ssh_access(
     session: Any, tenant: Any, sandbox_spec: Any, credential_vault: Any,
 ) -> None:
@@ -425,10 +448,8 @@ SAGA_EXCLUDED_TOOLS: frozenset[str] = frozenset({
     "skill_view",
     "skills_list",
     # Saga compensation restores a sandbox checkpoint (see
-    # governance/saga/compensator.py), and checkpoints are stashed only for
-    # file-mutating tools.  ``todo`` mutates the event log, not the
-    # workspace, so a journaled step would carry no checkpoint_hash and its
-    # rollback could only raise.
+    # governance/saga/compensator.py).  ``todo`` mutates the event log, not
+    # the workspace, so restoring a checkpoint could never undo it.
     "todo",
     "web_crawl",
     "web_extract",
@@ -1260,13 +1281,26 @@ async def _run_single_tool(
     sanitized_args = _sanitize_paths(tool_args, workspace_path)
 
     # Emit TOOL_CALL event.
-    # Include checkpoint hash if the harness stashed one (file-mutating tools).
     tool_call_data: dict[str, Any] = {
         "tool_call_id": tool_call_id,
         "name": tool_name,
         "arguments": sanitized_args,
     }
-    checkpoint_hash = tc.get("_checkpoint_hash")
+    checkpoint_hash = None
+    # In a project's thread every saga step starts from a snapshot of its
+    # copy, taken right before it runs: a stop puts the copy back however
+    # the step changed it.  A call refused below for not being offered or
+    # allowed never runs, so it takes none.
+    allowed = session.config.get("tool_allow_list")
+    if (
+        saga is not None and replay_of is None and not on_device and sandbox_pool is not None
+        and tool_name not in SAGA_EXCLUDED_TOOLS and is_project_thread(session.config)
+        and (offered_tools is None or tool_name in offered_tools)
+        and (not allowed or tool_name in allowed)
+    ):
+        checkpoint_hash = await _snapshot_copy(
+            session, tenant, sandbox_pool, credential_vault, reason=f"before {tool_name}",
+        )
     if checkpoint_hash:
         tool_call_data["checkpoint_hash"] = checkpoint_hash
 
