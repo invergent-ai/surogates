@@ -347,6 +347,24 @@ describe("Settings → General", () => {
     expect(existsSync(join(home, "c", "autostart"))).toBe(false);
   });
 
+  it("does not start at login from a build whose path systemd's autostart reader would misread, and says so", async () => {
+    // This build's Electron, as a folder whose name holds a $ would give it.
+    const dollar = join(home, "dollar.cjs");
+    writeFileSync(dollar, `process.execPath = ${JSON.stringify("/opt/a$b/electron")};`);
+    app = await launch(home, {}, [], [dollar]);
+    await shellPage(app);
+    await app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("settings")!.click());
+    const settings = await settingsPage(app);
+    expect(await settings.textContent("#login-refused")).toBe(
+      "This build cannot start at login: KDE and other desktops start it through systemd, which misreads a $, a ` or a \\ in its path.",
+    );
+    expect(await settings.isDisabled('[data-setting="startAtLogin"] [data-value="on"]')).toBe(true);
+    const set = settings.evaluate(() => (globalThis as unknown as { surogateSettings: { set(key: string, value: string): Promise<void> } })
+      .surogateSettings.set("startAtLogin", "on"));
+    await expect(set).rejects.toThrow("which misreads a $, a ` or a \\ in its path");
+    expect(existsSync(join(home, "c", "autostart"))).toBe(false);
+  });
+
   it("quits when the window is closed once Keep running is off, and keeps the choice", async () => {
     const { shell, page } = await signedIn();
     await page.click("#open-settings");

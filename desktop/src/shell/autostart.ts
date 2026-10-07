@@ -13,9 +13,15 @@ export const LAUNCHER = "/usr/local/bin/surogate";
 // GNOME looks for the program of an Exec whose path holds a % before it reads %% as one, finds
 // none, and starts nothing. An argument's % it reads as written.
 export const REFUSED = "This build cannot start at login: GNOME does not start a program whose path holds a %.";
+// systemd's autostart reader (systemd-xdg-autostart-generator, which KDE Plasma's startup uses) unquotes
+// each word of Exec and then reads its escapes again: a $, a ` or a \ it misreads, however it is quoted.
+export const MISREAD = "This build cannot start at login: KDE and other desktops start it through systemd, which misreads a $, a ` or a \\ in its path.";
 
 /** Why *command* cannot start at login, or null. */
-export const loginRefusal = (command: readonly string[]): string | null => (command[0]?.includes("%") ? REFUSED : null);
+export const loginRefusal = (command: readonly string[]): string | null => {
+  if (command[0]?.includes("%")) return REFUSED;
+  return command.some((word) => /[$`\\]/.test(word)) ? MISREAD : null;
+};
 
 /** The entry's place: the autostart folder of *configHome*, the user's XDG config folder. */
 export const autostartFile = (configHome: string): string => join(configHome, "autostart", "surogate.desktop");
