@@ -1005,7 +1005,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     }
     const after = await memcgs();
     console.log(`memory cgroups in the guest: ${before} before, ${processed} after 200 background processes, ${after} after 30 setups more`);
-    expect([processed - before, after - before].map((grown) => grown < 5)).toEqual([true, true]);
+    // A leak grows them by one per process or per setup (200, 30); the kernel frees dying cgroups late, a few at a time.
+    expect([processed - before, after - before].map((grown) => grown < 20)).toEqual([true, true]);
     await guest.teardown(MANY);
   });
 
