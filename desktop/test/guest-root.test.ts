@@ -307,6 +307,43 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
   });
 });
 
+describe("a root's socket to the host proxy", { timeout: 20_000 }, () => {
+  it("is made with the root's uid before its namespaces, and closed with everything of the root: torn down, lost, or never started", async () => {
+    const said: string[] = [];
+    const own: ChildProcess[] = [];
+    let fail = false;
+    const withTunnels = new Roots({
+      start: () => {
+        said.push("start");
+        if (fail) throw new Error("no runner");
+        const child = bare();
+        own.push(child);
+        return child;
+      },
+      uid: () => 10_001,
+      kill: () => void own.at(-1)?.kill("SIGKILL"),
+      tunnels: async (root, uid) => {
+        said.push(`listen ${root} ${uid}`);
+        return () => void said.push(`close ${root}`);
+      },
+    });
+    await withTunnels.setup("root-2", base, R1, user);
+    await withTunnels.teardown("root-2", R1);
+    fail = true;
+    await expect(withTunnels.setup("root-3", base, R1, user)).rejects.toThrow("no runner");
+    fail = false;
+    await withTunnels.setup("root-4", base, R1, user);
+    // Its runner goes by itself: the root is lost.
+    own.at(-1)?.kill("SIGKILL");
+    await until(() => said.includes("close root-4"));
+    expect(said).toEqual([
+      "listen root-2 10001", "start", "close root-2",
+      "listen root-3 10001", "start", "close root-3",
+      "listen root-4 10001", "start", "close root-4",
+    ]);
+  });
+});
+
 describe("a root's background processes", { timeout: 20_000 }, () => {
   type Answer = { ok?: any; error?: { type: string; message: string } };
   const signal = () => new AbortController().signal;

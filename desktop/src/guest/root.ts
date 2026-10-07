@@ -14,6 +14,7 @@ import { Failure } from "../files/answers.js";
 import { inside } from "../files/paths.js";
 import type { Outcome } from "../link/protocol.js";
 import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STOPPED, supervise, timedOut } from "./command.js";
+import { TUNNELS } from "./network.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
 import { type Answer, type BindMode, type HostUser, MAX_SHARES, type ProtectedKey, type Question, ROOT_ID, type Share } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
@@ -210,7 +211,7 @@ export async function enter(root: string, place: Place, share: Share, user: Host
     [
       "-c", 'echo $$ > "$1/cgroup.procs" && shift && exec "$@"', "sh", cgroup,
       "/usr/bin/unshare", "--mount", "--pid", "--fork", "--kill-child", "--ipc", "--uts", "--net", "--cgroup", "--propagation", "private", "--",
-      ENTER_ROOT, join(SESSIONS, root), place.folder, mount, place.home, String(uid), user.name,
+      ENTER_ROOT, join(SESSIONS, root), place.folder, mount, place.home, String(uid), user.name, join(TUNNELS, `${root}.sock`),
     ],
     { env: rootEnvironment(readFileSync(LAYOUT, "utf8"), user), stdio: ["pipe", "pipe", "pipe"] },
   );
@@ -487,6 +488,8 @@ export interface RootsOptions {
   protect?(pid: number, binds: Array<[string, BindMode]>): Promise<Bound>;
   // The mount of a share whose root was torn down goes (unmountShare).
   unmount?(share: Share): Promise<void>;
+  // The root's socket for its connections to the host proxy, its guest user's, made before its namespaces (Network.listen); resolves with what closes it.
+  tunnels?(root: string, uid: number): Promise<() => void>;
   questionMs?: number;
 }
 
@@ -526,6 +529,8 @@ export class Roots {
     const place = { folder, home: user.home };
     let listed: Root | undefined;
     let ending: Promise<void> | undefined;
+    // Its namespaces bind it, so it is there before they are made, and goes with everything of the root.
+    const unlisten = (await this.options.tunnels?.(root, this.options.uid(root))) ?? (() => {});
     // Everything of the root ends, once however often asked: its cgroup is killed
     // and emptied or, where it cannot be, its runner's stdin is ended. Only then is
     // a root still listed forgotten and the host told, so its setup again finds nothing of it running.
@@ -535,18 +540,26 @@ export class Roots {
       } catch {
         await runner.stop();
       }
+      unlisten();
       if (listed && this.roots.get(root) === listed) {
         this.roots.delete(root);
         this.options.lost?.(root);
       }
     })());
-    const child = await this.options.start(root, place, share, user);
+    let child: ChildProcess;
+    try {
+      child = await this.options.start(root, place, share, user);
+    } catch (error) {
+      unlisten();
+      throw error;
+    }
     const runner = new SessionRunner(child, () => void lose(), RUNNER_READY_MS);
     try {
       await runner.ready;
       await this.options.contain?.(root, child.pid);
     } catch (error) {
       await runner.stop();
+      unlisten();
       throw error;
     }
     const { protect } = this.options;

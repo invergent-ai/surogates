@@ -5,13 +5,13 @@
 # runner, as the root's own user, with no capabilities and no_new_privs, under
 # tini as the namespace's PID 1.
 #
-#   enter-root <data> <folder> <share> <home> <uid> <name>
+#   enter-root <data> <folder> <share> <home> <uid> <name> <tunnels>
 #
 # <data> is the root's folder on the sessions disk, holding its home and its temp
-# folder; <share> is the folder's virtiofs mount. Paths and the name are the
-# agent's, checked there.
+# folder; <share> is the folder's virtiofs mount; <tunnels> is the root's socket to
+# the host proxy (guest/network.ts). Paths and the name are the agent's, checked there.
 set -eu
-data=$1 folder=$2 share=$3 home=$4 uid=$5 name=$6
+data=$1 folder=$2 share=$3 home=$4 uid=$5 name=$6 tunnels=$7
 runner_path=$PATH
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -63,6 +63,9 @@ ln -s /proc/self/fd/2 "$new/dev/stderr"
 mount -t tmpfs -o mode=0755,nosuid,nodev run "$new/run"
 mkdir -p "$new/run/surogate/agent"
 mount --bind /run/surogate/agent "$new/run/surogate/agent"
+# Its socket to the host proxy, its commands' one way out: a mount point, which no command can remove.
+touch "$new/run/surogate/net.sock"
+mount --bind "$tunnels" "$new/run/surogate/net.sock"
 
 # /tmp, then HOME at the host home's path, both from the root's own folder; then
 # the folder at its own path. Each over the one before, so a home under /tmp, or a

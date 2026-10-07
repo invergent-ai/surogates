@@ -348,7 +348,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       ok: {
         output: [
           "lo:", "tini", "CapPrm: 0000000000000000", "CapEff: 0000000000000000", "CapBnd: 0000000000000000", "CapAmb: 0000000000000000",
-          "NoNewPrivs: 1", "2", "2", "2", "agent", "Permission denied", "Read-only file system",
+          "NoNewPrivs: 1", "2", "2", "2", "agent", "net.sock", "Permission denied", "Read-only file system",
           "No space left on device", "no sessions disk", "home and tmp writable", "",
         ].join("\n"),
         returncode: 0,
@@ -487,6 +487,28 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     }
     for (const [index, root] of [ROOT, OTHER].entries()) await guest.op(root, "kill", { session_id: ids[index] }, signal());
     for (const path of [folder, other]) rmSync(join(path, "who.txt"));
+  });
+
+  it("gives each root its own socket to the host proxy, which judges a command's connection there for that root", async () => {
+    // A connection as the root's runner opens one: its destination line, then the agent's answer.
+    const through = (destination: string) =>
+      `python3 -c 'import socket; s = socket.socket(socket.AF_UNIX); s.connect("/run/surogate/net.sock"); s.sendall(b"${destination}\\n"); print(s.recv(64).decode(), end="")'`;
+    expect(await run([
+      "stat -c '%u %a' /run/surogate/net.sock",
+      through("127.0.0.1:9"),
+      "(rm -f /run/surogate/net.sock) 2>&1 | sed 's/.*: //'",
+    ].join("; "))).toEqual({
+      ok: {
+        output: `${FIRST_UID} 600\n403 own\nPermission denied\n\nThis computer does not let a chat reach its own network services (127.0.0.1:9)`,
+        returncode: 0,
+        timed_out: false,
+      },
+    });
+    // The other root's connection is its own: its notice comes with its next run, not this root's.
+    expect(await run(through("127.0.0.1:7"), OTHER)).toMatchObject({
+      ok: { output: "403 own\n\nThis computer does not let a chat reach its own network services (127.0.0.1:7)" },
+    });
+    expect(await run("true")).toEqual({ ok: { output: "", returncode: 0, timed_out: false } });
   });
 
   it("keeps its guest, and another root's process, through a start whose command is longer than a control line", async () => {
