@@ -1112,6 +1112,14 @@ body.settings-page {
   overflow-wrap: anywhere;
 }
 
+/* A long command shows its first two lines. */
+.row .line > span {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
 .row .line button {
   flex-shrink: 0;
   padding: 3px 10px;

@@ -23,13 +23,14 @@ interface State {
 // A folder this computer's chats work on, and each chat on it (folders.ts).
 interface Folder {
   folder: string;
-  chats: Array<{ root: string; title: string; mode: "free" | "ask"; hosts: string[] }>;
+  chats: Array<{ root: string; title: string; mode: "free" | "ask"; hosts: string[]; processes: Array<{ id: string; command: string }> }>;
 }
 
 interface Settings {
   state(): Promise<State>;
   folders(): Promise<Folder[]>;
   takeBack(root: string, host: string): Promise<void>;
+  stop(root: string, id: string): Promise<void>;
   set(key: string, value: string): Promise<void>;
   link(which: "usage"): Promise<void>;
   close(): Promise<void>;
@@ -93,7 +94,8 @@ function line(text: string, action: string, name: string, act: () => Promise<voi
   return held;
 }
 
-// A chat's row: its title, as text, its mode, and each host its user let it reach. Its title is what a search finds it by.
+// A chat's row: its title, as text, its mode, each host its user let it reach, and each background process it runs.
+// Its title is what a search finds it by.
 function chatRow(chat: Folder["chats"][number]): HTMLElement {
   const row = document.createElement("div");
   row.className = "row";
@@ -105,8 +107,12 @@ function chatRow(chat: Folder["chats"][number]): HTMLElement {
   const mode = document.createElement("span");
   mode.className = "desc";
   mode.textContent = chat.mode === "free" ? "Works freely" : "Asks every time";
-  label.append(title, mode, ...chat.hosts.map((host) =>
-    line(`Reaches ${host}, on every port`, "Take back", host, () => settings.takeBack(chat.root, host))));
+  label.append(
+    title,
+    mode,
+    ...chat.hosts.map((host) => line(`Reaches ${host}, on every port`, "Take back", host, () => settings.takeBack(chat.root, host))),
+    ...chat.processes.map(({ id, command }) => line(`Runs ${command}`, "Stop", command, () => settings.stop(chat.root, id))),
+  );
   row.append(label);
   return row;
 }

@@ -325,6 +325,52 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     });
   });
 
+  it("stops a chat's background process from Settings, as the agent's own kill would, and no longer shows it", async () => {
+    const folder = join(home, "watch");
+    mkdirSync(folder);
+    await bound(folder);
+    // A command the agent wrote with a right-to-left override in it: shown as text.
+    const started = await operation("start", {
+      command: "sleep 600 #‮txt", workdir: null, task_id: null, pty: false, notify_on_complete: false, watcher_interval: null,
+    }) as { ok: { session_id: string } };
+    const settings = await foldersSettings();
+    await expect.poll(() => settings.textContent("#folders .row .line")).toBe("Runs sleep 600 #U+202EtxtStop");
+    expect(await settings.getAttribute("#folders .row .line button", "aria-label")).toBe("Stop sleep 600 #‮txt");
+    await settings.click("#folders .row .line button");
+    await expect.poll(() => settings.$$("#folders .row .line").then((lines) => lines.length)).toBe(0);
+    // The agent finds it ended at its next look, as after its own kill.
+    expect(await operation("poll", { session_id: started.ok.session_id })).toMatchObject({ ok: { status: "exited" } });
+  });
+
+  it("refuses a Stop for any process Settings does not show as the chat's own: another chat's, one it never ran, and one of a chat no longer bound here", async () => {
+    const [first, second] = [join(home, "first"), join(home, "second")];
+    for (const folder of [first, second]) mkdirSync(folder);
+    const client = await launched();
+    await bind(client, first);
+    await bind(client, second, OTHER);
+    const start = async (chat: string) => (await operation("start", {
+      command: "sleep 600", workdir: null, task_id: null, pty: false, notify_on_complete: false, watcher_interval: null,
+    }, "call", 1, chat) as { ok: { session_id: string } }).ok.session_id;
+    const [mine, theirs] = [await start(CHAT), await start(OTHER)];
+    const settings = await foldersSettings();
+    await expect.poll(() => settings.$$("#folders .row .line").then((lines) => lines.length)).toBe(2);
+    // Settings' own call, as a page talked into it would make it: what it was told.
+    const stop = (root: unknown, id: unknown) => settings.evaluate(([at, process]) =>
+      (window as unknown as { surogateSettings: { stop(root: unknown, id: unknown): Promise<void> } }).surogateSettings.stop(at, process)
+        .then(() => "stopped", (error: Error) => error.message), [root, id]);
+    const refused = "Error invoking remote method 'settings:stop': Error: This chat runs no such process";
+    expect(await stop(CHAT, theirs)).toBe(refused);
+    expect(await stop(CHAT, "proc_000000000000")).toBe(refused);
+    expect(await stop(42, mine)).toBe(refused);
+    expect(await stop(CHAT, [mine])).toBe(refused);
+    for (const [chat, id] of [[CHAT, mine], [OTHER, theirs]] as const) {
+      expect(await operation("poll", { session_id: id }, "call", 1, chat)).toMatchObject({ ok: { status: "running" } });
+    }
+    // A chat deleted meanwhile: its binding goes, while its process is still alive in the VM.
+    expect(await operation("retire", {}, "retire", 0, OTHER)).toEqual({ ok: null });
+    expect(await stop(OTHER, theirs)).toBe(refused);
+  });
+
   it("runs a background server in the folder, which the agent's next command reaches, and stops it with the app", async () => {
     const folder = join(home, "site");
     mkdirSync(folder);

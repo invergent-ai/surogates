@@ -32,7 +32,7 @@ import { reauthorize, rebind, register } from "./computer.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
 import { linkIn, type OpenLink } from "./deep-link.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
-import { type FolderRow, listFolders } from "./folders.js";
+import { type FolderRow, listFolders, LiveProcesses, stopOperation } from "./folders.js";
 import { letWindowClose, MainWindow } from "./main-window.js";
 import { appMenu, trayIcon, trayMenu } from "./menus.js";
 import { Notifications } from "./notifications.js";
@@ -217,11 +217,18 @@ function utilityManager(): ManagerProcess {
   };
 }
 
-// The app's one VM, shared by every device, for this computer's user.
+// The app's one VM, shared by every device, for this computer's user, and the background processes
+// alive in it, which Settings shows with Stop as they change.
 let vm: VmClient | null = null;
+const alive = new LiveProcesses();
 const vmFor = (): VmClient => {
+  if (vm) return vm;
   const { uid, gid, username } = userInfo();
-  vm ??= new VmClient({ vm: vmOptions(root, { uid, gid, name: username, home: env.HOME }), spawn: utilityManager });
+  vm = new VmClient({ vm: vmOptions(root, { uid, gid, name: username, home: env.HOME }), spawn: utilityManager });
+  vm.onProcesses((processRoot, change) => {
+    alive.heard(processRoot, change);
+    main?.settingsContents()?.send("settings:changed");
+  });
   return vm;
 };
 
@@ -1404,6 +1411,9 @@ async function setPreference(key: "keepRunning" | "developer", value: unknown): 
 
 const onOff = (on: boolean) => (on ? "on" : "off");
 
+// Past the guest's own bound on a kill: 2 s for the process to end on SIGTERM, 2 s more on SIGKILL.
+const STOP_PROCESS_MS = 15_000;
+
 // Each bound chat's title, read on the app's own sign-in, and kept once the agent named it. One it
 // names not yet, or whose read failed, is read once each time Settings opens, not at each redraw.
 // ponytail: kept for the app's life, one per chat bound here: a chat renamed meanwhile keeps its old title until the next launch.
@@ -1432,7 +1442,7 @@ function chatTitle(root: string): Promise<string> {
 // Settings → Folders and permissions: the folders this computer works on for its device's account.
 const folderRows = (): Promise<FolderRow[]> => {
   const stack = device?.stack;
-  return stack ? listFolders(stack.bindings, chatTitle) : Promise.resolve([]);
+  return stack ? listFolders(stack.bindings, chatTitle, alive) : Promise.resolve([]);
 };
 
 function settingsState() {
@@ -1607,6 +1617,19 @@ function showSettings(): void {
         throw new Error("This chat cannot reach that host");
       }
       bindings.disallowDomain(root, host);
+    });
+    // A chat's background process, stopped by its user, as the agent's own kill stops one. Only one
+    // Settings shows: the VM runs other devices' chats too, and a chat deleted here keeps its processes there.
+    handle("settings:stop", async (processRoot, id) => {
+      const stack = device?.stack;
+      if (
+        !stack || typeof processRoot !== "string" || typeof id !== "string" || !stack.bindings.get(processRoot)
+        || !alive.of(processRoot).some((found) => found.id === id)
+      ) {
+        throw new Error("This chat runs no such process");
+      }
+      const outcome = await stack.binder.run(stopOperation(processRoot, id), AbortSignal.timeout(STOP_PROCESS_MS));
+      if ("error" in outcome) throw new Error(outcome.error.message);
     });
     // A theme in effect that changes reaches the web client through the theme's own paint.
     handle("settings:set", async (key, value) => {
