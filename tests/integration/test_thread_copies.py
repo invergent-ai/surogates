@@ -598,7 +598,12 @@ async def test_a_thread_whose_pod_was_remade_mid_turn_is_told_its_edits_are_gone
     events = await api.app.state.session_store.get_events(thread.id, types=[EventType.TOOL_RESULT])
     first, second = [e.data["content"] for e in events if e.data["name"] == "write_file"]
     assert "was made again" not in first
-    assert second.startswith("[This thread's copy of the project's files was made again")
+    # It says what is known, not why the copy was made again.
+    assert second.startswith(
+        "[This thread's copy of the project's files was made again from the project's files. "
+        "Changes this thread made after its last landed turn are not in it. "
+        "Check the files before making any of those changes again.]\n\n"
+    ), second
     # What it wrote before is gone with the old copy; what it wrote after lands.
     assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "b.md", "notes.txt"]
 

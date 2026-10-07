@@ -181,11 +181,12 @@ async def _build_session_sandbox_spec(
 
 
 #: The first tool result on a thread's copy made afresh, when work it did
-#: since its last landing was in a copy that is gone.
+#: since its last landed turn was in a copy that is gone.  It says what is
+#: known, not why the copy was made again: a pod lost, a turn cut off, a Stop.
 COPY_REMADE = (
-    "[This thread's copy of the project's files was made again from the project's "
-    "files: its pod stopped before the changes made since the thread last finished "
-    "a turn could land.  Those changes are gone; make again any that are still needed.]"
+    "[This thread's copy of the project's files was made again from the project's files. "
+    "Changes this thread made after its last landed turn are not in it. "
+    "Check the files before making any of those changes again.]"
 )
 
 
