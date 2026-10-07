@@ -20,7 +20,7 @@ import { inside, realpath as followed } from "../files/paths.js";
 import { dependencyFolder, KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
 import type { Outcome } from "../link/protocol.js";
 
-export const SCAN_TIMEOUT_MS = 30_000;
+const SCAN_TIMEOUT_MS = 30_000;
 export const HOOKS_NOTICE = "The computer stopped these git hooks from running, because git would run them outside the sandbox (where it closed a hooks folder, that repository's other hooks are off until you make it searchable again): ";
 const STEPS_NOTICE = "The computer removed a step that appeared in a paused git rebase or cherry-pick while this chat's commands could write there, because git would run it outside the sandbox; each such exec line is now a comment in: ";
 const REMOVED = "# Surogate removed a step that appeared while the chat's commands could write: ";
@@ -71,7 +71,7 @@ export function isGitHook(folder: string, key: string): boolean {
 }
 
 // Folder-relative names, sorted, at most MAX_LISTED of them.
-export function listed(folder: string, paths: readonly string[]): string {
+function listed(folder: string, paths: readonly string[]): string {
   const names = paths.map((path) => relative(folder, path)).sort();
   return names.length > MAX_LISTED
     ? `${names.slice(0, MAX_LISTED).join(", ")} and ${names.length - MAX_LISTED} more`
