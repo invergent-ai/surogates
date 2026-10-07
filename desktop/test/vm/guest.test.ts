@@ -1122,6 +1122,46 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     }
   });
 
+  it("lets git add a linked worktree in the guest, and keeps read-only the files that send it to a config", { timeout: 60_000 }, async () => {
+    const folder = join(dir, "folder");
+    const admin = join(folder, ".git", "worktrees", "wt");
+    const said = (line: string) => `(${line}) 2>&1 | sed 's/.*: //'`;
+    expect(spawnSync("bash", ["-c", [
+      "git init -q -b main . && git config user.email a@b && git config user.name a && git config extensions.worktreeConfig true",
+      "echo base > base.txt && git add -A && git commit -qm base",
+    ].join(" && ")], { cwd: folder }).status).toBe(0);
+    try {
+      expect(await command("git worktree add -q wt -b wtb 2>&1; git -C wt config --worktree core.editor true; git -C wt rev-parse --abbrev-ref HEAD")).toMatchObject({
+        ok: { output: "wtb\n" },
+      });
+      const commondir = readFileSync(join(admin, "commondir"), "utf8");
+      // The look after it binds them. A git folder of the command's own, whose config would run a program at the next status on the host.
+      expect(await command([
+        "git init -q --bare evil.git && git -C evil.git config core.fsmonitor 'touch pwned'",
+        said("echo \"$PWD/evil.git\" > .git/worktrees/wt/commondir"),
+        said("echo '[core] fsmonitor = touch pwned' >> .git/worktrees/wt/config.worktree"),
+        said("mv .git/worktrees/wt .git/worktrees/wt-old"),
+        said("mv .git/worktrees .git/worktrees-old"),
+        "git -C wt status --porcelain",
+        "git worktree add -q wt2 -b wtb2 2>&1 && echo added",
+      ].join("; "))).toMatchObject({
+        ok: { output: "Read-only file system\nRead-only file system\nDevice or resource busy\nDevice or resource busy\nadded\n" },
+      });
+      expect(readFileSync(join(admin, "commondir"), "utf8")).toBe(commondir);
+      expect(readFileSync(join(admin, "config.worktree"), "utf8")).not.toContain("fsmonitor");
+      expect(spawnSync("git", ["-C", join(folder, "wt"), "status", "--porcelain"]).status).toBe(0);
+      expect(existsSync(join(folder, "wt", "pwned"))).toBe(false);
+      // Its removal is the host's to do: the guest's stops at what is bound, and the host's prune finishes it.
+      expect(await command("git worktree remove --force wt 2>&1 | tail -1; test -e .git/worktrees/wt/commondir && echo kept")).toMatchObject({
+        ok: { output: "error: failed to delete '.git/worktrees/wt': Device or resource busy\nkept\n" },
+      });
+      expect(spawnSync("git", ["-C", folder, "worktree", "prune"]).status).toBe(0);
+      expect(existsSync(admin)).toBe(false);
+    } finally {
+      for (const name of [".git", "wt", "wt2", "evil.git", "base.txt"]) rmSync(join(folder, name), { recursive: true, force: true });
+    }
+  });
+
   it("binds what a protected name's link leads to in the folder, and runs commands beside one linked out of it", async () => {
     const folder = join(dir, "folder");
     // An editor's settings shared with a sibling worktree, which the guest does not have.

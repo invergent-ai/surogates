@@ -150,15 +150,20 @@ describe("a folder's protected keys, for a guest's read-only binds", { timeout: 
     ]);
   });
 
-  it("leave git's own working state unbound, a submodule's too, which git makes and removes as it works", () => {
+  it("leave git's own working state unbound, a submodule's too, but for what sends a linked worktree to a config", () => {
     const f = "/home/ana/project";
     const keys = [
-      ".git/config", ".git/rebase-merge/git-rebase-todo", ".git/REBASE-APPLY/patch", ".git/sequencer/todo", ".git/worktrees/wt/commondir",
-      ".git/modules/lib/config", ".git/modules/lib/rebase-merge/done", "sub/.git/sequencer/head",
+      ".git/config", ".git/rebase-merge/git-rebase-todo", ".git/REBASE-APPLY/patch", ".git/sequencer/todo",
+      ".git/worktrees/wt/commondir", ".git/worktrees/wt/config.worktree", ".git/worktrees/wt/gitdir", ".git/worktrees/wt/HEAD",
+      ".git/worktrees/wt/rebase-merge/done", ".git/worktrees/wt/logs/HEAD",
+      ".git/modules/lib/config", ".git/modules/lib/rebase-merge/done", ".git/modules/lib/worktrees/w2/COMMONDIR", "sub/.git/sequencer/head",
     ];
     expect(guestBinds(f, keys.map((key) => join(f, key)))).toEqual([
       [`${f}/.git`, "rw"], [`${f}/.git/config`, "ro"],
       [`${f}/.git/modules`, "rw"], [`${f}/.git/modules/lib`, "rw"], [`${f}/.git/modules/lib/config`, "ro"],
+      [`${f}/.git/modules/lib/worktrees`, "rw"], [`${f}/.git/modules/lib/worktrees/w2`, "rw"], [`${f}/.git/modules/lib/worktrees/w2/COMMONDIR`, "ro"],
+      [`${f}/.git/worktrees`, "rw"], [`${f}/.git/worktrees/wt`, "rw"],
+      [`${f}/.git/worktrees/wt/commondir`, "ro"], [`${f}/.git/worktrees/wt/config.worktree`, "ro"],
     ]);
   });
 

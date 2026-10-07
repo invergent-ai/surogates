@@ -18,6 +18,10 @@ export const MAX_EXTRA_DENIES = 1024;
 
 export const GRANT_CHANGED = "a folder grant changed";
 
+// In a linked worktree's own folder, what sends git to a config: the common folder's path, and
+// the worktree's own config. Git reads its config and hooks from the common folder.
+const WORKTREE_CONFIGS = new Set(["commondir", "config.worktree"]);
+
 export const appeared = (key: string) => `a protected file appeared in the folder (${key})`;
 
 // srt 0.0.77's own write denies (linux-sandbox-utils.js) that hold whatever happens:
@@ -94,16 +98,25 @@ export function extraDenies(folder: string, keys: Iterable<string>): string[] {
 // not bound: it stays the agent's to rename. Nor is git's own working state (GIT_STATE: a
 // rebase's, a cherry-pick's, a linked worktree's), which git makes, writes and removes as it
 // works, across commands too: bound, a rebase would stop halfway and could neither go on nor
-// be aborted. So what is held in a .git is the .git itself, and in its modules each folder down
-// to a submodule's git folder, all of which git keeps. Past MAX_PROTECTED it throws, and commands are
+// be aborted. In a linked worktree's own folder (worktrees/<name>), only what sends git to a
+// config is bound, one by one, and held above: worktrees and <name> are held, so git can add a
+// worktree but no command can rename one to make them again. So what is held in a .git is
+// the .git itself, in its modules each folder down to a submodule's git folder, and each
+// linked worktree's folder with the worktrees above it. Past MAX_PROTECTED it throws, and commands are
 // refused, as srt's extra denies were past their own: each is a bind in the root's
 // namespace, and its path goes over the control port.
 export function guestBinds(folder: string, keys: Iterable<string>): Array<[path: string, mode: BindMode]> {
   const binds = new Map<string, BindMode>();
   for (const key of keys) {
-    const parts = outermost(folder, key.slice(folder.length + 1).split("/"));
+    const all = key.slice(folder.length + 1).split("/");
+    let parts = outermost(folder, all);
+    const state = parts.at(-1)?.toLowerCase() ?? "";
+    if (GIT_STATE.has(state) && parts.slice(0, -1).some((part) => part.toLowerCase() === ".git")) {
+      const [name, file, ...more] = all.slice(parts.length);
+      if (state !== "worktrees" || !name || more.length > 0 || !WORKTREE_CONFIGS.has(file?.toLowerCase() ?? "")) continue;
+      parts = all;
+    }
     const lower = parts.map((part) => part.toLowerCase());
-    if (GIT_STATE.has(lower.at(-1) ?? "") && lower.slice(0, -1).includes(".git")) continue;
     binds.set(join(folder, ...parts), "ro");
     for (let at = 1; at < parts.length; at += 1) {
       const above = lower.slice(0, at);
