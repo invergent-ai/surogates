@@ -256,8 +256,11 @@ class History:
         self._git(["update-index", "-z", "--index-info"], env=env, cwd=self.project, input=entries)
         tree = self._git(["write-tree"], env=env, cwd=self.project)
         index.unlink()
-        landing = self._main(
-            *_as(author), "commit-tree", tree, "-p", main, "-p", turn, "-m", "Landing", "-m", _block(trailers),
+        # The message on stdin too: a landing may leave out any number of files, each a trailer.
+        landing = self._git(
+            [*_as(author), "commit-tree", tree, "-p", main, "-p", turn, "-F", "-"],
+            env={"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project)}, cwd=self.project,
+            input=f"Landing\n\n{_block(trailers)}\n",
         )
         self._main("update-ref", "refs/heads/main", landing, main)
         self._main("update-ref", self.branch, landing)

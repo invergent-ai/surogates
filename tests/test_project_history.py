@@ -663,3 +663,14 @@ def test_a_file_whose_name_is_near_the_limit_lands(tmp_path, project):
     (history.copy / LONG_NAME).write_bytes(b"contrat")
     landed(history)
     assert (project / LONG_NAME).read_bytes() == b"contrat"
+
+
+def test_a_landing_that_left_out_two_thousand_files_is_recorded(tmp_path, project):
+    history = opened(tmp_path, project)
+    (history.copy / "kept.md").write_text("kept")
+    turn = history.commit_turn(author=THREAD_A, trailers=trailers("turn"))
+    applied = [history.apply(c["path"], c["before"], c["after"]) for c in turn["changes"]]
+    held = [["Surogate-Not-Merged", f"{'a folder with a long name, ' * 3}{n}.docx"] for n in range(2000)]
+    out = history.record(turn=turn["commit"], applied=applied, author=THREAD_A, trailers=trailers("landing", *held))
+    named = git(history, "log", "-1", "--format=%(trailers:key=Surogate-Not-Merged,valueonly)", out["commit"])
+    assert len(named.splitlines()) == 2000
