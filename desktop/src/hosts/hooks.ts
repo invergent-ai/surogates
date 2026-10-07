@@ -54,7 +54,7 @@ export interface GuardOptions {
   writable?: readonly string[];
   timeoutMs?: number;
   // Whether something of the chat's other than its runs could be writing the folder now: a
-  // background process, a runner, or a guest run that was answered before its processes ended.
+  // background process in the guest, or a guest run that was answered before its processes ended.
   writing?: () => boolean;
   // Whether a command of the chat's is running, whose git may be working through a todo: a look
   // leaves the todos alone until none is, so a rebase that finishes within its command keeps its steps.

@@ -39,7 +39,7 @@ export interface ProcessHandle {
   ended?: { exit_code: number | null; output: string; note: string | null };
 }
 
-// A process in the session runner, as the registry sees it.
+// A process in the root's runner, as the registry sees it.
 export interface Spawned extends CommandChild {
   readonly started: Promise<number | null>;
   signal(signal: NodeJS.Signals): void;
@@ -61,7 +61,7 @@ export interface Placed {
 export interface ProcessesOptions {
   // run's workdir checks for a start, asked where its command will run: throws the refusal.
   place(workdir: string | null, signal: AbortSignal): Promise<Placed>;
-  // The root's session runner, started at the first start; rejects when it cannot start,
+  // The root's runner, asked for at each start; rejects when there is none to be had,
   // or when *signal* cancels the start that waits for it.
   runner(signal: AbortSignal): Promise<Spawner>;
   // Why a command may not run now, or null (the hook guard).
@@ -239,7 +239,7 @@ export class Processes {
       runner = await Promise.race([this.options.runner(signal), cancelled]);
     } catch (error) {
       if (signal.aborted) return CANCELLED;
-      // The sandbox's own refusal, such as too many protected paths, is the agent's to read.
+      // The sandbox's own refusal, such as a chat it has not set up, is the agent's to read.
       if (error instanceof Failure) throw error;
       const why = error instanceof Error ? error.message : String(error);
       throw new Failure({ type: "unavailable", message: `This computer could not start the sandbox for background processes: ${why}` });
