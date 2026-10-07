@@ -289,26 +289,36 @@ async def test_a_project_whose_master_goes_while_the_list_is_read_is_left_out(ap
 async def test_a_project_with_more_threads_than_a_statement_binds_still_answers(api):
     project = await create(api)
     master = await master_of(api, project)
-    # Past asyncpg's 32,767 bind parameters, made in one statement.
-    async with api.app.state.session_factory() as db:
-        await db.execute(text("""
-            WITH made AS (
-              INSERT INTO sessions (id, user_id, org_id, agent_id, channel, status, title, parent_id, config)
-              SELECT gen_random_uuid(), :user_id, :org_id, :agent_id, 'worker', 'active', 'Draft ' || n, :master_id,
-                     '{"workstream_role": "thread"}'::jsonb
-              FROM generate_series(1, 33000) n
-              RETURNING id, title
-            )
-            INSERT INTO workstream_threads (session_id, workstream_id, title)
-            SELECT id, :project_id, title FROM made
-        """), {
-            "user_id": master.user_id, "org_id": master.org_id, "agent_id": master.agent_id,
-            "master_id": master.id, "project_id": project["id"],
-        })
-        await db.commit()
-    summary = await summary_of(api, project)
-    assert (summary["waiting"], summary["working"]) == (0, 33000)
-    assert len(await rows(api, project)) == SHELL_LIMITS["rows"]
+    try:
+        # Past asyncpg's 32,767 bind parameters, made in one statement.
+        async with api.app.state.session_factory() as db:
+            await db.execute(text("""
+                WITH made AS (
+                  INSERT INTO sessions (id, user_id, org_id, agent_id, channel, status, title, parent_id, config)
+                  SELECT gen_random_uuid(), :user_id, :org_id, :agent_id, 'worker', 'active', 'Draft ' || n,
+                         :master_id, '{"workstream_role": "thread"}'::jsonb
+                  FROM generate_series(1, 33000) n
+                  RETURNING id, title
+                )
+                INSERT INTO workstream_threads (session_id, workstream_id, title)
+                SELECT id, :project_id, title FROM made
+            """), {
+                "user_id": master.user_id, "org_id": master.org_id, "agent_id": master.agent_id,
+                "master_id": master.id, "project_id": project["id"],
+            })
+            await db.commit()
+        summary = await summary_of(api, project)
+        assert (summary["waiting"], summary["working"]) == (0, 33000)
+        assert len(await rows(api, project)) == SHELL_LIMITS["rows"]
+    finally:
+        # 33,000 working sessions would be every later test's, in the shared
+        # database.  The project's thread rows go with it; its master, which
+        # other tables refer to, is archived, as an archived project's is.
+        async with api.app.state.session_factory() as db:
+            await db.execute(text("DELETE FROM workstreams WHERE id = :project_id"), {"project_id": project["id"]})
+            await db.execute(text("DELETE FROM sessions WHERE parent_id = :master_id"), {"master_id": master.id})
+            await db.commit()
+        await api.app.state.session_store.update_session_status(master.id, "archived")
 
 
 def publishing(api, monkeypatch) -> None:
