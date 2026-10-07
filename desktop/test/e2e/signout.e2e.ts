@@ -93,8 +93,9 @@ describe("logging out", () => {
     await expect.poll(() => page.getAttribute("#device", "title")).not.toBe("Connected as Laptop");
     await logOut(page);
     await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
-    expect(credentials()).toEqual([expect.objectContaining({ deviceId: "d", revoking: true })]);
-    expect(existsSync(state("devices/d"))).toBe(false);
+    // The sign-in shows as soon as nobody is signed in, before the device has stopped.
+    await expect.poll(() => credentials()).toEqual([expect.objectContaining({ deviceId: "d", revoking: true })]);
+    await expect.poll(() => existsSync(state("devices/d"))).toBe(false);
     await agent.start(port);
     await expect.poll(() => revokes(), { timeout: 15_000 }).toBe(1);
     await expect.poll(() => credentials()).toEqual([]);
@@ -259,24 +260,45 @@ describe("removing the agent while it cannot be reached", () => {
 describe("a second user of the agent on this computer", () => {
   const OTHER = { name: "Bea Other", email: "bea@example.com", userId: "b", orgId: "o" };
 
-  it("ends the first one's access here once they agree, and this computer is added for them", async () => {
+  // The first user's sign-in ended (it expired): the next launch asks for one, while their device still runs.
+  async function firstOneExpired(): Promise<{ shell: ElectronApplication; page: Page }> {
     const first = await signedIn();
     await quit(first.shell);
-    // The first user's sign-in ended (it expired): the next launch asks for one, while their device still runs.
     rmSync(state("session.json"));
-    app = await launch(home);
-    await stubNative(app);
-    const page = await shellPage(app);
+    const shell = await launch(home);
+    app = shell;
+    await stubNative(shell);
+    const page = await shellPage(shell);
     await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
     await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    return { shell, page };
+  }
+
+  it("ends the first one's access here once they agree, and this computer is added for them", async () => {
+    const { shell, page } = await firstOneExpired();
     // Another user signs in at the agent's page, and the agent adds their own device.
     agent.account = OTHER;
     agent.link.identity = { ...agent.link.identity, device_id: "d2", user_id: "b" };
-    await signIn(app, page, agent);
+    await signIn(shell, page, agent);
     await expect.poll(() => credentials().map((credential) => [credential.deviceId, credential.userId])).toEqual([["d2", "b"]]);
     await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
-    expect(await asked(app)).toContain("Sign in as bea@example.com?");
+    expect(await asked(shell)).toContain("Sign in as bea@example.com?");
     expect(revokes()).toBe(1);
     expect(existsSync(state("devices/d"))).toBe(false);
+  });
+
+  it("leaves the first one's computer as it is when they cancel, and keeps nothing of their sign-in", async () => {
+    const { shell, page } = await firstOneExpired();
+    agent.account = OTHER;
+    await shell.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    await approved(shell, () => page.click("#sign-in-button"));
+    await expect.poll(() => page.textContent("#sign-in-error")).toBe(
+      "Not signed in as bea@example.com: this computer keeps working for the account that added it",
+    );
+    await expect.poll(() => agent.oauth.some((form) => form.token === "rt-2")).toBe(true);
+    expect(credentials().map((credential) => [credential.deviceId, credential.userId])).toEqual([["d", "u"]]);
+    expect(await page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    expect(existsSync(state("session.json"))).toBe(false);
+    expect(revokes()).toBe(0);
   });
 });

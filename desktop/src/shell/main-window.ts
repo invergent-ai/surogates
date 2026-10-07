@@ -330,8 +330,12 @@ export class MainWindow {
   private tryAgain(web: WebView): void {
     clearTimeout(web.retry);
     web.retry = setTimeout(() => {
-      void net.fetch(`${web.agent.origin}/api/v1/auth/config`).then((response) => response.ok, () => false)
-        .then((up) => (up ? web.view.webContents.reload() : this.tryAgain(web)));
+      void net.fetch(`${web.agent.origin}/api/v1/auth/config`).then((response) => response.ok, () => false).then((up) => {
+        // Taken out of the window meanwhile, as removing its agent does: that agent is asked nothing more.
+        if (this.web !== web) return;
+        if (up) web.view.webContents.reload();
+        else this.tryAgain(web);
+      });
     }, reconnectDelayMs(web.attempt++));
   }
 }

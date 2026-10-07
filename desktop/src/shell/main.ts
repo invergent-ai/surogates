@@ -123,6 +123,15 @@ const report = (error: unknown): void => {
   console.error(error);
 };
 
+// A write of the app's own state that fails is said, and what follows goes on: a log out still ends what it can.
+const trying = (write: () => void): void => {
+  try {
+    write();
+  } catch (error) {
+    report(error);
+  }
+};
+
 // The VM manager in an Electron utility process (spec, Section 11): a hang or a crash
 // there leaves the windows and the device link alone. What is sent before it has spawned waits.
 function utilityManager(): ManagerProcess {
@@ -388,7 +397,11 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
 }
 
 // The window's web client forgets whoever was signed in there: its storage, cookies and caches.
-const clearWindow = (agent: Agent): Promise<void> => session.fromPartition(partitionFor(agent.origin, agent.agentId)).clearStorageData();
+async function clearWindow(agent: Agent): Promise<void> {
+  const partition = session.fromPartition(partitionFor(agent.origin, agent.agentId));
+  await partition.clearStorageData();
+  await partition.clearCache();
+}
 
 // The app's sign-in, from now on. *first* holds the tokens of a sign-in that just happened.
 function startSession(remembered: SignedIn, first?: Tokens): void {
@@ -491,8 +504,8 @@ function revokeLater(credential: Credential): void {
   const revoking = revokeDevice(linkUrl(credential.origin), credential.token);
   revocations.set(credential.deviceId, revoking);
   void revoking.done.then(() => {
-    credentials.remove(credential.deviceId);
     revocations.delete(credential.deviceId);
+    trying(() => credentials.remove(credential.deviceId));
   });
 }
 
@@ -506,7 +519,7 @@ async function endDevice(credential: Credential): Promise<void> {
   device = null;
   kept = null;
   // Owed before anything stops: a quit or a crash from here on still revokes it, at the next launch.
-  if (credential.token !== null) credentials.save({ ...credential, revoking: true });
+  if (credential.token !== null) trying(() => credentials.save({ ...credential, revoking: true }));
   const stack = credential.token === null ? null : await ending?.started.catch(() => null);
   // A token the agent already ended needs no revoking. A stop that fails still ends access here: the
   // revocation is then owed, as when the agent could not hear it.
@@ -514,13 +527,14 @@ async function endDevice(credential: Credential): Promise<void> {
     report(error);
     return false;
   }))) {
-    credentials.remove(credential.deviceId);
+    trying(() => credentials.remove(credential.deviceId));
   } else {
+    // Kept in memory too, so it is revoked during this run even when it could not be saved.
     revokeLater(credential);
   }
   // A revoked device still being cleaned up has its journal open.
   await retiring;
-  rmSync(join(root, "devices", credential.deviceId), { recursive: true, force: true });
+  trying(() => rmSync(join(root, "devices", credential.deviceId), { recursive: true, force: true }));
 }
 
 async function ask(options: Electron.MessageBoxOptions): Promise<boolean> {
@@ -546,12 +560,12 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
     ? {
       type: "warning", message: `Remove ${agent.name} from Surogate?`,
       detail: `You are logged out, this computer's access to ${agent.name} ends, and the folders it was given here are forgotten. Surogate then asks for an agent again.${cutOff()}`,
-      buttons: ["Remove", "Cancel"], defaultId: 0, cancelId: 1, noLink: true,
+      buttons: ["Remove", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
     }
     : {
       type: "warning", message: `Log out of ${agent.name}?`,
       detail: `This computer's access to ${agent.name} ends, and the folders it was given here are forgotten.${cutOff()}`,
-      buttons: ["Log out", "Cancel"], defaultId: 0, cancelId: 1, noLink: true,
+      buttons: ["Log out", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
     });
   if (!confirmed || signingOut) return;
   const { promise, resolve: done } = Promise.withResolvers<void>();
@@ -707,7 +721,7 @@ async function signIn(agent: Agent): Promise<void> {
     if (previous && (previous.orgId !== who.orgId || previous.userId !== who.userId)) {
       const switching = await ask({
         type: "warning", message: `Sign in as ${who.email}?`,
-        detail: `This computer works for another account of ${agent.name}. Signing in as ${who.email} ends that account's access here, and forgets the folders it was given.`,
+        detail: `This computer works for another account of ${agent.name}. Signing in as ${who.email} ends that account's access here, and forgets the folders it was given.${cutOff()}`,
         buttons: ["Sign in", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
       });
       if (cancelled()) return;
