@@ -1,11 +1,18 @@
 // The web client's project helpers, which the desktop's ProjectsSource reuses: a row's mapping
 // (web/src/lib/projects-wire.ts) and the streams that open themselves again
-// (web/src/lib/reopening-stream.ts).
+// (web/src/lib/reopening-stream.ts). A project's stream runs over the SDK's own
+// FetchSseEventStream, as web/src/api/workstreams.ts opens it.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { FetchSseEventStream } from "../sdk/agent-chat-react/src/runtime/fetch-sse-stream.ts";
 import { threadRowOf } from "../web/src/lib/projects-wire.ts";
-import { INBOX_REOPENING, projectReopening, reopeningStream } from "../web/src/lib/reopening-stream.ts";
+import {
+  INBOX_REOPENING,
+  projectReopening,
+  projectStream,
+  reopeningStream,
+} from "../web/src/lib/reopening-stream.ts";
 
 class Connection {
   listeners = new Map();
@@ -90,6 +97,60 @@ test("the inbox's stream gives up after three failures in a row, as its hook exp
   assert.equal(connections.length, 4);
   assert.deepEqual(surfaced, ["onerror"]);
 });
+
+// The answers settle over the event loop, which the mocked timers leave alone.
+async function settled() {
+  for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+}
+
+function followed(t, answer) {
+  const fetches = [];
+  const stream = projectStream(
+    (fetchFn) => new FetchSseEventStream("/api/v1/workstreams/p-1/stream", { fetchFn }),
+    async (input) => {
+      fetches.push(String(input));
+      return answer();
+    },
+  );
+  const surfaced = [];
+  stream.onerror = () => surfaced.push("onerror");
+  t.after(() => stream.close());
+  return { fetches, surfaced };
+}
+
+test("a project's stream ends when its own route says the project is gone", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { fetches, surfaced } = followed(t, () => Response.json({ detail: "No such project." }, { status: 404 }));
+  await settled();
+  assert.deepEqual(surfaced, ["onerror"]);
+  t.mock.timers.tick(120_000);
+  await settled();
+  assert.deepEqual(fetches, ["/api/v1/workstreams/p-1/stream"]);
+});
+
+for (const [failure, answer] of [
+  // Traefik answers so for a Service with no ready pod.
+  ["an ingress's 404", () => new Response("404 page not found\n", { status: 404, headers: { "content-type": "text/plain" } })],
+  // An API pod that does not have the route yet.
+  ["another route's 404", () => Response.json({ detail: "Not Found" }, { status: 404 })],
+  ["a 502", () => new Response("Bad Gateway", { status: 502 })],
+  ["a 503", () => new Response("Service Unavailable", { status: 503 })],
+  ["a fetch that throws", () => {
+    throw new TypeError("fetch failed");
+  }],
+]) {
+  test(`a project's stream tries again after ${failure}`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    t.mock.method(console, "error", () => {});
+    const { fetches, surfaced } = followed(t, answer);
+    await settled();
+    assert.equal(fetches.length, 1);
+    t.mock.timers.tick(3_000);
+    await settled();
+    assert.equal(fetches.length, 2);
+    assert.deepEqual(surfaced, []);
+  });
+}
 
 test("a closed stream opens no more", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
