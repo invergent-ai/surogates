@@ -360,6 +360,24 @@ class History:
         has_saga = main is not None and saga is not None and f"Surogate-Saga: {saga}" in self._message(main)
         return {"main": main, "has_saga": has_saga}
 
+    def keep(self, *, author: dict[str, str], trailers: list[list[str]], base: bool) -> dict:
+        """Commit the copy on the thread's branch and push the branch; its base too when *base*, or when the history has none.
+
+        A failed turn's work, kept for the thread's next landing.
+        """
+        self._add_all(self._copy)
+        if self._copy("diff", "--cached", "--name-only", "HEAD"):
+            self._copy(*_as(author), "commit", "-q", "-m", "Kept", "-m", _block(trailers))
+        tip = self._copy("rev-parse", "HEAD")
+        # A branch never reaches the history without its base: the overlap check is against it.
+        moves_base = base or self.base not in self._durable_refs()
+        self._push(
+            {self.branch: tip, **({self.base: self._ref(self.base)} if moves_base else {})},
+            expect={self.branch: self._ref(self.synced)},
+        )
+        self._main("update-ref", self.synced, tip)
+        return {"commit": tip}
+
     # ------------------------------------------------------------------
     # The durable history
     # ------------------------------------------------------------------

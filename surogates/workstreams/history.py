@@ -20,6 +20,7 @@ from sqlalchemy.dialects.postgresql import Range
 
 from surogates.db.models import WorkstreamHistory
 from surogates.governance.saga import Saga
+from surogates.storage.tenant import boundary_workspace_prefix
 
 #: How long a landing waits between tries for its project's lock.
 LOCK_POLL = 0.5
@@ -106,3 +107,21 @@ def saga_of(row: WorkstreamHistory) -> Saga:
         "saga_id": row.saga_id, "session_id": str(row.thread_id or UUID(int=0)), "kind": "landing", "state": "running",
         "created_at": row.created_at.isoformat(), "completed_at": None, "error": None, "steps": steps,
     })
+
+
+async def waits_to_land(session_factory: Any, storage: Any, session: Any) -> bool:
+    """Whether a thread's turn that never used its pod lands at its end all the same.
+
+    It does while its branch in the project's history holds work its base
+    lacks, such as a failed turn's, or while a landing of the project is
+    left running for a lock holder to settle.
+    """
+    if await running_landings(session_factory, session.config["workstream_id"]):
+        return True
+    prefix = boundary_workspace_prefix(session.config, session, session.id)
+    try:
+        text = (await storage.read(session.config["storage_bucket"], f"{prefix}_history/packed-refs")).decode()
+    except KeyError:
+        return False
+    refs = {ref: sha for sha, _, ref in (line.partition(" ") for line in text.splitlines())}
+    return refs.get(f"refs/heads/threads/{session.id}") != refs.get(f"refs/bases/{session.id}")

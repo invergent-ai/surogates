@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -607,7 +608,7 @@ async def test_a_thread_whose_pod_was_remade_mid_turn_is_told_its_edits_are_gone
     # It says what is known, not why the copy was made again.
     assert second.startswith(
         "[This thread's copy of the project's files was made again from the project's files. "
-        "Changes this thread made after its last landed turn are not in it. "
+        "Changes this thread made since its work was last saved are not in it. "
         "Check the files before making any of those changes again.]\n\n"
     ), second
     # What it wrote before is gone with the old copy; what it wrote after lands.
@@ -889,7 +890,7 @@ async def test_a_thread_is_told_only_of_work_since_its_last_landed_turn(api, mon
         calling(("write_file", {"path": "d.md", "content": "d"})),
         _final_response("Done."),
     ], pool=pool, during=the_pod_goes_once)
-    # Its first step lost nothing the last landed turn did not hold; its step after the pod went did.
+    # Its first step lost nothing the last turn end did not save; its step after the pod went did.
     first, after_the_pod_went = (await last_writes(store, thread))[-2:]
     assert not first.startswith("[This thread's copy") and after_the_pod_went.startswith("[This thread's copy")
 
@@ -911,11 +912,21 @@ async def a_rolled_back_turn(api, monkeypatch, thread, pool) -> None:
         ], pool=pool, saga_settings=QUICK)
 
 
-async def test_a_turn_that_never_used_its_pod_does_not_count_as_landed(api, monkeypatch, pods):
+@asynccontextmanager
+async def a_dropped_lock(*_):
+    raise RuntimeError("the lock's connection dropped")
+    yield
+
+
+async def test_a_turn_that_never_used_its_pod_is_no_turn_end_that_saved(api, monkeypatch, pods):
     thread = await a_thread(api)
     store, pool = api.app.state.session_store, SandboxPool(pods)
-    await a_rolled_back_turn(api, monkeypatch, thread, pool)
-    # A question in between, answered with no tools: it lands nothing, so it is no landed turn.
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "project_lock", a_dropped_lock)
+        await a_turn(api, monkeypatch, thread, [
+            calling(("write_file", {"path": "a.md", "content": "a"})), _final_response("Done."),
+        ], pool=pool)
+    # A question in between, answered with no tools: it saves nothing, and the work before it is still gone.
     await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Which file did you start with?"})
     await a_turn(api, monkeypatch, thread, [_final_response("It was a.md.")], pool=pool)
     await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Try again."})
@@ -925,7 +936,7 @@ async def test_a_turn_that_never_used_its_pod_does_not_count_as_landed(api, monk
     assert (await last_writes(store, thread))[-1].startswith("[This thread's copy")
 
 
-async def test_a_turn_after_a_landing_that_rolled_back_is_told_its_copy_lacks_that_work(api, monkeypatch, pods):
+async def test_a_turn_after_a_landing_that_rolled_back_has_that_work_and_is_not_told_it_is_gone(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
     store, pool = api.app.state.session_store, SandboxPool(pods)
@@ -936,7 +947,10 @@ async def test_a_turn_after_a_landing_that_rolled_back_is_told_its_copy_lacks_th
     await a_turn(api, monkeypatch, thread, [
         calling(("write_file", {"path": "x.md", "content": "x"})), _final_response("Done."),
     ], pool=pool)
-    assert (await last_writes(store, thread))[-1].startswith("[This thread's copy")
+    # Its commit step kept the turn on the branch: the next copy has it, and lands it, your c.md aside.
+    assert not (await last_writes(store, thread))[-1].startswith("[This thread's copy")
+    assert pods.real_names() == ["Report.docx", "a.md", "b.md", "c.md", "notes.txt", "x.md"]
+    assert (pods.project / "c.md").read_text() == "saved by you just now"
 
 
 async def test_a_threads_code_command_runs_no_coding_agent_on_a_copy_never_landed(api, monkeypatch, pods):
@@ -978,15 +992,11 @@ async def test_a_turn_after_a_held_landing_is_told_its_copy_lacks_that_work(api,
     assert (await last_writes(store, second))[-1].startswith("[This thread's copy")
 
 
-async def test_a_turn_after_a_landing_that_failed_is_told_its_copy_lacks_that_work(api, monkeypatch, pods):
+async def test_a_turn_after_a_landing_that_failed_before_its_commit_is_told_its_copy_lacks_that_work(api, monkeypatch, pods):
     thread = await a_thread(api)
     store, pool = api.app.state.session_store, SandboxPool(pods)
-
-    async def raising(**_):
-        raise RuntimeError("the lock's connection dropped")
-
     with monkeypatch.context() as patch:
-        patch.setattr(loop_artifact_completion, "land_turn", raising)
+        patch.setattr(landing_module, "project_lock", a_dropped_lock)
         await a_turn(api, monkeypatch, thread, [
             calling(("write_file", {"path": "a.md", "content": "a"})), _final_response("Done."),
         ], pool=pool)
@@ -995,3 +1005,5 @@ async def test_a_turn_after_a_landing_that_failed_is_told_its_copy_lacks_that_wo
         calling(("write_file", {"path": "b.md", "content": "b"})), _final_response("Done."),
     ], pool=pool)
     assert (await last_writes(store, thread))[-1].startswith("[This thread's copy")
+    # Nothing of it reached the history: its work went with its pod.
+    assert pods.real_names() == ["Report.docx", "b.md", "notes.txt"]

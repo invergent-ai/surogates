@@ -32,7 +32,9 @@ from surogates.harness.loop_messages import (
 from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
 from surogates.session.inbox_payload import raises_completion_inbox_item
-from surogates.harness.landing import land_turn
+from surogates.harness.landing import keep_copy, land_turn
+from surogates.sandbox.pool import sandbox_session_key
+from surogates.workstreams.history import waits_to_land
 from surogates.workstreams import is_project_master, is_project_thread
 from surogates.workstreams.spend import admitted_at_wake
 
@@ -929,6 +931,7 @@ class ArtifactCompletionMixin:
         if is_project_thread(session.config) and self._sandbox_pool is not None:
             tool_saga = self._turn_saga.current_saga if self._turn_saga is not None else None
             try:
+                await self._open_copy_to_land(session)
                 landing = await land_turn(
                     store=self._store, session_factory=self._session_factory,
                     sandbox_pool=self._sandbox_pool, session=session,
@@ -1032,14 +1035,13 @@ class ArtifactCompletionMixin:
         }
         if cost_tracker is not None:
             complete_data["cost_summary"] = cost_tracker.summary()
-        if is_project_thread(session.config) and self._sandbox_pool is not None:
-            # Whether a landing ran and every write of the turn landed: a
-            # later turn on a copy made afresh lost nothing since.  A
-            # rolled-back, failed or held landing leaves writes the next copy
-            # lacks, and a turn that never used its pod is no landed turn.
-            complete_data["landed"] = landing is not None and (
-                landing["state"] == "completed" and all(f.get("landing") == "landed" for f in landing["files"])
-            )
+        if landing is not None:
+            # Whether this turn end saved the thread's work in the history: a
+            # later turn on a copy made afresh lost nothing before it.  A
+            # landing that failed before its commit step, or held a file,
+            # leaves work the next copy lacks.  A turn that never used its
+            # pod is no such turn end.
+            complete_data["saved"] = bool(landing.get("saved"))
 
         # Two independent best-effort settlements (neither raises); run
         # them concurrently to halve the session-complete round trip when
@@ -1171,6 +1173,17 @@ class ArtifactCompletionMixin:
                 session.id,
             )
 
+    async def _open_copy_to_land(self, session: Session) -> None:
+        """Give a thread's turn that never used its pod one, when its end lands all the same."""
+        owner = sandbox_session_key(session)
+        if self._sandbox_pool.holds_copy(owner) or self._storage is None or session.config.get("history_off"):
+            return
+        if await waits_to_land(self._session_factory, self._storage, session):
+            from surogates.harness.tool_exec import _build_session_sandbox_spec
+
+            spec = await _build_session_sandbox_spec(session, self._tenant, owner, credential_vault=self._credential_vault)
+            await self._sandbox_pool.ensure(owner, spec)
+
     async def _fail_session(
         self,
         session: Session,
@@ -1192,8 +1205,29 @@ class ArtifactCompletionMixin:
         if self._turn_saga is not None:
             await self._finalize_sagas(self._turn_saga, session)
 
+        # A failed turn does not land, since its files may be half made, but
+        # its copy is kept on its branch, and lands with its next turn.  Then
+        # its pod goes: the next turn takes the work up from the history.
+        saved: bool | None = None
+        owner = sandbox_session_key(session)
+        if self._sandbox_pool is not None and self._sandbox_pool.holds_copy(owner):
+            try:
+                saved = await keep_copy(
+                    session_factory=self._session_factory, sandbox_pool=self._sandbox_pool,
+                    session=session, saga_settings=self._saga_settings,
+                ) is not None
+            except Exception:
+                logger.exception("Could not keep the copy of %s", session.id)
+                saved = False
+            sandbox_id = await self._sandbox_pool.release_for_session(owner)
+            self._spawn_background(
+                self._destroy_sandbox_quietly(sandbox_id, str(session.id)), name=f"sandbox-teardown-{session.id}",
+            )
+
         fail_data: dict[str, Any] = {
             "reason": reason, "worker_id": self._worker_id, **data,
+            # Whether the keep saved the turn's work, as a completed turn's landing does.
+            **({"saved": saved} if saved is not None else {}),
         }
         if cost_tracker is not None:
             fail_data["cost_summary"] = cost_tracker.summary()

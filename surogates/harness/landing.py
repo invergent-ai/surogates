@@ -99,7 +99,7 @@ async def land_turn(
     """Land *session*'s turn; its outcome, or None when the turn never used its pod.
 
     The outcome is ``{saga, state, commit, landed, overlapped, excluded,
-    repositories, files}``: *state* is ``completed``, ``compensated``
+    repositories, files, saved}``: *state* is ``completed``, ``compensated``
     (rolled back whole) or ``escalated`` (a put-back failed); *files* are
     the report's, every file the turn changed, ``landed`` or
     ``not_merged``; *repositories* are the folders inside a git repository
@@ -138,6 +138,28 @@ async def land_turn(
         for f in row["files"] if f["merged"] and f["path"] not in known
     ]
     return outcome
+
+
+async def keep_copy(*, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any) -> dict | None:
+    """Keep *session*'s copy on its thread's branch, under the project's lock; None when it holds none.
+
+    A thread's failed turn keeps its work, base and all, to land with its
+    next turn: its files may be half made.  The landings a killed worker
+    left running are settled first, as every lock holder does.
+    """
+    owner = sandbox_session_key(session)
+    if not sandbox_pool.holds_copy(owner):
+        return None
+    workstream = session.config["workstream_id"]
+    author = {"name": session.title or "Thread", "email": f"thread:{session.id}@surogate"}
+    trailers = [
+        ["Surogate-Project", str(workstream)], ["Surogate-Thread", str(session.id)],
+        ["Surogate-Agent", str(session.agent_id)], ["Surogate-User", str(session.user_id)],
+        ["Surogate-Kind", "turn"],
+    ]
+    async with project_lock(session_factory, workstream):
+        await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings)
+        return await _call(sandbox_pool, owner, "keep", author=author, trailers=trailers, base=True)
 
 
 def _fence(saga_settings: Any) -> float:
@@ -207,6 +229,9 @@ async def _land(
     outcome: dict[str, Any] = {
         "saga": saga.saga_id, "state": "completed", "commit": None,
         "landed": [], "overlapped": [], "excluded": [], "repositories": [], "files": [],
+        # Whether the turn's work is in the history: its commit step pushed
+        # it, and held no file, whose version the next copy would lack.
+        "saved": False,
     }
     changes: list[dict] = []
     main: str | None = None
@@ -217,7 +242,10 @@ async def _land(
         main = (await asyncio.wait_for(_call(sandbox_pool, owner, "fetch"), commit.timeout_seconds))["main"]
         turn = await execute(commit)
         changes = turn["changes"]
-        outcome.update(overlapped=turn["overlapped"], excluded=turn["excluded"], repositories=turn["repositories"])
+        outcome.update(
+            overlapped=turn["overlapped"], excluded=turn["excluded"], repositories=turn["repositories"],
+            saved=not turn["overlapped"],
+        )
         if turn["commit"] is not None:
             applies = [step("apply", **change) for change in changes]
             await save()

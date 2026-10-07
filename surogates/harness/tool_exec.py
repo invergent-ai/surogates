@@ -181,25 +181,32 @@ async def _build_session_sandbox_spec(
 
 
 #: The first tool result on a thread's copy made afresh, when work it did
-#: since its last landed turn was in a copy that is gone.  It says what is
+#: since its work was last saved was in a copy that is gone.  It says what is
 #: known, not why the copy was made again: a pod lost, a turn cut off, a Stop.
 COPY_REMADE = (
     "[This thread's copy of the project's files was made again from the project's files. "
-    "Changes this thread made after its last landed turn are not in it. "
+    "Changes this thread made since its work was last saved are not in it. "
     "Check the files before making any of those changes again.]"
 )
 
 
 async def _copy_lost_work(store: Any, session_id: Any, before: int) -> bool:
-    """Whether a step that could change the copy ran since the thread's last landed turn end, before event *before*.
+    """Whether the thread's copy, made again, lacks work it did before event *before*.
 
-    Such a step is a ``tool.call`` taken after a snapshot: reads, plans and
-    refused calls take none, and change nothing.
+    It does when its last turn end did not save its work, or when a step
+    that could change the copy ran since one that did.  A turn end saved
+    it when its landing's commit step put the turn in the history and held
+    no file, or when a failed turn's keep did; one that never used its pod
+    is no turn end here.  A step that could change the copy is a
+    ``tool.call`` taken after a snapshot: reads, plans and refused calls
+    take none, and change nothing.
     """
-    landed = await store.last_event(session_id, EventType.SESSION_COMPLETE, containing={"landed": True})
+    end = await store.last_event(session_id, EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, with_key="saved")
+    if end is not None and not end.data["saved"]:
+        return True
     return await store.has_event(
         session_id, EventType.TOOL_CALL,
-        after=landed.id if landed else None, before=before, with_key="checkpoint_hash",
+        after=end.id if end else None, before=before, with_key="checkpoint_hash",
     )
 
 

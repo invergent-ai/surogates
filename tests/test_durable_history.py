@@ -242,3 +242,17 @@ def test_the_first_look_says_whether_main_carries_a_landings_saga(tmp_path, proj
     looked = history.fetch(saga="saga:mine")
     assert (looked["main"], looked["has_saga"]) == (landed["commit"], True)
     assert history.fetch(saga="saga:another")["has_saga"] is False
+
+
+KEPT = [["Surogate-Kind", "kept"]]
+
+
+def test_a_failed_turns_work_is_kept_on_its_branch_for_the_next_pod(tmp_path, project):
+    history = a_pod(tmp_path, project)
+    (history.copy / "Report.docx").write_bytes(b"PK\x03\x04 half made")
+    history.keep(author=A, trailers=KEPT, base=True)
+    pod = a_pod(tmp_path, project)
+    assert (pod.copy / "Report.docx").read_bytes() == b"PK\x03\x04 half made"
+    assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+    land(pod, "saga:2")
+    assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 half made"

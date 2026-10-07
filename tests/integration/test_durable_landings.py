@@ -17,11 +17,13 @@ from surogates.harness import landing as landing_module
 from surogates.sandbox.history import History
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
+from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams import history as rows_module
 from tests.test_steer_loop import _final_response
+from tests.thread_pods import ThreadPods
 
 from .test_devices import api  # noqa: F401  (api is a fixture)
-from .test_thread_copies import a_thread, git, open_pod, pods, reports  # noqa: F401  (pods is a fixture)
+from .test_thread_copies import a_step_ran, a_thread, git, last_writes, open_pod, pods, reports  # noqa: F401  (pods is a fixture)
 from .test_turn_sagas import a_turn, calling
 from .test_workstream_threads import harness_of
 from .test_workstreams import create, master_of
@@ -52,6 +54,16 @@ async def ends(api, pool, thread, *, failed: bool = False, settings=FENCED) -> N
     else:
         await harness._complete_session(thread, messages, lease, reason="completed", turn_id="turn-1")
     await store.release_lease(thread.id, lease.lease_token)
+
+
+def stored(api, thread, tmp_path) -> ThreadPods:
+    """Pods over *thread*'s project's files where the storage keeps them, as a pod's geesefs mounts them."""
+    storage = api.app.state.storage
+    project = storage._resolve(thread.config["storage_bucket"], boundary_workspace_prefix(thread.config, thread, thread.id))
+    pods = ThreadPods(tmp_path, project=project)
+    (pods.project / "Report.docx").write_bytes(b"PK\x03\x04 report v1")
+    (pods.project / "notes.txt").write_text("v1 notes\n")
+    return pods
 
 
 async def edited(pool, thread, command: str) -> None:
@@ -406,3 +418,54 @@ async def test_a_landing_that_lost_its_lock_never_writes_over_the_next_landing(a
     assert (a_row.saga_state, a_row.commit) == ("compensated", None)
     assert b_row.saga_state == "completed"
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by B"
+
+
+async def test_a_failed_turns_work_is_on_its_branch_at_the_next_turn_and_lands_then(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "printf ' half made' >> Report.docx")
+    await ends(api, pool, thread, failed=True)
+    # Not landed, kept on its branch; and its pod is gone.
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+    assert git(pods.project / "_history", "show", f"refs/heads/threads/{thread.id}:Report.docx") == "PK\x03\x04 report v1 half made"
+    assert not pool.holds_copy(str(thread.id))
+    # Its next turn uses no tool, and lands it all the same.
+    await ends(api, SandboxPool(pods), thread)
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 half made"
+    [report] = await reports(api, master)
+    assert [(f["ref"], f["landing"]) for f in report["files"]] == [("Report.docx", "landed")]
+
+
+async def test_a_turn_that_never_used_its_pod_and_has_nothing_waiting_opens_none(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    await ends(api, SandboxPool(pods), thread)
+    assert pods.pods == {}
+
+
+async def test_a_thread_whose_failed_turn_was_kept_is_not_told_its_work_is_gone(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    pool = SandboxPool(pods)
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "a.md", "content": "a"})),
+        _final_response("Done."),
+    ], pool=pool, saga_settings=FENCED)
+    store = api.app.state.session_store
+    # A turn that ran a step, then failed: its copy is kept.
+    await edited(pool, thread, "echo b > b.md")
+    await a_step_ran(store, thread)
+    await ends(api, pool, thread, failed=True)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Go on."})
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "c.md", "content": "c"})),
+        _final_response("Done."),
+    ], pool=SandboxPool(pods), saga_settings=FENCED)
+    # The next turn's first step, on a copy made again: it has the failed turn's work.
+    first = (await last_writes(store, thread))[-1]
+    assert not first.startswith("[This thread's copy"), first
+    assert pods.real_names() == ["Report.docx", "a.md", "b.md", "c.md", "notes.txt"]
