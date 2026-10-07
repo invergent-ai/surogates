@@ -105,9 +105,11 @@ describe("the agent's network", () => {
   });
 
   it("names the root whose socket a connection came on, whatever the connection says", async () => {
+    await network.listen(ROOT, uid);
     await network.listen(OTHER, uid);
     expect(await through(network.path(OTHER), "echo.example:443")).toMatchObject({ status: "200" });
-    expect(asked.map(([root]) => root)).toEqual([OTHER]);
+    expect(await through(network.path(ROOT), "echo.example:443")).toMatchObject({ status: "200" });
+    expect(asked.map(([root]) => root)).toEqual([OTHER, ROOT]);
   });
 
   it("answers what the host proxy refuses with its status and reason, and ends the connection", async () => {
