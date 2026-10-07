@@ -11,15 +11,17 @@ from uuid import UUID
 
 import pytest
 from jose import jwt as jose_jwt
+from sqlalchemy import select
 
 from surogates.api.routes.oauth import code_key
 from surogates.db.agent_users import purge_user_account
+from surogates.db.models import Device
 from surogates.devices.store import DeviceStore
 from surogates.runtime import agent_runtime_context_dep, build_agent_runtime_context
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.auth.oauth import OAuthTokens
 
-from .test_devices import AGENT_ID, api  # noqa: F401  (fixtures)
+from .test_devices import AGENT_ID, api, eventually, link_url, linked  # noqa: F401  (fixtures)
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -281,20 +283,32 @@ async def test_the_computer_revoking_itself_ends_its_sign_in_too(api):
 async def test_the_desktop_taking_back_a_computer_that_never_connected_stays_signed_in(api):
     tokens = await signed_in(api)
     device_id = await add_computer(api, tokens["access_token"])
+    # The link checked the computer's token, and then the app never got its welcome.
+    await DeviceStore(api.app.state.session_factory).touch(UUID(device_id))
     # As the app does with a computer it added but could not keep.
     removed = await api.client.delete(f"/v1/devices/{device_id}", headers=api.auth(tokens["access_token"]))
     assert removed.status_code == 204
     assert (await refresh(api, tokens["refresh_token"])).status_code == 200
+    # Nothing is left of it: each failed try leaves no row behind.
+    listed = await api.client.get("/v1/devices", headers=api.auth())
+    assert device_id not in [device["id"] for device in listed.json()]
+
+
+async def welcomed(api, device_id: str) -> bool:
+    async with api.app.state.session_factory() as db:
+        return await db.scalar(select(Device.connected_at).where(Device.id == UUID(device_id))) is not None
 
 
 @pytest.mark.parametrize("removed_by", ["its own sign-in, once it connected", "another sign-in of the desktop"])
-async def test_any_other_removal_of_the_computer_ends_its_sign_in(api, removed_by):
+async def test_any_other_removal_of_the_computer_ends_its_sign_in(api, link_url, removed_by):
     tokens = await signed_in(api)
-    device_id = await add_computer(api, tokens["access_token"])
+    added = await api.client.post("/v1/devices", json={"name": "ThinkPad"}, headers=api.auth(tokens["access_token"]))
+    device_id = added.json()["id"]
     if removed_by == "another sign-in of the desktop":
         remover = (await signed_in(api))["access_token"]
     else:
-        await DeviceStore(api.app.state.session_factory).touch(UUID(device_id))
+        async with linked(link_url, added.json()["token"]):
+            await eventually(lambda: welcomed(api, device_id))
         remover = tokens["access_token"]
     assert (await api.client.delete(f"/v1/devices/{device_id}", headers=api.auth(remover))).status_code == 204
     assert (await refresh(api, tokens["refresh_token"])).json() == {"error": "invalid_grant"}

@@ -23,6 +23,10 @@ ALTER TABLE events
     ADD COLUMN IF NOT EXISTS org_id  uuid REFERENCES orgs(id),
     ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES users(id);
 
+-- When the device link first welcomed a device (``Device.connected_at``).
+ALTER TABLE devices
+    ADD COLUMN IF NOT EXISTS connected_at timestamptz;
+
 CREATE INDEX IF NOT EXISTS idx_events_audit_type_time
     ON events (org_id, type, created_at);
 

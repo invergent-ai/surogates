@@ -1271,6 +1271,8 @@ class Device(Base):
         UTCDateTime(), nullable=False, server_default=func.now()
     )
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # When the link first sent the device its welcome: NULL for one that never connected.
+    connected_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     credential_generation: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("1"), default=1

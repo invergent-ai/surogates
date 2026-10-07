@@ -610,6 +610,7 @@ async def serve_device_link(
             "name": device.name,
             "heartbeat_s": HEARTBEAT_INTERVAL_S,
         })
+        await _bounded(store.welcomed(device.id))
         # Cancellations come before any new work, so the app stops what the
         # server closed while it was away: a session stopped it, or a
         # revocation did.

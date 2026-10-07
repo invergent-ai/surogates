@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import Device, DeviceOperation, OAuthRefreshToken
@@ -127,8 +127,9 @@ class DeviceStore:
         """Revoke the user's device.  Revoking again keeps the first revocation time.
 
         *by_sign_in* is the caller's OAuth sign-in, if any.  When it is the one
-        bound to a device that never connected, it is unbound rather than ended:
-        the desktop taking back a computer it could not keep stays signed in.
+        bound to a device the link never welcomed, it is unbound rather than
+        ended, and the device is deleted: the desktop taking back a computer it
+        could not keep stays signed in, and leaves no row behind.
         """
         return await self._revoke(
             Device.id == device_id, *_owned_by(org_id, agent_id, user_id), by_sign_in=by_sign_in,
@@ -153,12 +154,15 @@ class DeviceStore:
                 .returning(Device)
             )).scalar_one_or_none()
             if row is not None:
-                if by_sign_in is not None and row.last_seen_at is None:
-                    await db.execute(
+                if by_sign_in is not None and row.connected_at is None:
+                    unbound = await db.execute(
                         update(OAuthRefreshToken)
                         .where(OAuthRefreshToken.family_id == by_sign_in, OAuthRefreshToken.device_id == row.id)
                         .values(device_id=None)
                     )
+                    # Never welcomed, so it ran nothing: its operations, if any, go with it.
+                    if unbound.rowcount:
+                        await db.execute(delete(Device).where(Device.id == row.id))
                 # The sign-in that added or restored the computer ends with it:
                 # a lost laptop's copy of the app can no longer refresh.
                 await db.execute(
@@ -217,6 +221,16 @@ class DeviceStore:
                 select(Device).where(Device.token_hash == hash_token(token))
             )).scalar_one_or_none()
         return _record(row) if row is not None else None
+
+    async def welcomed(self, device_id: UUID) -> None:
+        """Record that the link welcomed the device: from then on it has connected."""
+        async with self._sf() as db:
+            await db.execute(
+                update(Device)
+                .where(Device.id == device_id, Device.connected_at.is_(None))
+                .values(connected_at=func.now())
+            )
+            await db.commit()
 
     async def touch(self, device_id: UUID) -> DeviceRecord | None:
         """Record that the device was seen now; return its row, or None if it is gone."""
