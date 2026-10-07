@@ -222,10 +222,18 @@ async def test_every_file_failure_answers_an_error_and_a_write_is_whole_or_not_a
         answer = await call(pods, pod, "_file", action="write", path="notes.md", content_b64=x)
     assert "No space left" in answer["error"]
     assert (copy / "notes.md").read_text() == "notes v1"
-    assert [p.name for p in copy.iterdir() if p.name.startswith("notes.md")] == ["notes.md"]
+    assert not list(copy.glob("*.file~"))
 
     # Over the cap, a write is refused before it is decoded.
     monkeypatch.setattr(executor_server, "MAX_FILE_BYTES", 4)
     monkeypatch.setattr(executor_server.base64, "b64decode", lambda *_: (_ for _ in ()).throw(ValueError("decoded first")))
     big = await call(pods, pod, "_file", action="write", path="big.bin", content_b64=base64.b64encode(b"1234567").decode())
     assert "50 MiB" in big["error"] and not (copy / "big.bin").exists()
+
+
+async def test_a_pod_writes_a_file_whose_name_is_near_the_limit(pods):
+    pod = await a_pod(pods)
+    name = "Contrat " + "é" * 119 + ".docx"
+    written = await call(pods, pod, "_file", action="write", path=name, content_b64=base64.b64encode(b"contrat").decode())
+    assert written == {"ok": True, "bytes": 7}
+    assert (pods.copies["t1"] / name).read_bytes() == b"contrat"

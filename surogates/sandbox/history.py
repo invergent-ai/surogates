@@ -377,9 +377,10 @@ class History:
             for folder in takewhile(lambda f: f != self.project and not f.exists(), target.parents)
         ]
         # Written beside the real file, then renamed over it: a write cut
-        # short leaves the real file whole.  History leaves out the *~ name.
+        # short leaves the real file whole.  A short name, so a real file's
+        # near the length limit fits too; history leaves out the *~ name.
         target.parent.mkdir(parents=True, exist_ok=True)
-        staged = target.with_name(f"{target.name}.landing~")
+        staged = target.with_name(f".~{os.urandom(4).hex()}.landing~")
         try:
             with open(staged, "wb") as out:
                 result = subprocess.run(

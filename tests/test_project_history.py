@@ -652,3 +652,14 @@ def test_a_move_into_a_path_history_leaves_out_keeps_its_source(tmp_path, projec
     # The move's other half never lands, so its deletion waits too.
     assert out["overlapped"] == [{"path": "Policies/Policy 17.docx", "reason": "with"}]
     assert (project / "Policies" / "Policy 17.docx").read_bytes() == b"policy 17"
+
+
+LONG_NAME = "Contrat " + "é" * 119 + ".docx"  # 251 bytes: no room left for a suffix
+
+
+def test_a_file_whose_name_is_near_the_limit_lands(tmp_path, project):
+    assert len(LONG_NAME.encode()) == 251
+    history = opened(tmp_path, project)
+    (history.copy / LONG_NAME).write_bytes(b"contrat")
+    landed(history)
+    assert (project / LONG_NAME).read_bytes() == b"contrat"

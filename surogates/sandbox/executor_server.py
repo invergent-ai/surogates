@@ -244,8 +244,9 @@ def _run_file(args: dict, workspace: str) -> str:
                 return json.dumps({"error": too_large})
             os.makedirs(os.path.dirname(target), exist_ok=True)
             # Written beside the file, then renamed over it: a write cut short
-            # leaves the file whole.  History leaves out the *~ name.
-            staged = Path(f"{target}.file~")
+            # leaves the file whole.  A short name, so a file's near the length
+            # limit fits too; history leaves out the *~ name.
+            staged = Path(target).with_name(f".~{os.urandom(4).hex()}.file~")
             try:
                 staged.write_bytes(data)
                 os.replace(staged, target)
