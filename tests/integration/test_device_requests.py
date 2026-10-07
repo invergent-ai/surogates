@@ -94,6 +94,27 @@ async def test_a_request_is_not_refused_on_a_full_computer(api, session_factory,
         await stop(task)
 
 
+async def test_a_user_browsing_files_never_gets_the_agents_tool_call_refused(api, session_factory, redis_client, monkeypatch):
+    monkeypatch.setattr(operations_module, "PARKED_SESSIONS_PER_DEVICE", 1)
+    issued, first = await bound_device(api)
+    device_id = UUID(issued["id"])
+    second = await another_bound_root(api, device_id)
+    ops = DeviceOperations(session_factory, redis_client)
+    # A request parks nothing on a worker, so it takes no tool call's place.
+    looking = asyncio.create_task(ops.run(asked(device_id, first), keep_open=True))
+    await eventually(lambda: has_pending(ops, device_id))
+    calling = asyncio.create_task(ops.run(request_for(device_id, second)))
+
+    async def recorded() -> bool:
+        if calling.done():
+            calling.result()  # a refusal surfaces here
+        return len(await ops.pending(device_id, 1)) == 2
+
+    await eventually(recorded)
+    for task in (looking, calling):
+        await stop(task)
+
+
 async def test_a_request_kept_open_outlives_its_wait_and_is_joined_later(api, session_factory, redis_client, tmp_path):
     issued, root = await bound_device(api)
     device_id = UUID(issued["id"])

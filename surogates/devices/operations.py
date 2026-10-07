@@ -253,7 +253,8 @@ async def _refuse_when_full(db: AsyncSession, request: OperationRequest, device:
     """Refuse a new operation from a session not yet waiting on a computer that has its fill.
 
     A session already waiting may keep asking.  A binding waits for its user,
-    not for the computer, so it never counts.  A replay gets its recorded
+    not for the computer, so it never counts; nor does the user's own request,
+    which parks nothing on a worker.  A replay gets its recorded
     outcome, and a tool call already under way may finish its remaining steps:
     neither is ever refused.
     """
@@ -269,6 +270,7 @@ async def _refuse_when_full(db: AsyncSession, request: OperationRequest, device:
         DeviceOperation.device_id == request.device_id,
         DeviceOperation.completed_at.is_(None),
         DeviceOperation.kind != BIND,
+        DeviceOperation.invocation_id.not_like(f"{REQUEST_PREFIX}%"),
     )
     others = (await db.execute(
         select(func.count(func.distinct(DeviceOperation.calling_session_id))).where(
