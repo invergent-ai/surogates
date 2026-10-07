@@ -58,6 +58,14 @@ async def test_adding_a_computer_needs_a_sign_in_from_the_last_ten_minutes(api, 
     assert (await api.client.get("/v1/devices", headers=api.auth())).json() == []
 
 
+@pytest.mark.parametrize(("signed_in", "status"), [("nine minutes ago", 201), ("two minutes from now", 403)])
+async def test_a_recent_sign_in_is_one_of_the_last_ten_minutes_and_none_to_come(api, signed_in, status):
+    offset = -9 * 60 if signed_in == "nine minutes ago" else 2 * 60
+    token = create_access_token(api.org_id, api.user_id, {"sessions:read"}, auth_time=int(time.time()) + offset)
+    response = await api.client.post("/v1/devices", json={"name": "ThinkPad"}, headers=api.auth(token))
+    assert response.status_code == status, response.text
+
+
 async def test_restoring_a_computer_needs_a_recent_sign_in_and_revoking_one_does_not(api):
     issued = await register(api)
     stale = create_access_token(api.org_id, api.user_id, {"sessions:read"}, auth_time=int(time.time()) - 11 * 60)
