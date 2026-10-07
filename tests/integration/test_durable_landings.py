@@ -500,3 +500,64 @@ async def test_a_thread_whose_failed_turn_was_kept_is_not_told_its_work_is_gone(
     first = (await last_writes(store, thread))[-1]
     assert not first.startswith("[This thread's copy"), first
     assert pods.real_names() == ["Report.docx", "a.md", "b.md", "c.md", "notes.txt"]
+
+
+async def test_a_put_back_goes_on_when_its_rows_cannot_be_written(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md && echo b > b.md")
+    call, save, down = landing_module._call, landing_module.save_landing, []
+
+    async def b_fails_and_the_database_goes(sandbox_pool, owner, action, **arguments):
+        if action == "apply" and arguments["path"] == "b.md":
+            down.append(True)
+            raise landing_module.LandingStepError("the pod's step timed out")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    async def unwritten(*args, **kwargs):
+        if down:
+            raise ConnectionError("the database is down")
+        await save(*args, **kwargs)
+
+    monkeypatch.setattr(landing_module, "_call", b_fails_and_the_database_goes)
+    monkeypatch.setattr(landing_module, "save_landing", unwritten)
+    await ends(api, pool, thread)
+    # All or nothing all the same: a.md is put back, and the landing is rolled back, not escalated.
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
+    [report] = await reports(api, master)
+    assert report["landing"] == "compensated"
+
+
+async def test_a_row_write_that_fails_once_never_fails_a_put_back_that_worked(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md && echo b > b.md")
+    call, compensate, save, putting_back = landing_module._call, landing_module.compensate_step, landing_module.save_landing, []
+
+    async def the_lock_goes_after_a(sandbox_pool, owner, action, **arguments):
+        result = await call(sandbox_pool, owner, action, **arguments)
+        if action == "apply" and arguments["path"] == "a.md":
+            await lose_the_lock(api, thread)  # nothing failed: the landing stops before b.md
+        return result
+
+    async def watched(it, **kwargs):
+        putting_back.append(True)
+        return await compensate(it, **kwargs)
+
+    async def fails_once(*args, **kwargs):
+        if putting_back == [True]:
+            putting_back.append(False)
+            raise ConnectionError("the database blinked")
+        await save(*args, **kwargs)
+
+    monkeypatch.setattr(landing_module, "_call", the_lock_goes_after_a)
+    monkeypatch.setattr(landing_module, "compensate_step", watched)
+    monkeypatch.setattr(landing_module, "save_landing", fails_once)
+    await ends(api, pool, thread)
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
+    [row] = await rows(api, thread)
+    assert row.saga_state == "compensated"
+    assert {s["state"] for s in row.steps if s["tool_name"] == "history.apply"} == {"compensated", "pending"}
+    assert putting_back[:2] == [True, False]  # the write after a.md's put-back failed

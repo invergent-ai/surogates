@@ -335,12 +335,25 @@ async def _settle(
         if looked["has_saga"]:
             if saga.state is SagaState.RUNNING:
                 saga.transition(SagaState.COMPLETED)
-            await save(state="completed", commit=looked["main"], files=_row_files(saga, "completed"))
+            await _written(save, tries=2, state="completed", commit=looked["main"], files=_row_files(saga, "completed"))
             return "completed", looked["main"]
     failed = await _put_back(saga, orchestrator, sandbox_pool, owner, save, recovered=recovered)
     state = "escalated" if failed else "compensated"
-    await save(state=state)
+    await _written(save, tries=2, state=state)
     return state, None
+
+
+async def _written(save: Any, *, tries: int = 1, **values: Any) -> None:
+    """Write a landing's row, as best it can: an outcome already known stands without it.
+
+    A write that fails is caught up by the next, or by the next lock
+    holder's settle, which puts the files back again: that is safe to repeat.
+    """
+    for _ in range(tries):
+        try:
+            return await save(**values)
+        except Exception:
+            logger.warning("A landing's row was not written", exc_info=True)
 
 
 async def settle_running(
@@ -423,13 +436,13 @@ async def _put_back(
             except Exception:
                 logger.warning("Could not put back %s", it.arguments.get("path"), exc_info=True)
                 failed.append(it)
-            await save()
+            await _written(save)
 
     async def compensate(it: SagaStep) -> Any:
         try:
             return await compensate_step(it, sandbox_pool=sandbox_pool, session_id=owner)
         finally:
-            await save()
+            await _written(save)
 
     failed += await orchestrator.compensate(saga.saga_id, compensate)
     return failed
