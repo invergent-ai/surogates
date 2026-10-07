@@ -56,6 +56,11 @@ beforeEach(async () => {
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 self.addEventListener("fetch", (event) => event.respondWith(new Response("<title>Served by the worker</title>", { headers: { "content-type": "text/html" } })));`);
     }
+    // A page whose own code holds its main thread once it has loaded.
+    if (req.url === "/hang") {
+      return void res.writeHead(200, { "content-type": "text/html" })
+        .end(`<title>Hang</title><script>addEventListener("load", () => setTimeout(() => { while (true) {} }, 0));</script>`);
+    }
     if (req.url === "/redirect") return void res.writeHead(302, { location: `http://127.0.0.1:${ports.canary}/redirected` }).end();
     if (req.url === "/reach") {
       // Every way a page reaches out, at this computer's own service: directly, from a worker, and by a redirect.
@@ -304,6 +309,19 @@ describe.skipIf(!run)("the browser host", () => {
     // The browser goes with its last tab, and the next operation launches it again.
     expect(await op(b, "browser.close")).toEqual({ ok: { closed: true } });
     expect((await op(a, "browser.navigate", { url: "http://fixture.test/" })).ok?.opened).toBe(true);
+  });
+
+  it("closes a page that holds its main thread after it loaded, so a navigation answers within the bound too", async () => {
+    await host.close();
+    host = hostWith({ boundMs: 2_000 });
+    const a = session();
+    const started = performance.now();
+    expect(await op(a, "browser.navigate", { url: "http://fixture.test/hang" })).toEqual({
+      error: { type: "browser", message: "The page did not answer within 2 s, so it was closed" },
+    });
+    expect(performance.now() - started).toBeLessThan(5_000);
+    // The session's next operation runs, in a tab of its own again.
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/second" })).ok).toMatchObject({ title: "Second", opened: true });
   });
 
   it("lets no service worker answer the agent's pages, one registered through the prototype's own register too", async () => {

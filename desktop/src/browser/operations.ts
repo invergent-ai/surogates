@@ -8,7 +8,8 @@ import { observe } from "./observe.js";
 
 export type PageOperation = (page: Page, args: Record<string, unknown>) => Promise<unknown>;
 
-const NAVIGATION_MS = 60_000;
+// Below the host's bound (BOUND_MS), so a page that does not load answers goto's own time-out and keeps its tab.
+const NAVIGATION_MS = 50_000;
 const WAITS = new Set(["load", "domcontentloaded", "networkidle"]);
 const BUTTONS = new Set(["left", "right", "middle"]);
 const MAX_PATH = 1_000;
