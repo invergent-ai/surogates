@@ -263,7 +263,22 @@ def test_a_failed_turns_work_is_kept_on_its_branch_for_the_next_pod(tmp_path, pr
     assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 half made"
 
 
-@pytest.mark.parametrize("crafted", ["id", "ref", "shallow", "HEAD"])
+#: What a thread's commands can write into the history's files: each file, and its text from main's id and an option for git.
+CRAFTED = {
+    "id": ("packed-refs", lambda main, option: f"{option} refs/heads/main\n"),
+    "ref": ("packed-refs", lambda main, option: f"{main} refs/heads/main\n{main} refs/heads/../../config\n"),
+    "ref-dash": ("packed-refs", lambda main, option: f"{main} refs/heads/main\n{main} refs/heads/-x\n"),
+    "ref-other-prefix": ("packed-refs", lambda main, option: f"{main} refs/heads/main\n{main} refs/tags/x\n"),
+    "ref-control": ("packed-refs", lambda main, option: f"{main} refs/heads/main\n{main} refs/heads/a\x1bb\n"),
+    "peeled": ("packed-refs", lambda main, option: f"{main} refs/heads/main\n^{option}\n"),
+    "shallow": ("shallow", lambda main, option: f"{option}\n"),
+    "short": ("shallow", lambda main, option: f"{main[:39]}\n"),
+    "upper": ("shallow", lambda main, option: f"{main.upper()}\n"),
+    "HEAD": ("HEAD", lambda main, option: f"ref: {option}\n"),
+}
+
+
+@pytest.mark.parametrize("crafted", list(CRAFTED))
 def test_a_history_a_command_wrote_runs_nothing_in_a_pod_and_refuses_its_open(tmp_path, project, crafted):
     first = a_pod(tmp_path, project)
     (first.copy / "A.md").write_text("by A")
@@ -272,21 +287,15 @@ def test_a_history_a_command_wrote_runs_nothing_in_a_pod_and_refuses_its_open(tm
     durable, ran = project / "_history", tmp_path / "ran"
     # A thread's commands can write the history: an option for git where an id goes.
     option = f"--upload-pack=touch${{IFS}}{ran}"
-    main = git(durable, "rev-parse", "refs/heads/main")
-    refs = (durable / "packed-refs").read_text()
-    if crafted == "id":
-        (durable / "packed-refs").write_text(refs.replace(f"{main} refs/heads/main", f"{option} refs/heads/main"))
-    elif crafted == "ref":
-        (durable / "packed-refs").write_text(f"{refs}{main} refs/heads/../../config\n")
-    elif crafted == "shallow":
-        (durable / "shallow").write_text(f"{option}\n")
-    else:
-        (durable / "HEAD").write_text(f"ref: {option}\n")
-    with pytest.raises(HistoryError, match="project's history"):
+    name, text = CRAFTED[crafted]
+    header = "# pack-refs with: peeled fully-peeled sorted \n" if name == "packed-refs" else ""
+    (durable / name).write_text(header + text(git(durable, "rev-parse", "refs/heads/main"), option))
+    with pytest.raises(HistoryError, match="refused the project's history") as refused:
         a_pod(tmp_path, project, "t2")
-    if crafted in ("id", "ref"):
+    assert "upload-pack" not in str(refused.value)
+    if name != "HEAD":
         # Nor at a landing's first look, in a pod opened before.
-        with pytest.raises(HistoryError, match="project's history"):
+        with pytest.raises(HistoryError, match="refused the project's history"):
             holder.fetch()
     with pytest.raises(HistoryError, match="project's history"):
         holder.fetch(commits=[option])
