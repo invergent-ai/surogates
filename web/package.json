@@ -13,6 +13,7 @@
     "preview": "vite preview",
     "test:shared-sdk": "node ../scripts/web-shared-chat-sdk.test.mjs",
     "test:desktop-bridge": "node --experimental-strip-types --test ../scripts/desktop-bridge.test.mjs",
+    "test:projects": "node --experimental-strip-types --test ../scripts/web-projects.test.mjs",
     "typecheck": "tsc -b --pretty false",
     "biome:check": "biome check .",
     "biome:fix": "biome check . --write"
