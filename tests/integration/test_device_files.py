@@ -16,6 +16,7 @@ from surogates.devices.operations import DeviceOperations, OperationRequest
 from surogates.devices.workspace import MAX_WALK_FILES
 from surogates.session.provisioning import create_child_session
 from surogates.tools.workspace_io import LocalWorkspaceIO
+from tests import fake_laptop
 from tests.fake_laptop import CHANGE_DENIED, FakeLaptop
 
 from .conftest import issue_service_account_token
@@ -593,3 +594,22 @@ async def test_an_upload_sent_again_by_its_digest_says_its_computer_did_not_run_
     }[ends]
     assert (again.status_code, again.json()["detail"]) == said, again.text
     assert not (chat.folder / "notes.txt").exists()
+
+
+async def test_the_platforms_folders_use_none_of_the_trees_cap(api, chat):
+    # Not dot-folders, so only the tree's own skip at the top keeps the walk out of them.
+    (chat.folder / "_history").mkdir()
+    for name in range(MAX_WALK_FILES):
+        (chat.folder / "_history" / str(name)).touch()
+    (chat.folder / "notes.md").write_text("n")
+    response = await api.client.get(url(chat, "tree"), headers=api.auth())
+    assert response.status_code == 200, response.text
+    assert ([entry["name"] for entry in response.json()["entries"]], response.json()["truncated"]) == (["notes.md"], False)
+
+
+async def test_a_walk_cut_short_says_the_tree_is(api, chat, monkeypatch):
+    (chat.folder / "notes.md").write_text("n")
+    monkeypatch.setattr(fake_laptop, "WALK_BUDGET_S", -1)  # its time is up before its first entry
+    response = await api.client.get(url(chat, "tree"), headers=api.auth())
+    assert response.status_code == 200, response.text
+    assert response.json()["truncated"] is True
