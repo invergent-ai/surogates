@@ -72,11 +72,13 @@ SG_NOINLINE int sg_classify(const struct sg_name *nm SG_ARG_NONNULL, int len)
 
 enum sg_child { CC_OTHER, CC_HOOKS, CC_CONFIG, CC_CFGLEAF, CC_MODULES, CC_WORKTREES, CC_CMDAGENT };
 
-struct sg_state { int i; int child; int any_hooks; int leaf_config; int refused; };
+// any_hooks: a hooks component below this one; hk1 and hk2 lag it by one and two
+// components, so at a .git, hk2 leaves out modules/<name's first part> as protect.ts does.
+struct sg_state { int i; int child; int any_hooks; int hk1; int hk2; int leaf_config; int refused; };
 
 SG_INLINE void sg_init(struct sg_state *s)
 {
-	s->i = 0; s->child = CC_OTHER; s->any_hooks = 0; s->leaf_config = 0; s->refused = 0;
+	s->i = 0; s->child = CC_OTHER; s->any_hooks = 0; s->hk1 = 0; s->hk2 = 0; s->leaf_config = 0; s->refused = 0;
 }
 
 // Feed one component's match bits (leaf-first; i == 0 is the target). Returns 1 the
@@ -93,10 +95,12 @@ SG_INLINE int sg_step(struct sg_state *s, int bits)
 		(d & ((child == CC_HOOKS) |                                 // .git/hooks/**
 			(child == CC_CONFIG) |                              // .git/config** (the pair)
 			((i == 1) & (child == CC_CFGLEAF)) |                // .git/config.worktree|commondir
-			((child == CC_MODULES) & (i >= 3) & (s->any_hooks | s->leaf_config)) | // submodule
+			((child == CC_MODULES) & (i >= 3) & (s->hk2 | s->leaf_config)) | // submodule
 			((child == CC_WORKTREES) & (i >= 3) & s->leaf_config))); // linked worktree config
 	if (i == 0)
 		s->leaf_config = (bits & (SB_CONFIG | SB_CFGLEAF)) != 0;
+	s->hk2 = s->hk1;
+	s->hk1 = s->any_hooks;
 	s->any_hooks |= (bits & SB_HOOKS) != 0;
 	s->child = (bits & SB_HOOKS) ? CC_HOOKS : (bits & SB_CONFIG) ? CC_CONFIG
 		: (bits & SB_CFGLEAF) ? CC_CFGLEAF : (bits & SB_MODULES) ? CC_MODULES
