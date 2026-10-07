@@ -60,8 +60,8 @@ let sessionStore: SessionStore;
 let signedIn: DesktopSession | null = null;
 // A sign-in under way in the system browser: starting another cancels it.
 let signingIn: AbortController | null = null;
-// Settled once every sign-in started so far has stopped: what a log out waits for.
-let signIns: Promise<unknown> = Promise.resolve();
+// Settled once every sign-in and Restore started so far has stopped: what a log out waits for.
+let underWay: Promise<unknown> = Promise.resolve();
 let signInFailure: string | null = null;
 // The agent would add this computer only on a more recent sign-in: the user signs in again.
 let signInAgain = false;
@@ -76,6 +76,8 @@ let signingOut: Promise<void> | null = null;
 // A device the agent revoked, being cleaned up: a restore waits for it.
 let retiring: Promise<void> = Promise.resolve();
 let restoring = false;
+// The Restore under way: a log out cancels it.
+let restoringNow: AbortController | null = null;
 let restoreFailure: string | null = null;
 // A kept computer whose token a later sign-in rotates: the agent closes its old link as revoked, which retires nothing.
 let rotating: Credential | null = null;
@@ -555,9 +557,11 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
   const { promise, resolve: done } = Promise.withResolvers<void>();
   signingOut = promise;
   try {
-    // A sign-in under way is cancelled, and stops first: one that finished afterwards would sign the user back in.
+    // A sign-in or a Restore under way is cancelled, and stops first: one that finished afterwards
+    // would sign the user back in, or bring the computer back.
     signingIn?.abort();
-    await signIns;
+    restoringNow?.abort();
+    await underWay;
     const ending = signedIn;
     signedIn = null;
     signInAgain = false;
@@ -615,30 +619,35 @@ function foldersOf(credential: Credential): string[] {
  */
 async function restore(agent: Agent): Promise<void> {
   const credential = kept;
-  if (restoring || !credential || credential.token !== null || !signedIn) return;
-  restoreFailure = null;
-  await retiring;
-  const folders = foldersOf(credential);
-  const confirmed = await ask({
-    type: "question",
-    message: `Restore local access on ${credential.name}?`,
-    detail: folders.length > 0
-      ? `${agent.name} revoked this computer's access. Restoring it lets the chats on these folders work here again:\n${folders.map((folder) => `• ${folder}`).join("\n")}\nWork that was cancelled stays cancelled.`
-      : `${agent.name} revoked this computer's access. Restoring it lets ${agent.name} work on folders of this computer again.`,
-    buttons: ["Restore access", "Cancel"], defaultId: 0, cancelId: 1, noLink: true,
-  });
-  // Signed out while the user was asked: nothing to restore with.
-  if (!confirmed || !signedIn) return;
-  if (!signedIn.recent()) await signIn(agent);
-  const session = signedIn;
-  // The sign-in did not finish, another account signed in, which ended this device, or a log out began.
-  if (!session || kept !== credential || signingOut) return;
+  if (restoring || !credential || credential.token !== null || !signedIn || signingOut) return;
+  // What a log out cancels, and waits for, as it does a sign-in.
+  const cancel = new AbortController();
+  restoringNow = cancel;
+  const { promise: stopped, resolve: stop } = Promise.withResolvers<void>();
+  underWay = Promise.all([underWay, stopped]);
   restoring = true;
+  restoreFailure = null;
   changed();
   try {
+    await retiring;
+    const folders = foldersOf(credential);
+    const confirmed = await ask({
+      type: "question",
+      message: `Restore local access on ${credential.name}?`,
+      detail: folders.length > 0
+        ? `${agent.name} revoked this computer's access. Restoring it lets the chats on these folders work here again:\n${folders.map((folder) => `• ${folder}`).join("\n")}\nWork that was cancelled stays cancelled.`
+        : `${agent.name} revoked this computer's access. Restoring it lets ${agent.name} work on folders of this computer again.`,
+      buttons: ["Restore access", "Cancel"], defaultId: 0, cancelId: 1, noLink: true,
+    });
+    // Signed out while the user was asked: nothing to restore with.
+    if (!confirmed || !signedIn || cancel.signal.aborted) return;
+    if (!signedIn.recent()) await signIn(agent);
+    const session = signedIn;
+    // The sign-in did not finish or was cancelled, another account signed in, which ended this device, or a log out began.
+    if (!session?.recent() || kept !== credential || cancel.signal.aborted) return;
     const restored = await reauthorize({ session, credential });
-    if (signingOut || signedIn !== session) {
-      // Logged out meanwhile: a token the agent issued all the same revokes the computer, with the log out.
+    if (cancel.signal.aborted) {
+      // Logged out meanwhile: nothing of it is kept, and a token the agent issued all the same revokes the computer.
       if (typeof restored === "object") await endDevice(restored);
     } else if (restored === "gone") {
       // The agent has no such device any more: its folders here go too, and this computer is added afresh.
@@ -657,6 +666,8 @@ async function restore(agent: Agent): Promise<void> {
     restoreFailure = error instanceof Error ? error.message : String(error);
   } finally {
     restoring = false;
+    if (restoringNow === cancel) restoringNow = null;
+    stop();
     changed();
   }
 }
@@ -669,7 +680,7 @@ async function signIn(agent: Agent): Promise<void> {
   const attempt = new AbortController();
   signingIn = attempt;
   const { promise: stopped, resolve: stop } = Promise.withResolvers<void>();
-  signIns = Promise.all([signIns, stopped]);
+  underWay = Promise.all([underWay, stopped]);
   signInFailure = null;
   changed();
   try {

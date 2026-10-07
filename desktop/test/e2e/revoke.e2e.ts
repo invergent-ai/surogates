@@ -143,11 +143,19 @@ describe("restoring a revoked computer", () => {
     await page.click("#user");
     await page.click('[data-action="logout"]');
     await expect.poll(async () => (await asked(shell)).some((options) => options.message.startsWith("Log out of"))).toBe(true);
+    // The log out waits for the Restore under way, which it cancelled.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(credentials()).toEqual([expect.objectContaining({ deviceId: "d" })]);
     release();
     await expect.poll(() => agent.link.received.filter((frame) => frame.type === "revoke").length).toBe(1);
     await expect.poll(() => credentials()).toEqual([]);
     await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
     expect(await page.getAttribute("#device", "title")).toBe("Sign in to this agent to let it work on folders of this computer");
+    // Nor at the next launch.
+    await quit(shell);
+    app = await launch(home);
+    const again = await shellPage(app);
+    await expect.poll(() => again.getAttribute("#device", "title")).toBe("Sign in to this agent to let it work on folders of this computer");
   });
 
   it("adds this computer afresh when the agent has no such device any more", async () => {
