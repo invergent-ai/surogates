@@ -184,6 +184,36 @@ describe("the app's menu", () => {
     expect(await reloads()).toBe(1);
   });
 
+  it("leaves the agent's page as it was on Ctrl+R from the Composio sign-in, a window the agent's page opens with no menu", async () => {
+    const { shell, client } = await signedIn();
+    await shell.evaluate(({ BrowserWindow, webContents }) => {
+      const window = BrowserWindow.getAllWindows()[0]!.webContents;
+      const view = webContents.getAllWebContents().find((contents) => contents !== window)!;
+      const reloads = { count: 0 };
+      Object.assign(globalThis, { reloads });
+      view.reload = () => void reloads.count++;
+      // The sign-in's own page stays out of the test: the popup opens on nothing outside.
+      view.session.webRequest.onBeforeRequest({ urls: ["https://connect.composio.dev/*"] }, (_details, answer) => answer({ cancel: true }));
+    });
+    const reloads = () => shell.evaluate(() => (globalThis as unknown as { reloads: { count: number } }).reloads.count);
+    const popped = shell.waitForEvent("window");
+    await client.evaluate(() => void window.open("https://connect.composio.dev/link/abc", "composio-oauth", "popup=yes"));
+    await popped;
+    const popup = () => shell.evaluate(({ BrowserWindow }) => {
+      const found = BrowserWindow.getAllWindows().find((window) => !window.webContents.getURL().endsWith("/shell.html"))!;
+      found.focus();
+      return found.isFocused();
+    });
+    await expect.poll(popup).toBe(true);
+    await shell.evaluate(({ BrowserWindow }) => {
+      const contents = BrowserWindow.getFocusedWindow()!.webContents;
+      contents.sendInputEvent({ type: "keyDown", keyCode: "R", modifiers: ["control"] });
+      contents.sendInputEvent({ type: "keyUp", keyCode: "R", modifiers: ["control"] });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await reloads()).toBe(0);
+  });
+
   it("quits on Ctrl+Q from the agent's page", async () => {
     const { shell } = await signedIn();
     const closed = shell.waitForEvent("close");

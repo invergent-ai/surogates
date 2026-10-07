@@ -65,6 +65,8 @@ function confine(contents: WebContents, origin: string, onRefused: (url: string)
     return { action: "allow", overrideBrowserWindowOptions: { webPreferences } };
   });
   contents.on("did-create-window", (popup) => {
+    // Linux gives every window the app's menu: its keys would act on the agent's page behind this one.
+    popup.removeMenu();
     popup.webContents.setWindowOpenHandler(({ url }) => {
       openOutside(url);
       return { action: "deny" };
