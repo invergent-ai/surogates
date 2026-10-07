@@ -22,6 +22,8 @@ import { inFolderRefusal } from "../src/files/protect.js";
 const reads = vi.hoisted(() => ({ cap: Number.POSITIVE_INFINITY, calls: 0, next: [] as number[] }));
 // Run once as the file helper's next write begins: another writer, changing a file meanwhile.
 const meanwhile = vi.hoisted(() => ({ run: null as (() => void) | null }));
+// How many folder entries the file helper has read, however it read them.
+const dirents = vi.hoisted(() => ({ read: 0 }));
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
   const readSync = (
@@ -37,7 +39,23 @@ vi.mock("node:fs", async (importOriginal) => {
     run?.();
     return fs.writeSync(fd, buffer, offset);
   };
-  return { ...fs, readSync, writeSync, default: { ...fs, readSync, writeSync } };
+  const readdirSync = ((...args: Parameters<typeof fs.readdirSync>) => {
+    const entries = fs.readdirSync(...args);
+    dirents.read += entries.length;
+    return entries;
+  }) as typeof fs.readdirSync;
+  const opendirSync = (...args: Parameters<typeof fs.opendirSync>) => {
+    const dir = fs.opendirSync(...args);
+    const next = dir.readSync.bind(dir);
+    dir.readSync = () => {
+      const entry = next();
+      if (entry !== null) dirents.read += 1;
+      return entry;
+    };
+    return dir;
+  };
+  const mocked = { readSync, writeSync, readdirSync, opendirSync };
+  return { ...fs, ...mocked, default: { ...fs, ...mocked } };
 });
 
 let base: string;
@@ -645,6 +663,18 @@ describe("walk", () => {
     const walking = walk(); // the walk itself is synchronous: it is done once this returns
     clock.mockRestore();
     expect((await walking).ok).toMatchObject({ files: [], truncated: true });
+  });
+
+  it("reads a folder no further than it looks, and closes every folder it opened", async () => {
+    mkdirSync(join(folder, "deep", "many"), { recursive: true });
+    for (let i = 0; i < 2 * MAX_WALK_FILES; i++) writeFileSync(join(folder, "deep", "many", String(i)), "");
+    const handles = readdirSync("/proc/self/fd").length;
+    dirents.read = 0;
+    const walked = await walk();
+    expect(walked.ok.truncated).toBe(true);
+    // The key's and deep's few entries, then many's up to the one past the cap: not the rest of it.
+    expect(dirents.read).toBeLessThan(MAX_WALK_FILES + 10);
+    expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
   });
 
   it("stops at its cap and says it did", async () => {

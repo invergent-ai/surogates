@@ -245,7 +245,7 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
 
 def _walk(a: dict[str, Any]) -> dict[str, Any]:
     """As the app walks: depth first, each folder entered as it is met, through a handle on its parent and never
-    through a link, and each folder's entries as the operating system lists them."""
+    through a link, and each folder's entries read as the walk goes, as the operating system lists them."""
     key, skip, top, hidden, since = (a.get(name) for name in ("key", "skip", "skip_top", "skip_hidden", "since"))
     if (
         not isinstance(key, str) or type(hidden) is not bool
@@ -262,17 +262,21 @@ def _walk(a: dict[str, Any]) -> dict[str, Any]:
     levels: list[tuple[int, str, Iterator[os.DirEntry[str]]]] = []
     fd = os.open(key, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        levels.append((fd, "", iter(_listing(fd))))
+        # Its entries' stats are taken through the handle too, so by no path that could hold a link.
+        levels.append((fd, "", os.scandir(fd)))
     except OSError:
         os.close(fd)
         raise
     try:
         while levels and not truncated:
             fd, rel, entries = levels[-1]
-            entry = next(entries, None)
+            try:
+                entry = next(entries, None)
+            except OSError:
+                entry = None  # what it could not read of a folder is left out
             if entry is None:
                 levels.pop()
-                os.close(fd)
+                _close(fd, entries)
                 continue
             looks += 1
             if looks > MAX_WALK_LOOKS or time.monotonic() > deadline:
@@ -291,7 +295,7 @@ def _walk(a: dict[str, Any]) -> dict[str, Any]:
                 except OSError:
                     continue
                 try:
-                    levels.append((child, path, iter(_listing(child))))
+                    levels.append((child, path, os.scandir(child)))
                 except OSError:
                     os.close(child)
                 continue
@@ -310,15 +314,14 @@ def _walk(a: dict[str, Any]) -> dict[str, Any]:
             files.append([path, st.st_size])
             cost += more
     finally:
-        for fd, _, _ in levels:
-            os.close(fd)
+        for fd, _, entries in levels:
+            _close(fd, entries)
     return {"files": files, "truncated": truncated, "cursor": cursor}
 
 
-def _listing(fd: int) -> list[os.DirEntry[str]]:
-    # Its entries' stats are taken through this handle too, so by no path that could hold a link.
-    with os.scandir(fd) as listing:
-        return list(listing)
+def _close(fd: int, entries: Iterator[os.DirEntry[str]]) -> None:
+    entries.close()  # type: ignore[attr-defined]  # a scandir iterator
+    os.close(fd)
 
 
 async def _run_process(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:

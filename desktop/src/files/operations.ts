@@ -11,7 +11,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   accessSync, type BigIntStats, closeSync, constants, type Dirent, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync,
-  openSync, readdirSync, readSync, renameSync, type Stats, statSync, unlinkSync, writeSync,
+  opendirSync, openSync, readdirSync, readSync, renameSync, type Stats, statSync, unlinkSync, writeSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -421,7 +421,8 @@ function listDir(args: Record<string, unknown>, { folder }: Context): string[] {
 //
 // Each folder is entered through a handle on its parent, never by its path, and never through a link: a command in
 // the VM can swap a folder for a link between the walk seeing it and entering it. Depth first, each folder entered as
-// it is met, so a handle is held for each folder above the one being read, and no more.
+// it is met, so a handle is held for each folder above the one being read, and no more. Each folder is read an entry
+// at a time, so one of a million entries costs no more than the walk looks at.
 function walk(args: Record<string, unknown>, { folder }: Context): { files: Array<[string, number]>; truncated: boolean; cursor: string } {
   const key = keyInFolder(folder, text(args, "key"));
   const { skip, skip_top: top, skip_hidden: hidden, since } = args;
@@ -444,13 +445,18 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
   const keyFd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW));
   const levels: Level[] = [];
   try {
-    levels.push({ fd: keyFd, rel: "", entries: io(key, () => listing(keyFd)), at: 0 });
+    levels.push({ fd: keyFd, rel: "", dir: io(key, () => listing(keyFd)) });
     while (levels.length > 0 && !truncated) {
       const level = levels.at(-1) as Level;
-      const entry = level.entries[level.at++];
-      if (entry === undefined) {
+      let entry: Dirent<Buffer> | null;
+      try {
+        entry = level.dir.readSync();
+      } catch {
+        entry = null; // what it could not read of a folder is left out
+      }
+      if (entry === null) {
         levels.pop();
-        closeSync(level.fd);
+        close(level);
         continue;
       }
       looks += 1;
@@ -474,7 +480,7 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
           continue;
         }
         try {
-          levels.push({ fd, rel: path, entries: listing(fd), at: 0 });
+          levels.push({ fd, rel: path, dir: listing(fd) });
         } catch {
           closeSync(fd);
         }
@@ -497,21 +503,26 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
       cost += more;
     }
   } finally {
-    for (const level of levels) closeSync(level.fd);
+    for (const level of levels) close(level);
   }
   return { files, truncated, cursor };
 }
 
-// A folder the walk is in: its handle, its path from the key, and its entries, read up to *at*.
+// A folder the walk is in: its handle, its path from the key, and its entries, read as it goes.
 interface Level {
   fd: number;
   rel: string;
-  entries: Dirent<Buffer>[];
-  at: number;
+  dir: { readSync(): Dirent<Buffer> | null; closeSync(): void };
 }
 
-const listing = (fd: number): Dirent<Buffer>[] =>
-  readdirSync(`/proc/self/fd/${fd}`, { withFileTypes: true, encoding: "buffer" });
+// @types/node names a Dir's entries as strings, and takes no "buffer" encoding; Node reads them as bytes with it.
+const listing = (fd: number): Level["dir"] =>
+  opendirSync(`/proc/self/fd/${fd}`, { encoding: "buffer" as BufferEncoding }) as unknown as Level["dir"];
+
+function close(level: Level): void {
+  level.dir.closeSync();
+  closeSync(level.fd);
+}
 
 // shutil.which: a name with a slash is checked as it is (relative to *cwd*);
 // otherwise the first PATH entry holding an executable file of that name, a

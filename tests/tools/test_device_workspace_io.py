@@ -623,6 +623,45 @@ async def test_the_reference_laptops_walk_stops_once_its_time_is_up_and_says_so(
     assert walked["ok"]["files"] == [] and walked["ok"]["truncated"] is True
 
 
+async def test_a_walk_reads_a_folder_no_further_than_it_looks_and_closes_every_folder_it_opened(wio, root, monkeypatch):
+    (root / "deep" / "many").mkdir(parents=True)
+    for name in range(2 * workspace.MAX_WALK_FILES):
+        (root / "deep" / "many" / str(name)).touch()
+    scandir, read = os.scandir, 0
+
+    class Counting:
+        """os.scandir, counting the entries it yields."""
+
+        def __init__(self, path):
+            self._listing = scandir(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal read
+            entry = next(self._listing)
+            read += 1
+            return entry
+
+        def close(self):
+            self._listing.close()
+
+    handles = len(os.listdir("/proc/self/fd"))
+    monkeypatch.setattr(os, "scandir", Counting)
+    walked = await wio.walk(str(root), skip=())
+    monkeypatch.undo()
+    assert walked.truncated is True
+    assert read < workspace.MAX_WALK_FILES + 10
+    assert len(os.listdir("/proc/self/fd")) == handles
+
+
 async def test_a_walk_stops_at_its_cap_and_says_so(wio, root):
     (root / "many").mkdir()
     for name in range(workspace.MAX_WALK_FILES + 1):
