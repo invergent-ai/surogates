@@ -375,18 +375,19 @@ export class HookGuard {
   }
 
   // The last look, when the host stops: what a stopped command left. False when
-  // it could not see the whole folder or left a hook it could not stop, so the
-  // record must not say the host stopped cleanly.
+  // it could not see the whole folder, left a hook it could not stop, or left the
+  // todos alone for a run still in flight, so the record must not say the host
+  // stopped cleanly: the next host then takes no exec step there as the user's.
   async settle(): Promise<boolean> {
     await this.first;
-    const { blocked } = await this.check();
-    return !blocked && !this.blocked;
+    const { blocked, held } = await this.check();
+    return !blocked && !this.blocked && !held;
   }
 
   // One look, numbered. Only the newest says whether commands may run: an older
   // one may have seen the folder before the newest did. Its own verdict goes back
   // to the caller either way.
-  private async check(between = false): Promise<{ changed: string[]; stripped: string[]; blocked: string | null }> {
+  private async check(between = false): Promise<{ changed: string[]; stripped: string[]; held: boolean; blocked: string | null }> {
     const mine = ++this.looks;
     const verdict = await this.look(between);
     if (mine === this.looks) this.blocked = verdict.blocked;
@@ -397,7 +398,7 @@ export class HookGuard {
   // recorded before any command runs; every look makes what is not in it unable
   // to run, as far as it can see, and, while no command runs, comments out each exec step in a
   // todo that is not the user's. What it changed, the todos it commented steps out of, and why commands may not run, or null.
-  private async look(between: boolean): Promise<{ changed: string[]; stripped: string[]; blocked: string | null }> {
+  private async look(between: boolean): Promise<{ changed: string[]; stripped: string[]; held: boolean; blocked: string | null }> {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), this.timeoutMs);
@@ -416,7 +417,7 @@ export class HookGuard {
       : scan.unreadable.length > 0
         ? `Blocked: the computer cannot read ${listed(this.folder, scan.unreadable)} in this folder, so it cannot check there for git hooks, which would run outside the sandbox. Make it readable to run commands here.`
         : null;
-    if (!scan || (unseen && !this.baseline)) return { changed: [], stripped: [], blocked: [unseen, untold].filter(Boolean).join(" ") || null };
+    if (!scan || (unseen && !this.baseline)) return { changed: [], stripped: [], held: true, blocked: [unseen, untold].filter(Boolean).join(" ") || null };
     this.baseline ??= scan.hooks;
     if (!this.recorded) {
       try {
@@ -426,6 +427,7 @@ export class HookGuard {
         return {
           changed: [],
           stripped: [],
+          held: true,
           blocked: [
             `Blocked: the computer could not record this folder's state, so commands cannot run here: ${error instanceof Error ? error.message : String(error)}`,
             untold,
@@ -435,7 +437,7 @@ export class HookGuard {
     }
     const { changed, stuck } = await neutralize(this.folder, scan, this.baseline, this.writable);
     this.todos = scan.todos;
-    const { stripped, stuck: unstrippable } = await this.todosLook(scan.todos);
+    const { stripped, stuck: unstrippable, held } = await this.todosLook(scan.todos);
     const unstopped = stuck.length > 0
       ? `Blocked: the computer could not stop these git hooks from running outside the sandbox: ${listed(this.folder, stuck)}. Remove them or make them non-executable to run commands here.`
       : null;
@@ -446,18 +448,18 @@ export class HookGuard {
     const unremoved = unstrippable.length > 0
       ? `Blocked: the computer could not remove the steps that appeared in ${listed(this.folder, unstrippable)} while this chat's commands could write there, which git would run outside the sandbox. Abort that rebase or cherry-pick, or remove those exec lines, to run commands here.`
       : null;
-    return { changed, stripped, blocked: [unstopped, unseen, untold, linked, unremoved].filter(Boolean).join(" ") || null };
+    return { changed, stripped, held, blocked: [unstopped, unseen, untold, linked, unremoved].filter(Boolean).join(" ") || null };
   }
 
-  // A look's work on *todos*. While a run is in flight it does nothing: the run's own git
+  // A look's work on *todos*. While a run is in flight it does nothing, held: the run's own git
   // may be working through one. Otherwise, once something of the chat's may have written since
   // the record, it comments out each exec step not in it; and while nothing of the chat's can
   // write, what is left is the user's, as a rebase -x of theirs paused meanwhile left it.
-  private todosLook(todos: readonly string[]): Promise<{ stripped: string[]; stuck: string[] }> {
+  private todosLook(todos: readonly string[]): Promise<{ stripped: string[]; stuck: string[]; held: boolean }> {
     return this.serial(async () => {
       const stripped: string[] = [];
       const stuck: string[] = [];
-      if (this.running()) return { stripped, stuck };
+      if (this.running()) return { stripped, stuck, held: true };
       const steps = this.steps;
       if (steps && this.wrote) {
         for (const todo of todos) {
@@ -471,7 +473,7 @@ export class HookGuard {
         await this.record();
         this.wrote = false;
       }
-      return { stripped, stuck };
+      return { stripped, stuck, held: false };
     });
   }
 
