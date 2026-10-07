@@ -170,6 +170,31 @@ describe("restoring a revoked computer", () => {
   });
 });
 
+describe("a later sign-in, while this computer is revoked", () => {
+  it.each([
+    ["revoked it, as its list of computers says", 4403, true],
+    ["no longer takes its token, though it still lists it", 4401, false],
+  ])("leaves it for the user to restore when the agent %s", async (_name, code, listed) => {
+    const { shell, page } = await bound();
+    if (listed) agent.revokedAt = new Date().toISOString();
+    agent.link.close(code);
+    await expect.poll(() => page.textContent("#device-action-button")).toBe("Restore…");
+    // That sign-in ended, and the user signs in again at the next launch.
+    await quit(shell);
+    rmSync(join(home, "surogate", "session.json"));
+    app = await launch(home);
+    await stubNative(app);
+    const again = await shellPage(app);
+    await expect.poll(() => again.isVisible("#sign-in")).toBe(true);
+    await signIn(app, again, agent);
+    await expect.poll(() => again.textContent("#device-action-button")).toBe("Restore…");
+    // Not bound to the new sign-in: restoring it is the user's to confirm, with its folders.
+    expect(agent.reauthorized).toEqual([]);
+    expect(credentials()).toEqual([expect.not.objectContaining({ plain: expect.anything() })]);
+    expect(agent.registered).toHaveLength(1);
+  });
+});
+
 describe("a later sign-in, which rotates this computer's token", () => {
   const OTHER = "7d2f0a8e-2b3c-4d4e-9f5a-6b7c8d9e0f1a";
 

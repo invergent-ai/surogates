@@ -54,6 +54,8 @@ export class FakeAgent {
   signedInAgoS = 0;
   // True: the agent has no device left to restore.
   gone = false;
+  // When the agent revoked the computer, as its device list says; null while it is active.
+  revokedAt: string | null = null;
   // Routes that answer only once the test releases them, as a slow agent would, and how often each was asked.
   private readonly held = new Map<Held, Promise<void>>();
   readonly asked: Record<Held, number> = { me: 0, register: 0, reauthorize: 0 };
@@ -115,7 +117,7 @@ export class FakeAgent {
       return json(response, 201, { id: this.link.identity.device_id, name: "Laptop", token: this.link.token });
     }
     if (request.method === "GET" && path === "/api/v1/devices" && bearer) {
-      return json(response, 200, [{ id: this.link.identity.device_id, name: "Laptop", revoked_at: null }]);
+      return json(response, 200, [{ id: this.link.identity.device_id, name: "Laptop", revoked_at: this.revokedAt }]);
     }
     if (request.method === "POST" && /^\/api\/v1\/devices\/[^/]+\/reauthorize$/.test(path) && bearer) {
       await this.answered("reauthorize");
