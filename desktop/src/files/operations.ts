@@ -10,16 +10,17 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  accessSync, type BigIntStats, closeSync, constants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync,
-  readdirSync, readSync, renameSync, type Stats, statSync, unlinkSync, writeSync,
+  accessSync, type BigIntStats, closeSync, constants, type Dirent, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync,
+  opendirSync, openSync, readdirSync, readSync, renameSync, type Stats, statSync, unlinkSync, writeSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import { isBase64, type Outcome } from "../link/protocol.js";
 import {
-  conflict, Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES,
-  OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE, sandboxError, valueError, WRITE_TOO_LARGE,
+  conflict, Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WALK_FILES,
+  MAX_WALK_DEPTH, MAX_WALK_LOOKS, MAX_WRITE_BYTES, OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE,
+  sandboxError, SHOWN_DOT_FOLDERS, valueError, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "./answers.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
@@ -41,6 +42,7 @@ const KINDS: Record<string, Kind> = {
   write,
   delete: remove,
   list_dir: listDir,
+  walk,
   ripgrep,
 };
 
@@ -56,6 +58,10 @@ const CODE_UNITS: Record<string, readonly [width: number, low: number]> = {
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 export const BAD_PAGE =
   `read_lines takes one of the encodings read_file picks, an offset from 1, an integer limit and a max_bytes from 0 to ${MAX_PAYLOAD_BYTES}`;
+export const BAD_WALK =
+  "walk takes a key, the folder names it skips anywhere and directly under the key, whether it skips hidden folders, "
+  + "and a since an earlier walk gave, or null";
+const names = (value: unknown): value is string[] => Array.isArray(value) && value.every((name) => typeof name === "string");
 
 export const RG_MISSING =
   "ripgrep (rg) not found on PATH -- install it (apt/brew/dnf install ripgrep) on this computer";
@@ -404,6 +410,144 @@ function makeDirs(dir: string): void {
 function listDir(args: Record<string, unknown>, { folder }: Context): string[] {
   const key = keyInFolder(folder, text(args, "key"));
   return io(key, () => readdirSync(key)).slice(0, MAX_NAMES);
+}
+
+// walk (surogates/devices/workspace.py): the regular files under the folder at the key, each as its path from it and
+// its size, depth first. No link is followed, and no folder the tree hides is entered: one named in skip, one directly
+// under the key named in skip_top, and with skip_hidden a dot-folder other than SHOWN_DOT_FOLDERS. A name that is not
+// UTF-8 is left out: read as bytes, it does not survive the round trip, and its decoded twin could be another file.
+// Since a cursor, only the files whose mtime or ctime is at or after it. The cursor is this computer's clock as the
+// walk began, less WALK_MARGIN_NS. It stops after WALK_BUDGET_MS: every other operation on the folder waits for it.
+//
+// Each folder is entered through a handle on its parent, never by its path, and never through a link: a command in
+// the VM can swap a folder for a link between the walk seeing it and entering it. Depth first, each folder entered as
+// it is met, so a handle is held for each folder above the one being read, and no more: MAX_WALK_DEPTH of them at
+// most. Each folder is read an entry at a time, so one of a million entries costs no more than the walk looks at. A
+// folder it may not read, or one a link took the place of, is left out, and the walk goes on. Out of handles, it
+// stops, said truncated: what the rest holds is unknown, and the walk must not be taken for whole.
+function walk(args: Record<string, unknown>, { folder }: Context): { files: Array<[string, number]>; truncated: boolean; cursor: string } {
+  const key = keyInFolder(folder, text(args, "key"));
+  const { skip, skip_top: top, skip_hidden: hidden, since } = args;
+  if (
+    !names(skip) || !names(top) || typeof hidden !== "boolean"
+    // A cursor is the clock in nanoseconds: 20 digits last past the year 5000.
+    || !(since === null || (typeof since === "string" && /^[0-9]{1,20}$/.test(since)))
+  ) {
+    throw valueError(BAD_WALK);
+  }
+  const cursor = String(BigInt(Date.now()) * 1_000_000n - WALK_MARGIN_NS);
+  const deadline = performance.now() + WALK_BUDGET_MS;
+  const after = since === null ? null : BigInt(since);
+  const skipped = new Set<string>(skip);
+  const skippedTop = new Set<string>(top);
+  const files: Array<[string, number]> = [];
+  let cost = 2; // "[]"
+  let looks = 0;
+  let truncated = false;
+  // The key's own failure is the answer.
+  const keyFd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW));
+  let keyDir: Level["dir"];
+  try {
+    keyDir = io(key, () => listing(keyFd));
+  } catch (error) {
+    closeSync(keyFd);
+    throw error;
+  }
+  const levels: Level[] = [{ fd: keyFd, rel: "", dir: keyDir }];
+  try {
+    while (levels.length > 0 && !truncated) {
+      const level = levels.at(-1) as Level;
+      let entry: Dirent<Buffer> | null;
+      try {
+        entry = level.dir.readSync();
+      } catch {
+        entry = null; // what it could not read of a folder is left out
+      }
+      if (entry === null) {
+        levels.pop();
+        close(level);
+        continue;
+      }
+      looks += 1;
+      if (looks > MAX_WALK_LOOKS || performance.now() > deadline) {
+        truncated = true;
+        break;
+      }
+      const name = entry.name.toString("utf8");
+      if (!Buffer.from(name, "utf8").equals(entry.name)) continue;
+      const path = level.rel ? `${level.rel}/${name}` : name;
+      // The entry by its parent's handle: no link on the way to it is followed.
+      const at = `/proc/self/fd/${level.fd}/${name}`;
+      if (entry.isDirectory()) {
+        const hides = hidden && name.startsWith(".") && !SHOWN_DOT_FOLDERS.has(name);
+        if (skipped.has(name) || (!level.rel && skippedTop.has(name)) || hides) continue;
+        // The key is the first level: this folder would be levels.length below it.
+        if (levels.length > MAX_WALK_DEPTH) {
+          truncated = true;
+          break;
+        }
+        let fd: number;
+        try {
+          fd = openSync(at, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+        } catch (error) {
+          if (outOfHandles(error)) {
+            truncated = true;
+            break;
+          }
+          continue;
+        }
+        try {
+          levels.push({ fd, rel: path, dir: listing(fd) });
+        } catch (error) {
+          closeSync(fd);
+          if (outOfHandles(error)) {
+            truncated = true;
+            break;
+          }
+        }
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      let st: BigIntStats;
+      try {
+        st = lstatSync(at, { bigint: true });
+      } catch {
+        continue;
+      }
+      if (after !== null && st.mtimeNs < after && st.ctimeNs < after) continue;
+      const more = pyJsonLength(path) + 24;
+      if (files.length === MAX_WALK_FILES || cost + more > MAX_PAYLOAD_BYTES) {
+        truncated = true;
+        break;
+      }
+      files.push([path, Number(st.size)]);
+      cost += more;
+    }
+  } finally {
+    for (const level of levels) close(level);
+  }
+  return { files, truncated, cursor };
+}
+
+// The process, or the system, has no file handle left: what a walk has not reached is unknown. Any other failure to
+// enter a folder (EACCES, EPERM, ELOOP, ENOTDIR) is that folder's alone.
+const outOfHandles = (error: unknown): boolean =>
+  error instanceof Error && ["EMFILE", "ENFILE"].includes((error as NodeJS.ErrnoException).code ?? "");
+
+// A folder the walk is in: its handle, its path from the key, and its entries, read as it goes.
+interface Level {
+  fd: number;
+  rel: string;
+  dir: { readSync(): Dirent<Buffer> | null; closeSync(): void };
+}
+
+// @types/node names a Dir's entries as strings, and takes no "buffer" encoding; Node reads them as bytes with it.
+const listing = (fd: number): Level["dir"] =>
+  opendirSync(`/proc/self/fd/${fd}`, { encoding: "buffer" as BufferEncoding }) as unknown as Level["dir"];
+
+function close(level: Level): void {
+  level.dir.closeSync();
+  closeSync(level.fd);
 }
 
 // shutil.which: a name with a slash is checked as it is (relative to *cwd*);

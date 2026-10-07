@@ -32,6 +32,7 @@ from surogates.db.agent_users import purge_user_account
 from surogates.db.models import Device, DeviceOperation, Event
 from surogates.devices import link as link_module
 from surogates.devices import operations as operations_module
+from surogates.devices import workspace as workspace_module
 from surogates.devices.binding import BIND, Binding, binding_of, device_of
 from surogates.devices.operations import (
     CANCELLED_OUTCOME,
@@ -1162,7 +1163,8 @@ async def test_completing_checks_device_digest_and_credentials(api, session_fact
 
     assert await ops.complete(second, 1, op.id, op.digest, {"ok": True}) == "rejected"
     assert await ops.complete(first, 1, op.id, "0" * 64, {"ok": True}) == "rejected"
-    assert await ops.complete(first, 1, uuid.uuid4(), op.digest, {"ok": True}) == "rejected"
+    # One the journal no longer has, as a request reaped since: nothing to record, nothing to refuse.
+    assert await ops.complete(first, 1, uuid.uuid4(), op.digest, {"ok": True}) == "gone"
     assert await ops.complete(first, 2, op.id, op.digest, {"ok": True}) == "stale"
     assert await ops.complete(first, 1, op.id, op.digest, {"ok": True}) == "completed"
     assert await ops.complete(first, 1, op.id, op.digest, {"ok": True}) == "duplicate"
@@ -2351,7 +2353,7 @@ async def test_a_lost_announcement_is_delivered_at_a_ping(laptop_rig, session_fa
     assert await asyncio.wait_for(wio.which("sh"), 5.0) is True
 
 
-async def test_a_reply_for_another_devices_operation_closes_the_link(api, link_url, laptop_rig):
+async def test_a_reply_for_another_devices_operation_is_rejected_and_closes_the_link(api, link_url, laptop_rig):
     rig = laptop_rig
     other = await register(api, name="Other laptop")
     waiting = asyncio.create_task(device_io(rig.ops, rig.device_id, rig.root, rig.folder).which("sh"))
@@ -2359,9 +2361,34 @@ async def test_a_reply_for_another_devices_operation_closes_the_link(api, link_u
     [op] = await rig.ops.pending(rig.device_id, 1)
     async with linked(link_url, other["token"]) as (ws, _):
         await send(ws, {"type": "op_result", "id": str(op.id), "digest": op.digest, "outcome": {"ok": True}})
+        # Named, so the app drops that reply rather than send it again at every welcome.
+        assert await receive(ws) == {"type": "rejected", "id": str(op.id)}
         assert await close_code(ws) == 4400
     assert await rig.ops.pending(rig.device_id, 1) != []
     await stop(waiting)
+
+
+async def test_a_result_header_for_another_devices_read_is_rejected_open_or_closed(api, link_url, laptop_rig):
+    rig = laptop_rig
+    other = await register(api, name="Other laptop")
+    reading = asyncio.create_task(device_io(rig.ops, rig.device_id, rig.root, rig.folder).read("a.txt"))
+    await eventually(lambda: has_pending(rig.ops, rig.device_id))
+    [op] = await rig.ops.pending(rig.device_id, 1)
+    header = {
+        "type": "op_result", "id": str(op.id), "digest": op.digest,
+        "outcome": {"ok": {"transfer": {"size": workspace_module.MAX_PAYLOAD_BYTES + 1, "sha256": "0" * 64}}},
+    }
+    async with linked(link_url, other["token"]) as (ws, _):
+        await send(ws, header)
+        assert await receive(ws) == {"type": "rejected", "id": str(op.id)}
+        assert await close_code(ws) == 4400
+    await stop(reading)  # closed now, cancelled
+    assert await rig.ops.pending(rig.device_id, 1) == []
+    async with linked(link_url, other["token"]) as (ws, _):
+        await send(ws, header)
+        # Refused, as for an open one: whether another device's operation is closed is not its to learn.
+        assert await receive(ws) == {"type": "rejected", "id": str(op.id)}
+        assert await close_code(ws) == 4400
 
 
 @pytest.mark.parametrize("change", [

@@ -7,6 +7,7 @@ enforces its rules; the worker never touches the folder.
 
   kind            args                                          ok value
   bind            folder, nonce                                 null
+  retire          (none)                                        null
   resolve         path                                          key (str)
   check_write     path                                          refusal (str) or null
   stat            key                                           {is_dir, size, mtime, revision} or null
@@ -18,6 +19,8 @@ enforces its rules; the worker never touches the folder.
                   and expected_revision, when the call has one
   delete          key                                           null
   list_dir        key                                           [name]
+  walk            key, skip ([name]), skip_top ([name]),        {files: [[path, size]], truncated, cursor}
+                  skip_hidden (bool), since (up to 20 digits, or null)
   ripgrep         key, mode, pattern, glob, context             stdout (str)
   which           name                                          bool
   run             command, workdir, timeout                     {output, returncode, timed_out}
@@ -38,6 +41,10 @@ recorded the binding; it refuses one it cannot match with
 app bound, or one created under it, and runs in the folder the app recorded,
 whatever the request says.
 
+retire is a deleted root session's own operation, invocation "retire",
+ordinal 0: the app forgets the chat's binding, and so takes no more
+operations for it.  The folder itself is never touched.
+
 A revision is "dev:ino:size:mtime_ns:ctime_ns", each the file's stat field in
 decimal (dev and ino unsigned), as LocalWorkspaceIO.stat makes it.  The worker
 never reads it: it compares it and hands it back as a write's
@@ -53,6 +60,29 @@ read_file picks, offset counts lines from 1, limit is any integer and selects
 lines as a Python slice does, and max_bytes is at most MAX_PAYLOAD_BYTES.  The
 computer only finds line ends; the worker decodes the page and applies every
 rule.  Arguments it cannot take are answered with a value error.
+
+walk lists the regular files under the folder at key, each as its path from
+key ("sub/a.txt") and its size.  It follows no link: it enters each folder
+through a handle on its parent, so a folder swapped for a link while it walks
+is not entered.  It enters no folder whose name is in skip, none directly
+under key whose name is in skip_top, and, with skip_hidden, none whose name
+starts with "." other than SHOWN_DOT_FOLDERS: the file panel's tree shows none
+of them.  A name that is not valid UTF-8 is left out, as are the files under
+it.  With since, a cursor an earlier walk returned, it lists only the files
+whose mtime or ctime is at or after it.  cursor is the computer's own clock as
+this walk began, in nanoseconds, less WALK_MARGIN_NS: a filesystem
+stamps changes by a coarser clock than the one the computer reads, a FAT
+folder's in two-second ticks.  So a walk since it lists what changed after it
+by that computer's clock, whatever the server's says.  It lists at most
+MAX_WALK_FILES files, whose paths, each measured JSON-encoded plus 24, fit in
+MAX_PAYLOAD_BYTES; it looks at most MAX_WALK_LOOKS entries, for at most
+WALK_BUDGET_S seconds, since the folder's other operations wait behind it; and
+it enters folders at most MAX_WALK_DEPTH below key, since it holds a handle on
+each folder above the one it reads.  A folder under key it may not read, or
+one a link took the place of, is left out, and it goes on.  Out of file
+handles (EMFILE, ENFILE) it stops too: what it has not reached is unknown.
+truncated says one of these stopped it.  key itself unreadable is an os error.  Arguments it cannot take
+are answered with a value error.
 
 An error names the exception the worker raises again:
 
@@ -115,7 +145,7 @@ import errno
 import hashlib
 import json
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -127,6 +157,7 @@ from surogates.tools.workspace_io.base import (
     RipgrepError,
     RipgrepMode,
     RunResult,
+    Walk,
 )
 
 MAX_PAYLOAD_BYTES = 1024 * 1024
@@ -137,6 +168,12 @@ CHUNK_BYTES = MAX_PAYLOAD_BYTES
 MAX_MESSAGE_CHARS = 1536 * 1024
 OUTPUT_CAP_CHARS = 256 * 1024
 MAX_NAMES = 10_000
+MAX_WALK_FILES = 5_000
+SHOWN_DOT_FOLDERS = (".github", ".vscode")
+MAX_WALK_LOOKS = 200_000
+MAX_WALK_DEPTH = 2_000
+WALK_MARGIN_NS = 2_000_000_000
+WALK_BUDGET_S = 5
 TOO_LARGE = "Too large for one operation on a local folder (over 1.5 MiB)"
 READ_TOO_LARGE = "File too large to read from a local folder (over 50 MiB)"
 WRITE_TOO_LARGE = "File too large to write to a local folder (over 50 MiB)"
@@ -194,6 +231,15 @@ def _raise(error: dict[str, Any]) -> None:
     raise DeviceOperationError(message)
 
 
+def answered(kind: str, outcome: dict[str, Any]) -> Any:
+    """What an operation's outcome says: its ok value, or its error, raised as the computer worded it."""
+    if "error" in outcome:
+        _raise(outcome["error"])
+    if "ok" not in outcome:
+        raise DeviceOperationError(f"The computer returned no result for {kind}")
+    return outcome["ok"]
+
+
 class DeviceWorkspaceIO:
     """WorkspaceIO for a session's folder on the user's computer."""
 
@@ -208,12 +254,7 @@ class DeviceWorkspaceIO:
     async def _call(self, kind: str, *, payload: bytes | None = None, **args: Any) -> Any:
         if len(json.dumps(args)) > MAX_MESSAGE_CHARS:
             raise OSError(errno.EFBIG, TOO_LARGE)
-        outcome = await self._runner.run(kind, args, payload)
-        if "error" in outcome:
-            _raise(outcome["error"])
-        if "ok" not in outcome:
-            raise DeviceOperationError(f"The computer returned no result for {kind}")
-        return outcome["ok"]
+        return answered(kind, await self._runner.run(kind, args, payload))
 
     # -- files -----------------------------------------------------------
 
@@ -286,6 +327,34 @@ class DeviceWorkspaceIO:
 
     async def list_dir(self, key: str) -> list[str]:
         return await self._call("list_dir", key=key)
+
+    async def walk(
+        self, key: str, *, skip: Collection[str], skip_top: Collection[str] = (), skip_hidden: bool = False,
+        since: str | None = None,
+    ) -> Walk:
+        if isinstance(skip, str) or isinstance(skip_top, str):
+            # A string is a collection of its characters: sorted, it would skip every one-letter folder.
+            raise TypeError("skip and skip_top take folder names, not one string")
+        value = await self._call(
+            "walk", key=key, skip=sorted(skip), skip_top=sorted(skip_top), skip_hidden=skip_hidden, since=since,
+        )
+        try:
+            files, truncated, cursor = value["files"], value["truncated"], value["cursor"]
+            if (
+                isinstance(files, list) and len(files) <= MAX_WALK_FILES
+                and all(
+                    isinstance(entry, list) and len(entry) == 2 and isinstance(entry[0], str)
+                    and type(entry[1]) is int and entry[1] >= 0
+                    for entry in files
+                )
+                and type(truncated) is bool
+                # Taken here, not at the next walk's since: up to 20 digits, as the computer takes it back.
+                and isinstance(cursor, str) and cursor.isascii() and cursor.isdigit() and len(cursor) <= 20
+            ):
+                return Walk([(path, size) for path, size in files], truncated, cursor)
+        except (KeyError, TypeError):
+            pass
+        raise DeviceOperationError("The computer returned an invalid listing")
 
     @contextlib.asynccontextmanager
     async def local_file(self, key: str) -> AsyncIterator[Path]:

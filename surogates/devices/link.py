@@ -36,6 +36,9 @@ accept frames that large.
   server -> app   {"type": "unwanted", "id"}             the server closed this operation: stop
                                                          sending its transfer, and take its result
                                                          as acknowledged
+  server -> app   {"type": "rejected", "id"}             the server refused this result or result
+                                                         header, then closes with 4400: drop it,
+                                                         and never send it again
   server -> app   {"type": "chunk", "id", "seq", "data"} a write's data, after its op: seq counts
                                                          from 0; data is CHUNK_BYTES of it in
                                                          standard base64, the last chunk the rest
@@ -65,9 +68,14 @@ reply's acknowledgement or a revocation.  A new connection is sent every
 operation still open, up to 100 at a time, so the app can see one again; the
 rest follow at the next reconcile or announcement.
 The app keeps a journal by operation id: it runs each operation once and
-answers a repeat with the recorded outcome.  A reply for an operation this
-device was not given, or with another digest, is a protocol error (4400); a
-reply under rotated-out credentials closes with 4403.
+answers a repeat with the recorded outcome.  A reply for an operation the
+journal no longer has, as a request reaped an hour after it closed, is
+acknowledged with an op_ack and dropped, and a result header for one is
+answered unwanted: the app may hold a reply for days, and resends it at every
+welcome.  A reply for another device's operation, or with another digest, is
+answered rejected and is a protocol error (4400): the app drops that reply, so
+it costs one reconnect, not the link.  A reply under rotated-out credentials
+closes with 4403.
 On connect, before any operation, the server sends a cancel for each operation
 the app reported open that the server closed while the app held it: cancelled
 by its session, or revoked before a reauthorization.  Later, a cancel is sent
@@ -97,9 +105,9 @@ answered unwanted, and so is the next chunk after it closes; the chunks
 already on their way behind an unwanted are dropped.  A connection that ends
 mid-transfer loses it: on the next one the app sends the header again and the
 data from chunk 0, and whatever the device left half-sent goes.  A transfer
-for an operation that is not a read, a malformed header, a chunk out of order
-or of the wrong size, and a header while another transfer is under way are
-protocol errors.
+for an operation that is not a read is answered rejected; it, a malformed
+header, a chunk out of order or of the wrong size, and a header while another
+transfer is under way are protocol errors.
 
 A write's data of more than MAX_PAYLOAD_BYTES, and at most MAX_WRITE_BYTES, is
 a transfer the other way: the op's args name it by size and SHA-256 in place of
@@ -445,7 +453,14 @@ class _Link:
         if status == "stale":
             raise _Close(CLOSE_REVOKED, "credentials rotated")
         if status == "rejected":
+            # Named first: the app drops it, rather than send it again at every welcome.
+            await self.send({"type": "rejected", "id": str(operation_id)})
             raise _Close(CLOSE_PROTOCOL, "result for an operation this device was not given")
+        if status == "gone":
+            logger.info(
+                "device %s replied for operation %s, which the journal no longer has: acknowledged and dropped",
+                self._device.id, operation_id,
+            )
         # Answered operations never come back from pending(), so only the
         # unanswered ones need excluding; this keeps the set, and the query
         # that carries it, bounded on a long-lived connection.
@@ -471,7 +486,8 @@ class _Link:
         if status == "stale":
             raise self._refused(CLOSE_REVOKED, "credentials rotated", operation_id, size, started)
         if status == "rejected":
-            # The app sends this header again at every welcome: its line shows the loop.
+            # Named first: the app drops it, rather than send it again at every welcome.
+            await self.send({"type": "rejected", "id": str(operation_id)})
             raise self._refused(
                 CLOSE_PROTOCOL, "transfer for an operation this device was not given, or not a read",
                 operation_id, size, started,

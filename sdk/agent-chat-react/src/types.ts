@@ -1040,14 +1040,20 @@ export interface AgentChatAdapter {
     sessionId: string;
     path: string;
   }): Promise<AgentChatWorkspaceFile>;
+  /**
+   * A local-folder chat's change may wait for its user on the computer its
+   * folder is on; *signal* stops waiting for it.
+   */
   uploadWorkspaceFile(input: {
     sessionId: string;
     file: File;
     directory?: string;
+    signal?: AbortSignal;
   }): Promise<AgentChatWorkspaceUpload>;
   deleteWorkspaceFile(input: {
     sessionId: string;
     path: string;
+    signal?: AbortSignal;
   }): Promise<void>;
   /**
    * Build a same-origin URL the browser can navigate to (or anchor at via

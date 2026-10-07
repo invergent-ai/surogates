@@ -11,6 +11,11 @@ import { report } from "./report.js";
 // cannot hear it. update_required keeps access, and its results go out after the update.
 const SUSPENDING: readonly LinkStatus[] = ["revoked", "unauthenticated", "superseded"];
 
+// Every way the link ends but the app's own stop: the server answers the user's own requests
+// "offline" from then on, so none still asked about may run later. The app's stop, at its quit,
+// suspends what waits instead, to be asked again at the next launch, which the server then cancels.
+const ENDING: readonly LinkStatus[] = ["offline", "update_required", ...SUSPENDING];
+
 export interface DeviceOptions {
   url: string;
   token: string;
@@ -30,6 +35,8 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
   // The device cannot go on: say why, then stop the link, as when its own handler throws.
   const fail = (error: unknown): void => {
     report(options.onError, error);
+    // A stop of its own, but not a quit: the app goes on, and an allow must not run what the server gave up on.
+    runner.disconnected();
     void link.stop();
   };
   // Opening the journal already answered what a crash cut off "interrupted".
@@ -59,8 +66,10 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
       onAck: (id) => runner.acknowledged(id),
       onChunkAck: (id, seq) => runner.chunkAcked(id, seq),
       onUnwanted: (id) => runner.unwanted(id),
+      onRejected: (id) => runner.rejected(id),
       onChunk: (id, seq, data) => runner.chunk(id, seq, data),
       onStatus: (status) => {
+        if (ENDING.includes(status)) runner.disconnected();
         if (SUSPENDING.includes(status)) {
           // What runs is recorded first; then what no operation holds ends too.
           void runner.suspend(ACCESS_ENDED).then(() => options.executor.end?.())
