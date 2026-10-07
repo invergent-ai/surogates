@@ -24,6 +24,7 @@ import shutil
 import stat
 import subprocess
 from collections.abc import Callable, Iterable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from itertools import takewhile
 from pathlib import Path, PurePosixPath
@@ -47,6 +48,10 @@ HISTORY_EXCLUDES = [e for e in DEFAULT_EXCLUDES if e != "*.log"] + [
 ] + [f"/{folder}" for folder in PLATFORM_EXCLUDES]
 
 _GIT_TIMEOUT = 120
+#: The open's git calls: the pod's ready bound of ten minutes, less a margin.
+#: Through geesefs, a large project's fetch is bound by request latency.
+_OPEN_TIMEOUT = 570
+_TIMEOUT: ContextVar[int | None] = ContextVar("history_git_timeout", default=None)
 _ZERO = "0" * 40
 MAIN = "refs/heads/main"
 _PACKED = "# pack-refs with: peeled fully-peeled sorted \n"
@@ -116,6 +121,13 @@ class History:
         it starts again at ``main``, and so does its base.  With no history
         yet, ``main``'s first commit is the real files as they are.
         """
+        budget = _TIMEOUT.set(_OPEN_TIMEOUT)
+        try:
+            self._open()
+        finally:
+            _TIMEOUT.reset(budget)
+
+    def _open(self) -> None:
         fresh = not (self.repo / "HEAD").exists()
         try:
             if fresh:
@@ -718,15 +730,16 @@ class History:
         return self._git(list(args), env={"GIT_DIR": str(self._admin), "GIT_WORK_TREE": str(self.copy)}, cwd=self.copy)
 
     def _git(self, args: list[str], *, env: dict[str, str], cwd: Path, input: str | None = None) -> str:
+        timeout = _TIMEOUT.get() or _GIT_TIMEOUT
         try:
             result = subprocess.run(
                 ["git", *args], capture_output=True, text=True, env=_environ(env), cwd=cwd,
-                input=input, timeout=_GIT_TIMEOUT,
+                input=input, timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
             # The git it killed held the index's lock, and no later git could run.
             Path(f"{env.get('GIT_INDEX_FILE') or Path(env['GIT_DIR']) / 'index'}.lock").unlink(missing_ok=True)
-            raise HistoryError(f"git {args[0]} timed out after {_GIT_TIMEOUT}s") from exc
+            raise HistoryError(f"git {args[0]} timed out after {timeout}s") from exc
         if result.returncode != 0:
             raise HistoryError(f"git {args[0]} failed: {result.stderr.strip()}")
         # Only the line end: a name may start or end with a space.

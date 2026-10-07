@@ -348,3 +348,24 @@ def test_a_push_retried_after_its_pack_went_up_still_marks_the_commit_a_pruning_
     slow.record(turn=turn["commit"], applied=applied, author=A, trailers=[["Surogate-Saga", "saga:slow"], ["Surogate-Kind", "landing"]], main=main)
     assert (project / "slow.md").read_text() == "the slow thread's work"
     assert whole(durable, "fsck", "--no-dangling") == ""
+
+
+def test_the_opens_git_has_the_pods_ready_bound_and_a_steps_git_its_own(tmp_path, project, monkeypatch):
+    first = a_pod(tmp_path, project)
+    (first.copy / "A.md").write_text("by A")
+    land(first)
+    run, timeouts = subprocess.run, []
+
+    def timed(args, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", timed)
+    pod = a_pod(tmp_path, project)
+    # Through geesefs, a large project's fetch is bound by request latency: ten minutes, less a margin.
+    opened = set(timeouts)
+    assert len(opened) == 1 and 540 <= opened.pop() < 600
+    timeouts.clear()
+    (pod.copy / "B.md").write_text("b")
+    pod.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:2"], ["Surogate-Kind", "turn"]])
+    assert set(timeouts) == {120}
