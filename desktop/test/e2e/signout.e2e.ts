@@ -216,6 +216,25 @@ describe("removing the agent", () => {
     expect(existsSync(state("agent.json"))).toBe(false);
     expect(await shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.contentView.children.length)).toBe(0);
   });
+
+  it("is offered on the sign-in screen too, with nobody signed in", async () => {
+    const first = await signedIn();
+    await quit(first.shell);
+    // The sign-in ended (it expired): the next launch asks for one, while the computer still runs.
+    rmSync(state("session.json"));
+    app = await launch(home);
+    await stubNative(app);
+    const page = await shellPage(app);
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    await page.click("#sign-in-remove");
+    await expect.poll(() => page.isVisible("#first-run")).toBe(true);
+    expect(await asked(app)).toContain(`Remove ${host} from Surogate?`);
+    expect(revokes()).toBe(1);
+    expect(credentials()).toEqual([]);
+    expect(existsSync(state("agent.json"))).toBe(false);
+    expect(existsSync(state("devices/d"))).toBe(false);
+  });
 });
 
 describe("removing the agent while it cannot be reached", () => {

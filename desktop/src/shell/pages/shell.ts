@@ -299,6 +299,8 @@ byId<HTMLFormElement>("connect").addEventListener("submit", (event) => {
 });
 // Continue opens the browser; pressed again, it opens it once more, for a new sign-in.
 byId("sign-in-button").addEventListener("click", () => void shell.signIn());
+// An agent nobody can sign in to any more is removed from here, as from the user menu.
+byId("sign-in-remove").addEventListener("click", () => void shell.remove());
 byId("device-action-button").addEventListener("click", () => {
   if (last?.deviceAction?.action === "sign-in") void shell.signIn();
   else if (last?.deviceAction?.action === "restore") void shell.restore();
