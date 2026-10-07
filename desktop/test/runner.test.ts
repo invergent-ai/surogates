@@ -625,6 +625,21 @@ describe("an operation the executor admits before it starts", () => {
     expect(gate.ran).toEqual(["z"]);
   });
 
+  it("runs on and is answered as it ended when the link drops once its user allowed it", async () => {
+    // Allowed, then the link drops while it writes: it is the one exception, and finishes as any started operation.
+    const executor = new RecordingExecutor(true);
+    const allowing: Executor = { admit: () => Promise.resolve(null), run: (operation, signal) => executor.run(operation, signal) };
+    await start(allowing);
+    server.send({ ...opFrame("a", "write"), invocation_id: "request:upload-0001" });
+    await server.until(() => executor.ran.length === 1);
+    server.close(1011);
+    await server.until(() => server.connections === 2 && link?.status === "connected");
+    executor.finish("a");
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual({ ok: "ran a" });
+    expect(executor.aborted).toEqual([]);
+  });
+
   it("is answered not run when the server ends the link for a newer app while it waits", async () => {
     const gate = new Gate(() => "hold");
     const { journal } = await start(gate);
