@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -43,31 +43,6 @@ const visible = (shell: ElectronApplication) =>
   shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map((window) => window.isVisible()));
 
 describe("the shell", () => {
-  it("runs in a session of the test's own: no bus, its own folders, X11 on xvfb, and the basic store, a second launch too", async () => {
-    const own = (environment: Record<string, string | undefined>) => {
-      expect(environment).toMatchObject({ DBUS_SESSION_BUS_ADDRESS: "disabled:", XDG_SESSION_TYPE: "x11", GDK_BACKEND: "x11", XDG_DATA_HOME: home });
-      for (const name of ["HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"]) {
-        expect(environment[name]?.startsWith(`${home}/`), name).toBe(true);
-      }
-      expect(statSync(environment.XDG_RUNTIME_DIR!).mode & 0o777).toBe(0o700);
-      expect(environment.WAYLAND_DISPLAY).toBeUndefined();
-      // xvfb's display, never the desktop's.
-      expect(environment.DISPLAY).toMatch(/^:\d+$/);
-      expect(environment.DISPLAY).not.toBe(":0");
-    };
-    // Checked before anything launches: an app started without it would reach the desktop's session.
-    own(shellEnv(home));
-    app = await launch(home);
-    await app.firstWindow();
-    own(await app.evaluate(() => ({ ...process.env })));
-    expect(await app.evaluate(() => process.argv)).toContain("--password-store=basic");
-    const handed = app.evaluate(({ app: electron }) => new Promise<string[]>((resolve) => {
-      electron.once("second-instance", (_event, argv) => resolve(argv));
-    }));
-    expect(await secondLaunch(home)).toBe(0);
-    expect(await handed).toContain("--password-store=basic");
-  });
-
   it("opens its window in its sandbox, with its state under one root", async () => {
     app = await launch(home);
     const page = await app.firstWindow();

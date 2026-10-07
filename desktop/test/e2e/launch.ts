@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { _electron, type ElectronApplication, type Page } from "playwright-core";
@@ -16,20 +17,27 @@ export const MAIN = join(import.meta.dirname, "..", "..", "dist", "shell", "main
 // Short, under /tmp: a tool host's socket path under the state root must stay within 107 bytes.
 export const dataHome = (): string => mkdtempSync("/tmp/sd-");
 
-// VS Code's terminals export ELECTRON_RUN_AS_NODE, and Electron then starts as plain Node.
-// In a Wayland session Electron would draw on the user's desktop: as an X11 session it
-// draws on xvfb's display. The desktop's session manager is none of a test's business.
-const DROPPED = ["ELECTRON_RUN_AS_NODE", "WAYLAND_DISPLAY", "SESSION_MANAGER"];
+// What a test app takes of the caller's environment, and nothing else: no agent, keyring, session or
+// desktop of the user's reaches it. VS Code's ELECTRON_RUN_AS_NODE, which would start Electron as plain
+// Node, is left out with the rest, and so is WAYLAND_DISPLAY: as an X11 session it draws on xvfb's.
+const TAKEN = ["PATH", "DISPLAY", "XAUTHORITY", "SUROGATE_VM_IMAGE"];
 
 /**
  * The environment of every app a test launches: a session of its own under *home*, the test's
  * data home. It has no session bus, so it reaches and starts no keyring daemon, portal, gvfsd or
- * at-spi; its own home, runtime, config, cache and state folders; and X11, on xvfb's display.
+ * at-spi; its own home, runtime, config, cache and state folders; and X11, on xvfb's display. It
+ * throws on any other display, before anything is made or started.
  */
 export function shellEnv(home: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (value !== undefined && !DROPPED.includes(name)) env[name] = value;
+  // xvfb-run -a sets both: its display, never the desktop's :0, and an authority in a folder of its own.
+  const { DISPLAY: display, XAUTHORITY: authority } = process.env;
+  if (!display || display === ":0" || !/^:\d+$/.test(display) || !authority?.startsWith(join(tmpdir(), "xvfb-run."))) {
+    throw new Error(`A test app runs only on an Xvfb's display, under xvfb-run -a: DISPLAY is ${display ?? "unset"}, XAUTHORITY ${authority ?? "unset"}`);
+  }
+  const env: Record<string, string> = { LANG: process.env.LANG || "C.UTF-8" };
+  for (const name of TAKEN) {
+    const value = process.env[name];
+    if (value) env[name] = value;
   }
   // Short names: the VM's sockets live under the runtime folder, within 107 bytes.
   const [own, runtime, config, cache, state] = ["h", "r", "c", "k", "s"].map((name) => join(home, name));
@@ -63,8 +71,8 @@ export async function quit(shell: ElectronApplication | undefined): Promise<void
  * Launch the shell with its state under *home*; *env* adds to its environment, and *args* to its
  * arguments, as the system adds a link it opens.
  */
-export function launch(home: string, env: Record<string, string> = {}, args: string[] = []): Promise<ElectronApplication> {
-  return _electron.launch({
+export async function launch(home: string, env: Record<string, string> = {}, args: string[] = []): Promise<ElectronApplication> {
+  return await _electron.launch({
     executablePath: ELECTRON,
     // The basic store: no test leaves an item in the user's keyring.
     args: [MAIN, "--password-store=basic", ...args],
