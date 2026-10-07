@@ -29,6 +29,12 @@ export const LOOK_MS = 5_000;
 // What a look at a folder answers: whether it is one, and its identity.
 export type FolderLook = { isDirectory(): boolean; dev: number; ino: number };
 
+// The chats whose folder Show folder looks at now, until the look returns, its deadline past or
+// not. Kept for the process, not the binder: a stack made again finds the looks still running.
+const looking = new Set<string>();
+// Looks at once, across chats: one dead mount can hold two of libuv's four threads, never more.
+const LOOKS_AT_ONCE = 2;
+
 // The server appends ". Start a new chat." to a binding refusal's message: none ends in ".".
 export const ALREADY_BOUND: Outcome = {
   error: { type: "binding", message: "This chat already works on another folder of this computer" },
@@ -153,8 +159,6 @@ export class Binder implements Executor {
   private readonly answered = new Map<string, Preparation>();
   // Built on the binder's own bindings, so the two cannot read different journals.
   readonly approvals: Approvals;
-  // The chats whose folder Show folder looks at now, until the look returns, its deadline past or not.
-  private readonly looking = new Set<string>();
 
   constructor(private readonly options: BinderOptions) {
     this.approvals = new Approvals({
@@ -195,19 +199,21 @@ export class Binder implements Executor {
 
   /**
    * The chat's folder, for the file manager to show, while it is still the folder its user
-   * confirmed: one replaced since, by another folder, a link or a file, is refused. The look is
-   * given up on after LOOK_MS. Node cannot cancel it, and a look into a dead mount holds one of
-   * libuv's four threads until it returns, so a chat has one look at a time.
+   * confirmed: one replaced since, by another folder, a link or a file, is refused. The user waits
+   * LOOK_MS at most. Node cannot cancel a look, and one into a dead mount holds one of libuv's four
+   * threads until it returns, which the main process's other file calls and lookups then wait on: so
+   * a chat has one look at a time, and the process LOOKS_AT_ONCE.
    */
   async folderToShow(sessionId: string): Promise<string> {
     const binding = this.options.bindings.get(sessionId);
     if (!binding) throw new Error("This chat has no folder on this computer");
-    if (this.looking.has(sessionId)) throw new Error(`Surogate is still looking for ${binding.folder}`);
-    this.looking.add(sessionId);
+    if (looking.has(sessionId)) throw new Error(`Surogate is still looking for ${binding.folder}`);
+    if (looking.size >= LOOKS_AT_ONCE) throw new Error("Surogate is still looking for another folder");
+    looking.add(sessionId);
     // lstat: a link at its path is never the folder. The path was resolved when it was bound,
     // so only its last name can have become a link since.
     const look = (this.options.look ?? lstat)(binding.folder).then((found) => found, () => null);
-    void look.finally(() => this.looking.delete(sessionId));
+    void look.finally(() => looking.delete(sessionId));
     const ms = this.options.lookMs ?? LOOK_MS;
     let timer: NodeJS.Timeout | undefined;
     const found = await Promise.race([

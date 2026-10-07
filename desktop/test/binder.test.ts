@@ -10,7 +10,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApprovalPrompts, ApprovalRequest } from "../src/binding/approvals.js";
 import {
-  ALREADY_BOUND, Binder, type BinderOptions, type FolderPrompts, type FolderSheet, NOT_FORGOTTEN, NOT_RECORDED, type Prepared,
+  ALREADY_BOUND, Binder, type BinderOptions, type FolderLook, type FolderPrompts, type FolderSheet, NOT_FORGOTTEN, NOT_RECORDED,
+  type Prepared,
 } from "../src/binding/binder.js";
 import { BOOT_ID } from "../src/binding/folder.js";
 import { connectDevice } from "../src/device.js";
@@ -24,6 +25,7 @@ import { FakeLinkServer } from "./fake-server.js";
 
 const ROOT = "44444444-4444-4444-8444-444444444444";
 const OTHER = "55555555-5555-4555-8555-555555555555";
+const THIRD = "66666666-6666-4666-8666-666666666666";
 const WINDOW = "window-1";
 
 // The user, as the dialog and the sheet meet them: each dialog picks the next of
@@ -772,6 +774,23 @@ describe("what the page may know of a chat's folder", () => {
     await answered;
     await new Promise((resolve) => setImmediate(resolve));
     expect(await chooser.folderToShow(ROOT)).toBe(notes);
+  });
+
+  it("looks at two folders at most at once, across chats and the binders made since", async () => {
+    const user = new User();
+    const { promise: answered, resolve: answer } = Promise.withResolvers<FolderLook>();
+    const chooser = binder(user, { look: () => answered, lookMs: 50 });
+    for (const root of [ROOT, OTHER, THIRD]) await chooser.admit(bindOp(root, await confirmed(user, chooser)), never());
+    // Chats under one dead mount: each look holds one of libuv's four threads until it returns.
+    for (const root of [ROOT, OTHER]) await expect(chooser.folderToShow(root)).rejects.toThrow(`The folder ${notes} did not answer`);
+    await expect(chooser.folderToShow(THIRD)).rejects.toThrow("Surogate is still looking for another folder");
+    // A stack made again, as a rotation makes it, finds the looks still running.
+    const again = binder(user, { look: () => answered, lookMs: 50 });
+    await expect(again.folderToShow(THIRD)).rejects.toThrow("Surogate is still looking for another folder");
+    answer(statSync(notes));
+    await answered;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(await again.folderToShow(THIRD)).toBe(notes);
   });
 });
 
