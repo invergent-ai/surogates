@@ -320,6 +320,18 @@ await navigator.serviceWorker.ready;`);
     expect(await script(b, "return (await fetch('/second')).text();")).toBe("<title>Second</title>");
   });
 
+  it("lets no service worker answer the first load of a popup a session's tab opens", async () => {
+    await host.close();
+    host = hostWith({ args: ["--unsafely-treat-insecure-origin-as-secure=http://fixture.test"] });
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    await script(a, `await ServiceWorkerContainer.prototype.register.call(navigator.serviceWorker, "/sw.js");
+await navigator.serviceWorker.ready;`);
+    await op(a, "browser.mouse", { action: "click", x: 50, y: 155, button: "left", clicks: 1 });
+    await expect.poll(() => script(a, "return location.pathname;")).toBe("/second");
+    expect(await script(a, "return document.title;")).toBe("Second");
+  });
+
   it("refuses a browser whose requests do not come through its proxy, as a policy can make it, and leaves it closed", async () => {
     await host.close();
     // As a managed policy would: the browser takes its proxy settings from elsewhere.

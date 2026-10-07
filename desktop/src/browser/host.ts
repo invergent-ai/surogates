@@ -212,23 +212,19 @@ export class BrowserHost {
     this.spare = null;
     const page = spare ?? (await context.newPage());
     this.tabs.set(session, []);
-    await this.adopt(session, page);
+    this.adopt(session, page);
     return { page, opened: true };
   }
 
   // *page* is *session*'s, and so is every popup it opens. A file it asks for opens no dialog,
   // and a download it starts is not kept; its agent is told of each with its next answer.
-  // Service workers answer none of its requests, so one a page installs never answers another
-  // chat's tab (Playwright's own block replaces only navigator.serviceWorker.register).
-  private async adopt(session: string, page: Page): Promise<void> {
+  // No service worker answers it (bypassWorkers).
+  private adopt(session: string, page: Page): void {
     this.tabs.get(session)?.push(page);
-    page.on("popup", (popup) => void this.adopt(session, popup).catch(() => {}));
+    page.on("popup", (popup) => this.adopt(session, popup));
     // With a listener, the browser opens no file dialog of its own: no path the agent did not get reaches a page.
     page.on("filechooser", () => this.note(session, FILE_ASKED));
     page.on("download", (download) => this.note(session, downloaded(download.suggestedFilename())));
-    const protocol = await page.context().newCDPSession(page);
-    await protocol.send("Network.enable");
-    await protocol.send("Network.setBypassServiceWorker", { bypass: true });
   }
 
   private note(session: string, notice: string): void {
@@ -297,12 +293,78 @@ export class BrowserHost {
       this.roots.clear();
     });
     try {
+      await this.bypassWorkers(context);
       this.spare = await this.proxied(context, this.proxy.server);
     } catch (error) {
       await context.close().catch(() => {});
       throw error;
     }
     return context;
+  }
+
+  // No service worker answers any page of the browser's, from its first request, so one a page
+  // installs never answers another chat's tab (Playwright's own block replaces only
+  // navigator.serviceWorker.register). Playwright reports a popup only once its first navigation
+  // has been answered, too late for a bypass set then: so each new page is held at its start until
+  // its bypass is on. A page whose bypass fails is closed.
+  private async bypassWorkers(context: BrowserContext): Promise<void> {
+    const browser = context.browser();
+    if (!browser) throw new Error("The computer's browser has no browser session");
+    // Each page's bypass is set over a non-flat session of root's, the kind Playwright's CDPSession
+    // can speak through, which stays attached, and the bypass with it.
+    const root = await browser.newBrowserCDPSession();
+    const bypassing = new Map<string, Promise<void>>();
+    const keepers = new Map<string, string>();
+    root.on("Target.detachedFromTarget", ({ sessionId }) => {
+      const page = keepers.get(sessionId);
+      keepers.delete(sessionId);
+      if (page !== undefined) bypassing.delete(page);
+    });
+    const bypass = async (targetId: string): Promise<void> => {
+      try {
+        const { sessionId } = await root.send("Target.attachToTarget", { targetId, flatten: false });
+        keepers.set(sessionId, targetId);
+        // Each is in force once the browser has taken it; the page itself answers only once it runs.
+        const send = (id: number, method: string, params = {}) =>
+          root.send("Target.sendMessageToTarget", { sessionId, message: JSON.stringify({ id, method, params }) });
+        await send(1, "Network.enable");
+        await send(2, "Network.setBypassServiceWorker", { bypass: true });
+      } catch {
+        bypassing.delete(targetId);
+        await root.send("Target.closeTarget", { targetId }).catch(() => {});
+      }
+    };
+    const bypassOnce = (targetId: string): Promise<void> => {
+      const known = bypassing.get(targetId);
+      if (known) return known;
+      const done = bypass(targetId);
+      bypassing.set(targetId, done);
+      return done;
+    };
+    // A holder holds each page that opens after it. Its sessions are flat, which Playwright's
+    // CDPSession cannot speak to, so it lets its pages go only by detaching whole: it spends itself
+    // on the first, the next is armed, then this one lets its pages go, each once it is bypassed.
+    const hold = async (): Promise<void> => {
+      const holder = await browser.newBrowserCDPSession();
+      const holding: Array<Promise<void>> = [];
+      let spent = false;
+      holder.on("Target.attachedToTarget", ({ targetInfo: { targetId }, waitingForDebugger }) => {
+        const done = bypassOnce(targetId);
+        if (!waitingForDebugger) return;
+        holding.push(done);
+        if (spent) return;
+        spent = true;
+        // With no next holder, the next page would go unheld: the browser closes instead.
+        hold().then(async () => {
+          await Promise.all(holding);
+          await holder.detach();
+        }, () => context.close()).catch(() => {});
+      });
+      await holder.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true, filter: [{ type: "page" }] });
+    };
+    await hold();
+    // The pages open before the first holder: the first tab's.
+    await Promise.all(bypassing.values());
   }
 
   // The proxy is proven to carry the browser's requests before any page is the agent's: a policy,
