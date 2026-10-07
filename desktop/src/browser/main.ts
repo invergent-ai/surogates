@@ -29,8 +29,8 @@ const host = new BrowserHost();
 const running = new Map<string, AbortController>();
 const answering = new Set<Promise<void>>();
 
-function answer(id: string, work: Promise<Outcome>): void {
-  const sent = work.then((outcome) => send({ type: "result", id, outcome }));
+function answer(id: string, work: Promise<Outcome>, type: "result" | "tried" = "result"): void {
+  const sent = work.then((outcome) => send({ type, id, outcome }));
   answering.add(sent);
   void sent.finally(() => answering.delete(sent));
 }
@@ -42,7 +42,7 @@ function received(message: ToBrowser): void {
     answer(message.id, host.perform(message.launch, message.root, message.session, message.kind, message.args, controller.signal)
       .finally(() => running.delete(message.id)));
   } else if (message.type === "try") {
-    answer(message.id, host.tryBrowser(message.executable));
+    answer(message.id, host.tryBrowser(message.executable), "tried");
   } else if (message.type === "cancel") {
     running.get(message.id)?.abort();
   } else if (message.type === "forget") {

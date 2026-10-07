@@ -59,6 +59,18 @@ describe("the browser host's client", () => {
     expect(await answered).toEqual({ ok: { url: "https://example.com/", title: "Example" } });
   });
 
+  it("keeps a try's answer apart from an operation's, whatever the operation's id", async () => {
+    const host = new FakeHost();
+    const client = new BrowserClient(() => host);
+    const ran = client.perform(LAUNCH, operation("try-1"), new AbortController().signal);
+    const tried = client.tryBrowser("/opt/google/chrome/chrome");
+    expect(host.sent.at(-1)).toEqual({ type: "try", id: "try-1", executable: "/opt/google/chrome/chrome" });
+    host.say({ type: "result", id: "try-1", outcome: { ok: { url: "https://example.com/", title: "Example" } } });
+    host.say({ type: "tried", id: "try-1", outcome: { ok: { version: "154.0" } } });
+    expect(await tried).toEqual({ ok: { version: "154.0" } });
+    expect(await ran).toEqual({ ok: { url: "https://example.com/", title: "Example" } });
+  });
+
   it("tells a running host to close a deleted chat's tabs, and starts none to do it", () => {
     const hosts: FakeHost[] = [];
     const client = new BrowserClient(() => {

@@ -36,6 +36,8 @@ export type ToBrowser =
 
 export type FromBrowser =
   | { type: "result"; id: string; outcome: Outcome }
+  // A try's answer: its ids are the client's own, apart from the link's operation ids.
+  | { type: "tried"; id: string; outcome: Outcome }
   // Its last word at a stop, after every answer: a utility process's postMessage has no callback.
   | { type: "stopped" };
 
@@ -68,6 +70,7 @@ export function forkBrowserHost(script = BROWSER_HOST): BrowserProcess {
 export class BrowserClient {
   private host: BrowserProcess | null = null;
   private readonly pending = new Map<string, (outcome: Outcome) => void>();
+  private readonly trying = new Map<string, (outcome: Outcome) => void>();
   private stopping: Promise<void> | null = null;
   private tries = 0;
 
@@ -76,7 +79,7 @@ export class BrowserClient {
   /** One browser operation of a session's, in its tab. A cancel is answered at once; the host is told. Never rejects. */
   perform(launch: Launch, operation: Operation, signal: AbortSignal): Promise<Outcome> {
     if (signal.aborted) return Promise.resolve(CANCELLED);
-    return this.ask(operation.id, {
+    return this.ask(this.pending, operation.id, {
       type: "op", id: operation.id, launch, root: operation.sessionId, session: operation.callingSessionId, kind: operation.kind, args: operation.args,
     }, signal);
   }
@@ -89,7 +92,7 @@ export class BrowserClient {
   /** Launch *executable* once, as Settings' Custom… does before it keeps it. Never rejects. */
   tryBrowser(executable: string): Promise<Outcome> {
     const id = `try-${(this.tries += 1)}`;
-    return this.ask(id, { type: "try", id, executable });
+    return this.ask(this.trying, id, { type: "try", id, executable });
   }
 
   // The host closes its browser and exits; one that does not is killed, and its browser goes with it.
@@ -112,7 +115,7 @@ export class BrowserClient {
     this.stopping = null;
   }
 
-  private ask(id: string, message: ToBrowser, signal?: AbortSignal): Promise<Outcome> {
+  private ask(waiting: Map<string, (outcome: Outcome) => void>, id: string, message: ToBrowser, signal?: AbortSignal): Promise<Outcome> {
     if (this.stopping) return Promise.resolve(BROWSER_STOPPED);
     let host: BrowserProcess;
     try {
@@ -123,14 +126,14 @@ export class BrowserClient {
     return new Promise((resolve) => {
       const answer = (outcome: Outcome) => {
         signal?.removeEventListener("abort", cancel);
-        this.pending.delete(id);
+        waiting.delete(id);
         resolve(outcome);
       };
       const cancel = () => {
         host.send({ type: "cancel", id });
         answer(CANCELLED);
       };
-      this.pending.set(id, answer);
+      waiting.set(id, answer);
       signal?.addEventListener("abort", cancel, { once: true });
       host.send(message);
     });
@@ -141,11 +144,12 @@ export class BrowserClient {
     this.host = host;
     host.onMessage((message) => {
       if (message.type === "result") this.pending.get(message.id)?.(message.outcome);
+      else if (message.type === "tried") this.trying.get(message.id)?.(message.outcome);
       else if (message.type === "stopped") host.kill();
     });
     host.onExit(() => {
       if (this.host === host) this.host = null;
-      for (const answer of [...this.pending.values()]) answer(BROWSER_STOPPED);
+      for (const answer of [...this.pending.values(), ...this.trying.values()]) answer(BROWSER_STOPPED);
     });
     return host;
   }
