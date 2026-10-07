@@ -218,16 +218,23 @@ export async function enter(root: string, place: Place, share: Share, user: Host
   const uid = uidOf(root);
   const mount = await mountShare(share.tag);
   const cgroup = join(CGROUPS, root);
-  // Made again for a root set up again once its runner was lost.
+  // Made at the root's first setup in this guest, and kept until the guest stops: the root's
+  // own memory cgroup, the only one it has. Removed while pages it charged remain, as a
+  // file a command left in /tmp, it would linger dying, counted by no limit.
   await mkdir(cgroup, { recursive: true });
   // Nothing of the root runs while enter-root checks its mount points: what it ran before ends first.
   await killRoot(root).catch(() => {
     throw new Error("what this chat ran before has not ended yet");
   });
-  // Then its cgroup is made again empty: the cgroups its runner and commands had go too.
-  // In it: init for the runner, run for each run's cgroup, proc for each background process's.
-  await removeCgroup(cgroup);
-  for (const leaf of ["init", "run", "proc"]) await mkdir(join(cgroup, leaf), { recursive: true });
+  // Then the cgroups its runner and commands had below it go, and are made again empty:
+  // init for the runner, run for each run's cgroup, proc for each background process's.
+  // None of them counts memory, so none lingers once removed.
+  for (const leaf of ["init", "run", "proc"]) {
+    await removeCgroup(join(cgroup, leaf)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    await mkdir(join(cgroup, leaf));
+  }
   await writeFile(join(cgroup, "pids.max"), String(PIDS_MAX));
   // No cgroup deeper than a command's, and at most CGROUPS_MAX.
   await writeFile(join(cgroup, "cgroup.max.descendants"), String(CGROUPS_MAX));
@@ -258,15 +265,11 @@ async function removeCgroup(path: string): Promise<void> {
 }
 
 // Once *root*'s runner is up: unshare, its one process outside its namespaces, joins
-// the runner's cgroup, so the root's own holds no process. Then each background
-// process's memory is counted in its own cgroup, where an out-of-memory kill shows. A
-// run's is not: its answer has no note, and a memory cgroup outlives its rmdir while
-// pages it charged remain, as a file a run left in /tmp.
+// the runner's cgroup, so the root's own holds no process. The root's memory is counted
+// in its own cgroup alone, where an out-of-memory kill shows (runner.ts): no cgroup below
+// it counts memory, so its next setup can enter it again, and none lingers once removed.
 export async function contain(root: string, pid: number | undefined): Promise<void> {
-  const cgroup = join(CGROUPS, root);
-  await writeFile(join(cgroup, "init", "cgroup.procs"), String(pid));
-  await writeFile(join(cgroup, "cgroup.subtree_control"), "+memory");
-  await writeFile(join(cgroup, "proc", "cgroup.subtree_control"), "+memory");
+  await writeFile(join(CGROUPS, root, "init", "cgroup.procs"), String(pid));
 }
 
 /**

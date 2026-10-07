@@ -263,7 +263,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     expect(await run([
       "ls /sys/fs/cgroup/run | grep -c '^op-'",
       "cat /proc/self/cgroup",
-      // A run's memory is not counted apart: a background process's is, for its out-of-memory note.
+      // A run's memory is not counted apart: the root's own cgroup counts it, for all of the root.
       'test -e "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.events" || echo a run has no memory cgroup',
       "(echo 1 > /sys/fs/cgroup/pids.max) 2>&1 | sed 's/.*: //'",
       "(echo 1 > /sys/fs/cgroup/init/cgroup.kill) 2>&1 | sed 's/.*: //'",
@@ -278,19 +278,20 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     });
   });
 
-  it("makes each background process's cgroup itself, which the root's user can enter and end but not make, and removes it once the process ends", async () => {
+  it("makes each background process's cgroup itself, counting no memory, which the root's user can enter and end but not make, and removes it once the process ends", async () => {
     const started = await guest.op(ROOT, "start", background("sleep 310"), signal()) as { ok: { session_id: string } };
     const { session_id } = started.ok;
     const cgroup = `/sys/fs/cgroup/proc/${session_id}`;
     expect(await run([
-      `stat -c %u ${cgroup} ${cgroup}/cgroup.procs ${cgroup}/cgroup.kill ${cgroup}/memory.max | tr '\\n' ' '; echo`,
-      // A memory cgroup a command made and removed again would hold guest memory no limit counts.
+      `stat -c %u ${cgroup} ${cgroup}/cgroup.procs ${cgroup}/cgroup.kill | tr '\\n' ' '; echo`,
+      // It counts no memory: the root's own cgroup does, for all of the root.
+      `test -e ${cgroup}/memory.max && echo counted || echo uncounted`,
       "(mkdir /sys/fs/cgroup/proc/mine) 2>&1 | sed 's/.*: //'",
       `(mkdir ${cgroup}/below) 2>&1 | sed 's/.*: //'`,
       `(rmdir ${cgroup}) 2>&1 | sed 's/.*: //'`,
       `sh -c 'echo $$ > ${cgroup}/cgroup.procs && cut -d: -f3 /proc/self/cgroup'`,
     ].join("; "))).toEqual({
-      ok: { output: `0 ${FIRST_UID} ${FIRST_UID} 0 \nPermission denied\nPermission denied\nPermission denied\n/proc/${session_id}\n`, returncode: 0, timed_out: false },
+      ok: { output: `0 ${FIRST_UID} ${FIRST_UID} \nuncounted\nPermission denied\nPermission denied\nPermission denied\n/proc/${session_id}\n`, returncode: 0, timed_out: false },
     });
     expect(await guest.op(ROOT, "kill", { session_id }, signal())).toEqual({ ok: { status: "killed", session_id } });
     expect(await run("find /sys/fs/cgroup/proc -mindepth 1 -type d | wc -l")).toMatchObject({ ok: { output: "0\n" } });
@@ -940,6 +941,39 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       "chmod +x node_modules/tool/bin/cli.js && ln -s ../tool/bin/cli.js node_modules/.bin/tool && ./node_modules/.bin/tool",
       "rm -rf configure built node_modules",
     ].join(" && "))).toEqual({ ok: { output: "configured\nbuilt\ntool\n", returncode: 0, timed_out: false } });
+  });
+
+  it("notes no shortage of memory for a background process a command ended with SIGKILL", async () => {
+    const started = await guest.op(ROOT, "start", background("exec sleep 311"), signal()) as { ok: { session_id: string; pid: number } };
+    expect(await run(`sleep 0.5; kill -KILL ${started.ok.pid}`)).toMatchObject({ ok: { returncode: 0 } });
+    expect(await guest.op(ROOT, "wait", { session_id: started.ok.session_id, timeout: 10 }, signal())).toEqual({
+      ok: { status: "exited", exit_code: 137, output: "" },
+    });
+  });
+
+  it("leaves no memory cgroup behind background processes that each leave a file in /tmp, nor behind a root set up again and again", async () => {
+    const MANY = "3e4f5a6b-7c8d-4e9f-8a0b-1c2d3e4f5a6b";
+    const path = join(dir, "many");
+    mkdirSync(path);
+    // The guest's memory cgroups, the dying among them: /proc/cgroups is not namespaced, as the
+    // root's own cgroup.stat is, and a root set up again in a new cgroup would hide those of the old.
+    const memcgs = async () => Number((await run("awk '$1 == \"memory\" { print $3 }' /proc/cgroups", MANY) as { ok: { output: string } }).ok.output);
+    expect(await guest.ready(MANY, folderOf(path))).toBeNull();
+    const before = await memcgs();
+    for (let n = 0; n < 200; n += 1) {
+      const started = await guest.op(MANY, "start", background(`echo ${n} > /tmp/bg-${n}`), signal()) as { ok: { session_id: string } };
+      expect(await guest.op(MANY, "wait", { session_id: started.ok.session_id, timeout: 10 }, signal())).toMatchObject({ ok: { status: "exited" } });
+    }
+    const processed = await memcgs();
+    for (let n = 0; n < 30; n += 1) {
+      await guest.teardown(MANY);
+      expect(await guest.ready(MANY, folderOf(path))).toBeNull();
+      expect(await run(`echo ${n} > /tmp/again-${n}`, MANY)).toMatchObject({ ok: { returncode: 0 } });
+    }
+    const after = await memcgs();
+    console.log(`memory cgroups in the guest: ${before} before, ${processed} after 200 background processes, ${after} after 30 setups more`);
+    expect([processed - before, after - before].map((grown) => grown < 5)).toEqual([true, true]);
+    await guest.teardown(MANY);
   });
 
   it("writes a home's file out at its stop, with no sync of its own, and leaves the sessions disk nothing to recover", async () => {
