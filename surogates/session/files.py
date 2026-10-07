@@ -107,15 +107,10 @@ async def session_files(
         )).one_or_none()
     if device is None or device.revoked_at is not None:
         raise ComputerAway(device.name if device is not None else "your computer", revoked=True)
-    if device_id not in await DevicePresence(redis).online([device_id]):
-        # A change's own caller, told it failed, cancels what it left waiting; a read leaves nothing open.
-        if change is not None:
-            # The app answers what it still asks about not run, once its link ends.  The one
-            # exception: a change its user allowed just before is running, and may still land.
-            await operations.cancel_invocation(session.id, invocation)
-        raise ComputerAway(device.name, revoked=False)
     root = UUID(sandbox_session_key(session))
     if change is not None:
+        # Before the computer is asked after: the same request id sent with another change is
+        # refused, online or not, and cancels nothing of the first.
         await operations.claim(OperationRequest(
             device_id=device_id,
             root_session_id=root,
@@ -125,6 +120,13 @@ async def session_files(
             kind="request",
             args={"change": change},
         ))
+    if device_id not in await DevicePresence(redis).online([device_id]):
+        # A change's own caller, told it failed, cancels what it left waiting; a read leaves nothing open.
+        if change is not None:
+            # The app answers what it still asks about not run, once its link ends.  The one
+            # exception: a change its user allowed just before is running, and may still land.
+            await operations.cancel_invocation(session.id, invocation)
+        raise ComputerAway(device.name, revoked=False)
     runner = JournalRunner(
         operations,
         device_id=device_id,

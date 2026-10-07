@@ -198,3 +198,12 @@ async def test_a_read_found_offline_cancels_nothing_kept_under_its_id(api, lapto
         async with files_of(api, session, request_id="change-0005"):
             pass
     assert await has_pending(laptop_rig.ops, laptop_rig.device_id)
+
+
+async def test_another_change_found_offline_under_a_kept_ones_id_is_refused_and_cancels_nothing(api, laptop_rig):
+    session, access = await kept_then_offline(api, laptop_rig, "change-0006", "upload notes.md one")
+    # Refused as it is online, however far the first got: the first stays the computer's to do.
+    with pytest.raises(OperationConflict):
+        async with files_of(api, session, request_id="change-0006", change="upload notes.md two", access=access):
+            pass
+    assert await has_pending(laptop_rig.ops, laptop_rig.device_id)
