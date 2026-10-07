@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -616,6 +618,60 @@ describe("processes from before the app quit", { timeout: 20_000 }, () => {
     expect(saves).toHaveLength(21);
     expect(saves[20]?.every((handle) => handle.ended?.note === RUNNER_GONE)).toBe(true);
   });
+});
+
+describe("a registry's output together", () => {
+  // The whole output of a process whose output is one line.
+  const kept = async (session_id: string) => ((await ask("read_output", { session_id, offset: 0, limit: 1 })).ok.output as string).length;
+
+  it("stays within its bound: finished processes' output, the earliest ended first, then the longest running one's, keep their last 2 000 characters", async () => {
+    const { runner: driven, spawned } = fake();
+    processes({ runner: driven, keep: 10_000 });
+    const ids = [await start("a"), await start("b"), await start("c")];
+    spawned[0]?.output("a".repeat(6_000));
+    spawned[0]?.end({ code: 0, signal: null });
+    spawned[1]?.output("b".repeat(3_000));
+    expect([await kept(ids[0]!), await kept(ids[1]!)]).toEqual([6_000, 3_000]);
+    spawned[2]?.output("c".repeat(1_500));
+    expect(await Promise.all(ids.map((id) => kept(id)))).toEqual([2_000, 3_000, 1_500]);
+    spawned[1]?.output("b".repeat(6_000));
+    expect(await Promise.all(ids.map((id) => kept(id)))).toEqual([2_000, 2_000, 1_500]);
+  });
+
+  it("keeps the whole of what each shows, 200 000 characters, for as many processes as its bound holds", async () => {
+    const { runner: driven, spawned } = fake();
+    processes({ runner: driven, keep: 2_000_000 });
+    const ids: string[] = [];
+    for (let n = 0; n < 10; n += 1) ids.push(await start(`p${n}`));
+    // In three writes each: a buffer holds up to twice what it shows between its own cuts.
+    for (const child of spawned) for (let write = 0; write < 3; write += 1) child.output("x".repeat(150_000));
+    expect(await Promise.all(ids.map((id) => kept(id)))).toEqual(Array.from({ length: 10 }, () => 200_000));
+  });
+
+  it.each([["one-byte", "x", 1], ["two-byte", "─", 2]] as const)(
+    "holds no more of the heap than its bound, for %s output: a cut keeps nothing of the string it was cut from",
+    async (_kind, char, bytes) => {
+      // The collector, in a context made once the flag is set.
+      setFlagsFromString("--expose-gc");
+      const gc = runInNewContext("gc") as () => void;
+      const heap = () => {
+        gc();
+        return process.memoryUsage().heapUsed;
+      };
+      const { runner: driven, spawned } = fake();
+      processes({ runner: driven, keep: 2_000_000 });
+      for (let n = 0; n < MAX_PROCESSES; n += 1) await start(`p${n}`);
+      const before = heap();
+      // About 390 000 characters each, in 64 KiB chunks, then its end.
+      const chunk = char.repeat(65_536);
+      for (const child of spawned) {
+        for (let write = 0; write < 6; write += 1) child.output(chunk);
+        child.end({ code: 0, signal: null });
+      }
+      // What the bound allows, 2M code units of one or two bytes, and 2 MB more.
+      expect(heap() - before).toBeLessThan(2_000_000 * bytes + 2_000_000);
+    },
+  );
 });
 
 describe("a background process with a terminal", { timeout: 20_000 }, () => {

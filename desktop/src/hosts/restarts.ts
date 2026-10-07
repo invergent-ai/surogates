@@ -7,7 +7,8 @@ import { lstatSync } from "node:fs";
 import { join, relative } from "node:path";
 
 import { sandboxError } from "../files/answers.js";
-import { protectedInFolder } from "../files/protect.js";
+import { GIT_STATE, KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
+import { type BindMode, MAX_PROTECTED } from "../guest/protocol.js";
 import { SCAN_TIMEOUT_MS, listed, scanHooks } from "./hooks.js";
 import { GLOB } from "./policy.js";
 
@@ -16,6 +17,10 @@ import { GLOB } from "./policy.js";
 export const MAX_EXTRA_DENIES = 1024;
 
 export const GRANT_CHANGED = "a folder grant changed";
+
+// In a linked worktree's own folder, what sends git to a config: the common folder's path, and
+// the worktree's own config. Git reads its config and hooks from the common folder.
+const WORKTREE_CONFIGS = new Set(["commondir", "config.worktree"]);
 
 export const appeared = (key: string) => `a protected file appeared in the folder (${key})`;
 
@@ -83,6 +88,48 @@ export function extraDenies(folder: string, keys: Iterable<string>): string[] {
     throw sandboxError(`Blocked: this computer cannot protect ${relative(folder, globbed)} in the sandbox, because its name holds *, ?, [ or ], so background processes cannot start here.`);
   }
   return sorted;
+}
+
+// What a guest root's namespace binds over itself (spec, Section 11, Folders), sorted, so
+// each folder comes before what lies in it: for every protected key the outermost protected
+// path it lies in, read-only; and, read-write, each folder above it that holds protected
+// names (KEY_FOLDERS) or lies in a .git folder. A command can then neither write a key in
+// place nor rename such a folder to make the key again. An ordinary folder above a key is
+// not bound: it stays the agent's to rename. Nor is git's own working state (GIT_STATE: a
+// rebase's, a cherry-pick's, a linked worktree's), which git makes, writes and removes as it
+// works, across commands too: bound, a rebase would stop halfway and could neither go on nor
+// be aborted. In a linked worktree's own folder (worktrees/<name>), only what sends git to a
+// config is bound, one by one, and held above: worktrees and <name> are held, so git can add a
+// worktree but no command can rename one to make them again. So what is held in a .git is
+// the .git itself, in its modules each folder down to a submodule's git folder, and each
+// linked worktree's folder with the worktrees above it. Past MAX_PROTECTED it throws, and commands are
+// refused, as srt's extra denies were past their own: each is a bind in the root's
+// namespace, and its path goes over the control port.
+export function guestBinds(folder: string, keys: Iterable<string>): Array<[path: string, mode: BindMode]> {
+  const binds = new Map<string, BindMode>();
+  for (const key of keys) {
+    const all = key.slice(folder.length + 1).split("/");
+    let parts = outermost(folder, all);
+    const state = parts.at(-1)?.toLowerCase() ?? "";
+    if (GIT_STATE.has(state) && parts.slice(0, -1).some((part) => part.toLowerCase() === ".git")) {
+      const [name, file, ...more] = all.slice(parts.length);
+      if (state !== "worktrees" || !name || more.length > 0 || !WORKTREE_CONFIGS.has(file?.toLowerCase() ?? "")) continue;
+      parts = all;
+    }
+    const lower = parts.map((part) => part.toLowerCase());
+    binds.set(join(folder, ...parts), "ro");
+    for (let at = 1; at < parts.length; at += 1) {
+      const above = lower.slice(0, at);
+      if (KEY_FOLDERS.has(above.at(-1) ?? "") || above.slice(0, -1).includes(".git")) {
+        const path = join(folder, ...parts.slice(0, at));
+        if (!binds.has(path)) binds.set(path, "rw");
+      }
+    }
+  }
+  if (binds.size > MAX_PROTECTED) {
+    throw new Error(`this folder has ${binds.size} protected paths, and the sandbox can make at most ${MAX_PROTECTED} read-only`);
+  }
+  return [...binds].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 // .git/hooks for a hook, .vscode for a file in it. Never a .git folder, which would

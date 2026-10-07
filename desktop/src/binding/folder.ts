@@ -9,6 +9,12 @@ import { GLOB, isReserved } from "../hosts/policy.js";
 
 const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
 
+// The folders of the guest's image that hold its tools (spec, Section 11, "Sessions in the
+// guest"): a chat's folder is bound at its own path in the guest, over whatever the image
+// has there. The image's other top-level folders are empty, or links into /usr, or the
+// root's own mounts; /root is no user's to bind.
+export const GUEST_SYSTEM = ["/etc", "/opt/venv", "/usr", "/var/cache", "/var/lib", "/var/log", "/var/spool"];
+
 // This boot, read once; "" when it cannot be read. A folder's st_dev belongs to its mount and
 // can change at a reboot (btrfs subvolumes, ZFS, NFS and SMB, FUSE, several NVMe drives).
 export const BOOT_ID = (() => {
@@ -55,6 +61,9 @@ export function checkFolder(folder: string, guards: FolderGuards): FolderCheck {
   const refused = (message: string): FolderCheck => ({ ok: false, missing: false, message });
   if (GLOB.test(path)) return refused(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${path}`);
   if (isReserved(path)) return refused(`the folder ${path} is inside one of this computer's system folders`);
+  // One that is, holds or lies in a folder of the guest's tools would hide them from its commands.
+  const tools = GUEST_SYSTEM.find((dir) => inside(path, dir) || inside(dir, path));
+  if (tools) return refused(`the sandbox keeps its own tools in ${tools}, so the folder ${path} cannot be a chat's`);
   // A sandbox whose writable folder held the home folder, the app's own data or
   // files or a credential folder would hand all of it to the agent. Each is
   // compared as spelled and as resolved: a link would otherwise walk around the check.

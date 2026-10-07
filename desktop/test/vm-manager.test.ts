@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BOOT_ID } from "../src/binding/folder.js";
 import { SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
+import type { ProtectedKey } from "../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { bootLinux, sweep } from "../src/vm/linux.js";
 import { type BootVm, bootFor, type Folder, Guest, type ProcessesChange, type VmBackend, VmManager, type VmOptions } from "../src/vm/manager.js";
@@ -73,6 +74,7 @@ const fakeVm = (roots?: ControlRoots): BootVm => async () => {
     control: host,
     exited,
     share: async () => ({ kind: "virtiofs", tag: "r1" }),
+    unshare: async () => {},
     kill: async () => {
       host.destroy();
       gone("");
@@ -222,6 +224,78 @@ describe("the VM manager on the host", () => {
     });
   });
 
+  // A QEMU with its two sockets, whose monitor takes every command, writes each to dir/commands,
+  // and says a device it was asked to delete is deleted, but while dir/stuck is there. As QEMU
+  // does, it refuses to delete a device a second time.
+  const answering = () => {
+    const fake = join(dir, "qemu.cjs");
+    writeFileSync(fake, [
+      'const fs = require("node:fs");',
+      'const net = require("node:net");',
+      "const run = process.argv[2];",
+      'net.createServer(() => {}).listen(run + "/control.sock");',
+      "const deleting = new Set();",
+      "net.createServer((socket) => {",
+      '  socket.write(\'{"QMP": {"version": {}, "capabilities": []}}\\n\');',
+      '  require("node:readline").createInterface({ input: socket }).on("line", (line) => {',
+      "    const command = JSON.parse(line);",
+      '    fs.appendFileSync(run + "/../commands", line + "\\n");',
+      '    if (command.execute === "device_del" && deleting.has(command.arguments.id)) {',
+      '      return socket.write(JSON.stringify({ error: { class: "GenericError", desc: `Device ${command.arguments.id} is already in the process of unplug` } }) + "\\n");',
+      "    }",
+      '    if (command.execute === "device_del") deleting.add(command.arguments.id);',
+      '    socket.write(\'{"return": {}}\\n\');',
+      '    if (command.execute === "device_del" && !fs.existsSync(run + "/../stuck")) {',
+      '      socket.write(JSON.stringify({ event: "DEVICE_DELETED", data: { device: command.arguments.id } }) + "\\n");',
+      "    }",
+      "  });",
+      '}).listen(run + "/qmp.sock");',
+    ].join("\n"));
+    return `exec '${process.execPath}' '${fake}' '${join(dir, "run")}'`;
+  };
+
+  it("gives a removed share's root port to the next, under a number of its own, and ends its virtiofsd", async () => {
+    await withQemu(answering(), async () => {
+      const vm = await bootLinux(options(), undefined, performance.now() + 5_000);
+      try {
+        const first = await vm.share(dir, 10_000, performance.now() + 5_000);
+        const daemon = Number(readFileSync(join(dir, "run", "vfs-1.pid"), "utf8"));
+        // Nothing connects to this virtiofsd: it is ended at the removal's deadline. Asked twice at
+        // once, as by two teardowns of one root, it is removed once.
+        await Promise.all([vm.unshare(first, performance.now() + 500), vm.unshare(first, performance.now() + 500)]);
+        await until(() => !alive(daemon));
+        expect(existsSync(join(dir, "run", "vfs-1.pid"))).toBe(false);
+        expect(await vm.share(dir, 10_000, performance.now() + 5_000)).toEqual({ kind: "virtiofs", tag: "r2" });
+        const commands = readFileSync(join(dir, "commands"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as { execute: string; arguments?: Record<string, unknown> });
+        expect(commands.map(({ execute, arguments: args }) => [execute, args?.id, args?.bus])).toEqual([
+          ["qmp_capabilities", undefined, undefined],
+          ["chardev-add", "vfs1", undefined], ["device_add", "fs1", "rp1"], ["device_del", "fs1", undefined], ["chardev-remove", "vfs1", undefined],
+          ["chardev-add", "vfs2", undefined], ["device_add", "fs2", "rp1"],
+        ]);
+      } finally {
+        await vm.kill();
+      }
+    });
+  });
+
+  it("ends a VM whose guest does not let a share go by the removal's deadline", async () => {
+    writeFileSync(join(dir, "stuck"), "");
+    await withQemu(answering(), async () => {
+      const vm = await bootLinux(options(), undefined, performance.now() + 5_000);
+      try {
+        let gone = false;
+        void vm.exited.then(() => {
+          gone = true;
+        });
+        const share = await vm.share(dir, 10_000, performance.now() + 5_000);
+        await expect(vm.unshare(share, performance.now() + 300)).rejects.toThrow("the guest did not let r1 go in time");
+        expect(gone).toBe(true);
+      } finally {
+        await vm.kill();
+      }
+    });
+  });
+
   it("ends a QEMU that opens no sockets by the boot's deadline", async () => {
     await withQemu(`echo $$ > '${join(dir, "qemu-pid")}'\nexec sleep 30`, async () => {
       await expect(bootLinux(options(), undefined, performance.now() + 500)).rejects.toThrow("QEMU did not open its sockets");
@@ -246,6 +320,7 @@ describe("the VM manager on a guest", () => {
         });
       },
       teardown: async () => void asked.push("teardown"),
+      protect: async () => {},
       perform: async () => ({ ok: true }),
     };
     const manager = new VmManager(options(), fakeVm(roots));
@@ -262,9 +337,169 @@ describe("the VM manager on a guest", () => {
   });
 });
 
+describe("a root torn down", () => {
+  const R1 = { kind: "virtiofs", tag: "r1" } as const;
+  const which = (manager: VmManager) => manager.perform({ id: `which-${Math.random()}`, root: "root-1", folder: { path: dir, ...statSync(dir) }, kind: "which", args: {} }, new AbortController().signal);
+  // A guest whose agent and backend say what they were asked, in turn; *unshare* is the backend's removal.
+  const recording = (asked: unknown[], unshare: () => Promise<void>): BootVm => {
+    const roots: ControlRoots = {
+      uid: () => 10_000,
+      setup: async (root) => void asked.push(["setup", root]),
+      teardown: async (root, share) => void asked.push(["teardown", root, share]),
+      protect: async () => {},
+      perform: async () => ({ ok: true }),
+    };
+    return async (...args) => {
+      const vm = await fakeVm(roots)(...args);
+      asked.push(["boot"]);
+      return {
+        ...vm,
+        share: async () => {
+          asked.push(["share"]);
+          return R1;
+        },
+        unshare: async (share) => {
+          asked.push(["unshare", share]);
+          await unshare();
+        },
+      };
+    };
+  };
+
+  it("ends in the guest before its folder leaves it, and has its folder shared and itself set up again by its next operation", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager(options(), recording(asked, async () => {}));
+    expect(await which(manager)).toEqual({ ok: true });
+    await manager.teardown("root-1");
+    expect(await which(manager)).toEqual({ ok: true });
+    expect(asked).toEqual([["boot"], ["share"], ["setup", "root-1"], ["teardown", "root-1", R1], ["unshare", R1], ["share"], ["setup", "root-1"]]);
+    await manager.stop();
+  });
+
+  it("loses a guest that does not let its folder go, and boots a new one for the next operation", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager(options(), recording(asked, async () => {
+      throw new Error("the guest did not let r1 go in time");
+    }));
+    expect(await which(manager)).toEqual({ ok: true });
+    await manager.teardown("root-1");
+    expect(await which(manager)).toEqual({ ok: true });
+    expect(asked.filter((step) => (step as string[])[0] === "boot")).toHaveLength(2);
+    await manager.stop();
+  });
+});
+
+describe("a root's protected keys in the guest", () => {
+  const KEYS: ProtectedKey[] = [["/f/.git", 40, "rw"], ["/f/.git/config", 41, "ro"]];
+  let asked: unknown[];
+  let refuse: boolean;
+  // Binds that take a while, as a few hundred do: what has been bound is told once they are.
+  let slow: boolean;
+  const roots = (): ControlRoots => ({
+    uid: () => 10_000,
+    setup: async (root) => void asked.push(["setup", root]),
+    teardown: async () => {},
+    protect: async (root, keys) => {
+      asked.push(["protect", root, keys]);
+      if (slow) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        asked.push(["bound", root]);
+      }
+      if (refuse) throw new Error("Blocked: the computer could not make these protected files read-only in its sandbox");
+    },
+    perform: async (root, kind) => {
+      asked.push([kind, root]);
+      return { ok: true };
+    },
+  });
+  const run = (manager: VmManager, protect?: ProtectedKey[], kind = "run") => manager.perform({
+    id: `${kind}-${Math.random()}`, root: "root-1", folder: { path: dir, ...statSync(dir) }, kind, args: {}, ...(protect ? { protect } : {}),
+  }, new AbortController().signal);
+
+  beforeEach(() => {
+    asked = [];
+    refuse = false;
+    slow = false;
+  });
+
+  it("are made read-only after the root's setup and before its command, asked again only once they change or it is set up again", async () => {
+    const manager = new VmManager(options(), fakeVm(roots()));
+    expect(await run(manager, KEYS)).toEqual({ ok: true });
+    expect(await run(manager, KEYS)).toEqual({ ok: true });
+    // A kind that runs no command brings none.
+    expect(await run(manager, undefined, "poll")).toEqual({ ok: true });
+    const changed: ProtectedKey[] = [["/f/.git", 40, "rw"], ["/f/.git/config", 42, "ro"]];
+    expect(await run(manager, changed)).toEqual({ ok: true });
+    // The root's runner is lost: its namespace is made again, and its keys bound there again.
+    agent?.write(`${JSON.stringify({ type: "lost", root: "root-1" })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await run(manager, changed)).toEqual({ ok: true });
+    expect(asked).toEqual([
+      ["setup", "root-1"], ["protect", "root-1", KEYS], ["run", "root-1"], ["run", "root-1"], ["poll", "root-1"],
+      ["protect", "root-1", changed], ["run", "root-1"],
+      ["setup", "root-1"], ["protect", "root-1", changed], ["run", "root-1"],
+    ]);
+    await manager.stop();
+  });
+
+  it("refuse the root's command while they cannot be made read-only, and are asked again with the next", async () => {
+    const manager = new VmManager(options(), fakeVm(roots()));
+    refuse = true;
+    expect(await run(manager, KEYS)).toEqual({
+      error: { type: "sandbox", message: "Blocked: the computer could not make these protected files read-only in its sandbox" },
+    });
+    refuse = false;
+    expect(await run(manager, KEYS)).toEqual({ ok: true });
+    expect(asked).toEqual([["setup", "root-1"], ["protect", "root-1", KEYS], ["protect", "root-1", KEYS], ["run", "root-1"]]);
+    await manager.stop();
+  });
+
+  it("are made read-only as the root's file host finds them between commands, once a guest has the root set up", async () => {
+    const manager = new VmManager(options(), fakeVm(roots()));
+    await manager.protect("root-1", KEYS);
+    expect(await run(manager, undefined, "which")).toEqual({ ok: true });
+    await manager.protect("root-1", KEYS);
+    await manager.protect("root-1", KEYS);
+    await manager.protect("root-2", KEYS);
+    expect(asked).toEqual([["setup", "root-1"], ["which", "root-1"], ["protect", "root-1", KEYS]]);
+    await manager.stop();
+  });
+
+  // The root's runner is lost while a command's keys are being bound, and another operation of the root sets it up again first.
+  const lostWhileBinding = async (manager: VmManager, other: () => Promise<unknown>) => {
+    slow = true;
+    const first = run(manager, KEYS);
+    await until(() => asked.length === 2);
+    agent?.write(`${JSON.stringify({ type: "lost", root: "root-1" })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await other()).toEqual({ ok: true });
+    expect(await first).toEqual({ ok: true });
+  };
+
+  it("are bound again in a namespace set up again by a poll while they were being bound, before the command runs there", async () => {
+    const manager = new VmManager(options(), fakeVm(roots()));
+    await lostWhileBinding(manager, () => run(manager, undefined, "poll"));
+    expect(asked).toEqual([
+      ["setup", "root-1"], ["protect", "root-1", KEYS], ["setup", "root-1"], ["poll", "root-1"], ["bound", "root-1"],
+      ["protect", "root-1", KEYS], ["bound", "root-1"], ["run", "root-1"],
+    ]);
+    await manager.stop();
+  });
+
+  it("are bound in a namespace set up again by another command while they were being bound, before either command runs there", async () => {
+    const manager = new VmManager(options(), fakeVm(roots()));
+    await lostWhileBinding(manager, () => run(manager, KEYS));
+    expect(asked).toEqual([
+      ["setup", "root-1"], ["protect", "root-1", KEYS], ["setup", "root-1"], ["bound", "root-1"],
+      ["protect", "root-1", KEYS], ["bound", "root-1"], ["run", "root-1"], ["run", "root-1"],
+    ]);
+    await manager.stop();
+  });
+});
+
 describe("a root's processes in the guest", () => {
   it("are told as they change, refused whole past a registry's count or a handle's shape and size, and told gone with every root of a guest that goes", async () => {
-    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, protect: async () => {}, perform: async () => ({ ok: true }) };
     const told: Array<[string, ProcessesChange]> = [];
     const vms: VmBackend[] = [];
     const boot: BootVm = async (...args) => {
@@ -304,6 +539,7 @@ describe("a guest that goes", () => {
       uid: () => 10_000,
       setup: async () => {},
       teardown: async () => {},
+      protect: async () => {},
       // A run that never ends; which answers at once.
       perform: (_root, kind) => new Promise((resolve) => kind === "which" && resolve({ ok: true })),
     };
@@ -336,7 +572,7 @@ describe("a guest that goes", () => {
 });
 
 describe("a chat's folder, checked again before it is shared", () => {
-  const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+  const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, protect: async () => {}, perform: async () => ({ ok: true }) };
   const which = (manager: VmManager, root: string, folder: Folder) =>
     manager.perform({ id: `which-${root}`, root, folder, kind: "which", args: {} }, new AbortController().signal);
 
@@ -386,7 +622,7 @@ function stalledFolder(): { folder: Folder; release: () => void } {
 
 describe("a chat's folder on a mount that does not answer", () => {
   it("is answered as unavailable within the share's bound, and its root torn down without waiting on it", async () => {
-    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, protect: async () => {}, perform: async () => ({ ok: true }) };
     const manager = new VmManager({ ...options(), shareMs: 300 }, fakeVm(roots));
     const { folder, release } = stalledFolder();
     try {

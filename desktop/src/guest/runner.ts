@@ -35,7 +35,8 @@ const MAX_STDIN_BYTES = 1024 * 1024;
 
 interface Child {
   proc: ChildProcess;
-  // Its cgroup in the guest; null under srt.
+  // Its cgroup in the guest; null under srt. A run's is the runner's own to make and
+  // remove; a background process's, the agent's (root.ts, ProcessCgroups).
   cgroup: string | null;
   // A command with no stdin is a foreground run: what it leaves running ends with it.
   foreground: boolean;
@@ -162,7 +163,7 @@ function finish(id: string): void {
   child.proc.stderr?.destroy();
   const oom = outOfMemory(child.cgroup);
   say({ type: "exit", id, code: child.proc.exitCode, signal: child.proc.signalCode as NodeJS.Signals | null, ...(oom ? { oom } : {}) });
-  retire(child.cgroup);
+  if (child.foreground) retire(child.cgroup);
 }
 
 function start(request: SpawnRequest): void {
@@ -174,11 +175,12 @@ function start(request: SpawnRequest): void {
   const env = CGROUPS ? { ...base, ...request.env } : { ...base, ...request.env, [MARKER]: id };
   let [file, args] = argv(request, env);
   const cgroup = CGROUPS && join(CGROUPS, request.stdin ? "proc" : "run", id);
+  const own = request.stdin ? null : cgroup;
   let proc: ChildProcess;
   try {
     if (cgroup) {
       tidy();
-      mkdirSync(cgroup);
+      if (own) mkdirSync(own);
       // Its shell enters the command's cgroup before it runs the command, so all the command starts is there.
       [file, args] = ["/bin/sh", ["-c", 'echo $$ > "$0" && exec "$@"', join(cgroup, "cgroup.procs"), file, ...args]];
     }
@@ -186,7 +188,7 @@ function start(request: SpawnRequest): void {
     proc = spawn(file, args, { cwd: request.cwd, env, detached: true, stdio: [request.stdin ? "pipe" : "ignore", "pipe", "pipe"] });
   } catch (error) {
     // A command past Linux's 128 KiB for one argument throws E2BIG here, its cgroup made.
-    retire(cgroup);
+    retire(own);
     say({ type: "error", id, message: error instanceof Error ? error.message : String(error) });
     return;
   }
@@ -205,7 +207,7 @@ function start(request: SpawnRequest): void {
     if (started || child.done) return;
     child.done = true;
     children.delete(id);
-    retire(cgroup);
+    retire(own);
     say({ type: "error", id, message: error.message });
   });
   proc.on("exit", () => {

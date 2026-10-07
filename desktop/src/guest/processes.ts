@@ -76,6 +76,10 @@ export interface ProcessesOptions {
   save?(handles: ProcessHandle[]): void;
   // Handles from before the app last quit.
   ended?: readonly ProcessHandle[];
+  // Told each process's id once, when it has ended: what was kept for it can go.
+  done?(id: string): void;
+  // How much of its processes' output it keeps together, in UTF-16 code units; unbounded without.
+  keep?: number;
   now?(): number; // seconds
 }
 
@@ -130,6 +134,15 @@ function settled(record: Tracked, ms: number, signal?: AbortSignal): Promise<voi
 }
 const output = (record: Tracked) => lastPoints(record.buffer, MAX_OUTPUT_CHARS);
 const status = (record: Tracked) => (record.exited ? "exited" : "running");
+
+// The record's buffer cut to its last *points*. A cut that shortens it is copied into a
+// string of its own: V8's slice keeps the whole string it was cut from, which no length
+// counts. The copy keeps lone surrogates as they are.
+function cut(record: Tracked, points: number): void {
+  const last = lastPoints(record.buffer, points);
+  if (last.length < record.buffer.length) record.buffer = Buffer.from(last, "utf16le").toString("utf16le");
+  record.kept = record.buffer.length;
+}
 
 // time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(seconds)).
 function localStamp(seconds: number): string {
@@ -425,9 +438,33 @@ export class Processes {
     }
     record.buffer += text;
     // Measured from the last cut, so astral output, two units a code point, is cut as seldom.
-    if (record.buffer.length > record.kept + MAX_OUTPUT_CHARS) {
-      record.buffer = lastPoints(record.buffer, MAX_OUTPUT_CHARS);
-      record.kept = record.buffer.length;
+    if (record.buffer.length > record.kept + MAX_OUTPUT_CHARS) cut(record, MAX_OUTPUT_CHARS);
+    this.within();
+  }
+
+  // Its processes' output together within keep: past it, first what each holds beyond what
+  // it shows (a buffer holds up to twice MAX_OUTPUT_CHARS between its own cuts), then
+  // finished processes' output, the earliest ended first, then the running ones', the
+  // longest first, each down to what its handle keeps (HANDLE_CHARS).
+  private within(): void {
+    const { keep } = this.options;
+    if (keep === undefined) return;
+    const records = [...this.running.values(), ...this.finished.values()];
+    let total = 0;
+    for (const record of records) total += record.buffer.length;
+    if (total <= keep) return;
+    for (const record of records) {
+      if (record.buffer.length <= MAX_OUTPUT_CHARS) continue;
+      const before = record.buffer.length;
+      cut(record, MAX_OUTPUT_CHARS);
+      total -= before - record.buffer.length;
+    }
+    const running = [...this.running.values()].sort((a, b) => b.buffer.length - a.buffer.length);
+    for (const record of [...this.finished.values(), ...running]) {
+      if (total <= keep) return;
+      const before = record.buffer.length;
+      cut(record, HANDLE_CHARS);
+      total -= before - record.buffer.length;
     }
   }
 
@@ -450,6 +487,7 @@ export class Processes {
     this.running.delete(record.handle.id);
     this.finished.set(record.handle.id, record);
     for (const waiter of record.waiters) waiter();
+    this.options.done?.(record.handle.id);
     this.changed();
   }
 

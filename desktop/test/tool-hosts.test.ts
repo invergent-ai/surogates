@@ -1,13 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
+import { type BindMode, MAX_PROTECTED, type ProtectedKey } from "../src/guest/protocol.js";
 import type { Operation } from "../src/link/protocol.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type NetworkAnswer, type NetworkAsk, type ToHost } from "../src/hosts/messages.js";
+import { guestBinds } from "../src/hosts/restarts.js";
 import {
   APP_DIRS, CANCELLED, forkHost, HOST_STOPPED, type HostProcess, NOT_BOUND, START_TIMEOUT_MS, ToolHosts,
   type ToolHostsOptions,
@@ -92,6 +94,116 @@ afterEach(async () => {
 });
 
 const slowSearch = () => op("ripgrep", { key: folders[ROOT_A], mode: "files", pattern: "*", glob: null, context: 0 });
+
+describe("a folder's protected keys, for a guest's read-only binds", { timeout: 30_000 }, () => {
+  const RAN = { ok: { output: "", returncode: 0, timed_out: false } };
+  const key = (path: string, mode: BindMode = "ro"): ProtectedKey => [join(folders[ROOT_A]!, path), lstatSync(join(folders[ROOT_A]!, path)).ino, mode];
+  // A command elsewhere (the VM), and the keys it was given.
+  const command = (executor: ToolHosts, carried: ProtectedKey[][]) => executor.guarded(op("run", { command: "true" }), signal(), "around", async (_b, _s, _e, keys) => {
+    carried.push(keys);
+    return RAN;
+  });
+
+  beforeEach(() => {
+    const a = folders[ROOT_A]!;
+    mkdirSync(join(a, ".git", "hooks"), { recursive: true });
+    writeFileSync(join(a, ".git", "config"), "[core]\n");
+    writeFileSync(join(a, ".git", "hooks", "pre-commit.sample"), "");
+    mkdirSync(join(a, "sub", ".vscode"), { recursive: true });
+    writeFileSync(join(a, "sub", ".vscode", "settings.json"), "{}\n");
+  });
+
+  it("come with each command, the outermost of each kind with its inode, named again when a host program has replaced one", async () => {
+    const told: Array<[string, ProtectedKey[]]> = [];
+    const executor = toolHosts({ protect: (root, keys) => void told.push([root, keys]) });
+    const carried: ProtectedKey[][] = [];
+    expect(await command(executor, carried)).toEqual(RAN);
+    const first = [key(".git", "rw"), key(".git/config"), key(".git/hooks"), key("sub/.vscode")];
+    expect(carried).toEqual([first]);
+    expect(told.at(-1)).toEqual([ROOT_A, first]);
+    // git config on the host renames a new file over the old one; no look has run since.
+    writeFileSync(join(folders[ROOT_A]!, ".git", "config.lock"), "[core]\n\teditor = true\n");
+    renameSync(join(folders[ROOT_A]!, ".git", "config.lock"), join(folders[ROOT_A]!, ".git", "config"));
+    await command(executor, carried);
+    expect(carried[1]).toEqual([key(".git", "rw"), key(".git/config"), key(".git/hooks"), key("sub/.vscode")]);
+    expect(carried[1]?.[1]?.[1]).not.toBe(first[1]?.[1]);
+  });
+
+  it("are told as a look between commands finds a new one, as something running elsewhere may make it", async () => {
+    const told: ProtectedKey[][] = [];
+    const executor = toolHosts({ protect: (_root, keys) => void told.push(keys) });
+    await command(executor, []);
+    writeFileSync(join(folders[ROOT_A]!, ".mcp.json"), "{}\n");
+    // The look every 5 s while a command of the root's has run elsewhere.
+    await until(() => told.at(-1)?.some(([path]) => path.endsWith("/.mcp.json")) === true, 15_000);
+    expect(told.at(-1)).toEqual([key(".git", "rw"), key(".git/config"), key(".git/hooks"), key(".mcp.json"), key("sub/.vscode")]);
+  });
+
+  it("hold each folder above a key that holds protected names or lies in a .git, a nested repository's too, and no ordinary folder", () => {
+    const f = "/home/ana/project";
+    const keys = [".git/config", ".git/hooks/pre-commit", ".git/modules/lib/config", ".claude/commands/x.md", "sub/.git/config", "sub/.vscode/settings.json"];
+    expect(guestBinds(f, keys.map((key) => join(f, key)))).toEqual([
+      [`${f}/.claude`, "rw"], [`${f}/.claude/commands`, "ro"],
+      [`${f}/.git`, "rw"], [`${f}/.git/config`, "ro"], [`${f}/.git/hooks`, "ro"],
+      [`${f}/.git/modules`, "rw"], [`${f}/.git/modules/lib`, "rw"], [`${f}/.git/modules/lib/config`, "ro"],
+      [`${f}/sub/.git`, "rw"], [`${f}/sub/.git/config`, "ro"], [`${f}/sub/.vscode`, "ro"],
+    ]);
+  });
+
+  it("leave git's own working state unbound, a submodule's too, but for what sends a linked worktree to a config", () => {
+    const f = "/home/ana/project";
+    const keys = [
+      ".git/config", ".git/rebase-merge/git-rebase-todo", ".git/REBASE-APPLY/patch", ".git/sequencer/todo",
+      ".git/worktrees/wt/commondir", ".git/worktrees/wt/config.worktree", ".git/worktrees/wt/gitdir", ".git/worktrees/wt/HEAD",
+      ".git/worktrees/wt/rebase-merge/done", ".git/worktrees/wt/logs/HEAD",
+      ".git/modules/lib/config", ".git/modules/lib/rebase-merge/done", ".git/modules/lib/worktrees/w2/COMMONDIR", "sub/.git/sequencer/head",
+    ];
+    expect(guestBinds(f, keys.map((key) => join(f, key)))).toEqual([
+      [`${f}/.git`, "rw"], [`${f}/.git/config`, "ro"],
+      [`${f}/.git/modules`, "rw"], [`${f}/.git/modules/lib`, "rw"], [`${f}/.git/modules/lib/config`, "ro"],
+      [`${f}/.git/modules/lib/worktrees`, "rw"], [`${f}/.git/modules/lib/worktrees/w2`, "rw"], [`${f}/.git/modules/lib/worktrees/w2/COMMONDIR`, "ro"],
+      [`${f}/.git/worktrees`, "rw"], [`${f}/.git/worktrees/wt`, "rw"],
+      [`${f}/.git/worktrees/wt/commondir`, "ro"], [`${f}/.git/worktrees/wt/config.worktree`, "ro"],
+    ]);
+  });
+
+  it("name what a link at a protected name leads to in the folder, nothing for one that leads out of it, and the link itself for one that leads to nothing there", async () => {
+    const a = folders[ROOT_A] ?? "";
+    // An editor's settings shared with a sibling worktree, out of the folder.
+    mkdirSync(join(base, "shared-vscode"));
+    rmSync(join(a, "sub", ".vscode"), { recursive: true });
+    symlinkSync(join(base, "shared-vscode"), join(a, "sub", ".vscode"));
+    writeFileSync(join(a, "mcp.json"), "{}\n");
+    symlinkSync("mcp.json", join(a, ".mcp.json"));
+    symlinkSync("missing", join(a, ".idea"));
+    symlinkSync(join(base, "nowhere"), join(a, ".zshrc"));
+    const carried: ProtectedKey[][] = [];
+    expect(await command(toolHosts({ protect: () => {} }), carried)).toEqual(RAN);
+    expect(carried).toEqual([[key(".git", "rw"), key(".git/config"), key(".git/hooks"), key(".idea"), key("mcp.json")]]);
+  });
+
+  it("are not named for an executor that binds none", async () => {
+    const carried: ProtectedKey[][] = [];
+    await command(toolHosts(), carried);
+    expect(carried).toEqual([[]]);
+  });
+
+  it("refuse commands past the most the sandbox makes read-only", async () => {
+    // Each repository's config, and its .git held above it.
+    for (let n = 0; n < MAX_PROTECTED / 2; n += 1) {
+      mkdirSync(join(folders[ROOT_A]!, `r${n}`, ".git"), { recursive: true });
+      writeFileSync(join(folders[ROOT_A]!, `r${n}`, ".git", "config"), "");
+    }
+    const ran: ProtectedKey[][] = [];
+    expect(await command(toolHosts({ protect: () => {} }), ran)).toEqual({
+      error: {
+        type: "sandbox",
+        message: `Blocked: the computer could not check this folder's protected paths, so commands cannot run here: this folder has ${MAX_PROTECTED + 4} protected paths, and the sandbox can make at most ${MAX_PROTECTED} read-only`,
+      },
+    });
+    expect(ran).toEqual([]);
+  });
+});
 
 describe("ToolHosts", { timeout: 30_000 }, () => {
   it("runs each root's operations in its own folder", async () => {

@@ -211,14 +211,32 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
   it("tears a root down: its work ends, no loss is told, and it can be set up again", async () => {
     const running = op("run", { command: "sleep 3", workdir: null, timeout: 10 }, undefined, "op-15");
     await new Promise((resolve) => setTimeout(resolve, 200));
-    await roots.teardown("root-1");
+    await roots.teardown("root-1", R1);
     expect(await running).toEqual(SANDBOX_STOPPED);
     expect(lost).toEqual([]);
     expect(await op("which", { name: "sh" }, undefined, "op-16")).toEqual(NOT_SET_UP);
     // Nothing set up: nothing to end.
-    await roots.teardown("root-1");
+    await roots.teardown("root-1", R1);
     await roots.setup("root-1", base, R1, user);
     expect(await op("which", { name: "sh" }, undefined, "op-17")).toEqual({ ok: true });
+  });
+
+  it("lets its share's mount go once everything of it has ended, and lets it go for a root not set up too", async () => {
+    const order: string[] = [];
+    const own: ChildProcess[] = [];
+    const unmounting = new Roots({
+      start: () => {
+        const child = bare();
+        own.push(child);
+        child.once("exit", () => order.push("ended"));
+        return child;
+      },
+      uid: () => 10_000, kill: () => void own.at(-1)?.kill("SIGKILL"), unmount: async (share) => void order.push(`unmount ${share.tag}`),
+    });
+    await unmounting.setup("root-3", base, { kind: "virtiofs", tag: "r7" }, user);
+    await unmounting.teardown("root-3", { kind: "virtiofs", tag: "r7" });
+    await unmounting.teardown("root-4", { kind: "virtiofs", tag: "r8" });
+    expect(order).toEqual(["ended", "unmount r7", "unmount r8"]);
   });
 
   it("tells the host of a lost root once everything of it has ended, and of one that cannot be ended once its runner is stopped", async () => {
@@ -274,7 +292,7 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
       kill: (root) => void runners.get(root)?.kill("SIGKILL"),
     });
     const setting = own.setup("root-2", base, R1, user);
-    await own.teardown("root-2");
+    await own.teardown("root-2", R1);
     await setting;
     expect(await own.perform("root-2", "which", { name: "sh" }, new AbortController().signal, "op-19")).toEqual(NOT_SET_UP);
     await own.setup("root-2", base, R1, user);
@@ -308,6 +326,31 @@ describe("a root's background processes", { timeout: 20_000 }, () => {
     expect((await ask(roots, "root-1", "list_processes", { task_id: "t" })).ok).toEqual([
       expect.objectContaining({ session_id, status: "exited", exit_code: -15 }),
     ]);
+  });
+
+  it("keeps a root's processes' output within its share of what the agent keeps for every root, 2M characters", async () => {
+    // Eleven processes that each print more than one keeps: about 2.75M characters together.
+    const ids: string[] = [];
+    for (let n = 0; n < 11; n += 1) ids.push((await begin(roots, "root-1", "head -c 250000 /dev/zero | tr '\\0' x")).ok.session_id);
+    for (const session_id of ids) await until(async () => (await ask(roots, "root-1", "poll", { session_id })).ok.status === "exited");
+    const lengths: number[] = [];
+    for (const session_id of ids) lengths.push(((await ask(roots, "root-1", "read_output", { session_id, offset: 0, limit: 1 })).ok.output as string).length);
+    expect(lengths.reduce((sum, length) => sum + length, 0)).toBeLessThanOrEqual(2_000_000);
+    expect(lengths).toContain(200_000);
+    expect(lengths).toContain(2_000);
+  });
+
+  it("sets up no ninth root while eight keep their processes, and one once a root is torn down", async () => {
+    const runners = new Map<string, ChildProcess>();
+    const eight = new Roots({ start: (root) => {
+      const child = bare();
+      runners.set(root, child);
+      return child;
+    }, uid: () => 10_000, kill: (root) => void runners.get(root)?.kill("SIGKILL") });
+    for (let n = 1; n <= 8; n += 1) await eight.setup(`root-${n}`, base, R1, user);
+    await expect(eight.setup("root-9", base, R1, user)).rejects.toThrow("This computer's sandbox holds 8 chats already");
+    await eight.teardown("root-8", R1);
+    await eight.setup("root-9", base, R1, user);
   });
 
   it("asks the runner where a start's command runs, and answers as the cloud does where it cannot", async () => {
@@ -392,7 +435,7 @@ describe("a root's background processes", { timeout: 20_000 }, () => {
     try {
       const session_id = (await begin(own, "root-5", "sleep 695")).ok.session_id as string;
       await until(() => told.at(-1) === 1);
-      await own.teardown("root-5");
+      await own.teardown("root-5", R1);
       await new Promise((resolve) => setTimeout(resolve, 200));
       // What the teardown ended is not told: the host keeps the process as it started, and it ended as the app quit.
       expect(told).toEqual([1]);
@@ -401,6 +444,85 @@ describe("a root's background processes", { timeout: 20_000 }, () => {
     } finally {
       reap("^sleep 695$");
     }
+  });
+});
+
+describe("a root's protected keys", () => {
+  // What the root's namespace holds at each path: its inode, or a link that leads nowhere; none when absent.
+  let inodes: Map<string, number | "failed">;
+  let binds: Array<Array<[string, string]>>;
+  let failing: boolean;
+  let guarded: Roots;
+  const git = () => join(base, ".git");
+  const config = () => join(base, ".git", "config");
+  const hooks = () => join(base, ".git", "hooks");
+
+  beforeEach(async () => {
+    inodes = new Map();
+    binds = [];
+    failing = false;
+    guarded = new Roots({
+      start: bare, uid: () => 10_000, kill: () => {},
+      protect: async (_pid, asked) => {
+        binds.push(asked);
+        if (failing) throw new Error("it did not finish in time");
+        return new Map(asked.map(([path]) => [path, inodes.get(path) ?? "absent"]));
+      },
+    });
+    await guarded.setup("root-1", base, R1, user);
+  });
+
+  it("binds each once, a folder before what lies in it, and again once the host names it with another inode, as git config's rename gives", async () => {
+    inodes.set(git(), 10).set(config(), 11).set(hooks(), 12);
+    await guarded.protect("root-1", [[config(), 11, "ro"], [hooks(), 12, "ro"], [git(), 10, "rw"]]);
+    await guarded.protect("root-1", [[git(), 10, "rw"], [config(), 11, "ro"], [hooks(), 12, "ro"]]);
+    inodes.set(config(), 21);
+    await guarded.protect("root-1", [[git(), 10, "rw"], [config(), 21, "ro"], [hooks(), 12, "ro"]]);
+    expect(binds).toEqual([[[git(), "rw"], [config(), "ro"], [hooks(), "ro"]], [[config(), "ro"]]]);
+  });
+
+  it("binds again all that lies in a folder it binds again, whose bind held none of theirs", async () => {
+    inodes.set(git(), 10).set(config(), 11).set(hooks(), 12);
+    await guarded.protect("root-1", [[git(), 10, "rw"], [config(), 11, "ro"], [hooks(), 12, "ro"]]);
+    // The folder made again on the host, its files moved into it: their inodes are as they were.
+    inodes.set(git(), 20);
+    await guarded.protect("root-1", [[git(), 20, "rw"], [config(), 11, "ro"], [hooks(), 12, "ro"]]);
+    expect(binds[1]).toEqual([[git(), "rw"], [config(), "ro"], [hooks(), "ro"]]);
+  });
+
+  it("binds one gone since the host looked once it is back, and none outside the folder", async () => {
+    const vscode = join(base, ".vscode");
+    await guarded.protect("root-1", [[vscode, 31, "ro"], ["/etc/passwd", 5, "ro"], [base, 6, "rw"]]);
+    inodes.set(vscode, 31);
+    await guarded.protect("root-1", [[vscode, 31, "ro"]]);
+    expect(binds).toEqual([[[vscode, "ro"]], [[vscode, "ro"]]]);
+  });
+
+  it("refuses commands while one cannot be bound, as a link that leads nowhere, and tries it again at the next ask", async () => {
+    const link = join(base, ".mcp.json");
+    inodes.set(config(), 11).set(link, "failed");
+    await expect(guarded.protect("root-1", [[config(), 11, "ro"], [link, 12, "ro"]])).rejects.toThrow(
+      "Blocked: the computer could not make these protected files read-only in its sandbox, so commands cannot run here: .mcp.json. A link among them leads to nothing in this folder. Remove it, or make it lead to a file, to run commands here.",
+    );
+    inodes.set(link, 12);
+    await guarded.protect("root-1", [[config(), 11, "ro"], [link, 12, "ro"]]);
+    expect(binds).toEqual([[[config(), "ro"], [link, "ro"]], [[link, "ro"]]]);
+  });
+
+  it("refuses commands in its own words when its binds do not finish, and asks them all again at the next", async () => {
+    failing = true;
+    await expect(guarded.protect("root-1", [[config(), 11, "ro"]])).rejects.toThrow(
+      "Blocked: the computer could not make these protected files read-only in its sandbox, so commands cannot run here: .git/config. Its sandbox did not finish binding them; the next command tries again.",
+    );
+    failing = false;
+    inodes.set(config(), 11);
+    await guarded.protect("root-1", [[config(), 11, "ro"]]);
+    expect(binds).toEqual([[[config(), "ro"]], [[config(), "ro"]]]);
+  });
+
+  it("has nothing to bind for a root not set up", async () => {
+    await guarded.protect("root-2", [[config(), 11, "ro"]]);
+    expect(binds).toEqual([]);
   });
 });
 
@@ -439,6 +561,20 @@ describe("a root's environment", () => {
       USER: "ana",
       LOGNAME: "ana",
       LANG: "C.UTF-8",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.checkStat",
+      GIT_CONFIG_VALUE_0: "minimal",
+    });
+  });
+
+  it("gives git its stat check after the layout's own git config", () => {
+    const layout = "GIT_CONFIG_COUNT=1\nGIT_CONFIG_KEY_0=safe.directory\nGIT_CONFIG_VALUE_0=*\n";
+    expect(rootEnvironment(layout, { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" })).toMatchObject({
+      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_KEY_0: "safe.directory",
+      GIT_CONFIG_VALUE_0: "*",
+      GIT_CONFIG_KEY_1: "core.checkStat",
+      GIT_CONFIG_VALUE_1: "minimal",
     });
   });
 

@@ -49,9 +49,9 @@ describe("QEMU's command line", () => {
     expect([1, 2, 3, 8, 20].map((threads) => guestCpus(threads))).toEqual([1, 1, 1, 4, 4]);
   });
 
-  it("maps the host user to the root's guest uid in its folder's virtiofsd", () => {
+  it("maps the host user to the root's guest uid in its folder's virtiofsd, which the guest does not cache", () => {
     expect(virtiofsdArgs("/home/ana/My folder's", "/run/vm/vfs-1.sock", 10_001, { uid: 1000, gid: 1001 })).toEqual([
-      "--shared-dir=/home/ana/My folder's", "--socket-path=/run/vm/vfs-1.sock", "--sandbox=namespace", "--cache=auto",
+      "--shared-dir=/home/ana/My folder's", "--socket-path=/run/vm/vfs-1.sock", "--sandbox=namespace", "--cache=never",
       "--uid-map=:10001:1000:1:", "--gid-map=:10001:1001:1:",
     ]);
   });
@@ -104,6 +104,26 @@ describe("QEMU's machine protocol", () => {
       { execute: "device_add", arguments: { driver: "vhost-user-fs-pci", bus: "rp9" } },
     ]);
     qmp.close();
+  });
+
+  it("tells an event's listeners its data between the answers, until they stop listening", async () => {
+    const qmp = await Qmp.open(connect(join(dir, "qmp.sock")));
+    answer = (command, socket) => {
+      const id = (command.arguments as { id: string }).id;
+      socket.write('{"return": {}}\n');
+      socket.write(`${JSON.stringify({ event: "DEVICE_DELETED", data: { device: id, path: `/machine/peripheral/${id}` }, timestamp: { seconds: 1, microseconds: 2 } })}\n`);
+    };
+    const heard: unknown[] = [];
+    try {
+      const stop = qmp.on("DEVICE_DELETED", (data) => heard.push(data));
+      await qmp.execute("device_del", { id: "fs1" });
+      await qmp.execute("query-status", { id: "x" });
+      stop();
+      await qmp.execute("device_del", { id: "fs2" });
+      expect(heard).toEqual([{ device: "fs1", path: "/machine/peripheral/fs1" }, { device: "x", path: "/machine/peripheral/x" }]);
+    } finally {
+      qmp.close();
+    }
   });
 
   it("fails to open a monitor QEMU closes before its greeting, or that never greets by the deadline", async () => {

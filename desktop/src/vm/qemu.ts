@@ -7,10 +7,12 @@ import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
+import { MAX_SHARES } from "../guest/protocol.js";
+
 // Ubuntu's, whose AppArmor profile lets its namespace sandbox work under 24.04's restriction.
 export const VIRTIOFSD = "/usr/libexec/virtiofsd";
 // The guest's empty PCIe slots: one for each folder added while it runs.
-export const ROOT_PORTS = 8;
+export const ROOT_PORTS = MAX_SHARES;
 const MEMORY = "2G";
 
 export interface Disks {
@@ -57,15 +59,20 @@ export function qemuArgs(disks: Disks, run: string, console: string, cpus = gues
 // One folder's daemon, in its namespace sandbox, which can reach nothing outside the
 // folder: it maps the host user to the root's guest uid, so the root's files are its
 // own in the guest and the host user's on the host.
+// Uncached (spec, Section 11, Folders): the guest keeps no name or attribute, so a command
+// sees at once what the file tools or the user wrote, and forgets each file it is done
+// with. Unprivileged, the daemon holds a descriptor for each file the guest keeps, up to
+// the user's hard limit; with cache=auto the guest kept every file it had looked at, and a
+// 150 000-file node_modules ran it out of them.
 export function virtiofsdArgs(folder: string, socket: string, guestUid: number, host: { uid: number; gid: number }): string[] {
   return [
-    `--shared-dir=${folder}`, `--socket-path=${socket}`, "--sandbox=namespace", "--cache=auto",
+    `--shared-dir=${folder}`, `--socket-path=${socket}`, "--sandbox=namespace", "--cache=never",
     `--uid-map=:${guestUid}:${host.uid}:1:`, `--gid-map=:${guestUid}:${host.gid}:1:`,
   ];
 }
 
 // QEMU's monitor: a greeting, the capabilities' negotiation, then one command at a
-// time, answered in turn by "return" or "error"; events come in between and are skipped.
+// time, answered in turn by "return" or "error"; events come in between, to whoever listens.
 export class Qmp {
   private readonly waiting: Array<{ resolve: (value: unknown) => void; reject: (error: Error) => void }> = [];
   private greet: (error?: Error) => void = () => {};
@@ -73,6 +80,8 @@ export class Qmp {
     this.greet = (error) => (error ? reject(error) : resolve());
   });
   private closed = false;
+  // What listens for each event, by its name.
+  private readonly listeners = new Map<string, Set<(data: Record<string, unknown>) => void>>();
 
   private constructor(private readonly socket: Socket) {
     // Nobody may be waiting for it when the monitor closes.
@@ -136,6 +145,14 @@ export class Qmp {
     });
   }
 
+  /** Told the data of each *event* QEMU sends, until what it returns is called. */
+  on(event: string, listener: (data: Record<string, unknown>) => void): () => void {
+    const listening = this.listeners.get(event) ?? new Set();
+    this.listeners.set(event, listening);
+    listening.add(listener);
+    return () => void listening.delete(listener);
+  }
+
   // Once QEMU closed it, or a command went unanswered: no command reaches QEMU again.
   get gone(): boolean {
     return this.closed;
@@ -154,6 +171,11 @@ export class Qmp {
       return;
     }
     if ("QMP" in message) return this.greet();
+    if (typeof message.event === "string") {
+      const data = (typeof message.data === "object" && message.data !== null ? message.data : {}) as Record<string, unknown>;
+      for (const listener of this.listeners.get(message.event) ?? []) listener(data);
+      return;
+    }
     if (!("return" in message) && !("error" in message)) return;
     const waiter = this.waiting.shift();
     if ("return" in message) waiter?.resolve(message.return);

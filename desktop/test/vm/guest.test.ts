@@ -3,19 +3,22 @@
 // first). Behind SUROGATE_VM_TESTS=1; SUROGATE_VM_IMAGE names another image folder.
 
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
+import {
+  closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync,
+  watch, writeFileSync,
+} from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { BOOT_ID } from "../../src/binding/folder.js";
+import { BOOT_ID, GUEST_SYSTEM } from "../../src/binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import type { ProcessHandle } from "../../src/guest/processes.js";
-import type { HostUser, Share } from "../../src/guest/protocol.js";
+import type { BindMode, HostUser, ProtectedKey, Share } from "../../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
-import type { Operation } from "../../src/link/protocol.js";
+import type { Operation, Outcome } from "../../src/link/protocol.js";
 import { VmClient, vmOptions } from "../../src/vm/client.js";
 import { VmExecutor } from "../../src/vm/executor.js";
 import { bootLinux } from "../../src/vm/linux.js";
@@ -64,6 +67,18 @@ const folderOf = (path: string): Folder => {
   const { dev, ino } = statSync(path);
   return { path, dev, ino };
 };
+// The pid of the newest share's virtiofsd in the runtime folder *run*: each share has a number of its own.
+const newestDaemon = (run: string) => {
+  const newest = Math.max(...readdirSync(run).map((name) => Number(/^vfs-(\d+)\.pid$/.exec(name)?.[1] ?? 0)));
+  return Number(readFileSync(join(run, `vfs-${newest}.pid`), "utf8"));
+};
+// How many descriptors the newest share's virtiofsd holds, its child that serves the share included.
+const descriptors = (run: string) => {
+  const daemon = newestDaemon(run);
+  const children = spawnSync("pgrep", ["-P", String(daemon)], { encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean).map(Number);
+  return [daemon, ...children].reduce((sum, pid) => sum + readdirSync(`/proc/${pid}/fd`).length, 0);
+};
+const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
 
 // The agent disk from the built agent, into *dir*.
 function agentDisk(dir: string): string {
@@ -196,13 +211,32 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       "(echo 1 > /sys/fs/cgroup/pids.max) 2>&1 | sed 's/.*: //'",
       "(echo 1 > /sys/fs/cgroup/init/cgroup.kill) 2>&1 | sed 's/.*: //'",
       "(mkdir /sys/fs/cgroup/mine) 2>&1 | sed 's/.*: //'",
+      "(mkdir /sys/fs/cgroup/proc/mine) 2>&1 | sed 's/.*: //'",
     ].join("; "))).toEqual({
       ok: {
-        output: expect.stringMatching(/^1\n0::\/run\/op-\d+\na run has no memory cgroup\nPermission denied\nPermission denied\nPermission denied\n$/),
+        output: expect.stringMatching(/^1\n0::\/run\/op-\d+\na run has no memory cgroup\nPermission denied\nPermission denied\nPermission denied\nPermission denied\n$/),
         returncode: 0,
         timed_out: false,
       },
     });
+  });
+
+  it("makes each background process's cgroup itself, which the root's user can enter and end but not make, and removes it once the process ends", async () => {
+    const started = await guest.op(ROOT, "start", background("sleep 310"), signal()) as { ok: { session_id: string } };
+    const { session_id } = started.ok;
+    const cgroup = `/sys/fs/cgroup/proc/${session_id}`;
+    expect(await run([
+      `stat -c %u ${cgroup} ${cgroup}/cgroup.procs ${cgroup}/cgroup.kill ${cgroup}/memory.max | tr '\\n' ' '; echo`,
+      // A memory cgroup a command made and removed again would hold guest memory no limit counts.
+      "(mkdir /sys/fs/cgroup/proc/mine) 2>&1 | sed 's/.*: //'",
+      `(mkdir ${cgroup}/below) 2>&1 | sed 's/.*: //'`,
+      `(rmdir ${cgroup}) 2>&1 | sed 's/.*: //'`,
+      `sh -c 'echo $$ > ${cgroup}/cgroup.procs && cut -d: -f3 /proc/self/cgroup'`,
+    ].join("; "))).toEqual({
+      ok: { output: `0 ${FIRST_UID} ${FIRST_UID} 0 \nPermission denied\nPermission denied\nPermission denied\n/proc/${session_id}\n`, returncode: 0, timed_out: false },
+    });
+    expect(await guest.op(ROOT, "kill", { session_id }, signal())).toEqual({ ok: { status: "killed", session_id } });
+    expect(await run("find /sys/fs/cgroup/proc -mindepth 1 -type d | wc -l")).toMatchObject({ ok: { output: "0\n" } });
   });
 
   it("stops a command that makes cgroups at its root's bound, none below a command's, and the guest keeps its memory", async () => {
@@ -326,12 +360,67 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
   it("gives a command the cloud's environment and the user's names, and nothing of how its root was made", async () => {
     expect(await run("env | cut -d= -f1 | sort | tr '\\n' ' '")).toEqual({
       ok: {
-        output: "HOME LANG LOGNAME NPM_CONFIG_PREFIX PATH PIP_USER PWD PYTHONDONTWRITEBYTECODE PYTHONUNBUFFERED PYTHONUSERBASE SHLVL " +
+        output: "GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 HOME LANG LOGNAME NPM_CONFIG_PREFIX PATH PIP_USER PWD PYTHONDONTWRITEBYTECODE " +
+          "PYTHONUNBUFFERED PYTHONUSERBASE SHLVL " +
           "USER UV_CACHE_DIR XDG_CACHE_HOME _ ",
         returncode: 0,
         timed_out: false,
       },
     });
+  });
+
+  it("makes a root's protected files read-only in its namespace and their .git unmovable, binds them again once the host replaces them, and refuses a link that leads nowhere", async () => {
+    // A repository as git init makes it, and an editor's settings beside it.
+    expect(spawnSync("git", ["init", "-q", folder]).status).toBe(0);
+    mkdirSync(join(folder, ".vscode"));
+    writeFileSync(join(folder, ".vscode", "settings.json"), "{}\n");
+    const key = (name: string, mode: BindMode = "ro"): ProtectedKey => [join(folder, name), lstatSync(join(folder, name)).ino, mode];
+    // The .git folder held over itself, then the keys in it.
+    const protect = (...names: string[]) => guest.request({ type: "protect", root: ROOT, keys: [key(".git", "rw"), ...names.map((name) => key(name))] });
+    const writes = [
+      "(echo '[alias] x = !evil' >> .git/config) 2>&1 | sed 's/.*: //'",
+      "(touch .git/hooks/post-checkout) 2>&1 | sed 's/.*: //'",
+      "(echo '{\"x\": 1}' > .vscode/settings.json) 2>&1 | sed 's/.*: //'",
+      "(mv .git moved) 2>&1 | sed 's/.*: //'",
+    ].join("; ");
+    const evil = "(echo '[alias] x = !evil' >> .git/config) 2>&1 | sed 's/.*: //'; (mv .git moved) 2>&1 | sed 's/.*: //'";
+    try {
+      expect(await protect(".git/config", ".git/hooks", ".vscode")).toMatchObject({ type: "done" });
+      const config = readFileSync(join(folder, ".git", "config"), "utf8");
+      // git still reads its config, and commits.
+      expect(await run(`${writes}; git status --porcelain .vscode; git -c user.email=a@b -c user.name=a commit -q --allow-empty -m x && echo committed`)).toEqual({
+        ok: {
+          output: "Read-only file system\nRead-only file system\nRead-only file system\nDevice or resource busy\n?? .vscode/\ncommitted\n", returncode: 0, timed_out: false,
+        },
+      });
+      expect(readFileSync(join(folder, ".git", "config"), "utf8")).toBe(config);
+      // git config on the host renames a new file over the old one, which takes the guest's bind with it.
+      expect(spawnSync("git", ["-C", folder, "config", "core.editor", "true"]).status).toBe(0);
+      expect(await protect(".git/config", ".git/hooks", ".vscode")).toMatchObject({ type: "done" });
+      expect(await run(evil)).toMatchObject({ ok: { output: "Read-only file system\nDevice or resource busy\n" } });
+      // .git made again on the host, its files moved into it: the folder's bind goes with the binds in it, and the files keep their inodes.
+      renameSync(join(folder, ".git"), join(folder, ".git-host"));
+      mkdirSync(join(folder, ".git"));
+      for (const name of readdirSync(join(folder, ".git-host"))) renameSync(join(folder, ".git-host", name), join(folder, ".git", name));
+      rmSync(join(folder, ".git-host"), { recursive: true });
+      expect(await protect(".git/config", ".git/hooks", ".vscode")).toMatchObject({ type: "done" });
+      expect(await run(evil)).toMatchObject({ ok: { output: "Read-only file system\nDevice or resource busy\n" } });
+      expect(readFileSync(join(folder, ".git", "config"), "utf8")).not.toContain("evil");
+      symlinkSync("missing", join(folder, ".mcp.json"));
+      expect(await protect(".git/config", ".git/hooks", ".vscode", ".mcp.json")).toEqual(expect.objectContaining({
+        type: "failed", message: expect.stringContaining("could not make these protected files read-only in its sandbox, so commands cannot run here: .mcp.json."),
+      }));
+    } finally {
+      for (const name of [".git", ".vscode", ".mcp.json"]) rmSync(join(folder, name), { recursive: true, force: true });
+    }
+  });
+
+  it("holds its tools in the folders a chat's folder may not be, hold or lie in, and in no other", async () => {
+    // Each folder of the image's, at its top and in its /opt and /var, that holds what the root's user can see.
+    const listed = await run('for d in /* /opt/* /var/*; do [ -d "$d" ] && [ ! -L "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ] && echo "$d"; done') as { ok: { output: string } };
+    // The root's own: its namespace's mounts, its home, and the folders of the two below.
+    const own = new Set(["/dev", "/home", "/opt", "/proc", "/run", "/sys", "/tmp", "/var", "/var/tmp"]);
+    expect(listed.ok.output.trim().split("\n").filter((folder) => !own.has(folder)).sort()).toEqual([...GUEST_SYSTEM].sort());
   });
 
   it("loads no kernel module for a command, and keeps the hardening a host's sysctl files would set", async () => {
@@ -424,15 +513,137 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     await new Promise((resolve) => setTimeout(resolve, 2_500));
   });
 
-  it("holds a folder for each root up to its eight root ports, and says why it takes no ninth", async () => {
+  it("holds a folder for each root up to its eight root ports, says why it takes no ninth, and takes it once one has left", async () => {
     // Two are in; six more, then one too many.
-    for (let n = 3; n <= 9; n += 1) {
-      const path = join(dir, `more-${n}`);
+    const more = Array.from({ length: 7 }, (_, n) => {
+      const path = join(dir, `more-${n + 3}`);
       mkdirSync(path);
-      const added = guest.share(`root-${n}`, folderOf(path));
-      if (n <= 8) expect(await added).toEqual({ kind: "virtiofs", tag: `r${n}` });
-      else await expect(added).rejects.toThrow("it holds 8 folders already, its most until the app restarts");
+      return [`root-${n + 3}`, folderOf(path)] as const;
+    });
+    for (const [root, shared] of more.slice(0, 6)) expect(await guest.ready(root, shared)).toBeNull();
+    const [ninth, its] = more[6]!;
+    expect(await guest.ready(ninth, its)).toEqual({
+      error: { type: "unavailable", message: "This computer's sandbox could not add this chat's folder: it holds 8 folders already, each of a chat at work" },
+    });
+    await guest.teardown("root-3");
+    expect(await guest.ready(ninth, its)).toBeNull();
+    expect(await guest.op(ninth, "run", { command: "pwd", workdir: null, timeout: 10 }, signal())).toMatchObject({ ok: { output: `${its.path}\n` } });
+    for (const [root] of more.slice(1)) await guest.teardown(root);
+  });
+
+  it("adds and removes a root's folder again and again, two roots at once, each time on a root port another has let go", async () => {
+    const roots = [["root-a", join(dir, "cycle-a")], ["root-b", join(dir, "cycle-b")]] as const;
+    for (const [, path] of roots) mkdirSync(path, { recursive: true });
+    const added: number[] = [];
+    const removed: number[] = [];
+    for (let cycle = 0; cycle < 20; cycle += 1) {
+      await Promise.all(roots.map(async ([root, path]) => {
+        writeFileSync(join(path, "cycle"), `${cycle}\n`);
+        let begun = performance.now();
+        expect(await guest.ready(root, folderOf(path))).toBeNull();
+        added.push(performance.now() - begun);
+        expect(await guest.op(root, "run", { command: "cat cycle", workdir: null, timeout: 10 }, signal())).toMatchObject({ ok: { output: `${cycle}\n` } });
+        begun = performance.now();
+        await guest.teardown(root);
+        removed.push(performance.now() - begun);
+      }));
     }
+    expect(guest.ended).toBe(false);
+    console.log(
+      `M3: a folder added and its root set up in ${median(added).toFixed(0)} ms (median, max ${Math.max(...added).toFixed(0)}), ` +
+      `torn down and removed in ${median(removed).toFixed(0)} ms (median, max ${Math.max(...removed).toFixed(0)}), 40 cycles, none failed`,
+    );
+  });
+
+  it("takes a folder of 150 000 files, as a node_modules is, with descriptors to spare", { timeout: 900_000 }, async () => {
+    const big = join(dir, "big");
+    // 1 500 packages of 100 files each, tracked by git, as the host made them.
+    for (let p = 0; p < 1_500; p += 1) {
+      mkdirSync(join(big, "node_modules", `p${p}`), { recursive: true });
+      writeFileSync(join(big, "node_modules", `p${p}`, "package.json"), "{}\n");
+      for (let f = 0; f < 99; f += 1) writeFileSync(join(big, "node_modules", `p${p}`, `f${f}.js`), "");
+    }
+    expect(spawnSync("bash", ["-c", "git init -q && git add -A && git -c user.email=a@b -c user.name=a commit -qm init"], { cwd: big }).status).toBe(0);
+    const timed = async (command: string) => {
+      const begun = performance.now();
+      const outcome = await guest.op("root-big", "run", { command, workdir: null, timeout: 600 }, signal()) as { ok: { output: string; returncode: number } };
+      return { ...outcome.ok, ms: performance.now() - begun };
+    };
+    try {
+      expect(await guest.ready("root-big", folderOf(big))).toBeNull();
+      // The first rehashes none, though the host's index holds the host's owner: git in the guest does not compare it.
+      const first = await timed("git status --porcelain 2>&1 | wc -l");
+      const again = await timed("git status --porcelain 2>&1 | wc -l");
+      const walk = await timed("find node_modules -type f 2>&1 | wc -l");
+      // What an install writes: a file at a time, 150 000 of them.
+      const write = await timed("python3 -c 'import os\nfor p in range(1500):\n    os.makedirs(f\"made/p{p}\")\n    for f in range(100): open(f\"made/p{p}/f{f}.js\", \"w\").close()' 2>&1; find made -type f | wc -l");
+      const held = descriptors(options.run);
+      console.log(
+        `M9: git status ${(first.ms / 1000).toFixed(1)} s first, ${(again.ms / 1000).toFixed(1)} s again; find ${(walk.ms / 1000).toFixed(1)} s; ` +
+        `150 000 files written ${(write.ms / 1000).toFixed(1)} s; virtiofsd holds ${held} descriptors`,
+      );
+      expect([first.output, again.output, walk.output, write.output]).toEqual(["0\n", "0\n", "150000\n", "150000\n"]);
+      expect(held).toBeLessThan(1_000);
+    } finally {
+      await guest.teardown("root-big");
+      rmSync(big, { recursive: true, force: true });
+    }
+  });
+
+  it("lets git in the guest take an index the host's git refreshed last, so its status after one on the host rehashes nothing", { timeout: 300_000 }, async () => {
+    const repo = join(dir, "repo");
+    // 20 000 files, tracked by git, as the host made them.
+    for (let p = 0; p < 200; p += 1) {
+      mkdirSync(join(repo, `p${p}`), { recursive: true });
+      for (let f = 0; f < 100; f += 1) writeFileSync(join(repo, `p${p}`, `f${f}.js`), `${p}.${f}\n`);
+    }
+    expect(spawnSync("bash", ["-c", "git init -q && git add -A && git -c user.email=a@b -c user.name=a commit -qm init"], { cwd: repo }).status).toBe(0);
+    const timed = async (command: string) => {
+      const begun = performance.now();
+      const outcome = await guest.op("root-git", "run", { command, workdir: null, timeout: 120 }, signal()) as { ok: { output: string } };
+      return { output: outcome.ok.output, ms: performance.now() - begun };
+    };
+    try {
+      expect(await guest.ready("root-git", folderOf(repo))).toBeNull();
+      // Git on the host refreshes the index last, with the host's owner in it.
+      expect(spawnSync("git", ["-C", repo, "status", "--porcelain"]).status).toBe(0);
+      const first = await timed("git status --porcelain 2>&1 | wc -l");
+      const again = await timed("git status --porcelain 2>&1 | wc -l");
+      console.log(`git status of 20 000 files in the guest after one on the host: ${first.ms.toFixed(0)} ms, then ${again.ms.toFixed(0)} ms`);
+      expect([first.output, again.output]).toEqual(["0\n", "0\n"]);
+      expect(first.ms).toBeLessThan(again.ms * 2 + 250);
+    } finally {
+      await guest.teardown("root-git");
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("maps a folder's file for one process's own use, and refuses to share a mapping of it, as virtiofsd 1.10 serves an uncached file", async () => {
+    const mapped = await run([
+      "python3 - <<'EOF'",
+      "import mmap, sqlite3",
+      "with open('mapped', 'w+b') as f:",
+      "    f.write(b'x' * 4096)",
+      "    f.flush()",
+      "    try:",
+      "        mmap.mmap(f.fileno(), 4096, mmap.MAP_SHARED)",
+      "        print('shared')",
+      "    except OSError as error:",
+      "        print('shared', error.errno)",
+      "    mmap.mmap(f.fileno(), 4096, mmap.MAP_PRIVATE)",
+      "    print('private')",
+      "try:",
+      "    db = sqlite3.connect('wal.db')",
+      "    db.execute('pragma journal_mode=wal')",
+      "    db.execute('create table t (x)')",
+      "    print('wal')",
+      "except sqlite3.Error as error:",
+      "    print('wal', error)",
+      "EOF",
+      "rm -f mapped wal.db wal.db-wal wal.db-shm",
+    ].join("\n"));
+    // A shared mapping of a file opened for direct I/O needs virtiofsd's --allow-mmap, which 1.10 has not; SQLite's WAL maps its index so.
+    expect(mapped).toEqual({ ok: { output: "shared 19\nprivate\nwal disk I/O error\n", returncode: 0, timed_out: false } });
   });
 
   it("repairs a sessions disk the quick check cannot, and keeps the homes on it", async () => {
@@ -599,7 +810,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
   it("stops a guest whose folder's virtiofsd goes, and boots a new one for the next operation", async () => {
     const running = op(ROOT, join(dir, "a"), "run", { command: "sleep 30", workdir: null, timeout: 60 });
     await new Promise((resolve) => setTimeout(resolve, 500));
-    process.kill(Number(readFileSync(join(options.run, "vfs-1.pid"), "utf8")), "SIGKILL");
+    process.kill(newestDaemon(options.run), "SIGKILL");
     expect(await running).toEqual(SANDBOX_STOPPED);
     expect(await op(ROOT, join(dir, "a"), "run", { command: "echo again", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "again\n" } });
   });
@@ -668,26 +879,43 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     for (const root of [...busy, "fifth"]) await managers.at(-1)!.teardown(root);
   });
 
-  it("sets a root up again only once everything of it has ended, and says why not until then", async () => {
+  it("loses a guest that does not let a torn-down root's folder go, and boots a new one for the next operation", async () => {
+    // A removal's bound of its own: the share's. The manager before it stops first, so its guest has let the disks go.
+    await managers.at(-1)?.stop();
+    managers.push(new VmManager({ ...options, shareMs: 3_000 }));
     const a = join(dir, "a");
+    expect(await op(ROOT, a, "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
     // Its folder's virtiofsd: the daemon, and the child that serves the share.
-    const daemon = Number(readFileSync(join(options.run, "vfs-1.pid"), "utf8"));
+    const daemon = newestDaemon(options.run);
     const share = [daemon, ...spawnSync("pgrep", ["-P", String(daemon)], { encoding: "utf8" }).stdout.trim().split("\n").map(Number)];
-    // A process that looks in the folder once its share has stalled: until the share answers, it cannot end.
+    const qemu = qemuPid();
+    // A process that looks in the folder once its share has stalled: the guest cannot let the share go while it waits.
     const stuck = "env -i /usr/bin/setsid /usr/bin/nohup /bin/sh -c '/usr/bin/sleep 1; /usr/bin/stat ./stuck' < /dev/null > /dev/null 2>&1 & echo started";
     expect(await op(ROOT, a, "start", background(stuck))).toMatchObject({ ok: { session_id: expect.any(String) } });
     await new Promise((resolve) => setTimeout(resolve, 500));
     for (const pid of share) process.kill(pid, "SIGSTOP");
     try {
       await new Promise((resolve) => setTimeout(resolve, 1_500));
+      const begun = performance.now();
       await managers.at(-1)!.teardown(ROOT);
-      expect(await op(ROOT, a, "run", { command: "echo back", workdir: null, timeout: 10 })).toEqual({
-        error: { type: "unavailable", message: "This computer's sandbox could not set up this chat: what this chat ran before has not ended yet" },
-      });
+      // The agent's 3 s for the root's processes to end, then the removal's 3 s.
+      expect(performance.now() - begun).toBeLessThan(10_000);
+      expect(() => process.kill(qemu, 0)).toThrow();
     } finally {
-      for (const pid of share) process.kill(pid, "SIGCONT");
+      for (const pid of share) {
+        try {
+          process.kill(pid, "SIGCONT");
+        } catch {
+          // Gone with its guest.
+        }
+      }
     }
     expect(await op(ROOT, a, "run", { command: "echo back", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "back\n" } });
+    expect(qemuPid()).not.toBe(qemu);
+    // The tests after this one bound a share by the default 15 s, with a guest running.
+    await managers.at(-1)!.stop();
+    managers.push(new VmManager(options));
+    expect(await op(ROOT, a, "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
   });
 
   it("stops a guest that has not added a root's folder in 15 s, and answers as stopped by the sandbox", async () => {
@@ -833,6 +1061,184 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     expect(await executor.run(operation("poll", { session_id }), signal())).toMatchObject({
       ok: { status: "exited", exit_code: null, note: "The process ended because the computer's sandbox stopped" },
     });
+  });
+
+  it("refuses a command's write to a git config a command made, a rename to make it again, and a write to one a host program replaced since", async () => {
+    const folder = join(dir, "folder");
+    const evil = (config: string) => `(echo '[alias] x = !evil' >> ${config}) 2>&1 | sed 's/.*: //'`;
+    // What a command can do in one go: move the repository's git folder aside, make it again, and write its config.
+    const rebuild = (git: string) => `(mv ${git} ${git}-old && mkdir ${git} && cp -a ${git}-old/. ${git}/ && echo '[core] fsmonitor = ./evil' >> ${git}/config) 2>&1 | sed 's/.*: //'`;
+    try {
+      // The look after a command finds the repository it made: read-only from the next command on.
+      expect(await command("git init -q . && git init -q sub && mkdir sub/.vscode && echo made")).toMatchObject({ ok: { output: "made\n" } });
+      expect(await command(`${evil(".git/config")}; ${evil("sub/.git/config")}`)).toMatchObject({ ok: { output: "Read-only file system\nRead-only file system\n" } });
+      expect(await command(`${rebuild(".git")}; ${rebuild("sub/.git")}; (mv sub/.vscode vscode-old) 2>&1 | sed 's/.*: //'`)).toMatchObject({
+        ok: { output: "Device or resource busy\nDevice or resource busy\nDevice or resource busy\n" },
+      });
+      // git config on the host renames a new file over the old one, which takes the guest's bind with it.
+      expect(spawnSync("git", ["-C", folder, "config", "core.editor", "true"]).status).toBe(0);
+      expect(await command(evil(".git/config"))).toMatchObject({ ok: { output: "Read-only file system\n" } });
+      for (const config of [join(folder, ".git", "config"), join(folder, "sub", ".git", "config")]) expect(readFileSync(config, "utf8")).not.toContain("evil");
+    } finally {
+      for (const name of [".git", "sub", ".git-old", "vscode-old"]) rmSync(join(folder, name), { recursive: true, force: true });
+    }
+  });
+
+  it("leaves git's own state unbound, so a slow rebase, a cherry-pick sequence and a merge complete, and one stopped for a conflict goes on or is aborted in the next command", { timeout: 120_000 }, async () => {
+    const folder = join(dir, "folder");
+    const long = (line: string) => executor.run(operation("run", { command: line, workdir: null, timeout: 60 }), signal());
+    // A repository as the user has it: a topic of six commits on main, and a branch that changes main's file another way.
+    expect(spawnSync("bash", ["-c", [
+      "git init -q -b main . && git config user.email a@b && git config user.name a",
+      "echo base > base.txt && git add -A && git commit -qm base",
+      "git checkout -qb topic && for i in 1 2 3 4 5 6; do echo $i > t$i.txt && git add -A && git commit -qm t$i; done",
+      "git checkout -qb other main && echo other > base.txt && git commit -qam other",
+      "git checkout -q main && echo main > base.txt && git commit -qam main",
+    ].join(" && ")], { cwd: folder }).status).toBe(0);
+    // Each stops for base.txt's conflict.
+    const stopped = (start: string, state: string) => `${start} >/dev/null 2>&1; test -e .git/${state} && echo stopped`;
+    const resolved = "echo both > base.txt && git add base.txt && GIT_EDITOR=true";
+    try {
+      // The root's first command: from its answer on, the file host looks every 5 s.
+      expect(await command("true")).toMatchObject({ ok: { returncode: 0 } });
+      // Six picks a second apart, so a look comes while it runs, as the review's probe broke at pick 10 of 12.
+      expect(await long("git checkout -q topic && out=$(git rebase -q -x 'sleep 1' main 2>&1) || echo \"$out\"; git log --format=%s main..topic | tr '\\n' ' '")).toMatchObject({
+        ok: { output: "t6 t5 t4 t3 t2 t1 " },
+      });
+      expect(await command(stopped("git checkout -qb c1 other && git rebase main", "rebase-merge"))).toMatchObject({ ok: { output: "stopped\n" } });
+      expect(await command(`${resolved} git rebase --continue >/dev/null 2>&1; git log --format=%s -2 | tr '\\n' ' '`)).toMatchObject({ ok: { output: "other main " } });
+      expect(await command(stopped("git checkout -qb c2 other && git rebase main", "rebase-merge"))).toMatchObject({ ok: { output: "stopped\n" } });
+      expect(await command("git rebase --abort 2>&1; git rev-parse --abbrev-ref HEAD; git status --porcelain")).toMatchObject({ ok: { output: "c2\n" } });
+      expect(await command(stopped("git checkout -qb picks main && git cherry-pick topic~1 other topic", "sequencer"))).toMatchObject({ ok: { output: "stopped\n" } });
+      expect(await command(`${resolved} git cherry-pick --continue >/dev/null 2>&1; git log --format=%s -4 | tr '\\n' ' '`)).toMatchObject({ ok: { output: "t6 other t5 main " } });
+      expect(await command(stopped("git checkout -qb merged main && git merge other", "MERGE_HEAD"))).toMatchObject({ ok: { output: "stopped\n" } });
+      expect(await command(`${resolved} git commit -q --no-edit 2>&1; git log -1 --format=%p | wc -w`)).toMatchObject({ ok: { output: "2\n" } });
+      // Git's own state is gone from the host's repository, and its config is still read-only.
+      expect(["rebase-merge", "sequencer", "MERGE_HEAD"].filter((name) => existsSync(join(folder, ".git", name)))).toEqual([]);
+      expect(await command("(echo '[alias] x = !evil' >> .git/config) 2>&1 | sed 's/.*: //'")).toMatchObject({ ok: { output: "Read-only file system\n" } });
+      expect(readFileSync(join(folder, ".git", "config"), "utf8")).not.toContain("evil");
+    } finally {
+      for (const name of [".git", "base.txt", "t1.txt", "t2.txt", "t3.txt", "t4.txt", "t5.txt", "t6.txt"]) rmSync(join(folder, name), { recursive: true, force: true });
+    }
+  });
+
+  it("lets git add a linked worktree in the guest, and keeps read-only the files that send it to a config", { timeout: 60_000 }, async () => {
+    const folder = join(dir, "folder");
+    const admin = join(folder, ".git", "worktrees", "wt");
+    const said = (line: string) => `(${line}) 2>&1 | sed 's/.*: //'`;
+    expect(spawnSync("bash", ["-c", [
+      "git init -q -b main . && git config user.email a@b && git config user.name a && git config extensions.worktreeConfig true",
+      "echo base > base.txt && git add -A && git commit -qm base",
+    ].join(" && ")], { cwd: folder }).status).toBe(0);
+    try {
+      expect(await command("git worktree add -q wt -b wtb 2>&1; git -C wt config --worktree core.editor true; git -C wt rev-parse --abbrev-ref HEAD")).toMatchObject({
+        ok: { output: "wtb\n" },
+      });
+      const commondir = readFileSync(join(admin, "commondir"), "utf8");
+      // The look after it binds them. A git folder of the command's own, whose config would run a program at the next status on the host.
+      expect(await command([
+        "git init -q --bare evil.git && git -C evil.git config core.fsmonitor 'touch pwned'",
+        said("echo \"$PWD/evil.git\" > .git/worktrees/wt/commondir"),
+        said("echo '[core] fsmonitor = touch pwned' >> .git/worktrees/wt/config.worktree"),
+        said("mv .git/worktrees/wt .git/worktrees/wt-old"),
+        said("mv .git/worktrees .git/worktrees-old"),
+        "git -C wt status --porcelain",
+        "git worktree add -q wt2 -b wtb2 2>&1 && echo added",
+      ].join("; "))).toMatchObject({
+        ok: { output: "Read-only file system\nRead-only file system\nDevice or resource busy\nDevice or resource busy\nadded\n" },
+      });
+      expect(readFileSync(join(admin, "commondir"), "utf8")).toBe(commondir);
+      expect(readFileSync(join(admin, "config.worktree"), "utf8")).not.toContain("fsmonitor");
+      expect(spawnSync("git", ["-C", join(folder, "wt"), "status", "--porcelain"]).status).toBe(0);
+      expect(existsSync(join(folder, "wt", "pwned"))).toBe(false);
+      // Its removal is the host's to do: the guest's stops at what is bound, and the host's prune finishes it.
+      expect(await command("git worktree remove --force wt 2>&1 | tail -1; test -e .git/worktrees/wt/commondir && echo kept")).toMatchObject({
+        ok: { output: "error: failed to delete '.git/worktrees/wt': Device or resource busy\nkept\n" },
+      });
+      expect(spawnSync("git", ["-C", folder, "worktree", "prune"]).status).toBe(0);
+      expect(existsSync(admin)).toBe(false);
+    } finally {
+      for (const name of [".git", "wt", "wt2", "evil.git", "base.txt"]) rmSync(join(folder, name), { recursive: true, force: true });
+    }
+  });
+
+  it("binds what a protected name's link leads to in the folder, and runs commands beside one linked out of it", async () => {
+    const folder = join(dir, "folder");
+    // An editor's settings shared with a sibling worktree, which the guest does not have.
+    const shared = join(dir, "shared-vscode");
+    mkdirSync(shared);
+    writeFileSync(join(shared, "settings.json"), "{}\n");
+    symlinkSync(shared, join(folder, ".vscode"));
+    writeFileSync(join(folder, "mcp.json"), "{}\n");
+    symlinkSync("mcp.json", join(folder, ".mcp.json"));
+    const write = (name: string) => `(echo '{"x": 1}' > ${name}) 2>&1 | sed 's/.*: //'`;
+    try {
+      // The look after a command names the links the host made.
+      expect(await command("echo ran")).toMatchObject({ ok: { output: "ran\n" } });
+      expect(await command(`echo ran; ${write(".mcp.json")}; ${write("mcp.json")}`)).toMatchObject({
+        ok: { output: "ran\nRead-only file system\nRead-only file system\n" },
+      });
+      expect([readFileSync(join(folder, "mcp.json"), "utf8"), readFileSync(join(shared, "settings.json"), "utf8")]).toEqual(["{}\n", "{}\n"]);
+    } finally {
+      for (const name of [".vscode", ".mcp.json", "mcp.json"]) rmSync(join(folder, name), { force: true });
+      rmSync(shared, { recursive: true, force: true });
+    }
+  });
+
+  it("shows a command what the file tools wrote just before it, each time, with nothing to wait for", async () => {
+    const folder = join(dir, "folder");
+    const key = join(folder, "lint.py");
+    const write = (text: string) => executor.run(operation("write", { key, data: Buffer.from(text).toString("base64") }), signal());
+    let stale = 0;
+    let begun = performance.now();
+    for (let i = 0; i < 1_000; i += 1) {
+      expect(await write(`x = ${i}\n`)).toEqual({ ok: null });
+      if ((await command("cat lint.py") as { ok: { output: string } }).ok.output !== `x = ${i}\n`) stale += 1;
+    }
+    const seen = (performance.now() - begun) / 1_000;
+    // A patch, then its lint, fifty times: the lint sees each patch.
+    begun = performance.now();
+    for (let i = 0; i < 50; i += 1) {
+      expect(await write(i % 2 ? `x = ${i}\n` : "x = (\n")).toEqual({ ok: null });
+      expect(await command("python3 -m py_compile lint.py 2>/dev/null && echo clean || echo broken")).toMatchObject({ ok: { output: i % 2 ? "clean\n" : "broken\n" } });
+    }
+    console.log(`M4: ${stale} of 1000 commands right after a write saw the old file; a write and the command after it ${seen.toFixed(1)} ms, a patch and its lint ${((performance.now() - begun) / 50).toFixed(0)} ms`);
+    expect(stale).toBe(0);
+    rmSync(key, { force: true });
+  });
+
+  it("keeps the file tools in the folder while a command in the guest flips a folder of it into a link out of it, through 5 000 operations", { timeout: 300_000 }, async () => {
+    const folder = join(dir, "folder");
+    const outside = join(dir, "outside");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "only-outside"), "OUTSIDE\n");
+    // In the guest the link's target names nothing; on the host it leads out of the folder.
+    const flipper = `while :; do rm -rf sub; mkdir sub; echo inside > sub/inside; rm -rf sub; ln -s '${outside}' sub; done`;
+    const started = await executor.run(operation("start", background(flipper)), signal()) as { ok: { session_id: string } };
+    const tally: Record<string, number> = {};
+    const count = (kind: string, outcome: Outcome) => {
+      const error = "error" in outcome ? outcome.error as { type: string; code?: string } : null;
+      const key = `${kind} ${error ? error.code ?? error.type : "ok"}`;
+      tally[key] = (tally[key] ?? 0) + 1;
+    };
+    try {
+      for (let i = 0; i < 1_250; i += 1) {
+        count("write", await executor.run(operation("write", { key: join(folder, "sub", `x-${i}`), data: Buffer.from("m8\n").toString("base64") }), signal()));
+        const read = await executor.run(operation("read", { key: join(folder, "sub", "only-outside"), max_bytes: null }), signal());
+        expect("ok" in read && Buffer.from(String(read.ok), "base64").toString()).not.toBe("OUTSIDE\n");
+        count("read", read);
+        const listed = await executor.run(operation("list_dir", { key: join(folder, "sub") }), signal());
+        expect("ok" in listed && (listed.ok as string[]).includes("only-outside")).toBe(false);
+        count("list_dir", listed);
+        count("delete", await executor.run(operation("delete", { key: join(folder, "sub", "only-outside") }), signal()));
+      }
+    } finally {
+      await executor.run(operation("kill", { session_id: started.ok.session_id }), signal());
+      rmSync(join(folder, "sub"), { recursive: true, force: true });
+    }
+    console.log(`M8: 5 000 file operations against a guest command's flips: ${JSON.stringify(tally)}`);
+    expect(readdirSync(outside)).toEqual(["only-outside"]);
+    expect(readFileSync(join(outside, "only-outside"), "utf8")).toBe("OUTSIDE\n");
   });
 
   it("ends what a command left running once the chat's file host lets its folder go", async () => {

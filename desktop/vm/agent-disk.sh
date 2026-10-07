@@ -18,7 +18,7 @@ mkdir -p "$tree/link"
 cp -r "$DESKTOP/dist/guest" "$DESKTOP/dist/files" "$tree/"
 cp "$DESKTOP/dist/link/protocol.js" "$tree/link/"
 find "$tree" -name '*.map' -delete
-cp "$DESKTOP/vm/init" "$DESKTOP/vm/enter-root" "$tree/"
+cp "$DESKTOP/vm/init" "$DESKTOP/vm/enter-root" "$DESKTOP/vm/protect" "$tree/"
 echo '{"type":"module"}' > "$tree/package.json"
 # Readable by every root's user, whatever umask built it.
 chmod -R u=rwX,go=rX "$tree"

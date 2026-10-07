@@ -30,6 +30,7 @@ const roots: ControlRoots = {
     setups.push(args);
   },
   teardown: async () => {},
+  protect: async () => {},
   perform: (_root, kind, args, signal) => new Promise<Outcome>((resolve) => {
     if (kind === "run") signal.addEventListener("abort", () => resolve(CANCELLED), { once: true });
     else resolve({ ok: args });

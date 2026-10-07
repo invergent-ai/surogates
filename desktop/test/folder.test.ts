@@ -45,11 +45,22 @@ describe("a chat's folder", () => {
     ["a credential folder", () => join(base, "home", ".config", "gh"), /home folder or the app's own data/],
     ["a path srt would read as a glob", () => join(base, "x[ab]"), /holds \*, \?, \[ or \]/],
     ["a system folder", () => "/proc", /system folders/],
+    ["a folder of the sandbox's tools", () => "/usr/share", /the sandbox keeps its own tools in \/usr, so the folder \/usr\/share cannot be a chat's$/],
+    ["a folder that holds them", () => "/var", /the sandbox keeps its own tools in \/var\/cache, so the folder \/var cannot be a chat's$/],
   ])("may never be %s", (_name, folder, message) => {
     for (const dir of ["data", "app/sub", "home/.config/gh", "x[ab]"]) mkdirSync(join(base, dir), { recursive: true });
     const checked = checkFolder(folder(), guards);
     expect(checked).toMatchObject({ ok: false, missing: false });
     expect(!checked.ok && checked.message).toMatch(message);
+  });
+
+  it("may be beside the sandbox's tools, where a chat's folder hides none of them", () => {
+    const beside = realpathSync(mkdtempSync("/var/tmp/folder-"));
+    try {
+      expect(checkFolder(beside, guards)).toMatchObject({ ok: true, path: beside });
+    } finally {
+      rmSync(beside, { recursive: true, force: true });
+    }
   });
 
   it("may not be where a credential folder's link leads", () => {

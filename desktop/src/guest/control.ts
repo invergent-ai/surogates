@@ -5,7 +5,7 @@
 
 import type { Outcome } from "../link/protocol.js";
 import type { ProcessHandle } from "./processes.js";
-import type { FromAgent, HostUser, Share, ToAgent } from "./protocol.js";
+import { type FromAgent, type HostUser, MAX_PROTECTED, type ProtectedKey, type Share, type ToAgent } from "./protocol.js";
 
 export const NO_HELLO = "The host has not answered hello";
 
@@ -13,7 +13,9 @@ export const NO_HELLO = "The host has not answered hello";
 export interface ControlRoots {
   uid(root: string): number;
   setup(root: string, folder: string, share: Share, user: HostUser, ended: ProcessHandle[]): Promise<void>;
-  teardown(root: string): Promise<void>;
+  teardown(root: string, share: Share): Promise<void>;
+  // Rejects with the refusal for the root's commands.
+  protect(root: string, keys: ProtectedKey[]): Promise<void>;
   // Never rejects: whatever goes wrong is an outcome.
   perform(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome>;
 }
@@ -23,6 +25,9 @@ const malformed = (type: string) => `The agent cannot take this ${type} request`
 const isText = (value: unknown): value is string => typeof value === "string";
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isKeys = (value: unknown): value is ProtectedKey[] => Array.isArray(value) && value.length <= MAX_PROTECTED &&
+  value.every((key) => Array.isArray(key) && key.length === 3 && isText(key[0]) && Number.isInteger(key[1]) && (key[2] === "ro" || key[2] === "rw"));
 
 // The kinds of share this agent mounts.
 const isShare = (value: unknown): value is Share => isRecord(value) && value.kind === "virtiofs" && isText(value.tag);
@@ -92,8 +97,14 @@ export class Control {
           this.send({ type: "result", id, outcome });
         });
     } else if (message.type === "teardown") {
-      if (!isText(message.root)) return this.send({ type: "failed", id, message: malformed("teardown") });
-      this.roots.teardown(message.root).then(
+      if (!isText(message.root) || !isShare(message.share)) return this.send({ type: "failed", id, message: malformed("teardown") });
+      this.roots.teardown(message.root, message.share).then(
+        () => this.send({ type: "done", id }),
+        (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
+      );
+    } else if (message.type === "protect") {
+      if (!isText(message.root) || !isKeys(message.keys)) return this.send({ type: "failed", id, message: malformed("protect") });
+      this.roots.protect(message.root, message.keys).then(
         () => this.send({ type: "done", id }),
         (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
       );
