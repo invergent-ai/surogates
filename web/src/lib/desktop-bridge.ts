@@ -28,7 +28,7 @@ export interface JoinApi {
  */
 export function joinDesktop(desktop: DesktopBridge, api: JoinApi): () => void {
   let stopped = false;
-  // Each step waits on the desktop or the server: a sign-out meanwhile ends the join there.
+  // Each step waits on the desktop or the server: a join ended meanwhile (an unmount, or StrictMode's run again) stops there.
   void (async () => {
     const account = await api.account();
     if (stopped) return;
