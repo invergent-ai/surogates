@@ -105,6 +105,9 @@ function keyPlace(folder: string, path: string): boolean {
 // where it ends, followed fully as a write follows it, or any link on the way there that lies in
 // the folder, which a command could swap for a folder of its own. The guest's rule judges a write
 // by the path it reaches, not by a link's name on the way.
+// ponytail: paths.realpath is synchronous, so a stalled mount on a link's way blocks the host and the
+// look's timeout with it; it runs only for links at protected names or key places. An async walk of
+// the links would let the timeout fire.
 function linkedInto(folder: string, path: string): string | null {
   const links = new Map<string, string | null>();
   const end = followed(path, links);
