@@ -13,6 +13,7 @@ pod opens.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ HISTORY_EXCLUDES = [e for e in DEFAULT_EXCLUDES if e != "*.log"] + [
 ] + [f"/{folder}" for folder in PLATFORM_EXCLUDES]
 
 _GIT_TIMEOUT = 120
+_ZERO = "0" * 40
 #: Only the repository's own config: none from the pod's home, where a
 #: thread's commands can write, and none from the system.  Paths are read
 #: as spelt: a file may be named ``:notes.md``.
@@ -119,6 +121,148 @@ class History:
         self._copy("read-tree", "-u", "--reset", commit)
 
     # ------------------------------------------------------------------
+    # Landing: the steps a landing saga runs, one call each
+    # ------------------------------------------------------------------
+
+    def commit_turn(self, *, author: dict[str, str], trailers: list[list[str]]) -> dict:
+        """Commit the turn on the branch, and say what a landing would apply.
+
+        ``changes`` are the files the turn changed since its base whose real
+        file is still the base's version, or already the turn's.
+        ``overlapped`` are those whose real file changed otherwise since: a
+        landing leaves them out.  ``commit`` is None when the turn changed
+        nothing since its base.
+        """
+        self._copy("add", "-A")
+        excluded = self._excluded()
+        base = self._main("rev-parse", self.base)
+        if not self._copy("diff", "--cached", "--name-only", base):
+            return {"commit": None, "changes": [], "overlapped": [], "excluded": excluded}
+        self._copy(*_as(author), "commit", "-q", "--allow-empty", "-m", "Turn", "-m", _block(trailers))
+        turn = self._copy("rev-parse", "HEAD")
+        changes, overlapped = [], []
+        raw = self._main("diff", "--raw", "-z", "--no-renames", "--no-abbrev", base, turn).split("\0")
+        for meta, path in zip(raw[0::2], raw[1::2]):
+            _, _, old, new, _ = meta.split(" ")
+            real, before, after = self._real(path), _blob(old), _blob(new)
+            if real in (before, after):
+                # A real file already as the turn left it lands as a no-op.
+                changes.append({"path": path, "before": real, "after": after})
+            else:
+                overlapped.append({"path": path})
+        return {"commit": turn, "changes": changes, "overlapped": overlapped, "excluded": excluded}
+
+    def apply(self, path: str, before: str | None, after: str | None) -> dict:
+        """Write the turn's version of *path* into the real files, if the real file is still *before*.
+
+        Safe to repeat: a real file that is already *after* is left as it
+        is, so a retry after a lost reply does not fail.
+        """
+        real = self._real(path)
+        if real != after:
+            if real != before:
+                raise HistoryConflict(f"{path} changed since the thread started")
+            self._put(path, after)
+        return {"path": path, "before": before, "after": after}
+
+    def unapply(
+        self, path: str, before: str | None, after: str | None, *, ran: bool = True,
+    ) -> dict:
+        """Put back *path*'s version from before the landing, where the real file is still the landing's.
+
+        Safe to repeat: a real file that is already *before* is left as it
+        is.  A real file that is neither is someone else's change: a
+        conflict, unless the apply failed (*ran* false), and then it found
+        the file changed and wrote nothing.
+        """
+        real = self._real(path)
+        if real != before:
+            if real == after:
+                self._put(path, before)
+            elif ran:
+                raise HistoryConflict(f"{path} changed after the landing wrote it")
+        return {"path": path, "before": before, "after": after}
+
+    def record(
+        self, *, turn: str, applied: list[dict], author: dict[str, str], trailers: list[list[str]],
+    ) -> dict:
+        """Write the landing on ``main``: main's files with *applied*, the turn its second parent.
+
+        The commit point.  The branch and its base move to the landing.
+        """
+        main = self._main("rev-parse", "refs/heads/main")
+        index = self.repo / "landing.index"
+        index.unlink(missing_ok=True)
+        env = {"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project), "GIT_INDEX_FILE": str(index)}
+        self._git(["read-tree", main], env=env, cwd=self.project)
+        modes = {}
+        written = [c["path"] for c in applied if c["after"] is not None]
+        if written:
+            for entry in self._main("ls-tree", "-z", turn, "--", *written).split("\0"):
+                if entry:
+                    meta, path = entry.split("\t", 1)
+                    modes[path] = meta.split(" ")[0]
+        for c in applied:
+            if c["after"] is None:
+                self._git(["update-index", "--force-remove", "--", c["path"]], env=env, cwd=self.project)
+            else:
+                cacheinfo = f"{modes[c['path']]},{c['after']},{c['path']}"
+                self._git(["update-index", "--add", "--cacheinfo", cacheinfo], env=env, cwd=self.project)
+        tree = self._git(["write-tree"], env=env, cwd=self.project)
+        index.unlink()
+        landing = self._main(
+            *_as(author), "commit-tree", tree, "-p", main, "-p", turn, "-m", "Landing", "-m", _block(trailers),
+        )
+        self._main("update-ref", "refs/heads/main", landing, main)
+        self._main("update-ref", self.branch, landing)
+        self._main("update-ref", self.base, landing)
+        return {"commit": landing}
+
+    def _excluded(self) -> list[str]:
+        """The excluded files and folders in the copy, at most ten.
+
+        A copy starts with none, so the turn made them.  The platform's own
+        folders are left out.
+        """
+        out = self._copy("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory")
+        return sorted(n for n in out.split("\0") if n and not n.startswith(PLATFORM_EXCLUDES))[:10]
+
+    def _inside(self, path: str) -> Path:
+        """*path* in the real files; refused if it would leave them."""
+        target = self.project / path
+        if (
+            Path(path).is_absolute() or ".." in Path(path).parts
+            or not target.parent.resolve().is_relative_to(self.project.resolve())
+        ):
+            raise HistoryError(f"{path} is outside the project's files")
+        return target
+
+    def _real(self, path: str) -> str | None:
+        """The blob id of the real file at *path*; None when there is none."""
+        target = self._inside(path)
+        return self._main("hash-object", "--", str(target)) if target.is_file() else None
+
+    def _put(self, path: str, blob: str | None) -> None:
+        """Make the real file at *path* blob *blob*, or remove it for None."""
+        target = self._inside(path)
+        if blob is None:
+            target.unlink(missing_ok=True)
+            return
+        # Written beside the real file, then renamed over it: a write cut
+        # short leaves the real file whole.  History leaves out the *~ name.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staged = target.with_name(f"{target.name}.landing~")
+        with open(staged, "wb") as out:
+            result = subprocess.run(
+                ["git", "cat-file", "blob", blob], stdout=out, stderr=subprocess.PIPE,
+                env={**_git_env(self.repo, str(self.project)), **_HERMETIC}, timeout=_GIT_TIMEOUT,
+            )
+        if result.returncode != 0:
+            staged.unlink()
+            raise HistoryError(f"git cat-file failed: {result.stderr.decode(errors='replace').strip()}")
+        os.replace(staged, target)
+
+    # ------------------------------------------------------------------
     # Git
     # ------------------------------------------------------------------
 
@@ -151,3 +295,18 @@ class History:
         if result.returncode != 0:
             raise HistoryError(f"git {args[0]} failed: {result.stderr.strip()}")
         return result.stdout.strip()
+
+
+def _as(author: dict[str, str]) -> list[str]:
+    """Git options that make *author* a commit's author and committer."""
+    return ["-c", f"user.name={author['name']}", "-c", f"user.email={author['email']}"]
+
+
+def _block(trailers: list[list[str]]) -> str:
+    """A commit message's trailer paragraph."""
+    return "\n".join(f"{key}: {value}" for key, value in trailers)
+
+
+def _blob(sha: str) -> str | None:
+    """A ``diff --raw`` blob id, None for an absent file."""
+    return None if sha == _ZERO else sha
