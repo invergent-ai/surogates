@@ -130,18 +130,19 @@ export async function launch(home: string, env: Record<string, string> = {}, arg
 }
 
 // The native confirmations answer globalThis.answer, their first button unless a test sets
-// another, and with globalThis.hold set, only once globalThis.release() is called; the folder
-// dialog picks globalThis.folder, or is cancelled; nothing leaves for the system browser.
+// another, with their checkbox ticked when globalThis.checked is, and with globalThis.hold set,
+// only once globalThis.release() is called; the folder dialog picks globalThis.folder, or is
+// cancelled; nothing leaves for the system browser.
 // What each was asked is kept in the main process, as globalThis.asked and .opened.
 export async function stubNative(shell: ElectronApplication): Promise<void> {
   await shell.evaluate(({ dialog, shell: electronShell }) => {
     const asked: unknown[] = [];
     const opened: string[] = [];
     Object.assign(globalThis, { asked, opened, answer: 0 });
-    const chosen = globalThis as unknown as { answer: number; folder?: string; hold?: boolean; release?: () => void };
+    const chosen = globalThis as unknown as { answer: number; checked?: boolean; folder?: string; hold?: boolean; release?: () => void };
     dialog.showMessageBox = ((...args: unknown[]) => {
       asked.push(args.at(-1));
-      const answered = () => ({ response: chosen.answer, checkboxChecked: false });
+      const answered = () => ({ response: chosen.answer, checkboxChecked: chosen.checked === true });
       if (!chosen.hold) return Promise.resolve(answered());
       return new Promise((resolve) => {
         chosen.release = () => resolve(answered());
