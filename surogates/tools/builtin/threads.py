@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from surogates.config import enqueue_session
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.workstreams import is_project_master
@@ -305,21 +305,13 @@ async def _message_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> s
 
 
 async def _stop(thread: Any, reason: str, **kwargs: Any) -> bool:
-    """Stop *thread* as the pause route stops a chat; whether it was working.
+    """Stop *thread* for the coordinator; whether it was working."""
+    from surogates.workstreams.threads import stop_thread
 
-    The status first, so the thread reads as stopped, then the interrupt
-    that ends its turn.  A thread already paused is interrupted again: its
-    turn may not have heard the first time.
-    """
-    from surogates.workstreams.store import WorkstreamStore
-
-    stopped = await WorkstreamStore(kwargs["session_factory"]).pause_thread(thread.id)
-    if stopped:
-        await kwargs["session_store"].emit_event(thread.id, EventType.SESSION_PAUSE, {"reason": reason})
-    redis = kwargs.get("redis")
-    if redis is not None and (stopped or thread.status == "paused"):
-        await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{thread.id}", json.dumps({"reason": _STOP_REASON}))
-    return stopped
+    return await stop_thread(
+        thread, reason=reason, interrupt=_STOP_REASON, session_store=kwargs["session_store"],
+        session_factory=kwargs["session_factory"], redis=kwargs.get("redis"),
+    )
 
 
 async def _stop_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str:

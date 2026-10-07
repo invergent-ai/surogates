@@ -102,11 +102,13 @@ class WorkstreamStore:
             return await db.get(WorkstreamThread, session_id)
 
     async def reopen_thread(self, session_id: UUID) -> None:
-        """New work for a thread takes it out of Resolved."""
+        """Take a thread out of Resolved, its own or seven quiet days': new
+        work for it, and the user's reopen, are its activity."""
         async with self._sf() as db:
             await db.execute(
                 update(WorkstreamThread).where(WorkstreamThread.session_id == session_id).values(resolved_at=None)
             )
+            await db.execute(update(SessionRow).where(SessionRow.id == session_id).values(updated_at=func.now()))
             await db.commit()
 
     async def pause_thread(self, session_id: UUID) -> bool:

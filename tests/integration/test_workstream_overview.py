@@ -22,11 +22,14 @@ from surogates.workstreams import stream as project_stream
 from surogates.workstreams.derive import SHELL_LIMITS, derive_thread
 from surogates.workstreams.store import WorkstreamStore
 
-from .test_devices import add_user, api  # noqa: F401  (api is a fixture)
+from .test_devices import add_user, api, next_control  # noqa: F401  (api is a fixture)
 from .test_workstream_threads import (
     answered,
     asks,
+    events_of,
     gives_up_asking,
+    quiet_for,
+    resolve,
     start,
     threads_in_every_state,
     turn_ends,
@@ -388,3 +391,106 @@ async def test_only_the_owner_hears_a_projects_stream_and_only_over_redis(api, s
     monkeypatch.setattr(api.app.state, "redis", None)
     response = await api.client.get(f"/v1/workstreams/{project['id']}/stream", headers=api.auth())
     assert response.status_code == 503, response.text
+
+
+async def act_on(api, project: dict, thread, action: str, token: str | None = None):
+    return await api.client.post(
+        f"/v1/workstreams/{project['id']}/threads/{thread.id}/{action}", headers=api.auth(token),
+    )
+
+
+async def test_the_user_resolves_a_working_thread_and_it_stops(api):
+    project = await create(api)
+    master = await master_of(api, project)
+    thread = await start(api, master)
+    before = len(await events_of(api, master.id))
+    listener = api.app.state.redis.pubsub()
+    await listener.subscribe(f"surogates:interrupt:{thread.id}")
+    try:
+        response = await act_on(api, project, thread, "resolve")
+        assert response.status_code == 200, response.text
+        assert json.loads(await next_control(listener)) == {"reason": "resolved by the user"}
+    finally:
+        await listener.aclose()
+    row = response.json()
+    assert (row["id"], row["group"]) == (str(thread.id), "resolved")
+    assert row["resolved_at"].endswith("Z")
+    assert (await api.app.state.session_store.get_session(thread.id)).status == "paused"
+    [paused] = await events_of(api, thread.id, EventType.SESSION_PAUSE)
+    assert paused.data == {"reason": "resolved by the user"}
+    # Nothing that only the Overview needs is written into the master's log.
+    assert len(await events_of(api, master.id)) == before
+
+
+async def test_reopening_takes_a_thread_out_of_resolved(api):
+    project = await create(api)
+    master = await master_of(api, project)
+    resolved, quiet = await start(api, master, title="Draft A"), await start(api, master, title="Draft B", goal="B.")
+    for thread in (resolved, quiet):
+        await answered(api, thread, "Drafted it.")
+        await turn_ends(api, thread)
+    assert (await act_on(api, project, resolved, "resolve")).json()["group"] == "resolved"
+    await quiet_for(api, quiet, days=8)
+    assert [row["group"] for row in await rows(api, project, thread_id=str(quiet.id))] == ["resolved"]
+    for thread in (resolved, quiet):
+        response = await act_on(api, project, thread, "reopen")
+        assert response.status_code == 200, response.text
+        assert (response.json()["group"], response.json()["resolved_at"]) == ("idle", None)
+
+
+async def test_a_message_typed_into_a_resolved_thread_reopens_it(api):
+    project = await create(api)
+    thread = await start(api, await master_of(api, project))
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    await resolve(api, thread)
+    response = await api.client.post(
+        f"/v1/sessions/{thread.id}/messages", json={"content": "Add a chart."}, headers=api.auth(),
+    )
+    assert response.status_code == 202, response.text
+    [row] = await rows(api, project)
+    assert (row["group"], row["resolved_at"]) == ("working", None)
+
+
+@pytest.mark.parametrize("route, status", [("resume", "paused"), ("retry", "failed")])
+async def test_bringing_a_resolved_thread_back_reopens_it(api, monkeypatch, route, status):
+    project = await create(api)
+    thread = await start(api, await master_of(api, project))
+    await api.app.state.session_store.update_session_status(thread.id, status)
+    await resolve(api, thread)
+    changes = heard(api, monkeypatch)
+    response = await api.client.post(f"/v1/sessions/{thread.id}/{route}", headers=api.auth())
+    assert response.status_code == 200, response.text
+    [row] = await rows(api, project)
+    assert (row["group"], row["resolved_at"]) == ("working", None)
+    # Heard as it resumes, the thread already reads working.
+    assert [groups[str(thread.id)] for _, kind, groups in changes if kind == "session.resume"] == ["working"]
+
+
+async def test_a_resolve_reaches_the_projects_stream(api, monkeypatch):
+    project = await create(api)
+    thread = await start(api, await master_of(api, project))
+
+    async def act():
+        await act_on(api, project, thread, "resolve")
+
+    tid = str(thread.id)
+    assert await streamed(api, monkeypatch, project, 2, act) == [
+        ("ready", {}),
+        ("change", {"thread_id": tid, "type": "session.pause"}),
+        ("change", {"thread_id": tid, "type": "thread.resolved"}),
+    ]
+
+
+async def test_only_the_projects_live_threads_are_resolved_or_reopened(api, session_factory):
+    project = await create(api)
+    master = await master_of(api, project)
+    deleted = await start(api, master, title="Draft A")
+    await api.app.state.session_store.update_session_status(deleted.id, "archived")
+    others = await start(api, await master_of(api, await create(api, name="Budget")))
+    _, their_token = await add_user(session_factory, api.org_id)
+    for action in ("resolve", "reopen"):
+        for thread in (deleted, others):
+            assert (await act_on(api, project, thread, action)).status_code == 404
+        mine = await start(api, master, title="Draft B", goal="B.")
+        assert (await act_on(api, project, mine, action, their_token)).status_code == 404

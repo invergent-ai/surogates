@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from uuid import UUID
 
 from surogates.board.groups import ensure_group_and_inherit
-from surogates.config import enqueue_session
+from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_thread_session
@@ -70,3 +71,23 @@ async def start_thread(
             redis, org_id=str(thread.org_id), agent_id=thread.agent_id, session_id=thread.id,
         )
     return thread
+
+
+async def stop_thread(
+    thread: Session, *, reason: str, interrupt: str, session_store: Any, session_factory: Any, redis: Any,
+) -> bool:
+    """Stop *thread* as the pause route stops a chat; whether it was working.
+
+    The status first, so the thread reads as stopped, then the interrupt
+    that ends its turn.  A thread already paused is interrupted again: its
+    turn may not have heard the first time.  *reason* goes into its
+    ``session.pause``; *interrupt* is always the server's words, never a
+    model's, because the dispatcher reads some reasons as commands
+    (``_SESSION_GONE_REASONS``).
+    """
+    stopped = await WorkstreamStore(session_factory).pause_thread(thread.id)
+    if stopped:
+        await session_store.emit_event(thread.id, EventType.SESSION_PAUSE, {"reason": reason})
+    if redis is not None and (stopped or thread.status == "paused"):
+        await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{thread.id}", json.dumps({"reason": interrupt}))
+    return stopped

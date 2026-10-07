@@ -21,6 +21,7 @@ from sse_starlette.sse import EventSourceResponse
 from surogates.api.routes.sessions import archive_session_tree
 from surogates.db.models import Workstream
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep, rate_limit_dep
+from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -28,6 +29,7 @@ from surogates.workstreams import master_config
 from surogates.workstreams import stream as project_stream
 from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread
 from surogates.workstreams.store import WorkstreamStore
+from surogates.workstreams.threads import stop_thread
 
 router = APIRouter(prefix="/workstreams")
 
@@ -63,6 +65,8 @@ Instructions = _text(16_000, min_length=0)
 Icon = _blank_is_none(64)
 # None: the agent's own tier.
 Tier = Literal["basic", "pro"] | None
+# What a thread the user resolves while it works is stopped with.
+_RESOLVED_BY_USER = "resolved by the user"
 
 
 class ProjectCreate(BaseModel):
@@ -284,3 +288,53 @@ async def stream_project(workstream_id: UUID, request: Request, ctx: AgentRuntim
                 await pubsub.aclose()
 
     return EventSourceResponse(changes())
+
+
+async def _thread(request: Request, project: Workstream, thread_id: UUID) -> Session:
+    """*thread_id* when it is one of *project*'s live threads; 404 otherwise."""
+    row = await _store(request).get_thread(thread_id)
+    if row is not None and row.workstream_id == project.id:
+        thread = await request.app.state.session_store.get_session(thread_id)
+        if thread.status != "archived":
+            return thread
+    raise HTTPException(status.HTTP_404_NOT_FOUND, "No such thread.")
+
+
+async def _row(request: Request, project: Workstream, thread_id: UUID) -> dict[str, Any]:
+    """*thread_id*'s row, as the threads route gives it."""
+    found = await _store(request).thread_facts(project.id, thread_id=thread_id)
+    if not found:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such thread.")
+    return derive_thread(found[0], now=datetime.now(timezone.utc))
+
+
+@router.post("/{workstream_id}/threads/{thread_id}/resolve")
+async def resolve_thread(
+    workstream_id: UUID, thread_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant,
+) -> dict[str, Any]:
+    """Move a thread to Resolved.  Its work is done, so one still working is
+    stopped first, as the coordinator's resolve stops it; one already
+    resolved keeps the moment it got there."""
+    project = await _project(request, workstream_id, tenant, ctx)
+    thread = await _thread(request, project, thread_id)
+    state = request.app.state
+    await stop_thread(
+        thread, reason=_RESOLVED_BY_USER, interrupt=_RESOLVED_BY_USER, session_store=state.session_store,
+        session_factory=state.session_factory, redis=state.redis,
+    )
+    await _store(request).resolve_thread(thread.id)
+    await project_stream.publish(state.redis, project.id, thread.id, project_stream.RESOLVED)
+    return await _row(request, project, thread.id)
+
+
+@router.post("/{workstream_id}/threads/{thread_id}/reopen")
+async def reopen_thread(
+    workstream_id: UUID, thread_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant,
+) -> dict[str, Any]:
+    """Take a thread out of Resolved, its own or seven quiet days'.  It
+    stays as its last turn left it: idle, or waiting on the user."""
+    project = await _project(request, workstream_id, tenant, ctx)
+    thread = await _thread(request, project, thread_id)
+    await _store(request).reopen_thread(thread.id)
+    await project_stream.publish(request.app.state.redis, project.id, thread.id, project_stream.REOPENED)
+    return await _row(request, project, thread.id)
