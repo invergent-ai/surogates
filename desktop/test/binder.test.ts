@@ -678,6 +678,16 @@ describe("what the page may know of a chat's folder", () => {
     await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`The folder ${notes} is not there`);
   });
 
+  it("refuses a link at the folder's path, even one to the folder confirmed", async () => {
+    const user = new User();
+    const chooser = binder(user);
+    await chooser.admit(bindOp(ROOT, await confirmed(user, chooser)), never());
+    const moved = join(base, "moved");
+    renameSync(notes, moved);
+    symlinkSync(moved, notes);
+    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`The folder ${notes} was replaced after it was confirmed for this chat`);
+  });
+
   it("refuses a file that took the folder's inode, as a deleted folder's can be given again", async () => {
     // On ext4 a file made where the folder was gets a new inode, which the inode compare already
     // refuses: a look that answers a file with the binding's own inode pins the folder check.

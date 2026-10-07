@@ -8,7 +8,7 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdirSync, rmdirSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { NOT_BOUND } from "../hosts/tool-hosts.js";
@@ -74,7 +74,7 @@ export interface BinderOptions {
   // and about a network destination off the package hosts in either mode.
   approvalPrompts: ApprovalPrompts;
   preparedMs?: number;
-  // How Show folder looks at a folder, and how long it waits; node:fs's stat and LOOK_MS unless a test says.
+  // How Show folder looks at a folder, and how long it waits; node:fs's lstat and LOOK_MS unless a test says.
   look?: (path: string) => Promise<FolderLook>;
   lookMs?: number;
   // A binding, a "Stop asking" or a host allowed for the session that could not be recorded,
@@ -200,7 +200,9 @@ export class Binder implements Executor {
     if (!binding) throw new Error("This chat has no folder on this computer");
     if (this.looking.has(sessionId)) throw new Error(`Surogate is still looking for ${binding.folder}`);
     this.looking.add(sessionId);
-    const look = (this.options.look ?? stat)(binding.folder).then((found) => found, () => null);
+    // lstat: a link at its path is never the folder. The path was resolved when it was bound,
+    // so only its last name can have become a link since.
+    const look = (this.options.look ?? lstat)(binding.folder).then((found) => found, () => null);
     void look.finally(() => this.looking.delete(sessionId));
     const ms = this.options.lookMs ?? LOOK_MS;
     let timer: NodeJS.Timeout | undefined;
