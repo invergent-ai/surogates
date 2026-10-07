@@ -359,10 +359,11 @@ async def test_a_file_two_threads_produced_is_the_last_ones(api):
     master = await master_of(api, project)
     first, second = await start(api, master), await start(api, master, title="Check A", goal="Check A.docx.")
     await written(api, first, "A.docx")
-    await turn_ends(api, first, files=["A.docx"])
+    # Last by event id, not the thread started last; a ref as the model gave it.
     await turn_ends(api, second, files=["A.docx"])
+    await turn_ends(api, first, files=["./A.docx"])
     [entry] = (await library(api, project)).json()
-    assert (entry["origin"], entry["thread_id"]) == ("produced", str(second.id))
+    assert (entry["origin"], entry["thread_id"]) == ("produced", str(first.id))
 
 
 async def test_the_library_and_the_file_panel_leave_out_the_platforms_own_files(api, monkeypatch):
@@ -378,11 +379,25 @@ async def test_the_library_and_the_file_panel_leave_out_the_platforms_own_files(
         await written(api, thread, path)
     assert [e["path"] for e in (await library(api, project)).json()] == ["brief.pdf"]
 
-    # The panel's limit counts only what it can show.
+    # A thread's checkouts do not count against the panel's limit.
     monkeypatch.setattr(workspace_routes, "_MAX_ENTRIES", 3)
     tree = await api.client.get(f"/v1/sessions/{master.id}/workspace/tree", headers=api.auth())
     assert tree.status_code == 200, tree.text
     assert ([e["path"] for e in tree.json()["entries"]], tree.json()["truncated"]) == (["threads", "brief.pdf"], False)
+
+
+async def test_a_threads_dependencies_do_not_push_the_users_files_out_of_the_library(api):
+    project = await create(api)
+    master = await master_of(api, project)
+    thread = await start(api, master)
+    await written(api, master, "brief.pdf", modified=1_790_000_000)
+    # An npm install in the thread's folder: more files than the shell takes, all newer.
+    for n in range(SHELL_LIMITS["library"] + 1):
+        await written(api, thread, f"threads/Draft A/node_modules/pkg{n}/index.js")
+    await written(api, thread, "threads/Draft A/venv/lib/site.py")
+    await written(api, thread, "threads/Draft A/A.docx")
+    # The Library leaves out what the file panel skips.
+    assert [e["path"] for e in (await library(api, project)).json()] == ["threads/Draft A/A.docx", "brief.pdf"]
 
 
 async def test_the_library_lists_the_newest_files_the_shell_takes(api, monkeypatch):

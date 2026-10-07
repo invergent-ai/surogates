@@ -7,6 +7,7 @@ capability: with it off, every web session but the canonical one is hidden.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -20,6 +21,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints, m
 from sse_starlette.sse import EventSourceResponse
 
 from surogates.api.routes.sessions import archive_session_tree
+from surogates.api.routes.workspace import _should_skip_dir
 from surogates.db.models import Workstream
 from surogates.harness.loop_artifacts import _coerce_modified_to_datetime
 from surogates.harness.turn_summarizer import is_platform_path
@@ -274,15 +276,26 @@ async def project_library(
     """The project's files, newest first and as many as the shell takes:
     the one workspace its master and threads share.  A file a thread's turn
     summary named is that thread's, the last one to name it; every other
-    file the user added.  The platform's own files are left out."""
+    file the user added.  The platform's own files are left out, and so is
+    every folder the file panel skips (dependencies, builds, checkouts):
+    an install's thousands of files would push the user's out."""
     project = await _project(request, workstream_id, tenant, ctx)
     master = await request.app.state.session_store.get_session(project.master_session_id)
     prefix = boundary_workspace_prefix(master.config, master, master.id)
-    produced = await _store(request).produced(project.id)
+    produced, listed = await asyncio.gather(
+        _store(request).produced(project.id),
+        request.app.state.storage.list_entries(master.config["storage_bucket"], prefix=prefix),
+    )
     entries: list[tuple[datetime, dict[str, Any]]] = []
-    for found in await request.app.state.storage.list_entries(master.config["storage_bucket"], prefix=prefix):
+    for found in listed:
         path = found["key"][len(prefix):]
-        if not path or path.endswith("/") or is_platform_path(path) or units(path) > SHELL_LIMITS["ref"]:
+        if (
+            not path
+            or path.endswith("/")
+            or is_platform_path(path)
+            or any(_should_skip_dir(folder) for folder in path.split("/")[:-1])
+            or units(path) > SHELL_LIMITS["ref"]
+        ):
             continue
         modified = _coerce_modified_to_datetime(found.get("modified"))
         thread_id = produced.get(path)
