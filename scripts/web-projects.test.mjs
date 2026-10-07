@@ -232,11 +232,14 @@ test("a row maps to the shell's ThreadRow field by field", () => {
 });
 
 // The project routes over a fake fetch: *answer* gives each request's response, and every
-// request is kept, as [method, url, body].
+// request is kept, as [method, url, body], and a POST or a PATCH with the type its body was sent as.
 function routesOver(answer) {
   const asked = [];
   const fetchFn = async (input, init = {}) => {
-    asked.push([init.method ?? "GET", String(input), init.body === undefined ? undefined : JSON.parse(init.body)]);
+    const method = init.method ?? "GET";
+    const request = [method, String(input), init.body === undefined ? undefined : JSON.parse(init.body)];
+    if (method === "POST" || method === "PATCH") request.push(init.headers?.["Content-Type"]);
+    asked.push(request);
     return answer(String(input), init);
   };
   return { asked, routes: workstreamRoutes(fetchFn, (url, watched) => new FetchSseEventStream(url, { fetchFn: watched })) };
@@ -290,21 +293,21 @@ test("each project route is asked at its own path, and answers the shell's types
     place: { kind: "cloud" },
   }]);
   // A schedule made without a name shows its schedule alone.
-  assert.deepEqual((await routes.routines("p-1")).map(({ name, scheduleDisplay, nextRunAt }) => [name, scheduleDisplay, nextRunAt]), [
-    ["Weekly cash report", "Every Monday at 08:00", "2026-10-12T08:00:00Z"],
-    ["", "Every Monday at 08:00", "2026-10-12T08:00:00Z"],
+  assert.deepEqual(await routes.routines("p-1"), [
+    { id: "r-1", name: "Weekly cash report", scheduleDisplay: "Every Monday at 08:00", nextRunAt: "2026-10-12T08:00:00Z", status: "active" },
+    { id: "r-2", name: "", scheduleDisplay: "Every Monday at 08:00", nextRunAt: "2026-10-12T08:00:00Z", status: "active" },
   ]);
   assert.deepEqual(asked, [
     ["GET", "/api/v1/workstreams", undefined],
     ["GET", "/api/v1/workstreams/p-1", undefined],
-    ["POST", "/api/v1/workstreams", { name: "Quarterly report", goal: "Close Q3" }],
-    ["PATCH", "/api/v1/workstreams/p-1", { name: "Q3", coordinator_tier: "pro", thread_tier: null }],
+    ["POST", "/api/v1/workstreams", { name: "Quarterly report", goal: "Close Q3" }, "application/json"],
+    ["PATCH", "/api/v1/workstreams/p-1", { name: "Q3", coordinator_tier: "pro", thread_tier: null }, "application/json"],
     ["DELETE", "/api/v1/workstreams/p-1", undefined],
     ["GET", "/api/v1/workstreams/p-1/threads", undefined],
     ["GET", "/api/v1/workstreams/p-1/threads?thread_id=t-1", undefined],
-    ["POST", "/api/v1/workstreams/p-1/threads/t-1/resolve", undefined],
-    ["POST", "/api/v1/workstreams/p-1/threads/t-1/reopen", undefined],
-    ["POST", "/api/v1/workstreams/p-1/threads", { proposal_id: "pr-1", key: "2" }],
+    ["POST", "/api/v1/workstreams/p-1/threads/t-1/resolve", undefined, undefined],
+    ["POST", "/api/v1/workstreams/p-1/threads/t-1/reopen", undefined, undefined],
+    ["POST", "/api/v1/workstreams/p-1/threads", { proposal_id: "pr-1", key: "2" }, "application/json"],
     ["GET", "/api/v1/workstreams/p-1/library", undefined],
     // The routines are the master's schedules: the project is read for its master first.
     ["GET", "/api/v1/workstreams/p-1", undefined],
