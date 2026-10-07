@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import exists, func, select, update
+from sqlalchemy import Text, cast, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
@@ -51,6 +51,7 @@ class SignIn:
     id: UUID
     created_at: datetime
     last_used_at: datetime
+    device_id: UUID | None
     device_name: str | None
 
 
@@ -162,6 +163,8 @@ class OAuthTokens:
                     OAuthRefreshToken.family_id,
                     func.min(OAuthRefreshToken.created_at),
                     func.max(OAuthRefreshToken.created_at),
+                    # A family binds one computer, from the row that bound it on: as text, which has a max.
+                    func.max(cast(Device.id, Text)),
                     func.max(Device.name),
                 )
                 .outerjoin(Device, Device.id == OAuthRefreshToken.device_id)
@@ -177,7 +180,10 @@ class OAuthTokens:
                 )
                 .order_by(func.max(OAuthRefreshToken.created_at).desc())
             )).all()
-        return [SignIn(*row) for row in rows]
+        return [
+            SignIn(family, created, used, UUID(device) if device is not None else None, name)
+            for family, created, used, device, name in rows
+        ]
 
     async def end(self, family_id: UUID, *, org_id: UUID, user_id: UUID, agent_id: str) -> bool:
         """End the user's sign-in *family_id* at *agent_id*, as signing out does. False when they have no such sign-in."""
