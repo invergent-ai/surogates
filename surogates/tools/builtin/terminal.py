@@ -209,6 +209,14 @@ Do NOT use vim/nano/interactive tools without pty=true — they hang without a p
 Important: cloud sandboxes may be cleaned up, idled out, or recreated between turns. Persistent filesystem means files can resume later; it does NOT guarantee a continuously running machine or surviving background processes. Use terminal sandboxes for task work, not durable hosting.
 """
 
+# Appended for a session on the user's computer (describe_for_device): its
+# guest refuses these writes with a bare "Operation not permitted".
+DEVICE_GIT_NOTE = (
+    "In a shared folder on your computer, git config, hooks and `.git` entries are read-only to commands; "
+    "run `git init` and `git clone` in your home folder instead; "
+    "submodule update and worktree add run on your computer, not here."
+)
+
 
 # ---------------------------------------------------------------------------
 # Tool schema (exposed to the LLM)
