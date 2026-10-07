@@ -80,7 +80,7 @@ from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.sandbox.pool import sandbox_session_key
-from surogates.workstreams import THREAD_CANNOT_DELEGATE, is_project_master, is_project_thread, master_refusal
+from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
@@ -1069,7 +1069,7 @@ class AgentHarness(
             and session is not None
             and is_project_thread(session.config)
         ):
-            return THREAD_CANNOT_DELEGATE
+            return thread_refusal(f"/{name}")
         if self._slash_command_enabled(name, session):
             return None
         return f"/{name} is disabled for this agent."

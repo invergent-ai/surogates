@@ -14,7 +14,7 @@ from sqlalchemy import delete, select, update
 
 import surogates.harness.loop as loop_module
 import surogates.workstreams.threads as threads_module
-from surogates.workstreams import THREAD_CANNOT_DELEGATE
+from surogates.workstreams import thread_refusal
 from surogates.coding_agents.run_core import execute_coding_run
 from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.db.agent_users import purge_user_account
@@ -1737,4 +1737,4 @@ async def test_a_report_lists_at_most_twenty_files(api):
 async def test_a_thread_cannot_start_a_session_by_any_tool(api, tool):
     thread = await start(api, await master_of(api, await create(api)))
     # call_tool also pins that a refused call sets up no pod.
-    assert await call_tool(api, thread, tool) == {"error": THREAD_CANNOT_DELEGATE}
+    assert await call_tool(api, thread, tool) == {"error": thread_refusal(tool)}

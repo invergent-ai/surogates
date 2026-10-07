@@ -31,9 +31,11 @@ def is_project_thread(config: dict[str, Any] | None) -> bool:
     return (config or {}).get("workstream_role") == THREAD
 
 
-#: What a project's thread answers to anything that would start a session:
-#: a helper's or a routine's edits would stay in a copy its thread never lands.
-THREAD_CANNOT_DELEGATE = "A thread can't hand work to a helper yet: do this step in the thread itself."
+def thread_refusal(name: str) -> str:
+    """What a project's thread answers to a command (``/name``) or tool *name*
+    it cannot start yet: a helper's, a routine's or a coding agent's edits
+    would stay in a copy the thread never lands."""
+    return f"A thread can't start {name} yet: do this step in the thread itself."
 
 
 def master_refusal(command: str) -> str:

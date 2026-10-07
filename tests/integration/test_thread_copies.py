@@ -631,7 +631,7 @@ async def test_a_thread_cannot_hand_work_to_a_helper_yet(api, monkeypatch, pods)
     store = api.app.state.session_store
     [answer] = [json.loads(e.data["content"]) for e in await store.get_events(thread.id, types=[EventType.TOOL_RESULT])
                 if e.data["name"] == "delegate_task"]
-    assert answer == {"error": "A thread can't hand work to a helper yet: do this step in the thread itself."}
+    assert answer == {"error": "A thread can't start delegate_task yet: do this step in the thread itself."}
     # A call that never runs takes no snapshot of the copy.
     [call] = await store.get_events(thread.id, types=[EventType.TOOL_CALL])
     assert "checkpoint_hash" not in call.data
@@ -726,7 +726,7 @@ async def test_a_threads_loop_starts_no_run_to_edit_a_copy_never_landed(api, mon
     harness._redis, harness._session_factory, harness._sandbox_pool = api.app.state.redis, api.app.state.session_factory, pool
     await asyncio.wait_for(harness.wake(thread.id), 60)
     [answer] = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
-    assert answer == "A thread can't hand work to a helper yet: do this step in the thread itself."
+    assert answer == "A thread can't start /loop yet: do this step in the thread itself."
     async with api.app.state.session_factory() as db:
         runs = (await db.execute(text("SELECT count(*) FROM sessions WHERE parent_id = :id"), {"id": thread.id})).scalar()
     assert (runs, pods.pods) == (0, {})
@@ -920,6 +920,6 @@ async def test_a_threads_code_command_runs_no_coding_agent_on_a_copy_never_lande
     harness._run_code_agent = a_coding_run
     await asyncio.wait_for(harness.wake(thread.id), 60)
     [answer] = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
-    assert answer.startswith("A thread can't"), answer
+    assert answer == "A thread can't start /code yet: do this step in the thread itself."
     assert (ran, pods.pods) == ([], {})
     assert (pods.project / "notes.txt").read_text() == "v1 notes\n"
