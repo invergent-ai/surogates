@@ -143,3 +143,33 @@ describe("the Work-freely confirmation", () => {
     expect([ids(content), allowing(content), content.focus, content.cancel]).toEqual([["keep", "free"], ["free"], "keep", "keep"]);
   });
 });
+
+describe("the browser's prompts", () => {
+  it("asks a chat's first use with Deny focused, and Allow for this chat held back", () => {
+    const content = approval({ kind: "browser", chat: CHAT, action: "use", detail: "" });
+    expect(content.title).toBe("Let acme.surogate.ai use a browser on this computer?");
+    expect(content.lead).toContain("signed in to nothing of yours");
+    expect(content.notes).toContain("It cannot reach this computer's own services or your private networks.");
+    expect([ids(content), allowing(content), content.focus, content.cancel]).toEqual([["deny", "allow_session"], ["allow_session"], "deny", "deny"]);
+  });
+
+  it("shows what an act would do in the page, whole, with the operation's buttons", () => {
+    const script = approval({ kind: "browser", chat: { ...CHAT, calling: "child" }, action: "script", detail: "const a = 1;\nreturn a;" });
+    expect(script.title).toBe("Run a script in the page?");
+    expect(script.lead.startsWith("A sub-agent of acme.surogate.ai wants to run this script")).toBe(true);
+    expect(script.details).toEqual([{ label: "Script, 2 lines", value: "const a = 1;\nreturn a;", code: true, keep: "\n\t" }]);
+    expect([ids(script), script.focus]).toEqual([["deny", "stop_asking", "allow"], "deny"]);
+    const open = approval({ kind: "browser", chat: CHAT, action: "open", detail: "https://example.com/‮gnp.exe" });
+    expect(open.details).toEqual([{ label: "Address", value: "https://example.com/‮gnp.exe", code: true, keep: "" }]);
+  });
+
+  it("names the host an open would go to, cut at its start, and opens tall enough for the whole address", () => {
+    expect(approval({ kind: "browser", chat: CHAT, action: "open", detail: "https://example.com:8443/a" }).title).toBe("Open example.com:8443?");
+    const padded = `bank.example.${"x".repeat(80)}.attacker.net`;
+    const long = approval({ kind: "browser", chat: CHAT, action: "open", detail: `https://${padded}/login?next=${"y".repeat(200)}` });
+    expect(long.title.startsWith("Open …")).toBe(true);
+    expect(long.title.endsWith(".attacker.net?")).toBe(true);
+    const short = approval({ kind: "browser", chat: CHAT, action: "open", detail: "https://a.example/" });
+    expect(long.height).toBeGreaterThan(short.height + 5 * 19);
+  });
+});

@@ -57,6 +57,7 @@ export class Bindings {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare(`DELETE FROM domains WHERE root = ?`).run(root);
+      this.db.prepare(`DELETE FROM browsing WHERE root = ?`).run(root);
       this.db.prepare(`DELETE FROM bindings WHERE root = ?`).run(root);
       this.db.exec("COMMIT");
     } catch (error) {
@@ -83,6 +84,16 @@ export class Bindings {
   domains(root: string): string[] {
     const rows = this.db.prepare(`SELECT domain FROM domains WHERE root = ? ORDER BY rowid`).all(root) as Array<{ domain: string }>;
     return rows.map((row) => row.domain);
+  }
+
+  /** Let a bound root's agent use the browser on this computer from now on, as its user allowed. An unknown root changes nothing. */
+  allowBrowser(root: string): void {
+    this.db.prepare(`INSERT OR IGNORE INTO browsing (root) SELECT root FROM bindings WHERE root = ?`).run(root);
+  }
+
+  /** Whether the root's user let its agent use the browser on this computer. */
+  browsing(root: string): boolean {
+    return this.db.prepare(`SELECT 1 FROM browsing WHERE root = ?`).get(root) !== undefined;
   }
 
   get(root: string): Binding | undefined {
