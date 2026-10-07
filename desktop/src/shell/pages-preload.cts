@@ -32,6 +32,7 @@ if (location.protocol === "file:") {
     settings: () => ipcRenderer.invoke("shell:settings"),
     newProject: () => ipcRenderer.invoke("shell:new-project"),
     projectSettings: () => ipcRenderer.invoke("shell:project-settings"),
+    quitNow: () => ipcRenderer.invoke("shell:quit-now"),
     link: (which: string) => ipcRenderer.invoke("shell:link", which),
     onChanged: listen("shell:changed"),
   });
@@ -47,6 +48,12 @@ if (location.protocol === "file:") {
     link: (which: string) => ipcRenderer.invoke("settings:link", which),
     close: () => ipcRenderer.invoke("settings:close"),
     onChanged: listen("settings:changed"),
+  });
+  contextBridge.exposeInMainWorld("surogateAbout", {
+    state: () => ipcRenderer.invoke("about:state"),
+    copy: () => ipcRenderer.invoke("about:copy"),
+    documentation: () => ipcRenderer.invoke("about:documentation"),
+    close: () => ipcRenderer.invoke("about:close"),
   });
   contextBridge.exposeInMainWorld("surogatePrompt", {
     state: () => ipcRenderer.invoke("prompt:state"),

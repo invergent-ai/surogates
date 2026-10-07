@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { OperationJournal } from "../../src/journal/journal.js";
 import { APP_CLOSED } from "../../src/operations/runner.js";
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { dataHome, launch, press, prompt, quit, shellPage, stubNative } from "./launch.js";
+import { dataHome, launch, press, prompt, quit, shellPage, stubNative, trayLabels, watchTray } from "./launch.js";
 
 const THREAD = "6c1e9f7d-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
 
@@ -127,6 +127,47 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the demo", () => {
 });
 
 describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("quitting", () => {
+  it("says, while it waits, that it quits once the thread finishes, in the window and the tray, and goes from the window first when told to quit now", async () => {
+    const { shell, page } = await bound();
+    await watchTray(shell);
+    // The quit's line is a live region from the start, empty, so that a screen reader hears it when it speaks.
+    expect(await page.evaluate(() => {
+      const line = document.getElementById("quitting-text")!;
+      return [line.getAttribute("role"), line.textContent, line.closest("[hidden]") === null];
+    })).toEqual(["status", "", true]);
+    expect(await page.isVisible("#quit-now")).toBe(false);
+    agent.link.send(op("run-5", "run", { command: "sleep 603", workdir: null, timeout: 900 }));
+    await expect.poll(() => sleeping(603), { timeout: 30_000 }).toBe(1);
+    await answer(shell, 1);
+    quitApp(shell);
+    await expect.poll(() => page.textContent("#quitting-text")).toBe("Quitting once 1 thread working on this computer finishes.");
+    expect(await page.isVisible("#quit-now")).toBe(true);
+    await expect.poll(() => trayLabels(shell)).toEqual(["Show Surogate", "Connected as Laptop", "", "Settings…", "Quit now"]);
+    // The window goes the moment the user says quit now, before the device has stopped.
+    const hidden = new Promise<void>((resolve) => shell.on("console", (message) => {
+      if (message.text() === "window hidden") resolve();
+    }));
+    await shell.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.once("hide", () => console.log("window hidden"));
+    });
+    const closed = shell.waitForEvent("close");
+    await page.click("#quit-now");
+    await hidden;
+    // Once it goes, a second launch brings no window back while the device stops.
+    expect(await shell.evaluate(({ app: electron, BrowserWindow }) => {
+      electron.emit("second-instance", {}, [], "");
+      return BrowserWindow.getAllWindows().some((window) => window.isVisible());
+    }).catch(() => false)).toBe(false);
+    await closed;
+    app = undefined;
+    const journal = new OperationJournal(join(home, "surogate", "devices", "d", "journal.sqlite"));
+    try {
+      expect(journal.unsent().find((result) => result.id === "run-5")?.outcome).toEqual(APP_CLOSED);
+    } finally {
+      journal.close();
+    }
+  });
+
   it("waits for the threads when told to, and quits once they finish", async () => {
     const { shell } = await bound();
     agent.link.send(op("run-3", "run", { command: "sleep 601", workdir: null, timeout: 900 }));
