@@ -76,17 +76,18 @@ enum sg_child { CC_OTHER, CC_HOOKS, CC_CONFIG, CC_CFGLEAF, CC_MODULES, CC_WORKTR
 // components, so at a .git, hk2 leaves out modules/<name's first part> as protect.ts does.
 // dir: 1 when the path is a directory being moved (rename), else 0; moved_key: the path
 // is one a moved directory may not take or leave.
-struct sg_state { int i; int child; int any_hooks; int hk1; int hk2; int leaf_config; int dir; int moved_key; int refused; };
+struct sg_state { int i; int child; int any_hooks; int hk1; int hk2; int leaf_config; int dir; int moved_key; };
 
 SG_INLINE void sg_init(struct sg_state *s, int dir)
 {
 	s->i = 0; s->child = CC_OTHER; s->any_hooks = 0; s->hk1 = 0; s->hk2 = 0; s->leaf_config = 0;
-	s->dir = dir; s->moved_key = 0; s->refused = 0;
+	s->dir = dir; s->moved_key = 0;
 }
 
 // Feed one component's match bits (leaf-first; i == 0 is the target). Returns 1 the
-// moment the path is refused (for a moved directory, sg_init's dir, more is refused). Branch-free (bitwise | and & on 0/1 terms) so that,
-// walked on BPF, the unknown bits do not fork the verifier into a state explosion.
+// moment the path is refused; for a moved directory (sg_init's dir), more is refused.
+// Branch-free (bitwise | and & on 0/1 terms) so that, walked on BPF, the unknown bits
+// do not fork the verifier into a state explosion.
 SG_INLINE int sg_step(struct sg_state *s, int bits)
 {
 	int i = s->i, child = s->child;
@@ -114,7 +115,6 @@ SG_INLINE int sg_step(struct sg_state *s, int bits)
 		: (bits & SB_CFGLEAF) ? CC_CFGLEAF : (bits & SB_MODULES) ? CC_MODULES
 		: (bits & SB_WORKTREES) ? CC_WORKTREES : (bits & SB_CMDAGENT) ? CC_CMDAGENT : CC_OTHER;
 	s->i++;
-	s->refused |= refuse;
 	return refuse;
 }
 
