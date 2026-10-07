@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +14,7 @@ import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { bootLinux, sweep } from "../src/vm/linux.js";
-import { type BootVm, bootFor, type Folder, Guest, type ProcessesChange, type VmBackend, VmManager, type VmOptions } from "../src/vm/manager.js";
+import { type BootVm, bootFor, type Folder, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions } from "../src/vm/manager.js";
 import { VIRTIOFSD } from "../src/vm/qemu.js";
 
 let dir: string;
@@ -60,32 +60,28 @@ let agentNet: Duplex | undefined;
 
 // A VM whose control port reaches the guest's own Control on *roots*, with no QEMU:
 // what the agent is asked, and when. Without roots, an agent that never says hello.
-const fakeVm = (roots?: ControlRoots): BootVm => async () => {
+// *powers*: its agent powers the fake VM off at a shutdown, as the guest's ends QEMU.
+const fakeVm = (roots?: ControlRoots, powers = true): BootVm => async () => {
   const [host, guest] = duplexPair();
   agent = guest;
   const [net, guestNet] = duplexPair();
   agentNet = guestNet;
-  if (roots) {
-    const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots);
-    createInterface({ input: guest }).on("line", (line) => control.receive(line));
-    control.hello();
-  }
   let gone = (_said: string) => {};
   const exited = new Promise<string>((resolve) => {
     gone = resolve;
   });
-  return {
-    control: host,
-    net,
-    exited,
-    share: async () => ({ kind: "virtiofs", tag: "r1" }),
-    unshare: async () => {},
-    kill: async () => {
-      host.destroy();
-      net.destroy();
-      gone("");
-    },
+  const kill = async () => {
+    host.destroy();
+    net.destroy();
+    gone("");
   };
+  if (roots) {
+    const machine = powers ? { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill } : undefined;
+    const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots, machine);
+    createInterface({ input: guest }).on("line", (line) => control.receive(line));
+    control.hello();
+  }
+  return { control: host, net, exited, share: async () => ({ kind: "virtiofs", tag: "r1" }), unshare: async () => {}, kill };
 };
 
 // *answer*, or "no answer" once *ms* pass.
@@ -380,7 +376,64 @@ describe("a root torn down", () => {
     expect(await which(manager)).toEqual({ ok: true });
     await manager.teardown("root-1");
     expect(await which(manager)).toEqual({ ok: true });
-    expect(asked).toEqual([["boot"], ["share"], ["setup", "root-1"], ["teardown", "root-1", R1], ["unshare", R1], ["share"], ["setup", "root-1"]]);
+    // Its last root gone, the guest stopped: the next operation boots another.
+    expect(asked).toEqual([["boot"], ["share"], ["setup", "root-1"], ["teardown", "root-1", R1], ["unshare", R1], ["boot"], ["share"], ["setup", "root-1"]]);
+    await manager.stop();
+  });
+
+  it("keeps the share of a root whose processes would not end in the guest, and loses no guest for it", async () => {
+    const asked: unknown[] = [];
+    const roots: ControlRoots = {
+      uid: () => 10_000,
+      setup: async (root) => void asked.push(["setup", root]),
+      // As the agent answers when something of the root waits on a share that stalled.
+      teardown: async (root) => {
+        if (root === "root-1") throw new Error("What this chat ran is waiting on its folder, which does not answer");
+      },
+      perform: async () => ({ ok: true }),
+    };
+    let boots = 0;
+    const boot: BootVm = async (...args) => {
+      boots += 1;
+      const vm = await fakeVm(roots)(...args);
+      return { ...vm, unshare: async (share) => void asked.push(["unshare", share]) };
+    };
+    const manager = new VmManager(options(), boot);
+    const on = (root: string) => manager.perform({ id: `which-${Math.random()}`, root, folder: { path: dir, ...statSync(dir) }, kind: "which", args: {} }, new AbortController().signal);
+    expect(await on("root-1")).toEqual({ ok: true });
+    // Another root keeps the guest running.
+    expect(await on("root-2")).toEqual({ ok: true });
+    await manager.teardown("root-1");
+    expect(await on("root-1")).toEqual({ ok: true });
+    expect(asked).toEqual([["setup", "root-1"], ["setup", "root-2"], ["setup", "root-1"]]);
+    expect(boots).toBe(1);
+    await manager.stop();
+  });
+
+  it("lets the share of a root go when its teardown fails for any other reason, and loses no guest for it", async () => {
+    const asked: unknown[] = [];
+    const roots: ControlRoots = {
+      uid: () => 10_000,
+      setup: async () => {},
+      teardown: async () => {
+        throw new Error("not a share tag: ../r1");
+      },
+      perform: async () => ({ ok: true }),
+    };
+    let boots = 0;
+    const boot: BootVm = async (...args) => {
+      boots += 1;
+      const vm = await fakeVm(roots)(...args);
+      return { ...vm, unshare: async (share) => void asked.push(["unshare", share]) };
+    };
+    const manager = new VmManager(options(), boot);
+    const on = (root: string) => manager.perform({ id: `which-${Math.random()}`, root, folder: { path: dir, ...statSync(dir) }, kind: "which", args: {} }, new AbortController().signal);
+    expect(await on("root-1")).toEqual({ ok: true });
+    // Another root keeps the guest running.
+    expect(await on("root-2")).toEqual({ ok: true });
+    await manager.teardown("root-1");
+    expect(asked).toEqual([["unshare", R1]]);
+    expect(boots).toBe(1);
     await manager.stop();
   });
 
@@ -450,6 +503,8 @@ describe("a root's network, through the guest's net port", () => {
   it("starts a root set up again with nothing met, even by a connection that landed once it was torn down", async () => {
     const manager = new VmManager(options(), fakeVm(roots));
     await run(manager);
+    // Another root keeps the guest running past this one's teardown.
+    await run(manager, "root-2");
     const session = connectH2("http://guest", { createConnection: () => agentNet as Duplex });
     await manager.teardown("root-1");
     // As a connection still in flight at the teardown lands.
@@ -569,44 +624,32 @@ describe("a chat's folder, checked again before it is shared", () => {
   });
 });
 
-// A folder on a FUSE mount whose daemon is stopped: every look into it waits, as on a
-// dead network mount. Bound first, as a chat's folder is; let go by *release*.
-function stalledFolder(): { folder: Folder; release: () => void } {
-  const fuse = join(dir, "fuse");
-  for (const name of ["lower/folder", "upper", "work", "mnt"]) mkdirSync(join(fuse, name), { recursive: true });
-  const mnt = join(fuse, "mnt");
-  const mounted = spawnSync("fuse-overlayfs", ["-o", `lowerdir=${fuse}/lower,upperdir=${fuse}/upper,workdir=${fuse}/work,timeout=0`, mnt]);
-  if (mounted.status !== 0) throw new Error(`fuse-overlayfs: ${mounted.stderr}`);
-  const path = join(mnt, "folder");
-  const { dev, ino } = statSync(path);
-  const pid = Number(spawnSync("pgrep", ["-f", `^fuse-overlayfs .* ${mnt}$`], { encoding: "utf8" }).stdout.trim());
-  process.kill(pid, "SIGSTOP");
-  return {
-    folder: { path, dev, ino },
-    release: () => {
-      process.kill(pid, "SIGCONT");
-      spawnSync("fusermount3", ["-u", mnt]);
-    },
-  };
-}
+describe("a guest's stop", () => {
+  const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
 
-describe("a chat's folder on a mount that does not answer", () => {
-  it("is answered as unavailable within the share's bound, and its root torn down without waiting on it", async () => {
-    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
-    const manager = new VmManager({ ...options(), shareMs: 300 }, fakeVm(roots));
-    const { folder, release } = stalledFolder();
-    try {
-      const begun = performance.now();
-      const answer = manager.perform({ id: "1", root: "root-1", folder, kind: "which", args: {} }, new AbortController().signal);
-      expect(await within(answer, 3_000)).toEqual({
-        error: { type: "unavailable", message: "This computer's sandbox could not add this chat's folder: it did not answer within 0.3 s" },
-      });
-      expect(await within(manager.teardown("root-1"), 1_000)).toBeUndefined();
-      expect(performance.now() - begun).toBeLessThan(2_000);
-      await manager.stop();
-    } finally {
-      release();
-    }
+  it("asks the guest to power off, and settles once it has, asked once however often it is stopped", async () => {
+    const asked: string[] = [];
+    const listening: BootVm = async (...args) => {
+      const vm = await fakeVm(roots)(...args);
+      createInterface({ input: agent as Duplex }).on("line", (line) => asked.push((JSON.parse(line) as { type: string }).type));
+      return vm;
+    };
+    const guest = await Guest.boot(listening, options());
+    const begun = performance.now();
+    await Promise.all([guest.stop(), guest.stop()]);
+    expect(performance.now() - begun).toBeLessThan(500);
+    expect(asked.filter((type) => type === "shutdown")).toHaveLength(1);
+    expect([guest.ended, guest.lost]).toEqual([true, false]);
+  });
+
+  it("ends a VM still running once the power-off's bound has passed", async () => {
+    // An agent with no power to switch off: the shutdown goes unheeded.
+    const guest = await Guest.boot(fakeVm(roots, false), { ...options(), powerOffMs: 300 });
+    const begun = performance.now();
+    await guest.stop();
+    expect(performance.now() - begun).toBeGreaterThanOrEqual(290);
+    expect(performance.now() - begun).toBeLessThan(1_000);
+    expect([guest.ended, guest.lost]).toEqual([true, false]);
   });
 });
 
@@ -636,4 +679,276 @@ describe("the VM's backend", () => {
     });
     expect(existsSync(join(dir, "run"))).toBe(false);
   });
+});
+
+describe("a guest's lifecycle", () => {
+  const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+  const which = (manager: VmManager, root = "root-1", signal = new AbortController().signal) =>
+    manager.perform({ id: `which-${Math.random()}`, root, folder: { path: dir, ...statSync(dir) }, kind: "which", args: {} }, signal);
+  // A fake VM per boot, each telling *events* when it boots and when it powers off or is ended.
+  const counted = (events: string[], answering: ControlRoots = roots): BootVm => async (...args) => {
+    events.push("boot");
+    const vm = await fakeVm(answering)(...args);
+    void vm.exited.then(() => events.push("gone"));
+    return vm;
+  };
+  // One whose agent cannot power off: its stop takes the power-off's bound, 300 ms.
+  const slowToStop = (events: string[]): BootVm => async (...args) => {
+    events.push("boot");
+    const vm = await fakeVm(roots, false)(...args);
+    void vm.exited.then(() => events.push("gone"));
+    return vm;
+  };
+
+  it("stops a guest once its last root's folder is let go, and boots another at once for the next operation", async () => {
+    const events: string[] = [];
+    const manager = new VmManager(options(), counted(events));
+    expect(await which(manager, "root-1")).toEqual({ ok: true });
+    expect(await which(manager, "root-2")).toEqual({ ok: true });
+    await manager.teardown("root-1");
+    // Another root is still set up in it.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(events).toEqual(["boot"]);
+    await manager.teardown("root-2");
+    await until(() => events.includes("gone"));
+    // A guest that stopped is no failure to back off from.
+    const begun = performance.now();
+    expect(await which(manager)).toEqual({ ok: true });
+    expect(performance.now() - begun).toBeLessThan(500);
+    expect(events).toEqual(["boot", "gone", "boot"]);
+    await manager.stop();
+  });
+
+  it("stops a guest booted for an operation cancelled while it booted", async () => {
+    const events: string[] = [];
+    let booted: (() => void) | null = null;
+    const slow: BootVm = async (...args) => {
+      await new Promise<void>((resolve) => {
+        booted = resolve;
+      });
+      return counted(events)(...args);
+    };
+    const manager = new VmManager(options(), slow);
+    const cancel = new AbortController();
+    const answer = which(manager, "root-1", cancel.signal);
+    cancel.abort();
+    expect(await answer).toEqual(CANCELLED);
+    await until(() => booted !== null);
+    booted!();
+    await until(() => events.includes("gone"));
+    expect(events).toEqual(["boot", "gone"]);
+    await manager.stop();
+  });
+
+  it("boots another for an operation that comes while its idle guest powers off, once that one has gone", async () => {
+    const events: string[] = [];
+    const manager = new VmManager({ ...options(), powerOffMs: 300 }, slowToStop(events));
+    expect(await which(manager)).toEqual({ ok: true });
+    await manager.teardown("root-1");
+    expect(await which(manager)).toEqual({ ok: true });
+    expect(events).toEqual(["boot", "gone", "boot"]);
+    await manager.stop();
+  });
+
+  it("stops once, when it is stopped while its idle guest powers off", async () => {
+    const events: string[] = [];
+    const manager = new VmManager({ ...options(), powerOffMs: 300 }, slowToStop(events));
+    expect(await which(manager)).toEqual({ ok: true });
+    await manager.teardown("root-1");
+    const begun = performance.now();
+    await manager.stop();
+    expect(performance.now() - begun).toBeLessThan(1_000);
+    expect(events).toEqual(["boot", "gone"]);
+  });
+
+  it("answers what comes while a boot that failed backs off with that failure, and boots again once it has passed", async () => {
+    let boots = 0;
+    const failing: BootVm = async () => {
+      boots += 1;
+      throw new Error("QEMU exited: the protected-names rule attached 0 of 11 hooks");
+    };
+    const manager = new VmManager(options(), failing);
+    const failed = { error: { type: "unavailable", message: "This computer's sandbox did not start: QEMU exited: the protected-names rule attached 0 of 11 hooks" } };
+    expect(await which(manager)).toEqual(failed);
+    expect(await which(manager)).toEqual(failed);
+    expect(boots).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    expect(await which(manager)).toEqual(failed);
+    expect(boots).toBe(2);
+    await manager.stop();
+  });
+
+  it("waits a second before it boots again after a guest that crashed", async () => {
+    const events: string[] = [];
+    const vms: VmBackend[] = [];
+    const boot: BootVm = async (...args) => {
+      const vm = await counted(events)(...args);
+      vms.push(vm);
+      return vm;
+    };
+    const manager = new VmManager(options(), boot);
+    expect(await which(manager)).toEqual({ ok: true });
+    // Its control channel goes, as a guest's that panics does.
+    vms[0]?.control.destroy();
+    await until(() => events.includes("gone"));
+    const begun = performance.now();
+    expect(await which(manager)).toEqual({ ok: true });
+    expect(performance.now() - begun).toBeGreaterThan(900);
+    await manager.stop();
+  });
+
+  it("answers what waits out a crashed guest's backoff as stopping, at once, when it is stopped", async () => {
+    const events: string[] = [];
+    const vms: VmBackend[] = [];
+    const boot: BootVm = async (...args) => {
+      const vm = await counted(events)(...args);
+      vms.push(vm);
+      return vm;
+    };
+    const manager = new VmManager(options(), boot);
+    expect(await which(manager)).toEqual({ ok: true });
+    vms[0]?.control.destroy();
+    await until(() => events.includes("gone"));
+    const waiting = which(manager);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const stopped = manager.stop();
+    expect(await within(waiting, 500)).toEqual(unavailable("is stopping"));
+    expect(await within(stopped, 500)).toBeUndefined();
+    expect(events).toEqual(["boot", "gone"]);
+  });
+
+  it("boots again on a new sessions disk when the guest could not check its own, and keeps the old one beside it", async () => {
+    const { sessions, console: log } = options();
+    mkdirSync(join(dir, "data"), { recursive: true });
+    mkdirSync(join(dir, "logs"), { recursive: true });
+    writeFileSync(sessions, "the homes");
+    let boots = 0;
+    const boot: BootVm = async (...args) => {
+      boots += 1;
+      if (boots === 1) {
+        writeFileSync(log, "surogate: e2fsck could not check the sessions disk (exit code 8), so the guest stops; the app keeps the disk aside and makes a new one\n");
+        throw new Error("The VM exited");
+      }
+      return fakeVm(roots)(...args);
+    };
+    const manager = new VmManager(options(), boot);
+    expect(await which(manager)).toEqual({ ok: true });
+    expect([boots, existsSync(sessions), readFileSync(`${sessions}.unchecked`, "utf8")]).toEqual([2, false, "the homes"]);
+    await manager.stop();
+  });
+
+  it("keeps the sessions disk where it is when a boot fails before its guest says why, whatever an earlier boot's console said", async () => {
+    const { sessions, console: log } = options();
+    mkdirSync(join(dir, "data"), { recursive: true });
+    mkdirSync(join(dir, "logs"), { recursive: true });
+    writeFileSync(sessions, "the homes");
+    writeFileSync(log, "surogate: e2fsck could not check the sessions disk (exit code 8), so the guest stops; the app keeps the disk aside and makes a new one\n");
+    const manager = new VmManager(options(), async () => {
+      throw new Error("QEMU exited: Could not access KVM kernel module: Permission denied");
+    });
+    expect(await which(manager)).toEqual({
+      error: { type: "unavailable", message: "This computer's sandbox did not start: QEMU exited: Could not access KVM kernel module: Permission denied" },
+    });
+    expect([readFileSync(sessions, "utf8"), existsSync(`${sessions}.unchecked`)]).toEqual(["the homes", false]);
+    await manager.stop();
+  });
+
+  it("stops a guest whose agent does not answer a setup, and boots another for the next operation", async () => {
+    const events: string[] = [];
+    let answer = false;
+    const stuck: ControlRoots = { ...roots, setup: () => (answer ? Promise.resolve() : new Promise<void>(() => {})) };
+    const manager = new VmManager({ ...options(), setupMs: 200 }, counted(events, stuck));
+    const begun = performance.now();
+    expect(await which(manager)).toEqual(SANDBOX_STOPPED);
+    expect(performance.now() - begun).toBeLessThan(1_000);
+    answer = true;
+    expect(await which(manager)).toEqual({ ok: true });
+    expect(events.slice(0, 3)).toEqual(["boot", "gone", "boot"]);
+    await manager.stop();
+  });
+});
+
+describe("a command's timeout", () => {
+  it("is this computer's to keep: at it the command is cancelled in the guest and answered as timed out", async () => {
+    let cancelled = false;
+    // An agent whose run never answers, as one whose backstop lies past the timeout.
+    const roots: ControlRoots = {
+      uid: () => 10_000, setup: async () => {}, teardown: async () => {},
+      perform: (_root, _kind, _args, signal) => new Promise((resolve) => signal.addEventListener("abort", () => {
+        cancelled = true;
+        resolve(CANCELLED);
+      })),
+    };
+    const manager = new VmManager(options(), fakeVm(roots));
+    const begun = performance.now();
+    const folder = { path: dir, ...statSync(dir) };
+    expect(await manager.perform({ id: "1", root: "root-1", folder, kind: "run", args: { command: "sleep 9", workdir: null, timeout: 0.3 } }, new AbortController().signal))
+      .toEqual({ ok: { output: "Command timed out after 0.3 seconds", returncode: 124, timed_out: true } });
+    expect(performance.now() - begun).toBeLessThan(1_000);
+    await until(() => cancelled);
+    await manager.stop();
+  });
+});
+
+describe("this computer's sleep", () => {
+  it("is told the guest at the next look, from this computer's own two clocks, with how long it slept", async () => {
+    const asked: Array<{ type: string; slept?: number }> = [];
+    const listening: BootVm = async (...args) => {
+      const vm = await fakeVm({ uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) })(...args);
+      createInterface({ input: agent as Duplex }).on("line", (line) => asked.push(JSON.parse(line) as { type: string; slept?: number }));
+      return vm;
+    };
+    const guest = await Guest.boot(listening, { ...options(), pingMs: 100 });
+    // The wall clock moves on 90 s, the monotonic one does not: as across a sleep.
+    const now = Date.now.bind(Date);
+    const spied = vi.spyOn(Date, "now").mockImplementation(() => now() + 90_000);
+    try {
+      await until(() => asked.some((message) => message.type === "time"));
+    } finally {
+      spied.mockRestore();
+    }
+    expect(asked.find((message) => message.type === "time")?.slept).toBeGreaterThan(89_000);
+    await guest.stop();
+  });
+});
+
+describe("a guest frozen while the computer slept", () => {
+  // A guest whose agent's answers wait in its port while it is frozen, and come at once when it
+  // thaws; *asked* gets each time request, and *gone* its VM's end.
+  const freezable = (frozen: { now: boolean; held: string[] }, asked: unknown[], gone: string[]): BootVm => async (...args) => {
+    const vm = await fakeVm({ uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) })(...args);
+    void vm.exited.then(() => gone.push("gone"));
+    const written = (agent as Duplex).write.bind(agent);
+    (agent as Duplex).write = ((line: string) => {
+      if (frozen.now) frozen.held.push(line);
+      else written(line);
+      return true;
+    }) as Duplex["write"];
+    createInterface({ input: agent as Duplex }).on("line", (line) => {
+      const message = JSON.parse(line) as { type: string };
+      if (message.type === "time") asked.push(message);
+    });
+    return vm;
+  };
+
+  for (const resumed of [true, false]) {
+    it(resumed ? "is kept at its wake, the pings it missed asleep not held against it, and told the time" : "is lost past three missed pings when nothing says the computer slept", async () => {
+      const frozen = { now: false, held: [] as string[] };
+      const asked: unknown[] = [];
+      const gone: string[] = [];
+      const manager = new VmManager({ ...options(), pingMs: 200 }, freezable(frozen, asked, gone));
+      const folder = { path: dir, ...statSync(dir) };
+      expect(await manager.perform({ id: "1", root: "root-1", folder, kind: "which", args: {} }, new AbortController().signal)).toEqual({ ok: true });
+      frozen.now = true;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      if (resumed) manager.resume();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      frozen.now = false;
+      for (const line of frozen.held.splice(0)) (agent as Duplex).write(line);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(gone).toEqual(resumed ? [] : ["gone"]);
+      if (resumed) expect(asked).toEqual([expect.objectContaining({ type: "time", now: expect.closeTo(Date.now(), -4) })]);
+      await manager.stop();
+    });
+  }
 });

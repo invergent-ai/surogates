@@ -21,6 +21,10 @@ export const ROOT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 // backend has as many places for them (Linux's, its PCIe root ports).
 export const MAX_SHARES = 8;
 
+// A teardown's failure when something of the root waits on its share, which stalled: the
+// share is still in use in the guest, so the host keeps it until the VM stops.
+export const HELD = "What this chat ran is waiting on its folder, which does not answer";
+
 // How the guest mounts a root's folder, as the host's VM backend shared it. Each
 // kind names who maps the folder's owner to the root's guest uid. virtiofs: its
 // server on the host (Linux's virtiofsd), so the guest mounts it by its tag as it is.
@@ -42,6 +46,12 @@ export type ToAgent =
   // Everything of a root ends, and its share's mount goes: the host is letting its folder
   // go, and removes the share from the guest next.
   | { type: "teardown"; id: number; root: string; share: Share }
+  // The computer woke: its clock now, in milliseconds since the epoch, and how long it slept.
+  // Every run's backstop in the guest falls that much later, whatever the guest's clock did.
+  | { type: "time"; id: number; now: number; slept: number }
+  // The host's stop: every root ends, the sessions disk is written out, and the guest
+  // powers off. Answered by the VM's exit.
+  | { type: "shutdown"; id: number }
   | { type: "cancel"; id: number }; // the op of that id
 
 export type FromAgent =

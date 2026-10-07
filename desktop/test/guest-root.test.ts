@@ -55,7 +55,8 @@ beforeEach(async () => {
   const told: string[] = [];
   const own = children;
   lost = told;
-  roots = new Roots({ start: bare, uid: () => 10_000, kill: () => void own[0]?.kill("SIGKILL"), lost: (root) => told.push(root) });
+  // A run's backstop falls at its timeout: the host keeps the timeout in the app, and these tests are the agent's alone.
+  roots = new Roots({ start: bare, uid: () => 10_000, kill: () => void own[0]?.kill("SIGKILL"), lost: (root) => told.push(root), backstopMs: 0 });
   await roots.setup("root-1", base, R1, user);
 });
 
@@ -113,6 +114,7 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
       },
       uid: () => 10_000,
       kill: killLatest(children),
+      backstopMs: 0,
     });
     await stalled.setup("root-5", base, R1, user);
     const ask = (kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string) => stalled.perform("root-5", kind, args, signal, id);
@@ -128,16 +130,52 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
   });
 
   // A runner whose loop blocks on a stalled stat, or that a command stopped, reports no command's end.
-  it("answers a run's timeout while its runner is stopped, at the timeout and its grace", async () => {
+  it("answers a run's timeout while its runner is stopped, at its backstop", async () => {
     const runner = children[0] as ChildProcess;
     const running = op("run", { command: "sleep 5", workdir: null, timeout: 0.5 }, undefined, "op-8");
     await new Promise((resolve) => setTimeout(resolve, 200));
     runner.kill("SIGSTOP");
-    // 0.5 s, then 2 s of grace.
-    expect(await within(running, 3_000)).toEqual({ ok: { output: "Command timed out after 0.5 seconds", returncode: 124, timed_out: true } });
+    // Its timeout, and the backstop's margin, none here.
+    expect(await within(running, 1_500)).toEqual({ ok: { output: "Command timed out after 0.5 seconds", returncode: 124, timed_out: true } });
     // Back, it reports the command's end, which nothing waits for any more.
     runner.kill("SIGCONT");
     expect(await op("which", { name: "sh" }, undefined, "op-9")).toEqual({ ok: true });
+  });
+
+  it("falls a run's backstop later by each time the computer slept, and not while the host is silent, until it speaks", async () => {
+    const backstopped = new Roots({ start: bare, uid: () => 10_000, kill: killLatest(children), backstopMs: 200, hostSilenceMs: 300 });
+    await backstopped.setup("root-6", base, R1, user);
+    const timed = { ok: { output: "Command timed out after 0.3 seconds", returncode: 124, timed_out: true } };
+    const run = (id: string) => backstopped.perform("root-6", "run", { command: "sleep 5", workdir: null, timeout: 0.3 }, new AbortController().signal, id);
+    // Heard all along: its timeout and its margin, 0.5 s, and the second it slept.
+    const heard = setInterval(() => backstopped.heard(), 50);
+    let begun = performance.now();
+    const slept = run("op-20");
+    setTimeout(() => backstopped.woke(1_000), 100);
+    expect(await slept).toEqual(timed);
+    expect(performance.now() - begun).toBeGreaterThan(1_400);
+    clearInterval(heard);
+    // The host silent past 300 ms: due, it waits to hear the host, then gives it the margin again.
+    begun = performance.now();
+    const silent = run("op-21");
+    expect(await within(silent, 1_500)).toBe("no answer");
+    backstopped.heard();
+    expect(await silent).toEqual(timed);
+    expect(performance.now() - begun).toBeGreaterThan(1_650);
+  });
+
+  it("forgets a run's backstop that waited to hear the host once the run ends", async () => {
+    const silent = new Roots({ start: bare, uid: () => 10_000, kill: killLatest(children), backstopMs: 0, hostSilenceMs: 0 });
+    await silent.setup("root-7", base, R1, user);
+    // Who waits to hear the host next.
+    const waiting = () => (silent as unknown as { hearing: Set<unknown> }).hearing.size;
+    const cancel = new AbortController();
+    const running = silent.perform("root-7", "run", { command: "sleep 5", workdir: null, timeout: 0.2 }, cancel.signal, "op-30");
+    // Due while the host is silent: it waits to hear it.
+    await until(() => waiting() === 1);
+    cancel.abort();
+    expect(await running).toEqual(CANCELLED);
+    expect(waiting()).toBe(0);
   });
 
   it("answers a run's cancel at once while its runner is stopped", async () => {
@@ -239,6 +277,87 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     await unmounting.teardown("root-3", { kind: "virtiofs", tag: "r7" });
     await unmounting.teardown("root-4", { kind: "virtiofs", tag: "r8" });
     expect(order).toEqual(["ended", "unmount r7", "unmount r8"]);
+  });
+
+  it("says a root torn down still holds its share while what it ran cannot end, and lets the share's mount go all the same", async () => {
+    const order: string[] = [];
+    const held = new Roots({
+      start: bare,
+      uid: () => 10_000,
+      // Its cgroup never empties, as when a process of it waits on a share that stalled.
+      kill: async () => {
+        throw new Error("the processes of root-5 have not ended");
+      },
+      unmount: async (share) => void order.push(`unmount ${share.tag}`),
+    });
+    await held.setup("root-5", base, R1, user);
+    await expect(held.teardown("root-5", R1)).rejects.toThrow("What this chat ran is waiting on its folder, which does not answer");
+    expect(order).toEqual(["unmount r1"]);
+    // Not set up any more: nothing of it holds anything.
+    await held.teardown("root-5", R1);
+  });
+
+  it("writes out what a root torn down wrote, its share's only if its processes ended, and holds a root whose share does not answer its flush", async () => {
+    const asked: Array<[string, boolean]> = [];
+    let answers = true;
+    const flushing = new Roots({
+      start: bare,
+      uid: () => 10_000,
+      kill: () => void children.at(-1)?.kill("SIGKILL"),
+      flush: async (share, stalled) => {
+        asked.push([share.tag, stalled]);
+        return answers;
+      },
+    });
+    await flushing.setup("root-6", base, R1, user);
+    await flushing.teardown("root-6", R1);
+    await flushing.setup("root-6", base, R1, user);
+    answers = false;
+    await expect(flushing.teardown("root-6", R1)).rejects.toThrow("What this chat ran is waiting on its folder, which does not answer");
+    expect(asked).toEqual([["r1", false], ["r1", false]]);
+    const stuck = new Roots({
+      start: bare,
+      uid: () => 10_000,
+      kill: async () => {
+        throw new Error("the processes of root-7 have not ended");
+      },
+      flush: async (share, stalled) => {
+        asked.push([share.tag, stalled]);
+        return true;
+      },
+    });
+    await stuck.setup("root-7", base, R1, user);
+    await expect(stuck.teardown("root-7", R1)).rejects.toThrow("What this chat ran is waiting on its folder, which does not answer");
+    // Its share stalled: only the sessions disk is written out.
+    expect(asked.at(-1)).toEqual(["r1", true]);
+  });
+
+  it("lets go of a root it held once it is set up again, what it ran having ended: its next teardown writes its share out and gives it back", async () => {
+    const asked: Array<[string, boolean]> = [];
+    const told: string[] = [];
+    let ends = false;
+    const recovering = new Roots({
+      start: bare,
+      uid: () => 10_000,
+      // What it ran would not end, as while its share stalled, until it does.
+      kill: async () => {
+        if (!ends) throw new Error("the processes of root-10 have not ended");
+        children.at(-1)?.kill("SIGKILL");
+      },
+      lost: (root) => told.push(root),
+      flush: async (share, stalled) => {
+        asked.push([share.tag, stalled]);
+        return true;
+      },
+    });
+    await recovering.setup("root-10", base, R1, user);
+    // Its runner goes while what it ran cannot end: the root is lost, and held.
+    children.at(-1)?.kill("SIGKILL");
+    await until(() => told.includes("root-10"));
+    ends = true;
+    await recovering.setup("root-10", base, R1, user);
+    await recovering.teardown("root-10", R1);
+    expect(asked).toEqual([["r1", false]]);
   });
 
   it("tells the host of a lost root once everything of it has ended, and of one that cannot be ended once its runner is stopped", async () => {

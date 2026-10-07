@@ -47,6 +47,11 @@ export class VmExecutor implements Executor {
     return this.files.guards();
   }
 
+  // The chats with a background process alive in the guest: the quit counts them as working.
+  live(): string[] {
+    return this.files.liveRoots();
+  }
+
   stop(): Promise<void> {
     this.unheard();
     this.unasked();

@@ -188,4 +188,31 @@ describe("the agent's control port", () => {
     ]);
     expect(calls).toEqual([["teardown", "root-1", share]]);
   });
+
+  it("powers the guest off at the host's shutdown, and answers nothing: the VM's exit is the answer", async () => {
+    const sent: FromAgent[] = [];
+    let powered = 0;
+    const agent = new Control((message) => sent.push(message), fakeRoots().roots, { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: async () => void (powered += 1) });
+    agent.receive(JSON.stringify({ type: "shutdown", id: 1 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect([powered, sent]).toEqual([1, []]);
+  });
+
+  it("sets the guest's clock to the host's time, moves its runs' backstops on by the time it slept, and refuses a time that is not one", async () => {
+    const sent: FromAgent[] = [];
+    const set: number[] = [];
+    const slept: number[] = [];
+    let heard = 0;
+    const machine = { setClock: async (now: number) => void set.push(now), woke: (ms: number) => void slept.push(ms), heard: () => void (heard += 1), powerOff: async () => {} };
+    const agent = new Control((message) => sent.push(message), fakeRoots().roots, machine);
+    const times = [[1, 1_791_000_000_000, 90_000], [2, "soon", 0], [3, -1, 0], [4, 1_791_000_000_000, -5], [5, 1_791_000_000_000, "long"]] as const;
+    for (const [id, now, asleep] of times) agent.receive(JSON.stringify({ type: "time", id, now, slept: asleep }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent).toEqual([
+      ...[2, 3, 4, 5].map((id) => ({ type: "failed", id, message: "The agent cannot take this time request" })),
+      { type: "done", id: 1 },
+    ]);
+    // Each run's backstop is told how long the computer slept; every line it hears is the host's word.
+    expect([set, slept, heard]).toEqual([[1_791_000_000_000], [90_000], 5]);
+  });
 });
