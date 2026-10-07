@@ -34,6 +34,7 @@ import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } 
 import { ANSWER_TIMEOUT_MS, PageProjects } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
+import { segments } from "./pages/ui.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
@@ -1144,11 +1145,13 @@ function projectFields(value: unknown, editing: boolean): ProjectFields {
     : named;
 }
 
+// The archive asks under the project's name as 4c's prompts show text: a control, bidi or invisible
+// character as its code point (U+202E), so none reorders or hides the question around it.
 async function confirmArchive(name: string): Promise<boolean> {
   if (!main) return false;
   const { response } = await dialog.showMessageBox(main.window, {
     type: "warning",
-    message: `Archive ${name}?`,
+    message: `Archive ${segments(name).map((run) => run.text).join("")}?`,
     detail: "It leaves your projects, with its conversation and its threads. Its files and its memory are kept.",
     buttons: ["Archive", "Cancel"],
     defaultId: 1,

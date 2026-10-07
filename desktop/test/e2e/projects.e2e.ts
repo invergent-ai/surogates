@@ -510,6 +510,18 @@ describe("the project dialog", () => {
     });
   }
 
+  it("names the project in the archive box with its control and invisible characters as their code points", async () => {
+    agent.projects!.projects.find((project) => project.id === REPORT)!.name = "Q3‮ report​";
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click("#project-settings");
+    const dialog = await projectDialog(shell);
+    await shell.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    await dialog.click("#archive");
+    await expect.poll(() => shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string }> }).asked.at(-1)?.message))
+      .toBe("Archive Q3U+202E reportU+200B?");
+  });
+
   it("goes with the account whose project it shows", async () => {
     const { shell, page, client } = await signedIn();
     await opened(page, client, REPORT);

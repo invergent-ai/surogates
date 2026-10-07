@@ -161,7 +161,7 @@ export class FakeAgent {
       return;
     }
     const served =this.projects === null ? "" : `<script>(${serveProjects.toString()})(${JSON.stringify(this.projects).replace(/</g, "\\u003c")}, ${this.registerAfterMs})</script>`;
-    response.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><title>Fake agent</title><p>The web client</p>${served}`);
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(`<!doctype html><title>Fake agent</title><p>The web client</p>${served}`);
   }
 
   /** Hold *route*: it answers only once the returned release is called. */
