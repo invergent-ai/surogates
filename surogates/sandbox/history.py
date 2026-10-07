@@ -13,9 +13,12 @@ pod opens.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -331,9 +334,31 @@ class History:
         return target
 
     def _real(self, path: str) -> str | None:
-        """The blob id of the real file at *path*; None when there is none."""
+        """The blob id of the real file at *path*, as the bucket has it now; None when there is none.
+
+        The real files are a geesefs mount that other pods and the Library
+        change.  geesefs is told to check the path with the bucket again,
+        and the file is opened anew and read past the page cache, so a save
+        or another landing since this pod opened is seen.  History keeps a
+        file's bytes as they are (``info/attributes``), so its blob id is
+        the git hash of those bytes.
+        """
         target = self._inside(path)
-        return self._main("hash-object", "--", str(target)) if target.is_file() else None
+        _invalidate(target if os.path.lexists(target) else target.parent)
+        try:
+            # Non-blocking, so a FIFO answers at once and is no file.
+            fd = os.open(target, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        with open(fd, "rb") as file:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                return None
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            blob = hashlib.sha1(b"blob %d\0" % info.st_size)
+            while chunk := file.read(1 << 20):
+                blob.update(chunk)
+        return blob.hexdigest()
 
     def _put(self, path: str, blob: str | None) -> list[str]:
         """Make the real file at *path* blob *blob*, or remove it for None; the folders it made, deepest first."""
@@ -410,6 +435,12 @@ def _environ(env: dict[str, str]) -> dict[str, str]:
     """The pod's environment for a git with *env*: none of the pod's own git variables reach it."""
     inherited = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
     return {**inherited, **env, **_HERMETIC}
+
+
+def _invalidate(path: Path) -> None:
+    """Have geesefs check *path* with the bucket again, past its cache; nothing off geesefs."""
+    with contextlib.suppress(OSError):
+        os.setxattr(path, ".invalidate", b"")
 
 
 def _pattern(name: str) -> str:

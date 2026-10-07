@@ -492,6 +492,15 @@ class K8sSandbox:
             client.V1EnvVar(name="S3_REGION", value=s3_region),
             client.V1EnvVar(name="S3_MOUNT_POINT", value=fuse_path),
         ]
+        if fuse_path != "/workspace":
+            # A thread's real files, which other pods and the Library
+            # change: each look asks the bucket, and no disk cache keeps an
+            # old version.  A landing's check must see a save made since.
+            s3fs_env += [
+                client.V1EnvVar(name="GEESEFS_STAT_CACHE_TTL", value="0s"),
+                client.V1EnvVar(name="GEESEFS_TYPE_CACHE_TTL", value="0s"),
+                client.V1EnvVar(name="GEESEFS_CACHE_DIR", value=""),
+            ]
 
         s3fs_container = client.V1Container(
             name="s3fs",

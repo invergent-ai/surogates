@@ -574,3 +574,21 @@ def test_a_turn_names_every_excluded_file_and_repository_it_made(tmp_path, proje
         a_repository(history.copy / f"clone {n:02}", committed=False)
     turn = history.commit_turn(author=THREAD_A, trailers=trailers("turn"))
     assert (len(turn["excluded"]), len(turn["repositories"])) == (12, 12)
+
+
+def test_a_landings_check_reads_each_real_file_as_the_bucket_has_it(tmp_path, project, monkeypatch):
+    history = opened(tmp_path, project)
+    (history.copy / "Report.docx").write_bytes(b"report v2")
+    landed(history)
+    # A save between two landings of one pod is seen.
+    (project / "Report.docx").write_bytes(b"saved by you")
+    (history.copy / "Report.docx").write_bytes(b"report v3")
+    asked, dropped = [], []
+    monkeypatch.setattr(os, "setxattr", lambda path, name, value: asked.append((str(path), name)))
+    monkeypatch.setattr(os, "posix_fadvise", lambda fd, offset, length, advice: dropped.append(advice))
+    out = landed(history)
+    assert out["overlapped"] == [{"path": "Report.docx", "reason": "changed"}]
+    assert (project / "Report.docx").read_bytes() == b"saved by you"
+    # geesefs checks the file with the bucket again, and the page cache does not answer for it.
+    assert (str(project / "Report.docx"), ".invalidate") in asked
+    assert dropped and set(dropped) == {os.POSIX_FADV_DONTNEED}

@@ -318,6 +318,36 @@ class TestExecuteHttp:
             await sandbox.aclose()
 
 
+_NO_CACHE = ("GEESEFS_STAT_CACHE_TTL", "GEESEFS_TYPE_CACHE_TTL", "GEESEFS_CACHE_DIR")
+
+
+@pytest.mark.parametrize(("env", "flags", "absent"), [
+    # A thread's pod: every look at /project asks the bucket, and no disk cache keeps an old version.
+    ({"GEESEFS_STAT_CACHE_TTL": "0s", "GEESEFS_TYPE_CACHE_TTL": "0s", "GEESEFS_CACHE_DIR": ""},
+     ["--stat-cache-ttl 0s", "--type-cache-ttl 0s"], ["--cache"]),
+    # Any other pod: geesefs's own TTLs, and the disk cache.
+    ({"GEESEFS_CACHE_DIR": "{cache}"}, ["--cache {cache}"], ["--stat-cache-ttl", "--type-cache-ttl"]),
+])
+def test_the_sidecar_mounts_with_the_caches_its_pod_asks_for(tmp_path, env, flags, absent):
+    from pathlib import Path
+    import subprocess
+
+    bin_dir, args = tmp_path / "bin", tmp_path / "geesefs-args"
+    bin_dir.mkdir()
+    (bin_dir / "geesefs").write_text(f'#!/bin/sh\necho "$@" > {args}\n')
+    (bin_dir / "geesefs").chmod(0o755)
+    entrypoint = Path(__file__).parent.parent / "images" / "s3fs" / "entrypoint.sh"
+    env = {k: v.format(cache=tmp_path / "cache") for k, v in env.items()}
+    subprocess.run(
+        ["bash", str(entrypoint)], check=True, capture_output=True, timeout=30,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "S3_BUCKET_PATH": "bucket:/w", "S3_ENDPOINT": "http://s3",
+             "S3_REGION": "eu-central-1", "S3_MOUNT_POINT": "/project", **env},
+    )
+    called = args.read_text()
+    assert all(f.format(cache=tmp_path / "cache") in called for f in flags), called
+    assert not any(a in called for a in absent), called
+
+
 class TestThreadPodLayout:
     """A thread's pod mounts the project's real files at /project and keeps its copy at /workspace."""
 
@@ -345,6 +375,15 @@ class TestThreadPodLayout:
         assert s3fs["/project"] == "workspace" and "/workspace" not in s3fs
         assert env["S3_MOUNT_POINT"] == "/project"
         assert volumes["copy"].empty_dir is not None
+
+    async def test_a_thread_pod_reads_its_real_files_from_the_bucket_never_from_a_cache(self, sandbox):
+        _, _, env, _ = await self.manifest(sandbox, "/project")
+        assert {k: env.get(k) for k in _NO_CACHE} == {
+            "GEESEFS_STAT_CACHE_TTL": "0s", "GEESEFS_TYPE_CACHE_TTL": "0s", "GEESEFS_CACHE_DIR": "",
+        }
+        # Other pods keep today's caches.
+        _, _, env, _ = await self.manifest(sandbox, "/workspace")
+        assert not set(_NO_CACHE) & set(env)
 
     async def test_any_other_pod_mounts_the_files_at_workspace(self, sandbox):
         main, s3fs, env, volumes = await self.manifest(sandbox, "/workspace")
