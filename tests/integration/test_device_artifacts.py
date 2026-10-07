@@ -11,6 +11,7 @@ from surogates.artifacts.models import ArtifactKind
 from surogates.artifacts.store import ArtifactStore
 from surogates.devices.operations import OPEN_REQUESTS_PER_SESSION
 from surogates.devices.workspace import DeviceWorkspaceIO
+from surogates.session.provisioning import create_child_session
 from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.fake_laptop import InProcessRunner
 
@@ -38,6 +39,17 @@ async def test_a_local_folder_chats_artifacts_are_read_from_its_folder(api, chat
     assert opened.status_code == 200, opened.text
     assert opened.json()["spec"] == {"content": "# Notes"}
     assert "read" in chat.laptop.ran
+
+
+async def test_a_sub_agents_artifacts_are_its_root_chats(api, chat):
+    artifact_id = await made_in(chat.folder, chat.id)
+    store = api.app.state.session_store
+    child = await create_child_session(store=store, parent=await store.get_session(UUID(chat.id)), channel="worker")
+    listed = await api.client.get(f"/v1/sessions/{child.id}/artifacts", headers=api.auth())
+    assert listed.status_code == 200, listed.text
+    assert [a["artifact_id"] for a in listed.json()["artifacts"]] == [artifact_id]
+    opened = await api.client.get(f"/v1/sessions/{child.id}/artifacts/{artifact_id}", headers=api.auth())
+    assert opened.status_code == 200, opened.text
 
 
 async def test_a_page_opens_more_artifact_cards_at_once_than_a_chat_may_have_changes_waiting(api, chat):

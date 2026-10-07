@@ -63,6 +63,10 @@ logger = logging.getLogger(__name__)
 CLOUD_ARTIFACTS = "_artifacts"
 FOLDER_ARTIFACTS = f"{WORKSPACE_STORAGE_DIR}/artifacts"
 _INDEX = "index.json"
+# How much of a local folder's artifact file is read: anything on its computer
+# may write there, and no file the store writes is longer than an artifact,
+# so one longer than that is cut, and read as corrupted.
+_FOLDER_READ_BYTES = MAX_ARTIFACT_BYTES + 1
 
 
 class ArtifactLimitError(Exception):
@@ -90,7 +94,8 @@ class ArtifactStore:
         if not self._on_device:
             self._folder = CLOUD_ARTIFACTS
         elif root:
-            self._folder = f"{FOLDER_ARTIFACTS}/{root}"
+            # A chat's id: nothing else may name a folder under the harness's.
+            self._folder = f"{FOLDER_ARTIFACTS}/{UUID(root)}"
         else:
             raise ValueError("A local folder keeps its artifacts per root chat: name the chat's root")
 
@@ -109,7 +114,11 @@ class ArtifactStore:
     async def _read(self, path: str) -> str:
         """The text of *path* under the artifacts folder.  Raises ``FileNotFoundError``."""
         key = await self._files.resolve(f"{self._folder}/{path}")
-        return (await self._files.read(key)).decode("utf-8")
+        if not self._on_device:
+            return (await self._files.read(key)).decode("utf-8")
+        data = await self._files.read(key, max_bytes=_FOLDER_READ_BYTES)
+        # Cut: corrupted, as an empty file is.
+        return "" if len(data) >= _FOLDER_READ_BYTES else data.decode("utf-8")
 
     async def _write(self, path: str, text: str) -> None:
         await keep_out_of_git(self._files)
@@ -147,7 +156,19 @@ class ArtifactStore:
                 self._session_id,
             )
             return []
-        return parsed if isinstance(parsed, list) else []
+        if not isinstance(parsed, list):
+            return []
+        if not self._on_device:
+            return parsed
+        # A local folder's index is anyone's on its computer to write: an
+        # entry that is no artifact's is passed over, not the chat's artifacts.
+        kept = [entry for entry in parsed if _is_meta(entry)]
+        if len(kept) < len(parsed):
+            logger.warning(
+                "artifact index for session %s has %d entries that are not artifacts — passing them over",
+                self._session_id, len(parsed) - len(kept),
+            )
+        return kept
 
     async def _write_index(self, entries: list[dict]) -> None:
         await self._write(_INDEX, json.dumps(entries, default=str))
@@ -293,6 +314,14 @@ class ArtifactStore:
                 f"{artifact_id} v{version}",
             ) from exc
         return json.loads(raw)
+
+
+def _is_meta(entry: Any) -> bool:
+    try:
+        ArtifactMeta.model_validate(entry)
+    except ValidationError:
+        return False
+    return True
 
 
 def artifact_event(meta: ArtifactMeta) -> dict[str, Any]:

@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
 import surogates.artifacts.store as store_module
-from surogates.artifacts.models import ArtifactKind
+from surogates.artifacts.models import MAX_ARTIFACT_BYTES, ArtifactKind
 from surogates.artifacts.store import ArtifactLimitError, ArtifactNotFoundError, ArtifactStore, FolderArtifacts
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.session.events import EventType
 from surogates.tools.builtin.artifact import _create_artifact_handler
+from surogates.tools.builtin.artifact import register as register_artifact_tool
+from surogates.tools.registry import ToolRegistry
 from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.fake_laptop import InProcessRunner
 
@@ -148,3 +152,91 @@ async def test_a_failed_revision_on_a_local_folder_hands_back_what_the_folder_ho
     ))
     assert failed["success"] is False
     assert failed["current"] == {"kind": "markdown", "spec": {"content": "a"}, "version": 1}
+
+
+async def test_a_folders_artifacts_are_kept_under_a_root_that_names_a_chat(files):
+    with pytest.raises(ValueError):
+        ArtifactStore(files, session_id=uuid4(), root="../../src")
+
+
+async def test_an_index_entry_that_is_not_an_artifact_is_passed_over_with_a_warning(files, folder, caplog):
+    root = str(uuid4())
+    store = ArtifactStore(files, session_id=uuid4(), root=root)
+    made = await store.create(name="notes", kind=ArtifactKind.MARKDOWN, spec={"content": "x"})
+    index = folder / ".surogates-results" / "artifacts" / root / "index.json"
+    # Anything on the computer may write it: the chat's artifacts go on.
+    index.write_text(json.dumps(["planted", {"artifact_id": "not one"}, *json.loads(index.read_text())]))
+    with caplog.at_level(logging.WARNING, logger="surogates.artifacts.store"):
+        assert [m.artifact_id for m in await store.list()] == [made.artifact_id]
+    assert "index" in caplog.text
+    await store.update(made.artifact_id, name="notes", kind=ArtifactKind.MARKDOWN, spec={"content": "y"})
+    assert [(m.artifact_id, m.version) for m in await store.list()] == [(made.artifact_id, 2)]
+
+
+class Reads(InProcessRunner):
+    """The computer, recording how much of each file a read asked for."""
+
+    def __init__(self, folder) -> None:
+        super().__init__(LocalWorkspaceIO(workspace_path=str(folder)))
+        self.asked: list = []
+
+    async def run(self, kind, args, payload=None):
+        if kind == "read":
+            self.asked.append(args["max_bytes"])
+        return await super().run(kind, args, payload)
+
+
+async def test_a_folders_artifact_files_are_read_no_further_than_an_artifact_and_a_longer_one_is_corrupted(folder):
+    runner, root = Reads(folder), str(uuid4())
+    store = ArtifactStore(DeviceWorkspaceIO(runner, root=str(folder)), session_id=uuid4(), root=root)
+    made = await store.create(name="notes", kind=ArtifactKind.MARKDOWN, spec={"content": "x"})
+    base = folder / ".surogates-results" / "artifacts" / root
+    # Still JSON, read whole, but longer than anything the store writes.
+    meta = base / str(made.artifact_id) / "meta.json"
+    meta.write_text(meta.read_text() + " " * MAX_ARTIFACT_BYTES)
+    with pytest.raises(ValueError):
+        await store.get_meta(made.artifact_id)
+    index = base / "index.json"
+    index.write_text(index.read_text() + " " * MAX_ARTIFACT_BYTES)
+    assert await store.list() == []
+    assert set(runner.asked) == {MAX_ARTIFACT_BYTES + 1}
+
+
+async def test_what_the_model_sees_when_its_computer_refuses_an_artifact_or_is_away(folder):
+    registry = ToolRegistry()
+    register_artifact_tool(registry)
+    args = {"name": "notes", "kind": "markdown", "spec": {"content": "# Notes"}}
+
+    class Revoked(InProcessRunner):
+        async def run(self, kind, args, payload=None):
+            if kind == "write":
+                return {"error": {"type": "revoked", "message": "Local access to this computer was revoked"}}
+            return await super().run(kind, args, payload)
+
+    def call(runner) -> dict:
+        return {
+            "workspace_io": DeviceWorkspaceIO(runner, root=str(folder)), "session_store": Events(),
+            "session_id": str(uuid4()), "task_id": str(uuid4()),
+        }
+
+    refused = await registry.dispatch("create_artifact", args, **call(Revoked(LocalWorkspaceIO(workspace_path=str(folder)))))
+    assert json.loads(refused) == {"error": "Tool execution failed: Local access to this computer was revoked"}
+
+    class Away(InProcessRunner):
+        """Offline: inside a tool call, its operations wait for it."""
+
+        def __init__(self, folder) -> None:
+            super().__init__(LocalWorkspaceIO(workspace_path=str(folder)))
+            self.back = asyncio.Event()
+
+        async def run(self, kind, args, payload=None):
+            await self.back.wait()
+            return await super().run(kind, args, payload)
+
+    away = Away(folder)
+    waiting = asyncio.ensure_future(registry.dispatch("create_artifact", args, **call(away)))
+    await asyncio.sleep(0.2)
+    # No error, and no deadline of its own: the call waits for its computer.
+    assert not waiting.done()
+    away.back.set()
+    assert json.loads(await asyncio.wait_for(waiting, 5.0))["success"] is True

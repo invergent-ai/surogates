@@ -1,8 +1,11 @@
 """Builtin ``create_artifact`` tool.
 
-Routes through :class:`HarnessAPIClient` because artifacts live in the
-session workspace, which is a tenant-gated resource the worker accesses via
-the API server.  Same wiring as the ``memory`` and ``skills`` tools.
+A cloud session's artifacts are made through :class:`HarnessAPIClient`,
+because they live in the session workspace, which is a tenant-gated resource
+the worker accesses via the API server: the same wiring as the ``memory`` and
+``skills`` tools.  A chat on a local folder makes them in the folder, through
+:class:`FolderArtifacts` under the tool call that makes them
+(:func:`artifact_client`).
 
 Handler-side validation: we parse the spec locally with
 :class:`ArtifactSpec` before the HTTP round-trip.  Catching malformed
