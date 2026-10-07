@@ -18,6 +18,9 @@ it("fetches every package of the kernel pin from Launchpad by its hash, the kern
     [`linux-hwe-${series}-tools-${abi}`, `linux-image-${kernel}`, `linux-modules-${kernel}`, `linux-tools-${kernel}`],
   );
   // apt would take whatever version it finds now: no stage installs a kernel package from it.
-  const fromApt = [...STAGES].filter(([, body]) => /apt-get install[^&]*\blinux-/.test(body)).map(([name]) => name);
+  const fromApt = [...STAGES].filter(([, body]) => /\bapt(-get)? install[^&]*\blinux-/.test(body)).map(([name]) => name);
   expect(fromApt).toEqual([]);
+  // Nor is a package fetched any other way: each one is an ADD the build checks by its hash.
+  const unpinned = DOCKERFILE.replace(/^ADD --checksum=sha256:[0-9a-f]{64} \\\n\s+\S+ \S+$/gm, "");
+  expect([...unpinned.matchAll(/https?:\/\/\S+/g)].map(([url]) => url).filter((url) => /launchpad\.net|\.deb\b/.test(url))).toEqual([]);
 });
