@@ -23,10 +23,11 @@ __all__ = [
 # caller's number when the agent remembers callers.
 MANAGED_CHANNELS: frozenset[str] = frozenset({"slack", "telegram", "whatsapp", "voice"})
 
-# Memory-boundary namespace for evaluation sessions. Outside the managed
-# channels this is the ONLY prefix honoured: an evaluation needs a scratch
-# partition, and letting a caller name any boundary would let it read or
-# overwrite the memory of a private conversation on the same agent.
+# Memory-boundary namespace for evaluation sessions, which need a scratch
+# partition. Outside the managed channels only this and
+# ``PROJECT_BOUNDARY_PREFIX`` are honoured, and the server stamps both:
+# letting a caller name any boundary would let it read or overwrite the
+# memory of a private conversation on the same agent.
 EVAL_BOUNDARY_PREFIX = "eval:"
 
 # A project's sessions share one partition, ``workstream:<project id>``: the

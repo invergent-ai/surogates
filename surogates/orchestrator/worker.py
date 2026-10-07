@@ -1206,7 +1206,8 @@ def local_memory_dir_for_session(
     Mirrors the namespace :func:`_build_r2_memory_keys` uses for R2 so the
     disk fallback (test / no-cache contexts) reads and writes the same
     partition: a boundary-scoped ``{asset_root}/boundaries/{boundary}`` for
-    channel sessions, else the per-user (or org-shared) layout.
+    channel, evaluation and project sessions, else the per-user (or
+    org-shared) layout.
     """
     from pathlib import Path
 

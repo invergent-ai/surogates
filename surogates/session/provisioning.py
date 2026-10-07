@@ -182,7 +182,10 @@ async def create_child_session(
     for field in _WORKSPACE_SHARING_FIELDS:
         merged_config[field] = parent_config[field]
 
+    # A boundary comes from the parent only: one named in *config* would
+    # reach another conversation's or project's memory.
     for field in _BOUNDARY_SHARING_FIELDS:
+        merged_config.pop(field, None)
         if field in parent_config:
             merged_config[field] = parent_config[field]
     # The user's package, as the parent's last turn pinned it: a helper's
@@ -240,6 +243,7 @@ async def create_thread_session(
     for field in _WORKSPACE_SHARING_FIELDS:
         merged_config[field] = parent_config[field]
     for field in _BOUNDARY_SHARING_FIELDS:
+        merged_config.pop(field, None)
         if field in parent_config:
             merged_config[field] = parent_config[field]
     # The user's package, as the master's last message pinned it: it bounds

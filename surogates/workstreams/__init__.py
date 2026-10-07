@@ -12,6 +12,8 @@ import re
 from typing import Any
 from uuid import UUID
 
+from surogates.channels.memory_boundary import PROJECT_BOUNDARY_PREFIX
+
 #: Config keys only the server may write.
 SERVER_OWNED_KEYS = ("workstream_id", "workstream_role", "workstream_tier")
 
@@ -46,7 +48,7 @@ def master_config(
     workstream_id: UUID, *, name: str, goal: str | None, instructions: str,
 ) -> dict[str, Any]:
     """The config a project's master session is created with."""
-    boundary = f"workstream:{workstream_id}"
+    boundary = f"{PROJECT_BOUNDARY_PREFIX}{workstream_id}"
     return {
         "coordinator": True,
         "strict_coordinator": True,

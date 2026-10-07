@@ -104,6 +104,20 @@ async def test_one_projects_memory_is_not_anothers(api):
     assert await memory_listed(api, other) == []
 
 
+async def test_a_chat_cannot_name_a_projects_memory(api):
+    master = await master_of(api, await create(api))
+    await remember(api, "Use the Q3 template.", master)
+    boundary = master.config["memory_boundary"]
+    chat = await api.client.post("/v1/sessions", json={"config": {
+        "memory_boundary": boundary, "workspace_boundary": boundary,
+    }}, headers=api.auth())
+    assert chat.status_code == 201, chat.text
+    assert not {"memory_boundary", "workspace_boundary"} & set(chat.json()["config"])
+    plain = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
+    assert "Use the Q3 template." not in await prompt_of(api, plain)
+    assert await memory_listed(api, plain) == []
+
+
 async def test_a_thread_starts_with_the_projects_name_and_instructions(api):
     project = await create(api, goal="The board's Q3 report", instructions="Use euros.")
     thread = await start(api, await master_of(api, project))
