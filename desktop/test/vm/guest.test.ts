@@ -360,9 +360,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
   it("gives a command the cloud's environment and the user's names, and nothing of how its root was made", async () => {
     expect(await run("env | cut -d= -f1 | sort | tr '\\n' ' '")).toEqual({
       ok: {
-        output: "GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 HOME LANG LOGNAME NPM_CONFIG_PREFIX PATH PIP_USER PWD PYTHONDONTWRITEBYTECODE " +
-          "PYTHONUNBUFFERED PYTHONUSERBASE SHLVL " +
-          "USER UV_CACHE_DIR XDG_CACHE_HOME _ ",
+        output: "ALL_PROXY GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 HOME HTTPS_PROXY HTTP_PROXY LANG LOGNAME NO_PROXY NPM_CONFIG_PREFIX PATH PIP_USER PWD " +
+          "PYTHONDONTWRITEBYTECODE PYTHONUNBUFFERED PYTHONUSERBASE SHLVL " +
+          "USER UV_CACHE_DIR XDG_CACHE_HOME _ all_proxy http_proxy https_proxy no_proxy ",
         returncode: 0,
         timed_out: false,
       },
@@ -509,6 +509,25 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       ok: { output: "403 own\n\nThis computer does not let a chat reach its own network services (127.0.0.1:7)" },
     });
     expect(await run("true")).toEqual({ ok: { output: "", returncode: 0, timed_out: false } });
+  });
+
+  it("has its runner's proxies take a command's connections, past its own loopback, to the host proxy, which refuses this computer's own", async () => {
+    // The HTTP status, then CONNECT's, as curl got them: 000 for none.
+    const status = (flags: string, url: string) => `curl -sS --max-time 10 ${flags} -o /dev/null -w '%{http_code} %{http_connect}\\n' ${url} 2>/dev/null`;
+    expect(await run([
+      status("--noproxy ''", "http://127.0.0.1:9/"),
+      status("--noproxy '' -p", "http://127.0.0.1:9/"),
+      status("--noproxy '' --socks5-hostname 127.0.0.1:1080", "http://localhost:9/"),
+      // Its own loopback is direct, so a session's own servers answer as they are: here, none.
+      status("", "http://127.0.0.1:9/"),
+    ].join("; "))).toEqual({
+      ok: {
+        output: "403 000\n000 403\n000 000\n000 000\n\nThis computer does not let a chat reach its own network services (127.0.0.1:9, localhost:9)",
+        // The last curl's: it could not connect.
+        returncode: 7,
+        timed_out: false,
+      },
+    });
   });
 
   it("keeps its guest, and another root's process, through a start whose command is longer than a control line", async () => {

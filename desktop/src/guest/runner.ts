@@ -5,19 +5,22 @@
 // {"ready":true}; it ends the runner by ending its stdin, and the namespaces go
 // with it. In the guest, enter-root gives it the root's cgroup, delegated to it
 // (--cgroups <folder>): each command gets a cgroup of its own there, which ends it
-// with everything it started. Until commands move into the VM, a tool host runs it
-// the same way, wrapped once in srt, as the root's session runner, and finds a
-// command's processes by its marker.
+// with everything it started; and the root's socket to the host proxy (--tunnel
+// <socket>), for the proxies it listens on before any command runs (listeners.ts).
+// Until commands move into the VM, a tool host runs it the same way, wrapped once in
+// srt, as the root's session runner, and finds a command's processes by its marker.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
+import { parseArgs } from "node:util";
 
 import { Failure } from "../files/answers.js";
 import { findOnPath } from "../files/operations.js";
 import { unenterable, workdir } from "./command.js";
+import { listen } from "./listeners.js";
 import { KILL_GRACE_MS } from "./processes.js";
 import type { FromRunner, SpawnRequest, ToRunner } from "./protocol.js";
 
@@ -25,7 +28,8 @@ import type { FromRunner, SpawnRequest, ToRunner } from "./protocol.js";
 export const MARKER = "SUROGATE_PROCESS";
 // The root's cgroup in the guest, or null under srt. A run's cgroup is in its run
 // folder, a background process's in its proc folder, where its memory is counted.
-const CGROUPS = process.argv[2] === "--cgroups" ? (process.argv[3] ?? null) : null;
+// The root's socket to the host proxy in the guest; under srt, srt's own proxy.
+const { cgroups: CGROUPS = null, tunnel: TUNNEL = null } = parseArgs({ options: { cgroups: { type: "string" }, tunnel: { type: "string" } } }).values;
 // The cgroups of commands that have ended, each removed once nothing of it runs.
 const ended = new Set<string>();
 // A process can fork while a sweep goes by: a SIGKILL sweeps again until it finds none.
@@ -284,4 +288,6 @@ process.stdin.on("end", () => {
   for (const [id, child] of children) signalAll(id, child, "SIGKILL");
   process.exit(0);
 });
+// Its proxies listen before any command runs: one that cannot ends the runner, and the root is not set up.
+if (TUNNEL) await listen(TUNNEL);
 process.stdout.write('{"ready":true}\n');

@@ -583,7 +583,7 @@ describe("a root's inputs", () => {
 });
 
 describe("a root's environment", () => {
-  it("is the cloud's layout under the root's own HOME, with the user's names", () => {
+  it("is the cloud's layout under the root's own HOME, with the user's names and the runner's proxies", () => {
     const layout = [
       "PATH=/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:/usr/bin:/bin",
       "PYTHONUSERBASE=/home/sandbox/.local",
@@ -594,6 +594,14 @@ describe("a root's environment", () => {
       PATH: "/home/ana/.npm-global/bin:/home/ana/.local/bin:/opt/venv/bin:/usr/bin:/bin",
       PYTHONUSERBASE: "/home/ana/.local",
       PIP_USER: "1",
+      HTTP_PROXY: "http://127.0.0.1:3128",
+      HTTPS_PROXY: "http://127.0.0.1:3128",
+      ALL_PROXY: "http://127.0.0.1:3128",
+      http_proxy: "http://127.0.0.1:3128",
+      https_proxy: "http://127.0.0.1:3128",
+      all_proxy: "http://127.0.0.1:3128",
+      NO_PROXY: "localhost,127.0.0.1,::1",
+      no_proxy: "localhost,127.0.0.1,::1",
       HOME: "/home/ana",
       USER: "ana",
       LOGNAME: "ana",
@@ -612,6 +620,12 @@ describe("a root's environment", () => {
       GIT_CONFIG_VALUE_0: "*",
       GIT_CONFIG_KEY_1: "core.checkStat",
       GIT_CONFIG_VALUE_1: "minimal",
+    });
+  });
+
+  it("keeps the runner's proxies whatever the layout says", () => {
+    expect(rootEnvironment("HTTPS_PROXY=http://elsewhere:8080\nNO_PROXY=*\n", { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" })).toMatchObject({
+      HTTPS_PROXY: "http://127.0.0.1:3128", NO_PROXY: "localhost,127.0.0.1,::1",
     });
   });
 

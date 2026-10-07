@@ -14,6 +14,7 @@ import { Failure } from "../files/answers.js";
 import { inside } from "../files/paths.js";
 import type { Outcome } from "../link/protocol.js";
 import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STOPPED, supervise, timedOut } from "./command.js";
+import { PROXY_URL } from "./listeners.js";
 import { TUNNELS } from "./network.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
 import { type Answer, type BindMode, type HostUser, MAX_SHARES, type ProtectedKey, type Question, ROOT_ID, type Share } from "./protocol.js";
@@ -82,6 +83,9 @@ const QUESTION_MS = 10_000;
 const GRACE_MS = 2_000;
 
 // The commands' environment: the cloud's layout under the root's own HOME, and the user's names.
+// Their proxy variables name the root's runner's proxies, the commands' one way out; ALL_PROXY
+// too, as srt set it, since httpx fails at once on a socks5h one without socksio; and the
+// root's own loopback stays direct, so a session's servers are reached as they are.
 // And git compares no owner, inode or sub-second time in its index (core.checkStat=minimal),
 // through git's own environment, after any the layout gives: the folder's files are the root's
 // uid in the guest and the user's on the host, so git in the guest would otherwise rehash every
@@ -94,8 +98,10 @@ export function rootEnvironment(layout: string, user: HostUser): Record<string, 
     if (at > 0) env[line.slice(0, at)] = line.slice(at + 1).replace(CLOUD_HOME, () => user.home);
   }
   const git = Number(env.GIT_CONFIG_COUNT ?? 0);
+  const proxies = Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"].flatMap((name) => [[name, PROXY_URL], [name.toLowerCase(), PROXY_URL]]));
+  const direct = "localhost,127.0.0.1,::1";
   return {
-    ...env, HOME: user.home, USER: user.name, LOGNAME: user.name, LANG: "C.UTF-8",
+    ...env, ...proxies, NO_PROXY: direct, no_proxy: direct, HOME: user.home, USER: user.name, LOGNAME: user.name, LANG: "C.UTF-8",
     GIT_CONFIG_COUNT: String(git + 1), [`GIT_CONFIG_KEY_${git}`]: "core.checkStat", [`GIT_CONFIG_VALUE_${git}`]: "minimal",
   };
 }
