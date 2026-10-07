@@ -227,13 +227,17 @@ export class VmClient {
     return manager;
   }
 
-  // The first asker whose root it is answers; with none, or one that fails, it is denied.
+  // The first asker whose root it is answers; with none, or one that fails, it is denied. One
+  // that throws is passed by: only the root's own device claims it, so another cannot let it through.
   private asked(manager: ManagerProcess, { id, root, host, port, privateNetwork }: Extract<FromManager, { type: "ask" }>): void {
     let answer: Promise<NetworkAnswer> | null = null;
-    try {
-      for (const asker of this.askers) if ((answer = asker(root, { host, port, privateNetwork }))) break;
-    } catch {
-      answer = null;
+    for (const asker of this.askers) {
+      try {
+        answer = asker(root, { host, port, privateNetwork });
+      } catch {
+        continue;
+      }
+      if (answer) break;
     }
     void (answer ?? Promise.resolve<NetworkAnswer>("deny")).catch((): NetworkAnswer => "deny").then((choice) => {
       manager.send({ type: "answer", id, allow: choice === "allow" || choice === "allow_session" });

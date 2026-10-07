@@ -280,6 +280,34 @@ describe("the VM manager's process", { timeout: 20_000 }, () => {
     expect(answered.at(-1)).toEqual({ type: "answer", id: 6, allow: false });
   });
 
+  it("asks the next device past one whose asker throws", async () => {
+    const heard: Array<(message: FromManager) => void> = [];
+    const exits: Array<() => void> = [];
+    const answered: unknown[] = [];
+    const tell = (message: FromManager) => heard.forEach((listener) => listener(message));
+    const manager: ManagerProcess = {
+      send: (message) => {
+        if (message.type === "start") tell({ type: "ready" });
+        if (message.type === "answer") answered.push(message);
+        if (message.type === "stop") exits.forEach((listener) => listener());
+      },
+      onMessage: (listener) => void heard.push(listener),
+      onExit: (listener) => void exits.push(listener),
+      kill: () => exits.forEach((listener) => listener()),
+    };
+    const vm = new VmClient({ vm: { kernel: "", rootfs: "", agentDisk: "", sessions: "", run: "", console: "", user: { uid: 1, gid: 1, name: "ana", home: "/home/ana" } }, spawn: () => manager });
+    clients.push(vm);
+    // A device whose journal cannot be read, then the one whose root it is.
+    vm.onAsk(() => {
+      throw new Error("database is locked");
+    });
+    vm.onAsk((root) => (root === "root-1" ? Promise.resolve("allow") : null));
+    void vm.perform(operation(), signal());
+    tell({ type: "ask", id: 1, root: "root-1", host: "example.com", port: 443, privateNetwork: false });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(answered).toEqual([{ type: "answer", id: 1, allow: true }]);
+  });
+
   it("answers that the sandbox did not start when its manager cannot", async () => {
     const vm = new VmClient({
       vm: { kernel: "", rootfs: "", agentDisk: "", sessions: "", run: "", console: "", user: { uid: 1, gid: 1, name: "ana", home: "/home/ana" } },
