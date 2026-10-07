@@ -168,6 +168,8 @@ export function ChatPage() {
       window.removeEventListener("focus", read);
       document.removeEventListener("visibilitychange", shown);
     };
+    // On sessionId, which the effect does not read: the line is read again for each chat opened,
+    // the way back to a new chat too.
   }, [sessionId]);
   const place = newChatPlace(
     device,
