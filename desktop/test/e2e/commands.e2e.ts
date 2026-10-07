@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { vmOptions } from "../../src/vm/client.js";
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
+import { dataHome, launch, press, prompt, quit, shellPage, stubNative } from "./launch.js";
 
 const IMAGE = process.env.SUROGATE_VM_IMAGE ?? fileURLToPath(new URL("../../../images/guest/out", import.meta.url));
 const CHAT = "4e5f6a7b-8c9d-4e0f-a1b2-c3d4e5f6a7b8";
@@ -76,8 +76,10 @@ async function launched(): Promise<Page> {
 
 // *folder* bound to *chat* as the user picked it: in the system's dialog, then Use this folder in the sheet.
 async function bind(client: Page, folder: string, chat = CHAT): Promise<void> {
-  await app?.evaluate((_electron, picked) => Object.assign(globalThis, { folder: picked, answer: 0 }), folder);
-  const prepared = await client.evaluate(() => window.surogateDesktop!.prepareFolder("pick")) as { folder: string; nonce: string };
+  await app?.evaluate((_electron, picked) => Object.assign(globalThis, { folder: picked }), folder);
+  const preparing = client.evaluate(() => window.surogateDesktop!.prepareFolder("pick")) as Promise<{ folder: string; nonce: string }>;
+  await press(await prompt(app!), "accept");
+  const prepared = await preparing;
   expect(prepared.folder).toBe(folder);
   expect(await operation("bind", { folder, nonce: prepared.nonce }, "bind", 0, chat)).toEqual({ ok: null });
 }

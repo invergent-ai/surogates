@@ -1058,3 +1058,127 @@ body.settings-page {
   background: var(--row);
   color: var(--fg);
 }
+
+/* The desktop's prompts: a window of their own, 460 px wide, as Claude Desktop's local consent.
+   What the agent sent and the user's paths are drawn in the order they are written, left to
+   right, right-to-left letters included, so a path cannot be made to look like another; they
+   scroll whole. A title is drawn so too, for the names in it: its own words are English. */
+body.prompt-page {
+  background: var(--panel);
+  user-select: text;
+}
+
+.prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100vh;
+  padding: 22px 24px 20px;
+}
+
+.prompt h1 {
+  font-size: 17px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* ponytail: the whole title, as prompts are English only; its names in spans of their own once a prompt is translated. */
+.prompt h1,
+.prompt .code {
+  direction: ltr;
+  unicode-bidi: bidi-override;
+}
+
+#prompt-details {
+  display: grid;
+  gap: 12px;
+}
+
+.prompt-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.prompt .detail .label,
+.prompt legend {
+  margin-bottom: 4px;
+  padding: 0;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.prompt .code {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--raised);
+  font: 12.5px/1.5 ui-monospace, "Noto Sans Mono", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.prompt .special {
+  padding: 0 3px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font: 11px/1.4 ui-monospace, "Noto Sans Mono", monospace;
+}
+
+.prompt .note {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  font-size: 12.5px;
+}
+
+.prompt fieldset {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.prompt .option {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.prompt .option label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.prompt .option .desc {
+  padding-left: 21px;
+  font-size: 12.5px;
+}
+
+.prompt .actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.prompt .actions .btn:last-child {
+  border-color: transparent;
+  background: var(--fg);
+  color: var(--centre);
+}
+
+.prompt .actions .btn[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}

@@ -9,12 +9,13 @@ import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
 import {
-  app, dialog, type IpcMainEvent, Menu, nativeTheme, net, safeStorage, session, shell, utilityProcess,
+  app, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, safeStorage, session, shell, utilityProcess,
   type WebContents, webContents,
 } from "electron";
 
 import type { DesktopAccount } from "../../../web/src/lib/desktop-bridge-contract.js";
 import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow } from "../../../web/src/lib/projects-contract.js";
+import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { appEnvironment } from "../hosts/environment.js";
 import { OperationJournal } from "../journal/journal.js";
@@ -30,7 +31,7 @@ import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { letWindowClose, MainWindow, onSettingsKey } from "./main-window.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
 import { ANSWER_TIMEOUT_MS, PageProjects } from "./projects.js";
-import { folderPrompts, refusingApprovals } from "./prompts.js";
+import { desktopPrompts, refusingApprovals } from "./prompts.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
@@ -54,6 +55,8 @@ let main: MainWindow | null = null;
 let theme: Theme;
 // After ready: safeStorage answers only then.
 let credentials: CredentialStore;
+// The desktop's own prompts, over the window, once it is made.
+let prompts: FolderPrompts;
 let sessionStore: SessionStore;
 // Who is signed in to the app, with the agent: what adds this computer, and what the window's web client takes its session from.
 let signedIn: DesktopSession | null = null;
@@ -393,7 +396,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     identity: { deviceId: credential.deviceId, orgId: credential.orgId, agentId: credential.agentId, userId: credential.userId },
     // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the VM.
     tools: (bindings, network) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(env) }),
-    prompts: folderPrompts(() => main?.window),
+    prompts,
     approvalPrompts: refusingApprovals,
     onStatus: (status) => {
       if (device?.credential === credential) device.status = status;
@@ -989,6 +992,26 @@ function state() {
   };
 }
 
+// Held until it is clicked or closed: a notification nothing holds can lose its click.
+let notice: Notification | null = null;
+
+// A prompt waits while the window is hidden: the system's notification says so, and opens the window.
+// It names nothing the agent sent: some notification services read markup in a body.
+function notifyAsking(): void {
+  if (!Notification.isSupported()) return;
+  const shown = new Notification({ title: "Surogate is asking you something", body: "Open Surogate to answer." });
+  notice = shown;
+  const done = () => {
+    if (notice === shown) notice = null;
+  };
+  shown.on("click", () => {
+    done();
+    main?.show();
+  });
+  shown.on("close", done);
+  shown.show();
+}
+
 function popup(which: unknown): void {
   const shown = main;
   const agent = agents.get();
@@ -1255,6 +1278,7 @@ if (!app.requestSingleInstanceLock()) {
       tellAppearance();
     });
     onSettingsKey(showSettings);
+    prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
     const page = join(PAGES, "shell.html");
     main = new MainWindow({ states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed });
     wire(main, page);
