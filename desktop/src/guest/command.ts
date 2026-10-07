@@ -19,7 +19,6 @@ export interface Place {
 
 // The workdirs the cloud reads as the folder itself (local.py _HOME_ALIASES).
 const HOME_ALIASES = new Set(["$HOME", "~", "$WORKSPACE_DIR", "${HOME}", "${WORKSPACE_DIR}"]);
-const MAX_TIMER_MS = 2 ** 31 - 1;
 export const CANCELLED: Outcome = { error: { type: "cancelled", message: "The session stopped this command" } };
 export const SANDBOX_STOPPED = {
   error: { type: "interrupted", message: "interrupted: the computer's sandbox stopped while this ran. Check what it did before repeating it." },
@@ -71,27 +70,20 @@ export function runArgs(args: Record<string, unknown>): { command: string; workd
   return { command, workdir, timeout };
 }
 
-// One command's answer, wherever it runs: its output and exit code, or its
-// timeout or cancel, once. *done* runs as it ends.
-export function supervise(child: CommandChild, timeout: number, signal: AbortSignal, done: () => void = () => {}): Promise<Outcome> {
+// One command's answer, wherever it runs: its output and exit code, or its cancel,
+// once. Its timeout is its caller's (root.ts, Root.run). *done* runs as it ends.
+export function supervise(child: CommandChild, signal: AbortSignal, done: () => void = () => {}): Promise<Outcome> {
   return new Promise<Outcome>((resolve) => {
     const out = new Window();
     const err = new Window();
-    let expired = false;
     const onAbort = () => child.kill();
-    const timer = setTimeout(() => {
-      expired = true;
-      child.kill();
-    }, Math.min(timeout * 1000, MAX_TIMER_MS));
     signal.addEventListener("abort", onAbort, { once: true });
     child.onOutput((chunk, isErr) => (isErr ? err : out).push(chunk));
     child.onEnd((end) => {
-      clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
       done();
       if ("failed" in end) resolve(ran(end.failed, -1));
       else if ("lost" in end) resolve(SANDBOX_STOPPED);
-      else if (expired) resolve(timedOut(timeout));
       else if (signal.aborted) resolve(CANCELLED);
       else {
         out.end();

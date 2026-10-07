@@ -9,7 +9,7 @@ import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
 import {
-  app, BrowserWindow, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, safeStorage, session, shell, Tray, utilityProcess,
+  app, BrowserWindow, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, powerMonitor, safeStorage, session, shell, Tray, utilityProcess,
   type WebContents, webContents,
 } from "electron";
 
@@ -478,7 +478,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     agent: agent.name,
     identity: { deviceId: credential.deviceId, orgId: credential.orgId, agentId: credential.agentId, userId: credential.userId },
     // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the VM.
-    tools: (bindings, network) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor() }),
+    tools: (bindings, network, changed) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(), changed }),
     prompts,
     approvalPrompts: prompts,
     // The page hears which of this account's chats changed on this computer, while it is this account's page.
@@ -1788,6 +1788,8 @@ if (!app.requestSingleInstanceLock()) {
     // Electron's own menu goes: its reload, zoom and developer tools would act on the window's own pages.
     Menu.setApplicationMenu(Menu.buildFromTemplate(appMenu(menuActions, !app.isPackaged)));
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
+    // The VM slept with the computer: at its wake its clock is set, and its keepalive starts afresh.
+    powerMonitor.on("resume", () => vm?.resume());
     const page = join(PAGES, "shell.html");
     main = new MainWindow({ states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed });
     wire(main, page);

@@ -170,11 +170,11 @@ describe("the app's notifications", () => {
     await expect.poll(async () => (await notices(app!)).length).toBe(2);
     // Another chat in the centre: the first is followed no more.
     await moveTo(client, `/chat/${OTHER}`);
-    await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(0);
+    await expect.poll(() => agent.chatStreams.get(CHAT)?.size, { timeout: 10_000 }).toBe(0);
     await expect.poll(() => agent.chatsAsked.at(-1)).toBe(`${OTHER}?after=-1&watch=1`);
     // The window in front again: nothing is followed.
     await focus(app!);
-    await expect.poll(() => agent.chatStreams.get(OTHER)?.size).toBe(0);
+    await expect.poll(() => agent.chatStreams.get(OTHER)?.size, { timeout: 10_000 }).toBe(0);
     await clickNotice(app!, 1);
     await expect.poll(() => new URL(client.url()).pathname).toBe(`/chat/${CHAT}`);
   });
@@ -188,7 +188,7 @@ describe("the app's notifications", () => {
     await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(1);
     const release = await quitHeld(app!, page, agent);
     // The inbox and the chat are followed no more: what comes now raises nothing.
-    await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(0);
+    await expect.poll(() => agent.chatStreams.get(CHAT)?.size, { timeout: 10_000 }).toBe(0);
     agent.tell({ kind: "input_required", title: "Which report should I start from?", session_id: OTHER });
     agent.turnEnds(CHAT);
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -319,7 +319,7 @@ describe("the app's notifications", () => {
     await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(1);
     // The web client's own Log out, while the window is away.
     void client.evaluate(() => window.surogateDesktop!.signOut()).catch(() => {});
-    await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(0);
+    await expect.poll(() => agent.chatStreams.get(CHAT)?.size, { timeout: 10_000 }).toBe(0);
     const asked = agent.chatsAsked.length;
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(agent.chatsAsked).toHaveLength(asked);

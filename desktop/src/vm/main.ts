@@ -63,6 +63,10 @@ function received(message: ToManager): void {
   } else if (message.type === "answer") {
     asks.get(message.id)?.(message.allow === true);
     asks.delete(message.id);
+  } else if (message.type === "ping") {
+    void send({ type: "pong" });
+  } else if (message.type === "resume") {
+    manager?.resume();
   } else if (message.type === "cancel") {
     running.get(message.id)?.abort();
   } else if (message.type === "stop") {

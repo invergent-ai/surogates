@@ -639,6 +639,22 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(sent(0, "stop")).toBe(0);
   });
 
+  it("names the roots whose processes live in the VM, and says each time they change, or a host goes", async () => {
+    let changes = 0;
+    const executor = toolHosts({ spawnHost: fakeSpawn(answering), changed: () => void (changes += 1) });
+    expect(await executor.run(resolve(), signal())).toMatchObject({ ok: expect.any(String) });
+    expect(executor.liveRoots()).toEqual([]);
+    const handle = { id: "proc_000000000001", command: "sleep 9", cwd: "/", task_id: null, started_at: Date.now() / 1000 };
+    executor.processes(ROOT_A, { handles: [handle], live: 1 });
+    expect([executor.liveRoots(), changes]).toEqual([[ROOT_A], 1]);
+    executor.processes(ROOT_A, { gone: true });
+    expect([executor.liveRoots(), changes]).toEqual([[], 2]);
+    executor.processes(ROOT_A, { handles: [handle], live: 1 });
+    fakes[0]?.exit();
+    await until(() => changes === 4);
+    expect(executor.liveRoots()).toEqual([]);
+  });
+
   it("does not stop a host while its root's processes in the guest run, the count coming after its last answer, and stops it once they end", async () => {
     const executor = toolHosts({ idleMs: 50, spawnHost: fakeSpawn(answering) });
     await executor.run(resolve(), signal());
