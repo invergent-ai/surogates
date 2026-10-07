@@ -171,6 +171,9 @@ class ArtifactCompletionMixin:
     #: Where a local folder's turn began by its folder's clock, a walk's
     #: cursor; None in the cloud, or when the computer could not say.
     _turn_cursor: str | None = None
+    #: Whether the turn asked its folder where it began: at its first tool
+    #: call.  One that made none changed nothing there, and walks nothing.
+    _turn_marked: bool = False
     #: The last event before the turn's loop started: the turn's own come after it.
     _turn_after_event_id: int = 0
 
@@ -830,6 +833,18 @@ class ArtifactCompletionMixin:
             return None
         return str(max(0, int(stamped.mtime * 1_000_000_000) - WALK_MARGIN_NS))
 
+    async def _mark_turn_start(self, session: Any) -> None:
+        """Before a local folder's turn's first tool call: where the turn begins there (see _folder_cursor).
+
+        Awaited before the call runs, never in the background: a mark that
+        landed after a tool's first write would miss its file.  Not taken for
+        a turn whose recap is ruled out, which lists no files.
+        """
+        if self._turn_marked or device_of(session.config) is None or summary_ruled_out(session):
+            return
+        self._turn_marked = True
+        self._turn_cursor = await self._folder_cursor(session)
+
     async def _scan_folder_for_new_files(
         self, session: Any, already_seen_paths: set[str],
     ) -> tuple[list[Any], dict[str, dict[str, Any]] | None]:
@@ -838,7 +853,8 @@ class ArtifactCompletionMixin:
         Each is listed by its path from the folder's top, and by the folder's
         own path, as the agent may have named it.  No ``modified``: the
         folder's clock chose them, and the "stale" rule would compare the
-        server's.  A turn that began while its computer was away lists none,
+        server's.  A turn that made no tool call lists none, and walks
+        nothing.  A turn that began while its computer was away lists none,
         and neither does one whose folder its computer did not list: their
         entries are None, as nothing was seen.
         """
@@ -847,6 +863,9 @@ class ArtifactCompletionMixin:
             _is_internal_workspace_path,
         )
 
+        if not self._turn_marked:
+            # No tool call: the turn changed nothing in the folder.
+            return [], {}
         if self._turn_cursor is None:
             logger.info(
                 "Session %s: its computer did not say where this turn began, so the turn lists none of its folder's files",

@@ -88,7 +88,7 @@ async def test_a_turn_whose_folder_could_not_be_listed_flags_no_file_its_reply_n
     for cursor in (None, "1700000000000000000"):
         harness = ArtifactCompletionMixin()
         harness._turn_started_at = datetime.now(timezone.utc)
-        harness._turn_cursor = cursor
+        harness._turn_marked, harness._turn_cursor = True, cursor  # it made a tool call
         harness._pending_iteration_summary_tasks = {}
         harness._turn_summarizer = None
         harness._storage = None

@@ -189,7 +189,7 @@ from surogates.harness.loop_vision import (
 )
 
 
-from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin, summary_ruled_out
+from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
 from surogates.harness.loop_arbor import ArborHarvestMixin
 from surogates.harness.loop_board import BoardMixin
 from surogates.harness.loop_code_commands import CodeCommandMixin
@@ -635,6 +635,7 @@ class AgentHarness(
         # (terminal scripts, execute_code).
         self._turn_started_at: datetime | None = None
         self._turn_cursor: str | None = None
+        self._turn_marked = False
 
         # Saga orchestration flag — when enabled, side-effecting tool
         # calls are tracked as saga steps with automatic compensation
@@ -1835,14 +1836,9 @@ class AgentHarness(
         # they were created indirectly (e.g. a python script written
         # by the terminal tool).
         self._turn_started_at = datetime.now(timezone.utc)
-        # A local folder's turn begins by the folder's clock too: its files are
-        # what changed there after it.  Not taken for a turn whose recap is
-        # ruled out, which lists no files.
-        self._turn_cursor = (
-            await self._folder_cursor(session)
-            if device_of(session.config) is not None and not summary_ruled_out(session)
-            else None
-        )
+        # A local folder's turn begins by the folder's clock too, marked before
+        # its first tool call (_mark_turn_start).
+        self._turn_cursor, self._turn_marked = None, False
 
         # Reset per-turn summary tracking so a paused-and-resumed
         # session can't reuse stale tasks from a previous wake().
@@ -3089,6 +3085,7 @@ class AgentHarness(
             messages.append(assistant_message)
 
             # 7. Execute tool calls.
+            await self._mark_turn_start(session)
             if use_streaming_exec:
                 # ── Streaming executor path ──────────────────────────
                 # Some or all tools started executing during LLM streaming.

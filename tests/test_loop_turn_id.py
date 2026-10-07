@@ -369,21 +369,13 @@ async def test_advisor_never_delays_the_first_llm_request(
     assert not advisor_called.is_set()
 
 
-@pytest.mark.parametrize(("config", "asked"), [
-    ({"execution": {"kind": "device", "device_id": str(uuid4())}}, True),
-    # Its recap is ruled out whatever the turn does, so its files are never listed.
-    ({"execution": {"kind": "device", "device_id": str(uuid4())}, "active_mission_id": "m-1"}, False),
-    ({}, False),
-])
-@pytest.mark.asyncio
-async def test_a_local_folders_turn_takes_where_it_begins_before_its_first_model_call(
-    monkeypatch: pytest.MonkeyPatch, config: dict, asked: bool,
-) -> None:
-    store = AsyncMock()
-    store.emit_event = AsyncMock(side_effect=range(100, 200))
-    store.get_events = AsyncMock(return_value=[])
-    harness = _make_loop_harness(session_store=store)
-    order: list[str] = []
+async def _drive_a_turn(monkeypatch: pytest.MonkeyPatch, config: dict, replies: list) -> tuple[Any, list[str]]:
+    """One turn of a session with *config*, its model answering *replies*; what ran, in order."""
+    from tests.test_loop_ordering import _harness
+
+    harness, order = _harness(), []
+    harness._find_invalid_tool_calls = MagicMock(return_value=[])
+    script = iter(replies)
 
     async def folder_cursor(session: Any) -> str:
         order.append("cursor")
@@ -391,23 +383,61 @@ async def test_a_local_folders_turn_takes_where_it_begins_before_its_first_model
 
     async def fake_call_llm_with_retry(**_kwargs: Any) -> tuple[dict, dict]:
         order.append("model")
-        return (
-            {"role": "assistant", "content": "Done.", "tool_calls": None},
-            {"model": "test-model", "finish_reason": "stop", "input_tokens": 1, "output_tokens": 2},
-        )
+        return next(script)
+
+    async def fake_execute_tool_calls(tool_calls_raw: list, **_kwargs: Any) -> list[dict]:
+        order.append("tools")
+        return [{"role": "tool", "tool_call_id": call["id"], "content": "ok"} for call in tool_calls_raw]
 
     harness._folder_cursor = folder_cursor
     monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
+    monkeypatch.setattr("surogates.harness.loop.execute_tool_calls", fake_execute_tool_calls)
     session = _make_session()
     session.config.update(config)
-
     await harness._run_loop(
         session, [{"role": "user", "content": "do the task"}], "system",
         SimpleNamespace(lease_token=uuid4()), all_events=[],
     )
+    return harness, order
 
-    assert order == (["cursor", "model"] if asked else ["model"])
+
+@pytest.mark.parametrize(("config", "asked"), [
+    ({"execution": {"kind": "device", "device_id": str(uuid4())}}, True),
+    # Its recap is ruled out whatever the turn does, so its files are never listed.
+    ({"execution": {"kind": "device", "device_id": str(uuid4())}, "active_mission_id": "m-1"}, False),
+    ({}, False),
+])
+@pytest.mark.asyncio
+async def test_a_local_folders_turn_takes_where_it_begins_before_its_first_tool_call(
+    monkeypatch: pytest.MonkeyPatch, config: dict, asked: bool,
+) -> None:
+    from tests.test_loop_ordering import _resp, _tool_resp
+
+    harness, order = await _drive_a_turn(monkeypatch, config, [_tool_resp("c1"), _tool_resp("c2"), _resp("Done.")])
+
+    # Once, and before the call runs: a mark taken after a tool's first write would miss its file.
+    assert order == (
+        ["model", "cursor", "tools", "model", "tools", "model"] if asked else ["model", "tools", "model", "tools", "model"]
+    )
     assert harness._turn_cursor == ("1700000000000000000" if asked else None)
+
+
+@pytest.mark.asyncio
+async def test_a_local_folders_turn_that_makes_no_tool_call_takes_no_cursor_and_walks_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_loop_ordering import _resp
+
+    config = {"execution": {"kind": "device", "device_id": str(uuid4())}, "workspace_path": "/home/me/notes"}
+    harness, order = await _drive_a_turn(monkeypatch, config, [_resp("Done.")])
+
+    assert order == ["model"]
+    harness._walk_folder = AsyncMock()
+    session = _make_session()
+    session.config.update(config)
+    # It changed nothing in the folder: seen to be so, without a look.
+    assert await harness._scan_folder_for_new_files(session, set()) == ([], {})
+    harness._walk_folder.assert_not_awaited()
 
 
 @pytest.mark.parametrize(("raised", "level"), [

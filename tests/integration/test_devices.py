@@ -3297,7 +3297,8 @@ async def test_the_turns_files_are_what_its_computer_changed_since_the_turn_bega
     store = SessionStore(session_factory)
     session = await store.get_session(rig.root)
     turn = TurnEnd(store, session_factory, redis_client)
-    turn._turn_cursor = await turn._folder_cursor(session)
+    # At its first tool call.
+    await turn._mark_turn_start(session)
     assert turn._turn_cursor is not None
     for name, text in [("report.md", "new"), ("seen.md", "s"), ("empty.md", ""), ("uploads/in.md", "u"),
                        (".surogates-results/terminal-output-1.log", "x"), ("node_modules/x/i.js", "")]:
@@ -3335,8 +3336,8 @@ async def test_a_turn_whose_computer_was_away_at_its_start_lists_no_files_and_ne
     store = SessionStore(session_factory)
     turn = TurnEnd(store, session_factory, redis_client)
     turn._storage = listing = Listing()
-    # The laptop never connected: no cursor, and nothing waited on.
-    turn._turn_cursor = await asyncio.wait_for(turn._folder_cursor(await store.get_session(rig.root)), 5.0)
+    # The laptop never connected: no cursor at its first tool call, and nothing waited on.
+    await asyncio.wait_for(turn._mark_turn_start(await store.get_session(rig.root)), 5.0)
     assert turn._turn_cursor is None
 
     found, entries = await turn._scan_workspace_for_new_files(session_id=rig.root, already_seen_paths=set())
