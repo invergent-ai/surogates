@@ -83,12 +83,16 @@ function verdicts(bin: string, paths: string[], args: string[] = []): boolean[] 
 
 describe("the guest rule mirrors protect.ts", () => {
   const cc = ["cc", "clang", "gcc"].find((c) => { try { execFileSync(c, ["--version"]); return true; } catch { return false; } });
-  const dir = mkdtempSync(join(tmpdir(), "rule-"));
-  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  // Made with the harness: vitest runs no afterAll for a suite whose tests are all filtered out or skipped.
+  let dir: string | undefined;
+  afterAll(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
   let bin: string | undefined;
   function harness(): string {
     if (!cc) throw new Error("no C compiler (cc, clang or gcc) to build the guest rule's harness");
     if (!bin) {
+      dir = mkdtempSync(join(tmpdir(), "rule-"));
       bin = join(dir, "rule");
       execFileSync(cc, ["-O2", "-I", fileURLToPath(new URL("../vm/", import.meta.url)),
         "-o", bin, fileURLToPath(new URL("./rule-harness.c", import.meta.url))]);
