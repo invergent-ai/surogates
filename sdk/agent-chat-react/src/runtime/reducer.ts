@@ -945,7 +945,10 @@ function applyWorkerReport(
     state: failed ? "failed" : "reported",
     // A mission worker's result can carry the loop's control markup, which never reaches the UI.
     report: stripMissionControlMarkup(stringValue(failed ? event.data.error : event.data.result)) || null,
-    files: failed ? worker.files : parseTurnArtifacts(event.data.files),
+    // A card lists files, as a thread's row does: not the URLs and commands a turn names.
+    files: failed
+      ? worker.files
+      : parseTurnArtifacts(event.data.files).filter((file) => file.kind === "file" || file.kind === "artifact"),
   };
   const next = [...messages];
   next[index] = { ...next[index]!, worker: reported };

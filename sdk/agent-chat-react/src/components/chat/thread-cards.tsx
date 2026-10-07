@@ -7,7 +7,7 @@
 // written by a model, so each sits in its own <bdi>: a bidirectional control
 // character in one cannot reorder the card around it.
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAgentChatAdapterContext } from "../../adapter-context";
 import type { AgentChatThreadProposal, AgentChatThreadRow, AgentChatWorker, ChatMessage } from "../../types";
 import { Button } from "../ui/button";
@@ -30,6 +30,16 @@ function firstLine(text: string | null): string | null {
   return text?.split("\n").find((line) => line.trim())?.trim() ?? null;
 }
 
+/** A report's first line that is not a markdown heading, without its bold or code marks. */
+function statusLineOf(report: string | null): string | null {
+  for (const line of report?.split("\n") ?? []) {
+    if (/^\s*#{1,6}(\s|$)/.test(line)) continue;
+    const plain = line.replace(/\*\*|__|`/g, "").trim();
+    if (plain) return plain;
+  }
+  return null;
+}
+
 /** The card a "worker" or "thread_proposal" system message draws, or nothing. */
 export function ThreadCards({ message }: { message: ChatMessage }) {
   if (message.worker) return <WorkerCard worker={message.worker} />;
@@ -44,29 +54,35 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
   const status = live
     ? GROUP_LABEL[live.group] + (live.progress ? ` · ${live.progress.done}/${live.progress.total}` : "")
     : STATE_LABEL[worker.state];
-  const statusLine = live ? live.statusLine : firstLine(worker.report);
+  const statusLine = live ? live.statusLine : statusLineOf(worker.report);
   const files = live ? live.files : worker.files;
+  const name = worker.title ?? firstLine(worker.goal);
+  const view = worker.title !== null ? "View thread" : "View worker";
   return (
     <div data-testid="worker-card" data-group={live?.group} className="my-2 rounded-lg border border-border px-3 py-2 text-sm">
       <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate font-medium text-foreground">
-          <bdi>{worker.title ?? firstLine(worker.goal)}</bdi>
+        <span className="min-w-0 flex-1 truncate font-medium text-foreground" title={name ?? undefined}>
+          <bdi>{name}</bdi>
         </span>
         <span data-testid="worker-card-status" className="shrink-0 text-xs text-muted-foreground">
           {status}
         </span>
       </div>
       {statusLine && (
-        <p className="truncate text-foreground/70">
+        <p className="truncate text-foreground/70" title={statusLine}>
           <bdi>{statusLine}</bdi>
         </p>
       )}
       {files.length > 0 && (
         <ul className="mt-1 flex flex-wrap gap-x-3 text-xs">
           {files.slice(0, FILES_SHOWN).map((file) => (
-            <li key={`${file.kind}:${file.ref}`}>
+            <li key={`${file.kind}:${file.ref}`} className="min-w-0 max-w-full truncate" title={file.label}>
               {file.kind === "file" && onFileSelect ? (
-                <button type="button" className="underline" onClick={() => onFileSelect(file.ref)}>
+                <button
+                  type="button"
+                  className="min-w-0 max-w-full truncate underline"
+                  onClick={() => onFileSelect(file.ref)}
+                >
                   <bdi>{file.label}</bdi>
                 </button>
               ) : (
@@ -78,8 +94,14 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
         </ul>
       )}
       {onOpenSession && (
-        <Button size="xs" variant="ghost" className="mt-1" onClick={() => onOpenSession(worker.id)}>
-          {worker.title !== null ? "View thread" : "View worker"}
+        <Button
+          size="xs"
+          variant="ghost"
+          className="mt-1"
+          aria-label={name ? `${view} ${name}` : undefined}
+          onClick={() => onOpenSession(worker.id)}
+        >
+          {view}
         </Button>
       )}
     </div>
@@ -94,6 +116,15 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const started = { ...startedHere, ...proposal.started };
   const canStart = !!projectId && !!adapter.startProposedThread;
+  // A card started here gives its View thread the focus its Start took away with it,
+  // unless the user has put the focus elsewhere meanwhile.
+  const viewButtons = useRef<Record<string, HTMLButtonElement | null>>({});
+  const [startedNow, setStartedNow] = useState<string | null>(null);
+  useEffect(() => {
+    if (startedNow === null) return;
+    if (!document.activeElement || document.activeElement === document.body) viewButtons.current[startedNow]?.focus();
+    setStartedNow(null);
+  }, [startedNow]);
 
   const start = async (key: string) => {
     setStarting((current) => ({ ...current, [key]: true }));
@@ -101,6 +132,7 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
     try {
       const row = await adapter.startProposedThread!({ projectId: projectId!, proposalId: proposal.proposalId, key });
       setStartedHere((current) => ({ ...current, [key]: row.id }));
+      setStartedNow(key);
     } catch (error) {
       setErrors((current) => ({
         ...current,
@@ -136,17 +168,25 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
           const threadId = started[thread.key];
           return (
             <li key={thread.key} data-testid="proposed-thread">
-              <div className="font-medium text-foreground">
+              <div className="break-words font-medium text-foreground">
                 <bdi>{thread.title}</bdi>
               </div>
-              <p className="line-clamp-2 text-foreground/70">
+              <p className="line-clamp-2 break-words text-foreground/70">
                 <bdi>{thread.goal}</bdi>
               </p>
               {threadId ? (
                 <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                  Started
+                  <span role="status">Started</span>
                   {onOpenSession && (
-                    <Button size="xs" variant="ghost" onClick={() => onOpenSession(threadId)}>
+                    <Button
+                      ref={(node) => {
+                        viewButtons.current[thread.key] = node;
+                      }}
+                      size="xs"
+                      variant="ghost"
+                      aria-label={`View thread ${thread.title}`}
+                      onClick={() => onOpenSession(threadId)}
+                    >
                       View thread
                     </Button>
                   )}
@@ -154,8 +194,14 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
               ) : thread.where === "device" ? (
                 <span className="text-xs text-muted-foreground">Works in a folder on your computer</span>
               ) : canStart ? (
-                <Button size="xs" variant="outline" disabled={!!starting[thread.key]} onClick={() => void start(thread.key)}>
-                  Start
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={!!starting[thread.key]}
+                  aria-label={`${starting[thread.key] ? "Starting" : "Start"} ${thread.title}`}
+                  onClick={() => void start(thread.key)}
+                >
+                  {starting[thread.key] ? "Starting…" : "Start"}
                 </Button>
               ) : null}
               {/* A start refused once the card is started, here or elsewhere, is moot. */}
