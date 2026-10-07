@@ -130,3 +130,29 @@ async def test_staging_refuses_a_name_or_a_file_that_would_leave_its_folder(file
         await stage_in_folder(files, skill_name=name, linked_files=linked, owner="root", fetch=fetch)
     assert sorted(path.name for path in folder.rglob("*")) == ["README.md"]
     assert (folder / "README.md").read_text() == "mine"
+
+
+async def test_a_skills_files_are_fetched_for_this_chat_and_a_failure_names_only_the_file():
+    import httpx
+
+    from surogates.harness.api_client import HarnessAPIClient
+
+    asked: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        asked.append(request)
+        if request.url.params["path"] == "scripts/gone.py":
+            return httpx.Response(404, json={"detail": "not found"})
+        return httpx.Response(200, content=b"print('x')")
+
+    api = HarnessAPIClient("http://api.internal:8000", "token", session_id="chat-1", agent_id="agent-7")
+    api._client = httpx.AsyncClient(base_url="http://api.internal:8000", transport=httpx.MockTransport(answer))
+    assert await api.skill_file_bytes("deck", "scripts/build.py") == b"print('x')"
+    # The chat's own entitlement, as view_skill asks for it.
+    assert dict(asked[0].url.params) == {
+        "agent_id": "agent-7", "session_id": "chat-1", "path": "scripts/build.py", "raw": "true",
+    }
+    with pytest.raises(httpx.HTTPError) as failed:
+        await api.skill_file_bytes("deck", "scripts/gone.py")
+    # What the model reads: never the api's address or the agent's id.
+    assert str(failed.value) == "the skill's file scripts/gone.py could not be fetched (HTTP 404)"
