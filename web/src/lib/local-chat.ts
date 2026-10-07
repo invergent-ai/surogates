@@ -5,7 +5,7 @@
 // (desktop design, Section 8). Every import here is a file of web/src named with its extension,
 // so a node test runs it.
 
-import type { DesktopBridge, DesktopDeviceState } from "./desktop-bridge-contract";
+import type { DesktopBinding, DesktopBridge, DesktopDeviceState } from "./desktop-bridge-contract";
 
 /** What the new chat's create sends the agent: the folder the user confirmed on this computer. */
 export interface LocalExecution {
@@ -109,4 +109,69 @@ export async function createChat<T extends { id: string }>(
     throw new Error(`Surogate made this chat but could not set up its folder on this computer: ${saidBy(error)}. Start a new chat.`);
   }
   return chat;
+}
+
+/** A computer of the user's, as GET /api/v1/devices lists it: what a chat's bar reads. */
+export interface ListedDevice {
+  id: string;
+  name: string;
+  revoked_at: string | null;
+}
+
+/** A chat on a folder of a computer of the user's, as its bar shows it. */
+export interface LocalChat {
+  root: string; // the chat its binding names: a sub-agent's chat works in its root's folder
+  folder: string; // as the computer showed it to its user
+  name: string; // the folder's own name
+  computer: string;
+  revoked: boolean; // the computer's access was revoked: it works on nothing until restored
+  here: DesktopBinding | null; // on this computer: its folder opens, and its mode shows
+}
+
+/**
+ * The chat's folder and computer, from its config (the server stamps both when it is made),
+ * the user's computers as the agent lists them now (null until they come) and, in the desktop,
+ * the binding this computer holds. Null for a chat in the cloud.
+ */
+export function localChatOf(
+  sessionId: string,
+  config: Record<string, unknown> | undefined,
+  devices: ListedDevice[] | null,
+  here: DesktopBinding | null,
+): LocalChat | null {
+  const execution = config?.execution as { kind?: unknown; device_id?: unknown; device_name?: unknown } | undefined;
+  if (execution?.kind !== "device" || typeof execution.device_id !== "string") return null;
+  const folder = typeof config?.workspace_path === "string" ? config.workspace_path : "";
+  const device = devices?.find((row) => row.id === execution.device_id);
+  const root = config?.sandbox_root_session_id;
+  return {
+    root: typeof root === "string" ? root : sessionId,
+    folder,
+    name: folder.split("/").filter(Boolean).at(-1) ?? folder,
+    computer: device?.name ?? (typeof execution.device_name === "string" ? execution.device_name : "your computer"),
+    revoked: device !== undefined && device.revoked_at !== null,
+    here,
+  };
+}
+
+/** A chat's mode, as its bar switches it: the page makes a chat ask; only the desktop's own confirmation lets it work freely. */
+export async function switchMode(
+  desktop: Pick<DesktopBridge, "setMode" | "requestFreeMode">,
+  sessionId: string,
+  mode: "free" | "ask",
+): Promise<void> {
+  if (mode === "ask") await desktop.setMode(sessionId, "ask");
+  else await desktop.requestFreeMode(sessionId);
+}
+
+export type FolderCalls = DesktopBridge & Required<Pick<DesktopBridge, "getBinding" | "revealFolder" | "onBindingChanged">>;
+
+/**
+ * This desktop, where it has the calls about a chat's folder: the bridge's version 1 grows,
+ * and a desktop from before them answers none, so the page looks for each.
+ */
+export function folderCalls(desktop: DesktopBridge | undefined): FolderCalls | null {
+  const present = desktop !== undefined && typeof desktop.getBinding === "function" &&
+    typeof desktop.revealFolder === "function" && typeof desktop.onBindingChanged === "function";
+  return present ? (desktop as FolderCalls) : null;
 }

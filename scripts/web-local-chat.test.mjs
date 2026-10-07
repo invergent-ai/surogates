@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createChat, desktopSessionsOf, NO_FOLDER, newChatPlace, saidBy } from "../web/src/lib/local-chat.ts";
+import { createChat, desktopSessionsOf, folderCalls, localChatOf, NO_FOLDER, newChatPlace, saidBy, switchMode } from "../web/src/lib/local-chat.ts";
 
 const PREPARED = { folder: "/home/flavius/notes", mode: "ask", nonce: "n".repeat(43), token: "t".repeat(43) };
 const THIS_COMPUTER = { device: { deviceId: "d-1", name: "Flavius's ThinkPad" }, localFolders: true };
@@ -144,4 +144,46 @@ test("says where a new chat works: on a folder of this computer, or in the cloud
   for (const [device, capabilities, choice, place] of cases) {
     assert.deepEqual(newChatPlace(device, capabilities, choice), place);
   }
+});
+
+const EXECUTION = { kind: "device", device_id: "d-1", device_name: "Flavius's ThinkPad" };
+const DEVICES = [{ id: "d-1", name: "Flavius's ThinkPad", revoked_at: null }, { id: "d-2", name: "Office iMac", revoked_at: "2026-10-01T09:00:00Z" }];
+
+test("shows a chat on a folder of a computer: the folder's name, the computer, and, here, how it asks", () => {
+  const config = { execution: EXECUTION, workspace_path: "/home/flavius/Documente/Lucrări — 2026/" };
+  assert.deepEqual(localChatOf("s-1", config, DEVICES, null), {
+    root: "s-1", folder: "/home/flavius/Documente/Lucrări — 2026/", name: "Lucrări — 2026", computer: "Flavius's ThinkPad", revoked: false, here: null,
+  });
+  const here = { folder: "/home/flavius/Documente/Lucrări — 2026", mode: "ask" };
+  assert.deepEqual(localChatOf("s-1", config, DEVICES, here).here, here);
+  // A sub-agent's chat works in its root's folder: the binding is the root's.
+  assert.equal(localChatOf("helper", { ...config, sandbox_root_session_id: "s-1" }, DEVICES, null).root, "s-1");
+  // A revoked computer, named as the agent knows it now; and before its list has come.
+  const revoked = { execution: { kind: "device", device_id: "d-2", device_name: "iMac" }, workspace_path: "/Users/f/notes" };
+  assert.deepEqual([localChatOf("s-2", revoked, DEVICES, null).computer, localChatOf("s-2", revoked, DEVICES, null).revoked], ["Office iMac", true]);
+  assert.deepEqual([localChatOf("s-2", revoked, null, null).computer, localChatOf("s-2", revoked, null, null).revoked], ["iMac", false]);
+  // A chat in the cloud has none.
+  assert.equal(localChatOf("s-3", {}, DEVICES, null), null);
+  assert.equal(localChatOf("s-3", { execution: { kind: "cloud" } }, DEVICES, null), null);
+});
+
+test("lets the page make a chat ask every time, and only ask the desktop to let it work freely", async () => {
+  const calls = [];
+  const desktop = {
+    setMode: async (...args) => calls.push(["setMode", ...args]),
+    requestFreeMode: async (...args) => {
+      calls.push(["requestFreeMode", ...args]);
+      return false;
+    },
+  };
+  await switchMode(desktop, "s-1", "ask");
+  await switchMode(desktop, "s-1", "free");
+  assert.deepEqual(calls, [["setMode", "s-1", "ask"], ["requestFreeMode", "s-1"]]);
+});
+
+test("uses a chat's folder calls only where this desktop has them", () => {
+  const full = { getBinding: async () => null, revealFolder: async () => {}, onBindingChanged: () => () => {} };
+  assert.equal(folderCalls(full), full);
+  assert.equal(folderCalls({ getBinding: async () => null }), null);
+  assert.equal(folderCalls(undefined), null);
 });

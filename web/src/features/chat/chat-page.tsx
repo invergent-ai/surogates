@@ -22,6 +22,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 //
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getChatRouteState } from "./chat-route-state";
+import { LocalChatBar } from "./local-chat-bar";
 import { NewChatPlace } from "./new-chat-place";
 import {
   surogatesWebChatAdapter,
@@ -289,6 +290,7 @@ export function ChatPage() {
           </div>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            {sessionId && <LocalChatBar sessionId={sessionId} />}
             <AgentChat
               sessionId={sessionId ?? null}
               adapter={chatAdapter}
