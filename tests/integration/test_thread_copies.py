@@ -406,3 +406,17 @@ async def test_a_report_says_why_each_file_was_not_merged():
         "Not merged, because the project has a folder where the thread made a file, or a file where it made a folder: notes\n"
         "Not merged, because they go with a change that was not merged (a move lands whole or not at all): Draft.docx"
     )
+
+
+async def test_a_reports_excluded_files_and_repositories_are_cut_at_ten_and_say_how_many_more():
+    data = {
+        "worker_id": "w", "title": "Draft A", "result": "Done.", "files": [],
+        "excluded": [f"n{i:02}.tmp" for i in range(12)], "repositories": [f"r{i:02}/" for i in range(11)],
+    }
+    note = worker_note(EventType.WORKER_COMPLETE.value, data)["content"]
+    assert note.endswith(
+        "Not saved, because the project's history leaves them out: "
+        + ", ".join(f"n{i:02}.tmp" for i in range(10)) + ", and 2 more\n"
+        "Not landed, because they are inside a git repository: "
+        + ", ".join(f"r{i:02}/" for i in range(10)) + ", and 1 more"
+    )

@@ -565,3 +565,12 @@ def test_a_put_back_takes_away_only_the_folders_its_apply_made(tmp_path, project
         history.unapply(**applied)
     assert sorted(p.name for p in project.iterdir() if p.is_dir()) == [".threads", "Reports", "node_modules", "uploads"]
     assert not any((project / "Reports").iterdir())
+
+
+def test_a_turn_names_every_excluded_file_and_repository_it_made(tmp_path, project):
+    history = opened(tmp_path, project)
+    for n in range(12):
+        (history.copy / f"notes {n:02}.tmp").write_text("scratch")
+        a_repository(history.copy / f"clone {n:02}", committed=False)
+    turn = history.commit_turn(author=THREAD_A, trailers=trailers("turn"))
+    assert (len(turn["excluded"]), len(turn["repositories"])) == (12, 12)

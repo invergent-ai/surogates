@@ -301,7 +301,7 @@ class History:
         git("add", "-A")
 
     def _excluded(self) -> tuple[list[str], list[str]]:
-        """The excluded files and folders in the copy, and its folders holding a git repository; at most ten each.
+        """The excluded files and folders in the copy, and its folders holding a git repository.
 
         A copy starts with none, so the turn made them.  The platform's own
         folders are left out.
@@ -318,7 +318,7 @@ class History:
             n for n in names
             if n.endswith("/") and ((self.copy / n / ".git").exists() or (self.project / n / ".git").exists())
         }
-        return [n for n in names if n not in repositories][:10], sorted(repositories)[:10]
+        return [n for n in names if n not in repositories], sorted(repositories)
 
     def _inside(self, path: str) -> Path:
         """*path* in the real files; refused if it would leave them."""
