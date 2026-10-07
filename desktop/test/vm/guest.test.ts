@@ -108,12 +108,30 @@ const alive = (pid: number) => {
 };
 const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
 
-// The agent disk from the built agent, into *dir*.
-function agentDisk(dir: string): string {
+// The agent disk from the built agent, into *dir*, by *script*.
+function agentDisk(dir: string, script = AGENT_DISK): string {
   const image = join(dir, "agent.img");
-  const made = spawnSync(AGENT_DISK, [image], { encoding: "utf8" });
+  const made = spawnSync(script, [image], { encoding: "utf8" });
   if (made.status !== 0) throw new Error(`agent-disk.sh failed: ${made.error?.message ?? made.stderr}`);
   return image;
+}
+
+// The guest's init, as the agent disk carries it.
+const INIT = readFileSync(join(dirname(AGENT_DISK), "init"), "utf8");
+// INIT with each [from, to] made, each found.
+const altered = (...changes: Array<[string | RegExp, string]>) => changes.reduce((init, [from, to]) => {
+  const made = init.replace(from, to);
+  if (made === init) throw new Error(`vm/init has no ${String(from)}`);
+  return made;
+}, INIT);
+// An agent disk as agentDisk() makes, from a folder of its own in *dir*, with *init* for vm/init.
+function agentDiskWith(dir: string, init: string): string {
+  const desktop = mkdtempSync(join(dir, "desktop-"));
+  mkdirSync(join(desktop, "vm"));
+  for (const name of ["agent-disk.sh", "enter-root"]) symlinkSync(join(dirname(AGENT_DISK), name), join(desktop, "vm", name));
+  symlinkSync(join(dirname(AGENT_DISK), "..", "dist"), join(desktop, "dist"));
+  writeFileSync(join(desktop, "vm", "init"), init, { mode: 0o755 });
+  return agentDisk(desktop, join(desktop, "vm", "agent-disk.sh"));
 }
 
 const host = userInfo();
@@ -1061,6 +1079,28 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       process.env.PATH = path;
     }
     expect(readFileSync(options.console, "utf8")).toContain("surogate: the bpf LSM is not active; refusing to run commands unprotected");
+    guest = await Guest.boot(bootLinux, options);
+    expect(await setUp(ROOT, folder)).toMatchObject({ type: "done" });
+  });
+
+  it("fails the boot before its hello when the rule's outcome comes after the agent's start: fewer hooks, a failed load, or none", { timeout: 120_000 }, async () => {
+    const want = Number(/^want=(\d+)/m.exec(INIT)?.[1]);
+    // The outcome *s* seconds late, past where the agent's ports would open: a hello before it would come first.
+    const late = (s: number): [string, string] => ["(\n  if ", `(\n  sleep ${s}\n  if `];
+    const cases: Array<[string, string]> = [
+      [altered(late(3), [/^want=\d+/m, `want=${want + 1}`]), `surogate: the protected-names rule attached ${want} of ${want + 1} hooks`],
+      [altered(late(3), ["/usr/lib/surogate/rule.bpf.o", "/usr/lib/surogate/missing.bpf.o"]), "surogate: could not load the guest-kernel protected-names rule"],
+      [altered(late(600)), "surogate: the protected-names rule did not finish loading"],
+    ];
+    await guest.stop();
+    for (const [init, said] of cases) {
+      const outcome = await Guest.boot(bootLinux, { ...options, agentDisk: agentDiskWith(dir, init) }).then(async (booted) => {
+        await booted.stop();
+        return "it said hello";
+      }, (error: Error) => error.message);
+      expect(outcome, said).toContain("The VM exited");
+      expect(readFileSync(options.console, "utf8")).toContain(said);
+    }
     guest = await Guest.boot(bootLinux, options);
     expect(await setUp(ROOT, folder)).toMatchObject({ type: "done" });
   });
