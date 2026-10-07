@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { vmOptions } from "../../src/vm/client.js";
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { dataHome, launch, press, prompt, quit, shellPage, stubNative } from "./launch.js";
+import { dataHome, launch, press, prompt, promptsShown, quit, shellPage, stubNative } from "./launch.js";
 
 const IMAGE = process.env.SUROGATE_VM_IMAGE ?? fileURLToPath(new URL("../../../images/guest/out", import.meta.url));
 const CHAT = "4e5f6a7b-8c9d-4e0f-a1b2-c3d4e5f6a7b8";
@@ -84,6 +84,9 @@ async function bind(client: Page, folder: string, chat = CHAT): Promise<void> {
   expect(await operation("bind", { folder, nonce: prepared.nonce }, "bind", 0, chat)).toEqual({ ok: null });
 }
 
+// A curl to *url* in the guest: its response's status, then its proxy's answer to CONNECT (000 for none).
+const status = (url: string, flags = "") => `curl -sS --max-time 20 ${flags} -o /dev/null -w '%{http_code} %{http_connect}\\n' ${url} 2>/dev/null`;
+
 // The VM's runtime folder for the app's state root, which its stop removes.
 const vmRun = () => vmOptions(join(home, "surogate"), { uid: 0, gid: 0, name: "", home: "" }, { XDG_RUNTIME_DIR: runtime }).run;
 
@@ -143,15 +146,38 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     expect(await run("pip install --no-cache-dir --no-deps --reinstall --quiet cowsay==6.1 && python3 -c 'import cowsay; print(\"installed\")'")).toEqual({
       ok: { output: "installed\n", returncode: 0, timed_out: false },
     });
-    // Its approval prompts are not drawn yet: it denies each network prompt.
-    const status = (url: string, flags = "") => `curl -sS --max-time 20 ${flags} -o /dev/null -w '%{http_code} %{http_connect}\\n' ${url} 2>/dev/null`;
-    expect(await run(`${status("https://example.com/")}; ${status("http://127.0.0.1:9/", "--noproxy ''")}`)).toEqual({
+    // Its own services are refused unasked; a site off the package hosts asks, in the desktop's own window.
+    const refused = run(`${status("https://example.com/")}; ${status("http://127.0.0.1:9/", "--noproxy ''")}`);
+    const asked = await prompt(app!);
+    expect(await asked.textContent("#prompt-title")).toBe("Connect to example.com?");
+    expect(await asked.textContent(".code")).toBe("example.com:443");
+    expect(await asked.evaluate(() => (document.activeElement as HTMLElement).dataset.id)).toBe("deny");
+    await press(asked, "deny");
+    expect(await refused).toEqual({
       ok: {
         output: "000 403\n403 000\n\nThis computer does not let a chat reach its own network services (127.0.0.1:9)\nThis computer did not allow network access to example.com:443.",
         returncode: 0,
         timed_out: false,
       },
     });
+  });
+
+  it("lets a command reach a site off the package hosts once its user allows it for the chat in the desktop's own window, on every port", async () => {
+    const folder = join(home, "site");
+    mkdirSync(folder);
+    await bound(folder);
+    const run = (command: string) => operation("run", { command, workdir: null, timeout: 60 });
+    const reached = run(status("https://example.com/"));
+    // Asked once the VM has started for the chat's first command.
+    await expect.poll(() => promptsShown(app!), { timeout: 30_000 }).toBe(1);
+    const asked = await prompt(app!);
+    expect(await asked.textContent("#prompt-title")).toBe("Connect to example.com?");
+    expect(await asked.$$eval("#prompt-buttons button", (buttons) => buttons.map((button) => button.dataset.id))).toEqual(["deny", "allow_session", "allow"]);
+    await press(asked, "allow_session");
+    expect(await reached).toEqual({ ok: { output: "200 200\n", returncode: 0, timed_out: false } });
+    // Its other ports too, for the rest of the chat, unasked.
+    expect(await run(status("http://example.com/"))).toEqual({ ok: { output: "200 000\n", returncode: 0, timed_out: false } });
+    expect(await promptsShown(app!)).toBe(0);
   });
 
   it("runs a background server in the folder, which the agent's next command reaches, and stops it with the app", async () => {
