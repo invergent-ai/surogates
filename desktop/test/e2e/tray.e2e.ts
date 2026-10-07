@@ -2,7 +2,8 @@
 // says how this computer is connected, opens Settings and quits. Electron lists no trays, so
 // the test reads what the app sets on its tray.
 
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import type { ElectronApplication } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -51,6 +52,25 @@ describe("the tray", () => {
     await theme(app, "dark");
     await theme(app, "light");
     await expect.poll(() => icons(app!)).toEqual(["tray-dark.png", "tray-dark.png"]);
+  });
+
+  it("says the app's name when pointed at, and shows the window on a click", async () => {
+    // The tray, kept as the app makes it, with what it says when pointed at.
+    const watching = join(home, "watch-tray.cjs");
+    writeFileSync(watching, [
+      'const { Tray } = require("electron");',
+      "const setToolTip = Tray.prototype.setToolTip;",
+      "Tray.prototype.setToolTip = function (tip) { Object.assign(globalThis, { tray: this, tooltip: tip }); return setToolTip.call(this, tip); };",
+    ].join("\n"));
+    app = await launch(home, {}, [], [watching]);
+    await (await app.firstWindow()).waitForLoadState();
+    expect(await app.evaluate(() => (globalThis as unknown as { tooltip: string }).tooltip)).toBe("Surogate");
+    const shown = () => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isVisible());
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.hide());
+    expect(await shown()).toBe(false);
+    // A left click, as the desktop sends one where it sends one.
+    await app.evaluate(() => (globalThis as unknown as { tray: Electron.Tray }).tray.emit("click"));
+    await expect.poll(shown).toBe(true);
   });
 
   it("shows the window, says how this computer is connected, opens Settings, and quits", async () => {

@@ -112,13 +112,14 @@ export async function quit(shell: ElectronApplication | undefined): Promise<void
 
 /**
  * Launch the shell with its state under *home*; *env* adds to its environment, and *args* to its
- * arguments, as the system adds a link it opens.
+ * arguments, as the system adds a link it opens. Each of *requires*, a script of the test's, runs
+ * in the main process before the app's own code, after Playwright's.
  */
-export async function launch(home: string, env: Record<string, string> = {}, args: string[] = []): Promise<ElectronApplication> {
+export async function launch(home: string, env: Record<string, string> = {}, args: string[] = [], requires: string[] = []): Promise<ElectronApplication> {
   return await _electron.launch({
     executablePath: ELECTRON,
     // The basic store: no test leaves an item in the user's keyring.
-    args: [MAIN, "--password-store=basic", ...args],
+    args: [...requires.flatMap((script) => ["-r", script]), MAIN, "--password-store=basic", ...args],
     env: { ...shellEnv(home), ...env },
     // Playwright adds --no-sandbox unless told: the app never runs without its sandbox.
     chromiumSandbox: true,
