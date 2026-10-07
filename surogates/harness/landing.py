@@ -33,6 +33,11 @@ from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
 
+#: How long a cancelled landing waits for its put-back before the cancel goes on.
+_PUT_BACK_BOUND = 300
+#: Put-backs still running after their landing was cancelled: each finishes.
+_PUTTING_BACK: set[asyncio.Future] = set()
+
 
 class LandingStepError(RuntimeError):
     """A ``_history`` step answered with an error."""
@@ -144,24 +149,20 @@ async def _land(
             ))
             outcome.update(commit=recorded["commit"], landed=landed)
         saga.transition(SagaState.COMPLETED)
-    except Exception:
+    except BaseException as exc:
         logger.warning("Landing of session %s rolled back", session.id, exc_info=True)
-        # An apply that failed may still have written its file: its reply
-        # was lost, or it ran out of time.  It is put back first.
-        failed: list[SagaStep] = []
-        for it in saga.steps:
-            if it.tool_name == "history.apply" and it.state is StepState.FAILED:
-                try:
-                    await asyncio.wait_for(
-                        compensate_history(it, sandbox_pool, owner, ran=False), it.timeout_seconds,
-                    )
-                except Exception:
-                    logger.warning("Could not put back %s", it.arguments.get("path"), exc_info=True)
-                    failed.append(it)
-        failed += await orchestrator.compensate(
-            saga.saga_id, partial(compensate_step, sandbox_pool=sandbox_pool, session_id=owner),
-        )
-        outcome.update(state="escalated" if failed else "compensated")
+        put_back = asyncio.ensure_future(_put_back(saga, orchestrator, sandbox_pool, owner))
+        if not isinstance(exc, Exception):
+            # Cancelled: the turn's lease went to another worker, which cannot
+            # reach this pod.  What was applied still goes back, then the cancel goes on.
+            _PUTTING_BACK.add(put_back)
+            put_back.add_done_callback(_PUTTING_BACK.discard)
+            try:
+                await asyncio.wait_for(asyncio.shield(put_back), _PUT_BACK_BOUND)
+            except BaseException:
+                logger.warning("The put-back of %s's cancelled landing is still running", session.id, exc_info=True)
+            raise
+        outcome.update(state="escalated" if await put_back else "compensated")
     applied = {c["path"]: c for c in outcome["landed"]}
     reasons = {o["path"]: o["reason"] for o in outcome["overlapped"]}
     paths = sorted({c["path"] for c in changes} | set(reasons))
@@ -177,3 +178,23 @@ async def _land(
         for path in paths
     ]
     return outcome
+
+
+async def _put_back(saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str) -> list[SagaStep]:
+    """Put back what a landing applied; the steps that could not be put back.
+
+    An apply that failed, or that was cut off, may still have written its
+    file: its reply was lost, or it ran out of time.  It is put back first.
+    """
+    failed: list[SagaStep] = []
+    for it in saga.steps:
+        if it.tool_name == "history.apply" and it.state in (StepState.FAILED, StepState.EXECUTING):
+            try:
+                await asyncio.wait_for(compensate_history(it, sandbox_pool, owner, ran=False), it.timeout_seconds)
+            except Exception:
+                logger.warning("Could not put back %s", it.arguments.get("path"), exc_info=True)
+                failed.append(it)
+    failed += await orchestrator.compensate(
+        saga.saga_id, partial(compensate_step, sandbox_pool=sandbox_pool, session_id=owner),
+    )
+    return failed

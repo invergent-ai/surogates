@@ -284,6 +284,31 @@ async def test_an_apply_whose_reply_is_lost_is_put_back(api, monkeypatch, pods):
     assert report["landing"] == "compensated"
 
 
+class CancelledOnTheThird(SandboxPool):
+    """A pool whose pod applies ``c.md``, and whose turn is then cancelled, as a lost lease detaches it."""
+
+    async def execute(self, session_id, name, input):
+        result = await super().execute(session_id, name, input)
+        args = json.loads(input or "{}")
+        if name == "_history" and (args.get("action"), args.get("path")) == ("apply", "c.md"):
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)
+        return result
+
+
+async def test_a_cancelled_landing_puts_its_files_back(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    turn = asyncio.create_task(a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "for f in a b c d e; do echo $f > $f.md; done"})),
+        _final_response("Wrote five notes."),
+    ], pool=CancelledOnTheThird(pods), saga_settings=QUICK))
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    # a.md and b.md were applied, and c.md written before its reply was read: all go back.
+    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "notes.txt"]
+
+
 async def test_an_excluded_file_a_turn_made_is_named_in_its_report(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
