@@ -54,7 +54,7 @@ def setup_frontend(app: FastAPI, build_path: Path) -> bool:
 
         content = (build_path / "index.html").read_bytes()
         content = _strip_crossorigin(content)
-        framing = _NOT_FRAMED if full_path.rstrip("/") == _CONSENT_PATH else {}
+        framing = _NOT_FRAMED if full_path.rstrip("/").lower() == _CONSENT_PATH else {}
         return Response(
             content=content,
             media_type="text/html",

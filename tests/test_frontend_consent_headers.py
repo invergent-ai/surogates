@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -15,8 +16,10 @@ def client(tmp_path) -> TestClient:
     return TestClient(app)
 
 
-def test_the_consent_page_refuses_to_be_framed(tmp_path):
-    response = client(tmp_path).get("/oauth/authorize?client_id=surogate-desktop")
+# The web client's router matches paths whatever their case, so the headers must too.
+@pytest.mark.parametrize("path", ["/oauth/authorize", "/OAuth/Authorize", "/oauth/authorize/"])
+def test_the_consent_page_refuses_to_be_framed(tmp_path, path):
+    response = client(tmp_path).get(f"{path}?client_id=surogate-desktop")
     assert response.status_code == 200
     assert response.headers["content-security-policy"] == "frame-ancestors 'none'"
     assert response.headers["x-frame-options"] == "DENY"
