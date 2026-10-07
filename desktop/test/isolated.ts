@@ -5,7 +5,7 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { userInfo } from "node:os";
-import { basename, isAbsolute, relative } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 
 const SCRATCH = ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"];
 
@@ -48,6 +48,9 @@ export function notIsolated(env: Record<string, string | undefined> = process.en
     }
   })();
   if (!runtime || !kept || within(runtime, `/run/user/${uid}`) || within(runtime, homedir)) missing.push("XDG_RUNTIME_DIR is not a scratch folder of mode 0700");
+  // The browser's and Playwright's own folders go to TMPDIR, and a browser that is killed leaves them.
+  const temp = env.TMPDIR;
+  if (!temp || !isAbsolute(temp) || resolve(temp) === "/tmp") missing.push("TMPDIR is not a scratch folder");
   const display = /^(:\d+)(\.\d+)?$/.exec(env.DISPLAY ?? "")?.[1];
   if (display === undefined || !xvfb(display)) missing.push("DISPLAY is not an Xvfb's");
   return missing;

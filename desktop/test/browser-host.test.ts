@@ -130,8 +130,12 @@ describe("the browser tests' gate", () => {
       "XDG_CACHE_HOME is not a scratch folder",
       "XDG_STATE_HOME is not a scratch folder",
       "XDG_RUNTIME_DIR is not a scratch folder of mode 0700",
+      "TMPDIR is not a scratch folder",
       "DISPLAY is not an Xvfb's",
     ]);
+    // The real /tmp is everyone's: the browser's own folders would be left there.
+    for (const real of ["/tmp", "/tmp/", "/tmp/."]) expect(notIsolated({ TMPDIR: real })).toContain("TMPDIR is not a scratch folder");
+    expect(notIsolated({ TMPDIR: "/tmp/tmp.scratch/tmp" })).not.toContain("TMPDIR is not a scratch folder");
   });
 });
 
