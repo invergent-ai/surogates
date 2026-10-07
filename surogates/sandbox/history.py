@@ -460,9 +460,12 @@ class History:
         have = [c for c in set(refs.values()) if self._has(c)]
         cut: set[str] = set()
         if tips and (self.repo / "shallow").is_file():
-            # Asked before the pack goes: after, the history holds them.
+            # By the parents, not the commit: an earlier try's pack may hold it already.
             sent = set(self._main("rev-list", *tips, *(["--not", *have] if have else [])).split())
-            cut = {c for c in (self.repo / "shallow").read_text().split() if c in sent and not self._in_durable(c)}
+            cut = {
+                c for c in (self.repo / "shallow").read_text().split()
+                if c in sent and not all(self._in_durable(p) for p in self._parents(c))
+            }
         outgoing = self.repo / "outgoing"
         shutil.rmtree(outgoing, ignore_errors=True)
         outgoing.mkdir()
@@ -489,6 +492,11 @@ class History:
         except HistoryError:
             return False
         return True
+
+    def _parents(self, commit: str) -> list[str]:
+        """*commit*'s parents as its object names them, fetched or not."""
+        header = self._main("cat-file", "commit", commit).partition("\n\n")[0]
+        return [line.split()[1] for line in header.splitlines() if line.startswith("parent ")]
 
     def _put_durable(self, name: str, source: bytes | Path) -> None:
         """Write *name* in the durable history whole, beside it then renamed over it; durable before it returns."""

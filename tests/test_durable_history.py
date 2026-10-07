@@ -286,3 +286,65 @@ def test_a_history_a_command_wrote_runs_nothing_in_a_pod_and_refuses_its_open(tm
     with pytest.raises(HistoryError, match="project's history"):
         holder.fetch(commits=[option])
     assert not ran.exists()
+
+
+def cut_history(tmp_path: Path, durable: Path, *, kept: int) -> None:
+    """A pruning's cut, made by hand: ``main``'s last *kept* landings stay, its other threads gone, with ``shallow`` below."""
+    work = tmp_path / f"cut-{time.monotonic_ns()}.git"
+    subprocess.run(["git", "clone", "-q", "--mirror", "--no-hardlinks", str(durable), str(work)], check=True, capture_output=True)
+    for ref in git(work, "for-each-ref", "--format=%(refname)").splitlines():
+        if ref != "refs/heads/main":
+            git(work, "update-ref", "-d", ref)
+    mains = git(work, "log", "--first-parent", "--format=%H", "refs/heads/main").split()
+    tips = set(git(work, "for-each-ref", "--format=%(objectname)").split())
+    parents = {line.split()[0]: line.split()[1:] for line in git(work, "rev-list", "--all", "--parents").splitlines()}
+    stays = set(git(work, "rev-list", "--all", f"^{mains[kept]}").split()) | tips
+    (work / "shallow").write_text("".join(f"{c}\n" for c in sorted(c for c in stays if any(p not in stays for p in parents[c]))))
+    git(work, "reflog", "expire", "--expire=now", "--all")
+    git(work, "gc", "-q", "--prune=now")
+    git(work, "pack-refs", "--all", "--prune")
+    for old in (durable / "objects" / "pack").iterdir():
+        old.unlink()
+    for name in ("shallow", "packed-refs", *(f"objects/pack/{p.name}" for p in (work / "objects" / "pack").iterdir())):
+        shutil.copyfile(work / name, durable / name)
+
+
+def whole(repo: Path, *args: str) -> str:
+    """What git says is wrong with *repo* when it runs *args*: nothing, for a whole history."""
+    out = subprocess.run(["git", f"--git-dir={repo}", *args], capture_output=True, text=True)
+    return f"{out.stdout}{out.stderr}".strip() or f"exit {out.returncode}" if out.returncode else ""
+
+
+def test_a_push_retried_after_its_pack_went_up_still_marks_the_commit_a_pruning_cut_below(tmp_path, project, monkeypatch):
+    first = a_pod(tmp_path, project, "early")
+    (first.copy / "start.md").write_text("x")
+    land(first, "saga:start")
+    slow = a_pod(tmp_path, project, "slow")  # a long turn's pod, open across a pruning
+    (slow.copy / "slow.md").write_text("the slow thread's work")
+    for n in range(4):
+        other = a_pod(tmp_path, project, f"o{n}")
+        (other.copy / "Budget.xlsx").write_bytes(os.urandom(5_000))
+        land(other, f"saga:o{n}", author={"name": f"O{n}", "email": f"thread:o{n}@surogate"})
+    durable = project / "_history"
+    cut_history(tmp_path, durable, kept=2)
+    assert subprocess.run(["git", f"--git-dir={durable}", "cat-file", "-e", git(slow.repo, "rev-parse", "refs/bases/slow")]).returncode
+    main = slow.fetch()["main"]
+    trailers = [["Surogate-Saga", "saga:slow"], ["Surogate-Kind", "turn"]]
+    put, failed = History._put_durable, []
+
+    def shallow_fails_once(self, name, source):
+        if name == "shallow" and not failed:
+            failed.append(name)
+            raise OSError(5, "Input/output error")  # the pack is up; its shallow line is not
+        return put(self, name, source)
+
+    monkeypatch.setattr(History, "_put_durable", shallow_fails_once)
+    with pytest.raises(OSError):
+        slow.commit_turn(author=A, trailers=trailers)
+    turn = slow.commit_turn(author=A, trailers=trailers)  # the step's retry
+    # The pod's own boundary, in the pack since the first try, is marked all the same.
+    assert whole(durable, "fsck", "--no-dangling") == whole(durable, "rev-list", "--all", "--objects", "--quiet") == ""
+    applied = [slow.apply(c["path"], c["before"], c["after"]) for c in turn["changes"]]
+    slow.record(turn=turn["commit"], applied=applied, author=A, trailers=[["Surogate-Saga", "saga:slow"], ["Surogate-Kind", "landing"]], main=main)
+    assert (project / "slow.md").read_text() == "the slow thread's work"
+    assert whole(durable, "fsck", "--no-dangling") == ""
