@@ -510,6 +510,16 @@ describe("the project dialog", () => {
     });
   }
 
+  it("goes with the account whose project it shows", async () => {
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click("#project-settings");
+    await projectDialog(shell);
+    // The page says nobody is signed in, as after its session expired.
+    await client.evaluate(() => window.surogateDesktop!.registerProjects(null));
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+  });
+
   it("asks for a name, says what the agent refused, and keeps a project when the archive is cancelled", async () => {
     const { shell, page, client } = await signedIn();
     await page.click("#open-projects");

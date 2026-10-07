@@ -158,6 +158,8 @@ const NO_SUCH_THREAD = "No such thread in the open project";
 // The open project, for the Overview pane, and what stops following it.
 let overview: { project: Project; threads: ThreadRow[]; library: LibraryEntry[]; routines: Routine[] } | null = null;
 let unfollow = (): void => {};
+// The project dialog's view, while it is open over the window.
+let projectDialog: WebContents | null = null;
 
 const report = (error: unknown): void => {
   console.error(error);
@@ -339,6 +341,8 @@ function withdrawProjects(signedOut: boolean): void {
 function forgetAccount(): void {
   listed = [];
   failure = null;
+  // The project dialog shows one of its projects: it goes too, and nothing it sends reaches the next account's page.
+  if (projectDialog && main?.settingsContents() === projectDialog) main.closeSettings();
   beforeProjects = { kind: "web" };
   masters.clear();
   overview = null;
@@ -1144,6 +1148,7 @@ async function confirmArchive(name: string): Promise<boolean> {
 function showProject(editing: Opened | null): void {
   const page = join(PAGES, "project.html");
   main?.openSettings(page, PAGES_PRELOAD, (contents) => {
+    projectDialog = contents;
     const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
       contents.ipc.handle(channel, (event, ...args: unknown[]) => {
         if (!ownPage(event.senderFrame, page)) throw new Error("Not the project dialog's own page");
