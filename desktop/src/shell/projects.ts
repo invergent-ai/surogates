@@ -13,9 +13,10 @@ export const ANSWER_TIMEOUT_MS = 10_000;
 const METHODS = ["list", "get", "create", "update", "archive", "threads", "resolve", "reopen", "library", "routines"] as const;
 type Method = (typeof METHODS)[number];
 
-// What the main process sends the page's preload.
+// What the main process sends the page's preload. A call's deadline is when its time runs out
+// (Date.now()'s clock): a page that holds the call until it serves drops it after that.
 export type ToPage =
-  | { type: "call"; id: number; method: Method; args: unknown[] }
+  | { type: "call"; id: number; method: Method; args: unknown[]; deadline: number }
   | { type: "subscribe"; id: number; projectId: string }
   | { type: "unsubscribe"; id: number };
 
@@ -24,7 +25,8 @@ class Unusable extends Error {}
 const fields = (value: unknown): Record<string, unknown> => (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
 const text = (value: unknown, max: number): value is string => typeof value === "string" && value.length <= max;
 const named = (value: unknown): value is string => text(value, 500) && value !== "";
-const time = (value: unknown): value is string => text(value, 40) && !Number.isNaN(Date.parse(value));
+// UTC with its Z (Section 12): a time with no zone would be read as this computer's local time.
+const time = (value: unknown): value is string => text(value, 40) && value.endsWith("Z") && !Number.isNaN(Date.parse(value));
 const count = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 1_000_000;
 const one = <T>(value: unknown, allowed: readonly T[]): value is T => allowed.includes(value as T);
 const tier = (value: unknown): value is Project["coordinatorTier"] => value === null || value === "basic" || value === "pro";
@@ -78,7 +80,7 @@ function threadOf(value: unknown): ThreadRow {
 function entryOf(value: unknown): LibraryEntry {
   const { path, origin, threadId, size, updatedAt, place } = fields(value);
   need(text(path, 4096) && one(origin, ["added", "produced"]) && (threadId === null || named(threadId))
-    && (size === null || Number.isSafeInteger(size)) && (updatedAt === null || time(updatedAt)));
+    && (size === null || (Number.isSafeInteger(size) && (size as number) >= 0)) && (updatedAt === null || time(updatedAt)));
   return { path, origin, threadId, size, updatedAt, place: placeOf(place) } as LibraryEntry;
 }
 
@@ -120,7 +122,8 @@ export class PageProjects implements ProjectsSource {
   create = (input: { name: string; goal?: string; instructions?: string }) => this.call<Project>("create", input);
   update = (projectId: string, patch: Parameters<ProjectsSource["update"]>[1]) => this.call<Project>("update", projectId, patch);
   archive = (projectId: string) => this.call<void>("archive", projectId);
-  threads = (projectId: string) => this.call<ThreadRow[]>("threads", projectId);
+  threads = (projectId: string, threadId?: string) =>
+    this.call<ThreadRow[]>("threads", ...(threadId === undefined ? [projectId] : [projectId, threadId]));
   resolve = (projectId: string, threadId: string) => this.call<ThreadRow>("resolve", projectId, threadId);
   reopen = (projectId: string, threadId: string) => this.call<ThreadRow>("reopen", projectId, threadId);
   library = (projectId: string) => this.call<LibraryEntry[]>("library", projectId);
@@ -177,7 +180,7 @@ export class PageProjects implements ProjectsSource {
       reject(new Error(`The agent's page did not answer ${method} in time`));
     }, this.timeoutMs);
     this.calls.set(id, { method, resolve: resolve as (value: unknown) => void, reject, timer });
-    this.send({ type: "call", id, method, args });
+    this.send({ type: "call", id, method, args, deadline: Date.now() + this.timeoutMs });
     return promise;
   }
 }

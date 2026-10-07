@@ -18,7 +18,7 @@ describe("the projects the page serves", () => {
   it("are asked for through the page, and its answer is checked and copied field by field", async () => {
     const { source, last } = page();
     const listed = source.list();
-    expect(last()).toEqual({ type: "call", id: 1, method: "list", args: [] });
+    expect(last()).toEqual({ type: "call", id: 1, method: "list", args: [], deadline: expect.any(Number) });
     source.answered(1, { ok: projects.map((project) => ({ ...project, secret: "x" })) });
     const summaries = await listed;
     expect(summaries[0]).toEqual({
@@ -26,7 +26,7 @@ describe("the projects the page serves", () => {
       waiting: 3, working: 2,
     });
     const rows = source.threads(REPORT);
-    expect(last()).toEqual({ type: "call", id: 2, method: "threads", args: [REPORT] });
+    expect(last()).toEqual({ type: "call", id: 2, method: "threads", args: [REPORT], deadline: expect.any(Number) });
     source.answered(2, { ok: threads[REPORT] });
     expect(await rows).toEqual(threads[REPORT]);
   });
@@ -39,6 +39,35 @@ describe("the projects the page serves", () => {
     const refused = source.get("nope");
     source.answered(2, { error: "No such project" });
     await expect(refused).rejects.toThrow("No such project");
+  });
+
+  it("refuse a time with no zone, which would be read as local time, and a negative size", async () => {
+    const { source } = page();
+    const naive = source.list();
+    source.answered(1, { ok: [{ ...projects[0], updatedAt: "2026-10-06T11:43:00" }] });
+    await expect(naive).rejects.toThrow("The agent's page answered list with something Surogate cannot use");
+    const negative = source.library(REPORT);
+    source.answered(2, { ok: [{ path: "brief.docx", origin: "added", threadId: null, size: -1, updatedAt: null, place: { kind: "cloud" } }] });
+    await expect(negative).rejects.toThrow("The agent's page answered library with something Surogate cannot use");
+  });
+
+  it("ask the page for one thread's row, or for every row", () => {
+    const { source, last } = page();
+    void source.threads(REPORT, FIXTURE_IDS.idle);
+    expect(last()).toEqual({ type: "call", id: 1, method: "threads", args: [REPORT, FIXTURE_IDS.idle], deadline: expect.any(Number) });
+    void source.threads(REPORT);
+    expect(last()).toEqual({ type: "call", id: 2, method: "threads", args: [REPORT], deadline: expect.any(Number) });
+  });
+
+  it("send each call with the moment its time runs out, for a page that holds it", () => {
+    vi.useFakeTimers({ now: 1_000 });
+    try {
+      const { source, last } = page(500);
+      void source.list();
+      expect(last()).toMatchObject({ type: "call", id: 1, deadline: 1_500 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("refuse a call the page does not answer in time, and ignore an answer to no call", async () => {

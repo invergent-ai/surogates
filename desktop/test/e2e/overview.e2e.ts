@@ -53,6 +53,7 @@ const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 interface Served {
   data: ProjectFixtures;
   lists: number;
+  reads: Array<string | null>;
   changed(id: string, threadId: string | null): void;
 }
 
@@ -231,16 +232,17 @@ describe("the Overview pane, at its edges", () => {
     const { page, client } = await opened();
     await page.click(`[data-thread="${QUESTION}"]`);
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${QUESTION}`);
-    await expect.poll(async () => {
-      await client.evaluate(([project, thread]) => {
-        const fake = (window as unknown as { fakeProjects?: Served }).fakeProjects;
-        if (!fake) return;
-        fake.data.projects.find((found) => found.id === project)!.masterSessionId = "not-a-chat";
-        fake.data.threads[project!] = fake.data.threads[project!]!.filter((found) => found.id !== thread);
-        fake.changed(project!, thread!);
-      }, [REPORT, QUESTION]).catch(() => {});
-      return page.textContent('[data-group="waiting"] .count');
-    }).toBe("2");
+    // The thread's page serves the projects and the shell has read them: the change below is read
+    // after that read, never across it.
+    await expect.poll(() => client.evaluate(() => (window as unknown as { fakeProjects?: Served }).fakeProjects?.reads.length ?? 0)
+      .catch(() => 0)).toBeGreaterThan(0);
+    await client.evaluate(([project, thread]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      fake.data.projects.find((found) => found.id === project)!.masterSessionId = "not-a-chat";
+      fake.data.threads[project!] = fake.data.threads[project!]!.filter((found) => found.id !== thread);
+      fake.changed(project!, thread!);
+    }, [REPORT, QUESTION]);
+    await expect.poll(() => page.textContent('[data-group="waiting"] .count')).toBe("2");
     await pause(500);
     expect(client.url()).toBe(`${origin}/chat/${QUESTION}`);
   });

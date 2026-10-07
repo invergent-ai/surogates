@@ -254,3 +254,59 @@ describe("the Projects page", () => {
     await expect.poll(() => page.textContent("#title")).toBe("Quarterly report");
   });
 });
+
+describe("the page's projects source", () => {
+  it("answers a call that reaches the page before it serves, once it serves, and drops one whose time ran out", async () => {
+    // The page serves its projects only once the test says so.
+    agent.registerAfterMs = -1;
+    const shell = await launch(home);
+    app = shell;
+    await stubNative(shell);
+    const page = await shellPage(shell);
+    await connect(page, origin);
+    await signIn(shell, page, agent);
+    const client = await webClient(shell, origin);
+    // The page is up and serves nothing yet, as a page whose load has just committed: two calls reach
+    // it, one of them past its time, which the main process has refused already.
+    await shell.evaluate(({ webContents }, [url, project]) => {
+      const contents = webContents.getAllWebContents().find((found) => found.getURL().startsWith(url!))!;
+      Object.assign(globalThis, {
+        early: new Promise((resolve) => {
+          contents.ipc.on("desktop:projects-answer", (_event, id: unknown, answered: unknown) => {
+            if (id === 999_998) Object.assign(globalThis, { late: answered });
+            if (id === 999_999) resolve(answered);
+          });
+        }),
+      });
+      contents.send("desktop:projects", { type: "call", id: 999_998, method: "threads", args: [project], deadline: 0 });
+      contents.send("desktop:projects", { type: "call", id: 999_999, method: "list", args: [], deadline: Date.now() + 60_000 });
+    }, [origin, REPORT] as const);
+    await client.evaluate(() => (window as unknown as { fakeProjects: { register(): void } }).fakeProjects.register());
+    const outcome = await shell.evaluate(() => (globalThis as unknown as { early: Promise<unknown> }).early);
+    expect((outcome as { ok?: Array<{ name: string }> }).ok?.map((project) => project.name).sort())
+      .toEqual(["Budget", "Hiring plan", "Quarterly report"]);
+    // Held with the one answered, the late one would have run before it: it never ran.
+    expect(await client.evaluate(() => (window as unknown as { fakeProjects: { reads: unknown[] } }).fakeProjects.reads)).toEqual([]);
+    expect(await shell.evaluate(() => (globalThis as unknown as { late?: unknown }).late)).toBeUndefined();
+  });
+
+  it("refuses a source whose methods are not its own, as a class instance's are, and keeps the one it serves", async () => {
+    const { page, client } = await signedIn();
+    const refused = await client.evaluate(async () => {
+      class Source {
+        async list() {
+          return [];
+        }
+      }
+      try {
+        await window.surogateDesktop!.registerProjects(new Source() as never);
+        return "registered";
+      } catch (error) {
+        return (error as Error).message;
+      }
+    });
+    expect(refused).toContain("A projects source's methods must be its own properties");
+    await page.click("#open-projects");
+    await expect.poll(() => texts(page, "#cards .card .name")).toEqual(["Quarterly report", "Hiring plan", "Budget"]);
+  });
+});

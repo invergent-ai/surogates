@@ -70,7 +70,9 @@ export interface DesktopBridge {
   // Who is signed in; null once nobody is.
   setAccount(account: DesktopAccount | null): Promise<void>;
   // The page serves its agent's projects, and the shell calls them through the main process
-  // (Section 12). Null withdraws them, as when the user signs out.
+  // (Section 12). Null withdraws them, as when the user signs out. The desktop is handed a copy,
+  // which keeps the source's own methods, bound to it, and leaves any prototype behind: a
+  // source's methods are its own properties, as an object literal's are, or it is refused.
   registerProjects(source: ProjectsSource | null): Promise<void>;
 }
 

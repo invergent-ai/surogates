@@ -17,24 +17,34 @@ if (origin !== undefined && window.top === window && location.origin === origin)
   // process, which checks each answer.
   let projects: ProjectsSource | null = null;
   const subscriptions = new Map<number, () => void>();
+  // Calls that reach this page before it serves its projects, as one sent while its load
+  // commits does: answered once it serves them, or refused once it says it serves none. One
+  // whose deadline has passed by then was refused by the main process already: it never runs.
+  const early: Array<Extract<ToPage, { type: "call" }>> = [];
+  // A source's methods, which must be its own: what the page hands over is a copy, and keeps no prototype.
+  const METHODS = ["list", "get", "create", "update", "archive", "threads", "resolve", "reopen", "library", "routines", "subscribe"] as const;
   const answer = (id: number, outcome: { ok: unknown } | { error: string }) => ipcRenderer.send("desktop:projects-answer", id, outcome);
+  const called = (source: ProjectsSource, message: Extract<ToPage, { type: "call" }>) => {
+    const method = source[message.method] as (...args: unknown[]) => Promise<unknown>;
+    Promise.resolve().then(() => method(...message.args)).then(
+      (ok) => answer(message.id, { ok }),
+      (error: unknown) => answer(message.id, { error: error instanceof Error ? error.message : String(error) }),
+    );
+  };
   ipcRenderer.on("desktop:projects", (_event, message: ToPage) => {
     const source = projects;
     if (message.type === "unsubscribe") {
       subscriptions.get(message.id)?.();
       subscriptions.delete(message.id);
     } else if (!source) {
-      if (message.type === "call") answer(message.id, { error: "The agent's page serves no projects" });
+      // A subscription is made again once the page serves: the main process follows anew then.
+      if (message.type === "call") early.push(message);
     } else if (message.type === "subscribe") {
       subscriptions.set(message.id, source.subscribe(message.projectId, (threadId) => {
         ipcRenderer.send("desktop:projects-changed", message.id, threadId);
       }));
     } else {
-      const method = source[message.method] as (...args: unknown[]) => Promise<unknown>;
-      Promise.resolve().then(() => method(...message.args)).then(
-        (ok) => answer(message.id, { ok }),
-        (error: unknown) => answer(message.id, { error: error instanceof Error ? error.message : String(error) }),
-      );
+      called(source, message);
     }
   });
   contextBridge.exposeInMainWorld("surogateDesktop", {
@@ -55,9 +65,17 @@ if (origin !== undefined && window.top === window && location.origin === origin)
     },
     setAccount: call("setAccount"),
     registerProjects: (source: ProjectsSource | null) => {
+      if (source && METHODS.some((name) => typeof source[name] !== "function")) {
+        throw new Error("A projects source's methods must be its own properties, as an object literal's are");
+      }
       for (const end of subscriptions.values()) end();
       subscriptions.clear();
       projects = source;
+      for (const message of early.splice(0)) {
+        if (Date.now() >= message.deadline) continue;
+        if (source) called(source, message);
+        else answer(message.id, { error: "The agent's page serves no projects" });
+      }
       return ipcRenderer.invoke("desktop:registerProjects", source !== null);
     },
   });

@@ -12,7 +12,7 @@ import type { AddressInfo } from "node:net";
 import type { ElectronApplication, Page } from "playwright-core";
 import { expect } from "vitest";
 
-import type { ProjectFixtures, ProjectsSource } from "../../../web/src/lib/projects.js";
+import type { Project, ProjectFixtures, ProjectsSource } from "../../../web/src/lib/projects.js";
 import { FakeLinkServer } from "../fake-server.js";
 
 // As surogates/devices/store.py issues one: surg_dev_ and token_urlsafe(33).
@@ -44,7 +44,8 @@ export class FakeAgent {
   config: Record<string, unknown> = { agent_id: "a", desktop_sessions: true, multi_session: true };
   // The projects the page serves: a fake ProjectsSource built on these, or none.
   projects: ProjectFixtures | null = null;
-  // How long each load of the page takes to register them, as the web client waits for its bundle and /auth/me.
+  // How long each load of the page takes to register them, as the web client waits for its bundle and
+  // /auth/me; below zero, the page registers them only when a test calls window.fakeProjects.register().
   registerAfterMs = 0;
   // Who signs in, as /auth/me answers.
   account = ACCOUNT;
@@ -253,44 +254,59 @@ export async function signedInAndAdded(shell: ElectronApplication, page: Page, a
 
 // Run in the fake agent's page: a ProjectsSource on *data*, registered with the desktop after
 // *delay* ms. The page keeps it as window.fakeProjects, whose changed() tells the source's subscribers,
-// and whose lists counts the times the projects were listed.
+// whose lists counts the times the projects were listed, whose reads names each read of threads (a
+// thread's id, or null for them all), and whose register() registers the source.
+// The source's methods read it through this, as an object's own methods may.
 function serveProjects(data: ProjectFixtures, delay: number): void {
   const listeners = new Map<string, Set<(threadId: string | null) => void>>();
   const fake = {
     data,
     lists: 0,
+    reads: [] as Array<string | null>,
+    register: () => {},
     changed: (id: string, threadId: string | null) => {
       for (const listener of listeners.get(id) ?? []) listener(threadId);
     },
   };
-  const one = (id: string) => {
-    const found = data.projects.find((project) => project.id === id);
-    if (!found) throw new Error("No such project");
-    return found;
-  };
   const refuse = () => Promise.reject(new Error("The fake source changes nothing"));
-  const source: ProjectsSource = {
-    list: async () => {
+  const source = {
+    served: data,
+    one(id: string) {
+      const found = this.served.projects.find((project) => project.id === id);
+      if (!found) throw new Error("No such project");
+      return found;
+    },
+    async list() {
       fake.lists++;
-      return data.projects.map(({ id, name, icon, createdAt, updatedAt, waiting, working }) =>
+      return this.served.projects.map(({ id, name, icon, createdAt, updatedAt, waiting, working }) =>
         ({ id, name, icon, createdAt, updatedAt, waiting, working }));
     },
-    get: async (id) => one(id),
-    threads: async (id) => data.threads[one(id).id] ?? [],
-    library: async (id) => data.library[one(id).id] ?? [],
-    routines: async (id) => data.routines[one(id).id] ?? [],
+    async get(id: string) {
+      return this.one(id);
+    },
+    async threads(id: string, threadId?: string) {
+      fake.reads.push(threadId ?? null);
+      return (this.served.threads[this.one(id).id] ?? []).filter((row) => threadId === undefined || row.id === threadId);
+    },
+    async library(id: string) {
+      return this.served.library[this.one(id).id] ?? [];
+    },
+    async routines(id: string) {
+      return this.served.routines[this.one(id).id] ?? [];
+    },
     create: refuse,
     update: refuse,
     archive: refuse,
     resolve: refuse,
     reopen: refuse,
-    subscribe: (id, onChange) => {
+    subscribe(id: string, onChange: (threadId: string | null) => void) {
       const heard = listeners.get(id) ?? new Set();
       heard.add(onChange);
       listeners.set(id, heard);
-      return () => heard.delete(onChange);
+      return () => void heard.delete(onChange);
     },
-  };
+  } satisfies ProjectsSource & { served: ProjectFixtures; one(id: string): Project };
+  fake.register = () => void window.surogateDesktop?.registerProjects(source);
   Object.assign(window, { fakeProjects: fake });
-  setTimeout(() => void window.surogateDesktop?.registerProjects(source), delay);
+  if (delay >= 0) setTimeout(fake.register, delay);
 }
