@@ -15,7 +15,7 @@ from uuid import UUID
 
 import pytest
 
-from surogates.workstreams.derive import GROUPS, REASONS, ThreadFacts, derive_thread, question_of
+from surogates.workstreams.derive import GROUPS, REASONS, SHELL_LIMITS, ThreadFacts, derive_thread, question_of
 
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
 CONTRACT = Path(__file__).resolve().parents[1] / "web/src/lib/projects-contract.d.ts"
@@ -243,6 +243,30 @@ def test_a_file_named_in_two_turns_is_listed_once_newest_first():
 def test_the_question_a_thread_waits_on(given, asked):
     found = question_of(given)
     assert (found.title if found else None) == asked
+
+
+def test_a_row_lists_its_newest_files_and_leaves_out_what_the_shell_refuses():
+    # The shell refuses every row over a list longer than 200, or one entry it cannot open.
+    given = facts(IDLE, "Collect the sales data", 540, "completed", events=[
+        summary(1, "Started", *[("file", f"day-{i}.csv", f"threads/sales/day-{i}.csv") for i in range(150)]),
+        event(2, "turn.summary", recap="Totals", artifacts=[
+            {"kind": "url", "label": "Source", "ref": "https://example.com"},
+            {"kind": "file", "label": "No ref"},
+            {"kind": "file", "label": 7, "ref": "threads/sales/total.csv"},
+            # 251 code points, but 502 UTF-16 units: the shell counts units.
+            {"kind": "file", "label": "\U0001F4CA" * 251, "ref": "threads/sales/chart.png"},
+            {"kind": "file", "label": "deep.csv", "ref": "threads/sales/" + "a" * 4083},
+        ]),
+        summary(3, "Done", *[("file", f"week-{i}.csv", f"threads/sales/week-{i}.csv") for i in range(60)]),
+    ])
+    files = derive_thread(given, now=NOW)["files"]
+    assert len(files) == SHELL_LIMITS["files"]
+    assert not {"threads/sales/chart.png", "threads/sales/" + "a" * 4083} & {f["ref"] for f in files}
+    assert files[0]["ref"] == "threads/sales/week-0.csv"
+    assert files[60] == {
+        "kind": "file", "label": "threads/sales/total.csv", "ref": "threads/sales/total.csv", "thread_id": IDLE,
+    }
+    assert files[-1]["ref"] == "threads/sales/day-138.csv"
 
 
 def _snake(name: str) -> str:

@@ -1720,6 +1720,9 @@ class AgentHarness(
         # The worker reports no request had read when the wake began.  Replay
         # left them out of ``messages``; the first request reads them.
         reports = unread_reports(all_events or [])
+        # What the user asked for, for the turn's summary: their own words,
+        # never a worker's report, which replay and the live loop put after them.
+        request = _latest_user_event_text(all_events or [])[:1000]
         # Report cursor: the newest worker news the wake has.  A project's
         # master reads later news live, before each request.
         report_cursor = max(
@@ -1944,6 +1947,7 @@ class AgentHarness(
             )
             if steer_message is not None:
                 messages.append(steer_message)
+                request = _latest_user_message_text([steer_message])
                 turn_id = str(uuid4())
                 turn_base_iteration = iteration - 1
                 self._pending_iteration_summary_tasks = {}
@@ -1997,6 +2001,7 @@ class AgentHarness(
             if not self._budget.consume():
                 await self._request_final_summary(
                     session, messages, system_prompt, lease,
+                    request=request,
                     cost_tracker=cost_tracker,
                     turn_id=turn_id,
                     iteration_index=turn_iteration_index,
@@ -2405,6 +2410,7 @@ class AgentHarness(
                 )
                 await self._request_final_summary(
                     session, messages, system_prompt, lease,
+                    request=request,
                     cost_tracker=cost_tracker,
                     turn_id=turn_id,
                     iteration_index=turn_iteration_index,
@@ -2843,6 +2849,7 @@ class AgentHarness(
                 if followup is not None or (reports and await self._has_unread_report(session.id)):
                     if followup is not None:
                         messages.append(followup)
+                        request = _latest_user_message_text([followup])
                     turn_id = str(uuid4())
                     turn_base_iteration = iteration
                     self._pending_iteration_summary_tasks = {}
@@ -2862,7 +2869,7 @@ class AgentHarness(
                     through_event_id=event_id,
                     cost_tracker=cost_tracker,
                     turn_id=turn_id,
-                    user_message=_latest_user_message_text(messages),
+                    user_message=request,
                 )
                 return
 
@@ -3244,6 +3251,7 @@ class AgentHarness(
         # summary with no tools.
         await self._request_final_summary(
             session, messages, system_prompt, lease,
+            request=request,
             cost_tracker=cost_tracker,
             turn_id=turn_id,
             iteration_index=max(iteration - 1 - turn_base_iteration, 0),
@@ -4453,11 +4461,16 @@ class AgentHarness(
         system_prompt: str,
         lease: SessionLease,
         *,
+        request: str,
         cost_tracker: SessionCostTracker | None = None,
         turn_id: str | None = None,
         iteration_index: int | None = None,
     ) -> None:
         """Request one final LLM response with no tools when the budget is exhausted.
+
+        *request* is what the user asked for.  Nothing reads it today: a
+        ``budget_exhausted`` end writes no turn summary (``wants_turn_summary``),
+        and one that did would be judged against it.
 
         The model is asked to summarise its work so far without issuing
         any more tool calls.  The summary is emitted as an ``LLM_RESPONSE``
@@ -4562,7 +4575,7 @@ class AgentHarness(
             session, messages, lease, reason="budget_exhausted",
             cost_tracker=cost_tracker,
             turn_id=turn_id,
-            user_message=_latest_user_message_text(messages),
+            user_message=request,
         )
 
     async def _handle_clear_command(

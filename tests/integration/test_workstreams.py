@@ -143,7 +143,7 @@ async def test_a_user_lists_and_reads_only_their_own_projects(api, session_facto
     listed = await api.client.get("/v1/workstreams", headers=api.auth())
     assert listed.status_code == 200, listed.text
     assert [p["name"] for p in listed.json()] == ["Hiring", "Budget"]
-    assert set(listed.json()[0]) == {"id", "name", "icon", "created_at", "updated_at"}
+    assert set(listed.json()[0]) == {"id", "name", "icon", "created_at", "updated_at", "waiting", "working"}
     got = await api.client.get(f"/v1/workstreams/{first['id']}", headers=api.auth())
     assert got.status_code == 200, got.text
     assert got.json() == first

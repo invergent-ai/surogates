@@ -9,7 +9,9 @@ import * as missionsApi from "@/api/missions";
 import * as sessionsApi from "@/api/sessions";
 import { type SkillSummary, listSkills } from "@/api/skills";
 import * as workspaceApi from "@/api/workspace";
+import * as workstreamsApi from "@/api/workstreams";
 import { getAuthToken } from "@/features/auth";
+import { INBOX_REOPENING, reopeningStream } from "@/lib/reopening-stream";
 import { useAppStore } from "@/stores/app-store";
 import type { ScheduledWorkItem, Session } from "@/types/session";
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
@@ -18,8 +20,6 @@ import type { ScheduledWorkItem, Session } from "@/types/session";
 import { FetchSseEventStream } from "@invergent/agent-chat-react";
 import type {
   AgentChatAdapter,
-  AgentChatInboxEventStream,
-  AgentChatInboxStreamEvent,
   AgentChatMissionResearch,
   AgentChatMissionSummary,
   AgentChatMissionTask,
@@ -187,7 +187,22 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
   },
 
   openInboxStream() {
-    return openSelfReopeningInboxStream();
+    return reopeningStream<"item" | "snapshot">(
+      () => new FetchSseEventStream("/api/v1/inbox/stream", { fetchFn: authFetch }),
+      INBOX_REOPENING,
+    );
+  },
+
+  async listProjectThreads(input) {
+    return workstreamsApi.listThreads(input.projectId, input.threadId);
+  },
+
+  openProjectStream(input) {
+    return workstreamsApi.openProjectStream(input.projectId);
+  },
+
+  async startProposedThread(input) {
+    return workstreamsApi.startThread(input.projectId, input.proposalId, input.key);
   },
 
   async stopSession(input) {
@@ -665,84 +680,4 @@ function attachTitleSideChannel(
       // Malformed payload — ignore.
     }
   });
-}
-
-// The SDK's inbox hook treats ``onerror`` as terminal ("Inbox stream
-// disconnected"), so this wrapper owns reconnection: it reopens the
-// stream on every failure — including watchdog-detected silent stalls —
-// and only surfaces ``onerror`` after several consecutive failures
-// with no event in between. authFetch refreshes an expired token
-// transparently, so a stale-token failure heals on the first reopen.
-function openSelfReopeningInboxStream(): AgentChatInboxEventStream {
-  type InboxStreamType = "item" | "snapshot";
-
-  const handlers = new Map<
-    InboxStreamType,
-    Set<(event: AgentChatInboxStreamEvent) => void>
-  >();
-  let source: FetchSseEventStream | null = null;
-  let closed = false;
-  let consecutiveFailures = 0;
-  let externalErrorHandler: (() => void) | null = null;
-  const MAX_CONSECUTIVE_FAILURES = 3;
-  const REOPEN_DELAY_MS = 3_000;
-
-  function open(): void {
-    if (closed) return;
-    const next = new FetchSseEventStream("/api/v1/inbox/stream", {
-      fetchFn: authFetch,
-    });
-    source = next;
-
-    for (const [type, set] of handlers.entries()) {
-      for (const fn of set) {
-        next.addEventListener(type, (event) => {
-          // Receiving any event proves the reopened stream is healthy.
-          consecutiveFailures = 0;
-          fn(event);
-        });
-      }
-    }
-
-    next.onerror = () => {
-      if (closed) return;
-      next.close();
-      if (source === next) source = null;
-
-      consecutiveFailures++;
-      if (consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
-        externalErrorHandler?.();
-        return;
-      }
-      setTimeout(open, REOPEN_DELAY_MS);
-    };
-  }
-
-  open();
-
-  return {
-    addEventListener(
-      type: InboxStreamType,
-      listener: (event: AgentChatInboxStreamEvent) => void,
-    ) {
-      const set = handlers.get(type) ?? new Set();
-      set.add(listener);
-      handlers.set(type, set);
-      source?.addEventListener(type, (event) => {
-        consecutiveFailures = 0;
-        listener(event);
-      });
-    },
-    close() {
-      closed = true;
-      source?.close();
-      source = null;
-    },
-    get onerror() {
-      return externalErrorHandler;
-    },
-    set onerror(handler: (() => void) | null) {
-      externalErrorHandler = handler;
-    },
-  };
 }

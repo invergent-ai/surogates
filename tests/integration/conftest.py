@@ -296,3 +296,37 @@ async def seeded_org_and_session(session_factory):
         await db.refresh(mission)
         mission_id = mission.id
     return org_id, mission_id, session_id
+
+
+async def leave_mid_stream(app, url: str, headers: dict[str, str], *, after: bytes) -> None:
+    """GET the stream at *url* from *app*, and leave it once *after* is sent,
+    while the stream waits for its next change.
+
+    Driven over ASGI: the test client reads a response whole, so it never
+    leaves one mid-stream.
+    """
+    import asyncio
+
+    path, _, query = url.partition("?")
+    left, requested = asyncio.Event(), asyncio.Event()
+
+    async def receive():
+        if not requested.is_set():
+            requested.set()
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await left.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if after in message.get("body", b""):
+            asyncio.get_running_loop().call_later(0.2, left.set)
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET", "scheme": "http",
+        "path": path, "raw_path": path.encode(), "query_string": query.encode(), "root_path": "",
+        "headers": [(key.lower().encode(), value.encode()) for key, value in headers.items()],
+        "client": ("127.0.0.1", 1), "server": ("test", 80),
+    }
+    async with asyncio.timeout(10):
+        await app(scope, receive, send)
+    assert left.is_set(), "the stream ended before the client left"

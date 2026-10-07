@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 from datetime import datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 
+import anyio
 from fastapi import (
     APIRouter,
     Depends,
@@ -30,6 +32,7 @@ from surogates.tenant.context import TenantContext
 from surogates.tools.builtin.ask_user_question import (
     ASK_USER_QUESTION_MAX_WAIT_SECONDS,
 )
+from surogates.workstreams import stream as project_stream
 
 router = APIRouter(prefix="/inbox")
 
@@ -290,11 +293,11 @@ async def stream_inbox(
         except asyncio.CancelledError:
             return
         finally:
-            try:
-                await pubsub.unsubscribe(channel)
+            # Shielded: a client that leaves cancels the stream, and every
+            # await here again, which would keep the connection from its
+            # pool.  Closing it ends the subscription.
+            with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
                 await pubsub.aclose()
-            except Exception:
-                pass
 
     return EventSourceResponse(event_gen())
 
@@ -406,6 +409,10 @@ async def delete_inbox_item(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Inbox item not found.",
         )
+    # A dismissed wait is over: its project's counts, or a thread's row, change.
+    await project_stream.publish_session(
+        request.app.state.redis, await store.get_session(item.session_id), project_stream.EXPIRED,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -501,5 +508,10 @@ async def respond_to_inbox_item(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
+    # The answer ends a project thread's wait only once the item is
+    # responded, after its message's own nudge: say so again.
+    await project_stream.publish_session(
+        request.app.state.redis, await store.get_session(item.session_id), EventType.USER_MESSAGE.value,
+    )
     await _wake_session_from_request(request, item.session_id)
     return _serialize_item(item, await _agent_fields_for(request, item.session_id))
