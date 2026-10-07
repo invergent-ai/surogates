@@ -453,6 +453,27 @@ describe("a tool host's own sandbox", { timeout: 30_000 }, () => {
     expect(readFileSync(join(folder, "given-path"), "utf8").split(":")[0]).toBe(tools);
   });
 
+  it.each([
+    ["under a file (ENOTDIR)", () => "/etc/passwd/bin"],
+    ["in a loop of links (ELOOP)", () => {
+      symlinkSync("loop", join(base, "loop"));
+      return join(base, "loop", "bin");
+    }],
+    ["under a folder it cannot search (EACCES)", () => {
+      mkdirSync(join(base, "shut", "bin"), { recursive: true });
+      chmodSync(join(base, "shut"), 0o000);
+      return join(base, "shut", "bin");
+    }],
+  ])("starts with an entry of the host's PATH it cannot judge, one %s, which it drops", async (_name, entry) => {
+    const harness = host({}, base, { ...process.env, PATH: `${entry()}:${process.env.PATH ?? ""}` });
+    try {
+      expect(await refusal(harness)).toBe("it answered ready");
+    } finally {
+      // So that afterEach can remove it.
+      if (existsSync(join(base, "shut"))) chmodSync(join(base, "shut"), 0o755);
+    }
+  });
+
   it("never reads the user's shell startup files outside its sandbox", async () => {
     // srt's outer bash runs out here. With a socket for stdin, as the helper's is, bash
     // takes itself for a remote shell and reads ~/.bashrc; its output would also spoil

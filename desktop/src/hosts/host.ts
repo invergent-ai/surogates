@@ -211,7 +211,12 @@ async function start(message: HostStart): Promise<void> {
   const held = [`${dev}:${ino}`, ((stats) => `${stats.dev}:${stats.ino}`)(statSync(tmp))];
   const within = (dir: string): boolean => {
     for (let at = dir; ; at = dirname(at)) {
-      const stats = statSync(at, { throwIfNoEntry: false });
+      let stats;
+      try {
+        stats = statSync(at, { throwIfNoEntry: false });
+      } catch {
+        return true; // a folder that cannot be judged (ENOTDIR, EACCES, ELOOP): its entry is dropped
+      }
       if (stats && held.includes(`${stats.dev}:${stats.ino}`)) return true;
       if (at === dirname(at)) return false;
     }
