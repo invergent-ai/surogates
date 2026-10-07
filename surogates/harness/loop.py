@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
+from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
 from surogates.channels.constants import END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
@@ -68,6 +69,7 @@ from surogates.harness.sanitize import (
 )
 from surogates.harness.slash_skill import (
     build_deep_research_message,
+    expand_skill_again,
     expand_slash_skill,
     parse_deep_research_command,
 )
@@ -77,6 +79,7 @@ from surogates.harness.structured_output import generate_structured, parse_json_
 from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.workstreams import is_project_master, master_refusal
+from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
     drop_unusable_tools,
@@ -492,6 +495,7 @@ class AgentHarness(
         agent_service_account_id: str | None = None,
         acting_principal: Any | None = None,
         platform_client: Any | None = None,
+        runtime_config_cache: Any | None = None,
         entitlement_excluded_tools: frozenset[str] = frozenset(),
         fallback_chain: tuple[Any, ...] = (),
     ) -> None:
@@ -551,6 +555,9 @@ class AgentHarness(
         # (``_settle_commerce_reservation``).  Optional: sessions
         # without a commerce reservation never touch it.
         self._platform_client = platform_client
+        # The agent's runtime config, for the planes a project's turn is
+        # held on at its wake (``admit_turn``).
+        self._runtime_config_cache = runtime_config_cache
         self._worker_id = worker_id
         self._budget = budget
         self._compressor = context_compressor
@@ -761,6 +768,41 @@ class AgentHarness(
             not (event.data or {}).get("synthetic") for event in events
         )
 
+    async def _expand_last_skill_again(self, session: Session, messages: list[dict], all_events: list) -> None:
+        """Put back the skill the user's last message ran at its own wake,
+        in place of the raw command replay rebuilt.  Nothing when that
+        message ran no skill, or replay folded it into another."""
+        raw = _latest_user_event_text(all_events)
+        # This message's skill, not one the same words ran before.
+        typed_at = max((event.id for event in all_events if event.type == EventType.USER_MESSAGE.value), default=0)
+        if not any(
+            event.type == EventType.SKILL_INVOKED.value and event.id > typed_at and event.data.get("raw_message") == raw
+            for event in all_events
+        ):
+            return
+        data = _latest_user_event_data(all_events) or {}
+        replayed = build_user_message_dict(data)["content"]
+        message = next((m for m in reversed(messages) if m.get("role") == "user" and m.get("content") == replayed), None)
+        if message is None:
+            return
+        expanded = await expand_skill_again(
+            text=raw, tools=self._tools, tenant=self._tenant, session_id=str(session.id),
+            api_client=self._api_client, session_factory=self._session_factory, session_config=session.config,
+        )
+        if expanded is not None:
+            message["content"] = build_user_message_dict(data, base_content=expanded)["content"]
+
+    async def _admit_turn(self, session: Session, content: str) -> str | None:
+        """Hold this turn of a project's session (``admit_turn``): the
+        user's words when their limit refuses it, None when it may run."""
+        return await admit_turn(
+            session, content,
+            platform_client=self._platform_client,
+            runtime_config_cache=self._runtime_config_cache,
+            session_store=self._store,
+            session_factory=self._session_factory,
+        )
+
     async def _has_unread_report(self, session_id: UUID) -> bool:
         """Return True if a worker's report is newer than the session's last model request.
 
@@ -842,6 +884,7 @@ class AgentHarness(
         self,
         session: Session,
         saga: Any,
+        cost_tracker: SessionCostTracker | None = None,
     ) -> None:
         """Tear down sandbox + sagas and emit SESSION_PAUSE, then clear.
 
@@ -852,6 +895,15 @@ class AgentHarness(
         reason_msg = self._interrupt_message or "interrupted"
         if saga is not None and saga.active_sagas:
             await self._compensate_sagas(saga, session, "interrupt")
+        # A project's stopped turn spent what it spent: settle its holds now,
+        # or a resolved thread keeps them reserved.  Only a project's session
+        # holds its next turn again at its wake; any other session's next
+        # turn (a resume, a retry, a message typed meanwhile) settles them.
+        if admitted_at_wake(session):
+            await asyncio.gather(
+                self._settle_commerce_reservation(session, cost_tracker),
+                self._settle_allowance_reservation(session, cost_tracker),
+            )
         if self._sandbox_pool is not None:
             try:
                 await self._sandbox_pool.destroy_for_session(str(session.id))
@@ -1144,6 +1196,20 @@ class AgentHarness(
                         revived_by = "stranded_user_message"
                     elif is_project_master(session.config) and await self._has_unread_report(session_id):
                         revived_by = "worker_report"
+                # A report has no user waiting on it: while the user's limit
+                # refuses the turn, the report waits for their next message,
+                # which the message route holds.
+                if revived_by == "worker_report" and admitted_at_wake(session):
+                    try:
+                        refused = await self._admit_turn(session, "")
+                    except (AllowanceReserveError, CommerceReserveError):
+                        # Closed without a crash: no turn ran, and the next
+                        # report or message wakes the master again.
+                        logger.warning("Session %s: a report waits while ops is unreachable", session_id, exc_info=True)
+                        return
+                    if refused is not None:
+                        logger.info("Session %s: the user's limit holds back a report", session_id)
+                        return
                 if revived_by is not None:
                     logger.info(
                         "Session %s: status is '%s' but %s is unprocessed — resuming",
@@ -1246,6 +1312,21 @@ class AgentHarness(
                     cursor,
                 )
                 return
+
+            # 4'. A project's turn no route admitted (a thread's, a helper's,
+            # or a master's resumed or retried) is held against the user's
+            # allowance and paid turns, as a typed message is.  A report
+            # wake was held when it revived the master.
+            if revived_by != "worker_report" and admitted_at_wake(session):
+                refused = await self._admit_turn(session, _latest_user_event_text(all_events))
+                if refused is not None:
+                    # The turn never ran: a paid hold taken before the
+                    # allowance refused is released at nothing spent.
+                    await self._fail_session(
+                        session, [], lease, reason="usage_limit", cost_tracker=SessionCostTracker(),
+                        error_title=refused,
+                    )
+                    return
 
             # 5. Emit HARNESS_WAKE event.
             await self._store.emit_event(
@@ -1477,6 +1558,13 @@ class AgentHarness(
                     # already emitted expert.delegation and (later) expert.result
                     # or expert.failure, so we intentionally skip the
                     # SKILL_INVOKED row here.
+
+            # A report wake replays the user's last message, which a skill
+            # may have expanded at its own wake.  Expanded again, the master
+            # keeps that skill's instructions, and the conversation the
+            # prompt cache holds.
+            elif revived_by == "worker_report":
+                await self._expand_last_skill_again(session, messages, all_events)
 
             # 11. Run the core LLM loop.
             await self._run_loop(session, messages, system_prompt, lease, cost_tracker=cost_tracker, all_events=all_events)
@@ -1934,7 +2022,7 @@ class AgentHarness(
 
             # --- Interrupt check at the top of each iteration ---
             if self._check_interrupt():
-                await self._abort_iteration_with_pause(session, saga)
+                await self._abort_iteration_with_pause(session, saga, cost_tracker)
                 return
 
             # --- Mid-turn steering ---
@@ -2340,7 +2428,7 @@ class AgentHarness(
             # user turn at the next iteration boundary by the steer
             # injector, so the buffered response is delivered, not discarded.
             if self._check_interrupt():
-                await self._abort_iteration_with_pause(session, saga)
+                await self._abort_iteration_with_pause(session, saga, cost_tracker)
                 return
 
             response_data["turn_id"] = turn_id
