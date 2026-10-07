@@ -291,7 +291,8 @@ describe("a tool host", { timeout: 30_000 }, () => {
   it("runs no command: the kinds that would are its helper's to refuse, as kinds it does not do", async () => {
     const harness = host();
     await ready(harness);
-    const proof = join(base, "ran");
+    // In the folder, which the helper's sandbox can write: a command run there would leave it.
+    const proof = join(folder, "ran");
     const touch = `touch '${proof}'`;
     for (const [kind, args] of [
       ["run", { command: touch, workdir: null, timeout: 10 }],
