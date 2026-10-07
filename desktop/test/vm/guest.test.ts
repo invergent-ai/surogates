@@ -1325,22 +1325,25 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     const folder = join(dir, "folder");
     const todo = join(folder, ".git", "rebase-merge", "git-rebase-todo");
     const steps = join(dir, "steps.log");
-    // Idle, the file host lets the folder go: the next command's starts with nothing of the chat's running.
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
-    // The user's own rebase -x, on the host, stopped before its first pick: its exec steps are the user's git's.
     expect(spawnSync("bash", ["-c", [
       "git init -q -b main . && git config user.email a@b && git config user.name a",
       "for i in 1 2 3; do echo $i > f$i.txt && git add -A && git commit -qm c$i; done",
-      `GIT_SEQUENCE_EDITOR='sed -i 1ibreak' git rebase -q -i -x 'echo user-step >> ${steps}' HEAD~2`,
     ].join(" && ")], { cwd: folder }).status).toBe(0);
+    // A command of the chat's first: from its answer on, the file host looks every 5 s.
+    expect(await command("git log --oneline | wc -l")).toMatchObject({ ok: { output: "3\n" } });
+    // Then the user's own rebase -x, on the host, stopped before its first pick: its exec steps are the
+    // user's git's, and a look while nothing of the chat's runs takes them as the user's.
+    expect(spawnSync("bash", ["-c", `GIT_SEQUENCE_EDITOR='sed -i 1ibreak' git rebase -q -i -x 'echo user-step >> ${steps}' HEAD~2`], { cwd: folder }).status).toBe(0);
     const own = readFileSync(todo, "utf8");
     expect(own.match(/^exec /gm)).toHaveLength(2);
+    await new Promise((resolve) => setTimeout(resolve, 6_000));
+    expect(readFileSync(todo, "utf8")).toBe(own);
     try {
       // The rule lets the write through; the look after the command comments it out, and says so.
       expect(await command(`echo 'exec touch ${folder}/pwned' >> .git/rebase-merge/git-rebase-todo && echo planted`)).toMatchObject({
         ok: { output: expect.stringMatching(/^planted\n\nThe computer removed a step .*: \.git\/rebase-merge\/git-rebase-todo$/) },
       });
-      expect(readFileSync(todo, "utf8")).toBe(`${own}# Surogate removed a step a command added: exec touch ${folder}/pwned\n`);
+      expect(readFileSync(todo, "utf8")).toBe(`${own}# Surogate removed a step that appeared while the chat's commands could write: exec touch ${folder}/pwned\n`);
       // The user's git goes on, with its own steps and none of the command's.
       expect(spawnSync("git", ["rebase", "--continue"], { cwd: folder }).status).toBe(0);
       expect(existsSync(join(folder, "pwned"))).toBe(false);
@@ -1368,7 +1371,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
         ok: { output: expect.stringMatching(/^paused\n\nThe computer removed a step .*: \.git\/rebase-merge\/git-rebase-todo$/) },
       });
       const todo = readFileSync(join(folder, ".git", "rebase-merge", "git-rebase-todo"), "utf8");
-      expect(todo.match(/^# Surogate removed a step a command added: exec touch guest-step$/gm)).toHaveLength(2);
+      expect(todo.match(/^# Surogate removed a step that appeared while the chat's commands could write: exec touch guest-step$/gm)).toHaveLength(2);
       expect(todo).not.toMatch(/^exec /m);
     } finally {
       for (const name of [".git", "steps.log", "f1.txt", "f2.txt", "f3.txt", "f4.txt", "f5.txt", "f6.txt", "f7.txt"]) rmSync(join(folder, name), { recursive: true, force: true });

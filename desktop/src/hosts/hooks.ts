@@ -5,9 +5,10 @@
 // makes each hook that is not the user's own, unchanged, non-executable: git skips
 // those. Nothing is deleted. The same look refuses commands while a protected name,
 // or a key place, is a link to a path in the folder that is not protected (linkedInto).
-// It also comments out each exec step a command added to a paused rebase's or
-// cherry-pick's todo, which the host's git rebase --continue would run outside the
-// sandbox: the guest's rule lets commands write git's transient state (stripTodo).
+// It also comments out each exec step that appeared in a paused rebase's or
+// cherry-pick's todo while the chat's commands could write there, which the host's
+// git rebase --continue would run outside the sandbox: the guest's rule lets commands
+// write git's transient state (stripTodo).
 
 import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
@@ -20,8 +21,8 @@ import type { Outcome } from "../link/protocol.js";
 
 export const SCAN_TIMEOUT_MS = 30_000;
 export const HOOKS_NOTICE = "The computer stopped these git hooks from running, because git would run them outside the sandbox (where it closed a hooks folder, that repository's other hooks are off until you make it searchable again): ";
-const STEPS_NOTICE = "The computer removed a step a command added to a paused git rebase or cherry-pick, because git would run it outside the sandbox; each such exec line is now a comment in: ";
-const REMOVED = "# Surogate removed a step a command added: ";
+const STEPS_NOTICE = "The computer removed a step that appeared in a paused git rebase or cherry-pick while this chat's commands could write there, because git would run it outside the sandbox; each such exec line is now a comment in: ";
+const REMOVED = "# Surogate removed a step that appeared while the chat's commands could write: ";
 export const MAX_LISTED = 20;
 // An exec step, as git reads a todo's line: "exec" or "x", then a blank or the line's end.
 const EXEC = /^[ \t]*(?:exec|x)(?:[ \t\r]|$)/;
@@ -54,8 +55,8 @@ export interface GuardOptions {
   // Told the protected keys of every look that finished, when it started (performance.now()),
   // and whether it was a look between commands.
   seen?: (keys: ReadonlySet<string>, startedAt: number, between: boolean) => void;
-  // Whether something of the chat's other than the command starting could be writing the folder:
-  // a background process, a runner, what ran in the guest, or another command.
+  // Whether something of the chat's other than its runs could be writing the folder now: a
+  // background process, a runner, or a guest run that was answered before its processes ended.
   writing?: () => boolean;
   // Whether a command of the chat's is running, whose git may be working through a todo: a look
   // leaves the todos alone until none is, so a rebase that finishes within its command keeps its steps.
@@ -291,10 +292,14 @@ export class HookGuard {
   private looks = 0;
   // Hooks a look between commands stopped, for the next command's output.
   private readonly unreported = new Set<string>();
-  // The exec steps in each todo at the latest command's start that recorded them (refusal): the
-  // user's. null until a command starts. The todos the latest look found, and those a look between
-  // commands commented steps out of, for the next command's output.
+  // The exec steps in each todo when nothing of the chat's could last write there: the user's.
+  // null until first recorded. wrote: something of the chat's may have written since. The todos
+  // the latest look found, and those a look between commands commented steps out of, for the
+  // next command's output. turn: the todo work of looks and refusals, one at a time, so a record
+  // never lands between another look's strip and its own.
   private steps: Map<string, Set<string>> | null;
+  private wrote: boolean;
+  private turn: Promise<unknown> = Promise.resolve();
   private todos: string[] = [];
   private readonly unstripped = new Set<string>();
   private readonly first: Promise<unknown>;
@@ -315,6 +320,7 @@ export class HookGuard {
     this.running = options.running ?? (() => false);
     // After a crash: no step in a todo is known to be the user's, since the killed host's commands ran.
     this.steps = options.inherited ? new Map() : null;
+    this.wrote = Boolean(options.inherited);
     // The first look starts at once, while srt starts. After a crash it also
     // catches what the killed host's commands left.
     this.first = this.check();
@@ -323,15 +329,16 @@ export class HookGuard {
   // Why the next command may not run, or null: the last look did not see the
   // whole folder, or left a hook it could not stop. A command that may run starts
   // here: the exec steps in the todos now are the user's, as a rebase -x of theirs
-  // left them, unless something of the chat's could have added one since the last
-  // record, which then stays, so the next look comments that one out.
+  // left them, unless something of the chat's could have written there since the
+  // last record, which then stays, so the next look comments those out.
   async refusal(): Promise<Outcome | null> {
     await this.first;
     if (this.blocked) await this.check();
     if (this.blocked) return { error: { type: "sandbox", message: this.blocked } };
-    if (!this.steps || !this.writing()) {
-      this.steps = new Map(await Promise.all(this.todos.map(async (todo) => [todo, await todoSteps(todo)] as const)));
-    }
+    await this.serial(async () => {
+      if (!this.steps || (!this.wrote && !this.writing())) await this.record();
+      this.wrote = true;
+    });
     return null;
   }
 
@@ -339,7 +346,12 @@ export class HookGuard {
   async after(outcome: Outcome): Promise<Outcome> {
     await this.first;
     const { changed, stripped } = await this.check();
-    if (!("ok" in outcome)) return outcome;
+    if (!("ok" in outcome)) {
+      // Told with the next command's output.
+      for (const key of changed) this.unreported.add(key);
+      for (const todo of stripped) this.unstripped.add(todo);
+      return outcome;
+    }
     const told = [...new Set([...this.unreported, ...changed])];
     const removed = [...new Set([...this.unstripped, ...stripped])];
     this.unreported.clear();
@@ -423,16 +435,7 @@ export class HookGuard {
     }
     const { changed, stuck } = await neutralize(this.folder, scan, this.baseline, this.writable);
     this.todos = scan.todos;
-    const stripped: string[] = [];
-    const held: string[] = [];
-    const steps = this.steps;
-    if (steps && !this.running()) {
-      for (const todo of scan.todos) {
-        const result = await stripTodo(todo, steps.get(todo) ?? new Set(), this.writable);
-        if (result === "stripped") stripped.push(todo);
-        else if (result === "stuck") held.push(todo);
-      }
-    }
+    const { stripped, stuck: unstrippable } = await this.todosLook(scan.todos);
     const unstopped = stuck.length > 0
       ? `Blocked: the computer could not stop these git hooks from running outside the sandbox: ${listed(this.folder, stuck)}. Remove them or make them non-executable to run commands here.`
       : null;
@@ -440,9 +443,46 @@ export class HookGuard {
     const linked = links.length > 0
       ? `Blocked: ${links.join(" ")} Make ${links.length > 1 ? "each" : "it"} a file, or point it outside the folder, to run commands here.`
       : null;
-    const unremoved = held.length > 0
-      ? `Blocked: the computer could not remove the steps a command added to ${listed(this.folder, held)}, which git would run outside the sandbox. Abort that rebase or cherry-pick, or remove those exec lines, to run commands here.`
+    const unremoved = unstrippable.length > 0
+      ? `Blocked: the computer could not remove the steps that appeared in ${listed(this.folder, unstrippable)} while this chat's commands could write there, which git would run outside the sandbox. Abort that rebase or cherry-pick, or remove those exec lines, to run commands here.`
       : null;
     return { changed, stripped, blocked: [unstopped, unseen, untold, linked, unremoved].filter(Boolean).join(" ") || null };
+  }
+
+  // A look's work on *todos*. While a run is in flight it does nothing: the run's own git
+  // may be working through one. Otherwise, once something of the chat's may have written since
+  // the record, it comments out each exec step not in it; and while nothing of the chat's can
+  // write, what is left is the user's, as a rebase -x of theirs paused meanwhile left it.
+  private todosLook(todos: readonly string[]): Promise<{ stripped: string[]; stuck: string[] }> {
+    return this.serial(async () => {
+      const stripped: string[] = [];
+      const stuck: string[] = [];
+      if (this.running()) return { stripped, stuck };
+      const steps = this.steps;
+      if (steps && this.wrote) {
+        for (const todo of todos) {
+          const result = await stripTodo(todo, steps.get(todo) ?? new Set(), this.writable);
+          if (result === "stripped") stripped.push(todo);
+          else if (result === "stuck") stuck.push(todo);
+        }
+      }
+      // One it could not strip stays the chat's, to be judged again.
+      if (!this.writing() && stuck.length === 0) {
+        await this.record();
+        this.wrote = false;
+      }
+      return { stripped, stuck };
+    });
+  }
+
+  // The exec steps in the latest look's todos are the user's.
+  private async record(): Promise<void> {
+    this.steps = new Map(await Promise.all(this.todos.map(async (todo) => [todo, await todoSteps(todo)] as const)));
+  }
+
+  private serial<T>(work: () => Promise<T>): Promise<T> {
+    const turn = this.turn.then(work);
+    this.turn = turn.catch(() => {});
+    return turn;
   }
 }

@@ -48,7 +48,8 @@ export type ToHost =
   | { type: "refusal"; id: string; run: boolean }
   | { type: "after"; id: string; outcome: Outcome }
   // The root's background processes in the VM, as the guest says: the folder's record keeps their handles.
-  | { type: "handles"; handles: ProcessHandle[] }
+  // live: how many of them are alive.
+  | { type: "handles"; handles: ProcessHandle[]; live: number }
   | { type: "stop" };
 
 export type FromHost =

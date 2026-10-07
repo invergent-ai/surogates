@@ -331,7 +331,7 @@ class Host {
     if (!this.readied) return;
     this.handles = "gone" in change ? lostWith(this.handles) : change.handles;
     this.live = "gone" in change ? 0 : change.live;
-    this.send({ type: "handles", handles: this.handles });
+    this.send({ type: "handles", handles: this.handles, live: this.live });
     this.idle();
   }
 

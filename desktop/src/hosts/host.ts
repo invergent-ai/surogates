@@ -75,6 +75,16 @@ let watching: NodeJS.Timeout | null = null;
 let guestCommands = false;
 // What of the root's can write the folder at any time, besides a command it runs.
 const alive = () => (processes?.live ?? 0) > 0 || liveRunner !== null || guestCommands;
+// The root's background processes alive in the guest, as the guest last said, and until when a guest
+// run answered before its processes went (cancelled, timed out) may still be ending. Its kill is sent
+// as it is answered.
+// ponytail: a fixed grace for that kill; the guest saying the run's cgroup went would replace it.
+let guestLive = 0;
+let endingUntil = 0;
+const ENDING_MS = 2_000;
+// What of the root's, besides its runs, can write the folder now: while nothing can, a look takes the
+// exec steps in paused rebases as the user's (HookGuard's writing).
+const writing = () => (processes?.live ?? 0) > 0 || liveRunner !== null || guestLive > 0 || performance.now() < endingUntil;
 // The root's runs from their refusal to the look after them, here or in the guest: while any is in
 // flight, the hook guard leaves paused rebases' todos alone, as a run's own rebase may be working through one.
 const runs = new Set<string>();
@@ -148,6 +158,7 @@ process.on("message", (raw) => {
     case "after":
       guestCommands = true;
       runs.delete(message.id);
+      if (!("ok" in message.outcome) || (message.outcome.ok as { timed_out?: boolean } | null)?.timed_out) endingUntil = performance.now() + ENDING_MS;
       void guard?.after(message.outcome).then((outcome) => {
         watchHooks();
         if (!failing) send({ type: "result", id: message.id, outcome });
@@ -156,6 +167,7 @@ process.on("message", (raw) => {
     case "handles":
       // What the guest's processes can write, they write at any time: the look every WATCH_MS goes on, as after a command.
       guestCommands = true;
+      guestLive = message.live;
       try {
         save({ processes: message.handles });
       } catch {
@@ -250,8 +262,7 @@ async function start(message: HostStart): Promise<void> {
   // Its first look finds the user's own hooks, while srt starts. After a killed
   // host, that host's are the user's, and the look catches what its commands left.
   // Commands can write the folder and the session's temp folder: a hook linked into either is theirs.
-  // A command's start records the exec steps in paused rebases as the user's only while nothing else of the chat's could write them.
-  guard = new HookGuard(path, { inherited, known: running, writable: [path, ...spellings(tmp)], seen, writing: () => alive() || commands.size > 1, running: () => runs.size > 0 });
+  guard = new HookGuard(path, { inherited, known: running, writable: [path, ...spellings(tmp)], seen, writing, running: () => runs.size > 0 });
   mkdirSync(tmp, { recursive: true });
   makeCaches(tmp);
   const env = commandEnvironment(message.env, tmp);
