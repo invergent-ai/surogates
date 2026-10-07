@@ -417,31 +417,6 @@ class CheckpointManager:
             result["file"] = file_path
         return result
 
-    def get_working_dir_for_path(self, file_path: str) -> str:
-        """Resolve a file path to its working directory for checkpointing.
-
-        Walks up from the file's parent to find a reasonable project root
-        (directory containing .git, pyproject.toml, package.json, etc.).
-        Falls back to the file's parent directory.
-        """
-        path = Path(file_path).resolve()
-        if path.is_dir():
-            candidate = path
-        else:
-            candidate = path.parent
-
-        # Walk up looking for project root markers
-        markers = {".git", "pyproject.toml", "package.json", "Cargo.toml",
-                    "go.mod", "Makefile", "pom.xml", ".hg", "Gemfile"}
-        check = candidate
-        while check != check.parent:
-            if any((check / m).exists() for m in markers):
-                return str(check)
-            check = check.parent
-
-        # No project root found — use the file's parent
-        return str(candidate)
-
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------

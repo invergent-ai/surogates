@@ -257,3 +257,15 @@ def test_a_checkpoint_take_answers_the_workspaces_snapshot_whether_or_not_it_cha
     first, unchanged = take(), take()
     (workspace / "a.md").write_text("b")
     assert first["hash"] == unchanged["hash"] != take()["hash"]
+
+
+def test_a_checkpoint_take_is_always_of_the_workspace_a_restore_puts_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(checkpoint_manager, "CHECKPOINT_BASE", tmp_path / "checkpoints")
+    workspace = tmp_path / "workspace"
+    (workspace / "app").mkdir(parents=True)
+    (workspace / "app" / "package.json").write_text("{}")
+    taken = json.loads(executor_server._run_checkpoint(
+        {"action": "take", "file_path": str(workspace / "app" / "package.json")}, str(workspace),
+    ))
+    latest = json.loads(executor_server._run_checkpoint({"action": "latest_hash"}, str(workspace)))
+    assert taken["hash"] == latest["hash"]

@@ -200,11 +200,8 @@ class ProcessSandbox:
         mgr = entry.checkpoint_mgr
 
         if action == "take":
-            reason = args.get("reason", "auto")
-            file_path = args.get("file_path")
-            if file_path:
-                workdir = mgr.get_working_dir_for_path(file_path)
-            ok = await _asyncio.to_thread(mgr.ensure_checkpoint, workdir, reason)
+            # Always the workspace: a restore puts back the workspace.
+            ok = await _asyncio.to_thread(mgr.ensure_checkpoint, workdir, args.get("reason", "auto"))
             result: dict[str, Any] = {"success": ok, "action": "take"}
             if ok:
                 hash_val = await _asyncio.to_thread(mgr.latest_hash, workdir)

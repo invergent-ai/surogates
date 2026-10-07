@@ -154,15 +154,11 @@ def _run_checkpoint(args: dict, workspace: str) -> str:
     logger.info("checkpoint action=%s", action)
 
     if action == "take":
-        reason = args.get("reason", "auto")
-        file_path = args.get("file_path")
-        workdir = workspace
-        if file_path:
-            workdir = mgr.get_working_dir_for_path(file_path)
-        ok = mgr.ensure_checkpoint(workdir, reason)
+        # Always the workspace: a restore puts back the workspace.
+        ok = mgr.ensure_checkpoint(workspace, args.get("reason", "auto"))
         result: dict = {"success": ok, "action": "take"}
         if ok:
-            h = mgr.latest_hash(workdir)
+            h = mgr.latest_hash(workspace)
             if h:
                 result["hash"] = h
         logger.info("checkpoint take: %s", "ok" if ok else "skipped")
