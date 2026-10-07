@@ -251,9 +251,13 @@ async def test_a_pod_whose_real_files_came_unmounted_lands_nothing(tmp_path):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://pod") as client:
         mounts.write_text(f"geesefs {project} fuse.geesefs rw 0 0\n")
         assert (await client.get("/healthz")).status_code == 200
+        step = {"action": "commit", "author": THREAD, "trailers": [["Surogate-Kind", "turn"]]}
+        # Mounted, the real files answer a landing's step: the copy, on the pod's disk, is never a mount.
         (copy / "new.md").write_text("new")
+        mounted = (await client.post("/execute", json={"name": "_history", "args": step}, headers=AUTH)).json()
+        assert [c["path"] for c in mounted.get("changes", [])] == ["new.md"], mounted
         # The sidecar went and /project is an empty folder: nothing written there would reach the bucket.
         mounts.write_text("")
-        step = {"action": "commit", "author": THREAD, "trailers": [["Surogate-Kind", "turn"]]}
+        (copy / "newer.md").write_text("newer")
         answer = (await client.post("/execute", json={"name": "_history", "args": step}, headers=AUTH)).json()
     assert list(answer) == ["error"] and "not mounted" in answer["error"]

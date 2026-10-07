@@ -558,11 +558,14 @@ async def test_a_thread_never_works_on_or_restores_its_real_files(api, monkeypat
         harness.interrupt("stopped by the user")
 
     await a_turn(api, monkeypatch, thread, [
-        calling(("write_file", {"path": "Report.docx", "content": "report by the thread"})),
+        calling(("terminal", {"command": "printf 'report by the thread' > Report.docx"})),
         calling(("memory", {"action": "add", "content": "Name: Ana"})),
         _final_response("Done."),
     ], pool=pool, during=the_user_saves_then_stops)
     # Its step was refused there, and its Stop restored nothing over the real files.
+    events = await api.app.state.session_store.get_events(thread.id, types=[EventType.TOOL_RESULT])
+    [refused] = [json.loads(e.data["content"]) for e in events if e.data["name"] == "terminal"]
+    assert refused["error"] == "sandbox_unavailable", refused
     assert (pods.project / "Budget.xlsx").read_bytes() == b"budget v2, saved by you"
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
 
