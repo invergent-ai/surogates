@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from surogates.harness.turn_summarizer import is_platform_path
-from surogates.sandbox.history import History, HistoryConflict
+from surogates.sandbox.history import History, HistoryConflict, HistoryError
 from surogates.tools.utils.checkpoint_manager import _shadow_repo_path
 
 A = {"name": "Draft A", "email": "thread:t1@surogate"}
@@ -256,3 +256,33 @@ def test_a_failed_turns_work_is_kept_on_its_branch_for_the_next_pod(tmp_path, pr
     assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
     land(pod, "saga:2")
     assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 half made"
+
+
+@pytest.mark.parametrize("crafted", ["id", "ref", "shallow", "HEAD"])
+def test_a_history_a_command_wrote_runs_nothing_in_a_pod_and_refuses_its_open(tmp_path, project, crafted):
+    first = a_pod(tmp_path, project)
+    (first.copy / "A.md").write_text("by A")
+    land(first, "saga:1")
+    holder = a_pod(tmp_path, project, "t3")  # a pod already open: the next lock holder's
+    durable, ran = project / "_history", tmp_path / "ran"
+    # A thread's commands can write the history: an option for git where an id goes.
+    option = f"--upload-pack=touch${{IFS}}{ran}"
+    main = git(durable, "rev-parse", "refs/heads/main")
+    refs = (durable / "packed-refs").read_text()
+    if crafted == "id":
+        (durable / "packed-refs").write_text(refs.replace(f"{main} refs/heads/main", f"{option} refs/heads/main"))
+    elif crafted == "ref":
+        (durable / "packed-refs").write_text(f"{refs}{main} refs/heads/../../config\n")
+    elif crafted == "shallow":
+        (durable / "shallow").write_text(f"{option}\n")
+    else:
+        (durable / "HEAD").write_text(f"ref: {option}\n")
+    with pytest.raises(HistoryError, match="project's history"):
+        a_pod(tmp_path, project, "t2")
+    if crafted in ("id", "ref"):
+        # Nor at a landing's first look, in a pod opened before.
+        with pytest.raises(HistoryError, match="project's history"):
+            holder.fetch()
+    with pytest.raises(HistoryError, match="project's history"):
+        holder.fetch(commits=[option])
+    assert not ran.exists()

@@ -50,6 +50,10 @@ _GIT_TIMEOUT = 120
 _ZERO = "0" * 40
 MAIN = "refs/heads/main"
 _PACKED = "# pack-refs with: peeled fully-peeled sorted \n"
+#: What the pod takes from the bucket's history, which a thread's commands
+#: can write: an id is 40 hex digits, and a ref one of the history's own.
+_ID = re.compile(r"[0-9a-f]{40}")
+_REF = re.compile(r"refs/(?:heads|bases|handoff|handoff-from|helpers)(?:/[A-Za-z0-9_.][A-Za-z0-9_.-]*)+")
 #: Only the repository's own config, ignores and attributes: none from the
 #: pod's home, where a thread's commands can write, and none from the
 #: system.  Paths are read as spelt: a file may be named ``:notes.md``.
@@ -126,6 +130,7 @@ class History:
                 (self.repo / "info" / "exclude").write_text("\n".join(HISTORY_EXCLUDES) + "\n")
                 (self.repo / "info" / "attributes").write_text(_ATTRIBUTES)
             refs = self._durable_refs()
+            self._check_durable()
             self._fetch(*(refs.get(r) for r in (MAIN, self.branch, self.base)))
             you = {"name": self.user, "email": f"user:{self.user}@surogate"}
             if MAIN in refs:
@@ -356,7 +361,7 @@ class History:
         proof that a landing pushed.
         """
         main = self._durable_refs().get(MAIN)
-        self._fetch(main, *commits)
+        self._fetch(main, *(_checked_id(c, "a fetch") for c in commits))
         has_saga = main is not None and saga is not None and f"Surogate-Saga: {saga}" in self._message(main)
         return {"main": main, "has_saga": has_saga}
 
@@ -393,8 +398,32 @@ class History:
         with open(fd, "rb") as file:
             # Past the page cache: another pod may have rewritten it.
             os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-            text = file.read().decode()
-        return {ref: sha for sha, _, ref in (line.partition(" ") for line in text.splitlines()) if sha[:1] not in ("#", "^", "")}
+            text = file.read().decode(errors="replace")
+        refs = {}
+        for line in text.splitlines():
+            if line.startswith("#") or not line:
+                continue
+            sha, _, ref = line.partition(" ")
+            if sha.startswith("^"):
+                _checked_id(sha[1:], "packed-refs")
+                continue
+            refs[_checked_ref(ref, "packed-refs")] = _checked_id(sha, "packed-refs")
+        return refs
+
+    def _check_durable(self) -> None:
+        """Refuse a history whose ``HEAD`` or ``shallow`` is not one the platform writes: git reads both."""
+        head = self.durable / "HEAD"
+        if head.is_file():
+            text = head.read_text(errors="replace")
+            if not (text.startswith("ref: ") and text.endswith("\n")):
+                raise HistoryError(f"refused the project's history: HEAD holds {text[:60]!r}")
+            _checked_ref(text[5:-1], "HEAD")
+        self._durable_shallow()
+
+    def _durable_shallow(self) -> list[str]:
+        """The commits the durable history's ``shallow`` file names."""
+        shallow = self.durable / "shallow"
+        return [_checked_id(c, "shallow") for c in (shallow.read_text(errors="replace").split() if shallow.is_file() else [])]
 
     def _fetch(self, *commits: str | None) -> None:
         """*commits* from the durable history, at depth 1, where this repository lacks them."""
@@ -402,7 +431,7 @@ class History:
         if wanted:
             _invalidate(self.durable / "objects" / "pack")
             self._git(
-                ["fetch", "-q", "--depth", "1", "--no-tags", "--no-write-fetch-head", str(self.durable), *wanted],
+                ["fetch", "-q", "--depth", "1", "--no-tags", "--no-write-fetch-head", "--", str(self.durable), *wanted],
                 env={"GIT_DIR": str(self.repo)}, cwd=self.repo,
             )
 
@@ -449,8 +478,7 @@ class History:
         finally:
             shutil.rmtree(outgoing, ignore_errors=True)
         if cut:
-            kept = (self.durable / "shallow").read_text().split() if (self.durable / "shallow").is_file() else []
-            self._put_durable("shallow", "".join(f"{c}\n" for c in sorted({*kept, *cut})).encode())
+            self._put_durable("shallow", "".join(f"{c}\n" for c in sorted({*self._durable_shallow(), *cut})).encode())
         refs.update(updates)
         self._put_durable("packed-refs", (_PACKED + "".join(f"{refs[r]} {r}\n" for r in sorted(refs) if refs[r])).encode())
 
@@ -512,7 +540,7 @@ class History:
 
     def _message(self, commit: str) -> list[str]:
         """*commit*'s message, line by line."""
-        return self._main("log", "-1", "--format=%B", commit).splitlines()
+        return self._main("log", "-1", "--format=%B", "--end-of-options", commit).splitlines()
 
     def _diff(self, base: str, turn: str) -> tuple[dict[str, tuple[str | None, str | None]], list[tuple[str, str]]]:
         """Each file the turn changed since *base*, as ``(before, after)``, and the renames git paired."""
@@ -740,6 +768,20 @@ def _as(author: dict[str, str]) -> list[str]:
 def _block(trailers: list[list[str]]) -> str:
     """A commit message's trailer paragraph.  A line end in a value is spelt out: a name cannot add a trailer."""
     return "\n".join(f"{key}: {value}".replace("\r", "\\r").replace("\n", "\\n") for key, value in trailers)
+
+
+def _checked_id(value: str, where: str) -> str:
+    """*value*, a commit id read from *where*; refused when it is anything else."""
+    if not _ID.fullmatch(value):
+        raise HistoryError(f"refused the project's history: {where} holds {value[:60]!r}, not a commit id")
+    return value
+
+
+def _checked_ref(value: str, where: str) -> str:
+    """*value*, a ref of the history read from *where*; refused when it is anything else."""
+    if not _REF.fullmatch(value) or ".." in value:
+        raise HistoryError(f"refused the project's history: {where} holds {value[:60]!r}, not one of its refs")
+    return value
 
 
 def _objects(index: Path) -> int:
