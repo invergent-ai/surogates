@@ -11,7 +11,7 @@ from datetime import timedelta
 from uuid import UUID
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 
 import surogates.devices.operations as operations_module
 from surogates.db.models import DeviceOperation
@@ -288,13 +288,17 @@ async def test_a_finished_requests_rows_go_an_hour_after_it_closed(api, session_
         await eventually(lambda: has_pending(ops, device_id))
         assert await complete_pending(ops, device_id, LocalWorkspaceIO(str(tmp_path))) == 1
         await asyncio.wait_for(done, 2.0)
-    still_open = asked(device_id, root)
+    # A change still waiting for its user: its claim closed two hours ago, its write still open.
+    still_open = await claimed(ops, asked(device_id, root))
     waiting = asyncio.create_task(ops.run(still_open, keep_open=True))
     await eventually(lambda: has_pending(ops, device_id))
     async with session_factory() as db:
         await db.execute(
             update(DeviceOperation)
-            .where(DeviceOperation.invocation_id.in_([old.invocation_id, tool_call.invocation_id]))
+            .where(or_(
+                DeviceOperation.invocation_id.in_([old.invocation_id, tool_call.invocation_id]),
+                and_(DeviceOperation.invocation_id == still_open.invocation_id, DeviceOperation.ordinal == 0),
+            ))
             .values(completed_at=func.now() - timedelta(hours=2))
         )
         await db.commit()
