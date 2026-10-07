@@ -169,3 +169,32 @@ async def test_a_change_its_computer_left_waiting_is_cancelled_once_it_is_found_
             pass
     # Told it failed, its caller must never see it land later.
     assert not await has_pending(rig.ops, rig.device_id)
+
+
+async def kept_then_offline(api, rig, request_id: str, change: str):
+    """A change its computer received and left waiting, and then the computer gone offline."""
+    await rig.laptop.connect()
+    rig.laptop.hold = True
+    session = await SessionStore(api.app.state.session_factory).get_session(rig.root)
+    access = await access_of(api, session)
+    with pytest.raises(TimeoutError):
+        async with files_of(api, session, request_id=request_id, change=change, access=access) as files:
+            async with asyncio.timeout(1.0):
+                await files.resolve("notes.md")
+    assert await has_pending(rig.ops, rig.device_id)
+    await rig.laptop.disconnect()
+
+    async def offline() -> bool:
+        return not await is_online(api, rig.device_id)
+
+    await eventually(offline, timeout=10.0)
+    return session, access
+
+
+async def test_a_read_found_offline_cancels_nothing_kept_under_its_id(api, laptop_rig):
+    session, _access = await kept_then_offline(api, laptop_rig, "change-0005", "upload notes.md")
+    # Only a change's own caller, told it failed, cancels what it left waiting: a read has nothing to cancel.
+    with pytest.raises(ComputerAway):
+        async with files_of(api, session, request_id="change-0005"):
+            pass
+    assert await has_pending(laptop_rig.ops, laptop_rig.device_id)

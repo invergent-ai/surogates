@@ -85,8 +85,8 @@ async def session_files(
     raises RuntimeError before anything is recorded.  Once the request ends,
     what it read in transfers is marked consumed, for the transfer reaper.
     Raises :class:`ComputerAway` at once when the computer is offline or its
-    access ended: a kept request it left open is then cancelled, since its
-    caller is told it failed.
+    access ended: a change it left open is then cancelled, since its caller is
+    told it failed.  A read under the same id cancels nothing.
     """
     if change is not None and (access is None or access.session_id != session.id or not access.bound):
         # A route that forgot the check would claim a change for anyone in the org, or on a folder not set up.
@@ -108,7 +108,8 @@ async def session_files(
     if device is None or device.revoked_at is not None:
         raise ComputerAway(device.name if device is not None else "your computer", revoked=True)
     if device_id not in await DevicePresence(redis).online([device_id]):
-        if request_id is not None:
+        # A change's own caller, told it failed, cancels what it left waiting; a read leaves nothing open.
+        if change is not None:
             # The app answers what it still asks about not run, once its link ends.  The one
             # exception: a change its user allowed just before is running, and may still land.
             await operations.cancel_invocation(session.id, invocation)
