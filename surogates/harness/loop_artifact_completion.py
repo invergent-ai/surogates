@@ -795,14 +795,14 @@ class ArtifactCompletionMixin:
         None when its computer cannot say within ``HARNESS_WITHIN_S``: the
         turn's files are best effort.
         """
-        from surogates.api.routes.workspace import _SKIP_DIRS, _TOP_HIDDEN
+        from surogates.api.routes.workspace import _FOLDER_TOP_HIDDEN, _SKIP_DIRS
 
         try:
             async with asyncio.timeout(HARNESS_WITHIN_S), session_files(
                 session, storage=self._storage, session_factory=self._session_factory, redis=self._redis,
             ) as files:
                 return await files.walk(
-                    await files.resolve(""), skip=_SKIP_DIRS, skip_top=_TOP_HIDDEN, skip_hidden=True, since=since,
+                    await files.resolve(""), skip=_SKIP_DIRS, skip_top=_FOLDER_TOP_HIDDEN, skip_hidden=True, since=since,
                 )
         except Exception as exc:
             logger.log(
@@ -879,7 +879,7 @@ class ArtifactCompletionMixin:
         out: list[TurnArtifact] = []
         entries_by_path: dict[str, dict[str, Any]] = {}
         for rel, size in walked.files:
-            if _is_internal_workspace_path(rel):
+            if _is_internal_workspace_path(rel, on_folder=True):
                 continue
             entries_by_path[rel] = entries_by_path[f"{root}/{rel}"] = {"size": size, "modified": None}
             if rel not in already_seen_paths and f"{root}/{rel}" not in already_seen_paths:

@@ -3301,7 +3301,9 @@ async def test_the_turns_files_are_what_its_computer_changed_since_the_turn_bega
     await turn._mark_turn_start(session)
     assert turn._turn_cursor is not None
     for name, text in [("report.md", "new"), ("seen.md", "s"), ("empty.md", ""), ("uploads/in.md", "u"),
-                       (".surogates-results/terminal-output-1.log", "x"), ("node_modules/x/i.js", "")]:
+                       (".surogates-results/terminal-output-1.log", "x"), ("node_modules/x/i.js", ""),
+                       # The user's own: the harness keeps a local folder's artifacts under .surogates-results/.
+                       ("_artifacts/summary.md", "a")]:
         (rig.folder / name).parent.mkdir(parents=True, exist_ok=True)
         (rig.folder / name).write_text(text)
     root = session.config["workspace_path"]
@@ -3310,7 +3312,7 @@ async def test_the_turns_files_are_what_its_computer_changed_since_the_turn_bega
         session_id=rig.root, already_seen_paths={f"{root}/seen.md"},
     )
 
-    assert sorted(artifact.ref for artifact in found) == ["empty.md", "report.md"]
+    assert sorted(artifact.ref for artifact in found) == ["_artifacts/summary.md", "empty.md", "report.md"]
     # No stamp: the folder's clock chose them, and the server's is another.
     assert entries["report.md"] == entries[f"{root}/report.md"] == {"size": 3, "modified": None}
     assert entries["empty.md"]["size"] == 0

@@ -611,3 +611,15 @@ async def test_an_uploads_change_is_named_off_the_event_loop(monkeypatch):
     # Each part length-prefixed, as before.
     framed = b"".join(len(part).to_bytes(8, "big") + part for part in (b"upload", b"a.txt", b"data"))
     assert real("upload", "a.txt", b"data") == hashlib.sha256(framed).hexdigest()
+
+
+async def test_a_cloud_chat_keeps_its_artifacts_folder_hidden_and_closed():
+    session_id, storage, request, tenant = _slow_chat()
+    storage.objects[("ops-agent-bucket", f"{session_id}/_artifacts/index.json")] = b"[]"
+    storage.objects[("ops-agent-bucket", f"{session_id}/notes.md")] = b"n"
+    tree = await workspace_route.get_workspace_tree(session_id, request, tenant=tenant)
+    assert [entry.name for entry in tree.entries] == ["notes.md"]
+    for opening in (workspace_route.get_workspace_file, workspace_route.download_file):
+        with pytest.raises(HTTPException) as refused:
+            await opening(session_id, request, path="_artifacts/index.json", tenant=tenant)
+        assert refused.value.status_code == 403

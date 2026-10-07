@@ -32,6 +32,7 @@ from surogates.api.session_guards import (
     require_session_visible,
     require_user_writable_session,
 )
+from surogates.devices.binding import device_of
 from surogates.devices.operations import REQUEST_PREFIX, DeviceOperations, OperationConflict, TooManyRequests
 from surogates.devices.workspace import SHOWN_DOT_FOLDERS, DeviceOperationError, DeviceWorkspaceIO, answered
 from surogates.session.files import ComputerAway, DeviceAccess, session_files
@@ -177,19 +178,27 @@ _CANVAS = "_whiteboard/canvas.json"
 # dot-folder other than SHOWN_DOT_FOLDERS (_should_skip_dir); at the top, the
 # platform's own folders (_is_hidden).
 _TOP_HIDDEN: tuple[str, ...] = tuple(prefix.rstrip("/") for prefix in _RESERVED_PREFIXES + _HIDDEN_PREFIXES)
+# A local folder reserves none: the harness keeps its artifacts under
+# .surogates-results/ there, so an _artifacts/ in it is the user's own.
+_FOLDER_TOP_HIDDEN: tuple[str, ...] = tuple(prefix.rstrip("/") for prefix in _HIDDEN_PREFIXES)
 
 
-def _is_reserved(key: str) -> bool:
+def _reserved(session: Session) -> tuple[str, ...]:
+    """The reserved prefixes of *session*'s files: a cloud chat's, and none of a local folder's."""
+    return () if device_of(session.config) is not None else _RESERVED_PREFIXES
+
+
+def _is_reserved(key: str, reserved: tuple[str, ...] = _RESERVED_PREFIXES) -> bool:
     """Return True if ``key`` points into a reserved internal prefix."""
-    return any(key.startswith(p) for p in _RESERVED_PREFIXES)
+    return any(key.startswith(p) for p in reserved)
 
 
-def _is_hidden(key: str) -> bool:
+def _is_hidden(key: str, reserved: tuple[str, ...] = _RESERVED_PREFIXES) -> bool:
     """Return True if ``key`` should be kept out of the workspace tree.
 
     Reserved prefixes are hidden too: blocked implies invisible.
     """
-    return _is_reserved(key) or any(key.startswith(p) for p in _HIDDEN_PREFIXES)
+    return _is_reserved(key, reserved) or any(key.startswith(p) for p in _HIDDEN_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
@@ -447,26 +456,30 @@ def _should_skip_dir(dirname: str) -> bool:
 
 
 def _validate_path(path: str) -> None:
-    """Reject path traversal and reserved-prefix access."""
+    """Reject path traversal."""
     parts = PurePosixPath(path).parts
     if ".." in parts:
         raise HTTPException(status_code=403, detail="Path traversal not allowed.")
     if path.startswith("/"):
         raise HTTPException(status_code=403, detail="Absolute paths not allowed.")
-    if _is_reserved(path):
+
+
+def _refuse_reserved(path: str, session: Session) -> None:
+    """Reject access to *session*'s reserved prefixes."""
+    if _is_reserved(path, _reserved(session)):
         raise HTTPException(
             status_code=403,
             detail="This path is reserved for internal storage.",
         )
 
 
-def _validate_change(path: str) -> None:
+def _validate_change(path: str, session: Session) -> None:
     """Refuse a change under the platform's own folders, which the panel hides, but to the canvas.
 
     Judged as the computer resolves it, so "./_history/x" is under _history too.
     """
     normal = PurePosixPath(path).as_posix()
-    if _is_hidden(normal) and normal != _CANVAS:
+    if _is_hidden(normal, _reserved(session)) and normal != _CANVAS:
         raise HTTPException(
             status_code=403,
             detail="This path is reserved for internal storage.",
@@ -554,11 +567,15 @@ async def get_workspace_tree(
     )
     await require_device_access(request, session, tenant)
 
+    reserved = _reserved(session)
     async with workspace_files(request, session) as files:
-        walked = await files.walk(await files.resolve(""), skip=_SKIP_DIRS, skip_top=_TOP_HIDDEN, skip_hidden=True)
+        walked = await files.walk(
+            await files.resolve(""), skip=_SKIP_DIRS, skip_top=_TOP_HIDDEN if reserved else _FOLDER_TOP_HIDDEN,
+            skip_hidden=True,
+        )
     # Drop keys living under reserved prefixes (artifact storage) so
     # internal server-side files don't leak into the workspace browser.
-    visible_keys = [path for path, _size in walked.files if not _is_hidden(path)]
+    visible_keys = [path for path, _size in walked.files if not _is_hidden(path, reserved)]
     entries = _build_tree(visible_keys)
     truncated = walked.truncated or len(visible_keys) >= _MAX_ENTRIES
 
@@ -590,6 +607,7 @@ async def get_workspace_file(
     session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant,
     )
+    _refuse_reserved(path, session)
     await require_device_access(request, session, tenant)
 
     is_text = _is_text_key(path)
@@ -704,7 +722,8 @@ async def upload_file(
 
     key = f"{path}/{safe_name}" if path else safe_name
     _validate_path(key)
-    _validate_change(key)
+    _refuse_reserved(key, session)
+    _validate_change(key, session)
 
     contents = await file.read(_MAX_UPLOAD_BYTES + 1)
     if len(contents) > _MAX_UPLOAD_BYTES:
@@ -768,6 +787,7 @@ async def download_file(
     session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant,
     )
+    _refuse_reserved(path, session)
     await require_device_access(request, session, tenant)
 
     async with workspace_files(request, session) as files:
@@ -809,11 +829,12 @@ async def delete_file(
     """Delete a file from the session's workspace; 202 as an upload is."""
     _require_service_account_api_route(request, tenant)
     _validate_path(path)
-    _validate_change(path)
     store = _get_session_store(request)
     session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant
     )
+    _refuse_reserved(path, session)
+    _validate_change(path, session)
     require_user_writable_session(session)
     access = await require_device_access(request, session, tenant)
 
