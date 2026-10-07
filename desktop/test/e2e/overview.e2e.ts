@@ -189,6 +189,18 @@ describe("the Overview pane", () => {
     expect(await page.isVisible(`[data-group="idle"] [data-thread="${IDLE}"]`)).toBe(true);
   });
 
+  it("still opens the project clicked while the page reloads when a row is resolved meanwhile", async () => {
+    agent.registerAfterMs = 1_500;
+    const { page, client } = await opened();
+    // The page loads again and serves after a second and a half: Budget's open waits for it.
+    await client.reload();
+    await page.click(`#projects [data-project="${BUDGET}"] .project`);
+    await page.hover(`[data-thread="${IDLE}"]`);
+    await page.click(`[data-act="${IDLE}"]`);
+    await expect.poll(() => client.url(), { timeout: 8_000 }).toBe(`${origin}/chat/${BUDGET}`);
+    await expect.poll(() => page.textContent("#title")).toBe("Budget");
+  });
+
   it("folds away with the Overview button, and the close button, and comes back", async () => {
     const { page } = await opened();
     await page.click("#overview");

@@ -1323,19 +1323,23 @@ function wire(window: MainWindow, page: string): void {
     changed();
   });
   // A thread of the open project resolved, or reopened, from its row: the page's answer is its row.
+  // A row's action is no choice of what the centre shows, so a project opening meanwhile still opens:
+  // it takes a number of its own, and only the latest action's refusal is said.
+  let settling = 0;
   const settle = (how: "resolve" | "reopen") => async (id: unknown) => {
     const open = view.kind === "project" && overview?.project.id === view.id ? view : null;
     if (!open || typeof id !== "string" || !overview?.threads.some((found) => found.id === id)) {
       failure = NO_SUCH_THREAD;
       return changed();
     }
-    const mine = choose();
+    const mine = ++settling;
+    failure = null;
     changed();
     try {
       const row = await projects[how](open.id, id);
       if (view === open && overview?.project.id === open.id) overview = { ...overview, threads: merged(overview.threads, id, row) };
     } catch (error) {
-      if (mine === choice) failure = error instanceof Error ? error.message : String(error);
+      if (mine === settling) failure = error instanceof Error ? error.message : String(error);
     }
     changed();
   };
