@@ -22,6 +22,7 @@ working directory or environment.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,6 +92,46 @@ class RevisionConflict(OSError):
 
     An OSError, so a handler that reports each file's failure reports this one too.
     """
+
+
+class WorkspaceFiles(Protocol):
+    """A session's files, as the api and the harness reach them outside a tool's handler.
+
+    Files only: a workspace in object storage runs no command, so there is no
+    process operation here, and nothing falls back to this host's shell.  Keys
+    are :meth:`resolve`'s output, as for :class:`WorkspaceIO`, and never a path
+    on this host.  ``surogates.session.files.session_files`` picks one.
+    """
+
+    identity: str | None
+    """As :attr:`WorkspaceIO.identity`."""
+
+    async def resolve(self, path: str) -> str:
+        """The key for *path*, from the workspace's root.  Raises WorkspaceSandboxError when it leaves it."""
+
+    async def stat(self, key: str) -> FileStat | None:
+        """The file at *key*, or None when there is none."""
+
+    async def read(self, key: str, max_bytes: int | None = None) -> bytes:
+        """The file's bytes, or only its first *max_bytes*.  Raises FileNotFoundError, or another OSError."""
+
+    async def write(self, key: str, data: bytes, *, expected_revision: str | None = None) -> None:
+        """Replace the file with *data*, as :meth:`WorkspaceIO.write` does."""
+
+    async def delete(self, key: str) -> None:
+        """Remove the file at *key*.  Raises FileNotFoundError when there is none."""
+
+    async def walk(
+        self, key: str, *, skip: Collection[str], skip_top: Collection[str] = (), skip_hidden: bool = False,
+    ) -> Walk:
+        """The regular files under the folder at *key*.
+
+        The caller does not want the files under a folder named in *skip*, one
+        directly under *key* named in *skip_top*, or, with *skip_hidden*, a
+        dot-folder other than ``SHOWN_DOT_FOLDERS``: a walk on a computer
+        never enters them, which bounds its cost.  Object storage lists them
+        all the same, in its one listing.
+        """
 
 
 class WorkspaceIO(Protocol):

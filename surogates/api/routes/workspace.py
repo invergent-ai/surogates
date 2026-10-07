@@ -21,7 +21,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from surogates.api.session_guards import (
-    require_bound_session,
+    require_device_access,
     require_session_visible,
     require_user_writable_session,
 )
@@ -528,7 +528,7 @@ async def upload_file(
         request, store, session_id, tenant
     )
     require_user_writable_session(session)
-    await require_bound_session(request, session)
+    await require_device_access(request, session, tenant)
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")

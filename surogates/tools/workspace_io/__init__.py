@@ -12,9 +12,11 @@ from surogates.tools.workspace_io.base import (
     RipgrepError,
     RunResult,
     Walk,
+    WorkspaceFiles,
     WorkspaceIO,
 )
 from surogates.tools.workspace_io.local import LocalWorkspaceIO
+from surogates.tools.workspace_io.storage import StorageWorkspaceIO
 
 __all__ = [
     "FileStat",
@@ -23,7 +25,9 @@ __all__ = [
     "RevisionConflict",
     "RipgrepError",
     "RunResult",
+    "StorageWorkspaceIO",
     "Walk",
+    "WorkspaceFiles",
     "WorkspaceIO",
     "workspace_io_from",
 ]
