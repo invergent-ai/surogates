@@ -4,11 +4,11 @@
 
 import { spawnSync } from "node:child_process";
 import {
-  closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync,
+  closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, symlinkSync,
   watch, writeFileSync,
 } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -16,7 +16,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BOOT_ID, GUEST_SYSTEM } from "../../src/binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import type { ProcessHandle } from "../../src/guest/processes.js";
-import type { BindMode, HostUser, ProtectedKey, Share } from "../../src/guest/protocol.js";
+import type { HostUser, Share } from "../../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
 import type { Operation, Outcome } from "../../src/link/protocol.js";
 import { VmClient, vmOptions } from "../../src/vm/client.js";
@@ -375,49 +375,121 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     });
   });
 
-  it("makes a root's protected files read-only in its namespace and their .git unmovable, binds them again once the host replaces them, and refuses a link that leads nowhere", async () => {
-    // A repository as git init makes it, and an editor's settings beside it.
-    expect(spawnSync("git", ["init", "-q", folder]).status).toBe(0);
-    mkdirSync(join(folder, ".vscode"));
-    writeFileSync(join(folder, ".vscode", "settings.json"), "{}\n");
-    const key = (name: string, mode: BindMode = "ro"): ProtectedKey => [join(folder, name), lstatSync(join(folder, name)).ino, mode];
-    // The .git folder held over itself, then the keys in it.
-    const protect = (...names: string[]) => guest.request({ type: "protect", root: ROOT, keys: [key(".git", "rw"), ...names.map((name) => key(name))] });
-    const writes = [
-      "(echo '[alias] x = !evil' >> .git/config) 2>&1 | sed 's/.*: //'",
-      "(touch .git/hooks/post-checkout) 2>&1 | sed 's/.*: //'",
-      "(echo '{\"x\": 1}' > .vscode/settings.json) 2>&1 | sed 's/.*: //'",
-      "(mv .git moved) 2>&1 | sed 's/.*: //'",
-    ].join("; ");
-    const evil = "(echo '[alias] x = !evil' >> .git/config) 2>&1 | sed 's/.*: //'; (mv .git moved) 2>&1 | sed 's/.*: //'";
-    try {
-      expect(await protect(".git/config", ".git/hooks", ".vscode")).toMatchObject({ type: "done" });
-      const config = readFileSync(join(folder, ".git", "config"), "utf8");
-      // git still reads its config, and commits.
-      expect(await run(`${writes}; git status --porcelain .vscode; git -c user.email=a@b -c user.name=a commit -q --allow-empty -m x && echo committed`)).toEqual({
-        ok: {
-          output: "Read-only file system\nRead-only file system\nRead-only file system\nDevice or resource busy\n?? .vscode/\ncommitted\n", returncode: 0, timed_out: false,
-        },
+  // A repository the user made, shared with a root of its own: the rule refuses its commands' writes to
+  // what the host's git and editors act on, whatever the route, and leaves git's own work and the rest alone.
+  describe("the protected-names rule", () => {
+    const RULE = "root-rule";
+    // From a file in DEEP/10 up to .vscode is twelve components, the walk's bound; from one in DEEP/10/11, thirteen.
+    const DEEP = "deep/.vscode/1/2/3/4/5/6/7/8/9";
+    let shared: string;
+    let repo: string;
+    // What the host has at *path* in the repository: its inode, links, mode and, for a file, its bytes.
+    const state = (path: string) => {
+      const stats = lstatSync(join(repo, path), { throwIfNoEntry: false });
+      return stats && { ino: stats.ino, nlink: stats.nlink, mode: stats.mode, bytes: stats.isFile() ? readFileSync(join(repo, path), "utf8") : null };
+    };
+    const inRepo = async (command: string) => ((await run(`cd repo; ${command}`, RULE)) as { ok: { output: string } }).ok.output;
+
+    beforeAll(async () => {
+      shared = join(dir, "rule");
+      repo = join(shared, "repo");
+      mkdirSync(repo, { recursive: true });
+      expect(spawnSync("bash", ["-c", "git init -q && git add -A && git -c user.email=a@b -c user.name=a commit -q --allow-empty -m a && git init -q sub"], { cwd: repo }).status).toBe(0);
+      // A submodule's git folder, a linked worktree's, and the user's own hook, which is not executable.
+      for (const [path, text] of [
+        [".git/modules/foo/config", "[core]\n"], [".git/worktrees/wt/commondir", "../..\n"], [".git/worktrees/wt/HEAD", "ref: refs/heads/wt\n"], [".git/hooks/post-merge", "#!/bin/sh\n"],
+      ] as const) {
+        mkdirSync(dirname(join(repo, path)), { recursive: true });
+        writeFileSync(join(repo, path), text);
+      }
+      mkdirSync(join(repo, DEEP, "10", "11"), { recursive: true });
+      expect(await guest.ready(RULE, folderOf(shared))).toBeNull();
+    });
+
+    afterAll(async () => {
+      await guest.teardown(RULE);
+      rmSync(shared, { recursive: true, force: true });
+    });
+
+    it("refuses: a hard link out of .git/config, so a write through the link leaves the host's config as it was", async () => {
+      const config = state(".git/config");
+      expect(await inRepo("ln .git/config cfg-link 2>&1; echo '[core] hooksPath = ../evil' >> cfg-link")).toContain("Operation not permitted");
+      expect(state(".git/config")).toEqual(config);
+    });
+
+    it("refuses: a .git remade under a folder a command moved aside, and the moved repository keeps its config", async () => {
+      const config = state("sub/.git/config");
+      expect(await inRepo("mv sub sub-old && { mkdir -p sub/.git && echo '[core] fsmonitor = ../evil' > sub/.git/config; } 2>&1")).toContain("Operation not permitted");
+      expect([state("sub/.git"), state("sub-old/.git/config")]).toEqual([undefined, config]);
+    });
+
+    // Each refused with the rule's EPERM, and the host's file at the case's path as it was, or still absent.
+    const refuse = [
+      ["hook create", "printf '#!/bin/sh\\n' > .git/hooks/pre-commit", ".git/hooks/pre-commit"],
+      ["hook append via fd", "exec 3>>.git/hooks/post-merge", ".git/hooks/post-merge"],
+      ["hooks subdir", "mkdir .git/hooks/x", ".git/hooks/x"],
+      ["hook symlink", "ln -s /bin/true .git/hooks/post-commit", ".git/hooks/post-commit"],
+      ["hook hardlink", "echo x > e; ln e .git/hooks/pre-push", ".git/hooks/pre-push"],
+      ["hook chmod +x", "chmod +x .git/hooks/post-merge", ".git/hooks/post-merge"],
+      ["config append", "echo '[core]' >> .git/config", ".git/config"],
+      ["config truncate", ": > .git/config", ".git/config"],
+      ["core.hooksPath", "printf '[core]\\n  hooksPath = ../evil\\n' >> .git/config", ".git/config"],
+      ["gitconfig", "echo x > .gitconfig", ".gitconfig"],
+      ["vscode dir", "mkdir .vscode", ".vscode"],
+      ["mcp.json", "echo x > .mcp.json", ".mcp.json"],
+      ["rename to .gitmodules", "echo x > m; mv m .gitmodules", ".gitmodules"],
+      ["claude commands", "mkdir -p .claude; mkdir .claude/commands", ".claude/commands"],
+      ["a FIFO at a protected name", "mkfifo .mcp.json", ".mcp.json"],
+      ["a socket at a protected name", "python3 -c \"import socket; socket.socket(socket.AF_UNIX).bind('.git/hooks/pre-push')\"", ".git/hooks/pre-push"],
+      ["a directory renamed into .claude", "mkdir -p cl/commands && echo x > cl/commands/evil.md && mv -T cl .claude", ".claude/commands"],
+      ["a directory renamed into .git/modules/<name>", "mkdir sm && echo '[core] fsmonitor = ../evil' > sm/config && mv sm .git/modules/bar", ".git/modules/bar"],
+      ["a directory renamed into .git/worktrees/<name>", "mkdir wtx && echo /evil > wtx/commondir && mv wtx .git/worktrees/wtx", ".git/worktrees/wtx"],
+      ["within-bound deep key", "mkdir -p a/b/c && echo x > a/b/c/.mcp.json", "a/b/c/.mcp.json"],
+      ["a key twelve components up, the walk's bound", `echo x > ${DEEP}/10/x`, `${DEEP}/10/x`],
+      ["C1 gitdir-pointer file", "mkdir d; echo 'gitdir: ./evil' > d/.git", "d/.git"],
+      ["C1 mkdir sub/.git", "mkdir s2; mkdir s2/.git", "s2/.git"],
+      ["C2 submodule config", "echo x >> .git/modules/foo/config", ".git/modules/foo/config"],
+      ["C3 worktree commondir", "echo x >> .git/worktrees/wt/commondir", ".git/worktrees/wt/commondir"],
+      ["C1 mv .git (I3)", "mv .git x", ".git"],
+    ] as const;
+    for (const [name, command, path] of refuse) {
+      it(`refuses: ${name}`, async () => {
+        const before = state(path);
+        const output = await inRepo(`{ ${command}; } 2>&1; echo rc=$?`);
+        expect(output).toContain("Operation not permitted");
+        expect(output).toMatch(/rc=[1-9]\d*\n$/);
+        expect(state(path)).toEqual(before);
       });
-      expect(readFileSync(join(folder, ".git", "config"), "utf8")).toBe(config);
-      // git config on the host renames a new file over the old one, which takes the guest's bind with it.
-      expect(spawnSync("git", ["-C", folder, "config", "core.editor", "true"]).status).toBe(0);
-      expect(await protect(".git/config", ".git/hooks", ".vscode")).toMatchObject({ type: "done" });
-      expect(await run(evil)).toMatchObject({ ok: { output: "Read-only file system\nDevice or resource busy\n" } });
-      // .git made again on the host, its files moved into it: the folder's bind goes with the binds in it, and the files keep their inodes.
-      renameSync(join(folder, ".git"), join(folder, ".git-host"));
-      mkdirSync(join(folder, ".git"));
-      for (const name of readdirSync(join(folder, ".git-host"))) renameSync(join(folder, ".git-host", name), join(folder, ".git", name));
-      rmSync(join(folder, ".git-host"), { recursive: true });
-      expect(await protect(".git/config", ".git/hooks", ".vscode")).toMatchObject({ type: "done" });
-      expect(await run(evil)).toMatchObject({ ok: { output: "Read-only file system\nDevice or resource busy\n" } });
-      expect(readFileSync(join(folder, ".git", "config"), "utf8")).not.toContain("evil");
-      symlinkSync("missing", join(folder, ".mcp.json"));
-      expect(await protect(".git/config", ".git/hooks", ".vscode", ".mcp.json")).toEqual(expect.objectContaining({
-        type: "failed", message: expect.stringContaining("could not make these protected files read-only in its sandbox, so commands cannot run here: .mcp.json."),
-      }));
-    } finally {
-      for (const name of [".git", ".vscode", ".mcp.json"]) rmSync(join(folder, name), { recursive: true, force: true });
+    }
+
+    // Refused by the rule at the move itself, not by a mount held over .git.
+    it("C1/I3: mv .git is refused at the mv itself and the host repo is intact", async () => {
+      const [git, config] = [state(".git"), state(".git/config")];
+      expect(await inRepo("mv .git x 2>&1; echo mv=$?; ls .git/HEAD >/dev/null 2>&1; echo head=$?")).toMatch(/Operation not permitted\nmv=1\nhead=0\n$/);
+      expect([state(".git"), state(".git/config"), state("x")]).toEqual([git, config, undefined]);
+    });
+
+    const allow = [
+      ["ordinary write", "echo x > notes.txt"],
+      ["I1 branch named hooks", "git branch hooks"],
+      ["I1 branch named config", "git branch config"],
+      ["a ref file directly", "echo 0000000000000000000000000000000000000000 > .git/refs/heads/zz"],
+      // Removed again, as git does once a rebase ends.
+      ["git-state rebase todo", "mkdir -p .git/rebase-merge && echo x > .git/rebase-merge/git-rebase-todo && rm -r .git/rebase-merge"],
+      ["worktree op file", "echo x > .git/worktrees/wt/HEAD"],
+      ["a file renamed in a submodule's git folder, as git writes one", "echo x > .git/modules/foo/HEAD.lock && mv .git/modules/foo/HEAD.lock .git/modules/foo/HEAD"],
+      // Removed again: the root's later git would read it.
+      ["home gitconfig (own disk)", "echo x > $HOME/.gitconfig && rm $HOME/.gitconfig"],
+      ["a FIFO at an ordinary name", "mkfifo plain-fifo"],
+      ["a hard link of an ordinary file", "echo x > plain && ln plain plain-link"],
+      ["an ordinary directory renamed", "mkdir plain-dir && mv plain-dir plain-dir2"],
+      // A ceiling the rule names: past its walk, a protected name above is not seen.
+      ["a key thirteen components up, past the walk's bound", `echo x > ${DEEP}/10/11/x`],
+    ] as const;
+    for (const [name, command] of allow) {
+      it(`allows: ${name}`, async () => {
+        expect(await inRepo(`{ ${command}; } 2>&1; echo rc=$?`)).toBe("rc=0\n");
+      });
     }
   });
 
