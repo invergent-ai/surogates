@@ -149,3 +149,24 @@ export async function key(page: Page, name: string): Promise<void> {
   await page.keyboard.up(name).catch(() => {});
   await closed(page);
 }
+
+// The system's notifications, as the app raises them: kept in the main process as globalThis.notices,
+// never shown. A test clicks one by emitting its click, as the notification service would.
+export async function stubNotifications(shell: ElectronApplication): Promise<void> {
+  await shell.evaluate(({ Notification }) => {
+    const notices: Electron.Notification[] = [];
+    Object.assign(globalThis, { notices });
+    Notification.prototype.show = function show(this: Electron.Notification) {
+      notices.push(this);
+    };
+  });
+}
+
+// What each notification raised so far says.
+export const notices = (shell: ElectronApplication) => shell.evaluate(() =>
+  (globalThis as unknown as { notices: Electron.Notification[] }).notices.map(({ title, body }) => ({ title, body })));
+
+// The user clicks the *index*th notification raised.
+export const clickNotice = (shell: ElectronApplication, index: number) => shell.evaluate((_electron, at) => {
+  (globalThis as unknown as { notices: Electron.Notification[] }).notices[at]!.emit("click");
+}, index);

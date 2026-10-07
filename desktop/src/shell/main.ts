@@ -31,6 +31,7 @@ import { type Credential, CredentialStore, type LiveCredential } from "./credent
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { letWindowClose, MainWindow } from "./main-window.js";
 import { appMenu } from "./menus.js";
+import { Notifications } from "./notifications.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
@@ -718,6 +719,8 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
     void ending?.end().catch(report);
     account = null;
     forgetAccount();
+    // What the agent told the user who logged out opens nothing more.
+    notifications?.closeAll();
     await clearWindow(agent);
     if (removing) {
       agents.clear();
@@ -1071,24 +1074,12 @@ function state() {
   };
 }
 
-// Held until it is clicked or closed: a notification nothing holds can lose its click.
-let notice: Notification | null = null;
+// The system's notifications, once the app is ready.
+let notifications: Notifications | null = null;
 
 // A prompt waits while the window is hidden: the system's notification says so, and opens the window.
-// It names nothing the agent sent: some notification services read markup in a body.
 function notifyAsking(): void {
-  if (!Notification.isSupported()) return;
-  const shown = new Notification({ title: "Surogate is asking you something", body: "Open Surogate to answer." });
-  notice = shown;
-  const done = () => {
-    if (notice === shown) notice = null;
-  };
-  shown.on("click", () => {
-    done();
-    main?.show();
-  });
-  shown.on("close", done);
-  shown.show();
+  notifications?.show({ tag: "asking", title: "Surogate is asking you something", body: "Open Surogate to answer.", open: () => main?.show() });
 }
 
 // A page of the web client in the centre: what the sidebar's links, New chat and a notification open.
@@ -1500,6 +1491,8 @@ async function quit(): Promise<void> {
       waiting = null;
     }
   }
+  // What the app told opens nothing once it goes. Before ready there is nothing to close.
+  notifications?.closeAll();
   // A sign-in under way closes its port in the browser's face, and keeps what the agent already
   // issued it; revocations still owed are tried at the next launch.
   signingIn?.abort(QUIT);
@@ -1542,6 +1535,7 @@ if (!app.requestSingleInstanceLock()) {
   });
   void app.whenReady().then(() => {
     credentials = new CredentialStore(join(root, "credentials.json"), safeStorage, report);
+    notifications = new Notifications(Notification.isSupported() ? (content) => new Notification(content) : null, report);
     sessionStore = new SessionStore(join(root, "session.json"), safeStorage, report);
     // Before the window: its first frame is in the chosen theme.
     theme = new Theme(nativeTheme, appearance, (dark) => {
