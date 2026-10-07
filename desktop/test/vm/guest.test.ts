@@ -3,7 +3,10 @@
 // first). Behind SUROGATE_VM_TESTS=1; SUROGATE_VM_IMAGE names another image folder.
 
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
+import {
+  closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync,
+  watch, writeFileSync,
+} from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +16,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BOOT_ID } from "../../src/binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import type { ProcessHandle } from "../../src/guest/processes.js";
-import type { HostUser, Share } from "../../src/guest/protocol.js";
+import type { BindMode, HostUser, ProtectedKey, Share } from "../../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
 import type { Operation } from "../../src/link/protocol.js";
 import { VmClient, vmOptions } from "../../src/vm/client.js";
@@ -351,6 +354,52 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
         timed_out: false,
       },
     });
+  });
+
+  it("makes a root's protected files read-only in its namespace and their .git unmovable, binds them again once the host replaces them, and refuses a link that leads nowhere", async () => {
+    // A repository as git init makes it, and an editor's settings beside it.
+    expect(spawnSync("git", ["init", "-q", folder]).status).toBe(0);
+    mkdirSync(join(folder, ".vscode"));
+    writeFileSync(join(folder, ".vscode", "settings.json"), "{}\n");
+    const key = (name: string, mode: BindMode = "ro"): ProtectedKey => [join(folder, name), lstatSync(join(folder, name)).ino, mode];
+    // The .git folder held over itself, then the keys in it.
+    const protect = (...names: string[]) => guest.request({ type: "protect", root: ROOT, keys: [key(".git", "rw"), ...names.map((name) => key(name))] });
+    const writes = [
+      "(echo '[alias] x = !evil' >> .git/config) 2>&1 | sed 's/.*: //'",
+      "(touch .git/hooks/post-checkout) 2>&1 | sed 's/.*: //'",
+      "(echo '{\"x\": 1}' > .vscode/settings.json) 2>&1 | sed 's/.*: //'",
+      "(mv .git moved) 2>&1 | sed 's/.*: //'",
+    ].join("; ");
+    const evil = "(echo '[alias] x = !evil' >> .git/config) 2>&1 | sed 's/.*: //'; (mv .git moved) 2>&1 | sed 's/.*: //'";
+    try {
+      expect(await protect(".git/config", ".git/hooks", ".vscode")).toMatchObject({ type: "done" });
+      const config = readFileSync(join(folder, ".git", "config"), "utf8");
+      // git still reads its config, and commits.
+      expect(await run(`${writes}; git status --porcelain .vscode; git -c user.email=a@b -c user.name=a commit -q --allow-empty -m x && echo committed`)).toEqual({
+        ok: {
+          output: "Read-only file system\nRead-only file system\nRead-only file system\nDevice or resource busy\n?? .vscode/\ncommitted\n", returncode: 0, timed_out: false,
+        },
+      });
+      expect(readFileSync(join(folder, ".git", "config"), "utf8")).toBe(config);
+      // git config on the host renames a new file over the old one, which takes the guest's bind with it.
+      expect(spawnSync("git", ["-C", folder, "config", "core.editor", "true"]).status).toBe(0);
+      expect(await protect(".git/config", ".git/hooks", ".vscode")).toMatchObject({ type: "done" });
+      expect(await run(evil)).toMatchObject({ ok: { output: "Read-only file system\nDevice or resource busy\n" } });
+      // .git made again on the host, its files moved into it: the folder's bind goes with the binds in it, and the files keep their inodes.
+      renameSync(join(folder, ".git"), join(folder, ".git-host"));
+      mkdirSync(join(folder, ".git"));
+      for (const name of readdirSync(join(folder, ".git-host"))) renameSync(join(folder, ".git-host", name), join(folder, ".git", name));
+      rmSync(join(folder, ".git-host"), { recursive: true });
+      expect(await protect(".git/config", ".git/hooks", ".vscode")).toMatchObject({ type: "done" });
+      expect(await run(evil)).toMatchObject({ ok: { output: "Read-only file system\nDevice or resource busy\n" } });
+      expect(readFileSync(join(folder, ".git", "config"), "utf8")).not.toContain("evil");
+      symlinkSync("missing", join(folder, ".mcp.json"));
+      expect(await protect(".git/config", ".git/hooks", ".vscode", ".mcp.json")).toEqual(expect.objectContaining({
+        type: "failed", message: expect.stringContaining("could not make these protected files read-only in its sandbox, so commands cannot run here: .mcp.json."),
+      }));
+    } finally {
+      for (const name of [".git", ".vscode", ".mcp.json"]) rmSync(join(folder, name), { recursive: true, force: true });
+    }
   });
 
   it("loads no kernel module for a command, and keeps the hardening a host's sysctl files would set", async () => {

@@ -246,6 +246,7 @@ describe("the VM manager on a guest", () => {
         });
       },
       teardown: async () => void asked.push("teardown"),
+      protect: async () => {},
       perform: async () => ({ ok: true }),
     };
     const manager = new VmManager(options(), fakeVm(roots));
@@ -264,7 +265,7 @@ describe("the VM manager on a guest", () => {
 
 describe("a root's processes in the guest", () => {
   it("are told as they change, refused whole past a registry's count or a handle's shape and size, and told gone with every root of a guest that goes", async () => {
-    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, protect: async () => {}, perform: async () => ({ ok: true }) };
     const told: Array<[string, ProcessesChange]> = [];
     const vms: VmBackend[] = [];
     const boot: BootVm = async (...args) => {
@@ -304,6 +305,7 @@ describe("a guest that goes", () => {
       uid: () => 10_000,
       setup: async () => {},
       teardown: async () => {},
+      protect: async () => {},
       // A run that never ends; which answers at once.
       perform: (_root, kind) => new Promise((resolve) => kind === "which" && resolve({ ok: true })),
     };
@@ -336,7 +338,7 @@ describe("a guest that goes", () => {
 });
 
 describe("a chat's folder, checked again before it is shared", () => {
-  const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+  const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, protect: async () => {}, perform: async () => ({ ok: true }) };
   const which = (manager: VmManager, root: string, folder: Folder) =>
     manager.perform({ id: `which-${root}`, root, folder, kind: "which", args: {} }, new AbortController().signal);
 
@@ -386,7 +388,7 @@ function stalledFolder(): { folder: Folder; release: () => void } {
 
 describe("a chat's folder on a mount that does not answer", () => {
   it("is answered as unavailable within the share's bound, and its root torn down without waiting on it", async () => {
-    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, protect: async () => {}, perform: async () => ({ ok: true }) };
     const manager = new VmManager({ ...options(), shareMs: 300 }, fakeVm(roots));
     const { folder, release } = stalledFolder();
     try {
