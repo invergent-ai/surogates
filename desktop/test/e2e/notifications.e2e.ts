@@ -7,7 +7,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { FIXTURE_IDS, projectFixtures } from "../../../web/src/lib/projects.js";
-import { ACCOUNT, connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
+import { ACCOUNT, connect, FakeAgent, opened, signedInAndAdded, webClient } from "./fake-agent.js";
 import { clickNotice, dataHome, launch, notices, press, prompt, promptsShown, quit, shellPage, stubNative, stubNotifications } from "./launch.js";
 
 let home: string;
@@ -160,5 +160,34 @@ describe("the app's notifications", () => {
     await expect.poll(() => agent.chatStreams.get(OTHER)?.size).toBe(0);
     await clickNotice(app!, 1);
     await expect.poll(() => new URL(client.url()).pathname).toBe(`/chat/${CHAT}`);
+  });
+
+  it("tell nothing once a quit has hidden the window, while the app still stops", async () => {
+    const client = await signedIn();
+    const page = await shellPage(app!);
+    await moveTo(client, `/chat/${CHAT}`);
+    await hide(app!);
+    await expect.poll(() => agent.inboxStreams.size).toBe(1);
+    await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(1);
+    // A sign-in under way, held at who signed in: the quit waits for it once the window has gone.
+    const release = agent.hold("me");
+    const asking = agent.asked.me;
+    const before = (await opened(app!)).length;
+    await page.evaluate(() => (window as unknown as { surogateShell: { signIn(): Promise<void> } }).surogateShell.signIn());
+    await expect.poll(async () => (await opened(app!)).length).toBe(before + 1);
+    void agent.approve((await opened(app!))[before]!).catch(() => {});
+    await expect.poll(() => agent.asked.me).toBe(asking + 1);
+    const closed = app!.waitForEvent("close");
+    void app!.evaluate(({ app: electron }) => electron.quit()).catch(() => {});
+    // The inbox and the chat are followed no more: what comes now raises nothing.
+    await expect.poll(() => agent.inboxStreams.size).toBe(0);
+    await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(0);
+    agent.tell({ kind: "input_required", title: "Which report should I start from?", session_id: OTHER });
+    agent.turnEnds(CHAT);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await notices(app!)).toEqual([]);
+    release();
+    await closed;
+    app = undefined;
   });
 });

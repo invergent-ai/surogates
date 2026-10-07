@@ -135,8 +135,6 @@ let kept: Credential | null = null;
 let device: { credential: Credential; status: LinkStatus; stack: DeviceStack | null; started: Promise<DeviceStack> } | null = null;
 let registering = false;
 let connecting = false;
-// Who waits for the threads working on this computer to finish: a quit that the user told to wait.
-const idle = new Set<() => void>();
 // What the web client tells once its user signed in (undefined until it has said), and the projects it serves.
 let account: DesktopAccount | null | undefined;
 const projects = new PageProjects((message) => main?.webContents()?.send("desktop:projects", message));
@@ -482,9 +480,9 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
       changed();
     },
     onWorking: (count) => {
-      if (count > 0) return;
-      for (const resume of idle) resume();
-      idle.clear();
+      // A quit told to wait for the threads goes on once none works, and says meanwhile how many are left.
+      if (count === 0) waiting?.();
+      else if (waiting) changed();
     },
     onError: report,
   }));
@@ -1080,6 +1078,8 @@ function state() {
       ? "Credentials on this computer are not encrypted: Linux has no secret store here" : null,
     signIn: { needed: agent !== null && (signedIn === null || reloading), pending: signingIn !== null, failure: signInFailure },
     deviceAction: deviceAction(agent),
+    // While a quit waits for the threads working on this computer: how many it waits for.
+    quitting: waiting ? (device?.stack?.working() ?? 0) : null,
   };
 }
 
@@ -1092,10 +1092,11 @@ const trayImage = (): string => join(ASSETS, trayIcon(theme.dark, process.env.XD
 function updateTray(): void {
   if (!tray) return;
   const agent = agents.get();
-  const template = trayMenu({ device: agent ? deviceLine(agent) : null }, {
+  const template = trayMenu({ device: agent ? deviceLine(agent) : null, quitting: waiting ? (device?.stack?.working() ?? 0) : null }, {
     show: () => main?.show(),
     settings: menuActions.settings,
     quit: () => app.quit(),
+    quitNow: () => waiting?.(),
   });
   const drawn = JSON.stringify(template.map((item) => [item.label, item.enabled]));
   if (drawn === trayDrawn) return;
@@ -1120,15 +1121,16 @@ const away = (): boolean => BrowserWindow.getFocusedWindow() === null;
 
 // A page of the web client, the window shown: what a notification's click opens.
 function openPage(path: string): void {
-  if (!main || !webClientPath(path)) return;
+  if (!main || leaving || !webClientPath(path)) return;
   main.show();
   goWeb(path);
 }
 
 const burst = new Burst();
 
+// Once the quit goes on, nothing more is told: the user is done with the app.
 function tellItem(item: InboxItem): void {
-  if (!away()) return;
+  if (leaving || !away()) return;
   const told = burst.add(item);
   if (told.length <= BURST) {
     notifications?.show({
@@ -1142,7 +1144,7 @@ function tellItem(item: InboxItem): void {
 }
 
 function tellTurnEnd(sessionId: string, title: string): void {
-  if (!away()) return;
+  if (leaving || !away()) return;
   notifications?.show({ tag: `chat:${sessionId}`, title, body: "Finished.", open: () => openPage(`/chat/${sessionId}`) });
 }
 
@@ -1158,12 +1160,12 @@ function showing(url: string): void {
 
 // What the agent tells, followed on the app's own sign-in, for whoever is signed in now: their
 // inbox, and the chat the web client shows while the window is away. What comes for a sign-in that
-// has ended meanwhile is told no more.
+// has ended meanwhile is told no more, and nothing is followed once the quit goes on.
 let inbox: { session: DesktopSession; stop(): void } | null = null;
 let chat: { session: DesktopSession; id: string; stop(): void } | null = null;
 
 function followAgent(): void {
-  const session = signedIn;
+  const session = leaving ? null : signedIn;
   const agentId = agents.get()?.agentId ?? "";
   const api = (path: string, init?: RequestInit) => session!.api(path, init);
   if (inbox?.session !== session) {
@@ -1195,6 +1197,7 @@ function followAgent(): void {
 
 // A prompt waits while the window is hidden: the system's notification says so, and opens the window.
 function notifyAsking(): void {
+  if (leaving) return;
   notifications?.show({ tag: "asking", title: "Surogate is asking you something", body: "Open Surogate to answer.", open: () => main?.show() });
 }
 
@@ -1561,6 +1564,8 @@ function wire(window: MainWindow, page: string): void {
     if (view.kind !== "project") throw new Error("No project is open");
     showProject({ id: view.id, name: view.name, masterSessionId: view.masterSessionId });
   });
+  // A quit waiting for the threads goes now: the user said so, in the window.
+  handle("shell:quit-now", () => waiting?.());
   handle("shell:link", openLink);
 }
 
@@ -1586,6 +1591,8 @@ let quitting: Promise<void> | null = null;
 let waiting: (() => void) | null = null;
 let askingAgain = false;
 let stopped = false;
+// Once the quit goes on: nothing shows the window again while the device stops.
+let leaving = false;
 
 // A quit asked again while the first waits for the threads: quit now, or keep waiting.
 async function quitNow(): Promise<void> {
@@ -1612,13 +1619,20 @@ async function quit(): Promise<void> {
     if (answer === "wait" && (device?.stack?.working() ?? 0) > 0) {
       await new Promise<void>((resume) => {
         waiting = resume;
-        idle.add(resume);
+        changed();
       });
       waiting = null;
     }
   }
-  // What the app told opens nothing once it goes. Before ready there is nothing to close.
+  // The user is done with the app: its window, its tray and what it told go now, while the device
+  // stops in its order, and nothing brings the window back. Before ready there is nothing to close.
+  leaving = true;
+  main?.window.hide();
+  tray?.destroy();
+  tray = null;
   notifications?.closeAll();
+  // What the agent tells is followed no more, though a window hidden already emits no hide to stop it.
+  followAgent();
   // A sign-in under way closes its port in the browser's face, and keeps what the agent already
   // issued it; revocations still owed are tried at the next launch.
   signingIn?.abort(QUIT);
@@ -1639,7 +1653,9 @@ async function quit(): Promise<void> {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on("second-instance", () => main?.show());
+  app.on("second-instance", () => {
+    if (!leaving) main?.show();
+  });
   // The device link stays up with the window closed (spec, Section 7).
   app.on("window-all-closed", () => {});
   app.on("before-quit", (event) => {

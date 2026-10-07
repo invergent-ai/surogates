@@ -1332,3 +1332,10 @@ body.about-page {
 .about .mark {
   display: inline-flex;
 }
+
+/* Empty, the waiting quit's line takes no room, and stays a live region. */
+#quitting:has(#quitting-text:empty) {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}

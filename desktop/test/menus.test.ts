@@ -67,16 +67,22 @@ describe("the app's menu", () => {
 describe("the tray", () => {
   it("shows the window, says how this computer is connected, opens Settings and quits", () => {
     const asked: string[] = [];
-    const menu = trayMenu({ device: "Connected as Laptop" }, {
-      show: () => asked.push("show"), settings: () => asked.push("settings"), quit: () => asked.push("quit"),
-    });
+    const actions = {
+      show: () => asked.push("show"), settings: () => asked.push("settings"), quit: () => asked.push("quit"), quitNow: () => asked.push("quitNow"),
+    };
+    const menu = trayMenu({ device: "Connected as Laptop", quitting: null }, actions);
     expect(menu.map((item) => [item.label ?? item.type, item.enabled ?? true])).toEqual([
       ["Show Surogate", true], ["Connected as Laptop", false], ["separator", true], ["Settings…", true], ["Quit Surogate", true],
     ]);
     for (const item of menu) (item.click as (() => void) | undefined)?.();
     expect(asked).toEqual(["show", "settings", "quit"]);
-    expect(trayMenu({ device: null }, { show() {}, settings() {}, quit() {} }).map((item) => item.label ?? item.type))
+    expect(trayMenu({ device: null, quitting: null }, actions).map((item) => item.label ?? item.type))
       .toEqual(["Show Surogate", "separator", "Settings…", "Quit Surogate"]);
+    // While a quit waits for the threads working on this computer: quit now, with no question.
+    const waiting = trayMenu({ device: "Connected as Laptop", quitting: 2 }, actions);
+    expect(waiting.at(-1)?.label).toBe("Quit now");
+    (waiting.at(-1)?.click as () => void)();
+    expect(asked.at(-1)).toBe("quitNow");
   });
 
   it("takes the light icon on a dark panel, as GNOME's always is, and the dark one on a light panel", () => {

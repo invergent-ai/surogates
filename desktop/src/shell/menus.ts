@@ -69,12 +69,14 @@ export function appMenu(act: MenuActions, developer: boolean): MenuItemConstruct
 
 export interface TrayState {
   device: string | null; // how this computer is connected to the agent, as the sidebar says it; null with no agent
+  quitting: number | null; // while a quit waits for the threads working on this computer: how many
 }
 
 export interface TrayActions {
   show(): void;
   settings(): void;
   quit(): void;
+  quitNow(): void; // a quit that waits goes now, with no question
 }
 
 // The tray's menu, as Claude Desktop's (index.chunk-B33tFrRY.js): the window first, then what to know, then Quit.
@@ -84,7 +86,7 @@ export function trayMenu(state: TrayState, act: TrayActions): MenuItemConstructo
     ...(state.device === null ? [] : [{ label: state.device, enabled: false }]),
     { type: "separator" },
     { label: "Settings…", click: () => act.settings() },
-    { label: "Quit Surogate", click: () => act.quit() },
+    state.quitting === null ? { label: "Quit Surogate", click: () => act.quit() } : { label: "Quit now", click: () => act.quitNow() },
   ];
 }
 

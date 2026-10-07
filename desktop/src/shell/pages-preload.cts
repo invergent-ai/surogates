@@ -32,6 +32,7 @@ if (location.protocol === "file:") {
     settings: () => ipcRenderer.invoke("shell:settings"),
     newProject: () => ipcRenderer.invoke("shell:new-project"),
     projectSettings: () => ipcRenderer.invoke("shell:project-settings"),
+    quitNow: () => ipcRenderer.invoke("shell:quit-now"),
     link: (which: string) => ipcRenderer.invoke("shell:link", which),
     onChanged: listen("shell:changed"),
   });
