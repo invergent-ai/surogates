@@ -25,7 +25,7 @@ export class PromptQueue {
     return this.line.length;
   }
 
-  /** Hear each change of how many wait. */
+  /** Hear each change of how many wait, once the line has moved. A listener's throw is reported, and the line goes on. */
   onChange(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -53,26 +53,27 @@ export class PromptQueue {
       finish();
     };
     const end = (answer: typeof TIMEOUT | null) => {
-      if (state === "waiting") {
-        this.line.splice(this.line.indexOf(turn), 1);
-        this.changed();
-      }
+      const at = state === "waiting" ? this.line.indexOf(turn) : -1;
+      if (at !== -1) this.line.splice(at, 1);
       // An open prompt closes; the next opens once it has.
       shown.abort();
       settle(() => resolve(answer));
+      if (at !== -1) this.changed();
     };
     const aborted = () => end(null);
-    const deadline = Date.now() + this.ms;
+    // On the clock the timers keep: a step of the system's clock ends no prompt.
+    const deadline = performance.now() + this.ms;
     const timer = setTimeout(() => end(TIMEOUT), this.ms);
     signal.addEventListener("abort", aborted, { once: true });
     const turn: Turn = () => {
       // Its time ran out as the one before it closed: it is never shown.
-      if (Date.now() >= deadline) {
+      if (performance.now() >= deadline) {
         settle(() => resolve(TIMEOUT));
         return false;
       }
       state = "open";
-      Promise.resolve().then(() => show(shown.signal)).then(
+      // One that ended before it could open is not opened.
+      Promise.resolve().then(() => (shown.signal.aborted ? null : show(shown.signal))).then(
         (answer) => settle(() => resolve(answer)),
         (error: unknown) => settle(() => reject(error)),
       ).finally(() => {
@@ -91,12 +92,18 @@ export class PromptQueue {
     while (!this.open) {
       const turn = this.line.shift();
       if (!turn) return;
-      this.changed();
       this.open = turn();
+      this.changed();
     }
   }
 
   private changed(): void {
-    for (const listener of this.listeners) listener();
+    for (const listener of this.listeners) {
+      try {
+        listener();
+      } catch (error) {
+        console.error(error);
+      }
+    }
   }
 }

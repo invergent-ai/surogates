@@ -38,6 +38,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("the desktop's prompts", () => {
@@ -145,5 +146,109 @@ describe("the desktop's prompts", () => {
     closed();
     await vi.advanceTimersByTimeAsync(0);
     expect(prompt.opened).toEqual(["next"]);
+  });
+
+  it("show nothing for an asker gone before its prompt could open", async () => {
+    const going = new AbortController();
+    const asked = queue.ask(prompt.show("gone"), going.signal);
+    going.abort();
+    expect(await asked).toBeNull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prompt.opened).toEqual([]);
+  });
+
+  it("tell the asker why one could not be shown when its show throws, and open the next", async () => {
+    const failing = queue.ask(() => {
+      throw new Error("no window");
+    }, never());
+    const next = queue.ask(prompt.show("next"), never());
+    await expect(failing).rejects.toThrow("no window");
+    await vi.advanceTimersByTimeAsync(0);
+    prompt.answer("next", "allow");
+    expect(await next).toBe("allow");
+  });
+
+  it("show one waiting its turn whatever the system clock does", async () => {
+    const open = queue.ask(prompt.show("open"), never());
+    const waiting = queue.ask(prompt.show("waiting"), never());
+    await vi.advanceTimersByTimeAsync(1_000);
+    vi.setSystemTime(Date.now() + 60 * 60_000);
+    prompt.answer("open", "allow");
+    expect(await open).toBe("allow");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prompt.opened).toEqual(["open", "waiting"]);
+    prompt.answer("waiting", "allow");
+    expect(await waiting).toBe("allow");
+  });
+});
+
+describe("the desktop's prompts, told to their listeners", () => {
+  it("open one at a time, in order, for a listener that asks as it hears", async () => {
+    const first = queue.ask(prompt.show("first"), never());
+    const second = queue.ask(prompt.show("second"), never());
+    let asked = false;
+    queue.onChange(() => {
+      if (asked) return;
+      asked = true;
+      void queue.ask(prompt.show("third"), never());
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    prompt.answer("first", "allow");
+    await first;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prompt.opened).toEqual(["first", "second"]);
+    expect(queue.waiting()).toBe(1);
+    prompt.answer("second", "allow");
+    await second;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prompt.opened).toEqual(["first", "second", "third"]);
+  });
+
+  it("go on past a listener that throws, and report its throw", async () => {
+    const thrown = new Error("listener");
+    const reported = vi.spyOn(console, "error").mockImplementation(() => {});
+    const first = queue.ask(prompt.show("first"), never());
+    const second = queue.ask(prompt.show("second"), never());
+    queue.onChange(() => {
+      throw thrown;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    prompt.answer("first", "allow");
+    expect(await first).toBe("allow");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prompt.opened).toEqual(["first", "second"]);
+    const third = queue.ask(prompt.show("third"), never());
+    expect(queue.waiting()).toBe(1);
+    prompt.answer("second", "deny");
+    expect(await second).toBe("deny");
+    await vi.advanceTimersByTimeAsync(0);
+    prompt.answer("third", "allow");
+    expect(await third).toBe("allow");
+    expect(reported).toHaveBeenCalledWith(thrown);
+  });
+
+  it("drop no other prompt from the line, once a listener has thrown", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const first = queue.ask(prompt.show("first"), never());
+    const second = queue.ask(prompt.show("second"), never());
+    let thrown = false;
+    queue.onChange(() => {
+      if (thrown) return;
+      thrown = true;
+      throw new Error("listener");
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    prompt.answer("first", "allow");
+    await first;
+    await vi.advanceTimersByTimeAsync(PROMPT_MS / 2);
+    const third = queue.ask(prompt.show("third"), never());
+    void queue.ask(prompt.show("fourth"), never());
+    await vi.advanceTimersByTimeAsync(PROMPT_MS / 2);
+    expect(await second).toBe(TIMEOUT);
+    await vi.advanceTimersByTimeAsync(0);
+    prompt.answer("third", "allow");
+    expect(await third).toBe("allow");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prompt.opened).toEqual(["first", "second", "third", "fourth"]);
   });
 });
