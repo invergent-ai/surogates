@@ -30,7 +30,7 @@ export function guestCpus(threads = availableParallelism()): number {
   return Math.min(4, Math.max(1, Math.floor(threads / 2)));
 }
 
-// *run* holds the control and QMP sockets and QEMU's pidfile; *console* is the guest's console log.
+// *run* holds the control, net and QMP sockets and QEMU's pidfile; *console* is the guest's console log.
 export function qemuArgs(disks: Disks, run: string, console: string, cpus = guestCpus()): string[] {
   const ports: string[] = [];
   for (let n = 1; n <= ROOT_PORTS; n += 1) ports.push("-device", `pcie-root-port,id=rp${n},chassis=${n}`);
@@ -48,6 +48,8 @@ export function qemuArgs(disks: Disks, run: string, console: string, cpus = gues
     "-device", "virtio-serial-pci",
     "-chardev", `socket,id=control,path=${option(join(run, "control.sock"))},server=on,wait=off`,
     "-device", "virtserialport,chardev=control,name=ai.surogate.control",
+    "-chardev", `socket,id=net,path=${option(join(run, "net.sock"))},server=on,wait=off`,
+    "-device", "virtserialport,chardev=net,name=ai.surogate.net",
     "-chardev", `file,id=console,path=${option(console)}`, "-device", "virtconsole,chardev=console",
     ...ports,
     "-device", "virtio-rng-pci", "-nic", "none",

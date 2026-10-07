@@ -1,7 +1,8 @@
 """A command's connections to hosts off the package list, through the cloud's own
-terminal tool and the real app: this computer's own services are refused without
-asking, any other host is asked about, and each refusal reaches the agent as srt's
-403 and the app's notice; a host its user allows goes through."""
+terminal tool and the real app, its commands in srt or in the VM: this computer's
+own services are refused without asking, any other host is asked about, and each
+refusal reaches the agent as the proxy's 403 and the app's notice; a host its user
+allows goes through."""
 
 from __future__ import annotations
 
@@ -16,22 +17,22 @@ from surogates.devices.operations import DeviceOperations
 from surogates.tools.builtin import terminal
 
 from .test_desktop_bindings import bind_id
-from .test_desktop_file_operations import journal_dir  # noqa: F401  (fixture)
+from .test_desktop_file_operations import VM, built_agent_disk, journal_dir  # noqa: F401  (fixtures)
 from .test_desktop_link_client import built_client, client, connected  # noqa: F401  (fixture)
 from .test_device_sessions import local_chat
 from .test_devices import api, device_io, link_url, register  # noqa: F401  (fixtures)
 
 pytestmark = [pytest.mark.desktop, pytest.mark.asyncio(loop_scope="session")]
 
-# TEST-NET-1 (RFC 5737): addresses no host answers. Refused, srt answers 403 before
+# TEST-NET-1 (RFC 5737): addresses no host answers. Refused, the proxy answers 403 before
 # anything is dialed; let through, curl gives up at its --max-time (status 000, exit 28),
-# or srt answers 502 at once on a computer with no route.
+# or the proxy answers 502 at once on a computer with no route.
 AWAY = "192.0.2.1"
 NEXT_DOOR = "192.0.2.2"
 
 
 def status(url: str) -> str:
-    """A command that prints the HTTP status it gets. --noproxy '' sends loopback to srt's proxy, past srt's NO_PROXY."""
+    """A command that prints the HTTP status it gets. --noproxy '' sends loopback to the proxy, past NO_PROXY."""
     return f"curl -sS --max-time 5 --noproxy '' -o /dev/null -w '%{{http_code}}\\n' {url} 2>/dev/null"
 
 
@@ -66,14 +67,24 @@ def network_prompt(session_id: str, folder: str, host: str) -> dict:
     }
 
 
-async def test_refusals_reach_the_agent_through_the_terminal_tool(built_client, api, link_url, tmp_path, journal_dir):
+# Commands in srt, the tool hosts' own, and in the VM, the app's.
+SANDBOXES = [pytest.param(False, id="srt"), pytest.param(True, id="vm", marks=VM)]
+
+
+@pytest.mark.parametrize("vm", SANDBOXES)
+async def test_refusals_reach_the_agent_through_the_terminal_tool(built_client, api, link_url, tmp_path, journal_dir, request, vm):
+    if vm:
+        request.getfixturevalue("built_agent_disk")
     folder = (tmp_path / "folder").resolve()
     folder.mkdir()
     device = await register(api)
     # Without --ask the chat works freely: only the network asks, and the echo client denies it.
-    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder)
+    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder, vm=vm)
     try:
         session_id, bound, terminal_call = await chat_on(app, api, device, folder)
+        # The root's own name, which only the guest gives a command: this ran in the VM, not in srt.
+        named = await terminal_call("hostname")
+        assert (named["output"] == "surogate") == vm, named
         own = await terminal_call(status("http://127.0.0.1:9/"))
         assert own["output"] == "403\n\nThis computer does not let a chat reach its own network services (127.0.0.1:9)"
         away = await terminal_call(status(f"http://{AWAY}:9/"))
@@ -85,12 +96,15 @@ async def test_refusals_reach_the_agent_through_the_terminal_tool(built_client, 
         await app.close()
 
 
-async def test_a_host_its_user_allows_goes_through_the_terminal_tool(built_client, api, link_url, tmp_path, journal_dir):
+@pytest.mark.parametrize("vm", SANDBOXES)
+async def test_a_host_its_user_allows_goes_through_the_terminal_tool(built_client, api, link_url, tmp_path, journal_dir, request, vm):
+    if vm:
+        request.getfixturevalue("built_agent_disk")
     folder = (tmp_path / "folder").resolve()
     folder.mkdir()
     device = await register(api)
     # With --ask the chat asks every time, and the echo client allows what does not name the word.
-    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder, ask="denied")
+    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder, ask="denied", vm=vm)
     try:
         session_id, bound, terminal_call = await chat_on(app, api, device, folder)
         allowed = await terminal_call(status(f"http://{NEXT_DOOR}:9/"))

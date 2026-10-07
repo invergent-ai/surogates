@@ -11,7 +11,7 @@ export interface ProjectSummary {
   icon: string | null;
   createdAt: string; // UTC, ISO 8601 with Z
   updatedAt: string;
-  waiting: number; // threads in Waiting on you, plus an open question in the master
+  waiting: number; // threads in Waiting on you, plus one for a question or approval open in the master
   working: number;
 }
 

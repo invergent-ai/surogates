@@ -13,6 +13,10 @@ export interface HostUser {
   home: string;
 }
 
+// A root's session id, as the agent and the host proxy take one: its folder's name on the
+// sessions disk, and its socket's.
+export const ROOT_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
 // The most folders a guest holds at once, one for each root set up in it: each OS's
 // backend has as many places for them (Linux's, its PCIe root ports).
 export const MAX_SHARES = 8;

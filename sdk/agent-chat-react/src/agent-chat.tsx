@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgentChatAdapterProvider } from "./adapter-context";
+import { useProjectThreads } from "./components/chat/use-project-threads";
 import { BrowserPane } from "./components/browser/browser-pane";
 import { useBrowserPreview } from "./components/browser/use-browser-preview";
 import { ChatThread } from "./components/chat/chat-thread";
@@ -169,6 +170,13 @@ export function AgentChat({
     sessionId,
     onSessionChange,
   });
+  // A project's master: the server stamps its role and project into its config.
+  const sessionConfig = runtime.session?.config;
+  const projectId = sessionConfig?.workstream_role === "coordinator"
+    && typeof sessionConfig.workstream_id === "string"
+    ? sessionConfig.workstream_id
+    : null;
+  const threadRows = useProjectThreads(adapter, projectId);
 
   // Reset right-stack pane defaults when the user flips view modes.
   // Simple mode hides the workspace pane; Expert mode shows it.
@@ -332,6 +340,9 @@ export function AgentChat({
         sessionId,
         onFileSelect: handleFileSelect,
         onOpenBilling,
+        onOpenSession: onSessionChange,
+        projectId,
+        threadRows,
       }}
     >
       <TooltipProvider>

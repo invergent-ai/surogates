@@ -65,6 +65,7 @@ from surogates.session.models import (
     SessionLease,
 )
 from surogates.workstreams import COORDINATOR
+from surogates.workstreams import stream as project_stream
 
 logger = logging.getLogger(__name__)
 
@@ -1185,13 +1186,19 @@ class SessionStore:
                     "make_interval(secs => :touch_window)"
                 )
                 params["touch_window"] = _DELTA_TOUCH_THROTTLE_SECONDS
-            await db.execute(
+            # For an event a project's stream may name, the session's
+            # workspace boundary names its project, and its role whether it
+            # is a thread, with no query of their own.
+            streamed = event_type.value in project_stream.STREAM_TYPES
+            result = await db.execute(
                 text(  # noqa: S608
                     f"UPDATE sessions SET {counter_clause} "
                     f"WHERE id = :id{touch_guard}"
+                    + (" RETURNING config->>'workspace_boundary', config->>'workstream_role'" if streamed else "")
                 ),
                 params,
             )
+            stamped = result.one_or_none() if streamed else None
 
             if inbox_row is not None and not suppress_for_viewer:
                 session_row = await db.get(SessionRow, session_id)
@@ -1238,6 +1245,12 @@ class SessionStore:
                 )
             except Exception:
                 pass
+
+        # The project's stream, for a master, its threads and every session
+        # under them.
+        project = project_stream.heard(*stamped, event_type.value) if stamped is not None else None
+        if project is not None:
+            await project_stream.publish(self._redis, project, session_id, event_type.value)
 
         # Notify inbox subscribers after commit so consumers can read the row.
         if inbox_publish is not None and self._redis is not None:

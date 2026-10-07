@@ -7,17 +7,19 @@ import {
   closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, symlinkSync,
   watch, writeFileSync,
 } from "node:fs";
-import { tmpdir, userInfo } from "node:os";
+import { networkInterfaces, tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { type ApprovalAnswer, type ApprovalPrompts, type ApprovalRequest, Approvals } from "../../src/binding/approvals.js";
 import { BOOT_ID, GUEST_SYSTEM } from "../../src/binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import type { ProcessHandle } from "../../src/guest/processes.js";
 import type { HostUser, Share } from "../../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
+import { OperationJournal } from "../../src/journal/journal.js";
 import type { Operation, Outcome } from "../../src/link/protocol.js";
 import { VmClient, vmOptions } from "../../src/vm/client.js";
 import { VmExecutor } from "../../src/vm/executor.js";
@@ -354,7 +356,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       ok: {
         output: [
           "lo:", "tini", "CapPrm: 0000000000000000", "CapEff: 0000000000000000", "CapBnd: 0000000000000000", "CapAmb: 0000000000000000",
-          "NoNewPrivs: 1", "2", "2", "2", "agent", "Permission denied", "Read-only file system",
+          "NoNewPrivs: 1", "2", "2", "2", "agent", "net.sock", "Permission denied", "Read-only file system",
           "No space left on device", "no sessions disk", "home and tmp writable", "",
         ].join("\n"),
         returncode: 0,
@@ -366,9 +368,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
   it("gives a command the cloud's environment and the user's names, and nothing of how its root was made", async () => {
     expect(await run("env | cut -d= -f1 | sort | tr '\\n' ' '")).toEqual({
       ok: {
-        output: "GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 HOME LANG LOGNAME NPM_CONFIG_PREFIX PATH PIP_USER PWD PYTHONDONTWRITEBYTECODE " +
-          "PYTHONUNBUFFERED PYTHONUSERBASE SHLVL " +
-          "USER UV_CACHE_DIR XDG_CACHE_HOME _ ",
+        output: "ALL_PROXY GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 HOME HTTPS_PROXY HTTP_PROXY LANG LOGNAME NO_PROXY NPM_CONFIG_PREFIX PATH PIP_USER PWD " +
+          "PYTHONDONTWRITEBYTECODE PYTHONUNBUFFERED PYTHONUSERBASE SHLVL " +
+          "USER UV_CACHE_DIR XDG_CACHE_HOME _ all_proxy http_proxy https_proxy no_proxy ",
         returncode: 0,
         timed_out: false,
       },
@@ -659,6 +661,50 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     }
     for (const [index, root] of [ROOT, OTHER].entries()) await guest.op(root, "kill", { session_id: ids[index] }, signal());
     for (const path of [folder, other]) rmSync(join(path, "who.txt"));
+  });
+
+  it("gives each root its own socket to the host proxy, which judges a command's connection there for that root", async () => {
+    // A connection as the root's runner opens one: its destination line, then the agent's answer.
+    const through = (destination: string) =>
+      `python3 -c 'import socket; s = socket.socket(socket.AF_UNIX); s.connect("/run/surogate/net.sock"); s.sendall(b"${destination}\\n"); print(s.recv(64).decode(), end="")'`;
+    expect(await run([
+      "stat -c '%u %a' /run/surogate/net.sock",
+      through("127.0.0.1:9"),
+      "(rm -f /run/surogate/net.sock) 2>&1 | sed 's/.*: //'",
+    ].join("; "))).toEqual({
+      ok: {
+        output: `${FIRST_UID} 600\n403 own\nPermission denied\n\nThis computer does not let a chat reach its own network services (127.0.0.1:9)`,
+        returncode: 0,
+        timed_out: false,
+      },
+    });
+    // The other root's connection is its own: its notice comes with its next run, not this root's.
+    expect(await run(through("127.0.0.1:7"), OTHER)).toMatchObject({
+      ok: { output: "403 own\n\nThis computer does not let a chat reach its own network services (127.0.0.1:7)" },
+    });
+    expect(await run("true")).toEqual({ ok: { output: "", returncode: 0, timed_out: false } });
+  });
+
+  it("has its runner's proxies take a command's connections, past its own loopback, to the host proxy, which refuses this computer's own", async () => {
+    // The HTTP status, then CONNECT's, as curl got them: 000 for none.
+    const status = (flags: string, url: string) => `curl -sS --max-time 10 ${flags} -o /dev/null -w '%{http_code} %{http_connect}\\n' ${url} 2>/dev/null`;
+    expect(await run([
+      status("--noproxy ''", "http://127.0.0.1:9/"),
+      status("--noproxy '' -p", "http://127.0.0.1:9/"),
+      status("--noproxy '' --socks5-hostname 127.0.0.1:1080", "http://localhost:9/"),
+      // Its own loopback is direct, so a session's own servers answer as they are: here, none.
+      // So are the address a server says it listens on, and the root's own name.
+      status("", "http://0.0.0.0:9/"),
+      status("", "http://surogate:9/"),
+      status("", "http://127.0.0.1:9/"),
+    ].join("; "))).toEqual({
+      ok: {
+        output: "403 000\n000 403\n000 000\n000 000\n000 000\n000 000\n\nThis computer does not let a chat reach its own network services (127.0.0.1:9, localhost:9)",
+        // The last curl's: it could not connect.
+        returncode: 7,
+        timed_out: false,
+      },
+    });
   });
 
   it("keeps its guest, and another root's process, through a start whose command is longer than a control line", async () => {
@@ -1514,5 +1560,166 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     expect(await executor.run(operation("which", { name: "pandoc" }), signal())).toEqual({ ok: true });
     console.log(`which: ${(performance.now() - begun).toFixed(0)} ms with its file host cold and the guest warm`);
     expect(await command("pgrep -c -x sleep || true")).toMatchObject({ ok: { output: "0\n" } });
+  });
+});
+
+describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the VmExecutor and the guest", { timeout: 60_000 }, () => {
+  const CHAT = "6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d";
+  let dir: string;
+  let run: string;
+  let folder: string;
+  let vm: VmClient;
+  let executor: VmExecutor;
+  let journal: OperationJournal;
+  // Every prompt the chat's user was shown, and what they answer each network one, after a moment.
+  let prompts: ApprovalRequest[];
+  let answer: (request: Extract<ApprovalRequest, { kind: "network" }>) => ApprovalAnswer;
+  const user: ApprovalPrompts = {
+    approve: async (request) => {
+      prompts.push(request);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return request.kind === "network" ? answer(request) : "allow";
+    },
+    confirmFreeMode: async () => false,
+  };
+  const operation = (kind: string, args: Record<string, unknown>): Operation => ({
+    id: `${kind}-${Math.random()}`, sessionId: CHAT, callingSessionId: CHAT, invocationId: "call", ordinal: 1, kind, args, digest: "d",
+  });
+  const command = (line: string, timeout = 60) => executor.run(operation("run", { command: line, workdir: null, timeout }), signal());
+  const networkPrompts = () => prompts.filter((prompt) => prompt.kind === "network").map(({ host, port, privateNetwork }) => ({ host, port, privateNetwork }));
+  // The HTTP status a command's curl gets, 000 for none.
+  const status = (url: string, flags = "") => `curl -sS --max-time 20 ${flags} -o /dev/null -w '%{http_code}\\n' ${url} 2>/dev/null`;
+
+  beforeAll(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-guest-network-")));
+    folder = join(dir, "folder");
+    mkdirSync(folder);
+    run = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-"));
+    vm = new VmClient({
+      vm: {
+        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+        run, console: join(dir, "console.log"), user: USER,
+      },
+    });
+    // The chat as the app binds one, working freely: only the network asks.
+    journal = new OperationJournal(join(dir, "journal.sqlite"));
+    const { dev, ino } = statSync(folder);
+    journal.bindings.add({ root: CHAT, nonce: "nonce", folder, dev, ino, boot: BOOT_ID, mode: "free", boundAt: 1 });
+    const approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "the VM tests" });
+    executor = new VmExecutor({
+      bindingOf: (root) => journal.bindings.get(root), dataDir: join(dir, "data"), env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
+      network: { granted: (root) => approvals.granted(root), askNetwork: (root, asked, cancel) => approvals.askNetwork(root, asked, cancel) }, vm,
+    });
+  });
+
+  beforeEach(() => {
+    prompts = [];
+    answer = () => "allow";
+  });
+
+  afterAll(async () => {
+    await executor?.stop();
+    await vm?.stop();
+    journal?.close();
+    rmSync(run, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("installs a package from PyPI with no prompt", async () => {
+    // The image's pip is uv's, into the root's own PYTHONUSERBASE.
+    expect(await command("pip install --no-cache-dir --no-deps --reinstall --quiet cowsay==6.1 && python3 -c 'import cowsay; print(cowsay.__file__)'", 120)).toEqual({
+      ok: { output: `${USER.home}/.local/lib/python3.12/site-packages/cowsay/__init__.py\n`, returncode: 0, timed_out: false },
+    });
+    expect(prompts).toEqual([]);
+  });
+
+  it("asks once for a site's connections in flight, lets them through once allowed, and every port of a host allowed for the session", async () => {
+    expect(await command(`${status("https://example.com/")} & ${status("https://example.com/")} & wait`)).toEqual({
+      ok: { output: "200\n200\n", returncode: 0, timed_out: false },
+    });
+    expect(networkPrompts()).toEqual([{ host: "example.com", port: 443, privateNetwork: false }]);
+    // Allowed once: the next connection asks again, and this answer lasts.
+    answer = () => "allow_session";
+    expect(await command(status("https://example.com/"))).toMatchObject({ ok: { output: "200\n" } });
+    expect(await command(`${status("https://example.com/")}; ${status("http://example.com/")}`)).toMatchObject({ ok: { output: "200\n200\n" } });
+    expect(networkPrompts()).toHaveLength(2);
+    expect(journal.bindings.domains(CHAT)).toEqual(["example.com"]);
+  });
+
+  it("refuses this computer's own services without asking, however a command names them, and says so", async () => {
+    const lan = Object.values(networkInterfaces()).flat().find((entry) => entry && !entry.internal && entry.family === "IPv4")?.address;
+    const targets = ["http://127.0.0.1:9/", "http://localhost:9/", "http://[::1]:9/", ...(lan ? [`http://${lan}:9/`] : [])];
+    const outcome = await command(targets.map((url) => status(url, "--noproxy ''")).join("; "));
+    const named = ["127.0.0.1:9", "localhost:9", "[::1]:9", ...(lan ? [`${lan}:9`] : [])].join(", ");
+    expect(outcome).toEqual({
+      ok: { output: `${"403\n".repeat(targets.length)}\nThis computer does not let a chat reach its own network services (${named})`, returncode: 0, timed_out: false },
+    });
+    expect(prompts).toEqual([]);
+  });
+
+  it("asks about a private network saying so, and tells the agent what its user denied", async () => {
+    answer = () => "deny";
+    expect(await command(status("http://10.255.255.1:9/"))).toEqual({
+      ok: { output: "403\n\nThis computer did not allow network access to 10.255.255.1:9.", returncode: 0, timed_out: false },
+    });
+    expect(networkPrompts()).toEqual([{ host: "10.255.255.1", port: 9, privateNetwork: true }]);
+  });
+
+  it("shows a command no network device but its own loopback, and no name server", async () => {
+    expect(await command("ip -o link | cut -d' ' -f2; getent hosts example.com || echo no lookup")).toEqual({
+      ok: { output: "lo:\nno lookup\n", returncode: 0, timed_out: false },
+    });
+  });
+
+  it("carries a large download, a package set and an npm install through the host proxy, timed against this computer's own", { timeout: 1_800_000 }, async () => {
+    const WHEEL = "https://files.pythonhosted.org/packages/8b/5c/36c114d120bfe10f9323ed35061bc5878cc74f3f594003854b0ea298942f/torch-2.5.1-cp312-cp312-manylinux1_x86_64.whl";
+    const SET = "numpy pandas scipy pyarrow scikit-learn matplotlib pillow lxml cryptography grpcio";
+    // uv's, as the image's pip is: into a folder of its own, past what the image has.
+    const PIP = `--no-cache --no-deps --reinstall --quiet --python-version 3.12 ${SET}`;
+    const NPM = "--no-audit --no-fund --no-package-lock --no-update-notifier --silent webpack@5 eslint@9 typescript@5";
+    const scratch = mkdtempSync(join(tmpdir(), "vm-guest-measured-"));
+    const uv = spawnSync("bash", ["-c", "command -v uv"], { encoding: "utf8" }).stdout.trim();
+    const seconds = (begun: number) => (performance.now() - begun) / 1000;
+    const span = (times: number[]) => `${Math.min(...times).toFixed(1)}–${Math.max(...times).toFixed(1)} s`;
+    // *line* through the guest and *here* on this computer, each from a cold cache, as the guest's
+    // is: in turn and twice, so neither always goes first. The guest's last outcome, and each one's range.
+    const twice = async (line: string, expected: object, here: ((turn: number) => string) | null) => {
+      const inGuest: number[] = [];
+      const onHost: number[] = [];
+      const native = (turn: number) => {
+        if (!here) return;
+        const begun = performance.now();
+        spawnSync("bash", ["-c", here(turn)], { encoding: "utf8", timeout: 600_000 });
+        onHost.push(seconds(begun));
+      };
+      let outcome: Outcome = { ok: null };
+      for (const turn of [0, 1]) {
+        if (turn === 1) native(turn);
+        const begun = performance.now();
+        outcome = await command(line, 600);
+        inGuest.push(seconds(begun));
+        expect(outcome).toMatchObject(expected);
+        if (turn === 0) native(turn);
+      }
+      return { outcome, guest: span(inGuest), here: onHost.length > 0 ? span(onHost) : "no uv" };
+    };
+    const wheel = await twice(`curl -sS -o /dev/null -w '%{size_download}' ${WHEEL}`, { ok: { output: "906389343", returncode: 0 } }, () => `curl -sS -o /dev/null ${WHEEL}`);
+    const set = await twice(
+      `uv pip install --python /opt/venv/bin/python --target ~/measured-pip ${PIP} && ls ~/measured-pip | grep -c dist-info; rm -rf ~/measured-pip`,
+      { ok: { output: "10\n", returncode: 0 } },
+      uv ? (turn) => `${uv} pip install --python-platform x86_64-manylinux_2_28 --target ${scratch}/pip-${turn} ${PIP}` : null,
+    );
+    const npm = await twice(
+      `npm install --cache ~/measured-npm-cache --prefix ~/measured-npm ${NPM} && ls ~/measured-npm/node_modules | wc -l; rm -rf ~/measured-npm ~/measured-npm-cache`,
+      { ok: { returncode: 0 } },
+      (turn) => `npm install --cache ${scratch}/npm-cache-${turn} --prefix ${scratch}/npm-${turn} ${NPM}`,
+    );
+    rmSync(scratch, { recursive: true, force: true });
+    expect(prompts).toEqual([]);
+    console.log([
+      `M7, twice each in turn: a 906 MB wheel in ${wheel.guest} through the guest, ${wheel.here} on this computer`,
+      `ten packages by uv in ${set.guest}, ${set.here} on this computer`,
+      `npm install of ${String((npm.outcome as { ok: { output: string } }).ok.output).trim()} top-level packages in ${npm.guest}, ${npm.here} on this computer`,
+    ].join("; "));
   });
 });

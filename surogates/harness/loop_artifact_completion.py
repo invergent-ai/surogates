@@ -26,7 +26,6 @@ from surogates.harness.loop_messages import (
     _as_aware_utc,
     _is_scheduled_run,
     _last_assistant_message_excerpt,
-    _latest_user_message_text,
     _seconds_since,
     _should_notify_parent_on_completion,
 )
@@ -34,6 +33,7 @@ from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
 from surogates.session.inbox_payload import raises_completion_inbox_item
 from surogates.workstreams import is_project_master
+from surogates.workstreams.spend import admitted_at_wake
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,8 @@ def _should_take_reservations(session: Any, config_key: str) -> bool:
     the commerce and per-user allowance settlements."""
     if getattr(session, "channel", None) == "website":
         return True
-    return bool((session.config or {}).get(config_key))
+    # A project's turn is held at its wake, after the wake read the session.
+    return bool((session.config or {}).get(config_key)) or admitted_at_wake(session)
 
 
 def wants_turn_summary(session: Any, *, turn_id: str | None, reason: str) -> bool:
@@ -905,7 +906,7 @@ class ArtifactCompletionMixin:
         through_event_id: int | None = None,
         cost_tracker: SessionCostTracker | None = None,
         turn_id: str | None = None,
-        user_message: str | None = None,
+        user_message: str = "",
     ) -> None:
         """Emit SESSION_COMPLETE and advance the cursor.
 
@@ -978,9 +979,7 @@ class ArtifactCompletionMixin:
                 files = await self._drain_and_emit_turn_summary(
                     session_id=session.id,
                     turn_id=turn_id,
-                    user_message=user_message
-                    if user_message is not None
-                    else _latest_user_message_text(messages),
+                    user_message=user_message,
                     # The closing message is the only place a delivery
                     # claim with nothing behind it can be seen.
                     final_message=_last_assistant_message_excerpt(messages),
@@ -1149,6 +1148,15 @@ class ArtifactCompletionMixin:
         }
         if cost_tracker is not None:
             fail_data["cost_summary"] = cost_tracker.summary()
+        # A project's failed turn spent what it spent; its holds settle as a
+        # completed turn's do, rather than waiting for a reaper or a refill.
+        # Only a project's session holds its next turn again at its wake; any
+        # other session's retry, or a message typed meanwhile, settles them.
+        if admitted_at_wake(session):
+            await asyncio.gather(
+                self._settle_commerce_reservation(session, cost_tracker),
+                self._settle_allowance_reservation(session, cost_tracker),
+            )
         fail_event_id = await self._store.emit_event(
             session.id, EventType.SESSION_FAIL, fail_data,
         )

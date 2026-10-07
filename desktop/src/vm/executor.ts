@@ -17,12 +17,13 @@ const PROCESS_KINDS = new Set(["run", "which", "start", "poll", "read_output", "
 const GUARDS: Partial<Record<string, Guard>> = { run: "around", start: "before", write_stdin: "before" };
 
 export interface VmExecutorOptions extends ToolHostsOptions {
-  vm: Pick<VmClient, "perform" | "teardown" | "onProcesses">;
+  vm: Pick<VmClient, "perform" | "teardown" | "onProcesses" | "onAsk">;
 }
 
 export class VmExecutor implements Executor {
   private readonly files: ToolHosts;
   private readonly unheard: () => void;
+  private readonly unasked: () => void;
 
   constructor(private readonly options: VmExecutorOptions) {
     // The guest's root goes before its file host lets the folder go: what its
@@ -30,6 +31,9 @@ export class VmExecutor implements Executor {
     this.files = new ToolHosts({ ...options, release: (root) => options.vm.teardown(root) });
     // The handles of its roots' processes in the guest go to each root's file host, which keeps them.
     this.unheard = options.vm.onProcesses((root, change) => this.files.processes(root, change));
+    // A destination off the package hosts that one of its chats' commands asked for: its approvals
+    // decide, as long as something of the chat runs. Another device's chat is not its to answer.
+    this.unasked = options.vm.onAsk((root, asked) => (options.bindingOf(root) ? this.files.ask(root, asked) : null));
   }
 
   run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
@@ -45,6 +49,7 @@ export class VmExecutor implements Executor {
 
   stop(): Promise<void> {
     this.unheard();
+    this.unasked();
     return this.files.stop();
   }
 

@@ -17,7 +17,7 @@ from surogates.db.models import Event, InboxItem
 from surogates.session.events import EventType
 from surogates.tenant.auth.jwt import create_access_token
 
-from .conftest import create_org, create_user, issue_service_account_token
+from .conftest import create_org, create_user, issue_service_account_token, leave_mid_stream
 from .inbox_e2e_helpers import (
     AGENT_ID,
     OTHER_AGENT_ID,
@@ -737,6 +737,26 @@ async def test_sse_stream_emits_snapshot_and_nudge_for_new_item(
     assert "event: snapshot" in response.text
     assert "event: item" in response.text
     assert "task_complete" in response.text
+
+
+async def test_a_client_that_leaves_the_stream_leaves_no_connection_behind(
+    app,
+    session_factory,
+    redis_client,
+):
+    _, user_id, token, _ = await _create_user_token_session(
+        session_factory,
+        app.state.session_store,
+    )
+    in_use = len(redis_client.connection_pool._in_use_connections)
+    await leave_mid_stream(
+        app,
+        inbox_path("/stream"),
+        {"Authorization": f"Bearer {token}"},
+        after=b"event: snapshot",
+    )
+    assert (await redis_client.pubsub_numsub(f"surogates:inbox:{user_id}"))[0][1] == 0
+    assert len(redis_client.connection_pool._in_use_connections) == in_use
 
 
 async def test_sse_snapshot_counts_only_pending_unread(

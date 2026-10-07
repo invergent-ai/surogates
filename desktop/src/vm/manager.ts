@@ -2,8 +2,8 @@
 // at the first process operation of any root, with each root's folder shared into
 // it when that root first needs the guest. What differs by OS is behind one
 // interface, VmBackend, with a backend per OS (linux.ts); everything here is the
-// same on every OS: hello, the keepalive, the roots' set-up and teardown, and what
-// a lost guest was running.
+// same on every OS: hello, the keepalive, the roots' set-up and teardown, the host
+// proxy on the guest's net port, and what a lost guest was running.
 
 import { rmSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
@@ -17,6 +17,7 @@ import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { ControlLink, type Request } from "./control.js";
 import { bootLinux } from "./linux.js";
+import { type Egress, NetProxy, withNotice } from "./proxy.js";
 import type { Disks } from "./qemu.js";
 
 const HELLO_MS = 15_000;
@@ -50,6 +51,14 @@ export interface VmOptions extends Disks {
 export interface VmBackend {
   /** The guest's control port, ai.surogate.control, as a byte stream. The agent's hello comes on it. */
   readonly control: Duplex;
+  /**
+   * The guest's network port, ai.surogate.net, as a byte stream: the guest's only way out.
+   * The agent opens one HTTP/2 session on it, a CONNECT stream for each connection its
+   * roots' commands make, which the host proxy serves (proxy.ts). Linux's is a
+   * virtio-serial port; a backend that has a socket per connection to give, as hvsock or
+   * vsock, gives one connection for this.
+   */
+  readonly net: Duplex;
   /** Settles once the VM has gone, however it went, with the end of what its hypervisor said, or "". */
   readonly exited: Promise<string>;
   /**
@@ -131,6 +140,9 @@ interface Root {
   setup: Promise<Outcome | null> | null; // null once set up, or why not
 }
 
+// Without an Egress, every destination off the package hosts is refused.
+const REFUSING: Egress = { ask: () => Promise.resolve(false) };
+
 // One boot of the guest, until it goes.
 export class Guest {
   // Settles once the guest has gone and all of its VM with it, so a next boot finds its disks free.
@@ -140,6 +152,7 @@ export class Guest {
   private readonly roots = new Map<string, Root>();
   private keepalive: NodeJS.Timeout | undefined;
   private readonly shareMs: number;
+  private readonly proxy: NetProxy;
 
   private constructor(
     options: VmOptions,
@@ -149,6 +162,7 @@ export class Guest {
     readonly launched: number,
     readonly helloMs: number,
     private readonly told: Told,
+    egress: Egress,
   ) {
     this.gone = new Promise((resolve) => {
       this.leave = resolve;
@@ -173,13 +187,15 @@ export class Guest {
     }, options.pingMs ?? PING_MS);
     this.keepalive.unref();
     this.shareMs = options.shareMs ?? SHARE_MS;
+    // Each connection a root's command makes, judged with the root the agent named.
+    this.proxy = new NetProxy(vm.net, { egress });
   }
 
   /**
    * The guest *boot* starts, once its agent has said hello. Rejects with why it did
    * not start, its hypervisor's words included. *signal* stops a boot under way.
    */
-  static async boot(boot: BootVm, options: VmOptions, signal?: AbortSignal, told: Told = () => {}): Promise<Guest> {
+  static async boot(boot: BootVm, options: VmOptions, signal?: AbortSignal, told: Told = () => {}, egress = REFUSING): Promise<Guest> {
     const launched = performance.now();
     const deadline = launched + HELLO_MS;
     const vm = await boot(options, signal, deadline);
@@ -189,7 +205,7 @@ export class Guest {
     if (signal?.aborted) halt();
     try {
       const control = await ControlLink.open(vm.control, options.user, deadline, vm.exited);
-      return new Guest(options, vm, control, launched, performance.now() - launched, told);
+      return new Guest(options, vm, control, launched, performance.now() - launched, told, egress);
     } catch (error) {
       await vm.kill();
       throw new Error([describe(error), await vm.exited].filter(Boolean).join(": "));
@@ -202,8 +218,12 @@ export class Guest {
     return this.control.request(message, ms);
   }
 
-  op(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
-    return this.control.op(root, kind, args, signal);
+  // A run that answers carries what the root's connections could not reach since its last;
+  // one that answers with an error leaves it for the next.
+  async op(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
+    const outcome = await this.control.op(root, kind, args, signal);
+    if (kind !== "run" || !("ok" in outcome)) return outcome;
+    return withNotice(outcome, this.proxy.takeNotice(root));
   }
 
   /**
@@ -232,6 +252,9 @@ export class Guest {
         if (this.left) return SANDBOX_STOPPED;
         return error instanceof FolderGone ? FOLDER_UNAVAILABLE : unavailable(`could not add this chat's folder: ${describe(error)}`);
       }
+      // A namespace of its own, with nothing met yet: a connection of the one torn down can
+      // land after its teardown.
+      this.proxy.forget(root);
       const answer = await this.request({ type: "setup", root, folder: folder.path, share, ended }, SETUP_MS);
       if (answer?.type === "done") return null;
       entry.setup = null;
@@ -290,6 +313,7 @@ export class Guest {
     // One that could not be added has left already.
     const share = await entry.share.catch(() => null);
     if (this.roots.get(root) === entry) this.roots.delete(root);
+    this.proxy.forget(root);
     if (!share) return;
     // Unanswered: the agent is stuck, and the guest goes, the root's processes with it.
     if (!(await this.request({ type: "teardown", root, share }, SETUP_MS))) return this.lose();
@@ -312,6 +336,7 @@ export class Guest {
     this.left = true;
     clearInterval(this.keepalive);
     this.control.close();
+    this.proxy.close();
     // Before what waited on it is answered: the next operation finds them ended.
     for (const root of this.roots.keys()) this.told(root, { gone: true });
     void this.vm.kill().catch(() => {}).then(this.leave);
@@ -324,11 +349,12 @@ export class VmManager {
   // Stops a boot under way when the manager stops.
   private readonly halt = new AbortController();
 
-  // *told*: each change of a root's processes in its guests.
+  // *told*: each change of a root's processes in its guests. *egress*: who lets a root's commands reach past the package hosts.
   constructor(
     private readonly options: VmOptions,
     private readonly boot: BootVm | null = bootFor(process.platform),
     private readonly told: Told = () => {},
+    private readonly egress: Egress = REFUSING,
   ) {}
 
   /**
@@ -381,7 +407,7 @@ export class VmManager {
   }
 
   private start(boot: BootVm): Promise<Guest> {
-    const booting = Guest.boot(boot, this.options, this.halt.signal, this.told);
+    const booting = Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress);
     booting.then((guest) => guest.gone, () => {}).finally(() => {
       if (this.guest === booting) this.guest = null;
     });

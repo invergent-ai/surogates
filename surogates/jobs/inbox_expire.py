@@ -18,12 +18,14 @@ import logging
 from datetime import timedelta
 
 from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.orm import aliased
 
 from surogates.db.models import InboxItem, Session
 from surogates.session.inbox_payload import ACKNOWLEDGE_ONLY_KINDS
 from surogates.tools.builtin.ask_user_question import (
     ASK_USER_QUESTION_MAX_WAIT_SECONDS,
 )
+from surogates.workstreams import stream as project_stream
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +48,12 @@ async def expire_inbox_items(session_store) -> int:
     answer_window = timedelta(
         seconds=ASK_USER_QUESTION_MAX_WAIT_SECONDS + _ANSWER_WINDOW_GRACE_SECONDS
     )
+    owner = aliased(Session)
     async with session_store._sf() as db:
         result = await db.execute(
             update(InboxItem)
             .where(
+                owner.id == InboxItem.session_id,
                 InboxItem.status == "pending",
                 or_(
                     and_(
@@ -75,14 +79,19 @@ async def expire_inbox_items(session_store) -> int:
                 status="expired",
                 updated_at=func.now(),
             )
-            .returning(InboxItem.id)
+            .returning(InboxItem.id, owner.id, owner.config["workspace_boundary"].astext)
         )
-        ids = list(result.scalars().all())
+        expired = result.all()
         await db.commit()
 
-    if ids:
-        logger.info("Expired %d inbox item(s)", len(ids))
-    return len(ids)
+    # A wait that ended changes its project's counts, and a thread's row.
+    for session_id, boundary in {(session_id, boundary) for _, session_id, boundary in expired}:
+        project = project_stream.project_of(boundary)
+        if project is not None:
+            await project_stream.publish(session_store._redis, project, session_id, project_stream.EXPIRED)
+    if expired:
+        logger.info("Expired %d inbox item(s)", len(expired))
+    return len(expired)
 
 
 async def run_expire_loop(

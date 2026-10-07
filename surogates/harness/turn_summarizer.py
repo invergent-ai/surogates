@@ -388,18 +388,16 @@ def _duplicates_prior_caption(text: str, priors: list[str]) -> bool:
 _INTERNAL_WORKSPACE_PREFIXES: tuple[str, ...] = ("_artifacts", "_whiteboard")
 
 
-def _is_internal_workspace_path(path: str) -> bool:
-    """True for workspace paths that are never user deliverables.
+def is_platform_path(path: str) -> bool:
+    """True for workspace paths that hold the platform's own state, never a
+    file of the user's or a deliverable.
 
     Any hidden path segment marks agent-internal state (``.agents/``
-    skill context files, ``.claude/`` config, ``.cache/`` …). Python's
-    ``__pycache__/`` directories and bytecode files are generated runtime
-    state, including when they live below a user output directory.
-    ``uploads/`` holds user-provided attachments — inputs, not
-    outputs — and the underscore directories above are storage for a
-    surface the chat already renders. Filtered deterministically so they
-    never reach the summary LLM as candidates nor the user-visible
-    download card.
+    skill context files, ``.claude/`` config, ``.cache/``, a project
+    thread's ``.threads/`` checkouts …). Python's ``__pycache__/``
+    directories and bytecode files are generated runtime state, including
+    when they live below a user output directory. The underscore
+    directories above are storage for a surface the chat already renders.
     """
     segments = [s for s in path.split("/") if s]
     if any(s.startswith(".") or s == "__pycache__" for s in segments):
@@ -408,10 +406,18 @@ def _is_internal_workspace_path(path: str) -> bool:
         return False
     if segments[-1].lower().endswith((".pyc", ".pyo")):
         return True
-    return (
-        segments[0] == "uploads"
-        or segments[0] in _INTERNAL_WORKSPACE_PREFIXES
-    )
+    return segments[0] in _INTERNAL_WORKSPACE_PREFIXES
+
+
+def _is_internal_workspace_path(path: str) -> bool:
+    """True for workspace paths that are never user deliverables: the
+    platform's own, and ``uploads/``, which holds user-provided
+    attachments, inputs rather than outputs. Filtered deterministically so
+    they never reach the summary LLM as candidates nor the user-visible
+    download card.
+    """
+    segments = [s for s in path.split("/") if s]
+    return is_platform_path(path) or (bool(segments) and segments[0] == "uploads")
 
 
 class TurnSummarizer:

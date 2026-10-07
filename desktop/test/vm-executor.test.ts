@@ -8,10 +8,11 @@ import { BOOT_ID } from "../src/binding/folder.js";
 import { APP_QUIT, type ProcessHandle, RUNNER_GONE } from "../src/guest/processes.js";
 import { readRecord, writeRecord } from "../src/hosts/folder-record.js";
 import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
-import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
-import { forkHost, HOST_STOPPED, type HostProcess, NOT_BOUND } from "../src/hosts/tool-hosts.js";
+import { FOLDER_UNAVAILABLE, type NetworkAnswer, type NetworkAsk } from "../src/hosts/messages.js";
+import { forkHost, HOST_STOPPED, type HostProcess, type NetworkApprovals, NOT_BOUND } from "../src/hosts/tool-hosts.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
 import { type DeviceStack, stopDevice } from "../src/shell/device-stack.js";
+import type { Asker } from "../src/vm/client.js";
 import { VmExecutor } from "../src/vm/executor.js";
 import type { ProcessesChange, VmOperation } from "../src/vm/manager.js";
 
@@ -33,6 +34,8 @@ let tear: (root: string) => Promise<void>;
 let heard: ((root: string, change: ProcessesChange) => void) | null;
 // Run as a file host's ready comes, before its root's host hears it.
 let beforeReady: () => void;
+// Who the VM asks about a root's destination, while the executor listens.
+let asker: Asker | null;
 let executor: VmExecutor;
 
 const ran = (output: string): Outcome => ({ ok: { output, returncode: 0, timed_out: false } });
@@ -48,9 +51,10 @@ async function until(check: () => boolean, ms = 10_000): Promise<void> {
 
 const run = (command = "true") => executor.run(op("run", { command, workdir: null, timeout: 10 }), signal());
 
-function vmExecutor(idleMs?: number): VmExecutor {
+function vmExecutor(idleMs?: number, network?: NetworkApprovals): VmExecutor {
   const { dev, ino } = statSync(folder);
   executor = new VmExecutor({
+    ...(network ? { network } : {}),
     bindingOf: (root) => (root === ROOT ? { folder, dev, ino, boot: BOOT_ID } : undefined),
     dataDir: join(base, "data"),
     env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
@@ -81,6 +85,12 @@ function vmExecutor(idleMs?: number): VmExecutor {
           heard = null;
         };
       },
+      onAsk: (listener) => {
+        asker = listener;
+        return () => {
+          asker = null;
+        };
+      },
     },
   });
   return executor;
@@ -97,6 +107,7 @@ beforeEach(() => {
   guest = async () => ran("ran\n");
   tear = async () => {};
   heard = null;
+  asker = null;
   beforeReady = () => {};
 });
 
@@ -374,5 +385,59 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
     expect(await run()).toEqual(ran("ran\n"));
     await executor.end();
     expect(torn).toEqual([[ROOT, 0], [ROOT, 1]]);
+  });
+
+  describe("a destination a chat's command in the guest asks for", () => {
+    const SITE: NetworkAsk = { host: "example.com", port: 443, privateNetwork: false };
+
+    it("is the chat's approvals' to decide while something of the chat runs, and denied unasked once nothing does", async () => {
+      const asked: Array<[string, NetworkAsk]> = [];
+      vmExecutor(undefined, { granted: () => [], askNetwork: async (root, request) => (asked.push([root, request]), "allow_session") });
+      let release = () => {};
+      guest = (operation) => (operation.kind === "run" ? new Promise((resolve) => {
+        release = () => resolve(ran("ran\n"));
+      }) : Promise.resolve(ran("")));
+      const running = run("curl https://example.com");
+      await until(() => sent.length === 1);
+      expect(await asker?.(ROOT, SITE)).toBe("allow_session");
+      // Another device's chat is not this one's to answer.
+      expect(asker?.(UNBOUND, SITE)).toBeNull();
+      release();
+      await running;
+      expect(await asker?.(ROOT, SITE)).toBe("deny");
+      expect(asked).toEqual([[ROOT, SITE]]);
+    });
+
+    it("dismisses the chat's open prompt once nothing of the chat runs, and denies with it", async () => {
+      let dismissed = false;
+      vmExecutor(undefined, {
+        granted: () => [],
+        askNetwork: (_root, _request, signal) => new Promise<NetworkAnswer>((resolve) => signal.addEventListener("abort", () => {
+          dismissed = true;
+          resolve("deny");
+        })),
+      });
+      let release = () => {};
+      guest = () => new Promise((resolve) => {
+        release = () => resolve(ran("ran\n"));
+      });
+      const running = run("curl https://example.com");
+      await until(() => sent.length === 1);
+      const answer = asker?.(ROOT, SITE);
+      release();
+      await running;
+      expect(await answer).toBe("deny");
+      expect(dismissed).toBe(true);
+    });
+
+    it("is denied for a chat without approvals to ask, and listened for only until the executor stops", async () => {
+      vmExecutor();
+      guest = () => new Promise(() => {});
+      void run("curl https://example.com");
+      await until(() => sent.length === 1);
+      expect(await asker?.(ROOT, SITE)).toBe("deny");
+      await executor.stop();
+      expect(asker).toBeNull();
+    });
   });
 });

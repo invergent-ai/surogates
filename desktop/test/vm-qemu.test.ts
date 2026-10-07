@@ -11,7 +11,7 @@ import { guestCpus, Qmp, qemuArgs, virtiofsdArgs } from "../src/vm/qemu.js";
 const DISKS = { kernel: "/i/vmlinuz", rootfs: "/i/rootfs.img", agentDisk: "/a/agent.img", sessions: "/d/sessions.img" };
 
 describe("QEMU's command line", () => {
-  it("is Section 11's, with eight empty root ports for shares and no network device", () => {
+  it("is Section 11's, with eight empty root ports for shares, the net port, and no network device", () => {
     const ports = Array.from({ length: 8 }, (_, n) => ["-device", `pcie-root-port,id=rp${n + 1},chassis=${n + 1}`]).flat();
     expect(qemuArgs(DISKS, "/run/user/1000/surogate/vm", "/d/logs/vm-console.log", 4)).toEqual([
       "-nodefaults", "-no-user-config", "-display", "none", "-no-reboot",
@@ -25,6 +25,8 @@ describe("QEMU's command line", () => {
       "-device", "virtio-serial-pci",
       "-chardev", "socket,id=control,path=/run/user/1000/surogate/vm/control.sock,server=on,wait=off",
       "-device", "virtserialport,chardev=control,name=ai.surogate.control",
+      "-chardev", "socket,id=net,path=/run/user/1000/surogate/vm/net.sock,server=on,wait=off",
+      "-device", "virtserialport,chardev=net,name=ai.surogate.net",
       "-chardev", "file,id=console,path=/d/logs/vm-console.log", "-device", "virtconsole,chardev=console",
       ...ports,
       "-device", "virtio-rng-pci", "-nic", "none",
@@ -39,6 +41,7 @@ describe("QEMU's command line", () => {
     expect(args).toContain("if=none,id=root,file=/home/a,,b/rootfs.img,format=raw,readonly=on");
     expect(args).toContain("if=none,id=sessions,file=/d,,x/sessions.img,format=raw,discard=unmap");
     expect(args).toContain("socket,id=control,path=/run/a,,b/control.sock,server=on,wait=off");
+    expect(args).toContain("socket,id=net,path=/run/a,,b/net.sock,server=on,wait=off");
     expect(args).toContain("file,id=console,path=/l,,c/console.log");
     expect(args).toContain("unix:/run/a,,b/qmp.sock,server=on,wait=off");
     // Not an option list: taken whole.

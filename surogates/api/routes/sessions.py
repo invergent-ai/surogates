@@ -52,6 +52,7 @@ from surogates.api.routes._commerce_turn import (
     authorize_allowance_turn,
     authorize_commerce_turn,
     firebase_buyer_identity,
+    release_commerce_hold,
     runtime_commerce_payload,
 )
 from surogates.devices.operations import DeviceOperations
@@ -74,6 +75,7 @@ from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.auth.service_account import ServiceAccountStore
 from surogates.tenant.context import TenantContext
 from surogates.workstreams import SERVER_OWNED_KEYS, is_project_master
+from surogates.workstreams.threads import reopen_if_thread
 
 logger = logging.getLogger(__name__)
 
@@ -1067,6 +1069,7 @@ async def send_message(
     # that resumes the session must be a NORMAL message — converting it
     # into an answer would feed a consumer that no longer exists.
     was_active = session.status == "active"
+    await reopen_if_thread(session, app_state=request.app.state)
     if session.status in ("failed", "paused", "completed"):
         await store.update_session_status(session_id, "active")
         await store.emit_event(session_id, EventType.SESSION_RESUME, {})
@@ -1373,6 +1376,7 @@ async def send_message(
     # Operator-provisioned accounts (database/external providers, no
     # Firebase uid) are the builder's own people and pass unmetered —
     # granting them access is the operator's explicit choice.
+    paid = None
     if session.channel == "web" and tenant.user_id is not None:
         payload = await runtime_commerce_payload(
             request, str(session.agent_id),
@@ -1380,12 +1384,15 @@ async def send_message(
         if str(payload.get("commerce_mode") or "free") != "free":
             buyer = await firebase_buyer_identity(request, tenant)
             if buyer is not None:
-                await authorize_commerce_turn(
+                # Pinned only once the allowance below takes the turn too: a
+                # hold left pinned is one a project's wake trusts unasked.
+                paid = await authorize_commerce_turn(
                     request,
                     session,
                     body.content,
                     buyer=buyer,
                     channel="web",
+                    record=False,
                 )
 
     # Per-user allowance (a slice of the operator's subscription) applies
@@ -1395,12 +1402,23 @@ async def send_message(
     # (kill-switch on + operator opt-in), so free/uncapped agents are
     # unaffected. The worker settles ``allowance_reservations`` after.
     if session.channel == "web" and tenant.user_id is not None:
-        await authorize_allowance_turn(
-            request,
-            session,
-            body.content,
-            end_user_id=str(tenant.user_id),
-            channel="web",
+        try:
+            await authorize_allowance_turn(
+                request,
+                session,
+                body.content,
+                end_user_id=str(tenant.user_id),
+                channel="web",
+            )
+        except Exception:
+            if paid is not None:
+                await release_commerce_hold(
+                    request.app.state.platform_client, session, paid,
+                )
+            raise
+    if paid is not None:
+        await store.append_session_config_list(
+            session_id, "commerce_reservations", paid,
         )
 
     event_data: dict = {"content": body.content}
@@ -1751,8 +1769,10 @@ async def resume_session(
             detail=f"Cannot resume session in '{session.status}' state.",
         )
 
-    await store.emit_event(session_id, EventType.SESSION_RESUME, {})
-    await store.update_session_status(session_id, "active")
+    await reopen_if_thread(session, app_state=request.app.state)
+    # The status first, as a message's resume writes it: whoever hears the
+    # resume then reads the session active.
+    await store.resume_session(session_id)
 
     # Re-enqueue so the worker picks it up.
     await enqueue_session(
@@ -1794,12 +1814,8 @@ async def retry_session(
             detail=f"Cannot retry session in '{session.status}' state.",
         )
 
-    await store.emit_event(
-        session_id,
-        EventType.SESSION_RESUME,
-        {"source": "user_retry"},
-    )
-    await store.update_session_status(session_id, "active")
+    await reopen_if_thread(session, app_state=request.app.state)
+    await store.resume_session(session_id, source="user_retry")
     await enqueue_session(
         request.app.state.redis,
         org_id=str(session.org_id),

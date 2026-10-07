@@ -555,6 +555,27 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(asked).toEqual([]);
   });
 
+  it("dismisses the prompt of an ask that comes in the same moment as its root's last process ends", async () => {
+    const executor = toolHosts({
+      spawnHost: fakeSpawn(answering),
+      // A prompt that stays open until it is dismissed.
+      network: {
+        granted: () => [],
+        askNetwork: (_root, _request, dismissed) => new Promise((done) => {
+          if (dismissed.aborted) done("deny");
+          dismissed.addEventListener("abort", () => done("deny"));
+        }),
+      },
+    });
+    await executor.run(resolve(), signal());
+    fakes[0]?.say({ type: "processes", live: 1 });
+    // As child-process IPC hands over the messages of one read: the ask, then its root's last process ended.
+    fakes[0]?.say({ type: "ask", id: 1, host: "example.com", port: 443, privateNetwork: false });
+    fakes[0]?.say({ type: "processes", live: 0 });
+    await until(() => sent(0, "answer") === 1, 1_000);
+    expect(fakes[0]?.sent.at(-1)).toEqual({ type: "answer", id: 1, allow: false, remember: false });
+  });
+
   it("starts each host with what its root's user allowed for the chat", async () => {
     const executor = toolHosts({
       spawnHost: fakeSpawn(answering),
@@ -613,6 +634,8 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     command.abort();
     await running;
     expect(prompt?.aborted).toBe(true);
+    // The dismissed prompt's denial is the host's answer.
+    await until(() => fakes[0]?.sent.at(-1)?.type === "answer");
     expect(fakes[0]?.sent.at(-1)).toEqual({ type: "answer", id: 1, allow: false, remember: false });
   });
 

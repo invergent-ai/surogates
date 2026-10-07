@@ -29,6 +29,7 @@ from surogates.session.interactive_input import (
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
+from surogates.workstreams import stream as project_stream
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +184,11 @@ async def respond_to_ask_user_question(
             await db.commit()
     except Exception:
         logger.exception("Failed to mark ask_user_question inbox item responded.")
+    # The answer ends a project thread's wait only once its item is claimed,
+    # after the response event's own nudge: say so again.
+    await project_stream.publish_session(
+        getattr(request.app.state, "redis", None), session, EventType.ASK_USER_QUESTION_RESPONSE.value,
+    )
 
     # The asking tool is usually still parked and will see the event itself.
     # If it is not — worker died, or the wait already timed out — the answer

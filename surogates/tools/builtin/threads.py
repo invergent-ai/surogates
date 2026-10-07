@@ -14,10 +14,11 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from surogates.config import enqueue_session
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.workstreams import is_project_master
+from surogates.workstreams import stream as project_stream
 from surogates.workstreams.derive import GROUPS, derive_thread, question_of
 
 # The chat title's cap, since a thread's title is its chat's title.  Counted
@@ -305,21 +306,13 @@ async def _message_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> s
 
 
 async def _stop(thread: Any, reason: str, **kwargs: Any) -> bool:
-    """Stop *thread* as the pause route stops a chat; whether it was working.
+    """Stop *thread* for the coordinator; whether it was working."""
+    from surogates.workstreams.threads import stop_thread
 
-    The status first, so the thread reads as stopped, then the interrupt
-    that ends its turn.  A thread already paused is interrupted again: its
-    turn may not have heard the first time.
-    """
-    from surogates.workstreams.store import WorkstreamStore
-
-    stopped = await WorkstreamStore(kwargs["session_factory"]).pause_thread(thread.id)
-    if stopped:
-        await kwargs["session_store"].emit_event(thread.id, EventType.SESSION_PAUSE, {"reason": reason})
-    redis = kwargs.get("redis")
-    if redis is not None and (stopped or thread.status == "paused"):
-        await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{thread.id}", json.dumps({"reason": _STOP_REASON}))
-    return stopped
+    return await stop_thread(
+        thread, reason=reason, interrupt=_STOP_REASON, session_store=kwargs["session_store"],
+        session_factory=kwargs["session_factory"], redis=kwargs.get("redis"),
+    )
 
 
 async def _stop_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
@@ -343,7 +336,9 @@ async def _list_threads_handler(arguments: dict[str, Any], **kwargs: Any) -> str
     now = datetime.now(timezone.utc)
     rows = [
         derive_thread(facts, now=now)
-        for facts in await WorkstreamStore(kwargs["session_factory"]).thread_facts(UUID(master_config["workstream_id"]))
+        for facts in await WorkstreamStore(kwargs["session_factory"]).thread_facts(
+            UUID(master_config["workstream_id"]), with_files=False,
+        )
     ]
     return json.dumps({"threads": [
         {"thread_id": row["id"], **{key: row[key] for key in ("title", "group", "reason", "status_line")}}
@@ -361,7 +356,7 @@ async def _read_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         return _error(f"No thread {thread_id} in this project.")
     projects = WorkstreamStore(kwargs["session_factory"])
     master_config = kwargs["session_config"]
-    found = await projects.thread_facts(UUID(master_config["workstream_id"]), thread_id=thread.id)
+    found = await projects.thread_facts(UUID(master_config["workstream_id"]), thread_id=thread.id, with_files=False)
     if not found:
         return _error(f"Thread {thread_id} was deleted.")
     row = derive_thread(found[0], now=datetime.now(timezone.utc))
@@ -389,6 +384,8 @@ async def _resolve_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     # A resolved thread's work is done, so one still working stops first.
     await _stop(thread, "resolved by the coordinator", **kwargs)
     await WorkstreamStore(kwargs["session_factory"]).resolve_thread(thread.id)
+    # After it is written, so whoever hears it reads the thread resolved.
+    await project_stream.publish_session(kwargs.get("redis"), thread, project_stream.RESOLVED)
     return json.dumps({"status": "resolved", "thread_id": str(thread.id)})
 
 
