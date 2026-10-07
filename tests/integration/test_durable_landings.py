@@ -7,6 +7,7 @@ import json
 import time
 from functools import partial
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import select, text
@@ -619,3 +620,11 @@ async def test_a_cancel_the_database_fails_under_stays_a_cancel_and_its_files_go
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(turn, 30)
     assert pods.real_names() == ["Report.docx", "notes.txt"]
+
+
+async def test_the_locks_check_fails_once_its_block_has_ended(api):
+    async with rows_module.project_lock(api.app.state.session_factory, uuid4()) as held:
+        await held()
+    # A put-back that outlives the block is never told the lock is still its own.
+    with pytest.raises(RuntimeError, match="let go"):
+        await held()

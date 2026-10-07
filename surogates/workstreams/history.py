@@ -40,6 +40,9 @@ async def project_lock(session_factory: Any, workstream_id: UUID | str) -> Async
             if (await db.execute(select(func.pg_try_advisory_xact_lock(key)))).scalar():
 
                 async def held() -> None:
+                    if not db.in_transaction():
+                        # The block has ended, and the lock with it.
+                        raise RuntimeError("the project's lock was let go")
                     await db.execute(select(1))
 
                 yield held
