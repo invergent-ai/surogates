@@ -212,3 +212,30 @@ async def test_expand_note_reads_a_local_folders_artifact_through_the_call_on_th
     # Another folder's call cannot reach it.
     elsewhere = json.loads(await _expand_note_handler({"note_id": note_id}, **kwargs, task_id=str(uuid.uuid4())))
     assert elsewhere == {"error": "ref artifact is on a local folder this session cannot reach"}
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_expand_note_says_in_its_words_that_a_local_folders_computer_will_not_read_it(
+    parent_session, session_factory, session_store, org_id, tmp_path,
+):
+    class Revoked(InProcessRunner):
+        async def run(self, kind, args, payload=None):
+            if kind == "read":
+                return {"error": {"type": "revoked", "message": "Local access to this computer was revoked"}}
+            return await super().run(kind, args, payload)
+
+    async with session_factory() as db:
+        await db.execute(update(ORMSession).where(ORMSession.id == parent_session.id).values(config={
+            **parent_session.config, "execution": {"kind": "device", "device_id": str(uuid.uuid4())},
+        }))
+        await db.commit()
+    folder = tmp_path.resolve()
+    made = DeviceWorkspaceIO(InProcessRunner(LocalWorkspaceIO(workspace_path=str(folder))), root=str(folder))
+    note_id = await _artifact_note(session_factory, org_id, parent_session, made)
+    refused = DeviceWorkspaceIO(Revoked(LocalWorkspaceIO(workspace_path=str(folder))), root=str(folder))
+    out = json.loads(await _expand_note_handler(
+        {"note_id": note_id},
+        **_kwargs(parent_session, session_factory, session_store, parent_session.id),
+        workspace_io=refused, task_id=str(parent_session.id),
+    ))
+    assert out == {"error": "ref artifact could not be read: Local access to this computer was revoked"}

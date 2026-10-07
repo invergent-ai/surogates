@@ -356,6 +356,7 @@ async def _expand_note_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             ArtifactStore,
         )
         from surogates.devices.binding import device_of
+        from surogates.devices.workspace import DeviceOperationError
         from surogates.sandbox.pool import sandbox_session_key
         from surogates.session.attachment_ingest import workspace_root_id
         from surogates.storage.tenant import boundary_workspace_prefix
@@ -382,6 +383,9 @@ async def _expand_note_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             payload = await artifact_store.get_payload(artifact_id)
         except ArtifactNotFoundError:
             return json.dumps({"error": "ref artifact not found"})
+        except DeviceOperationError as exc:
+            # A local folder's computer that will not read it, in its own words.
+            return json.dumps({"error": f"ref artifact could not be read: {exc}"})
         detail = json.dumps(payload)[:_EXPAND_MAX_CHARS]
         return json.dumps(
             {"note_id": note_id, "kind": "artifact", "detail": detail}

@@ -733,7 +733,8 @@ async def test_a_generated_image_its_user_does_not_allow_says_so(tmp_path):
         media_gen=_image_cfg(client), **_on_a_folder(folder, Denying(LocalWorkspaceIO(workspace_path=str(folder)))),
     ))
 
-    assert "The user did not allow this change" in result["error"]
+    # The computer's words, without Python's errno prefix.
+    assert result["error"] == "The user did not allow this change"
     assert not (folder / "media").exists()
 
 
@@ -793,3 +794,40 @@ async def test_generated_media_never_goes_into_the_harnesss_own_folder(tmp_path)
         assert refused == {"error": "That folder is Surogate's own; write somewhere else in the chat's folder."}
     assert client.last_create_kwargs is None
     assert not (folder / ".surogates-results").exists()
+
+
+def _revoked(folder, refused: str):
+    """The computer, once its access was revoked for the *refused* kind of operation."""
+    from surogates.tools.workspace_io import LocalWorkspaceIO
+    from tests.fake_laptop import InProcessRunner
+
+    class Revoked(InProcessRunner):
+        async def run(self, kind, args, payload=None):
+            if kind == refused:
+                return {"error": {"type": "revoked", "message": "Local access to this computer was revoked"}}
+            return await super().run(kind, args, payload)
+
+    return Revoked(LocalWorkspaceIO(workspace_path=str(folder)))
+
+
+@pytest.mark.asyncio
+async def test_a_computer_that_refuses_generated_media_or_its_input_says_so_in_its_own_words(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler
+
+    folder = tmp_path.resolve()
+    (folder / "in.png").write_bytes(base64.b64decode(_PNG_B64))
+    client = _FakeImageClient(images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}])
+    # Its input read refused: nothing is generated.
+    unread = json.loads(await _generate_image_handler(
+        {"prompt": "a red square", "input_images": ["in.png"]},
+        media_gen=_image_cfg(client), **_on_a_folder(folder, _revoked(folder, "read")),
+    ))
+    assert unread == {"error": "Could not read image in.png: Local access to this computer was revoked"}
+    assert client.last_create_kwargs is None
+    # Its write refused after the generation.
+    unsaved = json.loads(await _generate_image_handler(
+        {"prompt": "a red square"}, media_gen=_image_cfg(client), **_on_a_folder(folder, _revoked(folder, "write")),
+    ))
+    assert unsaved == {"error": "Local access to this computer was revoked"}
+    assert client.last_create_kwargs is not None
+    assert not (folder / "media").exists()

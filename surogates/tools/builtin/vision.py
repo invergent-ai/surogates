@@ -14,6 +14,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from surogates.devices.workspace import DeviceOperationError, said
 from surogates.harness.image_shrink import shrink_image_parts_in_messages
 from surogates.harness.message_utils import message_to_dict
 from surogates.sandbox.copy_files import has_copy, read_copy
@@ -240,8 +241,8 @@ async def _image_ref_to_data_url(
                     f"Image file is too large: {found.size} bytes exceeds {_MAX_IMAGE_BYTES}"
                 )
             data = await workspace_io.read(key)
-        except OSError as exc:
-            raise ValueError(f"Could not read image {image_ref}: {exc}") from None
+        except (OSError, DeviceOperationError) as exc:
+            raise ValueError(f"Could not read image {image_ref}: {said(exc)}") from None
         mime_type = _detect_mime_type(data, fallback=mimetypes.guess_type(key)[0] or "")
         if mime_type not in _SUPPORTED_MIME_TYPES:
             raise ValueError(f"Unsupported image MIME type: {mime_type or 'unknown'}")

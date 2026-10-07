@@ -384,3 +384,29 @@ async def test_a_local_folders_image_over_the_cap_is_refused_before_it_is_read(t
     assert payload["error"].startswith("Image file is too large:")
     assert runner.kinds == ["resolve", "stat"]
     create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_local_folders_image_its_computer_will_not_read_is_said_in_its_words(tmp_path: Path) -> None:
+    from surogates.devices.workspace import DeviceWorkspaceIO
+    from surogates.tools.builtin.vision import _vision_analyze_handler
+    from surogates.tools.workspace_io import LocalWorkspaceIO
+    from tests.fake_laptop import InProcessRunner
+
+    class Revoked(InProcessRunner):
+        async def run(self, kind, args, payload=None):
+            if kind == "read":
+                return {"error": {"type": "revoked", "message": "Local access to this computer was revoked"}}
+            return await super().run(kind, args, payload)
+
+    folder = tmp_path.resolve()
+    _png(folder / "a.png")
+    create = AsyncMock(return_value=_fake_response())
+    payload = json.loads(await _vision_analyze_handler(
+        {"image": "a.png"},
+        workspace_io=DeviceWorkspaceIO(Revoked(LocalWorkspaceIO(workspace_path=str(folder))), root=str(folder)),
+        llm_client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
+        model="surogate",
+    ))
+    assert payload == {"error": "Could not read image a.png: Local access to this computer was revoked"}
+    create.assert_not_called()

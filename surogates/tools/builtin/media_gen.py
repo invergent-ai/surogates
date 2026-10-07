@@ -31,6 +31,7 @@ from uuid import uuid4
 
 import httpx
 
+from surogates.devices.workspace import DeviceOperationError, said
 from surogates.harness.message_utils import message_to_dict
 from surogates.sandbox.copy_files import TooLargeForCopy, write_copy, writes_to_copy
 from surogates.tools.builtin.artifact import artifact_client
@@ -318,8 +319,8 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     try:
         output_path = _normalize_output_path(arguments.get("output_path"), default="", root=_folder_root(kwargs))
         taken = await _refuse_existing(kwargs.get("workspace_io"), output_path) if output_path else None
-    except (OSError, WorkspaceSandboxError) as exc:
-        return _json_error(str(exc))
+    except (OSError, WorkspaceSandboxError, DeviceOperationError) as exc:
+        return _json_error(said(exc))
     if taken is not None:
         return _json_error(taken)
 
@@ -407,8 +408,8 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
             owner=kwargs.get("task_id"),
             workspace_io=kwargs.get("workspace_io"),
         )
-    except (TooLargeForCopy, OSError, WorkspaceSandboxError) as exc:
-        return _json_error(str(exc))
+    except (TooLargeForCopy, OSError, WorkspaceSandboxError, DeviceOperationError) as exc:
+        return _json_error(said(exc))
     if not saved:
         return _json_error(
             "workspace_unavailable: generate_image requires a session "
@@ -456,8 +457,8 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
             root=_folder_root(kwargs),
         )
         taken = await _refuse_existing(kwargs.get("workspace_io"), relative_path)
-    except (OSError, WorkspaceSandboxError) as exc:
-        return _json_error(str(exc))
+    except (OSError, WorkspaceSandboxError, DeviceOperationError) as exc:
+        return _json_error(said(exc))
     if taken is not None:
         return _json_error(taken)
 
@@ -590,8 +591,8 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
             owner=kwargs.get("task_id"),
             workspace_io=kwargs.get("workspace_io"),
         )
-    except (TooLargeForCopy, OSError, WorkspaceSandboxError) as exc:
-        return _json_error(str(exc))
+    except (TooLargeForCopy, OSError, WorkspaceSandboxError, DeviceOperationError) as exc:
+        return _json_error(said(exc))
     if not saved:
         return _json_error(
             "workspace_unavailable: generate_video requires a session "
