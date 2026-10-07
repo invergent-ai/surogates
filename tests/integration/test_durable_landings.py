@@ -586,3 +586,36 @@ async def test_each_put_back_is_in_the_row_before_it_runs(api, monkeypatch, pods
     await ends(api, pool, thread)
     # A put-back the row shows done is done: a worker killed in one leaves it compensating, to run again.
     assert seen == [("b.md", "compensating"), ("a.md", "compensating")]
+
+
+@pytest.mark.parametrize("fails", ["the lock's connection", "the row's write"])
+async def test_a_cancel_the_database_fails_under_stays_a_cancel_and_its_files_go_back(api, monkeypatch, pods, fails):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md && echo b > b.md")
+    call, save, down = landing_module._call, landing_module.save_landing, []
+
+    async def cancelled_after_a(sandbox_pool, owner, action, **arguments):
+        result = await call(sandbox_pool, owner, action, **arguments)
+        if action == "apply" and arguments["path"] == "a.md":
+            if fails == "the lock's connection":
+                await lose_the_lock(api, thread)
+            else:
+                down.append(True)
+            asyncio.current_task().cancel()  # the turn's lease went to another worker
+            await asyncio.sleep(0)
+        return result
+
+    async def unwritten(*args, **kwargs):
+        if down:
+            raise ConnectionError("the database is down")
+        await save(*args, **kwargs)
+
+    monkeypatch.setattr(landing_module, "_call", cancelled_after_a)
+    monkeypatch.setattr(landing_module, "save_landing", unwritten)
+    turn = asyncio.create_task(ends(api, pool, thread))
+    # The worker stops ending a turn whose lease has moved.
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(turn, 30)
+    assert pods.real_names() == ["Report.docx", "notes.txt"]

@@ -124,7 +124,10 @@ async def land_turn(
         async with project_lock(session_factory, workstream) as held:
             settled = await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings)
             outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
-    except Exception:
+    except Exception as exc:
+        if _cancelling():
+            # The lock's dead connection failed the block's exit: the cancel goes on.
+            raise asyncio.CancelledError from exc
         if outcome is None:
             raise
         # The landing is done; only the lock's transaction did not end cleanly.
@@ -273,10 +276,13 @@ async def _land(
         put_back = asyncio.ensure_future(_settle(saga, orchestrator, sandbox_pool, owner, save))
         _PUTTING_BACK[owner] = put_back
         put_back.add_done_callback(lambda done: _PUTTING_BACK.pop(owner, None) if _PUTTING_BACK.get(owner) is done else None)
-        if not isinstance(exc, Exception):
+        if not isinstance(exc, Exception) or _cancelling():
             # Cancelled: the turn's lease went to another worker, which cannot
-            # reach this pod.  What was applied still goes back, then the cancel goes on.
+            # reach this pod.  What was applied still goes back, then the cancel
+            # goes on, though a row write it ran into failed in its place.
             await _after_cancel(put_back, sandbox_pool, owner)
+            if isinstance(exc, Exception):
+                raise asyncio.CancelledError from exc
             raise
         try:
             state, pushed = await asyncio.shield(put_back)
@@ -302,6 +308,12 @@ async def _land(
         for path in paths
     ]
     return outcome
+
+
+def _cancelling() -> bool:
+    """Whether this task is being cancelled, though an error may have taken the cancel's place."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
 
 
 def _row_files(saga: Any, state: str) -> list[dict]:
