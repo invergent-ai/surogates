@@ -1366,7 +1366,8 @@ function settingsState() {
       name: hostname(),
       connection: agent ? deviceLine(agent) : "",
       added: kept?.addedAt ?? null,
-      organisation: account?.orgId ?? kept?.orgId ?? null,
+      // The app's own sign-in names it, before the web client reports and whatever it reports.
+      organisation: signedIn?.account.orgName ?? null,
       agents: agent ? [agent.name] : [],
     },
     links: { usage: "usage" in links() },

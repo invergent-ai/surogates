@@ -224,7 +224,8 @@ describe("Settings", () => {
     const settings = await settingsPage(shell);
     await settings.click('[data-section="account"]');
     expect(await settings.textContent("#email")).toBe("flavius@example.com");
-    expect(await settings.textContent("#organisation")).toBe("o");
+    // By its name, not its id.
+    expect(await settings.textContent("#organisation")).toBe("Surogate");
     await settings.click('[data-section="computer"]');
     expect(await settings.textContent("#computer")).toBe(hostname());
     expect(await settings.textContent("#connection")).toBe("Connected as Laptop");
@@ -235,5 +236,7 @@ describe("Settings", () => {
     await client.evaluate(() => window.surogateDesktop!.setAccount(null));
     await settings.click('[data-section="account"]');
     await expect.poll(() => settings.textContent("#email")).toBe("Not signed in");
+    // Named by the app's own sign-in, not by what the web client reports.
+    expect(await settings.textContent("#organisation")).toBe("Surogate");
   });
 });
