@@ -26,7 +26,8 @@ export function consentRequest(search: string): ConsentRequest | null {
     if (!value) return null;
     fields[field] = value;
   }
-  const computer = (query.get("computer") ?? "").trim().slice(0, 100) || "this computer";
+  // Cut by character, so the cut never splits one in two.
+  const computer = Array.from((query.get("computer") ?? "").trim()).slice(0, 100).join("") || "this computer";
   return { ...(fields as Omit<ConsentRequest, "computer">), computer };
 }
 
@@ -41,29 +42,40 @@ export async function decide(
   decision: "allow" | "deny",
   post: (body: Record<string, string>) => Promise<Response>,
 ): Promise<ConsentOutcome> {
-  const { computer: _shown, ...asked } = request;
-  const response = await post({ ...asked, decision });
+  // Exactly the protocol's fields: the computer's name is only shown.
+  const response = await post({ ...Object.fromEntries(FIELDS.map((field) => [field, request[field]])), decision });
   const body = (await response.json().catch(() => null)) as { redirect_to?: unknown; detail?: unknown } | null;
   if (response.ok && typeof body?.redirect_to === "string") return { kind: "redirect", to: body.redirect_to };
   const detail = body?.detail;
   const code = typeof detail === "object" && detail !== null ? (detail as { code?: unknown }).code : undefined;
   if (response.status === 401 || code === "recent_sign_in_required") return { kind: "sign-in-again" };
-  return { kind: "refused", message: typeof detail === "string" ? detail : "This sign-in request did not come from Surogate Desktop." };
+  if (typeof detail === "string") return { kind: "refused", message: detail };
+  return {
+    kind: "refused",
+    message: response.status >= 500
+      ? "The agent could not finish this sign-in. Try again from Surogate Desktop."
+      : "This sign-in request did not come from Surogate Desktop.",
+  };
 }
 
-// The agent allows the desktop only on a sign-in from its last 10 minutes; a minute less here, for the clocks.
+// The agent allows the desktop only on a sign-in from its last 10 minutes; a minute less here, for the time Allow takes.
 const RECENT_S = 9 * 60;
 
 /**
  * Whether *accessToken* says its user signed in recently enough to allow the desktop. Read, not
  * checked, and only to ask for a new sign-in before the user clicks Allow: the agent decides.
+ * Measured on the agent's clock, from the token's own issue (`iat`): the page reads it from a
+ * token refreshed just now, and the browser's clock may be off.
  */
-export function recentSignIn(accessToken: string | null, now: number = Date.now()): boolean {
+export function recentSignIn(accessToken: string | null): boolean {
   const payload = accessToken?.split(".")[1];
   if (!payload) return false;
   try {
-    const { auth_time: authTime } = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/"))) as { auth_time?: unknown };
-    return typeof authTime === "number" && now / 1000 - authTime < RECENT_S;
+    const { auth_time: authTime, iat } = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/"))) as {
+      auth_time?: unknown;
+      iat?: unknown;
+    };
+    return typeof authTime === "number" && typeof iat === "number" && iat - authTime < RECENT_S;
   } catch {
     return false;
   }

@@ -17,6 +17,7 @@ import { getAuthToken, hasRefreshToken } from "./session";
 
 const SIGN_IN = "Sign in to continue to Surogate Desktop.";
 const SIGN_IN_AGAIN = "Sign in again to continue to Surogate Desktop: allowing it needs a sign-in from the last few minutes.";
+const UNREACHABLE = "Signed in, but the agent could not be reached. Try again.";
 
 type Step =
   | { kind: "checking" }
@@ -24,6 +25,11 @@ type Step =
   | { kind: "consent"; email: string }
   | { kind: "sent" }
   | { kind: "refused"; message: string };
+
+// The session's access token, refreshed just now so its `iat` is the agent's now; null when it cannot refresh.
+async function freshToken(): Promise<string | null> {
+  return hasRefreshToken() && (await refreshSession()) ? getAuthToken() : null;
+}
 
 function Notice({ text }: { text: string }) {
   return (
@@ -39,23 +45,18 @@ export function AuthorizePage() {
   const [busy, setBusy] = useState(false);
 
   // The consent, for whoever is signed in here with a session that still refreshes; else the sign-in.
-  const consentOrSignIn = async (notice: string) => {
-    const token = hasRefreshToken() && (await refreshSession()) ? getAuthToken() : null;
+  const consentOrSignIn = async (notice: string): Promise<Step> => {
+    const token = await freshToken();
+    if (!token) return { kind: "sign-in", notice };
     // A sign-in too old to allow the desktop asks for a new one first, rather than after Allow.
-    if (token && !recentSignIn(token)) {
-      setStep({ kind: "sign-in", notice: SIGN_IN_AGAIN });
-      return;
-    }
-    const me = token ? await fetch("/api/v1/auth/me", { headers: { Authorization: `Bearer ${token}` } }).catch(() => null) : null;
-    if (!me?.ok) {
-      setStep({ kind: "sign-in", notice });
-      return;
-    }
-    setStep({ kind: "consent", email: ((await me.json()) as { email: string }).email });
+    if (!recentSignIn(token)) return { kind: "sign-in", notice: SIGN_IN_AGAIN };
+    const me = await fetch("/api/v1/auth/me", { headers: { Authorization: `Bearer ${token}` } }).catch(() => null);
+    const email = me?.ok ? ((await me.json().catch(() => null)) as { email?: unknown } | null)?.email : undefined;
+    return typeof email === "string" ? { kind: "consent", email } : { kind: "sign-in", notice: UNREACHABLE };
   };
 
   useEffect(() => {
-    if (!getDesktop()) void consentOrSignIn(SIGN_IN);
+    if (!getDesktop()) void consentOrSignIn(SIGN_IN).then(setStep);
   }, []);
 
   // In Surogate Desktop's own window there is no sign-in form: the app opens this page in the browser.
@@ -66,11 +67,17 @@ export function AuthorizePage() {
   if (step.kind === "refused") return <Notice text={step.message} />;
   if (step.kind === "sign-in") {
     const { notice } = step;
-    return <LoginPage notice={notice} onSignedIn={() => void consentOrSignIn(notice)} />;
+    return <LoginPage notice={notice} onSignedIn={() => void consentOrSignIn(notice).then(setStep)} />;
   }
 
   const answer = async (decision: "allow" | "deny") => {
     setBusy(true);
+    // The sign-in may have aged past recent while the user read the consent: ask again now, not after Allow.
+    if (decision === "allow" && !recentSignIn(await freshToken())) {
+      setBusy(false);
+      setStep({ kind: "sign-in", notice: SIGN_IN_AGAIN });
+      return;
+    }
     const outcome = await decide(request, decision, (body) =>
       fetch("/api/v1/auth/oauth/authorize", {
         method: "POST",
@@ -94,7 +101,12 @@ export function AuthorizePage() {
       <Card className="w-full max-w-[420px] rounded-2xl border border-line px-6 py-8 sm:px-10">
         <h3 className="text-2xl font-bold tracking-tight">Allow Surogate Desktop?</h3>
         <p>
-          Surogate Desktop on <strong>{request.computer}</strong> wants to sign in to {window.location.host} as{" "}
+          Surogate Desktop on{" "}
+          <strong>
+            {/* Isolated and cut to its own line box: no name the request carries can reorder or cover the rest. */}
+            <bdi className="inline-block max-w-full truncate align-bottom">{request.computer}</bdi>
+          </strong>{" "}
+          wants to sign in to {window.location.host} as{" "}
           <strong>{step.email}</strong>.
         </p>
         <p className="text-muted-foreground">

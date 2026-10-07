@@ -18,6 +18,8 @@ test("reads the desktop's request from the page's address, naming this computer 
   assert.deepEqual(consentRequest(search({ ...ASKED, computer: "  Flavius's ThinkPad " })), { ...ASKED, computer: "Flavius's ThinkPad" });
   assert.equal(consentRequest(search({ ...ASKED })).computer, "this computer");
   assert.equal(consentRequest(search({ ...ASKED, computer: "x".repeat(300) })).computer.length, 100);
+  // Cut by character, never inside one.
+  assert.equal(consentRequest(search({ ...ASKED, computer: "\u{1F4BB}".repeat(150) })).computer, "\u{1F4BB}".repeat(100));
 });
 
 test("is no request when a field the desktop always sends is missing", () => {
@@ -48,13 +50,33 @@ test("goes nowhere with a request the agent refuses, and says why", async () => 
   assert.deepEqual((await decide(request, "allow", answering(422, { detail: [{ msg: "bad" }] }).post)).kind, "refused");
 });
 
+test("says the agent failed, not the request, when the agent answers with an error of its own", async () => {
+  const request = consentRequest(search(ASKED));
+  const failed = { post: async () => new Response("<html>Bad gateway</html>", { status: 502 }) };
+  assert.deepEqual(await decide(request, "allow", failed.post), {
+    kind: "refused", message: "The agent could not finish this sign-in. Try again from Surogate Desktop.",
+  });
+});
+
 test("tells a sign-in recent enough to allow the desktop from one the agent would refuse", () => {
-  const now = Date.parse("2026-10-07T12:00:00Z");
+  const issued = Date.parse("2026-10-07T12:00:00Z") / 1000;
   const token = (claims) => `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
-  assert.equal(recentSignIn(token({ auth_time: now / 1000 - 60 }), now), true);
-  assert.equal(recentSignIn(token({ auth_time: now / 1000 - 3600 }), now), false);
+  assert.equal(recentSignIn(token({ auth_time: issued - 60, iat: issued })), true);
+  assert.equal(recentSignIn(token({ auth_time: issued - 3600, iat: issued })), false);
   // Signed in before sign-ins carried their time, or no token at all: not recent.
-  assert.equal(recentSignIn(token({ iat: now / 1000 }), now), false);
-  assert.equal(recentSignIn("not a token", now), false);
-  assert.equal(recentSignIn(null, now), false);
+  assert.equal(recentSignIn(token({ iat: issued })), false);
+  assert.equal(recentSignIn(token({ auth_time: issued - 60 })), false);
+  assert.equal(recentSignIn("not a token"), false);
+  assert.equal(recentSignIn(null), false);
+});
+
+test("measures the sign-in on the agent's clock, so a browser clock 15 minutes off changes nothing", (t) => {
+  const issued = Date.parse("2026-10-07T12:00:00Z") / 1000;
+  const token = (claims) => `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
+  for (const offset of [15 * 60_000, -15 * 60_000]) {
+    t.mock.method(Date, "now", () => issued * 1000 + offset);
+    assert.equal(recentSignIn(token({ auth_time: issued - 60, iat: issued })), true, `${offset}`);
+    assert.equal(recentSignIn(token({ auth_time: issued - 3600, iat: issued })), false, `${offset}`);
+    t.mock.restoreAll();
+  }
 });
