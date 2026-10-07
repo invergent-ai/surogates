@@ -2,7 +2,7 @@
 // folder sheet, and the approval prompts of a chat that asks every time. Nothing here runs
 // in the VM: a denied command never reaches it, and the file kinds run in the root's file host.
 
-import { linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
@@ -289,5 +289,126 @@ describe("a prompt's text", () => {
     expect(seen).toBe(true);
     await press(asked, "allow");
     expect(await answered).toEqual({ button: "allow", choice: null });
+  });
+});
+
+const CHAT = "7d2e0f8a-2b3c-4d5e-9f60-718293a4b5c6";
+const OTHER = "8e3f1a9b-3c4d-4e6f-a071-8293a4b5c6d7";
+
+let next = 0;
+// *chat*'s operation as the server sends it: its id.
+function send(kind: string, args: Record<string, unknown>, chat = CHAT): string {
+  const id = `op-${(next += 1)}`;
+  agent.link.send({
+    type: "op", id, session_id: chat, calling_session_id: chat, invocation_id: kind === "bind" ? "bind" : "call",
+    ordinal: kind === "bind" ? 0 : 1, kind, args, digest: `d-${id}`,
+  });
+  return id;
+}
+
+const results = (id: string) => agent.link.received.filter((frame) => frame.type === "op_result" && frame.id === id);
+
+async function outcome(id: string): Promise<unknown> {
+  await agent.link.until(() => results(id).length === 1, 20_000);
+  agent.link.send({ type: "op_ack", id });
+  return results(id)[0]?.outcome;
+}
+
+// *picked* bound to *chat* as the user accepts it in the sheet, in *mode*.
+async function bound(client: Page, picked: string, chat = CHAT, mode = "ask"): Promise<void> {
+  await app!.evaluate((_electron, chosen) => Object.assign(globalThis, { folder: chosen }), picked);
+  const prepared = prepare(client);
+  const sheet = await prompt(app!);
+  await sheet.check(`input[value="${mode}"]`);
+  await press(sheet, "accept");
+  const ready = (await prepared)!;
+  expect(await outcome(send("bind", { folder: ready.folder, nonce: ready.nonce }, chat))).toEqual({ ok: null });
+}
+
+const write = (name: string, text: string, chat = CHAT, into = folder) =>
+  send("write", { key: join(into, name), data: Buffer.from(text).toString("base64") }, chat);
+
+describe("an approval prompt", () => {
+  it("asks before a change, showing the new content, focused on Deny, and makes it once allowed", async () => {
+    await bound(await signedIn(), folder);
+    const id = write("notes.txt", "hello\n");
+    const asked = await prompt(app!);
+    expect(await text(asked, "#prompt-title")).toBe("Write notes.txt?");
+    expect(await asked.$$eval(".code", (blocks) => blocks.map((block) => block.textContent))).toEqual(["notes.txt", "hello\n"]);
+    expect(await asked.evaluate(() => (document.activeElement as HTMLElement).dataset.id)).toBe("deny");
+    expect(await asked.getAttribute('[data-id="allow"]', "aria-disabled")).toBe("true");
+    await press(asked, "allow");
+    expect(await outcome(id)).toEqual({ ok: null });
+    expect(readFileSync(join(folder, "notes.txt"), "utf8")).toBe("hello\n");
+  });
+
+  it("denies a command on Escape, as the terminal reads a blocked one, and shows the characters it hides", async () => {
+    await bound(await signedIn(), folder);
+    const id = send("run", { command: "echo safe \u202Etxt.exe", workdir: null, timeout: 30 });
+    const asked = await prompt(app!);
+    expect(await text(asked, ".code .special")).toBe("U+202E");
+    expect(await text(asked, ".code")).toBe("echo safe U+202Etxt.exe");
+    await key(asked, "Escape");
+    expect(await outcome(id)).toEqual({ error: { type: "sandbox", message: "The user denied this command on this computer" } });
+  });
+
+  it("shows a long command whole, its end reachable", async () => {
+    await bound(await signedIn(), folder);
+    // A heredoc of a file with Windows line ends: each \r is marked, 140 000 runs in all.
+    const command = `cat > report.md <<'EOF'\n${Array.from({ length: 70_000 }, (_, line) => `line ${line}\r`).join("\n")}\nEOF\necho END`;
+    const id = send("run", { command, workdir: null, timeout: 30 });
+    const asked = await prompt(app!);
+    expect(await text(asked, ".code")).toBe(command.replaceAll("\r", "U+000D"));
+    // Scrolled to its end, the last line is in view.
+    const seen = await asked.evaluate(() => {
+      const body = document.querySelector(".prompt-body")!;
+      body.scrollTop = body.scrollHeight;
+      const end = document.querySelector(".code")!.getBoundingClientRect().bottom;
+      return body.scrollHeight > body.clientHeight && end <= body.getBoundingClientRect().bottom + 1;
+    });
+    expect(seen).toBe(true);
+    await press(asked, "deny");
+    expect(await outcome(id)).toMatchObject({ error: { type: "sandbox" } });
+  });
+
+  it("lets the chat work freely once its user stops asking", async () => {
+    await bound(await signedIn(), folder);
+    const first = write("a.txt", "a");
+    await press(await prompt(app!), "stop_asking");
+    expect(await outcome(first)).toEqual({ ok: null });
+    expect(await outcome(write("b.txt", "b"))).toEqual({ ok: null });
+    expect(await promptsShown(app!)).toBe(0);
+    expect(existsSync(join(folder, "b.txt"))).toBe(true);
+  });
+
+  it("shows one prompt at a time, saying more wait", async () => {
+    const second = realpathSync(mkdtempSync("/tmp/sf-"));
+    try {
+      const client = await signedIn();
+      await bound(client, folder);
+      await bound(client, second, OTHER);
+      const [one, two] = [write("a.txt", "a"), write("b.txt", "b", OTHER, second)];
+      const first = await prompt(app!);
+      await expect.poll(() => text(first, "#prompt-waiting")).toBe("More prompts wait after this one.");
+      expect(await promptsShown(app!)).toBe(1);
+      await press(first, "deny");
+      expect(await outcome(one)).toMatchObject({ error: { type: "os", code: "EACCES" } });
+      await expect.poll(async () => text(await prompt(app!), "#prompt-waiting")).toBe("");
+      await press(await prompt(app!), "allow");
+      expect(await outcome(two)).toEqual({ ok: null });
+    } finally {
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+
+  it("closes once the server cancels its operation, and answers nothing", async () => {
+    await bound(await signedIn(), folder);
+    const id = write("a.txt", "a");
+    await prompt(app!);
+    agent.link.send({ type: "cancel", id });
+    await expect.poll(() => promptsShown(app!)).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(results(id)).toEqual([]);
+    expect(existsSync(join(folder, "a.txt"))).toBe(false);
   });
 });

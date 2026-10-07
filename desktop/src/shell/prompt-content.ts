@@ -2,8 +2,9 @@
 // every word; what the agent sent, and the names of the user's folders and files, go
 // in their own fields, which the page sets as text and never as markup.
 
-import { basename } from "node:path";
+import { basename, relative } from "node:path";
 
+import { type ApprovalRequest, type ChatLabel, PREVIEW_BYTES } from "../binding/approvals.js";
 import type { FolderSheet } from "../binding/binder.js";
 import type { LinkSummary } from "../binding/links.js";
 
@@ -93,5 +94,82 @@ export function folderSheet(sheet: FolderSheet): PromptContent {
     cancel: "cancel",
     enter: "accept",
     height: sheet.links ? 550 : 490,
+  };
+}
+
+// Who asks: the chat's agent, or one of its sub-agents.
+const asker = (chat: ChatLabel) => (chat.calling === chat.root ? chat.agent : `A sub-agent of ${chat.agent}`);
+
+// A path in the chat's folder, from the folder; any other whole.
+const inFolder = (folder: string, path: string) => (path.startsWith(`${folder}/`) ? relative(folder, path) : path);
+
+export function sizeOf(bytes: number): string {
+  if (bytes < 1024) return `${bytes} ${bytes === 1 ? "byte" : "bytes"}`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 102.4) / 10} KB`;
+  return `${Math.round(bytes / (1024 * 102.4)) / 10} MB`;
+}
+
+// What an operation's prompt offers: Deny first, focused, and what Escape and a closed window answer.
+const OPERATION = {
+  notes: [],
+  choice: null,
+  buttons: [button("deny", "Deny"), button("stop_asking", "Allow and stop asking", true), button("allow", "Allow once", true)],
+  focus: "deny",
+  cancel: "deny",
+  enter: null,
+};
+
+/** The prompt for one operation or network destination (spec, Section 4): its buttons' ids are the answers. */
+export function approval(request: ApprovalRequest): PromptContent {
+  const { chat } = request;
+  const folder = named(chat.folder);
+  if (request.kind === "command") {
+    return {
+      ...OPERATION,
+      title: request.background ? `Start a background command in ${folder}?` : `Run a command in ${folder}?`,
+      lead: `${asker(chat)} wants to run this on this computer.`,
+      details: [code("Command", request.command, "\n\t"), ...(request.workdir === null ? [] : [code("In", request.workdir)])],
+      height: 380,
+    };
+  }
+  if (request.kind === "change") {
+    const file = code("File", inFolder(chat.folder, request.path));
+    // A path outside the folder is named whole, and its file host refuses it.
+    const where = request.path.startsWith(`${chat.folder}/`) ? ` in ${folder}` : "";
+    if (request.action === "delete") {
+      return { ...OPERATION, title: `Delete ${named(request.path)}?`, lead: `${asker(chat)} wants to delete this file${where}.`, details: [file], height: 300 };
+    }
+    const bytes = request.bytes ?? 0;
+    const { preview } = request;
+    const content: PromptDetail = preview === null
+      ? { label: `New content, ${sizeOf(bytes)}`, value: "Not text.", code: false, keep: "" }
+      : code(preview.cut ? `The first ${sizeOf(PREVIEW_BYTES)} of ${sizeOf(bytes)}` : `New content, ${sizeOf(bytes)}`, preview.text, "\n\t");
+    return {
+      ...OPERATION, title: `Write ${named(request.path)}?`, lead: `${asker(chat)} wants to write this file${where}.`, details: [file, content], height: 420,
+    };
+  }
+  if (request.kind === "input") {
+    const command: PromptDetail = request.command === null
+      ? { label: "To the command", value: `A command Surogate did not start in this session (${request.process}).`, code: false, keep: "" }
+      : code("To the command", request.command, "\n\t");
+    return {
+      ...OPERATION,
+      title: "Type into a running command?",
+      lead: `${asker(chat)} wants to send this input to a command running in ${folder}.`,
+      details: [command, code("Input", request.data)],
+      height: 380,
+    };
+  }
+  return {
+    title: `Connect to ${request.host}?`,
+    lead: `A command in ${folder} wants to connect to ${request.host} on port ${request.port}. Allow lets through the connections waiting now; later ones ask again.`,
+    details: [code("Address", `${request.host}:${request.port}`)],
+    notes: request.privateNetwork ? ["This address is on a private network, such as a home or office network, or a VPN."] : [],
+    choice: null,
+    buttons: [button("deny", "Deny"), button("allow_session", "Allow all its ports for this chat", true), button("allow", "Allow", true)],
+    focus: "deny",
+    cancel: "deny",
+    enter: null,
+    height: request.privateNetwork ? 340 : 290,
   };
 }

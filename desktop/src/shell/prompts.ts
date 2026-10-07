@@ -1,14 +1,14 @@
 // The desktop's own prompts (spec, Sections 4 and 8). The folder dialog is the system's,
 // as Claude Desktop picks a folder (dialog.showOpenDialog with openDirectory and
-// createDirectory); the folder sheet is a prompt window of the app's own. Each takes
-// its turn over the app's window, one at a time. No approval prompt allows anything
-// yet, and no chat works freely.
+// createDirectory); the folder sheet and the approval prompts are prompt windows of the
+// app's own. Each takes its turn over the app's window, one at a time. No chat works
+// freely yet.
 
 import { type BrowserWindow, dialog } from "electron";
 
-import type { ApprovalPrompts } from "../binding/approvals.js";
+import type { ApprovalAnswer, ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
-import { folderSheet, type PromptContent } from "./prompt-content.js";
+import { approval, folderSheet, type PromptContent } from "./prompt-content.js";
 import { PromptQueue, TIMEOUT } from "./prompt-queue.js";
 import { openPrompt, type PromptAnswer } from "./prompt-window.js";
 
@@ -31,7 +31,7 @@ async function pick(parent: BrowserWindow | undefined, startIn: string): Promise
 }
 
 // ponytail: one line for the app's one window; one per window once there is a second.
-export function desktopPrompts(options: DesktopPromptsOptions): FolderPrompts {
+export function desktopPrompts(options: DesktopPromptsOptions): FolderPrompts & ApprovalPrompts {
   const queue = new PromptQueue();
   // The button pressed, TIMEOUT, or null: closed, or dismissed.
   const ask = (content: PromptContent, signal: AbortSignal): Promise<PromptAnswer | typeof TIMEOUT | null> =>
@@ -52,10 +52,12 @@ export function desktopPrompts(options: DesktopPromptsOptions): FolderPrompts {
       if (answer.button === "change") return "change";
       return answer.button === "accept" && (answer.choice === "free" || answer.choice === "ask") ? { mode: answer.choice } : null;
     },
+    // Its buttons' ids are the answers; one closed some other way, or dismissed, denies.
+    async approve(request, signal) {
+      const answer = await ask(approval(request), signal);
+      if (answer === TIMEOUT) return "timeout";
+      return answer === null ? "deny" : (answer.button as ApprovalAnswer);
+    },
+    confirmFreeMode: () => Promise.resolve(false),
   };
 }
-
-export const refusingApprovals: ApprovalPrompts = {
-  approve: () => Promise.resolve("deny"),
-  confirmFreeMode: () => Promise.resolve(false),
-};

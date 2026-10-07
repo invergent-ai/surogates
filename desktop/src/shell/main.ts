@@ -15,6 +15,7 @@ import {
 
 import type { DesktopAccount } from "../../../web/src/lib/desktop-bridge-contract.js";
 import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow } from "../../../web/src/lib/projects-contract.js";
+import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { appEnvironment } from "../hosts/environment.js";
@@ -31,7 +32,7 @@ import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { letWindowClose, MainWindow, onSettingsKey } from "./main-window.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
 import { ANSWER_TIMEOUT_MS, PageProjects } from "./projects.js";
-import { desktopPrompts, refusingApprovals } from "./prompts.js";
+import { desktopPrompts } from "./prompts.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
@@ -56,7 +57,7 @@ let theme: Theme;
 // After ready: safeStorage answers only then.
 let credentials: CredentialStore;
 // The desktop's own prompts, over the window, once it is made.
-let prompts: FolderPrompts;
+let prompts: FolderPrompts & ApprovalPrompts;
 let sessionStore: SessionStore;
 // Who is signed in to the app, with the agent: what adds this computer, and what the window's web client takes its session from.
 let signedIn: DesktopSession | null = null;
@@ -397,7 +398,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the VM.
     tools: (bindings, network) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(env) }),
     prompts,
-    approvalPrompts: refusingApprovals,
+    approvalPrompts: prompts,
     onStatus: (status) => {
       if (device?.credential === credential) device.status = status;
       // The agent ended this token while it is this computer's: cleaned up here, its folders kept for a restore.
