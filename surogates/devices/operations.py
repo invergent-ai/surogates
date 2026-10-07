@@ -838,12 +838,14 @@ class DeviceOperations:
         operation_id: UUID,
         digest: str,
         outcome: dict[str, Any],
-    ) -> Literal["completed", "duplicate", "rejected", "stale"]:
+    ) -> Literal["completed", "duplicate", "gone", "rejected", "stale"]:
         """Record the device's outcome for one of its own operations.
 
-        "duplicate": already recorded.  "rejected": unknown, another device's,
-        or asked for with a different digest.  "stale": the reply came under
-        rotated-out or revoked credentials.
+        "duplicate": already recorded.  "gone": the journal no longer has it,
+        as a request reaped an hour after it closed, so there is nothing to
+        record.  "rejected": another device's, or asked for with a different
+        digest.  "stale": the reply came under rotated-out or revoked
+        credentials.
 
         The credential check is part of the write, not a step before it, so a
         reauthorization or revocation cannot land between the two.
@@ -865,7 +867,9 @@ class DeviceOperations:
                     select(DeviceOperation.device_id, DeviceOperation.digest)
                     .where(DeviceOperation.id == operation_id)
                 )).one_or_none()
-        if completed is None and (row is None or row.device_id != device_id or row.digest != digest):
+        if completed is None and row is None:
+            return "gone"
+        if completed is None and (row.device_id != device_id or row.digest != digest):
             return "rejected"
         # Announced for a duplicate too: its worker may have missed the first.
         await self._announce(operation_channel(operation_id), "completed")
@@ -883,9 +887,10 @@ class DeviceOperations:
     ) -> Literal["started", "unwanted", "rejected", "busy", "stale"]:
         """Get ready for the chunks of a read's result, sent by the connection *holder*.
 
-        "unwanted": the operation is closed, so its data is not needed.
-        "rejected": unknown, another device's, asked for with a different
-        digest, or not a read.  "busy": another connection started this
+        "unwanted": the operation is closed, or the journal no longer has it
+        (a request reaped since), so its data is not needed.
+        "rejected": another device's, asked for with a different digest, or
+        not a read.  "busy": another connection started this
         transfer at the same moment, or its last chunk landed meanwhile.
         "stale": rotated-out or revoked credentials.
 
@@ -902,10 +907,10 @@ class DeviceOperations:
                     DeviceOperation.completed_at,
                 ).where(DeviceOperation.id == operation_id)
             )).one_or_none()
-            if row is None or row.device_id != device_id or row.digest != digest or row.kind != "read":
-                return "rejected"
-            if row.completed_at is not None:
+            if row is None or row.completed_at is not None:
                 return "unwanted"
+            if row.device_id != device_id or row.digest != digest or row.kind != "read":
+                return "rejected"
             # Half-sent only: a whole one is a last chunk that landed since the check above.
             await db.execute(delete(DeviceTransfer).where(
                 DeviceTransfer.received < DeviceTransfer.size,

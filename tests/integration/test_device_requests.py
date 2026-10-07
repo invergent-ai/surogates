@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import timedelta
 from uuid import UUID
@@ -20,19 +21,25 @@ from surogates.devices.operations import (
     TooManyRequests,
     reap_requests,
 )
-from surogates.devices.workspace import DeviceOperationError
+from surogates.devices.workspace import MAX_PAYLOAD_BYTES, DeviceOperationError
 from surogates.session.store import SessionStore
 from surogates.tools.workspace_io import LocalWorkspaceIO
 
 from .test_devices import (  # noqa: F401  (fixtures)
     _fields,
+    _first_op,
     another_bound_root,
     api,
     bound_device,
     complete_pending,
     eventually,
     has_pending,
+    laptop_rig,
+    link_url,
+    linked,
+    receive,
     request_for,
+    send,
     stop,
 )
 
@@ -205,3 +212,38 @@ async def test_a_finished_requests_rows_go_an_hour_after_it_closed(api, session_
     # A tool call's rows stay for its replay; a request still open, or closed within the hour, keeps its own.
     assert left == {recent.invocation_id, still_open.invocation_id, tool_call.invocation_id}
     await stop(waiting)
+
+
+async def _answer(ws) -> dict:
+    """The next frame that is not a cancel: a stopped request's cancel may come first."""
+    while (frame := await receive(ws))["type"] == "cancel":
+        pass
+    return frame
+
+
+async def test_a_reply_to_a_request_reaped_meanwhile_is_acknowledged_and_keeps_the_link_up(
+    laptop_rig, link_url, session_factory, caplog,
+):
+    rig = laptop_rig
+    caplog.set_level(logging.INFO, logger="surogates.devices.link")
+    async with linked(link_url, rig.token) as (ws, _):
+        waiting = asyncio.create_task(rig.ops.run(asked(rig.device_id, rig.root)))
+        op = await _first_op(ws)
+        # Its caller stopped waiting, and an hour has passed since: its rows are gone.
+        await stop(waiting)
+        async with session_factory() as db:
+            await db.execute(
+                update(DeviceOperation).where(DeviceOperation.id == UUID(op["id"]))
+                .values(completed_at=func.now() - timedelta(hours=2))
+            )
+            await db.commit()
+        assert await reap_requests(session_factory) >= 1
+        # The computer, back after a night away, sends what it holds: a result header, then a result.
+        transfer = {"size": MAX_PAYLOAD_BYTES + 1, "sha256": "0" * 64}
+        await send(ws, {"type": "op_result", "id": op["id"], "digest": op["digest"], "outcome": {"ok": {"transfer": transfer}}})
+        assert await _answer(ws) == {"type": "unwanted", "id": op["id"]}
+        await send(ws, {"type": "op_result", "id": op["id"], "digest": op["digest"], "outcome": {"ok": True}})
+        assert await _answer(ws) == {"type": "op_ack", "id": op["id"]}
+        await send(ws, {"type": "ping"})
+        assert await _answer(ws) == {"type": "pong"}
+    assert f"operation {op['id']}, which the journal no longer has" in caplog.text

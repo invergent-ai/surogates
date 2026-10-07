@@ -236,6 +236,23 @@ describe("the link coming and going", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(results("a")).toHaveLength(1);
   });
+
+  it("drops a result the server rejects, says so, and never sends it again", async () => {
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const executor = new RecordingExecutor();
+    const { journal } = await start(executor);
+    server.send(opFrame("a"));
+    await server.until(() => results("a").length === 1);
+    // As surogates/devices/link.py refuses it: named, then the link closed.
+    server.send({ type: "rejected", id: "a" });
+    server.close(4400);
+    await server.until(() => server.connections === 2 && link?.status === "connected");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(results("a")).toHaveLength(1);
+    expect(journal.unsent()).toEqual([]);
+    expect(String(warned.mock.calls[0]?.[0])).toContain("The agent rejected this computer's result for operation a");
+    warned.mockRestore();
+  });
 });
 
 describe("an outcome that is not an answer", () => {

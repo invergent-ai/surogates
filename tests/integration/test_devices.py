@@ -1162,7 +1162,8 @@ async def test_completing_checks_device_digest_and_credentials(api, session_fact
 
     assert await ops.complete(second, 1, op.id, op.digest, {"ok": True}) == "rejected"
     assert await ops.complete(first, 1, op.id, "0" * 64, {"ok": True}) == "rejected"
-    assert await ops.complete(first, 1, uuid.uuid4(), op.digest, {"ok": True}) == "rejected"
+    # One the journal no longer has, as a request reaped since: nothing to record, nothing to refuse.
+    assert await ops.complete(first, 1, uuid.uuid4(), op.digest, {"ok": True}) == "gone"
     assert await ops.complete(first, 2, op.id, op.digest, {"ok": True}) == "stale"
     assert await ops.complete(first, 1, op.id, op.digest, {"ok": True}) == "completed"
     assert await ops.complete(first, 1, op.id, op.digest, {"ok": True}) == "duplicate"
@@ -2351,7 +2352,7 @@ async def test_a_lost_announcement_is_delivered_at_a_ping(laptop_rig, session_fa
     assert await asyncio.wait_for(wio.which("sh"), 5.0) is True
 
 
-async def test_a_reply_for_another_devices_operation_closes_the_link(api, link_url, laptop_rig):
+async def test_a_reply_for_another_devices_operation_is_rejected_and_closes_the_link(api, link_url, laptop_rig):
     rig = laptop_rig
     other = await register(api, name="Other laptop")
     waiting = asyncio.create_task(device_io(rig.ops, rig.device_id, rig.root, rig.folder).which("sh"))
@@ -2359,6 +2360,8 @@ async def test_a_reply_for_another_devices_operation_closes_the_link(api, link_u
     [op] = await rig.ops.pending(rig.device_id, 1)
     async with linked(link_url, other["token"]) as (ws, _):
         await send(ws, {"type": "op_result", "id": str(op.id), "digest": op.digest, "outcome": {"ok": True}})
+        # Named, so the app drops that reply rather than send it again at every welcome.
+        assert await receive(ws) == {"type": "rejected", "id": str(op.id)}
         assert await close_code(ws) == 4400
     assert await rig.ops.pending(rig.device_id, 1) != []
     await stop(waiting)

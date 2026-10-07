@@ -59,6 +59,7 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
       onAck: (id) => runner.acknowledged(id),
       onChunkAck: (id, seq) => runner.chunkAcked(id, seq),
       onUnwanted: (id) => runner.unwanted(id),
+      onRejected: (id) => runner.rejected(id),
       onChunk: (id, seq, data) => runner.chunk(id, seq, data),
       onStatus: (status) => {
         if (SUSPENDING.includes(status)) {

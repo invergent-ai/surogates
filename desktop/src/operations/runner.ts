@@ -258,6 +258,15 @@ export class OperationRunner {
     this.transfers.done(id);
   }
 
+  /**
+   * The server refused this result: sent again, it would be refused at every welcome, and
+   * the link with it. So it is dropped as an acknowledged one is, and said.
+   */
+  rejected(id: string): void {
+    console.warn(new Error(`The agent rejected this computer's result for operation ${id}, so it is not sent again`));
+    this.unwanted(id);
+  }
+
   chunkAcked(id: string, seq: number): void {
     this.transfers.acked(id, seq);
   }
