@@ -62,20 +62,13 @@ async def authorize_commerce_turn(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail={"code": "sign_in_required", "buy_url": buy_url},
         )
-    client = getattr(request.app.state, "platform_client", None)
-    if client is None:
-        logger.error("platform_client is not wired on app.state")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Access checks are temporarily unavailable; try again.",
-        )
     try:
-        receipt = await client.commerce_authorize(
-            str(session.agent_id),
-            firebase_uid=buyer["firebase_uid"],
-            estimated_tokens=estimate_turn_tokens(content),
-            email=buyer.get("email"),
-            name=buyer.get("name"),
+        await reserve_commerce(
+            platform_client=getattr(request.app.state, "platform_client", None),
+            session_store=getattr(request.app.state, "session_store", None),
+            session=session,
+            content=content,
+            buyer=buyer,
             channel=channel,
         )
     except CommercePaymentRequiredError as exc:
@@ -83,7 +76,7 @@ async def authorize_commerce_turn(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail={"code": exc.detail, "buy_url": buy_url},
         ) from exc
-    except Exception as exc:
+    except CommerceReserveError as exc:
         # Fail closed: a paid agent must not serve free turns because
         # the metering plane blinked.
         logger.error(
@@ -95,18 +88,57 @@ async def authorize_commerce_turn(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Access checks are temporarily unavailable; try again.",
         ) from exc
+
+
+class CommerceReserveError(RuntimeError):
+    """The commerce plane could not be reached — callers fail closed."""
+
+
+async def reserve_commerce(
+    *,
+    platform_client,
+    session_store,
+    session,
+    content: str,
+    buyer: dict,
+    channel: str | None,
+) -> None:
+    """Channel-agnostic paid-turn reservation for one turn of a monetized
+    agent (no HTTP request).
+
+    Reserves the turn's estimate against *buyer*'s purchased tokens and
+    pins the receipt on ``session.config`` for the worker to settle.
+    Raises :class:`~surogates.runtime.platform_client.CommercePaymentRequiredError`
+    on 402 and :class:`CommerceReserveError` when the plane is unreachable.
+    """
+    if platform_client is None:
+        raise CommerceReserveError("platform_client not wired")
+    try:
+        receipt = await platform_client.commerce_authorize(
+            str(session.agent_id),
+            firebase_uid=buyer["firebase_uid"],
+            estimated_tokens=estimate_turn_tokens(content),
+            email=buyer.get("email"),
+            name=buyer.get("name"),
+            channel=channel,
+        )
+    except CommercePaymentRequiredError:
+        raise
+    except Exception as exc:
+        raise CommerceReserveError(str(exc)) from exc
     await pin_entitlements(
-        getattr(request.app.state, "session_store", None),
+        session_store,
         session.id,
         session.config,
         receipt.get("features"),
     )
     if receipt.get("entitlement_id"):
-        store = get_session_store(request)
+        if session_store is None:
+            raise CommerceReserveError("session_store not wired")
         # Appended, not overwritten: a second message can land while a
         # turn is still running, and each hold must survive until the
         # worker's settlement takes the whole list atomically.
-        await store.append_session_config_list(
+        await session_store.append_session_config_list(
             session.id,
             "commerce_reservations",
             {
@@ -332,16 +364,22 @@ async def firebase_buyer_identity(
     the web message gate and the Plan & tokens tab."""
     if getattr(tenant, "user_id", None) is None:
         return None
+    return await buyer_identity(
+        request.app.state.session_factory, org_id=tenant.org_id, user_id=tenant.user_id,
+    )
+
+
+async def buyer_identity(session_factory, *, org_id, user_id) -> dict | None:
+    """*user_id*'s buyer identity, as :func:`firebase_buyer_identity` gives it."""
     from sqlalchemy import select
 
     from surogates.db.models import User
 
-    session_factory = request.app.state.session_factory
     async with session_factory() as db:
         user = await db.scalar(
             select(User).where(
-                User.id == tenant.user_id,
-                User.org_id == tenant.org_id,
+                User.id == user_id,
+                User.org_id == org_id,
             )
         )
     if (
@@ -355,3 +393,29 @@ async def firebase_buyer_identity(
         "email": user.email,
         "name": user.display_name,
     }
+
+
+def limit_notice(code: str | None, buy_url: str | None) -> str:
+    """User-facing notice when the allowance or paid-turn gate refuses a
+    turn no client is waiting on: a channel's, or a project thread's.
+
+    Names the reason (subscription vs. usage limit) and appends the buy
+    link when the agent projects one, so the user gets a real path to
+    keep going rather than a dead "try again later".
+    """
+    if code == "operator_subscription_exhausted":
+        # The agent OWNER ran out of platform credit; buying more access
+        # cannot help the sender, so no buy link is offered.
+        return (
+            "This assistant is temporarily unavailable. Its owner has "
+            "run out of credit."
+        )
+    if code == "subscription_required":
+        lead = "A subscription is required to keep chatting with this assistant."
+    elif code == "channel_not_included":
+        lead = "Your current plan doesn't include this channel."
+    else:
+        lead = "You've reached your usage limit for this assistant."
+    if buy_url:
+        return f"{lead} Get more access here: {buy_url}"
+    return f"{lead} Please try again later."
