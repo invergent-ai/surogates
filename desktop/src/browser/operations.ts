@@ -4,6 +4,7 @@
 
 import type { Page } from "playwright-core";
 
+import { MAX_FRAME_CHARS } from "../link/protocol.js";
 import { observe } from "./observe.js";
 
 export type PageOperation = (page: Page, args: Record<string, unknown>) => Promise<unknown>;
@@ -52,8 +53,17 @@ async function navigate(page: Page, args: Record<string, unknown>): Promise<unkn
 
 // The page's own JavaScript, run in the page as the cloud runs it: a function body, awaited.
 // Its value goes under value, so nothing a page returns is ever read as the link's own framing.
+// It is measured in the page, as the JSON the link sends: one too large for a frame never leaves it.
 async function evaluate(page: Page, args: Record<string, unknown>): Promise<unknown> {
-  return { value: (await page.evaluate(`(async () => {\n${text(args.code, "code")}\n})()`)) ?? null };
+  const sent: unknown = await page.evaluate(`(async () => {
+const value = await (async () => {\n${text(args.code, "code")}\n})();
+const json = JSON.stringify(value === undefined ? null : value) ?? "null";
+return typeof json !== "string" ? false : json.length > ${MAX_FRAME_CHARS} ? json.length : json;
+})()`);
+  if (typeof sent === "number") throw new Error(`The script's value is too large to send: ${sent} characters, at most ${MAX_FRAME_CHARS}. Return less of it.`);
+  // A page's own JSON.stringify can answer anything.
+  if (typeof sent !== "string") throw new Error("The script's value could not be sent as JSON");
+  return { value: JSON.parse(sent) as unknown };
 }
 
 // As the cloud's click: a moment after it, and the network's quiet if it sent a request.

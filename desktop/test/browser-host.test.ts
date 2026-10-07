@@ -337,6 +337,11 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     const shaped = { transfer: { size: 5, sha256: "a".repeat(64) } };
     expect(await op(a, "browser.evaluate", { code: `return ${JSON.stringify(shaped)};` })).toEqual({ ok: { value: shaped } });
     expect(await op(a, "browser.evaluate", { code: "document.title = 'x';" })).toEqual({ ok: { value: null } });
+    // One too large for the link is measured in the page and refused there, before it crosses.
+    const large = await op(a, "browser.evaluate", { code: "return 'x'.repeat(3 * 1024 * 1024);" });
+    expect(large.ok === undefined ? large : `a value of ${JSON.stringify(large.ok).length} characters`).toEqual({
+      error: { type: "browser", message: "The script's value is too large to send: 3145730 characters, at most 2097152. Return less of it." },
+    });
   });
 
   it("closes a page that does not answer in time, and a close does not wait behind one", async () => {
