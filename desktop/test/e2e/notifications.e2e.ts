@@ -111,6 +111,14 @@ describe("the app's notifications", () => {
     await expect.poll(() => notices(app!), { timeout: 10_000 }).toEqual([{ title: "Delete the old drafts?", body: "Waits for your approval." }]);
   });
 
+  it("tell an item of a kind the app does not know in the app's own words, whatever the agent calls the kind", async () => {
+    await signedIn();
+    await hide(app!);
+    await expect.poll(() => agent.inboxStreams.size).toBe(1);
+    agent.tell({ kind: "constructor", title: "Something new", session_id: CHAT });
+    await expect.poll(() => notices(app!)).toEqual([{ title: "Something new", body: "Has something for you." }]);
+  });
+
   it("tell a flood of items as one notice, which opens the inbox", async () => {
     const client = await signedIn();
     await hide(app!);

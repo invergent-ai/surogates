@@ -1204,6 +1204,9 @@ const TOLD: Record<string, string> = {
   progress_checkin: "Checked in.",
 };
 
+// Only the app's own words for a kind it knows: the agent's kind is no key of an object's prototype.
+const bodyOf = (kind: string): string => Object.hasOwn(TOLD, kind) ? TOLD[kind]! : "Has something for you.";
+
 // The window is away: hidden, minimised, or behind another app's.
 const away = (): boolean => BrowserWindow.getFocusedWindow() === null;
 
@@ -1226,7 +1229,7 @@ function tellItem(item: InboxItem): void {
   const told = burst.add(item);
   if (told.length <= BURST) {
     notifications?.show({
-      tag: `chat:${item.sessionId}`, title: item.title, body: TOLD[item.kind] ?? "Has something for you.", open: () => openPage(`/chat/${item.sessionId}`),
+      tag: `chat:${item.sessionId}`, title: item.title, body: bodyOf(item.kind), open: () => openPage(`/chat/${item.sessionId}`),
     });
     return;
   }
