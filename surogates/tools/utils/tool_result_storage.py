@@ -28,6 +28,7 @@ import logging
 import os
 import uuid
 import weakref
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
@@ -52,6 +53,16 @@ STORAGE_DIR = "/tmp/surogates-results"
 # so the spill has to be workspace-relative and written through the same
 # sandbox, or the model is handed a path it cannot open.
 WORKSPACE_STORAGE_DIR = ".surogates-results"
+
+# On a local folder the model's own writes there are refused: Ask every time
+# never asks about a write under it, and the harness runs a staged skill's
+# scripts from it.  The harness's own writes there never come that way.
+HARNESS_FOLDER_REFUSAL = "That folder is Surogate's own; write somewhere else in the chat's folder."
+
+
+def in_harness_folder(key: str) -> bool:
+    """Whether *key*, as a local folder's computer resolved it, lies in a WORKSPACE_STORAGE_DIR."""
+    return WORKSPACE_STORAGE_DIR in PurePosixPath(key).parts
 
 _BUDGET_TOOL_NAME = "__budget_enforcement__"
 

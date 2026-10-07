@@ -20,7 +20,9 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from surogates.devices.binding import device_of
-from surogates.devices.sandbox import INTERRUPTED, UNAVAILABLE_TOOLS, device_call_for, refusal
+from surogates.devices.sandbox import (
+    INTERRUPTED, UNAVAILABLE_TOOLS, device_call_for, harness_folder_refusal, refusal,
+)
 from surogates.session.events import EventType
 from surogates.harness.message_utils import make_skipped_tool_result
 from surogates.harness.resilience import unknown_tool_error
@@ -1718,7 +1720,9 @@ async def _run_single_tool(
             # model call), and running it again would do that again.
             result_content = INTERRUPTED
         elif device_call is not None and location == ToolLocation.SANDBOX:
-            result_content = await device_call.dispatch(tool_name, tool_args)
+            result_content = await harness_folder_refusal(
+                device_call.workspace_io, tool_name, tool_args,
+            ) or await device_call.dispatch(tool_name, tool_args)
         elif location == ToolLocation.SANDBOX and sandbox_pool is not None:
             from surogates.sandbox.pool import sandbox_session_key
             sandbox_owner = sandbox_session_key(session)

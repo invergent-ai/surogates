@@ -71,6 +71,8 @@ async def test_nothing_the_harness_keeps_in_a_folder_shows_in_its_git_status(tmp
 
     assert git(folder, "status", "--porcelain", "--untracked-files=all").splitlines() == ["?? README.md"]
     assert (folder / ".surogates-results" / ".gitignore").read_bytes() == b"*\n"
+    # It lands: only the model's own writes there are refused.
+    assert any(path.is_file() and path.name != ".gitignore" for path in (folder / ".surogates-results").rglob("*"))
 
 
 async def test_a_folders_own_ignore_file_there_is_kept_and_asked_after_once_per_call(tmp_path):

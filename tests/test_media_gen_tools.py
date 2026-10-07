@@ -772,3 +772,24 @@ async def test_a_path_outside_the_folder_is_the_computers_to_refuse(tmp_path):
     assert "error" in result and "logo.png" in result["error"], result
     assert client.last_create_kwargs is None
     assert list(folder.rglob("*")) == []
+
+
+@pytest.mark.asyncio
+async def test_generated_media_never_goes_into_the_harnesss_own_folder(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler, _generate_video_handler
+
+    folder = tmp_path.resolve()
+    client = _FakeImageClient(images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}])
+    image = json.loads(await _generate_image_handler(
+        {"prompt": "a logo", "output_path": ".surogates-results/skills/deck/assets/logo.png"},
+        media_gen=_image_cfg(client), **_on_a_folder(folder),
+    ))
+    video = json.loads(await _generate_video_handler(
+        {"prompt": "a clip", "output_path": f"{folder}/.surogates-results/clip.mp4"},
+        media_gen=_video_cfg(), **_on_a_folder(folder),
+    ))
+    # Refused before anything is paid for.
+    for refused in (image, video):
+        assert refused == {"error": "That folder is Surogate's own; write somewhere else in the chat's folder."}
+    assert client.last_create_kwargs is None
+    assert not (folder / ".surogates-results").exists()

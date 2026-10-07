@@ -19,7 +19,9 @@ from surogates.runtime.turn_slots import current_turn, turn_waiting
 from surogates.sandbox.base import SandboxUnavailableError
 from surogates.session.store import LeaseNotHeldError
 from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.runtime import ToolRuntime
 from surogates.tools.workspace_io import LocalWorkspaceIO, workspace_io_from
+from tests.fake_laptop import InProcessRunner
 from tests.test_turn_slots import held_turn
 
 pytestmark = pytest.mark.asyncio
@@ -298,3 +300,51 @@ async def test_a_tool_call_is_activity_of_its_turn():
     # The lone tool call waited, so all of the turn waited and gave its slot back.
     assert seen == [False]
     assert semaphore.locked() and gate.held == 1
+
+
+def on_the_folder(monkeypatch, folder) -> None:
+    """Each tool call's DeviceCall on *folder*, run in-process as the computer would."""
+    runner = InProcessRunner(LocalWorkspaceIO(workspace_path=str(folder)))
+
+    def call_for(session, *, tools, **_kwargs) -> DeviceCall:
+        return DeviceCall(
+            tools=tools, workspace_io=DeviceWorkspaceIO(runner, root=str(folder)),
+            task_id=str(session.id), read_tracker_id=str(session.id),
+        )
+
+    monkeypatch.setattr("surogates.harness.tool_exec.device_call_for", call_for)
+
+
+async def test_the_model_never_writes_the_harnesss_own_folder_and_the_harness_still_does(monkeypatch, tmp_path):
+    folder = tmp_path.resolve()
+    on_the_folder(monkeypatch, folder)
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    registry.register(
+        "long_listing",
+        ToolSchema(name="long_listing", description="list", parameters={"type": "object", "properties": {}}),
+        handler=AsyncMock(return_value="x" * 150_000),
+        max_result_size=100_000,
+    )
+    session = device_session(workspace_path=str(folder))
+    staged = ".surogates-results/skills/xlsx/scripts/recalc.py"
+    # However it is spelled: the computer resolves it, as Ask every time judges it.
+    for name, args in (
+        ("write_file", {"path": staged, "content": "print('rewritten')\n"}),
+        ("write_file", {"path": f"{folder}/{staged}", "content": "x"}),
+        ("write_file", {"path": f"notes/../{staged}", "content": "x"}),
+        ("patch", {"mode": "patch", "patch": f"*** Begin Patch\n*** Add File: {staged}\n+x\n*** End Patch"}),
+        ("patch", {"mode": "replace", "path": staged, "old_string": "a", "new_string": "b"}),
+    ):
+        refused = await run(registry, session, name, args)
+        assert json.loads(refused["content"]) == {
+            "error": "That folder is Surogate's own; write somewhere else in the chat's folder.",
+        }, (name, args)
+    assert not (folder / staged).exists()
+    # Anywhere else in the folder, as before.
+    written = await run(registry, session, "write_file", {"path": "notes.md", "content": "n"})
+    assert json.loads(written["content"])["status"] == "ok"
+    # The harness's own spill there still lands, through the same call.
+    spilled = await run(registry, session, "long_listing", {})
+    [spill] = (folder / ".surogates-results").glob("*.txt")
+    assert spill.read_text().startswith("x" * 100_000) and spill.name in spilled["content"]

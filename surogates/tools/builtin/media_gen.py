@@ -40,6 +40,7 @@ from surogates.tools.builtin.vision import (
     _image_ref_to_data_url,
 )
 from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.utils.tool_result_storage import HARNESS_FOLDER_REFUSAL, in_harness_folder
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, validate_path
 
 logger = logging.getLogger(__name__)
@@ -732,9 +733,16 @@ async def _refuse_existing(workspace_io: Any, relative_path: str) -> str | None:
     """write_file's refusal of a blind overwrite, when a local folder already has *relative_path*; else None.
 
     Generated media never replaces a file of the user's, read or not: the
-    model names another file.  None in the cloud (no *workspace_io*), as before.
+    model names another file.  Nor does it go into the harness's own
+    folder there, which Ask every time never asks about.  None in the cloud
+    (no *workspace_io*), as before.
     """
-    if workspace_io is None or await workspace_io.stat(await workspace_io.resolve(relative_path)) is None:
+    if workspace_io is None:
+        return None
+    key = await workspace_io.resolve(relative_path)
+    if in_harness_folder(key):
+        return HARNESS_FOLDER_REFUSAL
+    if await workspace_io.stat(key) is None:
         return None
     return (
         f"Refusing to overwrite '{relative_path}': it already exists. "

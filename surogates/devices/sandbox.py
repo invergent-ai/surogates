@@ -21,9 +21,11 @@ from uuid import UUID, uuid4
 from surogates.devices.binding import device_of
 from surogates.devices.binding import device_owners as _owners
 from surogates.devices.operations import DeviceOperations, JournalRunner
-from surogates.devices.workspace import DeviceWorkspaceIO
+from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
 from surogates.sandbox.pool import sandbox_session_key
-from surogates.tools.builtin.file_ops import forget_read_tracker
+from surogates.tools.builtin.file_ops import forget_read_tracker, patch_targets
+from surogates.tools.utils.tool_result_storage import HARNESS_FOLDER_REFUSAL, in_harness_folder
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
 if TYPE_CHECKING:
     from surogates.tools.registry import ToolRegistry
@@ -56,6 +58,27 @@ def refusal(name: str) -> str:
         # The saga compensator reads ``success``.
         return json.dumps({"success": False, "error": error})
     return json.dumps({"error": error})
+
+
+async def harness_folder_refusal(workspace_io: DeviceWorkspaceIO, name: str, args: Any) -> str | None:
+    """The model's own write_file or patch into the harness's folder, refused; else None.
+
+    Each target is judged as the computer resolves it, as Ask every time
+    judges a write.  One the computer will not resolve is the handler's to
+    refuse, in the computer's words.
+    """
+    if not isinstance(args, dict) or name not in ("write_file", "patch"):
+        return None
+    for path in [args.get("path")] if name == "write_file" else patch_targets(args):
+        if not isinstance(path, str) or not path:
+            continue
+        try:
+            key = await workspace_io.resolve(path)
+        except (OSError, ValueError, WorkspaceSandboxError, DeviceOperationError):
+            continue
+        if in_harness_folder(key):
+            return json.dumps({"error": HARNESS_FOLDER_REFUSAL})
+    return None
 
 
 class DeviceCall:
