@@ -142,9 +142,11 @@ class History:
         that the real files cannot take as a file (a folder is there, or a
         file where its folder would be): a landing leaves them out.  A
         rename's two sides, and a file and a folder of one name, are left
-        out together.  ``commit`` is None when the turn changed nothing
-        since its base.  ``repositories`` are the folders holding a git
-        repository that the turn wrote into: they never land.
+        out together.  While any write of the turn is left out, or it wrote
+        into a repository, every deletion git did not pair is too: it may be
+        a move git could not see.  ``commit`` is None when the turn changed
+        nothing since its base.  ``repositories`` are the folders holding a
+        git repository that the turn wrote into: they never land.
         """
         self._add_all(self._copy)
         excluded, repositories = self._excluded()
@@ -154,9 +156,17 @@ class History:
             return {"commit": None, "changes": [], "overlapped": [], **left_out}
         self._copy(*_as(author), "commit", "-q", "--allow-empty", "-m", "Turn", "-m", _block(trailers))
         turn = self._copy("rev-parse", "HEAD")
-        versions, links = self._diff(base, turn)
+        versions, renames = self._diff(base, turn)
+        # A file and a folder of one name land together, as a rename's two sides do.
+        links = renames + [(p, str(f)) for p in versions for f in PurePosixPath(p).parents if str(f) in versions]
         real = {path: self._real(path) for path in versions if self._fits(path)}
         held = _together({p for p, kept in versions.items() if p not in real or real[p] not in kept}, links)
+        if repositories or any(versions[p][1] is not None for p in held):
+            # A move git cannot pair (an edited docx, a move onto a name that
+            # exists) reads as a deletion and a write: the deletion waits too.
+            paired = {p for pair in renames for p in pair}
+            unpaired = {p for p, (_, after) in versions.items() if after is None and p not in paired}
+            held = _together(held | unpaired, links)
         changes = [
             # A real file already as the turn left it lands as a no-op.
             {"path": path, "before": real[path], "after": versions[path][1]}
@@ -231,13 +241,10 @@ class History:
         return {"commit": landing}
 
     def _diff(self, base: str, turn: str) -> tuple[dict[str, tuple[str | None, str | None]], list[tuple[str, str]]]:
-        """Each file the turn changed since *base*, as ``(before, after)``, and the pairs that land together.
-
-        A pair is a rename's two sides, or a file and a folder of one name.
-        """
+        """Each file the turn changed since *base*, as ``(before, after)``, and the renames git paired."""
         fields = iter(self._main("diff", "--raw", "-z", "-M", "--no-abbrev", base, turn).split("\0"))
         versions: dict[str, tuple[str | None, str | None]] = {}
-        links: list[tuple[str, str]] = []
+        renames: list[tuple[str, str]] = []
         for meta in fields:
             if not meta:
                 break
@@ -245,11 +252,10 @@ class History:
             if status.startswith("R"):
                 source, target = next(fields), next(fields)
                 versions[source], versions[target] = (_blob(old), None), (None, _blob(new))
-                links.append((source, target))
+                renames.append((source, target))
             else:
                 versions[next(fields)] = (_blob(old), _blob(new))
-        links += [(p, str(folder)) for p in versions for folder in PurePosixPath(p).parents if str(folder) in versions]
-        return versions, links
+        return versions, renames
 
     def _fits(self, path: str) -> bool:
         """Whether the real files can take a file at *path*: inside them, not a folder, under no file."""

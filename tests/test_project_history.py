@@ -157,12 +157,13 @@ def test_a_landing_leaves_out_a_file_the_real_files_changed_since_its_branch_poi
     assert (project / "threads" / "A" / "a.md").read_text() == "A's notes"
 
     b = landed(second, author={"name": "Draft B", "email": "thread:t2@surogate"})
-    assert b["overlapped"] == [{"path": "Report.docx"}]
-    assert sorted(c["path"] for c in b["changes"]) == ["Budget.xlsx", "uploads/brief.pdf"]
-    # The newer file stays; B's other files land, a deletion included.
+    assert b["overlapped"] == [{"path": "Report.docx"}, {"path": "uploads/brief.pdf"}]
+    assert [c["path"] for c in b["changes"]] == ["Budget.xlsx"]
+    # The newer file stays, and B's other file lands.  B's deletion waits:
+    # while a write of its turn is held, a deletion may be a move git could not see.
     assert (project / "Report.docx").read_bytes() == b"report by A"
     assert (project / "Budget.xlsx").read_bytes() == b"budget by B"
-    assert not (project / "uploads" / "brief.pdf").exists()
+    assert (project / "uploads" / "brief.pdf").read_bytes() == b"%PDF brief"
 
 
 def test_a_landing_is_a_merge_with_the_turn_as_its_second_parent(tmp_path, project):
@@ -503,3 +504,57 @@ def test_a_turns_empty_folders_are_named_and_a_landing_takes_away_the_folders_it
     history.apply(change["path"], change["before"], change["after"])
     history.unapply(change["path"], change["before"], change["after"])
     assert not (project / "threads").exists()
+
+
+def test_a_rename_with_an_edit_git_cannot_pair_keeps_the_draft_while_its_target_is_held(tmp_path, project):
+    draft = os.urandom(4000)  # one edited paragraph rewrites a docx's whole zip
+    (project / "Draft.docx").write_bytes(draft)
+    history = opened(tmp_path, project)
+    (history.copy / "Draft.docx").unlink()
+    (history.copy / "Final.docx").write_bytes(os.urandom(4000))
+    (project / "Final.docx").write_bytes(b"your own final")
+    out = landed(history)
+    assert [o["path"] for o in out["overlapped"]] == ["Draft.docx", "Final.docx"]
+    assert (project / "Draft.docx").read_bytes() == draft
+
+
+def test_a_move_onto_a_name_someone_changed_keeps_its_source(tmp_path, project):
+    (project / "Draft.docx").write_bytes(b"the draft")
+    (project / "Final.docx").write_bytes(b"last year's final")
+    (project / "X.docx").write_bytes(b"x")
+    (project / "archive").mkdir()
+    (project / "archive" / "X.docx").write_bytes(b"an older x")
+    history = opened(tmp_path, project)
+    # mv -f Draft.docx Final.docx; and X moved into archive/ over its older self.
+    for source, target in (("Draft.docx", "Final.docx"), ("X.docx", "archive/X.docx")):
+        (history.copy / source).replace(history.copy / target)
+        (project / target).write_bytes(b"changed by you")
+    out = landed(history)
+    assert [o["path"] for o in out["overlapped"]] == ["Draft.docx", "Final.docx", "X.docx", "archive/X.docx"]
+    assert (project / "Draft.docx").read_bytes() == b"the draft" and (project / "X.docx").read_bytes() == b"x"
+
+
+def test_two_identical_files_paired_wrong_lose_neither(tmp_path, project):
+    for name in ("A.docx", "B.docx"):
+        (project / name).write_bytes(b"one text, twice")
+    history = opened(tmp_path, project)
+    (history.copy / "A.docx").unlink()
+    (history.copy / "B.docx").rename(history.copy / "C.docx")
+    (project / "A.docx").write_bytes(b"A, edited by you")
+    (project / "C.docx").write_bytes(b"your own C")
+    out = landed(history)
+    assert (out["changes"], [o["path"] for o in out["overlapped"]]) == ([], ["A.docx", "B.docx", "C.docx"])
+    assert (project / "B.docx").read_bytes() == b"one text, twice"
+
+
+def test_a_folder_deleted_and_cloned_into_keeps_its_files(tmp_path, project):
+    (project / "docs").mkdir()
+    for name in ("a.md", "b.md"):
+        (project / "docs" / name).write_text(name)
+    history = opened(tmp_path, project)
+    shutil.rmtree(history.copy / "docs")
+    history.snapshot("before terminal")
+    a_repository(history.copy / "docs")  # git clone … docs
+    out = landed(history)
+    assert (out["repositories"], [o["path"] for o in out["overlapped"]]) == (["docs/"], ["docs/a.md", "docs/b.md"])
+    assert sorted(p.name for p in (project / "docs").iterdir()) == ["a.md", "b.md"]
