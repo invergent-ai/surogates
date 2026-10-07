@@ -2077,6 +2077,52 @@ async def test_a_resumed_harness_tool_is_reported_interrupted_without_running_ag
     assert result.data["content"] == INTERRUPTED
 
 
+async def test_a_resumed_browser_call_is_reported_interrupted_without_acting_again(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    acted: list[str] = []
+
+    def browse(kind: str, args: dict) -> dict:
+        acted.append(kind)
+        return {"ok": {}}
+
+    rig.laptop.browser = browse
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    first = await tool_call(rig, store, tools, "call_1", "browser_click", {"x": 5, "y": 6}, **io)
+    assert json.loads(first["content"]) == {"clicked": True}
+    await forget_result(store, session_factory, rig.root, "call_1")
+    await take_over(store, rig)
+
+    resumed = await resume_call(rig, store, tools, "call_1", "browser_click", {"x": 5, "y": 6}, **io)
+
+    # A click on the user's own browser is not clicked again: what it did is for the user to see.
+    assert resumed["content"] == INTERRUPTED
+    assert acted == ["browser.mouse"]
+
+
+async def test_a_screenshot_over_a_mebibyte_crosses_the_link_and_lands_in_the_folder(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    png = b"\x89PNG\r\n\x1a\n" + os.urandom(1536 * 1024)
+    rig.laptop.browser = lambda kind, args: {"ok": base64.b64encode(png).decode("ascii")}
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+
+    result = await tool_call(
+        rig, store, tools, "call_1", "browser_screenshot", {},
+        redis_client=redis_client, session_factory=session_factory,
+    )
+
+    body = json.loads(result["content"])
+    assert (rig.folder / body["relative_path"]).read_bytes() == png
+    # Both ways in chunks: the shot from the computer, then the file back to it.
+    assert rig.laptop.chunks_sent and rig.laptop.chunks_received
+
+
 async def test_a_resumed_patch_after_a_read_returns_what_the_computer_did(
     laptop_rig, session_factory, redis_client,
 ):

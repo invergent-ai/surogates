@@ -23,6 +23,14 @@ from surogates.browser.client import KernelBrowserClient
 from surogates.browser.control import BrowserControlStore
 from surogates.browser.pool import BrowserPool
 from surogates.browser.serialize import render_markdown
+from surogates.devices.browser import (
+    DeviceBrowserClient,
+    DeviceEndpoint,
+    answering_refusals,
+    forget_snapshot_cache,
+)
+from surogates.devices.browser import snapshot_cache as device_snapshot_cache
+from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.sandbox.copy_files import write_copy, writes_to_copy
 
 from surogates.storage.tenant import (
@@ -91,7 +99,13 @@ async def _resolve_session_browser(
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
     browser_profile_store: Any = None,
-) -> tuple[str, BrowserEndpoint, dict[str, dict[str, Any]]] | str:
+    workspace_io: Any = None,
+) -> tuple[str, BrowserEndpoint | DeviceEndpoint, dict[str, dict[str, Any]]] | str:
+    if isinstance(workspace_io, DeviceWorkspaceIO) and session_id is not None:
+        # A session on the user's computer drives the browser there, through its
+        # tool call's runner: no browser pool, no browser minutes, no cloud profile.
+        return "device", DeviceEndpoint(workspace_io.runner), device_snapshot_cache(str(session_id))
+
     if browser_pool is None or session_id is None:
         return browser_unavailable_result("browser pool not configured")
 
@@ -240,16 +254,24 @@ def _default_client_factory(
 
 def _make_client(
     factory: Callable[..., Any],
-    endpoint: BrowserEndpoint,
-    snapshot_cache: dict[str, dict[str, Any]],
+    endpoint: BrowserEndpoint | DeviceEndpoint,
+    cache: dict[str, dict[str, Any]],
 ) -> Any:
+    if isinstance(endpoint, DeviceEndpoint):
+        return DeviceBrowserClient(endpoint.runner, snapshot_cache=cache)
     try:
-        return factory(endpoint, snapshot_cache)
+        return factory(endpoint, cache)
     except TypeError as first_error:
         try:
             return factory(endpoint)
         except TypeError:
             raise first_error
+
+
+def _noted(body: dict[str, Any], client: Any) -> dict[str, Any]:
+    """*body* with what the page did that the agent could not see happen, when the computer said."""
+    notices = getattr(client, "notices", None)
+    return {**body, "notices": list(notices)} if notices else body
 
 
 NAVIGATE_SCHEMA = {
@@ -276,6 +298,7 @@ NAVIGATE_SCHEMA = {
 }
 
 
+@answering_refusals
 async def _browser_navigate_handler(
     arguments: dict[str, Any],
     *,
@@ -286,6 +309,7 @@ async def _browser_navigate_handler(
     _client_factory: Callable[..., Any] = _default_client_factory,
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
+    workspace_io: Any = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -295,6 +319,7 @@ async def _browser_navigate_handler(
         browser_control=browser_control,
         workspace_path=workspace_path,
         session_config=session_config,
+        workspace_io=workspace_io,
     )
     if isinstance(preflight, str):
         return preflight
@@ -328,7 +353,7 @@ async def _browser_navigate_handler(
     except RuntimeError as exc:
         return json.dumps({"error": "navigate_failed", "detail": str(exc)})
 
-    payload: dict[str, Any] = {"url": result["url"], "title": result["title"]}
+    payload: dict[str, Any] = _noted({"url": result["url"], "title": result["title"]}, client)
     if snapshot is None:
         payload["snapshot_error"] = (
             "Page outline unavailable. Call browser_get_state to read the page."
@@ -389,6 +414,7 @@ GET_STATE_SCHEMA = {
 }
 
 
+@answering_refusals
 async def _browser_get_state_handler(
     arguments: dict[str, Any],
     *,
@@ -399,6 +425,7 @@ async def _browser_get_state_handler(
     _client_factory: Callable[..., Any] = _default_client_factory,
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
+    workspace_io: Any = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -408,6 +435,7 @@ async def _browser_get_state_handler(
         browser_control=browser_control,
         workspace_path=workspace_path,
         session_config=session_config,
+        workspace_io=workspace_io,
     )
     if isinstance(preflight, str):
         return preflight
@@ -475,6 +503,7 @@ EVALUATE_SCHEMA = {
 }
 
 
+@answering_refusals
 async def _browser_evaluate_handler(
     arguments: dict[str, Any],
     *,
@@ -485,6 +514,7 @@ async def _browser_evaluate_handler(
     _client_factory: Callable[..., Any] = _default_client_factory,
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
+    workspace_io: Any = None,
     **_: Any,
 ) -> str:
     code = arguments.get("code")
@@ -501,6 +531,7 @@ async def _browser_evaluate_handler(
         browser_control=browser_control,
         workspace_path=workspace_path,
         session_config=session_config,
+        workspace_io=workspace_io,
     )
     if isinstance(preflight, str):
         return preflight
@@ -527,6 +558,7 @@ async def _browser_evaluate_handler(
 CLOSE_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 
 
+@answering_refusals
 async def _browser_close_handler(
     arguments: dict[str, Any],
     *,
@@ -534,8 +566,15 @@ async def _browser_close_handler(
     session_id: UUID | str | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
+    workspace_io: Any = None,
     **_: Any,
 ) -> str:
+    if isinstance(workspace_io, DeviceWorkspaceIO) and session_id is not None:
+        # Its tab on the computer, and the popups it opened; the browser stays for the other sessions.
+        closed = await DeviceBrowserClient(workspace_io.runner).close_tab()
+        forget_snapshot_cache(str(session_id))
+        return json.dumps({"closed": closed})
+
     if browser_pool is None or session_id is None:
         return json.dumps({"closed": False, "reason": "no_browser_pool"})
 
@@ -561,6 +600,7 @@ CLICK_SCHEMA = {
 }
 
 
+@answering_refusals
 async def _browser_click_handler(
     arguments: dict[str, Any],
     *,
@@ -571,6 +611,7 @@ async def _browser_click_handler(
     _client_factory: Callable[..., Any] = _default_client_factory,
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
+    workspace_io: Any = None,
     **_: Any,
 ) -> str:
     has_ref = "ref" in arguments
@@ -585,6 +626,7 @@ async def _browser_click_handler(
         browser_control=browser_control,
         workspace_path=workspace_path,
         session_config=session_config,
+        workspace_io=workspace_io,
     )
     if isinstance(preflight, str):
         return preflight
@@ -604,7 +646,7 @@ async def _browser_click_handler(
                 await client.click_at(arguments["x"], arguments["y"], **common)
         except KeyError as exc:
             return json.dumps({"error": "unknown_ref", "detail": str(exc)})
-    return json.dumps({"clicked": True})
+    return json.dumps(_noted({"clicked": True}, client))
 
 
 TYPE_SCHEMA = {
@@ -619,6 +661,7 @@ TYPE_SCHEMA = {
 }
 
 
+@answering_refusals
 async def _browser_type_handler(
     arguments: dict[str, Any],
     *,
@@ -629,6 +672,7 @@ async def _browser_type_handler(
     _client_factory: Callable[..., Any] = _default_client_factory,
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
+    workspace_io: Any = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -638,6 +682,7 @@ async def _browser_type_handler(
         browser_control=browser_control,
         workspace_path=workspace_path,
         session_config=session_config,
+        workspace_io=workspace_io,
     )
     if isinstance(preflight, str):
         return preflight
@@ -653,7 +698,7 @@ async def _browser_type_handler(
             )
         else:
             await client.type_text(arguments["text"], delay_ms=arguments.get("delay_ms", 0))
-    return json.dumps({"typed": True})
+    return json.dumps(_noted({"typed": True}, client))
 
 
 PRESS_KEY_SCHEMA = {
@@ -667,6 +712,7 @@ PRESS_KEY_SCHEMA = {
 }
 
 
+@answering_refusals
 async def _browser_press_key_handler(
     arguments: dict[str, Any],
     *,
@@ -677,6 +723,7 @@ async def _browser_press_key_handler(
     _client_factory: Callable[..., Any] = _default_client_factory,
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
+    workspace_io: Any = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -686,6 +733,7 @@ async def _browser_press_key_handler(
         browser_control=browser_control,
         workspace_path=workspace_path,
         session_config=session_config,
+        workspace_io=workspace_io,
     )
     if isinstance(preflight, str):
         return preflight
@@ -694,7 +742,7 @@ async def _browser_press_key_handler(
     client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
         await client.press_key(*arguments["keys"], duration_ms=arguments.get("duration_ms", 0))
-    return json.dumps({"pressed": arguments["keys"]})
+    return json.dumps(_noted({"pressed": arguments["keys"]}, client))
 
 
 SCROLL_SCHEMA = {
@@ -724,6 +772,7 @@ SCROLL_SCHEMA = {
 }
 
 
+@answering_refusals
 async def _browser_scroll_handler(
     arguments: dict[str, Any],
     *,
@@ -734,6 +783,7 @@ async def _browser_scroll_handler(
     _client_factory: Callable[..., Any] = _default_client_factory,
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
+    workspace_io: Any = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -743,6 +793,7 @@ async def _browser_scroll_handler(
         browser_control=browser_control,
         workspace_path=workspace_path,
         session_config=session_config,
+        workspace_io=workspace_io,
     )
     if isinstance(preflight, str):
         return preflight
@@ -764,7 +815,7 @@ async def _browser_scroll_handler(
         viewport_height = position.get("viewport_height")
         if None not in (scroll_y, page_height, viewport_height):
             body["at_bottom"] = scroll_y + viewport_height >= page_height - 2
-    return json.dumps(body)
+    return json.dumps(_noted(body, client))
 
 
 DRAG_SCHEMA = {
@@ -787,6 +838,7 @@ DRAG_SCHEMA = {
 }
 
 
+@answering_refusals
 async def _browser_drag_handler(
     arguments: dict[str, Any],
     *,
@@ -797,6 +849,7 @@ async def _browser_drag_handler(
     _client_factory: Callable[..., Any] = _default_client_factory,
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
+    workspace_io: Any = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -806,6 +859,7 @@ async def _browser_drag_handler(
         browser_control=browser_control,
         workspace_path=workspace_path,
         session_config=session_config,
+        workspace_io=workspace_io,
     )
     if isinstance(preflight, str):
         return preflight
@@ -815,7 +869,7 @@ async def _browser_drag_handler(
     client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
         await client.drag(path, button=arguments.get("button", "left"))
-    return json.dumps({"dragged": True, "points": len(path)})
+    return json.dumps(_noted({"dragged": True, "points": len(path)}, client))
 
 
 WAIT_SCHEMA = {
@@ -826,6 +880,7 @@ WAIT_SCHEMA = {
 }
 
 
+@answering_refusals
 async def _browser_wait_handler(
     arguments: dict[str, Any],
     *,
@@ -836,6 +891,7 @@ async def _browser_wait_handler(
     _client_factory: Callable[..., Any] = _default_client_factory,
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
+    workspace_io: Any = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -845,6 +901,7 @@ async def _browser_wait_handler(
         browser_control=browser_control,
         workspace_path=workspace_path,
         session_config=session_config,
+        workspace_io=workspace_io,
     )
     if isinstance(preflight, str):
         return preflight
@@ -956,6 +1013,40 @@ async def _save_screenshot_to_storage(
     return relative_path
 
 
+# A session on the user's computer keeps its screenshots in its folder, among the
+# harness's own files, so a chat that asks every time is not asked about each one.
+_DEVICE_SCREENSHOT_DIR = ".surogates-results"
+# Not read_file's to show yet: vision reads the cloud's storage, and this shot is on the computer.
+_DEVICE_SCREENSHOT_HINT = (
+    "This screenshot is not displayed to you. It is saved in the chat's folder on the user's "
+    "computer, where the user can open it; browser_get_state reads the page as text."
+)
+
+
+async def _save_device_screenshot(client: Any, arguments: dict[str, Any], workspace_io: Any) -> str:
+    """Take the shot on the computer and write it into the session's folder there."""
+    async with client:
+        result = await client.screenshot(
+            region=arguments.get("region"),
+            annotate=bool(arguments.get("annotate", False)),
+        )
+    png_bytes = result["png_bytes"]
+    relative_path = f"{_DEVICE_SCREENSHOT_DIR}/{_new_screenshot_path()}"
+    await workspace_io.write(await workspace_io.resolve(relative_path), png_bytes)
+    body: dict[str, Any] = {
+        "saved": True,
+        "path": relative_path,
+        "relative_path": relative_path,
+        "mime_type": "image/png",
+        "bytes": len(png_bytes),
+        "hint": _DEVICE_SCREENSHOT_HINT,
+    }
+    if "annotations" in result:
+        body["annotations"] = result["annotations"]
+    return json.dumps(body)
+
+
+@answering_refusals
 async def _browser_screenshot_handler(
     arguments: dict[str, Any],
     *,
@@ -969,6 +1060,7 @@ async def _browser_screenshot_handler(
     storage: Any | None = None,
     sandbox_pool: Any | None = None,
     task_id: str | None = None,
+    workspace_io: Any = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -978,11 +1070,16 @@ async def _browser_screenshot_handler(
         browser_control=browser_control,
         workspace_path=workspace_path,
         session_config=session_config,
+        workspace_io=workspace_io,
     )
     if isinstance(preflight, str):
         return preflight
 
     _browser_id, endpoint, snapshot_cache = preflight
+    if isinstance(endpoint, DeviceEndpoint):
+        return await _save_device_screenshot(
+            _make_client(_client_factory, endpoint, snapshot_cache), arguments, workspace_io,
+        )
     storage_bucket = (session_config or {}).get("storage_bucket")
     should_save = bool(workspace_path or (storage is not None and storage_bucket))
     if not should_save:
