@@ -8,9 +8,14 @@ class FakeAgent {
   readonly items = new Map<number, Record<string, unknown>>();
   readonly titles = new Map<string, string>();
   status = 200; // what the next stream opens with
+  itemFailure: number | "throw" | null = null; // how the next item's read fails: an HTTP status, or no answer at all
   readonly api: Api = async (path, init) => {
     const item = /^\/api\/v1\/inbox\/(\d+)\?agent_id=a$/.exec(path);
     if (item) {
+      const failure = this.itemFailure;
+      this.itemFailure = null;
+      if (failure === "throw") throw new TypeError("fetch failed");
+      if (failure !== null) return new Response(null, { status: failure });
       const found = this.items.get(Number(item[1]));
       return found ? Response.json(found) : new Response(null, { status: 404 });
     }
@@ -85,6 +90,32 @@ describe("the inbox, followed", () => {
     await settle();
     expect(told.map((item) => item.id)).toEqual([4]);
     expect(errors).toEqual([]);
+    stop();
+  });
+
+  it("tells, once it is back, an item whose read failed, and never one the agent did not have", async () => {
+    const agent = new FakeAgent();
+    agent.pending(2, "input_required", "Which report?");
+    agent.pending(3, "governance_gate", "Delete the old drafts?");
+    const { told, stop } = following(agent);
+    await until(() => agent.streams.length === 1);
+    agent.streams[0]!.send('event: snapshot\r\ndata: {"unread_ids": []}\r\n\r\n');
+    // As the agent restarts: one read answers 503, one gets no answer, and one is of an item it does not have.
+    agent.itemFailure = 503;
+    agent.streams[0]!.send('event: item\r\ndata: {"item_id": 2}\r\n\r\n');
+    await settle();
+    agent.itemFailure = "throw";
+    agent.streams[0]!.send('event: item\r\ndata: {"item_id": 3}\r\n\r\n');
+    await settle();
+    agent.streams[0]!.send('event: item\r\ndata: {"item_id": 4}\r\n\r\n');
+    await settle();
+    expect(told).toEqual([]);
+    agent.pending(4, "input_required", "Made after its read");
+    agent.streams[0]!.end();
+    await until(() => agent.streams.length === 2);
+    agent.streams[1]!.send('event: snapshot\r\ndata: {"unread_ids": [2, 3, 4]}\r\n\r\n');
+    await settle();
+    expect(told.map((item) => item.id)).toEqual([2, 3]);
     stop();
   });
 

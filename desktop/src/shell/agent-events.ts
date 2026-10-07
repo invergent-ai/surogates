@@ -84,16 +84,20 @@ export interface InboxItem {
 export function followInbox(options: FollowOptions & { onItem(item: InboxItem): void }): () => void {
   const known = new Set<number>();
   let opened = false;
+  // An item whose read fails, as an agent that restarts answers, is read again when a later snapshot lists it;
+  // one the agent does not have, or answered meanwhile, is not.
   const tell = async (id: number): Promise<void> => {
     if (known.has(id)) return;
     known.add(id);
     try {
       const response = await options.api(`/api/v1/inbox/${id}?agent_id=${encodeURIComponent(options.agentId)}`);
+      if (response.status >= 500 || response.status === 429) known.delete(id);
       if (!response.ok) return;
       const { status, kind, title, session_id: sessionId } = parsed(await response.text()) ?? {};
       if (status !== "pending" || typeof kind !== "string" || typeof title !== "string" || typeof sessionId !== "string") return;
       options.onItem({ id, kind, title, sessionId });
     } catch (error) {
+      known.delete(id);
       options.onError(error);
     }
   };
