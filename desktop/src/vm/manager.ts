@@ -5,9 +5,10 @@
 // same on every OS: hello, the keepalive, the roots' set-up and teardown, the host
 // proxy on the guest's net port, and what a lost guest was running.
 
-import { rmSync } from "node:fs";
+import { readFileSync, renameSync, rmSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import type { Duplex } from "node:stream";
+import { setTimeout as wait } from "node:timers/promises";
 
 import { BOOT_ID } from "../binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
@@ -15,6 +16,7 @@ import type { ProcessHandle } from "../guest/processes.js";
 import type { FromAgent, HostUser, Share } from "../guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
+import { Backoff } from "./backoff.js";
 import { ControlLink, type Request } from "./control.js";
 import { bootLinux } from "./linux.js";
 import { type Egress, NetProxy, withNotice } from "./proxy.js";
@@ -368,11 +370,17 @@ export class Guest {
   }
 }
 
+// The guest's init says so on its console when it cannot check the sessions disk (vm/init).
+const UNCHECKED = "surogate: e2fsck could not check the sessions disk";
+
 export class VmManager {
   private guest: Promise<Guest> | null = null;
   private stopping = false;
   // Stops a boot under way when the manager stops.
   private readonly halt = new AbortController();
+  // Each boot waits out the last failure's backoff; what a boot that failed said, while it lasts.
+  private readonly backoff = new Backoff();
+  private failed: string | null = null;
 
   // *told*: each change of a root's processes in its guests. *egress*: who lets a root's commands reach past the package hosts.
   constructor(
@@ -385,12 +393,14 @@ export class VmManager {
   /**
    * One process operation of a root's, in the guest, its folder added first. A
    * cancel is answered at once, and a cancel before the folder is added adds
-   * nothing. Never rejects.
+   * nothing. While a boot that failed backs off, it is answered with that boot's failure
+   * at once. Never rejects.
    */
   async perform(operation: VmOperation, signal: AbortSignal): Promise<Outcome> {
     if (this.stopping) return unavailable("is stopping");
     // No backend for this OS yet: answered as a VM that cannot start is.
     if (!this.boot) return unavailable("is not available on this platform yet");
+    if (this.failed && this.backoff.wait > 0 && !this.guest) return unavailable(`did not start: ${this.failed}`);
     let guest: Guest | "aborted";
     try {
       guest = await Promise.race([this.booted(this.boot), aborted(signal)]);
@@ -431,11 +441,44 @@ export class VmManager {
     });
   }
 
+  // A boot, once the last failure's backoff has passed. One whose guest could not check its
+  // sessions disk boots again on a new one: the old one is kept beside it, the next to fail
+  // its check taking its place, as the homes and caches it holds can be lost.
   private start(boot: BootVm): Promise<Guest> {
-    const booting = Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress);
-    booting.then((guest) => guest.gone, () => {}).finally(() => {
+    const booting = (async () => {
+      await wait(this.backoff.wait, undefined, { signal: this.halt.signal });
+      // What the console says is then this boot's alone.
+      rmSync(this.options.console, { force: true });
+      try {
+        return await Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress);
+      } catch (error) {
+        if (this.stopping || !this.unchecked()) throw error;
+        renameSync(this.options.sessions, `${this.options.sessions}.unchecked`);
+        return Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress);
+      }
+    })();
+    booting.then(async (guest) => {
+      this.failed = null;
+      this.backoff.up();
+      await guest.gone;
+      // One that crashed, or stuck, backs off its next boot; one that stopped, idle or asked, does not.
+      if (guest.lost) this.backoff.down();
+    }, (error: unknown) => {
+      if (this.stopping) return;
+      this.failed = describe(error);
+      this.backoff.down();
+    }).finally(() => {
       if (this.guest === booting) this.guest = null;
     });
     return booting;
+  }
+
+  // Whether the guest's console says it could not check the sessions disk.
+  private unchecked(): boolean {
+    try {
+      return readFileSync(this.options.console, "utf8").includes(UNCHECKED);
+    } catch {
+      return false;
+    }
   }
 }

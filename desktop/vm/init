@@ -11,7 +11,8 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 # every later boot it is checked and repaired, and made again only when the
 # repair leaves errors (e2fsck's exit code 4, without 8 or more). Any other
 # failure, such as a feature this e2fsck does not know, stops the boot and
-# leaves the homes on the disk as they are.
+# leaves the homes on the disk as they are: the app keeps that disk aside, by
+# this line on the console, and boots again on a new one (vm/manager.ts).
 if [ "$(od -An -tx2 -j1080 -N2 /dev/vdc)" != " ef53" ]; then
   mke2fs -q -F -t ext4 -E nodiscard -L sessions /dev/vdc
 else
@@ -22,7 +23,7 @@ else
     e2fsck -y /dev/vdc || checked=$?
   fi
   if [ "$checked" -ge 8 ]; then
-    echo "surogate: e2fsck could not check the sessions disk (exit code $checked), so the guest stops and leaves it as it is" >&2
+    echo "surogate: e2fsck could not check the sessions disk (exit code $checked), so the guest stops; the app keeps the disk aside and makes a new one" >&2
     exit 1
   fi
   [ "$checked" -lt 4 ] || mke2fs -q -F -t ext4 -E nodiscard -L sessions /dev/vdc

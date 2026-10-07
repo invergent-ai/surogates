@@ -63,6 +63,17 @@ const shareDaemons = (run: string) => {
 };
 // A background process that looks in its folder a second after it starts: once the share has stalled, it waits there.
 const STUCK = "env -i /usr/bin/setsid /usr/bin/nohup /bin/sh -c '/usr/bin/sleep 1; /usr/bin/stat ./stuck' < /dev/null > /dev/null 2>&1 & echo started";
+// A disk's incompatible features, as its superblock names them.
+const incompat = (disk: string) => {
+  const fd = openSync(disk, "r");
+  try {
+    const field = Buffer.alloc(4);
+    readSync(fd, field, 0, 4, INCOMPAT);
+    return field.readUInt32LE(0);
+  } finally {
+    closeSync(fd);
+  }
+};
 
 const signal = () => new AbortController().signal;
 const background = (command: string) => ({ command, workdir: null, task_id: "vm", pty: false, notify_on_complete: false, watcher_interval: null });
@@ -995,30 +1006,20 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
 
   it("stops the boot, and keeps the homes, on a sessions disk e2fsck cannot check", async () => {
     await guest.stop();
-    const incompat = () => {
-      const fd = openSync(options.sessions, "r");
-      try {
-        const field = Buffer.alloc(4);
-        readSync(fd, field, 0, 4, INCOMPAT);
-        return field.readUInt32LE(0);
-      } finally {
-        closeSync(fd);
-      }
-    };
     expect(spawnSync("e2fsck", ["-p", "-E", "journal_only", options.sessions], { stdio: "ignore" }).status).toBe(0);
     // A feature this e2fsck does not know, as a newer mke2fs could set: e2fsck exits 8, though the disk was made.
-    const known = incompat();
+    const known = incompat(options.sessions);
     expect(spawnSync("debugfs", ["-w", "-R", `ssv feature_incompat ${(known | 0x8000_0000) >>> 0}`, options.sessions], { stdio: "ignore" }).status).toBe(0);
     // The guest panics, which ends QEMU.
     await expect(Guest.boot(bootLinux, options)).rejects.toThrow("The VM exited");
     expect(readFileSync(options.console, "utf8")).toContain(
-      "surogate: e2fsck could not check the sessions disk (exit code 8), so the guest stops and leaves it as it is",
+      "surogate: e2fsck could not check the sessions disk (exit code 8), so the guest stops; the app keeps the disk aside and makes a new one",
     );
     // debugfs opens a disk with a feature it does not know only when forced.
     const restored = spawnSync("debugfs", ["-f", "-"], {
       input: `open -w -f ${options.sessions}\nssv feature_incompat ${known}\nclose\n`, stdio: ["pipe", "ignore", "ignore"],
     });
-    expect([restored.status, incompat()]).toEqual([0, known]);
+    expect([restored.status, incompat(options.sessions)]).toEqual([0, known]);
     guest = await Guest.boot(bootLinux, options);
     expect(await setUp(ROOT, folder)).toMatchObject({ type: "done" });
     expect(await run("cat ~/kept")).toEqual({ ok: { output: "kept\n", returncode: 0, timed_out: false } });
@@ -1247,6 +1248,21 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     await managers.at(-1)!.stop();
     managers.push(new VmManager(options));
     expect(await op(ROOT, a, "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+  });
+
+  it("keeps a sessions disk its guest could not check aside, and boots on a new one", async () => {
+    await managers.at(-1)?.stop();
+    managers.push(new VmManager(options));
+    const a = join(dir, "a");
+    expect(await op(ROOT, a, "run", { command: "echo kept > ~/kept-aside", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+    await managers.at(-1)!.stop();
+    // A feature this e2fsck does not know, as a newer mke2fs could set: e2fsck exits 8, though the disk was made.
+    const known = incompat(options.sessions);
+    expect(spawnSync("debugfs", ["-w", "-R", `ssv feature_incompat ${(known | 0x8000_0000) >>> 0}`, options.sessions], { stdio: "ignore" }).status).toBe(0);
+    managers.push(new VmManager(options));
+    expect(await op(ROOT, a, "run", { command: "cat ~/kept-aside 2>/dev/null || echo new", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "new\n" } });
+    // The old one, beside the new, as it was: its homes, under a feature only a newer e2fsck knows.
+    expect([statSync(`${options.sessions}.unchecked`).size, incompat(`${options.sessions}.unchecked`)]).toEqual([32 * 1024 ** 3, (known | 0x8000_0000) >>> 0]);
   });
 
   it("stops a guest that has not added a root's folder in 15 s, and answers as stopped by the sandbox", async () => {

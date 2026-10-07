@@ -662,3 +662,88 @@ describe("the VM's backend", () => {
     expect(existsSync(join(dir, "run"))).toBe(false);
   });
 });
+
+describe("a guest's lifecycle", () => {
+  const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+  const which = (manager: VmManager, root = "root-1", signal = new AbortController().signal) =>
+    manager.perform({ id: `which-${Math.random()}`, root, folder: { path: dir, ...statSync(dir) }, kind: "which", args: {} }, signal);
+  // A fake VM per boot, each telling *events* when it boots and when it powers off or is ended.
+  const counted = (events: string[], answering: ControlRoots = roots): BootVm => async (...args) => {
+    events.push("boot");
+    const vm = await fakeVm(answering)(...args);
+    void vm.exited.then(() => events.push("gone"));
+    return vm;
+  };
+
+  it("answers what comes while a boot that failed backs off with that failure, and boots again once it has passed", async () => {
+    let boots = 0;
+    const failing: BootVm = async () => {
+      boots += 1;
+      throw new Error("QEMU exited: the protected-names rule attached 0 of 11 hooks");
+    };
+    const manager = new VmManager(options(), failing);
+    const failed = { error: { type: "unavailable", message: "This computer's sandbox did not start: QEMU exited: the protected-names rule attached 0 of 11 hooks" } };
+    expect(await which(manager)).toEqual(failed);
+    expect(await which(manager)).toEqual(failed);
+    expect(boots).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    expect(await which(manager)).toEqual(failed);
+    expect(boots).toBe(2);
+    await manager.stop();
+  });
+
+  it("waits a second before it boots again after a guest that crashed", async () => {
+    const events: string[] = [];
+    const vms: VmBackend[] = [];
+    const boot: BootVm = async (...args) => {
+      const vm = await counted(events)(...args);
+      vms.push(vm);
+      return vm;
+    };
+    const manager = new VmManager(options(), boot);
+    expect(await which(manager)).toEqual({ ok: true });
+    // Its control channel goes, as a guest's that panics does.
+    vms[0]?.control.destroy();
+    await until(() => events.includes("gone"));
+    const begun = performance.now();
+    expect(await which(manager)).toEqual({ ok: true });
+    expect(performance.now() - begun).toBeGreaterThan(900);
+    await manager.stop();
+  });
+
+  it("boots again on a new sessions disk when the guest could not check its own, and keeps the old one beside it", async () => {
+    const { sessions, console: log } = options();
+    mkdirSync(join(dir, "data"), { recursive: true });
+    mkdirSync(join(dir, "logs"), { recursive: true });
+    writeFileSync(sessions, "the homes");
+    let boots = 0;
+    const boot: BootVm = async (...args) => {
+      boots += 1;
+      if (boots === 1) {
+        writeFileSync(log, "surogate: e2fsck could not check the sessions disk (exit code 8), so the guest stops; the app keeps the disk aside and makes a new one\n");
+        throw new Error("The VM exited");
+      }
+      return fakeVm(roots)(...args);
+    };
+    const manager = new VmManager(options(), boot);
+    expect(await which(manager)).toEqual({ ok: true });
+    expect([boots, existsSync(sessions), readFileSync(`${sessions}.unchecked`, "utf8")]).toEqual([2, false, "the homes"]);
+    await manager.stop();
+  });
+
+  it("keeps the sessions disk where it is when a boot fails before its guest says why, whatever an earlier boot's console said", async () => {
+    const { sessions, console: log } = options();
+    mkdirSync(join(dir, "data"), { recursive: true });
+    mkdirSync(join(dir, "logs"), { recursive: true });
+    writeFileSync(sessions, "the homes");
+    writeFileSync(log, "surogate: e2fsck could not check the sessions disk (exit code 8), so the guest stops; the app keeps the disk aside and makes a new one\n");
+    const manager = new VmManager(options(), async () => {
+      throw new Error("QEMU exited: Could not access KVM kernel module: Permission denied");
+    });
+    expect(await which(manager)).toEqual({
+      error: { type: "unavailable", message: "This computer's sandbox did not start: QEMU exited: Could not access KVM kernel module: Permission denied" },
+    });
+    expect([readFileSync(sessions, "utf8"), existsSync(`${sessions}.unchecked`)]).toEqual(["the homes", false]);
+    await manager.stop();
+  });
+});
