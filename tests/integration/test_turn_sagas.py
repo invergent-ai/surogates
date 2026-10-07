@@ -6,13 +6,14 @@ import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
 import surogates.harness.loop as loop_module
 from surogates.harness import tool_exec
 from surogates.harness.budget import IterationBudget
+from surogates.governance.events import saga_compensate_event, saga_start_event, saga_step_event
 from surogates.harness.loop import AgentHarness
 from surogates.runtime import SlashCommandConfig
 from surogates.session.events import EventType
@@ -173,3 +174,46 @@ async def test_a_failed_turn_completes_its_saga(api, monkeypatch):
     assert (await api.app.state.session_store.get_session(chat.id)).status == "failed"
     [(_, done)] = [(t, d) for t, d in await saga_events(api, chat.id) if t == EventType.SAGA_COMPLETE.value]
     assert done["status"] == "completed"
+
+
+async def a_saga_left_open(api, chat, *, compensating: bool) -> str:
+    """A turn's saga with one step done, that nothing closed; its id."""
+    store, saga_id = api.app.state.session_store, f"saga:{uuid4()}"
+    await store.emit_event(chat.id, EventType.SAGA_START, saga_start_event(saga_id, str(chat.id)))
+    for kind, state in ((EventType.SAGA_STEP_BEGIN, "executing"), (EventType.SAGA_STEP_COMMITTED, "committed")):
+        await store.emit_event(chat.id, kind, saga_step_event(saga_id, "step-1", "memory", state))
+    if compensating:
+        await store.emit_event(chat.id, EventType.SAGA_COMPENSATE, saga_compensate_event(saga_id, 0, "interrupt"))
+    return saga_id
+
+
+@pytest.mark.parametrize(("compensating", "end", "status"), [
+    (False, EventType.SESSION_FAIL, "completed"),  # the dispatcher gave up on the turn itself
+    (False, EventType.SESSION_COMPLETE, "completed"),  # the turn's saga.complete was lost
+    (True, EventType.SESSION_FAIL, "escalated"),  # lost while it was being put back
+])
+async def test_a_saga_a_turn_left_open_is_closed_before_the_next_turn_starts_its_own(
+    api, monkeypatch, compensating, end, status,
+):
+    chat = await a_chat(api)
+    store = api.app.state.session_store
+    left_open = await a_saga_left_open(api, chat, compensating=compensating)
+    await store.emit_event(chat.id, end, {"error": "gave up"} if end is EventType.SESSION_FAIL else {})
+    await store.emit_event(chat.id, EventType.USER_MESSAGE, {"content": "Thanks."})
+    await a_turn(api, monkeypatch, chat, [_final_response("You're welcome.")])
+    sagas = [(t, d) for t, d in await saga_events(api, chat.id) if t in (EventType.SAGA_START.value, EventType.SAGA_COMPLETE.value)]
+    [closed, (_, started), (_, done)] = sagas[-3:]
+    assert closed == (EventType.SAGA_COMPLETE.value, {**closed[1], "saga_id": left_open, "status": status, "steps_executed": 1})
+    assert started["saga_id"] != left_open and done["saga_id"] == started["saga_id"]
+
+
+async def test_a_turn_retried_after_a_crash_keeps_its_saga(api, monkeypatch):
+    chat = await a_chat(api)
+    store = api.app.state.session_store
+    await store.emit_event(chat.id, EventType.SESSION_COMPLETE, {})  # an earlier turn
+    await store.emit_event(chat.id, EventType.USER_MESSAGE, {"content": "Remember my name."})
+    running = await a_saga_left_open(api, chat, compensating=False)  # this turn's, before its worker crashed
+    await a_turn(api, monkeypatch, chat, [_final_response("Noted.")])
+    starts = [d for t, d in await saga_events(api, chat.id) if t == EventType.SAGA_START.value]
+    [(_, done)] = [(t, d) for t, d in await saga_events(api, chat.id) if t == EventType.SAGA_COMPLETE.value]
+    assert ([d["saga_id"] for d in starts], done["saga_id"]) == ([running], running)

@@ -1673,6 +1673,7 @@ class AgentHarness(
                 ]
                 if saga_events:
                     saga.reconstruct_from_events(saga_events)
+                    await self._close_stale_sagas(saga, session, all_events)
             # Create a fresh saga for this wake cycle if none is active.
             if not saga.active_sagas:
                 from surogates.governance.events import saga_start_event
@@ -3301,6 +3302,31 @@ class AgentHarness(
                 logger.debug(
                     "Failed to finalize saga %s", active.saga_id, exc_info=True,
                 )
+
+    async def _close_stale_sagas(self, saga: Any, session: Any, events: list[Any]) -> None:
+        """Close each active saga started before the log's last turn end.
+
+        A turn the dispatcher failed itself, or whose ``saga.complete`` was
+        lost, leaves its saga open; the next turn must start its own.  It is
+        closed ``completed`` if it was running, as a failed turn's is, and
+        ``escalated`` if it was being put back.
+        """
+        from surogates.governance.events import saga_complete_event
+        from surogates.governance.saga.state_machine import SagaState
+
+        ends = (EventType.SESSION_COMPLETE.value, EventType.SESSION_FAIL.value)
+        ended = max((e.id for e in events if e.type in ends), default=None)
+        if ended is None:
+            return
+        started = {e.data.get("saga_id"): e.id for e in events if e.type == EventType.SAGA_START.value}
+        for stale in [s for s in saga.active_sagas if started.get(s.saga_id, ended) < ended]:
+            status = SagaState.COMPLETED if stale.state is SagaState.RUNNING else SagaState.ESCALATED
+            stale.transition(status)
+            await self._store.emit_event(
+                session.id,
+                EventType.SAGA_COMPLETE,
+                saga_complete_event(stale.saga_id, status=status.value, steps_executed=len(stale.steps)),
+            )
 
     async def _compensate_sagas(self, saga: Any, session: Any, reason: str) -> None:
         """Compensate all active sagas on interrupt/crash/failure.
