@@ -5,7 +5,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { connect, FakeAgent, opened, ROTATED, signedInAndAdded, signIn, TOKEN, webClient } from "./fake-agent.js";
-import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
+import { dataHome, launch, press, prompt, quit, shellPage, stubNative } from "./launch.js";
 
 const THREAD = "6c1e9f7d-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
 
@@ -47,7 +47,9 @@ async function bound(): Promise<{ shell: ElectronApplication; page: Page; client
   await connect(page, origin);
   await signedInAndAdded(shell, page, agent);
   const client = await webClient(shell, origin);
-  const prepared = await client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"));
+  const preparing = client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"));
+  await press(await prompt(shell), "accept");
+  const prepared = await preparing;
   agent.link.send({
     type: "op", id: "bind-1", session_id: THREAD, calling_session_id: THREAD, invocation_id: "bind", ordinal: 0,
     kind: "bind", args: { folder: prepared!.folder, nonce: prepared!.nonce }, digest: "digest-bind-1",
@@ -230,7 +232,9 @@ describe("a later sign-in, which rotates this computer's token", () => {
   it("is no revocation: what the computer had not sent yet goes out on the new token", async () => {
     const { shell, client } = await bound();
     // A second chat bound to the folder, whose result the agent has not acknowledged.
-    const prepared = await client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"));
+    const preparing = client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"));
+    await press(await prompt(shell), "accept");
+    const prepared = await preparing;
     agent.link.send({
       type: "op", id: "bind-2", session_id: OTHER, calling_session_id: OTHER, invocation_id: "bind", ordinal: 0,
       kind: "bind", args: { folder: prepared!.folder, nonce: prepared!.nonce }, digest: "digest-bind-2",

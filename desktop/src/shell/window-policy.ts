@@ -3,6 +3,8 @@
 // to the system browser. Claude Desktop keeps its own view the same way (index.js:
 // will-navigate, will-redirect, and a window-open handler that denies and opens outside).
 
+import { fileURLToPath } from "node:url";
+
 // The Composio sign-in popup (sdk/agent-chat-react/src/lib/oauth-popup.ts): the page watches it close.
 const POPUP = { name: "composio-oauth", origin: "https://connect.composio.dev" };
 
@@ -34,3 +36,14 @@ export function windowOpen(url: string, frameName: string): "popup" | "external"
 const PATHS = /^\/(?:chat|inbox|missions|skills|settings)$|^\/chat\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export const webClientPath = (path: string): boolean => PATHS.test(path);
+
+/** A call from *page*, one of the app's own pages, in its top frame: no other page, a file dropped there included. */
+export function ownPage(frame: { readonly url: string; readonly parent: unknown } | null, page: string): boolean {
+  if (frame == null || frame.parent !== null || !frame.url.startsWith("file:")) return false;
+  // A file URL no path can be (another host's, an encoded slash) is none of the app's pages either.
+  try {
+    return fileURLToPath(frame.url) === page;
+  } catch {
+    return false;
+  }
+}

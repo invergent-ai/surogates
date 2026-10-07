@@ -86,3 +86,42 @@ export async function shellPage(shell: ElectronApplication): Promise<Page> {
   }).toBe(true);
   return found!;
 }
+
+// The desktop's prompt open now, once drawn: the folder sheet, an approval, a confirmation.
+export async function prompt(shell: ElectronApplication): Promise<Page> {
+  let found: Page | undefined;
+  await expect.poll(() => {
+    found = shell.windows().find((page) => page.url().endsWith("/prompt.html"));
+    return found !== undefined;
+  }).toBe(true);
+  await found!.waitForSelector("#prompt-buttons button");
+  return found!;
+}
+
+// The prompt answered: its window has gone, so the next prompt() finds the next one.
+async function closed(page: Page): Promise<void> {
+  if (!page.isClosed()) await page.waitForEvent("close", { timeout: 5_000 });
+}
+
+/** Press *button* on *page*'s prompt, once its input protection lets it, and wait for the prompt to close. */
+export async function press(page: Page, button: string): Promise<void> {
+  const selector = `#prompt-buttons button[data-id="${button}"]`;
+  await expect.poll(() => page.getAttribute(selector, "aria-disabled")).not.toBe("true");
+  // The window can close before the click is acknowledged: that it closed is what tells it answered.
+  await page.click(selector, { noWaitAfter: true }).catch(() => {});
+  await closed(page);
+}
+
+// How many of the app's prompts are up on the screen.
+export const promptsShown = (shell: ElectronApplication) => shell.evaluate(({ BrowserWindow }) =>
+  BrowserWindow.getAllWindows().filter((window) => window.isVisible() && window.webContents.getURL().endsWith("/prompt.html")).length);
+
+/**
+ * Press *key* on *page*'s prompt, which answers it: its window closes before the key comes up,
+ * and can close before the key's press is acknowledged. That it closed is what tells it answered.
+ */
+export async function key(page: Page, name: string): Promise<void> {
+  await page.keyboard.down(name).catch(() => {});
+  await page.keyboard.up(name).catch(() => {});
+  await closed(page);
+}
