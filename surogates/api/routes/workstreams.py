@@ -68,6 +68,8 @@ Tier = Literal["basic", "pro"] | None
 _RESOLVED_BY_USER = "resolved by the user"
 # How long a card's start holds its claim at most: a start takes about a second.
 _CARD_CLAIM_SECONDS = 60
+# Releases a card's claim only while it is still the releasing start's.
+_RELEASE_CLAIM = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0"
 
 
 class ProjectCreate(BaseModel):
@@ -370,8 +372,8 @@ async def start_proposed_thread(
     # in Redis, so no start holds a database connection while it waits for
     # more of the pool, as Start all's every card at once would; the
     # thread's ``worker.spawned`` refuses a later start.
-    claim = f"surogates:workstream:card:{project.id}:{body.proposal_id}:{body.key}"
-    if not await redis.set(claim, "1", nx=True, ex=_CARD_CLAIM_SECONDS):
+    claim, token = f"surogates:workstream:card:{project.id}:{body.proposal_id}:{body.key}", uuid4().hex
+    if not await redis.set(claim, token, nx=True, ex=_CARD_CLAIM_SECONDS):
         raise HTTPException(status.HTTP_409_CONFLICT, "This thread was already started.")
     try:
         if await store.started_from(project.master_session_id, body.proposal_id, body.key):
@@ -383,8 +385,10 @@ async def start_proposed_thread(
             proposal={"proposal_id": str(body.proposal_id), "key": body.key},
         )
     finally:
-        # Released however the start ends, so one that failed can be tried again.
-        await redis.delete(claim)
+        # Released however the start ends, so one that failed can be tried
+        # again; but only its own, so a start that ran past its claim's
+        # expiry leaves the claim of the start that took it over.
+        await redis.eval(_RELEASE_CLAIM, 1, claim, token)
     if thread is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
     return await _row(request, project, thread.id)

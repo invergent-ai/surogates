@@ -709,6 +709,23 @@ async def test_a_start_that_fails_can_be_tried_again(api, monkeypatch):
     assert (await start_card(api, project, proposal_id, "1")).status_code == 201
 
 
+async def test_a_start_past_its_claims_expiry_leaves_the_next_starts_claim(api, monkeypatch):
+    project = await create(api)
+    proposal_id = await proposed(api, await master_of(api, project))
+    claim = f"surogates:workstream:card:{project['id']}:{proposal_id}:1"
+    redis = api.app.state.redis
+    real = workstreams_routes.start_thread
+
+    async def slow(**kwargs):
+        # The start runs past its claim's expiry, and another start claims the card.
+        await redis.set(claim, "another start's", ex=60)
+        return await real(**kwargs)
+
+    monkeypatch.setattr(workstreams_routes, "start_thread", slow)
+    assert (await start_card(api, project, proposal_id, "1")).status_code == 201
+    assert await redis.get(claim) == b"another start's"
+
+
 async def test_a_card_starts_only_over_redis(api, monkeypatch):
     project = await create(api)
     proposal_id = await proposed(api, await master_of(api, project))
