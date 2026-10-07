@@ -94,8 +94,8 @@ export function ago(when: string, now = Date.now(), form: "short" | "long" = "sh
 
 // What a prompt shows as its code point rather than as itself: controls and format characters (the
 // bidi controls among them), private-use, unassigned and lone surrogate code points, line and
-// paragraph separators, what draws nothing, and every space but U+0020.
-const SPECIAL = /[\p{C}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]|(?! )\p{Zs}/gu;
+// paragraph separators, what draws nothing (the blank symbols among it), and every space but U+0020.
+const SPECIAL = /[\p{C}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\u2800\uFFFC\u{1D159}]|(?! )\p{Zs}/gu;
 
 /** *text* in runs: plain text, and each special character as its code point (U+202E). *keep* holds the special characters shown as themselves. */
 export function segments(text: string, keep = ""): Array<{ text: string; special: boolean }> {

@@ -24,6 +24,13 @@ describe("text as a prompt shows it", () => {
     ["what draws nothing", "a​bㅤ", [{ text: "a", special: false }, { text: "U+200B", special: true }, { text: "b", special: false }, { text: "U+3164", special: true }]],
     ["a control character and a lone surrogate", "\u001B[2J\uD800", [{ text: "U+001B", special: true }, { text: "[2J", special: false }, { text: "U+D800", special: true }]],
     ["a line separator", "one two", [{ text: "one", special: false }, { text: "U+2028", special: true }, { text: "two", special: false }]],
+    ["a paragraph separator", "a b", [{ text: "a", special: false }, { text: "U+2029", special: true }, { text: "b", special: false }]],
+    ["a blank that is a symbol", "a⠀b￼\u{1D159}", [
+      { text: "a", special: false }, { text: "U+2800", special: true }, { text: "b", special: false },
+      { text: "U+FFFC", special: true }, { text: "U+1D159", special: true },
+    ]],
+    ["a character beyond the first plane", "x\u{E0041}y", [{ text: "x", special: false }, { text: "U+E0041", special: true }, { text: "y", special: false }]],
+    ["a private-use and an unassigned code point", "͸", [{ text: "U+E000", special: true }, { text: "U+0378", special: true }]],
     ["plain text, accents included", "café — naïve", [{ text: "café — naïve", special: false }]],
   ])("marks %s by its code point", (_name, text, runs) => {
     expect(segments(text)).toEqual(runs);
