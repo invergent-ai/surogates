@@ -4,7 +4,7 @@
 //   npm run test:browser -- test/browser-host.test.ts
 // With the flag set anywhere else, they fail before any browser is launched.
 
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { connect as connectTcp } from "node:net";
 import { tmpdir, userInfo } from "node:os";
@@ -142,7 +142,24 @@ describe("the browser tests' gate", () => {
     ]);
     // The real /tmp is everyone's: the browser's own folders would be left there.
     for (const real of ["/tmp", "/tmp/", "/tmp/."]) expect(notIsolated({ TMPDIR: real })).toContain("TMPDIR is not a scratch folder");
-    expect(notIsolated({ TMPDIR: "/tmp/tmp.scratch/tmp" })).not.toContain("TMPDIR is not a scratch folder");
+    const scratch = mkdtempSync(join(tmpdir(), "sb-gate-"));
+    try {
+      mkdirSync(join(scratch, "tmp"));
+      expect(notIsolated({ TMPDIR: join(scratch, "tmp") })).not.toContain("TMPDIR is not a scratch folder");
+      // A link is where it leads: into the user's home, or to the session's own runtime folder.
+      const { uid, homedir } = userInfo();
+      symlinkSync(homedir, join(scratch, "home"));
+      symlinkSync(`/run/user/${uid}`, join(scratch, "run"));
+      symlinkSync("/tmp", join(scratch, "temp"));
+      const linked = notIsolated({ HOME: join(scratch, "home"), XDG_CONFIG_HOME: join(scratch, "home", ".config"), XDG_RUNTIME_DIR: join(scratch, "run"), TMPDIR: join(scratch, "temp") });
+      for (const named of ["HOME is not a scratch folder", "XDG_CONFIG_HOME is not a scratch folder", "XDG_RUNTIME_DIR is not a scratch folder of mode 0700", "TMPDIR is not a scratch folder"]) {
+        expect(linked).toContain(named);
+      }
+      // And a folder that is not there is no scratch folder.
+      expect(notIsolated({ HOME: join(scratch, "gone") })).toContain("HOME is not a scratch folder");
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });
 
