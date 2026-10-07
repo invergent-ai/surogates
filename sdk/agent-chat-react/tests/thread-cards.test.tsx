@@ -69,6 +69,17 @@ describe("the reducer's thread cards", () => {
     expect(failed.messages[0]?.worker).toMatchObject({ state: "failed", report: "recovery_loop" });
   });
 
+  it("draws nothing for a report from a worker it has no card for, as a delegated task's", () => {
+    const before = applied({ type: "llm.response", data: { message: { content: "I delegated it." } } });
+    for (const report of [
+      { type: "worker.complete" as const, data: { worker_id: THREAD, result: "Done." } },
+      { type: "worker.failed" as const, data: { worker_id: THREAD, error: "recovery_loop" } },
+    ]) {
+      const after = applyAgentChatEvent(before, { ...report, eventId: 2 });
+      expect(after.messages).toEqual(before.messages);
+    }
+  });
+
   it("keeps the loop's control markup out of a mission worker's report", () => {
     const state = applied(spawned(), { type: "worker.complete", data: {
       worker_id: THREAD, result: 'Checked the figures.\n<next_action complexity="low">done</next_action>',
