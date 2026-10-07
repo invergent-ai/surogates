@@ -73,7 +73,11 @@ describe("one of the app's own pages", () => {
     ["a frame inside it", { url: "file:///opt/surogate/dist/shell/pages/prompt.html", parent: {} }, false],
     ["a web page", { url: "https://agent.example.com/prompt.html", parent: null }, false],
     ["a frame that has gone", null, false],
+    ["a frame that was never there", undefined, false],
+    ["a file of another host", { url: "file://evil.example/opt/surogate/dist/shell/pages/prompt.html", parent: null }, false],
+    ["a path with an encoded slash", { url: "file:///opt/surogate/dist/shell/pages%2Fprompt.html", parent: null }, false],
   ])("is %s: %s", (_name, frame, own) => {
-    expect(ownPage(frame, PAGE)).toBe(own);
+    // No frame, however a caller spells it, is none of the app's pages.
+    expect(ownPage(frame as Parameters<typeof ownPage>[0], PAGE)).toBe(own);
   });
 });

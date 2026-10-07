@@ -39,6 +39,11 @@ export const webClientPath = (path: string): boolean => PATHS.test(path);
 
 /** A call from *page*, one of the app's own pages, in its top frame: no other page, a file dropped there included. */
 export function ownPage(frame: { readonly url: string; readonly parent: unknown } | null, page: string): boolean {
-  if (frame === null || frame.parent !== null || !frame.url.startsWith("file:")) return false;
-  return fileURLToPath(frame.url) === page;
+  if (frame == null || frame.parent !== null || !frame.url.startsWith("file:")) return false;
+  // A file URL no path can be (another host's, an encoded slash) is none of the app's pages either.
+  try {
+    return fileURLToPath(frame.url) === page;
+  } catch {
+    return false;
+  }
 }
