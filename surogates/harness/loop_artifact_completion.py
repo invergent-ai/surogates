@@ -1148,12 +1148,15 @@ class ArtifactCompletionMixin:
         }
         if cost_tracker is not None:
             fail_data["cost_summary"] = cost_tracker.summary()
-        # A failed turn spent what it spent; its holds settle as a
+        # A project's failed turn spent what it spent; its holds settle as a
         # completed turn's do, rather than waiting for a reaper or a refill.
-        await asyncio.gather(
-            self._settle_commerce_reservation(session, cost_tracker),
-            self._settle_allowance_reservation(session, cost_tracker),
-        )
+        # Only a project's session holds its next turn again at its wake; any
+        # other session's retry, or a message typed meanwhile, settles them.
+        if admitted_at_wake(session):
+            await asyncio.gather(
+                self._settle_commerce_reservation(session, cost_tracker),
+                self._settle_allowance_reservation(session, cost_tracker),
+            )
         fail_event_id = await self._store.emit_event(
             session.id, EventType.SESSION_FAIL, fail_data,
         )

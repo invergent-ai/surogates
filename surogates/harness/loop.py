@@ -892,12 +892,15 @@ class AgentHarness(
         reason_msg = self._interrupt_message or "interrupted"
         if saga is not None and saga.active_sagas:
             await self._compensate_sagas(saga, session, "interrupt")
-        # A stopped turn spent what it spent: settle its holds now, or a
-        # session stopped for good, a resolved thread, keeps them reserved.
-        await asyncio.gather(
-            self._settle_commerce_reservation(session, cost_tracker),
-            self._settle_allowance_reservation(session, cost_tracker),
-        )
+        # A project's stopped turn spent what it spent: settle its holds now,
+        # or a resolved thread keeps them reserved.  Only a project's session
+        # holds its next turn again at its wake; any other session's next
+        # turn (a resume, a retry, a message typed meanwhile) settles them.
+        if admitted_at_wake(session):
+            await asyncio.gather(
+                self._settle_commerce_reservation(session, cost_tracker),
+                self._settle_allowance_reservation(session, cost_tracker),
+            )
         if self._sandbox_pool is not None:
             try:
                 await self._sandbox_pool.destroy_for_session(str(session.id))

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import pytest
 from sqlalchemy import update
 
 import surogates.harness.loop as loop_module
 from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
+from surogates.channels.channel_state import ChannelAdapterState
+from surogates.channels.identity import get_or_create_channel_session
+from surogates.channels.inbound import ChannelInboundPipeline, InboundMessage, InboundOutcome, PipelineDeps
 from surogates.db.models import User
 from surogates.harness.loop_context_replay import unread_reports
 from surogates.runtime import SlashCommandConfig
@@ -17,7 +22,7 @@ from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
 from tests.test_wake_slash_command_gate import _harness
 
-from .test_devices import api  # noqa: F401  (api is a fixture)
+from .test_devices import AGENT_ID, api  # noqa: F401  (api is a fixture)
 from .test_workstream_threads import answered, events_of, start, turn_ends, turn_of_the_master_ends
 from .test_workstreams import create, master_of
 
@@ -88,11 +93,14 @@ def served(api, payload: dict, ops: Ops) -> None:
     api.app.state.platform_client = ops
 
 
-def worker(api, monkeypatch, payload: dict, ops: Ops, *, ends: str = "completed"):
+def worker(api, monkeypatch, payload: dict, ops: Ops, *, ends: str = "completed", turns: tuple = ()):
     """A worker whose wake runs for real; its turn spends 1,200 tokens in and
     300 out, then ends as the loop ends one: ``completed``, ``stopped`` (the
     user stopped or resolved the thread) or ``failed`` (the provider kept
-    failing).  Returns it and the turns it ran."""
+    failing).  *turns*, when given, scripts its wakes' turns in order instead,
+    each as the tokens it spends, what the user does while it runs (called
+    with the harness and the session), and how it ends.  Returns it and the
+    turns it ran."""
     monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
     state = api.app.state
     harness = _harness(state.session_store, SlashCommandConfig())
@@ -102,13 +110,18 @@ def worker(api, monkeypatch, payload: dict, ops: Ops, *, ends: str = "completed"
     harness._platform_client, harness._runtime_config_cache = ops, RuntimeConfig(payload)
     ran: list = []
 
+    async def resolved(harness, session):
+        harness.interrupt("Resolved by the user")  # as the dispatcher relays a stop
+
     async def turn(session, messages, system_prompt, lease, *, cost_tracker, **_):
+        tokens, meanwhile, end = turns[len(ran)] if turns else (1500, resolved if ends == "stopped" else None, ends)
         ran.append(session.id)
-        cost_tracker.record_call(1200, 300, 0.0)
-        if ends == "stopped":
-            harness.interrupt("Resolved by the user")  # as the dispatcher relays a stop
+        cost_tracker.record_call(tokens * 4 // 5, tokens // 5, 0.0)
+        if meanwhile is not None:
+            await meanwhile(harness, session)
+        if end == "stopped":  # at the loop's next interrupt check
             await harness._abort_iteration_with_pause(session, None, cost_tracker)
-        elif ends == "failed":
+        elif end == "failed":
             await harness._fail_session(session, messages, lease, reason="provider_error", cost_tracker=cost_tracker)
         else:
             await harness._complete_session(session, messages, lease, reason="completed", cost_tracker=cost_tracker)
@@ -319,3 +332,129 @@ async def test_a_refused_thread_wakes_the_master_at_most_once(api, monkeypatch):
     await harness.wake((await start(api, master, title="Summarise B", goal=goal)).id)
     await harness.wake(master.id)
     assert ran == [master.id]
+
+
+async def a_chat(api) -> UUID:
+    """An ordinary chat, outside any project."""
+    response = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    assert response.status_code == 201, response.text
+    return UUID(response.json()["id"])
+
+
+async def typed(api, session_id, text: str) -> None:
+    response = await api.client.post(f"/v1/sessions/{session_id}/messages", json={"content": text}, headers=api.auth())
+    assert response.status_code == 202, response.text
+
+
+async def acted(api, session_id, action: str) -> None:
+    """The user pauses, resumes or retries *session_id*."""
+    response = await api.client.post(f"/v1/sessions/{session_id}/{action}", headers=api.auth())
+    assert response.status_code == 200, response.text
+
+
+def paused(api, *, then_typed: str | None = None):
+    """The user pauses the chat while its turn runs, and types *then_typed*
+    before the worker's next interrupt check."""
+    async def act(harness, session):
+        await acted(api, session.id, "pause")
+        harness.interrupt("paused by user")  # as the worker's interrupt listener relays it
+        if then_typed is not None:
+            await typed(api, session.id, then_typed)
+    return act
+
+
+async def charged(api, monkeypatch, payload, ops, first, *, after=None) -> list:
+    """An ordinary chat's first turn plays *first*, *after* runs, then its
+    next turn spends 1,500 tokens and completes.  Returns what ops debited."""
+    await a_firebase_user(api)
+    served(api, payload, ops)
+    chat = await a_chat(api)
+    await typed(api, chat, "Draft the memo.")
+    harness, ran = worker(api, monkeypatch, payload, ops, turns=(first, (1500, None, "completed")))
+    await harness.wake(chat)
+    if after is not None:
+        await after(chat)
+    await harness.wake(chat)
+    assert ran == [chat, chat]
+    return ops.spent
+
+
+PLANES = pytest.mark.parametrize("payload, plane", [(CAPPED, "allowance"), (PAID, "paid")], ids=["allowance", "paid"])
+
+
+# Only a project's session holds its next turn again at its wake.  Any other
+# session's stopped or failed turn leaves its holds to the turn that runs
+# next, a resume's, a retry's or a message's typed meanwhile, which spends them.
+
+@PLANES
+async def test_a_message_typed_while_an_ordinary_chat_stops_is_charged_in_full(api, monkeypatch, payload, plane):
+    spent = await charged(api, monkeypatch, payload, Ops(), (150, paused(api, then_typed="Make it shorter."), "stopped"))
+    assert spent == [(plane, "hold-1", 1500), (plane, "hold-2", 0)]
+
+
+@PLANES
+@pytest.mark.parametrize("ends, action", [("stopped", "resume"), ("failed", "retry")], ids=["resumed", "retried"])
+async def test_an_ordinary_chat_resumed_or_retried_is_charged_in_full(api, monkeypatch, payload, plane, ends, action):
+    spent = await charged(
+        api, monkeypatch, payload, Ops(), (150, paused(api) if ends == "stopped" else None, ends),
+        after=lambda chat: acted(api, chat, action),
+    )
+    assert spent == [(plane, "hold-1", 1500)]
+
+
+@PLANES
+async def test_an_ordinary_chat_stopped_at_once_and_resumed_past_the_limit_is_charged_in_full(
+    api, monkeypatch, payload, plane,
+):
+    ops = Ops()
+
+    async def resumed_past_the_limit(chat):
+        ops.allowance_left = ops.paid_left = False  # a resume is not held again
+        await acted(api, chat, "resume")
+
+    spent = await charged(api, monkeypatch, payload, ops, (0, paused(api), "stopped"), after=resumed_past_the_limit)
+    assert spent == [(plane, "hold-1", 1500)]
+
+
+async def test_a_message_sent_after_a_channel_stop_is_charged_in_full(api, monkeypatch):
+    ops, pipeline, chats = Ops(), ChannelInboundPipeline(), []
+    routing = SimpleNamespace(org_id=api.org_id, agent_id=AGENT_ID, platform="slack", identifier="A0APP")
+
+    async def enqueued(redis, *, org_id, agent_id, session_id):
+        chats.append(session_id)
+
+    async def resolved_identity(*_, **__):
+        return SimpleNamespace(user_id=api.user_id)
+
+    async def nothing(*_, **__):
+        return None
+
+    deps = PipelineDeps(
+        session_store=api.app.state.session_store, redis=api.app.state.redis,
+        state=ChannelAdapterState(api.app.state.redis, agent_id=AGENT_ID, platform="slack"),
+        firehose_append=nothing, get_or_create_session=get_or_create_channel_session,
+        enqueue_session=enqueued, resolve_identity=resolved_identity,
+        session_factory=api.app.state.session_factory, platform_client=ops, runtime_config=RuntimeConfig(CAPPED).get,
+    )
+
+    async def sent(text: str, ts: str) -> InboundOutcome:
+        """The user sends *text* to the agent in a Slack DM."""
+        message = InboundMessage(
+            kind="text", identifier="D1", thread_key=None, platform_user_id="U1", user_name="Flavius",
+            text=text, media_urls=[], media_types=[], is_dm=True, is_mention=False, ts=ts, source={},
+        )
+        return await pipeline.handle(message, routing=routing, config={"require_mention": True}, deps=deps)
+
+    async def stopped_and_sent_again(harness, session):
+        assert await sent("/stop", "2.0") == InboundOutcome.INTERRUPTED
+        harness.interrupt("channel_stop")  # as the worker's interrupt listener relays it
+        assert await sent("Draft the letter instead.", "3.0") == InboundOutcome.PROCESSED
+
+    assert await sent("Draft the memo.", "1.0") == InboundOutcome.PROCESSED
+    harness, ran = worker(api, monkeypatch, CAPPED, ops, turns=(
+        (150, stopped_and_sent_again, "stopped"), (1500, None, "completed"),
+    ))
+    await harness.wake(chats[0])
+    await harness.wake(chats[0])
+    assert ran == [chats[0], chats[0]]
+    assert ops.spent == [("allowance", "hold-1", 1500), ("allowance", "hold-2", 0)]
