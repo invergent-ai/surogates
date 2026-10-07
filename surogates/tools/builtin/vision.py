@@ -114,6 +114,7 @@ async def _vision_analyze_handler(arguments: dict[str, Any], **kwargs: Any) -> s
             session_config=kwargs.get("session_config"),
             sandbox_pool=kwargs.get("sandbox_pool"),
             owner=kwargs.get("task_id"),
+            workspace_io=kwargs.get("workspace_io"),
         )
     except ValueError as exc:
         return _json_error(str(exc))
@@ -209,7 +210,14 @@ async def _image_ref_to_data_url(
     session_config: dict[str, Any] | None = None,
     sandbox_pool: Any | None = None,
     owner: Any | None = None,
+    workspace_io: Any | None = None,
 ) -> tuple[str, str]:
+    """*image_ref* as a data URL, and where it came from.
+
+    A tool call of a chat on a local folder has the folder's *workspace_io*:
+    an image in the folder is read from the computer through it, so the
+    reads are journaled under that call.
+    """
     if image_ref.startswith("data:image/"):
         return _validate_data_url(image_ref), "data_url"
 
@@ -220,6 +228,24 @@ async def _image_ref_to_data_url(
         if mime_type not in _SUPPORTED_MIME_TYPES:
             raise ValueError(f"Unsupported image MIME type: {mime_type or 'unknown'}")
         return _to_data_url(data, mime_type), "url"
+
+    if workspace_io is not None:
+        try:
+            key = await workspace_io.resolve(image_ref)
+            found = await workspace_io.stat(key)
+            if found is None or found.is_dir:
+                raise ValueError(f"Image file not found: {image_ref}")
+            if found.size > _MAX_IMAGE_BYTES:
+                raise ValueError(
+                    f"Image file is too large: {found.size} bytes exceeds {_MAX_IMAGE_BYTES}"
+                )
+            data = await workspace_io.read(key)
+        except OSError as exc:
+            raise ValueError(f"Could not read image {image_ref}: {exc}") from None
+        mime_type = _detect_mime_type(data, fallback=mimetypes.guess_type(key)[0] or "")
+        if mime_type not in _SUPPORTED_MIME_TYPES:
+            raise ValueError(f"Unsupported image MIME type: {mime_type or 'unknown'}")
+        return _to_data_url(data, mime_type), "workspace_file"
 
     if storage is not None and session_id is not None:
         storage_bucket = (session_config or {}).get("storage_bucket")
