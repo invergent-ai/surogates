@@ -117,6 +117,18 @@ describe("the user menu", () => {
     expect(await shell.evaluate(() => (globalThis as unknown as { opened: unknown[] }).opened.length)).toBe(2);
   });
 
+  it("names the user from the app's own sign-in until the web client reports, with nothing of the organisation", async () => {
+    const shell = await launch(home);
+    app = shell;
+    await stubNative(shell);
+    const page = await shellPage(shell);
+    await connect(page, origin);
+    await signedInAndAdded(shell, page, agent);
+    const { orgName: _, ...shown } = ACCOUNT;
+    await expect.poll(() => page.evaluate(() => (window as unknown as { surogateShell: { state(): Promise<{ account: unknown }> } })
+      .surogateShell.state().then((state) => state.account))).toEqual(shown);
+  });
+
   it("forgets the account once the user signs out in the web client", async () => {
     const { page, client } = await signedIn();
     await client.evaluate(() => window.surogateDesktop!.setAccount(null));

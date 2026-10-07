@@ -1173,6 +1173,14 @@ function deviceLine(agent: Agent): string {
   return describeAgent(agent, kept?.token === null ? { status: "revoked", computer: kept.name } : null);
 }
 
+// Who the web client says is signed in, or until it has said, the app's own sign-in, whose organisation's name is Settings' alone.
+function sidebarAccount(): DesktopAccount | null {
+  if (account !== undefined) return account;
+  if (!signedIn) return null;
+  const { orgName: _, ...shown } = signedIn.account;
+  return shown;
+}
+
 function state() {
   const agent = agents.get();
   return {
@@ -1182,8 +1190,7 @@ function state() {
       text: deviceLine(agent),
       status: device?.status ?? (kept?.token === null ? "revoked" : null),
     },
-    // Who the web client says is signed in, or until it has said, the app's own sign-in.
-    account: account === undefined ? signedIn?.account ?? null : account,
+    account: sidebarAccount(),
     view,
     overview: view.kind === "project" && overview?.project.id === view.id ? overview : null,
     projects: listed,
