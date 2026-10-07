@@ -121,13 +121,14 @@ export class BrowserProxy {
   // https and WebSockets: one tunnel, dialed at what was judged.
   private async tunnel(request: IncomingMessage, client: Duplex, head: Buffer): Promise<void> {
     this.keep(client);
+    // Before the lookup, so a browser that resets during it, or a close, has nothing dialed for it.
+    const gone = new AbortController();
+    client.once("close", () => gone.abort());
     const to = target(request.url);
     // The https upgrade's try at a check comes here; the plain request after it is answered.
     if (to && this.answered(to.host)) return void client.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
     const addresses = to && (await admitted(to.host, to.port, this.options));
     if (!to || !addresses) return void client.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
-    const gone = new AbortController();
-    client.once("close", () => gone.abort());
     let upstream: Socket;
     try {
       upstream = await dialFirst(addresses, to.port, gone.signal, this.options.connect);
@@ -137,6 +138,8 @@ export class BrowserProxy {
     this.keep(upstream);
     upstream.once("close", () => client.destroy());
     client.once("close", () => upstream.destroy());
+    // A browser closes a tunnel whole, never half: its end ends the tunnel, whether the site hears it or not.
+    client.once("end", () => upstream.destroy());
     client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
     if (head.length > 0) upstream.write(head);
     upstream.pipe(client);
@@ -167,6 +170,8 @@ export class BrowserProxy {
       return;
     }
     this.keep(socket);
+    // The browser gone, partway through the answer or before it: the site's connection goes too.
+    response.once("close", () => socket.destroy());
     // ponytail: one connection a request, none kept for the next; a pool if page loads ever show it.
     const upstream = httpRequest(
       { createConnection: () => socket, method: request.method, path: `${url.pathname}${url.search}`, headers: passed(request.headers), setHost: false },

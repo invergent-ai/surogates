@@ -24,9 +24,16 @@ const names: Record<string, string[][]> = {
   "compatible-lan.example": [["::c0a8:101"]],
   // An answer with a zone id, which no URL spells.
   "nat64-scoped.example": [["64:ff9b::5db8:d70e%eth0"]],
+  // A site that takes a connection, and then ignores the browser's close.
+  "holding.example": [["192.0.2.9"]],
+  // A site whose name takes SLOW_MS to look up.
+  "slow.example": [["93.184.215.14"]],
 };
-const resolve = (name: string) => {
+const SLOW_MS = 200;
+const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+const resolve = async (name: string) => {
   const seen = (lookups[name] = (lookups[name] ?? 0) + 1);
+  if (name === "slow.example") await sleep(SLOW_MS);
   const answers = names[name];
   if (!answers) return Promise.reject(new Error("ENOTFOUND"));
   return Promise.resolve(answers[Math.min(seen, answers.length) - 1] ?? []);
@@ -34,7 +41,11 @@ const resolve = (name: string) => {
 
 let echo: Server;
 let web: HttpServer;
-let ports: { echo: number; web: number; closed: number };
+let hold: Server;
+let ports: { echo: number; web: number; hold: number; closed: number };
+// The proxy's connections to the sites that are open now, and the sites' ends of every connection.
+let open: Set<Socket>;
+let accepted: Set<Socket>;
 let proxy: BrowserProxy;
 let port: number;
 // Each address:port the proxy dialed.
@@ -46,26 +57,42 @@ beforeEach(async () => {
   lookups = {};
   dialed = [];
   seen = [];
+  open = new Set();
+  accepted = new Set();
   echo = createServer((socket) => socket.on("data", (chunk) => socket.write(`echo ${chunk.toString()}`)));
   web = createHttp((req, res) => {
     seen.push({ method: req.method ?? "", url: req.url ?? "", host: req.headers.host ?? "", headers: Object.keys(req.headers) });
+    // An answer that streams until the browser goes, and one that never comes.
+    if (req.url === "/stream") {
+      const streaming = setInterval(() => res.write("x".repeat(1024)), 5);
+      return void res.once("close", () => clearInterval(streaming)).writeHead(200);
+    }
+    if (req.url === "/never") return;
     res.writeHead(201, { "content-type": "text/plain" }).end("hello from the site");
   });
+  // Reads all it is sent, and never closes, the browser's end or not.
+  hold = createServer({ allowHalfOpen: true }, (socket) => socket.resume());
   const closed = createServer();
-  await Promise.all([echo, web, closed].map((server) => new Promise<void>((done) => server.listen(0, "127.0.0.1", () => done()))));
+  for (const server of [echo, web, hold]) {
+    server.on("connection", (socket: Socket) => void accepted.add(socket.once("close", () => accepted.delete(socket))));
+  }
+  await Promise.all([echo, web, hold, closed].map((server) => new Promise<void>((done) => server.listen(0, "127.0.0.1", () => done()))));
   const portOf = (server: Server | HttpServer) => (server.address() as { port: number }).port;
-  ports = { echo: portOf(echo), web: portOf(web), closed: portOf(closed) };
+  ports = { echo: portOf(echo), web: portOf(web), hold: portOf(hold), closed: portOf(closed) };
   await new Promise<void>((done) => closed.close(() => done()));
   proxy = new BrowserProxy({
     resolve,
     local: () => ["127.0.0.1", "::1", "198.51.100.5", "2001:db8:1::5"],
     // This computer's networks: a public IPv4 range, as a campus's is, and a home LAN's global IPv6 prefix.
     subnets: () => ["198.51.100.5/24", "2001:db8:1::5/64"],
-    // Every judged address reaches the servers here, by the port asked for; 192.0.2.1 refuses.
+    // Every judged address reaches the servers here, by the port asked for; 192.0.2.1 refuses,
+    // and 192.0.2.9 holds.
     connect: (address, to) => {
       dialed.push(`${address}:${to}`);
-      const at = address === "192.0.2.1" ? ports.closed : to === 443 ? ports.echo : ports.web;
-      return connectTcp({ host: "127.0.0.1", port: at });
+      const at = address === "192.0.2.1" ? ports.closed : address === "192.0.2.9" ? ports.hold : to === 443 ? ports.echo : ports.web;
+      const socket = connectTcp({ host: "127.0.0.1", port: at });
+      open.add(socket.once("close", () => open.delete(socket)));
+      return socket;
     },
   });
   port = await proxy.listen();
@@ -73,8 +100,24 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await proxy.close();
-  await Promise.all([echo, web].map((server) => new Promise<void>((done) => server.close(() => done()))));
+  for (const socket of accepted) socket.destroy();
+  await Promise.all([echo, web, hold].map((server) => new Promise<void>((done) => server.close(() => done()))));
 });
+
+// How many of the proxy's connections to the sites are still open once a second has passed for them to close.
+async function stillOpen(): Promise<number> {
+  for (let waited = 0; open.size > 0 && waited < 1_000; waited += 25) await sleep(25);
+  return open.size;
+}
+
+// A browser's raw connection to the proxy that has asked to CONNECT *authority*, once the proxy is looking it up.
+async function asking(authority: string): Promise<Socket> {
+  const browser = connectTcp({ host: "127.0.0.1", port });
+  browser.on("error", () => {});
+  browser.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`);
+  while (!lookups[authority.slice(0, authority.lastIndexOf(":"))]) await sleep(5);
+  return browser;
+}
 
 // CONNECT *authority* through the proxy, as the browser asks for https and WebSockets: its status, and the tunnel.
 function connect(authority: string): Promise<{ status: number; socket: Socket }> {
@@ -188,6 +231,51 @@ describe("the browser's proxy", () => {
     expect((await connect("4567ef00.proxy-check.invalid:443")).status).toBe(403);
     expect(proxy.checked("4567ef00")).toBe(true);
     expect(dialed).toEqual([]);
+  });
+
+  it("leaves nothing open when the browser leaves a plain answer partway through", async () => {
+    await new Promise<void>((done) => {
+      const asked = request({ host: "127.0.0.1", port, path: "http://example.com/stream", headers: { host: "example.com" } }, (answer) => {
+        answer.once("data", () => done(asked.destroy() && undefined));
+      });
+      asked.on("error", () => {});
+      asked.end();
+    });
+    expect(await stillOpen()).toBe(0);
+  });
+
+  it("leaves nothing open when the browser gives up on a plain request before any answer", async () => {
+    const asked = request({ host: "127.0.0.1", port, path: "http://example.com/never", headers: { host: "example.com" } });
+    asked.on("error", () => {});
+    asked.end();
+    while (!seen.some(({ url }) => url === "/never")) await sleep(5);
+    asked.destroy();
+    expect(await stillOpen()).toBe(0);
+  });
+
+  it("leaves nothing open when the browser closes a tunnel whose site ignores the close", async () => {
+    const { status, socket } = await connect("holding.example:443");
+    socket.on("error", () => {});
+    expect(status).toBe(200);
+    const closed = new Promise((done) => socket.once("close", done));
+    socket.resume().end();
+    expect(await stillOpen()).toBe(0);
+    await closed;
+  });
+
+  it("dials nothing for a tunnel the browser resets during its lookup", async () => {
+    (await asking("slow.example:443")).resetAndDestroy();
+    await sleep(2 * SLOW_MS);
+    expect(dialed).toEqual([]);
+    expect(await stillOpen()).toBe(0);
+  });
+
+  it("dials nothing for a tunnel still being looked up when it closes", async () => {
+    await asking("slow.example:443");
+    await proxy.close();
+    await sleep(2 * SLOW_MS);
+    expect(dialed).toEqual([]);
+    expect(await stillOpen()).toBe(0);
   });
 
   it("answers 400 for what is not a proxy's request", async () => {
