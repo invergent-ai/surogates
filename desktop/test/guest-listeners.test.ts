@@ -240,6 +240,11 @@ describe("a root's proxies", () => {
     await vi.waitFor(() => expect(left).toEqual(["wait.example:443", "wait.example:444", "wait.example:445"]), { timeout: 1_000 });
   });
 
+  it("give an HTTP client a minute to finish its headers, though none to finish its request", () => {
+    const server = proxies[0] as unknown as HttpServer;
+    expect([server.headersTimeout, server.requestTimeout]).toEqual([60_000, 0]);
+  });
+
   it("do not start where their ports are taken", async () => {
     const taken = portOf(proxies[0] as Server);
     await expect(listen(join(dir, "net.sock"), { http: taken, socks: 0 })).rejects.toThrow(/EADDRINUSE/);

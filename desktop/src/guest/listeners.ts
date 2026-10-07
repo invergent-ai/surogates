@@ -113,7 +113,9 @@ function forwarded(raw: readonly string[]): string[] {
 
 // HTTP: CONNECT for a tunnel, an absolute-form request for plain HTTP, one tunnel a request.
 function httpProxy(path: string): Server {
-  const server = createHttpServer({ requestTimeout: 0 });
+  // A request has no bound, an upload or a long poll; a client that stalls in its headers is
+  // dropped after a minute, node:http's default when a request has one.
+  const server = createHttpServer({ requestTimeout: 0, headersTimeout: 60_000 });
   // A client that half-closes once its request is sent (an HTTP/1.0 upload, `nc -N`) still
   // hears the answer: node:http's own switch, which its types do not name.
   Object.assign(server, { httpAllowHalfOpen: true });
