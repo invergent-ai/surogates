@@ -1,0 +1,185 @@
+import { type ChildProcess, fork } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+
+import { BROWSER_HOST, BROWSER_STOPPED, BrowserClient, type BrowserProcess, CANCELLED, type FromBrowser, type ToBrowser } from "../src/browser/client.js";
+import type { Operation } from "../src/link/protocol.js";
+import { isolated } from "./isolated.js";
+
+const operation = (id: string, kind = "browser.navigate", args: Record<string, unknown> = { url: "https://example.com/" }): Operation => ({
+  id, sessionId: "root", callingSessionId: "child", invocationId: "call", ordinal: 1, kind, args, digest: `d-${id}`,
+});
+const LAUNCH = { executable: "/opt/google/chrome/chrome", profile: "/tmp/nowhere" };
+
+// A host in a test: what it was sent, and its answers and exit as the test makes them.
+class FakeHost implements BrowserProcess {
+  readonly sent: ToBrowser[] = [];
+  private listener: (message: FromBrowser) => void = () => {};
+  private readonly exits: Array<() => void> = [];
+  exited = false;
+  killed = false;
+  send(message: ToBrowser): void {
+    this.sent.push(message);
+  }
+  onMessage(listener: (message: FromBrowser) => void): void {
+    this.listener = listener;
+  }
+  onExit(listener: () => void): void {
+    if (this.exited) listener();
+    else this.exits.push(listener);
+  }
+  kill(): void {
+    this.killed = true;
+    this.exit();
+  }
+  say(message: FromBrowser): void {
+    this.listener(message);
+  }
+  exit(): void {
+    if (this.exited) return;
+    this.exited = true;
+    for (const listener of this.exits) listener();
+  }
+}
+
+describe("the browser host's client", () => {
+  it("starts a host at the first operation, sends it the calling session's operation, and gives its answer", async () => {
+    const hosts: FakeHost[] = [];
+    const client = new BrowserClient(() => {
+      hosts.push(new FakeHost());
+      return hosts.at(-1)!;
+    });
+    const answered = client.perform(LAUNCH, operation("op-1"), new AbortController().signal);
+    expect(hosts).toHaveLength(1);
+    expect(hosts[0]!.sent).toEqual([{ type: "op", id: "op-1", launch: LAUNCH, root: "root", session: "child", kind: "browser.navigate", args: { url: "https://example.com/" } }]);
+    hosts[0]!.say({ type: "result", id: "op-1", outcome: { ok: { url: "https://example.com/", title: "Example" } } });
+    expect(await answered).toEqual({ ok: { url: "https://example.com/", title: "Example" } });
+  });
+
+  it("tells a running host to close a deleted chat's tabs, and starts none to do it", () => {
+    const hosts: FakeHost[] = [];
+    const client = new BrowserClient(() => {
+      hosts.push(new FakeHost());
+      return hosts.at(-1)!;
+    });
+    client.forget("root");
+    expect(hosts).toHaveLength(0);
+    void client.perform(LAUNCH, operation("op-1"), new AbortController().signal);
+    client.forget("root");
+    expect(hosts[0]!.sent.at(-1)).toEqual({ type: "forget", root: "root" });
+  });
+
+  it("answers a cancel at once and tells the host", async () => {
+    const host = new FakeHost();
+    const client = new BrowserClient(() => host);
+    const cancel = new AbortController();
+    const answered = client.perform(LAUNCH, operation("op-1"), cancel.signal);
+    cancel.abort();
+    expect(await answered).toEqual(CANCELLED);
+    expect(host.sent.at(-1)).toEqual({ type: "cancel", id: "op-1" });
+  });
+
+  it("answers what a host that went was running as interrupted, and starts another for the next", async () => {
+    const hosts: FakeHost[] = [];
+    const client = new BrowserClient(() => {
+      hosts.push(new FakeHost());
+      return hosts.at(-1)!;
+    });
+    const running = client.perform(LAUNCH, operation("op-1"), new AbortController().signal);
+    hosts[0]!.exit();
+    expect(await running).toEqual(BROWSER_STOPPED);
+    void client.perform(LAUNCH, operation("op-2"), new AbortController().signal);
+    expect(hosts).toHaveLength(2);
+  });
+
+  it("stops its host, which closes the browser, and runs nothing after", async () => {
+    const host = new FakeHost();
+    const client = new BrowserClient(() => host);
+    void client.perform(LAUNCH, operation("op-1"), new AbortController().signal);
+    const stopped = client.stop();
+    expect(host.sent.at(-1)).toEqual({ type: "stop" });
+    host.say({ type: "stopped" });
+    await stopped;
+    expect(host.killed).toBe(true);
+    expect(await client.perform(LAUNCH, operation("op-2"), new AbortController().signal)).toEqual(BROWSER_STOPPED);
+  });
+
+  it("ends its host when the computer's access ends, and a later operation starts one again", async () => {
+    const hosts: FakeHost[] = [];
+    const client = new BrowserClient(() => {
+      hosts.push(new FakeHost());
+      return hosts.at(-1)!;
+    });
+    void client.perform(LAUNCH, operation("op-1"), new AbortController().signal);
+    const ended = client.end();
+    hosts[0]!.say({ type: "stopped" });
+    await ended;
+    void client.perform(LAUNCH, operation("op-2"), new AbortController().signal);
+    expect(hosts).toHaveLength(2);
+  });
+});
+
+const EXECUTABLE = ["/opt/google/chrome/chrome", "/opt/microsoft/msedge/msedge"].find((path) => existsSync(path));
+const run = EXECUTABLE !== undefined && process.env.SUROGATE_BROWSER_TESTS === "1";
+
+let profile = "";
+afterEach(() => {
+  if (profile) rmSync(profile, { recursive: true, force: true });
+  profile = "";
+});
+
+const browserOf = (path: string) => readdirSync("/proc").filter((pid) => /^\d+$/.test(pid)).filter((pid) => {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8").includes(path);
+  } catch {
+    return false;
+  }
+});
+
+// The real host, a Node child process of the test's own, behind SUROGATE_BROWSER_TESTS=1 and apart from the user's session, as browser-host.test.ts says.
+describe.skipIf(!run)("the browser host's process", () => {
+  beforeAll(() => isolated());
+
+  it("takes its browser with it when it is killed, and its running operation is answered interrupted", async () => {
+    profile = mkdtempSync(join(tmpdir(), "sb-profile-"));
+    let child: ChildProcess | undefined;
+    const client = new BrowserClient(() => {
+      child = fork(BROWSER_HOST, [], { stdio: ["ignore", 2, 2, "ipc"] });
+      const exits: Array<() => void> = [];
+      let closed = false;
+      child.once("close", () => {
+        closed = true;
+        for (const listener of exits) listener();
+      });
+      return {
+        send: (message) => void child!.send(message),
+        onMessage: (listener) => void child!.on("message", (message) => listener(message as FromBrowser)),
+        onExit: (listener) => (closed ? listener() : void exits.push(listener)),
+        kill: () => void child!.kill("SIGKILL"),
+      };
+    });
+    const launch = { executable: EXECUTABLE!, profile };
+    const signal = new AbortController().signal;
+    // This computer's own address: refused by the proxy, but the browser is up, with a tab.
+    expect(await client.perform(launch, operation("op-1", "browser.navigate", { url: "http://127.0.0.1:9/" }), signal)).toMatchObject({ error: { type: "browser" } });
+    expect(browserOf(profile).length).toBeGreaterThan(0);
+    const running = client.perform(launch, operation("op-2", "browser.evaluate", { code: "await new Promise((r) => setTimeout(r, 60000));" }), signal);
+    await new Promise((done) => setTimeout(done, 500));
+    child!.kill("SIGKILL");
+    expect(await running).toEqual(BROWSER_STOPPED);
+    await expect.poll(() => browserOf(profile).length, { timeout: 5_000 }).toBe(0);
+  });
+
+  it("launches a browser the user picked once, headless, and says its version", async () => {
+    const client = new BrowserClient();
+    try {
+      expect((await client.tryBrowser(EXECUTABLE!) as { ok: { version: string } }).ok.version).toMatch(/^\d+\./);
+      expect(await client.tryBrowser("/bin/true")).toMatchObject({ error: { type: "browser" } });
+    } finally {
+      await client.stop();
+    }
+  });
+});

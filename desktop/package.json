@@ -15,18 +15,19 @@
     "start": "npm run build && npm run agent-disk && env -u ELECTRON_RUN_AS_NODE electron dist/shell/main.js",
     "pretest": "npm run build",
     "test": "vitest run",
+    "test:browser": "npm run build && sh test/isolated.sh vitest run --no-file-parallelism",
     "test:e2e": "npm run build && npm run agent-disk && xvfb-run -a vitest run -c vitest.e2e.config.ts",
     "agent-disk": "vm/agent-disk.sh dist/agent.img"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.77",
+    "playwright-core": "1.63.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
     "@types/ws": "^8.5.12",
     "electron": "44.5.0",
-    "playwright-core": "1.63.0",
     "typescript": "~5.9.3",
     "vitest": "^3.2.4"
   }

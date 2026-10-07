@@ -1,0 +1,278 @@
+// The browser host with the user's own browser: Chrome or Edge from its .deb, headed on xvfb's
+// display. Behind SUROGATE_BROWSER_TESTS=1, as the VM tests are behind theirs, and skipped where
+// neither browser is installed. Run apart from the user's session (test/isolated.sh), as
+//   npm run test:browser -- test/browser-host.test.ts
+// With the flag set anywhere else, they fail before any browser is launched.
+
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import { connect as connectTcp } from "node:net";
+import { tmpdir, userInfo } from "node:os";
+import { join } from "node:path";
+
+import type { BrowserContext } from "playwright-core";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+import { BrowserHost, type BrowserHostOptions, type Launch, PROXY_BYPASSED, WEAKENING } from "../src/browser/host.js";
+import { isolated, notIsolated } from "./isolated.js";
+
+const EXECUTABLE = ["/opt/google/chrome/chrome", "/opt/microsoft/msedge/msedge"].find((path) => existsSync(path));
+const run = EXECUTABLE !== undefined && process.env.SUROGATE_BROWSER_TESTS === "1";
+const ROOT = "root-1";
+
+// The fixture, as a site past this computer: fixture.test leads to 203.0.113.10, which the
+// proxy dials at the fixture's own port here. Every other name is unknown.
+const SITE = "203.0.113.10";
+
+const PAGE = `<!doctype html><title>Fixture</title>
+<button id="go" style="position:absolute;left:40px;top:40px;width:100px;height:30px" onclick="document.title='clicked '+(++window.n)">Go</button>
+<input id="name" style="position:absolute;left:40px;top:100px;width:200px;height:24px">
+<a id="pop" href="/second" target="_blank" style="position:absolute;left:40px;top:150px">Open</a>
+<input id="file" type="file" style="position:absolute;left:40px;top:200px">
+<a id="dl" href="/report.txt" download style="position:absolute;left:40px;top:250px">Download</a>
+<iframe src="/inner" style="position:absolute;left:300px;top:40px;width:200px;height:100px"></iframe>
+<div style="height:4000px"></div>
+<script>window.n = 0;</script>`;
+
+let site: Server;
+let canary: Server;
+let ports: { site: number; canary: number };
+let hits: string[];
+let profile: string;
+let launch: Launch;
+let host: BrowserHost;
+let next = 0;
+
+beforeEach(async () => {
+  hits = [];
+  site = createServer((req, res) => {
+    if (req.url === "/inner") return void res.writeHead(200, { "content-type": "text/html" }).end(`<a href="/x">Inner link</a>`);
+    if (req.url === "/report.txt") return void res.writeHead(200, { "content-type": "text/plain", "content-disposition": "attachment" }).end("report");
+    if (req.url === "/second") return void res.writeHead(200, { "content-type": "text/html" }).end("<title>Second</title>");
+    // A service worker that would answer every request of its origin's pages.
+    if (req.url === "/sw.js") {
+      return void res.writeHead(200, { "content-type": "text/javascript" })
+        .end(`self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener("fetch", (event) => event.respondWith(new Response("<title>Served by the worker</title>", { headers: { "content-type": "text/html" } })));`);
+    }
+    if (req.url === "/redirect") return void res.writeHead(302, { location: `http://127.0.0.1:${ports.canary}/redirected` }).end();
+    if (req.url === "/reach") {
+      // Every way a page reaches out, at this computer's own service: directly, from a worker, and by a redirect.
+      const own = `http://127.0.0.1:${ports.canary}`;
+      return void res.writeHead(200, { "content-type": "text/html" }).end(`<title>Reach</title>
+<img src="${own}/img"><img src="/redirect"><iframe src="${own}/frame"></iframe>
+<script>fetch("${own}/fetch").catch(()=>{});new WebSocket("ws://127.0.0.1:${ports.canary}/ws");navigator.sendBeacon("${own}/beacon");
+new Worker(URL.createObjectURL(new Blob([\`fetch("${own}/worker").catch(()=>{})\`])));</script>`);
+    }
+    res.writeHead(200, { "content-type": "text/html" }).end(PAGE);
+  });
+  canary = createServer((req, res) => {
+    hits.push(req.url ?? "");
+    res.end("canary");
+  });
+  canary.on("upgrade", (req, socket) => {
+    hits.push(req.url ?? "");
+    socket.destroy();
+  });
+  await Promise.all([site, canary].map((server) => new Promise<void>((done) => server.listen(0, "127.0.0.1", () => done()))));
+  ports = { site: (site.address() as { port: number }).port, canary: (canary.address() as { port: number }).port };
+  profile = mkdtempSync(join(tmpdir(), "sb-profile-"));
+  launch = { executable: EXECUTABLE ?? "", profile };
+  host = hostWith();
+});
+
+// A host whose proxy finds fixture.test at SITE and dials the fixture there; *options* add to it.
+const hostWith = (options: Omit<BrowserHostOptions, "proxy"> = {}) => new BrowserHost({
+  proxy: {
+    resolve: (name) => (name === "fixture.test" ? Promise.resolve([SITE]) : Promise.reject(new Error("ENOTFOUND"))),
+    local: () => ["127.0.0.1", "::1"],
+    connect: (address, port) => connectTcp({ host: "127.0.0.1", port: address === SITE && port === 80 ? ports.site : 9 }),
+  },
+  ...options,
+});
+
+afterEach(async () => {
+  await host.close();
+  await Promise.all([site, canary].map((server) => new Promise<void>((done) => server.close(() => done()))));
+  rmSync(profile, { recursive: true, force: true });
+});
+
+const op = (session: string, kind: string, args: Record<string, unknown> = {}, root = ROOT) =>
+  host.perform(launch, root, session, kind, args, new AbortController().signal) as Promise<{ ok?: any; error?: { type: string; message: string } }>;
+const script = async (session: string, code: string) => (await op(session, "browser.evaluate", { code })).ok?.value;
+const session = () => `session-${(next += 1)}`;
+
+// How many pages the running browser has.
+const pages = async () => (await (host as unknown as { running: Promise<BrowserContext> }).running).pages().length;
+
+// The browser's processes for this profile, each as its command line: Chrome rewrites its title, so split on spaces too.
+function processes(): Array<{ pid: string; args: string[] }> {
+  return readdirSync("/proc").filter((pid) => /^\d+$/.test(pid)).flatMap((pid) => {
+    try {
+      const line = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      return line.includes(profile) ? [{ pid, args: line.split(/[\0 ]/).filter(Boolean) }] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+describe("the browser tests' gate", () => {
+  it("names each thing that would put a test browser on the user's session", () => {
+    expect(notIsolated({ WAYLAND_DISPLAY: "wayland-0", XDG_SESSION_TYPE: "wayland", HOME: userInfo().homedir, XDG_RUNTIME_DIR: "/run/user/1000", DISPLAY: ":4242" })).toEqual([
+      "WAYLAND_DISPLAY is set",
+      "XDG_SESSION_TYPE and GDK_BACKEND are not both x11",
+      "DBUS_SESSION_BUS_ADDRESS is not disabled:",
+      "HOME is not a scratch folder",
+      "XDG_CONFIG_HOME is not a scratch folder",
+      "XDG_DATA_HOME is not a scratch folder",
+      "XDG_CACHE_HOME is not a scratch folder",
+      "XDG_STATE_HOME is not a scratch folder",
+      "XDG_RUNTIME_DIR is not a scratch folder of mode 0700",
+      "DISPLAY is not an Xvfb's",
+    ]);
+  });
+});
+
+describe.skipIf(!run)("the browser host", () => {
+  beforeAll(() => isolated());
+
+  it("launches the user's browser over a pipe, its sandbox on, without Playwright's weakening defaults, every request through the proxy", async () => {
+    const a = session();
+    expect(await op(a, "browser.navigate", { url: "http://fixture.test/", wait_until: "load" })).toEqual({
+      ok: { url: "http://fixture.test/", title: "Fixture", opened: true, notices: [] },
+    });
+    const main = processes().find(({ args }) => !args.some((arg) => arg.startsWith("--type=")) && args.includes("--remote-debugging-pipe"));
+    expect(main).toBeDefined();
+    const args = main!.args;
+    expect(args.some((arg) => arg.startsWith("--remote-debugging-port"))).toBe(false);
+    expect(processes().some(({ args: other }) => other.includes("--no-sandbox"))).toBe(false);
+    for (const weak of WEAKENING) expect(args).not.toContain(weak);
+    const disabled = args.filter((arg) => arg.startsWith("--disable-features=")).join(",");
+    expect(disabled).not.toContain("HttpsUpgrades");
+    expect(disabled).not.toContain("ThirdPartyStoragePartitioning");
+    expect(args).toContain("--proxy-bypass-list=<-loopback>");
+    expect(args.some((arg) => /^--proxy-server=http:\/\/127\.0\.0\.1:\d+$/.test(arg))).toBe(true);
+    // The renderers run in the browser's seccomp sandbox.
+    const renderers = processes().filter(({ args: other }) => other.includes("--type=renderer"));
+    expect(renderers.length).toBeGreaterThan(0);
+    for (const { pid } of renderers) expect(readFileSync(`/proc/${pid}/status`, "utf8")).toMatch(/Seccomp:\s+2/);
+    // WebRTC sends no UDP around the proxy.
+    const prefs = JSON.parse(readFileSync(join(profile, "Default", "Preferences"), "utf8"));
+    expect(prefs.webrtc.ip_handling_policy).toBe("disable_non_proxied_udp");
+  });
+
+  it("refuses this computer's own services to the page, whichever way it reaches, and to a navigation", async () => {
+    const a = session();
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/reach" })).ok?.title).toBe("Reach");
+    await new Promise((done) => setTimeout(done, 1_500));
+    // The agent hears why, where the browser says only net::ERR_*.
+    expect(await op(a, "browser.navigate", { url: `http://127.0.0.1:${ports.canary}/direct` })).toEqual({
+      error: { type: "browser", message: `The agent's browser does not reach this computer's own services (127.0.0.1:${ports.canary})` },
+    });
+    expect(await op(a, "browser.navigate", { url: "https://192.168.1.5/" })).toEqual({
+      error: { type: "browser", message: "The agent's browser does not reach private networks (192.168.1.5:443)" },
+    });
+    expect(hits).toEqual([]);
+  });
+
+  it("opens only http and https addresses", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    for (const url of ["file:///etc/hostname", "chrome://version", "edge://version", "view-source:http://fixture.test/", "javascript:alert(1)", "not a url"]) {
+      const refused = await op(a, "browser.navigate", { url });
+      expect(refused.error?.type, url).toBe("browser");
+    }
+    expect(await script(a, "return location.href;")).toBe("http://fixture.test/");
+  });
+
+  it("gives each session a tab of its own, and closes only its own", async () => {
+    const [a, b] = [session(), session()];
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/" })).ok?.opened).toBe(true);
+    expect((await op(b, "browser.navigate", { url: "http://fixture.test/second" })).ok?.opened).toBe(true);
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/second" })).ok?.opened).toBe(false);
+    expect(await op(a, "browser.close")).toEqual({ ok: { closed: true } });
+    expect(await op(a, "browser.close")).toEqual({ ok: { closed: false } });
+    // B's tab stays.
+    expect(await script(b, "return document.title;")).toBe("Second");
+    // A's next operation opens a tab again.
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/" })).ok?.opened).toBe(true);
+  });
+
+  it("launches again after its user closed it, in new tabs", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    for (const { pid } of processes().filter(({ args }) => !args.some((arg) => arg.startsWith("--type=")))) process.kill(Number(pid), "SIGTERM");
+    await expect.poll(() => processes().length, { timeout: 10_000 }).toBe(0);
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/second" })).ok).toMatchObject({ title: "Second", opened: true });
+  });
+
+  it("answers a script's value under value, whatever its shape, a transfer's too", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    const shaped = { transfer: { size: 5, sha256: "a".repeat(64) } };
+    expect(await op(a, "browser.evaluate", { code: `return ${JSON.stringify(shaped)};` })).toEqual({ ok: { value: shaped } });
+    expect(await op(a, "browser.evaluate", { code: "document.title = 'x';" })).toEqual({ ok: { value: null } });
+  });
+
+  it("closes a page that does not answer in time, and a close does not wait behind one", async () => {
+    await host.close();
+    host = hostWith({ boundMs: 2_000 });
+    const [a, b] = [session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    await op(b, "browser.navigate", { url: "http://fixture.test/second" });
+    // An endless script: its page is closed at the bound, and the session's next operation opens a tab again.
+    const started = performance.now();
+    expect(await op(a, "browser.evaluate", { code: "while (true) {}" })).toEqual({
+      error: { type: "browser", message: "The page did not answer within 2 s, so it was closed" },
+    });
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/" })).ok?.opened).toBe(true);
+    // A close goes past the one stuck in its line.
+    const stuck = op(a, "browser.evaluate", { code: "while (true) {}" });
+    await new Promise((done) => setTimeout(done, 300));
+    const closing = performance.now();
+    expect(await op(a, "browser.close")).toEqual({ ok: { closed: true } });
+    expect(performance.now() - closing).toBeLessThan(1_500);
+    expect((await stuck).error?.type).toBe("browser");
+    expect(await script(b, "return document.title;")).toBe("Second");
+    // The browser goes with its last tab, and the next operation launches it again.
+    expect(await op(b, "browser.close")).toEqual({ ok: { closed: true } });
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/" })).ok?.opened).toBe(true);
+  });
+
+  it("lets no service worker answer the agent's pages, one registered through the prototype's own register too", async () => {
+    await host.close();
+    // fixture.test as a secure origin, as an https site is: it may have service workers.
+    host = hostWith({ args: ["--unsafely-treat-insecure-origin-as-secure=http://fixture.test"] });
+    const [a, b] = [session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    await script(a, `await ServiceWorkerContainer.prototype.register.call(navigator.serviceWorker, "/sw.js");
+await navigator.serviceWorker.ready;`);
+    // Neither the page that registered it nor another chat's tab on its origin is answered by it.
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/second" })).ok?.title).toBe("Second");
+    expect((await op(b, "browser.navigate", { url: "http://fixture.test/second" })).ok?.title).toBe("Second");
+    expect(await script(b, "return (await fetch('/second')).text();")).toBe("<title>Second</title>");
+  });
+
+  it("refuses a browser whose requests do not come through its proxy, as a policy can make it, and leaves it closed", async () => {
+    await host.close();
+    // As a managed policy would: the browser takes its proxy settings from elsewhere.
+    host = hostWith({ args: ["--no-proxy-server"] });
+    expect(await op(session(), "browser.navigate", { url: "http://fixture.test/" })).toEqual({ error: { type: "browser", message: PROXY_BYPASSED } });
+    await expect.poll(() => processes().length, { timeout: 10_000 }).toBe(0);
+  });
+
+  it("closes every tab of a deleted chat's sessions, and no other chat's", async () => {
+    const [a, child, b] = [session(), session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    await op(child, "browser.navigate", { url: "http://fixture.test/second" }, "chat-1");
+    await op(b, "browser.navigate", { url: "http://fixture.test/second" }, "chat-2");
+    expect(await pages()).toBe(3);
+    await host.forget("chat-1");
+    expect(await pages()).toBe(1);
+    expect(await script(b, "return document.title;")).toBe("Second");
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1")).ok?.opened).toBe(true);
+  });
+});
