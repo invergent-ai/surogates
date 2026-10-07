@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -14,13 +15,15 @@ from surogates.memory.manager import MemoryManager
 from surogates.memory.r2_store import R2MemoryStore
 from surogates.orchestrator.worker import _build_r2_memory_keys
 from surogates.runtime import build_agent_runtime_context
+from surogates.scheduled.schedule import parse_schedule
+from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session.provisioning import create_child_session
 from surogates.tenant.context import TenantContext
 from tests.test_harness_resilience import _make_harness
 
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_workstream_threads import start
-from .test_workstreams import create, master_of, patch, runtime, system_prompt
+from .test_workstreams import create, master_of, patch, runtime, system_prompt, turn_calling
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -204,3 +207,40 @@ async def test_a_threads_helper_runs_under_the_users_package(api):
     # A helper's turn, often its only one, runs before any hold of its own pins the package.
     helper = await create_child_session(store=store, parent=thread, channel="delegation")
     assert helper.config["entitlements"] == package
+
+
+async def routine_made_in(monkeypatch, session, session_factory, prompt: str) -> None:
+    """*session*'s model makes a routine with ``cron_create``."""
+    call = {"cron_create": {"cron": "0 9 * * 1", "prompt": prompt, "name": prompt}}
+    _, _, answered = await turn_calling(monkeypatch, session, call, session_factory=session_factory)
+    assert json.loads(answered["call_cron_create"])["success"] is True
+
+
+async def test_the_routines_are_the_schedules_the_master_made(api, monkeypatch, session_factory):
+    master = await master_of(api, await create(api))
+    await routine_made_in(monkeypatch, master, session_factory, "Check the cash report")
+    chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    plain = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
+    # An ordinary chat makes its routines with a typed /loop.
+    await ScheduledSessionStore(session_factory).create(
+        org_id=plain.org_id, user_id=plain.user_id, agent_id=plain.agent_id, name="Water the plants",
+        prompt="Water the plants", schedule=parse_schedule("0 9 * * 1"), source="loop",
+        created_from_session_id=plain.id,
+    )
+
+    response = await api.client.get(f"/v1/scheduled-work?created_from_session_id={master.id}", headers=api.auth())
+    assert response.status_code == 200, response.text
+    [routine] = response.json()["items"]
+    assert (routine["name"], routine["schedule_display"], routine["status"]) == (
+        "Check the cash report", "0 9 * * 1", "active",
+    )
+    everything = await api.client.get("/v1/scheduled-work", headers=api.auth())
+    assert len(everything.json()["items"]) == 2
+
+
+async def test_a_routines_name_is_kept_to_what_the_shell_shows(api, monkeypatch, session_factory):
+    master = await master_of(api, await create(api))
+    await routine_made_in(monkeypatch, master, session_factory, "Check the cash report " + "and the ledger " * 40)
+    response = await api.client.get(f"/v1/scheduled-work?created_from_session_id={master.id}", headers=api.auth())
+    [routine] = response.json()["items"]
+    assert routine["name"] == ("Check the cash report " + "and the ledger " * 40)[:200]

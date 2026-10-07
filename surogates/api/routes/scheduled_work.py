@@ -112,6 +112,8 @@ async def list_scheduled_work(
     ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    # A project's routines: the schedules its master session made.
+    created_from_session_id: UUID | None = Query(None),
 ) -> ScheduledWorkListResponse:
     user_id = _require_user(tenant)
     rows = await _scheduled_store(request).list_for_user(
@@ -122,6 +124,7 @@ async def list_scheduled_work(
         include_inactive=status_filter == "all",
         limit=limit,
         offset=offset,
+        created_from_session_id=created_from_session_id,
     )
     return ScheduledWorkListResponse(
         items=[_item(row) for row in rows],
