@@ -712,13 +712,23 @@ async def test_a_walk_fails_as_its_folder_does(wio, root):
     [None, [], {"files": [], "truncated": False}, {"files": [["a", "1"]], "truncated": False, "cursor": "1"},
      {"files": [["a", -1]], "truncated": False, "cursor": "1"}, {"files": [["a"]], "truncated": False, "cursor": "1"},
      {"files": [[1, 1]], "truncated": False, "cursor": "1"}, {"files": [], "truncated": 0, "cursor": "1"},
-     {"files": [], "truncated": False, "cursor": 1}],
+     {"files": [], "truncated": False, "cursor": 1}, {"files": [], "truncated": False, "cursor": ""},
+     {"files": [], "truncated": False, "cursor": "soon"}, {"files": [], "truncated": False, "cursor": "\u0661\u0662"},
+     {"files": [], "truncated": False, "cursor": "1" * 21}],
     ids=["null", "list", "no cursor", "size as text", "negative size", "no size", "path as number",
-         "truncated as number", "cursor as number"],
+         "truncated as number", "cursor as number", "empty cursor", "cursor as words", "cursor in other digits",
+         "cursor too long"],
 )
 async def test_a_listing_that_is_not_one_is_an_error_not_a_wrong_tree(value):
     with pytest.raises(DeviceOperationError, match="returned an invalid listing"):
         await DeviceWorkspaceIO(_Answers(value), root="/").walk("/", skip=())
+
+
+@pytest.mark.parametrize("skips", [{"skip": "node_modules"}, {"skip": (), "skip_top": "_whiteboard"}], ids=["skip", "skip_top"])
+async def test_a_walk_takes_folder_names_not_one_string(skips):
+    # A string is a collection of its characters: sorted, it would skip every one-letter folder.
+    with pytest.raises(TypeError, match="folder names"):
+        await DeviceWorkspaceIO(_Answers({"files": [], "truncated": False, "cursor": "1"}), root="/").walk("/", **skips)
 
 
 async def test_the_reference_laptop_refuses_a_walk_it_cannot_take(root):

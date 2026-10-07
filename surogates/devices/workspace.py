@@ -319,6 +319,9 @@ class DeviceWorkspaceIO:
         self, key: str, *, skip: Collection[str], skip_top: Collection[str] = (), skip_hidden: bool = False,
         since: str | None = None,
     ) -> Walk:
+        if isinstance(skip, str) or isinstance(skip_top, str):
+            # A string is a collection of its characters: sorted, it would skip every one-letter folder.
+            raise TypeError("skip and skip_top take folder names, not one string")
         value = await self._call(
             "walk", key=key, skip=sorted(skip), skip_top=sorted(skip_top), skip_hidden=skip_hidden, since=since,
         )
@@ -331,7 +334,9 @@ class DeviceWorkspaceIO:
                     and type(entry[1]) is int and entry[1] >= 0
                     for entry in files
                 )
-                and type(truncated) is bool and isinstance(cursor, str)
+                and type(truncated) is bool
+                # Taken here, not at the next walk's since: up to 20 digits, as the computer takes it back.
+                and isinstance(cursor, str) and cursor.isascii() and cursor.isdigit() and len(cursor) <= 20
             ):
                 return Walk([(path, size) for path, size in files], truncated, cursor)
         except (KeyError, TypeError):
