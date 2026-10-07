@@ -12,6 +12,7 @@ from __future__ import annotations
 __all__ = [
     "MANAGED_CHANNELS",
     "EVAL_BOUNDARY_PREFIX",
+    "PROJECT_BOUNDARY_PREFIX",
     "boundary_token",
     "is_eval_session",
     "session_memory_boundary",
@@ -27,6 +28,11 @@ MANAGED_CHANNELS: frozenset[str] = frozenset({"slack", "telegram", "whatsapp", "
 # partition, and letting a caller name any boundary would let it read or
 # overwrite the memory of a private conversation on the same agent.
 EVAL_BOUNDARY_PREFIX = "eval:"
+
+# A project's sessions share one partition, ``workstream:<project id>``: the
+# server stamps it on the master and every thread, children inherit it, and
+# the session create route strips it from a client's config.
+PROJECT_BOUNDARY_PREFIX = "workstream:"
 
 
 def boundary_token(
@@ -100,13 +106,14 @@ def session_memory_boundary(session: object) -> str | None:
     ``channel_session_key`` or ``session.id``.  Every non-channel session
     returns ``None`` so the caller keeps today's per-user / shared memory,
     except an evaluation session, which carries an ``eval:`` boundary stamped
-    by the session route.
+    by the session route, and a project's session, which carries its
+    project's ``workstream:`` boundary.
     """
     channel = getattr(session, "channel", None)
     cfg = getattr(session, "config", None) or {}
     persisted = str(cfg.get("memory_boundary") or "").strip()
     if channel not in MANAGED_CHANNELS:
-        if is_eval_session(session):
+        if is_eval_session(session) or persisted.startswith(PROJECT_BOUNDARY_PREFIX):
             return persisted
         return None
     if persisted:
