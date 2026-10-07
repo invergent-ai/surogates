@@ -3,7 +3,7 @@
 // it, where it leads, and the addresses the host then dials, the ones it judged.
 
 import { lookup } from "node:dns/promises";
-import { BlockList, isIP } from "node:net";
+import { BlockList, connect as connectTcp, isIP, isIPv6, type Socket } from "node:net";
 import { networkInterfaces } from "node:os";
 
 import type { Destination, NetworkAsk } from "../hosts/messages.js";
@@ -77,21 +77,26 @@ const PRIVATE = subnets([
 
 const family = (address: string) => (isIP(address) === 6 ? "ipv6" : "ipv4");
 const addressesOf = async (name: string) => (await lookup(name, { all: true })).map((entry) => entry.address);
-const interfaceAddresses = () => Object.values(networkInterfaces()).flatMap((entries) => (entries ?? []).map((entry) => entry.address));
+const interfaces = () => Object.values(networkInterfaces()).flatMap((entries) => entries ?? []);
+const interfaceAddresses = () => interfaces().map((entry) => entry.address);
+const interfaceSubnets = () => interfaces().flatMap((entry) => (entry.cidr ? [entry.cidr] : []));
 
 export interface ReachOptions {
   resolve?: (name: string) => Promise<string[]>; // a name's addresses; dns.lookup by default
   local?: () => string[]; // this computer's own addresses; its interfaces' by default, read at each call
+  // The networks this computer is on, as address/prefix: private, whatever their range. Its interfaces' by default, read at each call.
+  subnets?: () => string[];
   timeoutMs?: number;
 }
 
 /**
  * Where a destination from destination() leads, from one lookup, with the addresses it
  * gave. Any of them on this computer makes it "own": a command must not reach the user's
- * own services. Null when a name cannot be looked up in time. BlockList matches IPv4-mapped IPv6 too.
+ * own services. Any in a private range, or on a network this computer is on, makes it
+ * "private". Null when a name cannot be looked up in time. BlockList matches IPv4-mapped IPv6 too.
  */
 export async function reach(host: string, options: ReachOptions = {}): Promise<Reached | null> {
-  const { resolve = addressesOf, local = interfaceAddresses, timeoutMs = LOOKUP_MS } = options;
+  const { resolve = addressesOf, local = interfaceAddresses, subnets: near = interfaceSubnets, timeoutMs = LOOKUP_MS } = options;
   const bare = host.startsWith("[") ? host.slice(1, -1) : host;
   let addresses: string[] = [bare];
   if (!isIP(bare)) {
@@ -111,7 +116,14 @@ export async function reach(host: string, options: ReachOptions = {}): Promise<R
   for (const address of local()) if (isIP(address)) mine.addAddress(address, family(address));
   const own = (address: string) => [LOCAL, METADATA, mine].some((list) => list.check(address, family(address)));
   if (addresses.some(own)) return { reach: "own", addresses };
-  return { reach: addresses.some((address) => PRIVATE.check(address, family(address))) ? "private" : "public", addresses };
+  // A network this computer is on is private, a home LAN's global IPv6 prefix or a campus's public range too.
+  const lans = new BlockList();
+  for (const subnet of near()) {
+    const [net, prefix] = subnet.split("/");
+    if (net && isIP(net) && prefix !== undefined) lans.addSubnet(net, Number(prefix), family(net));
+  }
+  const inside = (address: string) => [PRIVATE, lans].some((list) => list.check(address, family(address)));
+  return { reach: addresses.some(inside) ? "private" : "public", addresses };
 }
 
 // What the host proxy does with a connection, by its destination's *key* (host:port, as
@@ -137,4 +149,74 @@ export async function judge(host: string, port: number, options: ReachOptions = 
   if (!where) return { refused: "unknown", key };
   if (where.reach === "own") return { refused: "own", key };
   return { key, dial: where.addresses, ask: packageHost(found.host) ? null : { ...found, privateNetwork: where.reach === "private" } };
+}
+
+// How long an attempt has to connect before the next judged address is tried beside it, the
+// earlier one still running (RFC 8305), so an address that never answers holds no other back.
+// Node's autoSelectFamily waits as long, then drops the earlier one.
+export const STAGGER_MS = 250;
+
+// The judged addresses, IPv6 and IPv4 by turns, always IPv6 first, whatever order the lookup
+// gave them. Node's autoSelectFamily leads with the family of the lookup's first address.
+export function inTurn(addresses: readonly string[]): string[] {
+  const six = addresses.filter((address) => isIPv6(address));
+  const four = addresses.filter((address) => !isIPv6(address));
+  return Array.from({ length: Math.max(six.length, four.length) }, (_, at) => [six[at], four[at]]).flat().filter((address) => address !== undefined);
+}
+
+export type Dial = (address: string, port: number) => Socket;
+const tcp: Dial = (address, port) => connectTcp({ host: address, port, allowHalfOpen: true });
+
+/**
+ * A connection to *port* at the judged *addresses* and no others, in turn (inTurn): the next at
+ * once when one fails, or beside it once it has had STAGGER_MS; the first to connect is the one,
+ * and the rest go. Rejects with the last failure's code (an Error whose message is the code) when
+ * none connects, and once *signal* aborts, with every attempt ended.
+ */
+export function dialFirst(addresses: readonly string[], port: number, signal: AbortSignal, dial: Dial = tcp): Promise<Socket> {
+  const order = inTurn(addresses);
+  return new Promise((resolve, reject) => {
+    const trying = new Set<Socket>();
+    let next = 0;
+    let failed = "EHOSTUNREACH";
+    let settled = false;
+    let stagger: NodeJS.Timeout | undefined;
+    const end = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(stagger);
+      for (const socket of trying) socket.destroy();
+      reject(error);
+    };
+    const aborted = () => end(new Error("ECANCELED"));
+    if (signal.aborted) return aborted();
+    signal.addEventListener("abort", aborted, { once: true });
+    const attempt = (): void => {
+      clearTimeout(stagger);
+      const address = order[next];
+      if (settled || address === undefined) return;
+      next += 1;
+      const socket = dial(address, port);
+      trying.add(socket);
+      if (next < order.length) stagger = setTimeout(attempt, STAGGER_MS);
+      socket.once("connect", () => {
+        if (settled) return void socket.destroy();
+        settled = true;
+        clearTimeout(stagger);
+        signal.removeEventListener("abort", aborted);
+        for (const other of trying) if (other !== socket) other.destroy();
+        resolve(socket);
+      });
+      socket.once("error", (error: NodeJS.ErrnoException) => {
+        socket.destroy();
+        trying.delete(socket);
+        if (settled) return;
+        failed = error.code ?? failed;
+        if (next < order.length) attempt();
+        else if (trying.size === 0) end(new Error(failed));
+      });
+    };
+    if (order.length === 0) return end(new Error(failed));
+    attempt();
+  });
 }

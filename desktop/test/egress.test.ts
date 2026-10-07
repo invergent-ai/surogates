@@ -92,6 +92,17 @@ describe("where a destination leads", () => {
     expect(await where(host)).toBe("public");
   });
 
+  it("is a private network for an address on a network this computer is on, a public IPv4 range or a global IPv6 prefix", async () => {
+    // As its interfaces give them: each address with its prefix.
+    const on = async (host: string) => (await reach(host, {
+      local: () => ["198.51.100.5", "2001:db8:1::5"], subnets: () => ["198.51.100.5/24", "2001:db8:1::5/64"], resolve,
+    }))?.reach;
+    expect(await on("198.51.100.7")).toBe("private");
+    expect(await on("[2001:db8:1::1234]")).toBe("private");
+    expect(await on("198.51.101.7")).toBe("public");
+    expect(await on("[2001:db8:2::1]")).toBe("public");
+  });
+
   it("gives the addresses it judged, each without brackets, from one lookup", async () => {
     let lookups = 0;
     const counted = (name: string) => {
