@@ -125,13 +125,13 @@ describe("the agent's capabilities", () => {
   });
 });
 
-describe("a folder asked for while the device starts", () => {
-  it("waits for the device, rather than saying this computer is not registered", async () => {
+describe("a folder asked for from a freshly launched app", () => {
+  it("answers no folder when its dialog is cancelled, rather than saying this computer is not registered", async () => {
     const first = await launched();
     await connect(first.page, origin);
     await signedInAndAdded(first.shell, first.page, agent);
     await quit(first.shell);
-    // Asked as soon as the web client loads, while the device may still be starting.
+    // Asked as soon as the web client loads.
     const { shell } = await launched();
     const client = await webClient(shell, origin);
     // The folder dialog is cancelled: the answer is no folder, not a refusal.
