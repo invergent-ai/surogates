@@ -216,6 +216,8 @@ async def _refuse_too_many_requests(db: AsyncSession, request: OperationRequest,
 
     A request already under way may go on: its next operation, or the same
     request sent again.  A change's claim at ordinal 0 does not count as under way.
+    Nor does a request count against itself: sent twice at once, the second
+    finds the first recorded only once it holds the lock, and joins it.
     """
     already = (await db.execute(
         select(DeviceOperation.id).where(
@@ -233,6 +235,7 @@ async def _refuse_too_many_requests(db: AsyncSession, request: OperationRequest,
         select(func.count(func.distinct(DeviceOperation.invocation_id))).where(
             DeviceOperation.calling_session_id == request.calling_session_id,
             DeviceOperation.invocation_id.startswith(REQUEST_PREFIX),
+            DeviceOperation.invocation_id != request.invocation_id,
             DeviceOperation.completed_at.is_(None),
         )
     )).scalar_one()

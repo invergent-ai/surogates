@@ -197,6 +197,36 @@ async def test_a_burst_of_new_requests_opens_no_more_than_the_cap(api, session_f
         await stop(task)
 
 
+async def test_the_same_request_sent_twice_at_once_at_the_cap_joins_itself(api, session_factory, redis_client, monkeypatch):
+    monkeypatch.setattr(operations_module, "OPEN_REQUESTS_PER_SESSION", 1)
+    issued, root = await bound_device(api)
+    device_id = UUID(issued["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    # An upload sent again while the first send still stores its data: one request, under one id.
+    data = os.urandom(4 * 1024 * 1024)
+    upload = OperationRequest(**{
+        **_fields(asked(device_id, root)), "kind": "write",
+        "args": {"key": "/folder/a.bin", "transfer": {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}},
+        "payload": data,
+    })
+    for _ in range(3):
+        sends = [asyncio.create_task(ops.run(upload, keep_open=True)) for _ in range(2)]
+
+        async def recorded() -> bool:
+            for task in sends:
+                if task.done():
+                    task.result()  # a refusal surfaces here
+            return len(await ops.pending(device_id, 1)) == 1
+
+        await eventually(recorded)
+        await asyncio.sleep(0.2)
+        assert not any(task.done() for task in sends)  # both wait on the one write
+        for task in sends:
+            await stop(task)
+        upload = OperationRequest(**{**_fields(upload), "invocation_id": f"{REQUEST_PREFIX}{uuid.uuid4().hex}", "payload": data})
+        await ops.cancel([root], bindings=True)
+
+
 async def test_pausing_a_chat_leaves_its_users_requests_open_and_deleting_it_cancels_them(api, session_factory, redis_client):
     issued, root = await bound_device(api)
     device_id = UUID(issued["id"])
