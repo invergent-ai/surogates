@@ -160,17 +160,16 @@ async def load_folder_context(files: "DeviceWorkspaceIO") -> str | None:
 
     The first of :data:`PROJECT_CONTEXT_FILENAMES` there that is UTF-8
     text, scanned and cut as :func:`load_project_context` does on this
-    host.  Only the folder's top: the computer gives nothing above it.  At
-    most one frame of it is read (``MAX_PAYLOAD_BYTES``), far past what the
-    prompt keeps; a character the frame cuts in two is left out.
+    host.  Each name is read in turn, a missing one answered as such: a
+    listing of a big folder stops short of its names.  Only the folder's
+    top: the computer gives nothing above it.  At most one frame of it is
+    read (``MAX_PAYLOAD_BYTES``), far past what the prompt keeps; a
+    character the frame cuts in two is left out.
     """
     from surogates.devices.workspace import MAX_PAYLOAD_BYTES
     from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
-    names = set(await files.list_dir(await files.resolve("")))
     for filename in PROJECT_CONTEXT_FILENAMES:
-        if filename not in names:
-            continue
         try:
             data = await files.read(await files.resolve(filename), max_bytes=MAX_PAYLOAD_BYTES)
             # Strict, so the scan reads what the model would: a byte that is
@@ -179,8 +178,8 @@ async def load_folder_context(files: "DeviceWorkspaceIO") -> str | None:
                 data, final=len(data) < MAX_PAYLOAD_BYTES,
             ).strip()
         except (OSError, WorkspaceSandboxError, UnicodeDecodeError):
-            # A folder by that name, a link out of the folder, a file the
-            # computer will not read, or one that is not text.
+            # None by that name, a folder by it, a link out of the folder, a
+            # file the computer will not read, or one that is not text.
             continue
         if content:
             return truncate_context(scan_context_content(content, filename))

@@ -89,3 +89,21 @@ def test_the_prompt_shows_the_folder_context_read_for_it_and_reads_nothing_on_th
     assert builder._context_files_section() == ""
     builder.folder_context = "Use tabs."
     assert builder._context_files_section() == "# Context Files\n\n## Project Context\nUse tabs."
+
+
+@pytest.mark.asyncio
+async def test_a_big_folders_context_file_is_found_by_its_name_not_in_a_listing(folder):
+    from surogates.devices.workspace import DeviceWorkspaceIO
+    from surogates.tools.workspace_io import LocalWorkspaceIO
+
+    class CutListing(InProcessRunner):
+        """A folder of more names than the computer lists: its listing stops before AGENTS.md."""
+
+        async def run(self, kind, args, payload=None):
+            if kind == "list_dir":
+                return {"ok": [f"file-{n}.txt" for n in range(10_000)]}
+            return await super().run(kind, args, payload)
+
+    (folder / "AGENTS.md").write_text("Use tabs.")
+    runner = CutListing(LocalWorkspaceIO(workspace_path=str(folder)))
+    assert await load_folder_context(DeviceWorkspaceIO(runner, root=str(folder))) == "Use tabs."
