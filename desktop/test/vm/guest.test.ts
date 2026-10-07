@@ -1252,10 +1252,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     try {
       // The root's first command: from its answer on, the file host looks every 5 s.
       expect(await command("true")).toMatchObject({ ok: { returncode: 0 } });
-      // Six picks a second apart, so a look comes while it runs, as the review's probe broke at pick 10 of 12. The rebase
-      // finishes. Its exec steps are the command's: a look that finds some left comments them out, git skips them, and the output says so.
+      // Six picks a second apart, so a look comes while it runs, as the review's probe broke at pick 10 of 12.
       expect(await long("git checkout -q topic && out=$(git rebase -q -x 'sleep 1' main 2>&1) || echo \"$out\"; git log --format=%s main..topic | tr '\\n' ' '")).toMatchObject({
-        ok: { output: expect.stringMatching(/^t6 t5 t4 t3 t2 t1 (\nThe computer removed a step .*: \.git\/rebase-merge\/git-rebase-todo)?$/) },
+        ok: { output: "t6 t5 t4 t3 t2 t1 " },
       });
       expect(await command(stopped("git checkout -qb c1 other && git rebase main", "rebase-merge"))).toMatchObject({ ok: { output: "stopped\n" } });
       expect(await command(`${resolved} git rebase --continue >/dev/null 2>&1; git log --format=%s -2 | tr '\\n' ' '`)).toMatchObject({ ok: { output: "other main " } });
@@ -1303,6 +1302,30 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     } finally {
       for (const name of [".git", "f1.txt", "f2.txt", "f3.txt", "pwned"]) rmSync(join(folder, name), { recursive: true, force: true });
       rmSync(steps, { force: true });
+    }
+  });
+
+  it("runs every exec step of a guest rebase -x that runs as one long command, with no notice, and strips those of one paused at a command's end", async () => {
+    const folder = join(dir, "folder");
+    const long = (line: string) => executor.run(operation("run", { command: line, workdir: null, timeout: 60 }), signal());
+    expect(spawnSync("bash", ["-c", [
+      "git init -q -b main . && git config user.email a@b && git config user.name a",
+      "for i in 1 2 3 4 5 6 7; do echo $i > f$i.txt && git add -A && git commit -qm c$i; done",
+    ].join(" && ")], { cwd: folder }).status).toBe(0);
+    try {
+      // From its answer on, the file host looks every 5 s: at least one look comes while the rebase's eight seconds run.
+      expect(await command("true")).toMatchObject({ ok: { returncode: 0 } });
+      expect(await long("git rebase -q -x 'sleep 1.3; echo step >> steps.log' HEAD~6 2>&1; wc -l < steps.log")).toMatchObject({ ok: { output: "6\n" } });
+      expect(existsSync(join(folder, ".git", "rebase-merge"))).toBe(false);
+      // One the command leaves paused: the look after it comments out the steps it wrote.
+      expect(await command("GIT_SEQUENCE_EDITOR='sed -i 1ibreak' git rebase -q -i -x 'touch guest-step' HEAD~2 >/dev/null 2>&1; echo paused")).toMatchObject({
+        ok: { output: expect.stringMatching(/^paused\n\nThe computer removed a step .*: \.git\/rebase-merge\/git-rebase-todo$/) },
+      });
+      const todo = readFileSync(join(folder, ".git", "rebase-merge", "git-rebase-todo"), "utf8");
+      expect(todo.match(/^# Surogate removed a step a command added: exec touch guest-step$/gm)).toHaveLength(2);
+      expect(todo).not.toMatch(/^exec /m);
+    } finally {
+      for (const name of [".git", "steps.log", "f1.txt", "f2.txt", "f3.txt", "f4.txt", "f5.txt", "f6.txt", "f7.txt"]) rmSync(join(folder, name), { recursive: true, force: true });
     }
   });
 

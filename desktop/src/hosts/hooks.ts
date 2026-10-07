@@ -57,6 +57,9 @@ export interface GuardOptions {
   // Whether something of the chat's other than the command starting could be writing the folder:
   // a background process, a runner, what ran in the guest, or another command.
   writing?: () => boolean;
+  // Whether a command of the chat's is running, whose git may be working through a todo: a look
+  // leaves the todos alone until none is, so a rebase that finishes within its command keeps its steps.
+  running?: () => boolean;
 }
 
 // A key under a hooks folder inside a .git folder, at any depth and in any case.
@@ -300,6 +303,7 @@ export class HookGuard {
   private readonly timeoutMs: number;
   private readonly seen: (keys: ReadonlySet<string>, startedAt: number, between: boolean) => void;
   private readonly writing: () => boolean;
+  private readonly running: () => boolean;
 
   constructor(private readonly folder: string, options: GuardOptions = {}) {
     this.baseline = options.inherited ?? null;
@@ -308,6 +312,7 @@ export class HookGuard {
     this.timeoutMs = options.timeoutMs ?? SCAN_TIMEOUT_MS;
     this.seen = options.seen ?? (() => {});
     this.writing = options.writing ?? (() => false);
+    this.running = options.running ?? (() => false);
     // After a crash: no step in a todo is known to be the user's, since the killed host's commands ran.
     this.steps = options.inherited ? new Map() : null;
     // The first look starts at once, while srt starts. After a crash it also
@@ -378,8 +383,8 @@ export class HookGuard {
 
   // The first look that sees the whole folder sets the baseline, which is
   // recorded before any command runs; every look makes what is not in it unable
-  // to run, as far as it can see, and comments out each exec step in a todo that is not the
-  // user's. What it changed, the todos it commented steps out of, and why commands may not run, or null.
+  // to run, as far as it can see, and, while no command runs, comments out each exec step in a
+  // todo that is not the user's. What it changed, the todos it commented steps out of, and why commands may not run, or null.
   private async look(between: boolean): Promise<{ changed: string[]; stripped: string[]; blocked: string | null }> {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<null>((resolve) => {
@@ -421,7 +426,7 @@ export class HookGuard {
     const stripped: string[] = [];
     const held: string[] = [];
     const steps = this.steps;
-    if (steps) {
+    if (steps && !this.running()) {
       for (const todo of scan.todos) {
         const result = await stripTodo(todo, steps.get(todo) ?? new Set(), this.writable);
         if (result === "stripped") stripped.push(todo);

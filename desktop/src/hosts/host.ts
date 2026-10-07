@@ -76,6 +76,9 @@ let watching: NodeJS.Timeout | null = null;
 let guestCommands = false;
 // What of the root's can write the folder at any time, besides a command it runs.
 const alive = () => (processes?.live ?? 0) > 0 || liveRunner !== null || guestCommands;
+// The root's runs from their refusal to the look after them, here or in the guest: while any is in
+// flight, the hook guard leaves paused rebases' todos alone, as a run's own rebase may be working through one.
+const runs = new Set<string>();
 // For a guest root's binds (HostStart.protect): what the latest look found to bind, each
 // with its inode when it was last named to the app.
 let naming = false;
@@ -130,6 +133,8 @@ process.on("message", (raw) => {
       else helper?.stdin?.write(`${JSON.stringify({ id: message.id, kind: message.kind, args: message.args })}\n`);
       break;
     case "cancel":
+      // A guest's run cancelled while its refusal was asked: no after comes for it. One here ends by itself.
+      if (!commands.has(message.id)) runs.delete(message.id);
       commands.get(message.id)?.controller.abort();
       helper?.stdin?.write(`${JSON.stringify({ cancel: message.id })}\n`);
       break;
@@ -138,7 +143,9 @@ process.on("message", (raw) => {
       if (!sameFolder()) send({ type: "result", id: message.id, outcome: FOLDER_UNAVAILABLE });
       else {
         guestCommands = true;
+        if (message.run) runs.add(message.id);
         void guard?.refusal().then((refused) => {
+          if (refused) runs.delete(message.id);
           // A host program may have replaced one since the look, as git config renames a new file over the old.
           if (naming && named) name(named.map(([path, , mode]) => [path, mode]));
           if (!failing) send({ type: "result", id: message.id, outcome: refused ?? { ok: null } });
@@ -147,6 +154,7 @@ process.on("message", (raw) => {
       break;
     case "after":
       guestCommands = true;
+      runs.delete(message.id);
       void guard?.after(message.outcome).then((outcome) => {
         watchHooks();
         if (!failing) send({ type: "result", id: message.id, outcome });
@@ -251,7 +259,7 @@ async function start(message: HostStart): Promise<void> {
   // host, that host's are the user's, and the look catches what its commands left.
   // Commands can write the folder and the session's temp folder: a hook linked into either is theirs.
   // A command's start records the exec steps in paused rebases as the user's only while nothing else of the chat's could write them.
-  guard = new HookGuard(path, { inherited, known: running, writable: [path, ...spellings(tmp)], seen, writing: () => alive() || commands.size > 1 });
+  guard = new HookGuard(path, { inherited, known: running, writable: [path, ...spellings(tmp)], seen, writing: () => alive() || commands.size > 1, running: () => runs.size > 0 });
   mkdirSync(tmp, { recursive: true });
   makeCaches(tmp);
   const env = commandEnvironment(message.env, tmp);
@@ -675,8 +683,10 @@ function command(id: string, args: Record<string, unknown>): void {
   const ready = context;
   const hooks = guard;
   const controller = new AbortController();
+  runs.add(id);
   const done = (async () => {
     const outcome = await commandOutcome(args, ready, hooks, controller.signal, id);
+    runs.delete(id);
     commands.delete(id);
     if (!failing) send({ type: "result", id, outcome });
   })();
@@ -701,6 +711,7 @@ async function commandOutcome(
   if (inRunner) runnerRuns += 1;
   const outcome = await runCommand(args, ready, signal, id, inRunner);
   if (inRunner) runnerRuns -= 1;
+  runs.delete(id);
   return withNotice(await hooks.after(outcome));
 }
 

@@ -595,6 +595,22 @@ describe("a paused rebase's or cherry-pick's todo", () => {
     expect(readFileSync(todo, "utf8")).toBe("exec make test\n# Surogate removed a step a command added: exec touch pwned\n");
   });
 
+  it("leaves the todos alone while a command runs, whose rebase may be working through one, and comments out what it added once none does", async () => {
+    mkdirSync(join(folder, ".git"));
+    let running = false;
+    const guard = new HookGuard(folder, { running: () => running });
+    await guard.refusal();
+    running = true;
+    const todo = join(folder, ".git/rebase-merge/git-rebase-todo");
+    mkdirSync(dirname(todo));
+    writeFileSync(todo, "pick abc one\nexec make test\n");
+    await guard.watch();
+    expect(readFileSync(todo, "utf8")).toBe("pick abc one\nexec make test\n");
+    running = false;
+    expect(await output(guard)).toMatch(/removed a step.*\.git\/rebase-merge\/git-rebase-todo$/);
+    expect(readFileSync(todo, "utf8")).toBe("pick abc one\n# Surogate removed a step a command added: exec make test\n");
+  });
+
   it("after a crash, comments out every exec line before any command", async () => {
     const todo = join(folder, ".git/rebase-merge/git-rebase-todo");
     mkdirSync(dirname(todo), { recursive: true });

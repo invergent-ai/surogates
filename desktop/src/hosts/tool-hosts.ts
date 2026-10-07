@@ -324,7 +324,7 @@ class Host {
         const failure = await this.ready(signal);
         if (failure) return failure;
         if (guard) {
-          const refused = await this.request({ type: "refusal", id: operation.id }, signal);
+          const refused = await this.request({ type: "refusal", id: operation.id, run: guard === "around" }, signal);
           if (!("ok" in refused)) return refused;
         }
         const outcome = await inner(signal, this.handles, this.keys);

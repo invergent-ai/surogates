@@ -47,7 +47,8 @@ export type ToHost =
   | { type: "answer"; id: number; allow: boolean; remember: boolean }
   // The hook guard around a command that runs in the VM: why it may not run, answered
   // {ok: null} when it may; then the look after it, answered with its outcome and the look's notice.
-  | { type: "refusal"; id: string }
+  // run: a run, which an after ends, not a start or input to a process.
+  | { type: "refusal"; id: string; run: boolean }
   | { type: "after"; id: string; outcome: Outcome }
   // The root's background processes in the VM, as the guest says: the folder's record keeps their handles.
   | { type: "handles"; handles: ProcessHandle[] }
