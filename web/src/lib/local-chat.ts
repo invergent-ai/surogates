@@ -5,6 +5,7 @@
 // (desktop design, Section 8). Every import here is a file of web/src named with its extension,
 // so a node test runs it.
 
+import { onDeviceOf } from "../api/device-requests.ts";
 import type { DesktopBinding, DesktopBridge, DesktopDeviceState } from "./desktop-bridge-contract";
 
 /** What the new chat's create sends the agent: the folder the user confirmed on this computer. */
@@ -166,8 +167,8 @@ export function localChatOf(
   devices: ListedDevice[] | null,
   here: DesktopBinding | null,
 ): LocalChat | null {
-  const execution = config?.execution as { kind?: unknown; device_id?: unknown; device_name?: unknown } | undefined;
-  if (execution?.kind !== "device" || typeof execution.device_id !== "string") return null;
+  if (!onDeviceOf(config)) return null;
+  const execution = config?.execution as { device_id?: unknown; device_name?: unknown };
   const folder = typeof config?.workspace_path === "string" ? config.workspace_path : "";
   const device = devices?.find((row) => row.id === execution.device_id);
   const root = config?.sandbox_root_session_id;
