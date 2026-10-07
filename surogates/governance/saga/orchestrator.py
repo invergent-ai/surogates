@@ -89,12 +89,12 @@ class SagaOrchestrator:
     # Saga lifecycle
     # ------------------------------------------------------------------
 
-    def create_saga(self, session_id: UUID) -> Saga:
+    def create_saga(self, session_id: UUID, kind: str = "tools") -> Saga:
         """Create a new saga for *session_id*."""
-        saga = Saga(
-            saga_id=f"saga:{uuid.uuid4()}",
-            session_id=session_id,
-        )
+        return self.adopt(Saga(saga_id=f"saga:{uuid.uuid4()}", session_id=session_id, kind=kind))
+
+    def adopt(self, saga: Saga) -> Saga:
+        """Take over *saga*, rebuilt from its record, to go on with it or compensate it."""
         self._sagas[saga.saga_id] = saga
         return saga
 
@@ -321,6 +321,8 @@ class SagaOrchestrator:
                 saga = Saga(
                     saga_id=data["saga_id"],
                     session_id=UUID(data["session_id"]),
+                    # A log written before sagas had kinds holds tool sagas only.
+                    kind=data.get("kind", "tools"),
                 )
                 self._sagas[saga.saga_id] = saga
 

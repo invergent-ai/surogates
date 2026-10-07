@@ -26,7 +26,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, INT8RANGE, JSONB, UUID
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -2191,4 +2191,59 @@ class WorkstreamThread(Base):
     resolved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now()
+    )
+
+
+class WorkstreamHistory(Base):
+    """One change to a project's files, the landing saga's durable record.
+
+    A landing writes its row before its first step, with the saga
+    ``running``, and each step's state as it changes, so the next holder
+    of the project's lock can finish or undo a landing whose worker died.
+    The audit is kept without file contents: ``files`` and ``picked_up``
+    hold git blob ids.  ``device_id`` and ``folder`` name a folder on that
+    computer; both null, the project's cloud files.
+    """
+
+    __tablename__ = "workstream_history"
+    __table_args__ = (
+        Index("idx_workstream_history_workstream", "workstream_id", "created_at"),
+        Index(
+            "idx_workstream_history_files", "files",
+            postgresql_using="gin", postgresql_ops={"files": "jsonb_path_ops"},
+        ),
+        # The lock holder's first look: the project's landings still running.
+        Index("idx_workstream_history_running", "workstream_id", postgresql_where=text("saga_state = 'running'")),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    workstream_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workstreams.id", ondelete="CASCADE"), nullable=False,
+    )
+    device_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    folder: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 'landing' | 'pickup' | 'restore' | 'undo'
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    saga_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # 'running' | 'completed' | 'compensated' | 'escalated'
+    saga_state: Mapped[str] = mapped_column(Text, nullable=False)
+    steps: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    commit: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The thread's audit outlives its session.
+    thread_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True,
+    )
+    tool_saga_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    events: Mapped[Optional[Any]] = mapped_column(INT8RANGE, nullable=True)
+    # Logical reference to the ops ``Agent.id`` (another database, so no FK).
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    picked_up: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    files: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    undoes: Mapped[Optional[list[int]]] = mapped_column(ARRAY(BigInteger), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now(), onupdate=func.now()
     )

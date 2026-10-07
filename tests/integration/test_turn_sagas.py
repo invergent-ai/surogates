@@ -181,7 +181,7 @@ async def test_a_failed_turn_completes_its_saga(api, monkeypatch):
 async def a_saga_left_open(api, chat, *, compensating: bool) -> str:
     """A turn's saga with one step done, that nothing closed; its id."""
     store, saga_id = api.app.state.session_store, f"saga:{uuid4()}"
-    await store.emit_event(chat.id, EventType.SAGA_START, saga_start_event(saga_id, str(chat.id)))
+    await store.emit_event(chat.id, EventType.SAGA_START, saga_start_event(saga_id, str(chat.id), "tools"))
     for kind, state in ((EventType.SAGA_STEP_BEGIN, "executing"), (EventType.SAGA_STEP_COMMITTED, "committed")):
         await store.emit_event(chat.id, kind, saga_step_event(saga_id, "step-1", "memory", state))
     if compensating:

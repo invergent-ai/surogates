@@ -117,7 +117,7 @@ async def _land(
             "retry_delay": saga_settings.retry_delay,
         } if saga_settings is not None else {}
     ))
-    saga = orchestrator.create_saga(session.id)
+    saga = orchestrator.create_saga(session.id, kind="landing")
     thread = {"name": session.title or "Thread", "email": f"thread:{session.id}@surogate"}
     audit = [
         ["Surogate-Project", str(session.config["workstream_id"])],

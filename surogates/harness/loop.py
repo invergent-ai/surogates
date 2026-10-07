@@ -1808,7 +1808,7 @@ class AgentHarness(
                 await self._store.emit_event(
                     session.id,
                     EventType.SAGA_START,
-                    saga_start_event(new_saga.saga_id, str(session.id)),
+                    saga_start_event(new_saga.saga_id, str(session.id), new_saga.kind),
                 )
 
         # One stable turn_id per user turn. The wake() body services
