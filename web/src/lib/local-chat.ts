@@ -23,6 +23,11 @@ export function saidBy(error: unknown): string {
   return message.replace(/^Error invoking remote method '[^']*': (?:Error: )?/, "");
 }
 
+// A refusal of the desktop's, said again in its own words.
+const said = (error: unknown): never => {
+  throw new Error(saidBy(error));
+};
+
 /**
  * The agent's /auth/config, as the page keeps it: local folders only where it says true. An older
  * server says nothing. Null where it could not be read: fetchAuthConfig's fallback names no agent,
@@ -104,7 +109,7 @@ export async function createChat<T extends { id: string }>(
   if (known.desktopSessions === null) {
     throw new Error("Surogate could not read the agent's settings, so this chat was not made. Send it again.");
   }
-  const state = await desktop.getDevice();
+  const state = await desktop.getDevice().catch(said);
   const device = state.device;
   if (!device || !newChatPlace(state, known, choice).local) {
     if (!shown.local) return api.create();
@@ -114,7 +119,7 @@ export async function createChat<T extends { id: string }>(
   if (!(await api.online(device.deviceId))) {
     throw new Error(`${device.name} is not connected to the agent right now, so this chat was not made. Send it again once it is.`);
   }
-  const prepared = await desktop.prepareFolder(choice);
+  const prepared = await desktop.prepareFolder(choice).catch(said);
   if (!prepared) throw new Error(NO_FOLDER);
   let chat: T;
   try {

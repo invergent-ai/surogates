@@ -115,6 +115,27 @@ test("asks for no folder while the agent does not hear this computer, and says s
     message: "Flavius's ThinkPad is not connected to the agent right now, so this chat was not made. Send it again once it is.",
   });
   assert.deepEqual([server.made, desktop.calls], [[], [["getDevice"]]]);
+  // Nor while the agent's list of computers cannot be read.
+  const unlisted = bridge();
+  const failing = { ...agent(), online: async () => Promise.reject(new Error("Failed to list your computers")) };
+  await assert.rejects(createChat(unlisted, AGENT, "last", SHOWN_HERE, failing), { message: "Failed to list your computers" });
+  assert.deepEqual([failing.made, unlisted.calls], [[], [["getDevice"]]]);
+});
+
+test("says the desktop's refusals in its own words, and makes no chat", async () => {
+  // As Electron rejects a call the main process refused: the call's name, then the desktop's words.
+  const refused = (call, words) => async () => {
+    throw new Error(`Error invoking remote method 'desktop:${call}': Error: ${words}`);
+  };
+  const desktop = bridge();
+  const server = agent();
+  desktop.prepareFolder = refused("prepareFolder", "Surogate is already asking");
+  await assert.rejects(createChat(desktop, AGENT, "last", SHOWN_HERE, server), { message: "Surogate is already asking" });
+  desktop.getDevice = refused("getDevice", "This computer is registered with the agent for another account");
+  await assert.rejects(createChat(desktop, AGENT, "last", SHOWN_HERE, server), {
+    message: "This computer is registered with the agent for another account",
+  });
+  assert.deepEqual(server.made, []);
 });
 
 test("lets the confirmation go when the chat cannot be made, and says why in the server's words", async () => {
