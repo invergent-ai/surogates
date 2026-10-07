@@ -199,7 +199,7 @@ describe("Settings", () => {
     await settings.fill("#settings-search", "");
     // Off surogate.ai Usage stays gone, the search cleared too.
     expect(await texts(settings, ".settings-nav .item")).toEqual([
-      "General", "Account", "This computer", "Folders and permissionsLater", "SkillsLater", "ConnectorsLater",
+      "General", "Account", "This computer", "Browser", "Folders and permissionsLater", "SkillsLater", "ConnectorsLater",
     ]);
     expect(await texts(settings, ".settings-nav h3")).toEqual(["Settings", "Customize"]);
   });

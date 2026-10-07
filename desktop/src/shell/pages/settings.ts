@@ -12,6 +12,7 @@ interface Appearance {
 }
 
 interface State {
+  browser: { choice: string; rows: Array<{ value: string; label: string; disabled: boolean }>; none: boolean; failure: string | null };
   appearance: Appearance;
   account: { name: string; email: string } | null;
   computer: { name: string; connection: string; added: string | null; organisation: string | null; agents: string[] };
@@ -75,6 +76,19 @@ async function render(): Promise<void> {
       option.setAttribute("aria-pressed", String(option.dataset.value === chosen));
     }
   }
+  const browser = byId<HTMLSelectElement>("browser");
+  browser.replaceChildren(...state.browser.rows.map(({ value, label, disabled }) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    option.disabled = disabled;
+    return option;
+  }));
+  browser.value = state.browser.choice;
+  const note = byId("browser-note");
+  note.textContent = state.browser.failure
+    ?? (state.browser.none ? "No supported browser is installed. Install Google Chrome, Microsoft Edge, Brave or Vivaldi, or choose one with Custom…. The Snap build of Chromium is not supported." : "");
+  note.hidden = note.textContent === "";
   byId("email").textContent = state.account?.email ?? "Not signed in";
   byId("name").textContent = state.account?.name ?? "";
   byId("organisation").textContent = state.computer.organisation ?? "";
@@ -100,6 +114,10 @@ for (const control of document.querySelectorAll<HTMLElement>("[data-setting]")) 
     option.addEventListener("click", () => void settings.set(control.dataset.setting ?? "", option.dataset.value ?? "").then(render));
   }
 }
+// Custom… opens the system's dialog: the page shows the choice kept once the main process answers.
+byId<HTMLSelectElement>("browser").addEventListener("change", (event) => {
+  void settings.set("browser", (event.target as HTMLSelectElement).value).then(render, render);
+});
 byId("settings-search").addEventListener("input", search);
 byId("close").addEventListener("click", () => void settings.close());
 byId("backdrop").addEventListener("click", () => void settings.close());

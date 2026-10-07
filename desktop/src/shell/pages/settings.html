@@ -19,6 +19,7 @@
           <button class="item selected" type="button" data-section="general" data-icon="settings">General</button>
           <button class="item" type="button" data-section="account" data-icon="circle-user-round">Account</button>
           <button class="item" type="button" data-section="computer" data-icon="laptop">This computer</button>
+          <button class="item" type="button" data-section="browser" data-icon="globe">Browser</button>
           <button class="item" type="button" data-section="folders" data-icon="folder-lock" disabled title="Comes later">Folders and permissions<span class="later">Later</span></button>
           <button class="item" type="button" data-link="usage" data-icon="gauge">Usage<span class="external" data-icon="external-link"></span></button>
         </div>
@@ -84,6 +85,17 @@
             <div class="label"><span>Registered agents</span><span class="desc">The agents this computer works for.</span></div>
             <span class="value" id="agents"></span>
           </div>
+        </section>
+        <section data-section="browser" hidden>
+          <h2>Browser</h2>
+          <div class="row" data-label="Agent's browser">
+            <div class="label">
+              <span>Agent's browser</span>
+              <span class="desc">The browser the agent drives on this computer, in a profile of its own, apart from yours. A change applies the next time the agent's browser starts. Firefox is not offered: Surogate can drive only browsers built on Chromium.</span>
+            </div>
+            <select class="choice" id="browser" aria-label="Agent's browser"></select>
+          </div>
+          <p class="row-note" id="browser-note" hidden></p>
         </section>
       </main>
     </div>
