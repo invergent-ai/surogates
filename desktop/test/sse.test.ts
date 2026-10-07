@@ -33,6 +33,14 @@ describe("server-sent events", () => {
     expect(await read([": ping - 2026-10-07\r\n\r\n"])).toEqual({ events: [], heard: 1 });
   });
 
+  it("gives up on a line, or an event's data, longer than a mebibyte, as no agent sends one", async () => {
+    await expect(read(["data: ", "x".repeat(1 << 20)])).rejects.toThrow("The agent sent a line or an event longer than 1 MiB");
+    const lines = `data: ${"x".repeat(1_000)}\r\n`.repeat(1_100);
+    await expect(read([lines])).rejects.toThrow("The agent sent a line or an event longer than 1 MiB");
+    // Each well under it, the same lines as events of their own are read.
+    expect((await read([lines.replaceAll("\r\n", "\r\n\r\n")])).events).toHaveLength(1_100);
+  });
+
   it("leaves an event the stream ended in the middle of untold", async () => {
     expect((await read(["event: item\r\ndata: cut"])).events).toEqual([]);
   });

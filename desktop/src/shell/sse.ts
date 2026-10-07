@@ -8,7 +8,14 @@ export interface ServerEvent {
   data: string;
 }
 
-/** Read *body* to its end: *onEvent* hears each event, and *heard* each chunk, a comment's included. */
+// No line or event the agent sends comes near this: one past it is a stream gone wrong, as from a broken proxy.
+const LONGEST = 1 << 20;
+const tooLong = (): Error => new Error("The agent sent a line or an event longer than 1 MiB");
+
+/**
+ * Read *body* to its end: *onEvent* hears each event, and *heard* each chunk, a comment's included.
+ * A line, or an event's data, longer than LONGEST rejects, with the body cancelled.
+ */
 export async function readEvents(
   body: ReadableStream<Uint8Array>,
   onEvent: (event: ServerEvent) => void,
@@ -19,11 +26,13 @@ export async function readEvents(
   let id: string | null = null;
   let type = "message";
   let data: string[] = [];
+  let held = 0; // the length of the event's data so far
   const line = (text: string): void => {
     if (text === "") {
       if (data.length > 0) onEvent({ id, type, data: data.join("\n") });
       type = "message";
       data = [];
+      held = 0;
       return;
     }
     if (text.startsWith(":")) return;
@@ -32,17 +41,27 @@ export async function readEvents(
     const value = colon < 0 ? "" : text.slice(colon + 1).replace(/^ /, "");
     if (field === "id") id = value;
     else if (field === "event") type = value;
-    else if (field === "data") data.push(value);
+    else if (field === "data") {
+      held += value.length + 1;
+      if (held > LONGEST) throw tooLong();
+      data.push(value);
+    }
   };
   const reader = body.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) return;
-    heard();
-    pending += decoder.decode(value, { stream: true });
-    // ponytail: lines end in \n or \r\n, as the agent ends them; a lone \r, which the format also allows, would need a held-back \r across chunks.
-    const lines = pending.split("\n");
-    pending = lines.pop() ?? "";
-    for (const each of lines) line(each.endsWith("\r") ? each.slice(0, -1) : each);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      heard();
+      pending += decoder.decode(value, { stream: true });
+      // ponytail: lines end in \n or \r\n, as the agent ends them; a lone \r, which the format also allows, would need a held-back \r across chunks.
+      const lines = pending.split("\n");
+      pending = lines.pop() ?? "";
+      for (const each of lines) line(each.endsWith("\r") ? each.slice(0, -1) : each);
+      if (pending.length > LONGEST) throw tooLong();
+    }
+  } catch (error) {
+    void reader.cancel(error).catch(() => {});
+    throw error;
   }
 }
