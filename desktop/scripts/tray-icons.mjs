@@ -17,7 +17,10 @@ try {
   for (const [name, colour] of [["tray-dark", "#f5f4ed"], ["tray-light", "#3d3d3a"]]) {
     const svg = join(scratch, `${name}.svg`);
     writeFileSync(svg, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 113 113"><mask id="m"><rect width="113" height="113" fill="#fff"/><path d="${figure}" fill="#000"/></mask><circle cx="56.5" cy="56.5" r="56.5" fill="${colour}" mask="url(#m)"/></svg>`);
-    execFileSync("inkscape", [svg, "--export-type=png", "--export-width=32", "--export-height=32", `--export-filename=${join(desktop, "assets", `${name}.png`)}`], { stdio: "ignore" });
+    // With no session bus: Inkscape reaches nothing of the desktop's session, and starts nothing on it.
+    execFileSync("inkscape", [svg, "--export-type=png", "--export-width=32", "--export-height=32", `--export-filename=${join(desktop, "assets", `${name}.png`)}`], {
+      stdio: "ignore", env: { ...process.env, DBUS_SESSION_BUS_ADDRESS: "disabled:" },
+    });
   }
 } finally {
   rmSync(scratch, { recursive: true, force: true });
