@@ -44,7 +44,7 @@ const unavailable = (why: string): Outcome => ({
   error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${why}` },
 });
 
-// The hook guard around a process operation that runs elsewhere: its refusal before it
+// The hook guard around a process operation that runs in the VM: its refusal before it
 // and its look after it, its refusal alone, or neither.
 export type Guard = "around" | "before" | null;
 
@@ -151,7 +151,7 @@ export class ToolHosts implements Executor {
   }
 
   /**
-   * *inner*, a process operation that runs elsewhere (the VM), while the root's host
+   * *inner*, a process operation that runs in the VM, while the root's host
    * holds the folder: its lock, and the hook guard as *guard* says (Host.guarded).
    */
   guarded(
@@ -165,14 +165,14 @@ export class ToolHosts implements Executor {
   }
 
   /**
-   * A destination one of *root*'s commands elsewhere (the VM) asked for, decided as its
-   * own commands' are: denied when the root has no host, or nothing of it runs.
+   * A destination one of *root*'s commands in the VM asked for: the approvals' to decide
+   * while something of the root runs, and denied when the root has no host, or nothing of it runs.
    */
   ask(root: string, asked: NetworkAsk): Promise<NetworkAnswer> {
     return this.hosts.get(root)?.ask(asked) ?? Promise.resolve("deny");
   }
 
-  /** A root's background processes elsewhere (the VM) changed: its host keeps their handles, and stays while any lives. */
+  /** A root's background processes in the VM changed: its host keeps their handles, and stays while any lives. */
   processes(root: string, change: ProcessesChange): void {
     this.hosts.get(root)?.processes(change);
   }
@@ -255,7 +255,7 @@ class Host {
   // Its open network prompts: dismissed when it goes, or once nothing of its root runs.
   private prompts = new AbortController();
   private letting: Promise<void> | null = null;
-  // The handles of its root's background processes elsewhere (the VM), which every
+  // The handles of its root's background processes in the VM, which every
   // operation there carries: from the folder's record at its start, then as they change.
   private handles: ProcessHandle[] = [];
   // Once its file host said ready: what came of its root's processes before is not its own.
@@ -321,7 +321,7 @@ class Host {
     });
   }
 
-  // Its root's processes elsewhere changed: the host's record keeps their handles, and a
+  // Its root's processes in the VM changed: the host's record keeps their handles, and a
   // host with any alive is never idle. Gone: those still running ended with their sandbox.
   // Until its file host is ready, a change is an earlier host's or an earlier guest's: its
   // operations reach the guest only after, and the record's handles, which ready brings, have all ended.

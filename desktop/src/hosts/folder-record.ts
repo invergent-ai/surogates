@@ -22,7 +22,8 @@ export interface FolderRecord {
   state: "running" | "stopped";
   // That host's baseline of the user's own hooks (see HookGuard), once it knew it.
   hooks: Record<string, string> | null;
-  // The background processes it started, so a later host can say they ended when the app quit.
+  // The handles of the root's background processes in the VM, as the guest last told that host,
+  // so a later host can say they ended when the app quit.
   processes: ProcessHandle[];
 }
 

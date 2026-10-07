@@ -29,7 +29,7 @@ export const SANDBOX_STOPPED = {
 // oom: the kernel ended one of its processes for memory, in the guest.
 export type CommandEnd = { code: number | null; signal: NodeJS.Signals | null; oom?: true } | { failed: string } | { lost: true };
 
-// What run needs of a running command, in a sandbox of its own or in a runner.
+// What run needs of a running command in a runner.
 export interface CommandChild {
   // Each chunk of its output, as it comes; err: from its stderr.
   onOutput(listener: (chunk: Buffer, err: boolean) => void): void;

@@ -157,7 +157,7 @@ export class Approvals {
     });
   }
 
-  /** The hosts the chat's user allowed for the chat past the package hosts: each new tool host for it starts with these. */
+  /** The hosts the chat's user allowed for the session, past the package hosts: a connection to one goes through unasked. */
   granted(root: string): string[] {
     return this.options.bindings.domains(root);
   }
