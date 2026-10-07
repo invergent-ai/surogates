@@ -138,6 +138,13 @@ let registering = false;
 let connecting = false;
 // What the web client tells once its user signed in (undefined until it has said), and the projects it serves.
 let account: DesktopAccount | null | undefined;
+
+// Whether the page is *who*'s. One that said nobody is signed in is no account's. One that has not
+// said yet is whoever is signed in to the app, whose sign-in gave it its session.
+function pageIs(who: { orgId: string; userId: string }): boolean {
+  const owner = account === undefined ? signedIn?.account ?? null : account;
+  return owner?.orgId === who.orgId && owner.userId === who.userId;
+}
 const projects = new PageProjects((message) => main?.webContents()?.send("desktop:projects", message));
 let served = false;
 // Settled once the page serves its projects: a project chosen while it loads waits for this.
@@ -476,8 +483,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     approvalPrompts: prompts,
     // The page hears which of this account's chats changed on this computer, while it is this account's page.
     onBindingChanged: (root) => {
-      const owner = account ?? signedIn?.account ?? null;
-      if (owner?.orgId === credential.orgId && owner.userId === credential.userId) main?.webContents()?.send("desktop:binding-changed", root);
+      if (pageIs(credential)) main?.webContents()?.send("desktop:binding-changed", root);
     },
     onStatus: (status) => {
       if (device?.credential === credential) device.status = status;
@@ -961,12 +967,8 @@ async function preparing<T>(window: string, prepare: (signal: AbortSignal) => Pr
 function bridge(contents: WebContents, agent: Agent): void {
   // Each load of the page is a page of its own: what its user refused there holds until it is replaced.
   let load = 0;
-  // The device is the account's it was registered for: a page signed in as anyone else sees none.
-  // Until the page says who it is, it is whoever is signed in to the app, whose sign-in gave it its session.
-  const anotherAccount = () => {
-    const owner = account ?? signedIn?.account ?? null;
-    return kept !== null && (owner?.orgId !== kept.orgId || owner.userId !== kept.userId);
-  };
+  // The device is the account's it was registered for: a page of anyone else's, or of nobody's, sees none.
+  const anotherAccount = () => kept !== null && !pageIs(kept);
   // The device, once started: a page asking while it still starts, as at a launch, waits for it.
   const registered = async (): Promise<DeviceStack> => {
     if (anotherAccount()) throw new Error("This computer is registered with the agent for another account");

@@ -687,7 +687,10 @@ describe("a chat's folder, from the page", () => {
     expect(await binding(client, OTHER)).toBeNull();
   });
 
-  it("tells a page signed in as another account nothing of this account's chats", async () => {
+  it.each([
+    ["signed in as another account", { ...ACCOUNT, userId: "b", email: "b@example.com" }],
+    ["that said nobody is signed in", null],
+  ])("tells a page %s nothing of this account's chats", async (_name, said) => {
     const client = await signedIn();
     await fileManager();
     await bound(client, folder, CHAT, "ask");
@@ -696,7 +699,7 @@ describe("a chat's folder, from the page", () => {
       Object.assign(window, { heard });
       window.surogateDesktop!.onBindingChanged!((id) => heard.push(id));
     });
-    await client.evaluate((other) => window.surogateDesktop!.setAccount(other), { ...ACCOUNT, userId: "b", email: "b@example.com" });
+    await client.evaluate((account) => window.surogateDesktop!.setAccount(account), said);
     await expect(binding(client)).rejects.toThrow("another account");
     expect(await showFolder(client)).toContain("another account");
     // The chat's user lets it work freely at a prompt here: a page of another account hears nothing of it.
