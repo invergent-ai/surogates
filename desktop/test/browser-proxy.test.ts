@@ -3,7 +3,7 @@ import { connect as connectTcp, createServer, type Server, type Socket } from "n
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { BrowserProxy } from "../src/browser/proxy.js";
+import { BrowserProxy, CHECKS_KEPT } from "../src/browser/proxy.js";
 
 // What a name leads to, and how often it was looked up: rebinding.example leads elsewhere, then here.
 let lookups: Record<string, number>;
@@ -293,6 +293,16 @@ describe("the browser's proxy", () => {
     await sleep(2 * SLOW_MS);
     expect(dialed).toEqual([]);
     expect(await stillOpen()).toBe(0);
+  });
+
+  it("forgets a check once asked about it, and keeps only the latest CHECKS_KEPT, however many a page asks for", async () => {
+    await get("http://0123abcd.proxy-check.invalid/", "0123abcd.proxy-check.invalid");
+    expect(proxy.checked("0123abcd")).toBe(true);
+    expect(proxy.checked("0123abcd")).toBe(false);
+    for (let at = 0; at <= CHECKS_KEPT; at += 1) await get(`http://page${at}.proxy-check.invalid/`, `page${at}.proxy-check.invalid`);
+    expect(proxy.checked("page0")).toBe(false);
+    expect(proxy.checked("page1")).toBe(true);
+    expect(proxy.checked(`page${CHECKS_KEPT}`)).toBe(true);
   });
 
   it("answers 400 for what is not a proxy's request", async () => {

@@ -19,6 +19,9 @@ export interface BrowserProxyOptions extends ReachOptions {
 // prove its browser's requests come here. No resolver answers them (RFC 6761), so a browser
 // that goes around the proxy reaches nothing with one.
 export const CHECK_DOMAIN = ".proxy-check.invalid";
+// How many of the checks asked for it keeps, the latest: a launch waits on one at a time, and a
+// page can ask for any number.
+export const CHECKS_KEPT = 16;
 const checkOf = (host: string): string | null => (host.endsWith(CHECK_DOMAIN) ? host.slice(0, -CHECK_DOMAIN.length) : null);
 
 const subnets = (ranges: Array<[string, number]>) => {
@@ -81,7 +84,7 @@ export class BrowserProxy {
   private readonly server: Server;
   // Every connection it carries, so a close ends them all.
   private readonly carried = new Set<Duplex>();
-  // The checks asked for through it, by token.
+  // The latest checks asked for through it, by token, oldest first.
   private readonly checks = new Set<string>();
 
   constructor(private readonly options: BrowserProxyOptions = {}) {
@@ -98,16 +101,18 @@ export class BrowserProxy {
     });
   }
 
-  /** Whether a request for *token*'s check name came through this proxy. */
+  /** Whether a request for *token*'s check name came through this proxy; asking forgets it. */
   checked(token: string): boolean {
-    return this.checks.has(token);
+    return this.checks.delete(token);
   }
 
   // A check's name, recorded and answered here: nothing is dialed for it.
   private answered(host: string): boolean {
     const token = checkOf(host);
-    if (token !== null) this.checks.add(token);
-    return token !== null;
+    if (token === null) return false;
+    const [oldest] = this.checks.add(token);
+    if (this.checks.size > CHECKS_KEPT && oldest !== undefined) this.checks.delete(oldest);
+    return true;
   }
 
   close(): Promise<void> {
