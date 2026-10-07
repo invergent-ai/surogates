@@ -71,9 +71,9 @@ describe("the folder sheet", () => {
     // Each mode is named by its label alone, and described by its description.
     expect(await sheet.getByRole("radio", { name: "Work freely", exact: true }).isChecked()).toBe(true);
     expect(await sheet.getAttribute('input[value="free"]', "aria-describedby")).toBe("choice-free");
-    // What allows is held back at first, and the keyboard starts on it.
+    // What allows is held back at first, and the keyboard starts on the mode chosen.
     expect(await sheet.getAttribute('[data-id="accept"]', "aria-disabled")).toBe("true");
-    expect(await sheet.evaluate(() => (document.activeElement as HTMLElement).dataset.id)).toBe("accept");
+    expect(await sheet.evaluate(() => (document.activeElement as HTMLInputElement).value)).toBe("free");
     expect(await sheet.getAttribute(".prompt", "role")).toBe("alertdialog");
     await sheet.check('input[value="ask"]');
     await press(sheet, "accept");
@@ -118,6 +118,7 @@ describe("the folder sheet", () => {
     const client = await signedIn();
     const begun: Array<(sheet: Page) => Promise<() => Promise<void>>> = [
       async (sheet) => {
+        await sheet.focus('[data-id="accept"]');
         await sheet.keyboard.down(" ");
         return () => sheet.keyboard.up(" ");
       },
@@ -139,6 +140,22 @@ describe("the folder sheet", () => {
       await key(sheet, "Escape");
       expect(await prepared).toBeNull();
     }
+  });
+
+  it("takes nothing from a sentence typed as it opens", async () => {
+    const client = await signedIn();
+    const prepared = prepare(client);
+    let settled = false;
+    void prepared.then(() => {
+      settled = true;
+    });
+    const sheet = await prompt(app!);
+    // The user typing in the composer as the page opens the sheet: its spaces come long after the input protection.
+    await sheet.keyboard.type("please fix the failing test", { delay: 90 });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect([await promptsShown(app!), settled]).toEqual([1, false]);
+    await key(sheet, "Escape");
+    expect(await prepared).toBeNull();
   });
 
   it("shows a path with right-to-left names in the order it is written", async () => {

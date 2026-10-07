@@ -10,14 +10,14 @@ const ids = (content: { buttons: Array<{ id: string }> }) => content.buttons.map
 const allowing = (content: { buttons: Array<{ id: string; allows: boolean }> }) => content.buttons.filter((b) => b.allows).map((b) => b.id);
 
 describe("the folder sheet", () => {
-  it("shows the folder and both modes, with Use this folder held back, focused, and on Enter", () => {
+  it("shows the folder and both modes, focused on the mode, with Use this folder held back and on Enter", () => {
     const content = folderSheet(SHEET);
     expect(content.title).toBe("Work in notes?");
     expect(content.details).toEqual([{ label: "Folder", value: "/home/me/notes", code: true, keep: "" }]);
     expect(content.choice?.options.map((option) => option.value)).toEqual(["free", "ask"]);
     expect(content.choice?.value).toBe("free");
     expect([ids(content), allowing(content)]).toEqual([["cancel", "change", "accept"], ["accept"]]);
-    expect([content.focus, content.cancel, content.enter]).toEqual(["accept", "cancel", "accept"]);
+    expect([content.focus, content.cancel, content.enter]).toEqual(["choice", "cancel", "accept"]);
   });
 
   it("offers only Cancel and Change for a folder that cannot be used, saying why", () => {

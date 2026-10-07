@@ -125,7 +125,8 @@ function draw(state: State): void {
   }));
   waiting(state.waiting);
   hold();
-  document.querySelector<HTMLButtonElement>(`#prompt-buttons button[data-id="${content.focus}"]`)?.focus();
+  const focus = content.focus === "choice" ? "#prompt-choice input:checked" : `#prompt-buttons button[data-id="${content.focus}"]`;
+  document.querySelector<HTMLElement>(focus)?.focus();
 }
 
 document.addEventListener("keydown", (event) => {

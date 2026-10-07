@@ -39,7 +39,7 @@ export interface PromptContent {
   notes: string[]; // what the user should know before answering
   choice: PromptChoice | null;
   buttons: PromptButton[]; // left to right; the last is drawn as the main one
-  focus: string; // the button focused as it opens
+  focus: string; // the button focused as it opens, or "choice": the option chosen
   cancel: string; // Escape's, and a window closed some other way
   enter: string | null; // what Enter does from anywhere but a button
   height: number; // the window's, in px
@@ -90,7 +90,8 @@ export function folderSheet(sheet: FolderSheet): PromptContent {
     notes: sheet.links ? [linked(sheet.links)] : [],
     choice: { ...MODES, value: sheet.mode },
     buttons: [button("cancel", "Cancel"), button("change", "Change…"), button("accept", "Use this folder", true)],
-    focus: "accept",
+    // On the mode, not on Use this folder: a space typed as the sheet opens only picks the mode already picked.
+    focus: "choice",
     cancel: "cancel",
     enter: "accept",
     height: sheet.links ? 550 : 490,
