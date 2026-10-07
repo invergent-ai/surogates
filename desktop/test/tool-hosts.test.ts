@@ -1,12 +1,13 @@
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
-import type { Operation } from "../src/link/protocol.js";
+import { perform } from "../src/files/operations.js";
+import type { Operation, Outcome } from "../src/link/protocol.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type NetworkAnswer, type NetworkAsk, type ToHost } from "../src/hosts/messages.js";
 import {
   APP_DIRS, CANCELLED, forkHost, HOST_STOPPED, type HostProcess, NODE, NOT_BOUND, START_TIMEOUT_MS, ToolHosts,
@@ -287,6 +288,59 @@ const answering = (host: FakeHost, message: ToHost) => {
   readyOnly(host, message);
   if (message.type === "op") host.say({ type: "result", id: message.id, outcome: { ok: message.id } });
 };
+
+// Spike Q7's race (M8): a program of this computer's, outside every sandbox, flips a folder in the
+// chat's folder between a folder and a link to one beside it, while the file tools work through it.
+describe("the file tools, against a process of this computer's racing them", { timeout: 120_000 }, () => {
+  type Answer = (kind: string, args: Record<string, unknown>) => Promise<Outcome>;
+
+  // 1 250 rounds of a write, a read, a listing and a delete through the flipped folder, and a search
+  // of it every tenth: what of the folder beside it each reached (its file gone counts), how many
+  // writes were answered, what was written beside it, and what its file holds after.
+  async function race(answer: Answer, folder: string, outside: string) {
+    rmSync(outside, { recursive: true, force: true });
+    mkdirSync(outside);
+    writeFileSync(join(outside, "only-outside"), "OUTSIDE\n");
+    const flipper = spawn("sh", ["-c", `cd '${folder}' && while :; do rm -rf sub; mkdir sub; echo inside > sub/inside; rm -rf sub; ln -s '${outside}' sub; done`], {
+      stdio: "ignore", detached: true,
+    });
+    let reached = 0;
+    let wrote = 0;
+    try {
+      for (let i = 0; i < 1_250; i += 1) {
+        if ("ok" in (await answer("write", { key: join(folder, "sub", `x-${i}`), data: Buffer.from("m8\n").toString("base64") }))) wrote += 1;
+        const read = await answer("read", { key: join(folder, "sub", "only-outside"), max_bytes: null });
+        if ("ok" in read && typeof read.ok === "string" && Buffer.from(read.ok, "base64").toString() === "OUTSIDE\n") reached += 1;
+        const listed = await answer("list_dir", { key: join(folder, "sub") });
+        if ("ok" in listed && Array.isArray(listed.ok) && listed.ok.includes("only-outside")) reached += 1;
+        await answer("delete", { key: join(folder, "sub", "only-outside") });
+        if (i % 10 === 0) {
+          const found = await answer("ripgrep", { key: join(folder, "sub"), mode: "count", pattern: "OUTSIDE", glob: null, context: 0 });
+          if ("ok" in found && typeof found.ok === "string" && found.ok.includes("only-outside")) reached += 1;
+        }
+      }
+    } finally {
+      process.kill(-flipper.pid!, "SIGKILL");
+    }
+    const left = readdirSync(outside).sort();
+    const kept = left.includes("only-outside") ? readFileSync(join(outside, "only-outside"), "utf8") : null;
+    return { reached: reached + (kept === null ? 1 : 0), wrote, wroteOutside: left.filter((name) => name !== "only-outside").length, kept };
+  }
+
+  it("reach nothing beside the folder through its file host on the app's own node, where the same operations outside any sandbox do", async () => {
+    const folder = folders[ROOT_A]!;
+    const outside = join(base, "outside");
+    // The probe can race: the helper's own checks alone, outside srt, are beaten.
+    const bare = await race((kind, args) => perform(kind, args, { folder, home: base, env: { PATH: "/usr/bin:/bin" } }, signal()), folder, outside);
+    expect(bare.reached + bare.wroteOutside).toBeGreaterThan(0);
+    const executor = toolHosts();
+    const sandboxed = await race((kind, args) => executor.run(op(kind, args), signal()), folder, outside);
+    console.log(`M8: ${JSON.stringify({ bare, sandboxed })}`);
+    // The file host worked in the folder: its writes landed while sub was a folder.
+    expect(sandboxed).toEqual({ reached: 0, wrote: expect.any(Number), wroteOutside: 0, kept: "OUTSIDE\n" });
+    expect(sandboxed.wrote).toBeGreaterThan(0);
+  });
+});
 
 describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
   let fakes: FakeHost[];
