@@ -13,6 +13,8 @@ import copy
 from typing import Any
 
 from surogates.channels.constants import ADAPTER_CHANNELS, VOICE_TOOLS
+from surogates.devices.binding import device_of
+from surogates.tools.builtin.terminal import DEVICE_GIT_NOTE
 
 _AGENT_TYPE_GATED_TOOLS: frozenset[str] = frozenset({
     "delegate_task",
@@ -119,3 +121,23 @@ def drop_unusable_tools(
 
     kept = [s for s in schemas if s["function"]["name"] not in drop]
     return kept or schemas
+
+
+def describe_for_device(
+    schemas: list[dict[str, Any]],
+    config: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Return *schemas* with the terminal told what git cannot do in a folder of the user's computer.
+
+    Only for a session whose ``config`` names a device; a cloud session's
+    list is returned unchanged.  Input is never mutated.
+    """
+    if device_of(config) is None:
+        return schemas
+    described: list[dict[str, Any]] = []
+    for schema in schemas:
+        if schema["function"]["name"] == "terminal":
+            schema = copy.deepcopy(schema)
+            schema["function"]["description"] += f"{DEVICE_GIT_NOTE}\n"
+        described.append(schema)
+    return described

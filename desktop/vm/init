@@ -66,4 +66,18 @@ echo $(( (total - 262144) * 1024 )) > /sys/fs/cgroup/roots/memory.max
 echo 28672 > /sys/fs/cgroup/roots/pids.max
 echo -1000 > /proc/self/oom_score_adj
 
+# The guest-kernel rule on protected names (rule.bpf.c), loaded before any session.
+# A session (uid >= 10000) cannot unload it: unprivileged_bpf_disabled=1 is set above.
+mount -t securityfs -o nosuid,nodev,noexec securityfs /sys/kernel/security
+mount -t bpf -o nosuid,nodev,noexec bpf /sys/fs/bpf
+mkdir -p /sys/fs/bpf/surogate
+grep -qw bpf /sys/kernel/security/lsm || { echo "surogate: the bpf LSM is not active; refusing to run commands unprotected" >&2; exit 1; }
+/usr/sbin/bpftool prog loadall /usr/lib/surogate/rule.bpf.o /sys/fs/bpf/surogate autoattach \
+  || { echo "surogate: could not load the guest-kernel protected-names rule" >&2; exit 1; }
+want=11 # the rule's lsm programs; a host test keeps this in step with rule.bpf.c
+# grep -c exits 1 on a count of 0, which set -e would end on without saying why.
+have=$(/usr/sbin/bpftool link show | grep -c lsm || true)
+[ "$have" = "$want" ] || { echo "surogate: the protected-names rule attached $have of $want hooks" >&2; exit 1; }
+echo "surogate: the protected-names rule attached $have of $want hooks, under the LSMs $(cat /sys/kernel/security/lsm)"
+
 exec /usr/bin/tini -- /usr/bin/node /run/surogate/agent/guest/agent.js

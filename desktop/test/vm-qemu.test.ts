@@ -18,7 +18,7 @@ describe("QEMU's command line", () => {
       "-machine", "q35,accel=kvm,memory-backend=mem", "-cpu", "host", "-smp", "4", "-m", "2G",
       "-object", "memory-backend-memfd,id=mem,size=2G,share=on",
       "-kernel", "/i/vmlinuz",
-      "-append", "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet",
+      "-append", "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf",
       "-drive", "if=none,id=root,file=/i/rootfs.img,format=raw,readonly=on", "-device", "virtio-blk-pci,drive=root",
       "-drive", "if=none,id=agent,file=/a/agent.img,format=raw,readonly=on", "-device", "virtio-blk-pci,drive=agent",
       "-drive", "if=none,id=sessions,file=/d/sessions.img,format=raw,discard=unmap", "-device", "virtio-blk-pci,drive=sessions",
