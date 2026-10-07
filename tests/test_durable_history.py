@@ -52,8 +52,10 @@ def land(history: History, saga: str = "saga:1", author=A) -> dict:
     )
 
 
-def git(repo: Path, *args: str) -> str:
-    return subprocess.run(["git", f"--git-dir={repo}", *args], capture_output=True, text=True, check=True).stdout.strip()
+def git(repo: Path, *args: str, input: str | None = None) -> str:
+    return subprocess.run(
+        ["git", f"--git-dir={repo}", *args], capture_output=True, text=True, check=True, input=input,
+    ).stdout.strip()
 
 
 def test_a_landing_reaches_the_bucket_as_packs_and_packed_refs_alone(tmp_path, project):
@@ -563,3 +565,71 @@ def test_a_pruning_whose_lock_was_lost_leaves_the_landing_made_meanwhile(tmp_pat
     durable = project / "_history"
     assert git(durable, "rev-parse", "refs/heads/main") == landed[0]
     assert git(durable, "fsck", "--no-dangling") == ""
+
+
+def a_main_whose_parent_the_history_lacks(durable: Path) -> str:
+    """``main`` made a commit whose parent the history lacks, as after a pruning or as a command can make it; in a pack."""
+    main = git(durable, "rev-parse", "refs/heads/main")
+    body = (
+        f"tree {git(durable, 'rev-parse', f'{main}^{{tree}}')}\nparent {'1' * 40}\n"
+        "author X <x@x> 1700000000 +0000\ncommitter X <x@x> 1700000000 +0000\n\ncut\n"
+    )
+    crafted = git(durable, "hash-object", "-t", "commit", "--literally", "-w", "--stdin", input=body)
+    (durable / "packed-refs").write_text(f"# pack-refs with: peeled fully-peeled sorted \n{crafted} refs/heads/main\n")
+    (durable / "shallow").write_text(f"{crafted}\n")
+    git(durable, "repack", "-q", "-d")  # pods read only packs
+    return crafted
+
+
+def test_a_history_whose_config_a_command_wrote_runs_nothing_at_an_open_a_push_or_a_pruning(tmp_path, project):
+    first = a_pod(tmp_path, project, "early")
+    (first.copy / "start.md").write_text("x")
+    land(first, "saga:start")
+    durable, ran = project / "_history", tmp_path / "ran"
+    a_main_whose_parent_the_history_lacks(durable)
+    slow = a_pod(tmp_path, project, "slow")
+    other = a_pod(tmp_path, project, "o1")
+    (other.copy / "o.md").write_text("o")
+    land(other, "saga:o1", author={"name": "O", "email": "thread:o1@surogate"})
+    # A partial clone's config: a git in this repository that misses an object fetches it with this command.
+    (durable / "config").write_text(
+        "[core]\n\trepositoryformatversion = 1\n\tbare = true\n[extensions]\n\tpartialClone = evil\n"
+        f"[remote \"evil\"]\n\turl = {durable}\n\tpromisor = true\n\tuploadpack = touch {ran}; false\n"
+    )
+    # A push whose boundary's parent the history lacks looks for it there.
+    (slow.copy / "slow.md").write_text("the slow thread's work")
+    land(slow, "saga:slow")
+    a_pod(tmp_path, project, "t2").prune(keep=[], now=time.time())
+    assert (a_pod(tmp_path, project, "t3").copy / "slow.md").read_text() == "the slow thread's work"
+    assert not ran.exists()
+
+
+def test_git_never_runs_in_the_buckets_history(tmp_path, project, monkeypatch):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first, "saga:1")
+    durable, ran = project / "_history", tmp_path / "ran"
+    # What a thread's commands can write there: hooks, and a config that runs commands.
+    for hook in ("reference-transaction", "post-checkout", "pre-auto-gc", "post-index-change"):
+        (durable / "hooks").mkdir(exist_ok=True)
+        (durable / "hooks" / hook).write_text(f"#!/bin/sh\ntouch {ran}-{hook}\n")
+        (durable / "hooks" / hook).chmod(0o755)
+    (durable / "config").write_text(
+        f"[core]\n\tbare = true\n\tfsmonitor = touch {ran}-fsmonitor\n\talternateRefsCommand = touch {ran}-refs\n"
+        f"[uploadpack]\n\tpackObjectsHook = touch {ran}-pack;\n"
+    )
+    run, gits = subprocess.run, []
+
+    def recorded(args, **kwargs):
+        gits.append((args, (kwargs.get("env") or {}).get("GIT_DIR"), kwargs.get("cwd")))
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", recorded)
+    pod = a_pod(tmp_path, project, "t2")
+    (pod.copy / "b.md").write_text("b")
+    land(pod, "saga:2")
+    a_pod(tmp_path, project, "t3").prune(keep=[], now=time.time())
+    # Neither its repository, nor its folder, nor a remote: the pod copies the history's files and reads them as data.
+    there = [args for args, repo, cwd in gits if any(str(durable) in str(v) for v in (*args, repo, cwd))]
+    assert there == [] and not list(tmp_path.glob("ran*"))
+    assert (project / "b.md").read_text() == "b"

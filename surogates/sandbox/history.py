@@ -9,9 +9,12 @@ checkpoint manager runs it, so no git state reaches either folder.
 
 The history outlives the pod: it is a bare repository at ``_history/`` in
 the project's files, every object in a pack and every ref in
-``packed-refs``.  A pod opens by fetching ``main``, its thread's branch and
-base at depth 1, and the project's lock holder pushes by writing a pack,
-then ``packed-refs``.
+``packed-refs``.  A thread's commands can write those files, so git never
+runs there: the pod copies the packs, ``packed-refs`` and ``shallow`` to its
+own disk as data, and git runs in that copy under the pod's own config.  A
+pod opens by fetching ``main``, its thread's branch and base from the copy
+at depth 1, and the project's lock holder pushes by writing a pack, then
+``packed-refs``, as files.
 """
 
 from __future__ import annotations
@@ -60,7 +63,7 @@ THREAD_POD_DEADLINE = 86_400
 
 _GIT_TIMEOUT = 120
 #: The open's git calls: the pod's ready bound of ten minutes, less a margin.
-#: Through geesefs, a large project's fetch is bound by request latency.
+#: Through geesefs, a large project's read of its real files is bound by request latency.
 _OPEN_TIMEOUT = 570
 _TIMEOUT: ContextVar[int | None] = ContextVar("history_git_timeout", default=None)
 _ZERO = "0" * 40
@@ -81,6 +84,8 @@ _REF = re.compile(r"refs/(?:heads|bases|handoff|handoff-from|helpers)(?:/[A-Za-z
 _HERMETIC = {
     "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_ATTR_NOSYSTEM": "1",
     "XDG_CONFIG_HOME": "/dev/null/none", "GIT_LITERAL_PATHSPECS": "1",
+    # A missing object is missing: never fetched by a command a config names.
+    "GIT_NO_LAZY_FETCH": "1",
 }
 #: A file's bytes are history's as they are: no project, home or system
 #: ``.gitattributes`` converts line endings or runs a filter on them.
@@ -183,7 +188,7 @@ class History:
                 (self.repo / "info").mkdir(exist_ok=True)
                 (self.repo / "info" / "exclude").write_text("\n".join(HISTORY_EXCLUDES) + "\n")
                 (self.repo / "info" / "attributes").write_text(_ATTRIBUTES)
-            refs = self._durable_refs()
+            refs = self._take()
             self._check_durable()
             self._fetch(*(refs.get(r) for r in (MAIN, self.branch, self.base)))
             you = {"name": self.user, "email": f"user:{self.user}@surogate"}
@@ -377,7 +382,7 @@ class History:
         Safe to repeat: a landing already pushed is found by its saga.
         """
         saga = f"Surogate-Saga: {dict(map(tuple, trailers))['Surogate-Saga']}"
-        now = self._durable_refs().get(MAIN)
+        now = self._take().get(MAIN)
         if now != main:
             self._fetch(now)
             if now is not None and saga in self._message(now):
@@ -426,10 +431,10 @@ class History:
         ``has_saga`` says whether ``main`` is the landing of *saga*: the only
         proof that a landing pushed.
         """
-        main = self._durable_refs().get(MAIN)
+        main = self._take().get(MAIN)
         self._fetch(main, *(_checked_id(c, "a fetch") for c in commits))
         has_saga = main is not None and saga is not None and f"Surogate-Saga: {saga}" in self._message(main)
-        packs = sum(p.stat().st_size for p in (self.durable / "objects" / "pack").glob("*.pack"))
+        packs = sum(p.stat().st_size for p in (self._taken / "objects" / "pack").glob("*.pack"))
         return {"main": main, "has_saga": has_saga, "packs": packs}
 
     def keep(self, *, author: dict[str, str], trailers: list[list[str]], base: bool) -> dict:
@@ -479,12 +484,13 @@ class History:
             return {"pruned": False}
         self._put_durable("pruned", b"")
         self._sweep()
-        _invalidate(self.durable / "objects" / "pack")
-        packs = list((self.durable / "objects" / "pack").iterdir())
+        refs = self._take()
+        packs = [self.durable / "objects" / "pack" / p.name for p in (self._taken / "objects" / "pack").iterdir()]
         work = self.repo / "pruning.git"
         shutil.rmtree(work, ignore_errors=True)
         try:
-            self._mirror(work, refs, packs)
+            # Linked, not copied: git never writes a file in place, and the cut writes its shallow anew.
+            shutil.copytree(self._taken, work, copy_function=os.link)
             git = partial(self._in, work)
             for ref in set(git("for-each-ref", "--format=%(refname)").splitlines()) - {MAIN, *keep}:
                 git("update-ref", "-d", ref)
@@ -517,22 +523,6 @@ class History:
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
-    def _mirror(self, work: Path, refs: dict[str, str], packs: list[Path]) -> None:
-        """The durable history as *refs* and *packs*, in a repository at *work* on the pod's disk.
-
-        Its packs are copied whole, each read once in order: ``git clone``
-        of a history with a ``shallow`` file reads them object by object
-        instead, one request a read through geesefs (four minutes a GiB at
-        20 ms a request).  Its ``HEAD`` and config are its own, not the bucket's.
-        """
-        self._git(["init", "-q", "--bare", "-b", "main", str(work)], env={}, cwd=self.repo)
-        (work / "packed-refs").write_bytes(_packed(refs))
-        if shallow := self._durable_shallow():
-            (work / "shallow").write_text("".join(f"{c}\n" for c in shallow))
-        for pack in packs:
-            if pack.suffix in (".pack", ".idx"):
-                shutil.copyfile(pack, work / "objects" / "pack" / pack.name)
-
     def _cut(self, git: Callable[..., str], work: Path, *, mains: list[str], kept: int) -> int:
         """Cut *work*'s history to *mains*' newest *kept* and what only they reach; the size of its one pack after.
 
@@ -546,7 +536,7 @@ class History:
         was = set((work / "shallow").read_text().split()) if (work / "shallow").is_file() else set()
         shallow = sorted({c for c in stays if any(p not in stays for p in parents[c])} | (was & stays))
         if shallow:
-            (work / "shallow").write_text("".join(f"{c}\n" for c in shallow))
+            _replace(work / "shallow", "".join(f"{c}\n" for c in shallow).encode())
         git("reflog", "expire", "--expire=now", "--all")
         git("gc", "-q", "--prune=now")
         return sum(p.stat().st_size for p in (work / "objects" / "pack").glob("pack-*.pack"))
@@ -564,6 +554,47 @@ class History:
     # ------------------------------------------------------------------
     # The durable history
     # ------------------------------------------------------------------
+
+    @property
+    def _taken(self) -> Path:
+        """The durable history copied to the pod's disk: the only repository of it git runs in."""
+        return self.repo / "durable.git"
+
+    def _take(self) -> dict[str, str]:
+        """Copy the durable history to the pod's disk as the bucket has it now, as data; its refs.
+
+        Git never runs in the bucket's history, whose files a thread's
+        commands can write, only in this copy, whose ``HEAD`` and config are
+        the pod's own.  A pack is named by its contents: only the packs new
+        since the last copy are read, each whole and in order, which geesefs
+        reads in large ranges at once, where git reads a pack a request at a
+        time.  The refs are read first: a push writes its pack before
+        ``packed-refs``, so each commit they name is in a pack listed after.
+        """
+        taken = self._taken
+        if not (taken / "HEAD").exists():
+            self._git(["init", "-q", "--bare", "-b", "main", str(taken)], env={}, cwd=self.repo)
+        refs, shallow = self._durable_refs(), self._durable_shallow()
+        folder, packs = self.durable / "objects" / "pack", taken / "objects" / "pack"
+        _invalidate(folder)
+        try:
+            names = {n for n in os.listdir(folder) if n.endswith((".pack", ".idx"))}
+        except (FileNotFoundError, NotADirectoryError):
+            names = set()
+        here = set(os.listdir(packs))
+        for gone in here - names:
+            (packs / gone).unlink()
+        # Each pack before its index: git reads a pack only through it.
+        for name in sorted(names - here, key=lambda n: n.endswith(".idx")):
+            staged = packs / f".~{name}"
+            shutil.copyfile(folder / name, staged)
+            os.replace(staged, packs / name)
+        _replace(taken / "packed-refs", _packed(refs))
+        if shallow:
+            _replace(taken / "shallow", "".join(f"{c}\n" for c in shallow).encode())
+        else:
+            (taken / "shallow").unlink(missing_ok=True)
+        return refs
 
     def _durable_refs(self) -> dict[str, str]:
         """The durable history's refs as the bucket has them now, every one in ``packed-refs``."""
@@ -604,12 +635,11 @@ class History:
         return [_checked_id(c, "shallow") for c in (shallow.read_text(errors="replace").split() if shallow.is_file() else [])]
 
     def _fetch(self, *commits: str | None) -> None:
-        """*commits* from the durable history, at depth 1, where this repository lacks them."""
+        """*commits* from the durable history as last taken, at depth 1, where this repository lacks them."""
         wanted = [c for c in dict.fromkeys(commits) if c and not self._has(c)]
         if wanted:
-            _invalidate(self.durable / "objects" / "pack")
             self._git(
-                ["fetch", "-q", "--depth", "1", "--no-tags", "--no-write-fetch-head", "--", str(self.durable), *wanted],
+                ["fetch", "-q", "--depth", "1", "--no-tags", "--no-write-fetch-head", "--", str(self._taken), *wanted],
                 env={"GIT_DIR": str(self.repo)}, cwd=self.repo,
             )
 
@@ -623,7 +653,7 @@ class History:
         joins the history's ``shallow`` file.  The rewrite of ``packed-refs``
         is the moment a push counts.  Only the project's lock holder pushes.
         """
-        refs = self._durable_refs()
+        refs = self._take()
         moved = sorted(ref for ref, want in expect.items() if refs.get(ref) != want)
         if moved:
             raise HistoryConflict(f"{', '.join(moved)} moved in the project's history")
@@ -666,9 +696,9 @@ class History:
         self._put_durable("packed-refs", _packed(refs))
 
     def _in_durable(self, commit: str) -> bool:
-        """Whether the durable history holds *commit*."""
+        """Whether the durable history held *commit* when last taken."""
         try:
-            self._git(["cat-file", "-e", f"{commit}^{{commit}}"], env={"GIT_DIR": str(self.durable)}, cwd=self.repo)
+            self._git(["cat-file", "-e", f"{commit}^{{commit}}"], env={"GIT_DIR": str(self._taken)}, cwd=self.repo)
         except HistoryError:
             return False
         return True
@@ -930,6 +960,13 @@ def _sync(folder: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _replace(target: Path, data: bytes) -> None:
+    """Write *target* on the pod's disk anew, never in place: another repository may link the old file."""
+    staged = target.with_name(f".~{target.name}")
+    staged.write_bytes(data)
+    os.replace(staged, target)
 
 
 def _invalidate(path: Path) -> None:
