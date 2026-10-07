@@ -396,7 +396,7 @@ export class Root {
       if (typeof result === "number") this.bound.set(path, result);
       else if (result !== "absent") stuck.push(path);
     }
-    if (stuck.length > 0) throw new Error(refusal(folder, stuck, "A link among them that leads nowhere keeps it from doing so."));
+    if (stuck.length > 0) throw new Error(refusal(folder, stuck, "A link among them leads to nothing in this folder. Remove it, or make it lead to a file, to run commands here."));
   }
 
   // Everything of the root ends; resolves once it has, and its runner has gone.

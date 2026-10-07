@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { lstatSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -160,6 +160,21 @@ describe("a folder's protected keys, for a guest's read-only binds", { timeout: 
       [`${f}/.git`, "rw"], [`${f}/.git/config`, "ro"],
       [`${f}/.git/modules`, "rw"], [`${f}/.git/modules/lib`, "rw"], [`${f}/.git/modules/lib/config`, "ro"],
     ]);
+  });
+
+  it("name what a link at a protected name leads to in the folder, nothing for one that leads out of it, and the link itself for one that leads to nothing there", async () => {
+    const a = folders[ROOT_A] ?? "";
+    // An editor's settings shared with a sibling worktree, out of the folder.
+    mkdirSync(join(base, "shared-vscode"));
+    rmSync(join(a, "sub", ".vscode"), { recursive: true });
+    symlinkSync(join(base, "shared-vscode"), join(a, "sub", ".vscode"));
+    writeFileSync(join(a, "mcp.json"), "{}\n");
+    symlinkSync("mcp.json", join(a, ".mcp.json"));
+    symlinkSync("missing", join(a, ".idea"));
+    symlinkSync(join(base, "nowhere"), join(a, ".zshrc"));
+    const carried: ProtectedKey[][] = [];
+    expect(await command(toolHosts({ protect: () => {} }), carried)).toEqual(RAN);
+    expect(carried).toEqual([[key(".git", "rw"), key(".git/config"), key(".git/hooks"), key(".idea"), key("mcp.json")]]);
   });
 
   it("are not named for an executor that binds none", async () => {

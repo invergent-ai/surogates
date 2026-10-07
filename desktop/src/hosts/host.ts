@@ -537,15 +537,32 @@ function seen(keys: ReadonlySet<string>, startedAt: number, between: boolean): v
 }
 
 // *binds* told to the app with their inodes now, when any differs from what it was last told.
+// A link is named by what it leads to on the host, which the guest has at the same path. One
+// that leads out of the folder is named for nothing: no write in the guest reaches the host
+// there. One that leads to nothing in the folder is named itself, which the guest refuses: a
+// write through it would make what it names, there.
 function name(binds: ReadonlyArray<readonly [string, BindMode]>): void {
-  const keys: ProtectedKey[] = [];
+  if (!folder) return;
+  const root = folder.path;
+  const found = new Map<string, ProtectedKey>();
   for (const [path, mode] of binds) {
     try {
-      keys.push([path, lstatSync(path).ino, mode]);
+      const stats = lstatSync(path);
+      let at: [string, number] = [path, stats.ino];
+      if (stats.isSymbolicLink()) {
+        // Each link followed, as a write would; past one that leads nowhere, the name a write would make.
+        const target = realpath(path);
+        if (!target.loop && !inside(target.path, root)) continue;
+        const led = target.loop ? undefined : lstatSync(target.path, { throwIfNoEntry: false });
+        if (led) at = [target.path, led.ino];
+      }
+      // Two links to one file: read-only over a hold.
+      if (found.get(at[0])?.[2] !== "ro") found.set(at[0], [...at, mode]);
     } catch {
       // Gone since the look.
     }
   }
+  const keys = [...found.values()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   if (named && JSON.stringify(keys) === JSON.stringify(named)) return;
   named = keys;
   send({ type: "protected", keys });

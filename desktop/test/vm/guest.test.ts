@@ -1093,6 +1093,29 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     }
   });
 
+  it("binds what a protected name's link leads to in the folder, and runs commands beside one linked out of it", async () => {
+    const folder = join(dir, "folder");
+    // An editor's settings shared with a sibling worktree, which the guest does not have.
+    const shared = join(dir, "shared-vscode");
+    mkdirSync(shared);
+    writeFileSync(join(shared, "settings.json"), "{}\n");
+    symlinkSync(shared, join(folder, ".vscode"));
+    writeFileSync(join(folder, "mcp.json"), "{}\n");
+    symlinkSync("mcp.json", join(folder, ".mcp.json"));
+    const write = (name: string) => `(echo '{"x": 1}' > ${name}) 2>&1 | sed 's/.*: //'`;
+    try {
+      // The look after a command names the links the host made.
+      expect(await command("echo ran")).toMatchObject({ ok: { output: "ran\n" } });
+      expect(await command(`echo ran; ${write(".mcp.json")}; ${write("mcp.json")}`)).toMatchObject({
+        ok: { output: "ran\nRead-only file system\nRead-only file system\n" },
+      });
+      expect([readFileSync(join(folder, "mcp.json"), "utf8"), readFileSync(join(shared, "settings.json"), "utf8")]).toEqual(["{}\n", "{}\n"]);
+    } finally {
+      for (const name of [".vscode", ".mcp.json", "mcp.json"]) rmSync(join(folder, name), { force: true });
+      rmSync(shared, { recursive: true, force: true });
+    }
+  });
+
   it("shows a command what the file tools wrote just before it, each time, with nothing to wait for", async () => {
     const folder = join(dir, "folder");
     const key = join(folder, "lint.py");

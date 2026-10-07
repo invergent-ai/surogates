@@ -502,7 +502,7 @@ describe("a root's protected keys", () => {
     const link = join(base, ".mcp.json");
     inodes.set(config(), 11).set(link, "failed");
     await expect(guarded.protect("root-1", [[config(), 11, "ro"], [link, 12, "ro"]])).rejects.toThrow(
-      "Blocked: the computer could not make these protected files read-only in its sandbox, so commands cannot run here: .mcp.json. A link among them that leads nowhere keeps it from doing so.",
+      "Blocked: the computer could not make these protected files read-only in its sandbox, so commands cannot run here: .mcp.json. A link among them leads to nothing in this folder. Remove it, or make it lead to a file, to run commands here.",
     );
     inodes.set(link, 12);
     await guarded.protect("root-1", [[config(), 11, "ro"], [link, 12, "ro"]]);
