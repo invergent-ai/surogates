@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -109,7 +110,9 @@ async def test_a_turn_end_completes_its_saga_so_a_stop_in_the_next_turn_undoes_o
     assert (done["saga_id"], done["status"], done["steps_executed"]) == (first["saga_id"], "completed", 1)
 
     await store.emit_event(chat.id, EventType.USER_MESSAGE, {"content": "Remember my city too."})
-    await a_turn(api, monkeypatch, chat, [remember, _final_response("Noted.")], during=stop)
+    pool = SimpleNamespace(ensure=AsyncMock(side_effect=RuntimeError("no pod")), destroy_for_session=AsyncMock())
+    await a_turn(api, monkeypatch, chat, [remember, _final_response("Noted.")], pool=pool, during=stop)
+    pool.ensure.assert_not_awaited()  # nothing the turn did can be undone, so no pod is set up
     sagas = await saga_events(api, chat.id)
     second = [d for t, d in sagas if t == EventType.SAGA_START.value][-1]
     assert second["saga_id"] != first["saga_id"]
@@ -120,6 +123,39 @@ async def test_a_turn_end_completes_its_saga_so_a_stop_in_the_next_turn_undoes_o
     # A compensation ends its saga, so no later step joins it.
     last_type, last = sagas[-1]
     assert (last_type, last["saga_id"], last["status"]) == (EventType.SAGA_COMPLETE.value, second["saga_id"], "escalated")
+
+    await store.emit_event(chat.id, EventType.USER_MESSAGE, {"content": "Thanks."})
+    await a_turn(api, monkeypatch, chat, [_final_response("You're welcome.")])
+    third = [d for t, d in await saga_events(api, chat.id) if t == EventType.SAGA_START.value][-1]
+    assert third["saga_id"] not in (first["saga_id"], second["saga_id"])
+
+
+async def test_a_stop_whose_sandbox_cannot_be_set_up_still_ends_its_saga(api, monkeypatch):
+    chat = await a_chat(api)
+    store = api.app.state.session_store
+    await store.emit_event(chat.id, EventType.USER_MESSAGE, {"content": "Remember my name."})
+    remember = calling(("memory", {"action": "add", "content": "Name: Ana"}))
+    remember[0]["tool_calls"][0]["_checkpoint_hash"] = "0" * 40  # a step a restore could undo
+    pool = SimpleNamespace(
+        ensure=AsyncMock(side_effect=RuntimeError("the pod is gone")),
+        destroy_for_session=AsyncMock(),
+    )
+    await a_turn(api, monkeypatch, chat, [remember, _final_response("Noted.")], pool=pool, during=stop)
+    pool.ensure.assert_awaited_once()
+    sagas = await saga_events(api, chat.id)
+    [(_, first)] = [(t, d) for t, d in sagas if t == EventType.SAGA_START.value]
+    [step] = [d for t, d in sagas if t == EventType.SAGA_STEP_BEGIN.value]
+    [compensated] = [d for t, d in sagas if t == EventType.SAGA_COMPENSATE.value]
+    assert (compensated["saga_id"], compensated["steps_rolled_back"], compensated["failed_steps"]) == (
+        first["saga_id"], 0, [step["step_id"]],
+    )
+    last_type, last = sagas[-1]
+    assert (last_type, last["saga_id"], last["status"]) == (EventType.SAGA_COMPLETE.value, first["saga_id"], "escalated")
+
+    await store.emit_event(chat.id, EventType.USER_MESSAGE, {"content": "Thanks."})
+    await a_turn(api, monkeypatch, chat, [_final_response("You're welcome.")])
+    second = [d for t, d in await saga_events(api, chat.id) if t == EventType.SAGA_START.value][-1]
+    assert second["saga_id"] != first["saga_id"]
 
 
 async def test_a_failed_turn_completes_its_saga(api, monkeypatch):

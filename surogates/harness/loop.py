@@ -3033,7 +3033,6 @@ class AgentHarness(
                 make_sandbox_writer,
             )
             if self._sandbox_pool is not None:
-                from surogates.sandbox.pool import sandbox_session_key
                 _spill_writer = make_sandbox_writer(
                     self._sandbox_pool, sandbox_session_key(session),
                 )
@@ -3401,10 +3400,16 @@ class AgentHarness(
                 continue
 
             try:
-                # Ensure the sandbox is still available for compensation
-                # (it may have been destroyed on a prior crash).
-                if self._sandbox_pool is not None:
-                    try:
+                # Capture count before compensate() transitions steps
+                # away from COMMITTED (after which committed_steps is empty).
+                committed_count = len(active.committed_steps)
+                try:
+                    # Ensure the sandbox is still available for compensation
+                    # (it may have been destroyed on a prior crash).  Only a
+                    # step that can be undone needs it.
+                    if self._sandbox_pool is not None and any(
+                        s.is_compensable for s in active.committed_steps
+                    ):
                         from surogates.harness.tool_exec import _build_session_sandbox_spec
                         sandbox_owner = sandbox_session_key(session)
                         sandbox_spec = await _build_session_sandbox_spec(
@@ -3412,25 +3417,23 @@ class AgentHarness(
                             credential_vault=self._credential_vault,
                         )
                         await self._sandbox_pool.ensure(sandbox_owner, sandbox_spec)
-                    except Exception:
-                        logger.warning(
-                            "Cannot provision sandbox for saga compensation "
-                            "in session %s — marking saga as escalated",
-                            session.id,
-                        )
-                        active.transition(SagaState.ESCALATED)
-                        active.error = "Sandbox unavailable for compensation"
-                        continue
-
-                # Capture count before compensate() transitions steps
-                # away from COMMITTED (after which committed_steps is empty).
-                committed_count = len(active.committed_steps)
-                compensator = partial(
-                    compensate_step,
-                    sandbox_pool=self._sandbox_pool,
-                    session_id=sandbox_session_key(session),
-                )
-                failed = await saga.compensate(active.saga_id, compensator)
+                except Exception:
+                    logger.warning(
+                        "Cannot provision sandbox for saga compensation "
+                        "in session %s — marking saga as escalated",
+                        session.id,
+                    )
+                    active.transition(SagaState.COMPENSATING)
+                    active.transition(SagaState.ESCALATED)
+                    active.error = "Sandbox unavailable for compensation"
+                    failed = active.committed_steps
+                else:
+                    compensator = partial(
+                        compensate_step,
+                        sandbox_pool=self._sandbox_pool,
+                        session_id=sandbox_session_key(session),
+                    )
+                    failed = await saga.compensate(active.saga_id, compensator)
                 failed_ids = [s.step_id for s in failed]
                 await self._store.emit_event(
                     session.id,
