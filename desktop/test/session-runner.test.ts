@@ -102,7 +102,7 @@ afterEach(async () => {
   for (const started of runners) await started.stop();
   for (const child of raw) child.kill("SIGKILL");
   // A bare runner has no pid namespace: what it ran outlives one that is killed.
-  spawnSync("pkill", ["-KILL", "-f", "^sleep 6(48|57)$"]);
+  spawnSync("pkill", ["-KILL", "-f", "^sleep 648$"]);
   rmSync(base, { recursive: true, force: true });
 });
 
