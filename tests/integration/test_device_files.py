@@ -238,10 +238,8 @@ async def test_a_change_its_user_has_not_allowed_is_kept_and_the_same_request_ge
     assert waiting.status_code == 202, waiting.text
     assert waiting.json()["request_id"] == "upload-000000000002"
     assert not chat.laptop.cancelled
-    # Allowed now: the computer answers what it held when it is next asked.
-    chat.laptop.hold_asked = False
-    await chat.laptop.disconnect()
-    await chat.laptop.connect()
+    # Allowed now: the computer answers what it held.
+    await chat.laptop.release()
     for _ in range(2):  # and the same request once more, which changes nothing again
         done = await upload(api, chat, "notes.txt", b"draft", request_id="upload-000000000002")
         assert done.status_code == 201, done.text
@@ -263,9 +261,7 @@ async def test_a_request_id_sent_again_with_another_change_is_refused_and_change
     assert first.status_code == 202, first.text  # its write is recorded, and waits
     again = await upload(api, chat, "notes.txt", b"two", request_id="upload-000000000005")
     assert again.status_code == 409, again.text
-    chat.laptop.hold_asked = False
-    await chat.laptop.disconnect()
-    await chat.laptop.connect()
+    await chat.laptop.release()
     landed = await upload(api, chat, "notes.txt", b"one", request_id="upload-000000000005")
     assert landed.status_code == 201, landed.text
     assert (chat.folder / "notes.txt").read_bytes() == b"one"
@@ -517,3 +513,20 @@ async def test_an_upload_sent_again_by_another_digest_is_refused_and_changes_not
     landed = await sent_again(api, chat, first.json()["change"], "upload-000000000053")
     assert landed.status_code == 201, landed.text
     assert (chat.folder / "notes.txt").read_bytes() == b"one"
+
+
+async def test_a_change_still_asked_about_when_its_computers_link_drops_never_lands(api, chat, monkeypatch):
+    monkeypatch.setattr(workspace_routes, "CHANGE_WITHIN_S", 0.5)
+    chat.laptop.hold_asked = True
+    waiting = await upload(api, chat, "notes.txt", b"draft", request_id="upload-000000000060")
+    assert waiting.status_code == 202, waiting.text
+    # The link drops while its user is still asked: the app answers it not run, at the next welcome.
+    await chat.laptop.disconnect()
+    chat.laptop.hold_asked = False
+    await chat.laptop.connect()
+    monkeypatch.setattr(workspace_routes, "CHANGE_WITHIN_S", 5.0)
+    again = await upload(api, chat, "notes.txt", b"draft", request_id="upload-000000000060")
+    assert again.status_code == 502, again.text
+    assert again.json()["detail"] == "This computer's link dropped before this was allowed, so it did not run"
+    assert not (chat.folder / "notes.txt").exists()
+    assert "write" not in chat.laptop.ran

@@ -47,6 +47,12 @@ from surogates.tools.workspace_io.local import CODE_UNITS
 
 # What the app asks its user about before it runs, in Ask every time (desktop/src/binding/approvals.ts).
 ASKED = {"run", "start", "write", "delete", "write_stdin"}
+# What the app answers the user's own request still asked about, or waiting for its data, once its link
+# ends (desktop/src/operations/runner.ts): its caller was told "offline", so it never runs.
+DISMISSED = {"error": {
+    "type": "cancelled", "message": "This computer's link dropped before this was allowed, so it did not run",
+}}
+_REQUEST = "request:"
 
 _PROCESS_KINDS = {"start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"}
 
@@ -504,7 +510,17 @@ class FakeLaptop:
         finally:
             if self._ws is ws:
                 self.connected = False
+                self._dropped()
             self._heard.set()
+
+    def _dropped(self) -> None:
+        """As the app when its link ends: the user's own requests still asked about, or waiting for their
+        data, are answered not run, and that answer goes when the server sends them again."""
+        waiting = {**self._asked, **{operation_id: op for operation_id, (op, _) in self._incoming.items()}}
+        for operation_id, frame in waiting.items():
+            if frame["invocation_id"].startswith(_REQUEST) and operation_id not in self.outcomes:
+                self.outcomes[operation_id] = DISMISSED
+                self._asked.pop(operation_id, None)
 
     def _bind(self, frame: dict[str, Any]) -> dict[str, Any]:
         args = frame["args"]
