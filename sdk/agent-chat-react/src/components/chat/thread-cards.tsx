@@ -158,7 +158,8 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
                   Start
                 </Button>
               ) : null}
-              {errors[thread.key] && (
+              {/* A start refused once the card is started, here or elsewhere, is moot. */}
+              {!threadId && errors[thread.key] && (
                 <p role="alert" className="text-xs text-destructive">
                   {errors[thread.key]}
                 </p>

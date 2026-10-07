@@ -126,16 +126,22 @@ function adapterStub(overrides: Partial<AgentChatAdapter> = {}): AgentChatAdapte
   } as unknown as AgentChatAdapter;
 }
 
-function mount(node: ReactElement, adapter: AgentChatAdapter, context: { projectId?: string; onOpenSession?: (id: string) => void } = {}) {
+type CardContext = { projectId?: string; onOpenSession?: (id: string) => void };
+
+function provided(node: ReactElement, adapter: AgentChatAdapter, context: CardContext) {
+  return (
+    <AgentChatAdapterProvider value={{ adapter, sessionId: "master", ...context }}>
+      <TooltipProvider>{node}</TooltipProvider>
+    </AgentChatAdapterProvider>
+  );
+}
+
+function mount(node: ReactElement, adapter: AgentChatAdapter, context: CardContext = {}) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
-    root?.render(
-      <AgentChatAdapterProvider value={{ adapter, sessionId: "master", ...context }}>
-        <TooltipProvider>{node}</TooltipProvider>
-      </AgentChatAdapterProvider>,
-    );
+    root?.render(provided(node, adapter, context));
   });
   return container;
 }
@@ -257,6 +263,24 @@ describe("the cards in the conversation", () => {
     const card = dom.querySelector('[data-testid="proposed-thread"]')!;
     await act(async () => button(dom, "Start", card).click());
     expect(card.querySelector('[role="alert"]')?.textContent).toBe("This thread was already started.");
+  });
+
+  it("shows a card started elsewhere as Started, with no alert for its own start refused", async () => {
+    let refuse: () => void = () => {};
+    const startProposedThread = vi.fn(() => new Promise<AgentChatThreadRow>((_resolve, reject) => {
+      refuse = () => reject(new Error("This thread was already started."));
+    }));
+    const adapter = adapterStub({ startProposedThread });
+    const context = { projectId: "project-1" };
+    const dom = mount(thread(applied(proposed), "simple"), adapter, context);
+    await act(async () => button(dom, "Start", dom.querySelector('[data-testid="proposed-thread"]')!).click());
+    // Another device started it: its thread's event arrives before this start's refusal.
+    const startedElsewhere = applied(proposed, spawned({ started_by: "user", proposal_id: PROPOSAL, key: "1" }));
+    act(() => root?.render(provided(thread(startedElsewhere, "simple"), adapter, context)));
+    await act(async () => refuse());
+    const card = dom.querySelector('[data-testid="proposed-thread"]')!;
+    expect(card.textContent).toContain("Started");
+    expect(card.querySelector('[role="alert"]')).toBeNull();
   });
 
   it("offers no Start outside a project's master", () => {
