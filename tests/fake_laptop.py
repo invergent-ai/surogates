@@ -246,11 +246,17 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
 def _walk(a: dict[str, Any]) -> dict[str, Any]:
     """As the app walks: depth first, each folder entered as it is met, through a handle on its parent and never
     through a link, and each folder's entries read as the walk goes, as the operating system lists them."""
-    key, skip, top, hidden, since = (a.get(name) for name in ("key", "skip", "skip_top", "skip_hidden", "since"))
+    key = a.get("key")
+    if not isinstance(key, str):
+        # The key before anything else, as the app checks it.
+        raise ValueError("'key' must be a string")
+    skip, top, hidden, since = (a.get(name) for name in ("skip", "skip_top", "skip_hidden", "since"))
     if (
-        not isinstance(key, str) or type(hidden) is not bool
+        type(hidden) is not bool
         or not all(isinstance(names, list) and all(isinstance(name, str) for name in names) for names in (skip, top))
-        or not (since is None or (isinstance(since, str) and since.isascii() and since.isdigit()))
+        # Present, as the app reads it: null or at most 20 digits, the clock in nanoseconds past the year 5000.
+        or "since" not in a
+        or not (since is None or (isinstance(since, str) and since.isascii() and since.isdigit() and len(since) <= 20))
     ):
         raise ValueError(BAD_WALK)
     cursor = str(time.time_ns() - WALK_MARGIN_NS)

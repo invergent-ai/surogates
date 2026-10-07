@@ -718,9 +718,13 @@ describe("walk", () => {
     expect(await walk({ key: join(base, "outside") })).toMatchObject({ error: { type: "sandbox" } });
     for (const args of [
       { skip: "node_modules" }, { skip: [1] }, { skip_top: "_whiteboard" }, { skip_hidden: 1 }, { since: "yesterday" },
+      { since: "1".repeat(21) }, { since: undefined },
     ]) {
       expect(await walk(args)).toEqual({ error: { type: "value", message: BAD_WALK } });
     }
+    // The key before anything else.
+    expect(await walk({ key: 7, skip: "x" })).toEqual({ error: { type: "value", message: "'key' must be a string" } });
+    expect((await walk({ since: "9".repeat(20) })).ok.files).toEqual([]);
   });
 });
 

@@ -723,7 +723,14 @@ async def test_a_listing_that_is_not_one_is_an_error_not_a_wrong_tree(value):
 
 async def test_the_reference_laptop_refuses_a_walk_it_cannot_take(root):
     taken = {"key": str(root), "skip": [], "skip_top": [], "skip_hidden": False, "since": None}
-    for changes in ({"skip": "node_modules"}, {"skip_top": [1]}, {"skip_hidden": 1}, {"since": "yesterday"}):
+    for changes in ({"skip": "node_modules"}, {"skip_top": [1]}, {"skip_hidden": 1}, {"since": "yesterday"}, {"since": "1" * 21}):
         assert await perform(LocalWorkspaceIO(str(root)), "walk", {**taken, **changes}) == {
             "error": {"type": "value", "message": BAD_WALK},
         }
+    missing = {name: value for name, value in taken.items() if name != "since"}
+    assert await perform(LocalWorkspaceIO(str(root)), "walk", missing) == {"error": {"type": "value", "message": BAD_WALK}}
+    # The key before anything else, as the app checks it.
+    assert await perform(LocalWorkspaceIO(str(root)), "walk", {**taken, "key": 7, "skip": "x"}) == {
+        "error": {"type": "value", "message": "'key' must be a string"},
+    }
+    assert (await perform(LocalWorkspaceIO(str(root)), "walk", {**taken, "since": "9" * 20}))["ok"]["files"] == []

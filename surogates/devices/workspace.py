@@ -19,7 +19,7 @@ enforces its rules; the worker never touches the folder.
   delete          key                                           null
   list_dir        key                                           [name]
   walk            key, skip ([name]), skip_top ([name]),        {files: [[path, size]], truncated, cursor}
-                  skip_hidden (bool), since (str or null)
+                  skip_hidden (bool), since (up to 20 digits, or null)
   ripgrep         key, mode, pattern, glob, context             stdout (str)
   which           name                                          bool
   run             command, workdir, timeout                     {output, returncode, timed_out}

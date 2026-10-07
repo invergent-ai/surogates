@@ -428,7 +428,8 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
   const { skip, skip_top: top, skip_hidden: hidden, since } = args;
   if (
     !names(skip) || !names(top) || typeof hidden !== "boolean"
-    || !(since === null || (typeof since === "string" && /^[0-9]+$/.test(since)))
+    // A cursor is the clock in nanoseconds: 20 digits last past the year 5000.
+    || !(since === null || (typeof since === "string" && /^[0-9]{1,20}$/.test(since)))
   ) {
     throw valueError(BAD_WALK);
   }
