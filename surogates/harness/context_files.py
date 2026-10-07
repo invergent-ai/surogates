@@ -12,9 +12,14 @@ SOUL.md is loaded independently (always, from asset root).
 
 from __future__ import annotations
 
+import codecs
 import logging
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from surogates.devices.workspace import DeviceWorkspaceIO
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +152,38 @@ def load_project_context(workspace_path: str | None) -> str | None:
             break
         current = parent
 
+    return None
+
+
+async def load_folder_context(files: "DeviceWorkspaceIO") -> str | None:
+    """Project context from the top of a local folder, read through its computer.
+
+    The first of :data:`PROJECT_CONTEXT_FILENAMES` there that is UTF-8
+    text, scanned and cut as :func:`load_project_context` does on this
+    host.  Only the folder's top: the computer gives nothing above it.  At
+    most one frame of it is read (``MAX_PAYLOAD_BYTES``), far past what the
+    prompt keeps; a character the frame cuts in two is left out.
+    """
+    from surogates.devices.workspace import MAX_PAYLOAD_BYTES
+    from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+
+    names = set(await files.list_dir(await files.resolve("")))
+    for filename in PROJECT_CONTEXT_FILENAMES:
+        if filename not in names:
+            continue
+        try:
+            data = await files.read(await files.resolve(filename), max_bytes=MAX_PAYLOAD_BYTES)
+            # Strict, so the scan reads what the model would: a byte that is
+            # not UTF-8 could hide a pattern from it.
+            content = codecs.getincrementaldecoder("utf-8")().decode(
+                data, final=len(data) < MAX_PAYLOAD_BYTES,
+            ).strip()
+        except (OSError, WorkspaceSandboxError, UnicodeDecodeError):
+            # A folder by that name, a link out of the folder, a file the
+            # computer will not read, or one that is not text.
+            continue
+        if content:
+            return truncate_context(scan_context_content(content, filename))
     return None
 
 

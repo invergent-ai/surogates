@@ -31,7 +31,7 @@ from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceR
 from surogates.channels.constants import END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
-from surogates.devices.sandbox import enter_device_session, leave_device_session
+from surogates.devices.sandbox import NOT_AVAILABLE, enter_device_session, leave_device_session
 from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
     resolve_agent_def,
@@ -366,6 +366,10 @@ _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
 # tasks, a research's experiments and helpers would all edit a copy the
 # thread never lands, and so would a coding agent, whose turn never lands.
 _PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "mission", "auto-research", "deep-research", "code"})
+
+# The commands a chat on a local folder refuses: a research run's
+# experiments need the cloud's coding sandbox and a /workspace repository.
+_LOCAL_FOLDER_REFUSED_COMMANDS = frozenset({"auto-research"})
 
 
 #: A first-person intention to act, sitting at the very end of the message:
@@ -1071,6 +1075,12 @@ class AgentHarness(
             and is_project_thread(session.config)
         ):
             return thread_refusal(f"/{name}")
+        if (
+            name in _LOCAL_FOLDER_REFUSED_COMMANDS
+            and session is not None
+            and device_of(session.config) is not None
+        ):
+            return f"/{name} is {NOT_AVAILABLE}"
         if self._slash_command_enabled(name, session):
             return None
         return f"/{name} is disabled for this agent."

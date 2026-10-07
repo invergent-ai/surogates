@@ -53,6 +53,9 @@ from surogates.governance.policy import GovernanceGate
 from surogates.harness.device_replay import replay_unanswered
 from surogates.harness import loop_artifact_completion
 from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
+from surogates.harness import loop_context_replay
+from surogates.harness.loop_context_replay import ContextReplayMixin
+from surogates.harness.prompt_cache import SystemPromptCache
 from surogates.harness.tool_exec import execute_single_tool
 from surogates.runtime.turn_slots import TurnSlots, current_turn
 from surogates.session.events import EventType
@@ -3355,3 +3358,59 @@ async def test_a_computer_that_does_not_answer_holds_the_turn_no_longer_than_its
     turn = TurnEnd(store, session_factory, redis_client)
     assert await asyncio.wait_for(turn._folder_cursor(session), 3.0) is None
     assert await asyncio.wait_for(turn._walk_folder(session, since="1"), 3.0) is None
+
+
+class Prompting(ContextReplayMixin):
+    """The harness's prompt build, with only what it reads."""
+
+    class Builder:
+        folder_context: str | None = None
+
+        def build(self) -> str:
+            return f"prompt with {self.folder_context}"
+
+    def __init__(self, session_factory, redis_client) -> None:
+        self._session_factory, self._redis, self._storage = session_factory, redis_client, None
+        self._system_prompt_cache, self._prompt = SystemPromptCache(), self.Builder()
+        self._coding_repos, self._ssh_targets = [], []
+
+
+async def test_a_local_folders_agents_md_is_read_through_its_computer_when_the_prompt_is_built(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    (rig.folder / "AGENTS.md").write_text("Use tabs.")
+    await rig.laptop.connect()
+    session = await SessionStore(session_factory).get_session(rig.root)
+    harness = Prompting(session_factory, redis_client)
+
+    assert await harness._build_system_prompt(session) == "prompt with Use tabs."
+    looked = len(rig.laptop.ran)
+    # Built once, as any prompt: the next wake on this worker reuses it.
+    assert await harness._build_system_prompt(session) == "prompt with Use tabs."
+    assert len(rig.laptop.ran) == looked
+
+
+async def test_a_prompt_built_while_its_computer_is_away_goes_without_the_folders_context_and_is_not_kept(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    (rig.folder / "AGENTS.md").write_text("Use tabs.")
+    session = await SessionStore(session_factory).get_session(rig.root)
+    harness = Prompting(session_factory, redis_client)
+    assert await asyncio.wait_for(harness._build_system_prompt(session), 5.0) == "prompt with None"
+    # Built again once the computer is back, rather than cached without it.
+    await rig.laptop.connect()
+    assert await harness._build_system_prompt(session) == "prompt with Use tabs."
+
+
+async def test_a_prompt_waits_no_longer_than_its_bound_on_a_computer_that_does_not_answer(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    rig.laptop.hold = True  # online, but answers nothing
+    monkeypatch.setattr(loop_context_replay, "HARNESS_WITHIN_S", 0.5)
+    session = await SessionStore(session_factory).get_session(rig.root)
+    prompt = await asyncio.wait_for(Prompting(session_factory, redis_client)._build_system_prompt(session), 3.0)
+    assert prompt == "prompt with None"
