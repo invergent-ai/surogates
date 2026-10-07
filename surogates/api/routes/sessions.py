@@ -1523,6 +1523,9 @@ def _tree_node_from_row(row: dict) -> SessionTreeNode:
 
 
 def _session_run_kind(channel: str, config: dict) -> str | None:
+    # A project's master: the chat list, which draws an open chat's tree, leaves its tree out.
+    if is_project_master(config):
+        return "project"
     if channel == "scheduled" and config.get("scheduled_dynamic_loop") is True:
         return "dynamic_loop"
     if channel == "scheduled":
