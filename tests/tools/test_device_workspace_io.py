@@ -671,6 +671,34 @@ async def test_a_walk_stops_at_its_cap_and_says_so(wio, root):
     assert walked.truncated is True
 
 
+async def test_a_walk_lists_a_folder_of_exactly_its_cap_whole_and_says_so(wio, root):
+    for name in range(workspace.MAX_WALK_FILES):
+        (root / str(name)).touch()
+    walked = await wio.walk(str(root), skip=())
+    assert len(walked.files) == workspace.MAX_WALK_FILES
+    assert walked.truncated is False
+
+
+async def test_a_walk_stops_where_its_paths_fill_one_frame(wio, root):
+    # Each path costs 252 encoded and 24 more: 3 799 of them fit in MAX_PAYLOAD_BYTES, not 3 800.
+    for name in range(4_000):
+        (root / str(name).rjust(250, "x")).touch()
+    walked = await wio.walk(str(root), skip=())
+    assert len(walked.files) == 3_799
+    assert walked.truncated is True
+
+
+async def test_a_walk_stops_past_its_looks_a_folder_it_does_not_enter_counted_too(wio, root):
+    # Hidden, so none is entered: each is one look.
+    for name in range(workspace.MAX_WALK_LOOKS):
+        (root / f".{name}").mkdir()
+    walked = await wio.walk(str(root), skip=(), skip_hidden=True)
+    assert (walked.files, walked.truncated) == ([], False)
+    (root / ".one-more").mkdir()
+    walked = await wio.walk(str(root), skip=(), skip_hidden=True)
+    assert (walked.files, walked.truncated) == ([], True)
+
+
 async def test_a_walk_fails_as_its_folder_does(wio, root):
     (root / "a.txt").write_text("a")
     with pytest.raises(NotADirectoryError):

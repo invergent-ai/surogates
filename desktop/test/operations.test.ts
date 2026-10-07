@@ -11,8 +11,8 @@ import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WALK_FILES, MAX_WRITE_BYTES, READ_TOO_LARGE,
-  WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
+  MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WALK_FILES, MAX_WALK_LOOKS, MAX_WRITE_BYTES,
+  READ_TOO_LARGE, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "../src/files/answers.js";
 import { BAD_PAGE, BAD_WALK, type Context, perform, revisionOf } from "../src/files/operations.js";
 import { inFolderRefusal } from "../src/files/protect.js";
@@ -684,6 +684,33 @@ describe("walk", () => {
     expect(walked.ok.files).toHaveLength(MAX_WALK_FILES);
     expect(walked.ok.truncated).toBe(true);
   });
+
+  it("lists a folder of exactly its cap whole, and says it is whole", async () => {
+    mkdirSync(join(folder, "many"));
+    for (let i = 0; i < MAX_WALK_FILES; i++) writeFileSync(join(folder, "many", String(i)), "");
+    const walked = await walk({ key: join(folder, "many") });
+    expect(walked.ok.files).toHaveLength(MAX_WALK_FILES);
+    expect(walked.ok.truncated).toBe(false);
+  });
+
+  it("stops where its paths fill one frame", async () => {
+    // Each path costs 252 encoded and 24 more: 3 799 of them fit in MAX_PAYLOAD_BYTES, not 3 800.
+    mkdirSync(join(folder, "long"));
+    for (let i = 0; i < 4_000; i++) writeFileSync(join(folder, "long", String(i).padStart(250, "x")), "");
+    const walked = await walk({ key: join(folder, "long") });
+    expect(walked.ok.files).toHaveLength(3_799);
+    expect(walked.ok.truncated).toBe(true);
+  });
+
+  it("stops past its looks, a folder it does not enter counted too", async () => {
+    // Hidden, so none is entered: each is one look.
+    mkdirSync(join(folder, "dirs"));
+    for (let i = 0; i < MAX_WALK_LOOKS; i++) mkdirSync(join(folder, "dirs", `.${i}`));
+    const hidden = { key: join(folder, "dirs"), skip_hidden: true };
+    expect((await walk(hidden)).ok).toMatchObject({ files: [], truncated: false });
+    mkdirSync(join(folder, "dirs", ".one-more"));
+    expect((await walk(hidden)).ok).toMatchObject({ files: [], truncated: true });
+  }, 60_000);
 
   it("fails as its folder does, and refuses a key or arguments it cannot take", async () => {
     expect(await walk({ key: `${folder}/a.txt` })).toMatchObject({ error: { type: "os", code: "ENOTDIR" } });
