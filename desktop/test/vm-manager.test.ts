@@ -393,12 +393,18 @@ describe("a root's protected keys in the guest", () => {
   const KEYS: ProtectedKey[] = [["/f/.git", 40, "rw"], ["/f/.git/config", 41, "ro"]];
   let asked: unknown[];
   let refuse: boolean;
+  // Binds that take a while, as a few hundred do: what has been bound is told once they are.
+  let slow: boolean;
   const roots = (): ControlRoots => ({
     uid: () => 10_000,
     setup: async (root) => void asked.push(["setup", root]),
     teardown: async () => {},
     protect: async (root, keys) => {
       asked.push(["protect", root, keys]);
+      if (slow) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        asked.push(["bound", root]);
+      }
       if (refuse) throw new Error("Blocked: the computer could not make these protected files read-only in its sandbox");
     },
     perform: async (root, kind) => {
@@ -413,6 +419,7 @@ describe("a root's protected keys in the guest", () => {
   beforeEach(() => {
     asked = [];
     refuse = false;
+    slow = false;
   });
 
   it("are made read-only after the root's setup and before its command, asked again only once they change or it is set up again", async () => {
@@ -455,6 +462,37 @@ describe("a root's protected keys in the guest", () => {
     await manager.protect("root-1", KEYS);
     await manager.protect("root-2", KEYS);
     expect(asked).toEqual([["setup", "root-1"], ["which", "root-1"], ["protect", "root-1", KEYS]]);
+    await manager.stop();
+  });
+
+  // The root's runner is lost while a command's keys are being bound, and another operation of the root sets it up again first.
+  const lostWhileBinding = async (manager: VmManager, other: () => Promise<unknown>) => {
+    slow = true;
+    const first = run(manager, KEYS);
+    await until(() => asked.length === 2);
+    agent?.write(`${JSON.stringify({ type: "lost", root: "root-1" })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await other()).toEqual({ ok: true });
+    expect(await first).toEqual({ ok: true });
+  };
+
+  it("are bound again in a namespace set up again by a poll while they were being bound, before the command runs there", async () => {
+    const manager = new VmManager(options(), fakeVm(roots()));
+    await lostWhileBinding(manager, () => run(manager, undefined, "poll"));
+    expect(asked).toEqual([
+      ["setup", "root-1"], ["protect", "root-1", KEYS], ["setup", "root-1"], ["poll", "root-1"], ["bound", "root-1"],
+      ["protect", "root-1", KEYS], ["bound", "root-1"], ["run", "root-1"],
+    ]);
+    await manager.stop();
+  });
+
+  it("are bound in a namespace set up again by another command while they were being bound, before either command runs there", async () => {
+    const manager = new VmManager(options(), fakeVm(roots()));
+    await lostWhileBinding(manager, () => run(manager, KEYS));
+    expect(asked).toEqual([
+      ["setup", "root-1"], ["protect", "root-1", KEYS], ["setup", "root-1"], ["bound", "root-1"],
+      ["protect", "root-1", KEYS], ["bound", "root-1"], ["run", "root-1"], ["run", "root-1"],
+    ]);
     await manager.stop();
   });
 });

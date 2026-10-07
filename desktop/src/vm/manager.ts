@@ -249,7 +249,13 @@ export class Guest {
       return SANDBOX_STOPPED;
     })();
     const { setup } = entry;
-    return protect ? setup.then((failure) => failure ?? this.protect(root, protect)) : setup;
+    if (!protect) return setup;
+    return setup.then(async (failure) => {
+      if (failure) return failure;
+      const refused = await this.protect(root, protect);
+      // Set up again meanwhile, its runner lost: the keys go to the new namespace before the command does.
+      return refused ?? (entry.setup === setup ? null : this.ready(root, folder, ended, protect));
+    });
   }
 
   /**
