@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
+import { once } from "node:events";
 import {
   type BigIntStats, chmodSync, linkSync, mkdirSync, mkdtempSync, type ReadPosition, readdirSync, readFileSync, realpathSync, rmSync,
   statSync, symlinkSync, truncateSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -606,6 +608,34 @@ describe("walk", () => {
     writeFileSync(Buffer.concat([Buffer.from(`${folder}/`), Buffer.from([0x6e, 0xff])]), "bytes");
     writeFileSync(join(folder, "n\ufffd"), "t");
     expect(listed(await walk())).toEqual([["a.txt", 6], ["n\ufffd", 1]]);
+  });
+
+  it("never enters a folder swapped for a link while it walks", async () => {
+    mkdirSync(join(folder, "aaa"));
+    writeFileSync(join(folder, "aaa", "in.txt"), "in");
+    // As a command in the VM writing the folder could: the folder swapped for a link outside, and back.
+    const state = new Int32Array(new SharedArrayBuffer(8)); // [stop, swaps]
+    const swapper = new Worker(`
+      const { renameSync, symlinkSync, unlinkSync } = require("node:fs");
+      const { workerData: { aaa, real, outside, state } } = require("node:worker_threads");
+      while (Atomics.load(state, 0) === 0) {
+        try {
+          renameSync(aaa, real); symlinkSync(outside, aaa); unlinkSync(aaa); renameSync(real, aaa);
+          Atomics.add(state, 1, 1);
+        } catch {}
+      }
+    `, { eval: true, workerData: { aaa: join(folder, "aaa"), real: join(folder, "aaa.real"), outside: join(base, "outside"), state } });
+    const leaked = new Set<string>();
+    try {
+      for (const deadline = Date.now() + 2_000; Date.now() < deadline;) {
+        for (const [path] of (await walk()).ok.files) if (path === "aaa/o.txt") leaked.add(path);
+      }
+    } finally {
+      Atomics.store(state, 0, 1);
+      await once(swapper, "exit");
+    }
+    expect(Atomics.load(state, 1)).toBeGreaterThan(100);
+    expect([...leaked]).toEqual([]);
   });
 
   it("stops at its cap and says it did", async () => {

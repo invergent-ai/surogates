@@ -9,7 +9,10 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -574,6 +577,40 @@ async def test_a_walk_leaves_out_a_name_that_is_not_utf_8_and_lists_its_decoded_
         fh.write(b"bytes")
     (root / "n\ufffd").write_text("t")
     assert sorted((await wio.walk(str(root), skip=())).files) == [("a.txt", 1), ("n\ufffd", 1)]
+
+
+# Swaps the folder at argv[1] for a link to argv[3] and back, as a command in the VM writing the folder could,
+# until it is killed.  Each swap is a line on stdout.
+_SWAPPER = """
+import os, sys
+folder, real, outside = sys.argv[1:4]
+while True:
+    try:
+        os.rename(folder, real); os.symlink(outside, folder); os.unlink(folder); os.rename(real, folder)
+        print(flush=True)
+    except OSError:
+        pass
+"""
+
+
+async def test_a_walk_never_enters_a_folder_swapped_for_a_link_meanwhile(wio, root, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    (outside / "o.txt").write_text("outside")
+    (root / "aaa").mkdir()
+    (root / "aaa" / "in.txt").write_text("in")
+    swapper = subprocess.Popen(
+        [sys.executable, "-c", _SWAPPER, str(root / "aaa"), str(root / "aaa.real"), str(outside)],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert swapper.stdout.readline() == b"\n"  # swapping
+        leaked, deadline = set(), time.monotonic() + 2
+        while time.monotonic() < deadline:
+            leaked |= {path for path, _ in (await wio.walk(str(root), skip=())).files if path == "aaa/o.txt"}
+    finally:
+        swapper.kill()
+        swapper.wait()
+    assert leaked == set()
 
 
 async def test_a_walk_stops_at_its_cap_and_says_so(wio, root):

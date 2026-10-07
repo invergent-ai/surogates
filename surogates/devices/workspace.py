@@ -57,13 +57,15 @@ computer only finds line ends; the worker decodes the page and applies every
 rule.  Arguments it cannot take are answered with a value error.
 
 walk lists the regular files under the folder at key, each as its path from
-key ("sub/a.txt") and its size.  It follows no link.  It enters no folder whose
-name is in skip, none directly under key whose name is in skip_top, and, with
-skip_hidden, none whose name starts with "." other than SHOWN_DOT_FOLDERS: the
-file panel's tree shows none of them.  A name that is not valid UTF-8 is left
-out, as are the files under it.  With since, a cursor an earlier walk returned,
-it lists only the files whose mtime or ctime is at or after it.  cursor is the computer's own
-clock as this walk began, in nanoseconds, less WALK_MARGIN_NS: a filesystem
+key ("sub/a.txt") and its size.  It follows no link: it enters each folder
+through a handle on its parent, so a folder swapped for a link while it walks
+is not entered.  It enters no folder whose name is in skip, none directly
+under key whose name is in skip_top, and, with skip_hidden, none whose name
+starts with "." other than SHOWN_DOT_FOLDERS: the file panel's tree shows none
+of them.  A name that is not valid UTF-8 is left out, as are the files under
+it.  With since, a cursor an earlier walk returned, it lists only the files
+whose mtime or ctime is at or after it.  cursor is the computer's own clock as
+this walk began, in nanoseconds, less WALK_MARGIN_NS: a filesystem
 stamps changes by a coarser clock than the one the computer reads, a FAT
 folder's in two-second ticks.  So a walk since it lists what changed after it
 by that computer's clock, whatever the server's says.  It lists at most

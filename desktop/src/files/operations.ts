@@ -418,6 +418,10 @@ function listDir(args: Record<string, unknown>, { folder }: Context): string[] {
 // UTF-8 is left out: read as bytes, it does not survive the round trip, and its decoded twin could be another file.
 // Since a cursor, only the files whose mtime or ctime is at or after it. The cursor is this computer's clock as the
 // walk began, less WALK_MARGIN_NS.
+//
+// Each folder is entered through a handle on its parent, never by its path, and never through a link: a command in
+// the VM can swap a folder for a link between the walk seeing it and entering it. Depth first, each folder entered as
+// it is met, so a handle is held for each folder above the one being read, and no more.
 function walk(args: Record<string, unknown>, { folder }: Context): { files: Array<[string, number]>; truncated: boolean; cursor: string } {
   const key = keyInFolder(folder, text(args, "key"));
   const { skip, skip_top: top, skip_hidden: hidden, since } = args;
@@ -435,18 +439,19 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
   let cost = 2; // "[]"
   let looks = 0;
   let truncated = false;
-  const pending = [""];
-  while (pending.length > 0 && !truncated) {
-    const rel = pending.pop() as string;
-    let entries: Dirent<Buffer>[];
-    try {
-      entries = readdirSync(rel ? join(key, rel) : key, { withFileTypes: true, encoding: "buffer" });
-    } catch (error) {
-      // A folder under the key it cannot read is left out; the key's own failure is the answer.
-      if (!rel) io(key, () => { throw error; });
-      continue;
-    }
-    for (const entry of entries) {
+  // The key's own failure is the answer.
+  const keyFd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW));
+  const levels: Level[] = [];
+  try {
+    levels.push({ fd: keyFd, rel: "", entries: io(key, () => listing(keyFd)), at: 0 });
+    while (levels.length > 0 && !truncated) {
+      const level = levels.at(-1) as Level;
+      const entry = level.entries[level.at++];
+      if (entry === undefined) {
+        levels.pop();
+        closeSync(level.fd);
+        continue;
+      }
       looks += 1;
       if (looks > MAX_WALK_LOOKS) {
         truncated = true;
@@ -454,16 +459,30 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
       }
       const name = entry.name.toString("utf8");
       if (!Buffer.from(name, "utf8").equals(entry.name)) continue;
-      const path = rel ? `${rel}/${name}` : name;
+      const path = level.rel ? `${level.rel}/${name}` : name;
+      // The entry by its parent's handle: no link on the way to it is followed.
+      const at = `/proc/self/fd/${level.fd}/${name}`;
       if (entry.isDirectory()) {
         const hides = hidden && name.startsWith(".") && !SHOWN_DOT_FOLDERS.has(name);
-        if (!(skipped.has(name) || (!rel && skippedTop.has(name)) || hides)) pending.push(path);
+        if (skipped.has(name) || (!level.rel && skippedTop.has(name)) || hides) continue;
+        let fd: number;
+        try {
+          fd = openSync(at, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+        } catch {
+          // A folder under the key it cannot read, or one a link took the place of, is left out.
+          continue;
+        }
+        try {
+          levels.push({ fd, rel: path, entries: listing(fd), at: 0 });
+        } catch {
+          closeSync(fd);
+        }
         continue;
       }
       if (!entry.isFile()) continue;
       let st: BigIntStats;
       try {
-        st = lstatSync(join(key, path), { bigint: true });
+        st = lstatSync(at, { bigint: true });
       } catch {
         continue;
       }
@@ -476,9 +495,22 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
       files.push([path, Number(st.size)]);
       cost += more;
     }
+  } finally {
+    for (const level of levels) closeSync(level.fd);
   }
   return { files, truncated, cursor };
 }
+
+// A folder the walk is in: its handle, its path from the key, and its entries, read up to *at*.
+interface Level {
+  fd: number;
+  rel: string;
+  entries: Dirent<Buffer>[];
+  at: number;
+}
+
+const listing = (fd: number): Dirent<Buffer>[] =>
+  readdirSync(`/proc/self/fd/${fd}`, { withFileTypes: true, encoding: "buffer" });
 
 // shutil.which: a name with a slash is checked as it is (relative to *cwd*);
 // otherwise the first PATH entry holding an executable file of that name, a

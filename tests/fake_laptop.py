@@ -16,6 +16,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Iterator
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -242,7 +243,8 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
 
 
 def _walk(a: dict[str, Any]) -> dict[str, Any]:
-    """As the app walks: depth first, each folder's entries as the operating system lists them."""
+    """As the app walks: depth first, each folder entered as it is met, through a handle on its parent and never
+    through a link, and each folder's entries as the operating system lists them."""
     key, skip, top, hidden, since = (a.get(name) for name in ("key", "skip", "skip_top", "skip_hidden", "since"))
     if (
         not isinstance(key, str) or type(hidden) is not bool
@@ -254,17 +256,22 @@ def _walk(a: dict[str, Any]) -> dict[str, Any]:
     after = None if since is None else int(since)
     files: list[list[Any]] = []
     cost, looks, truncated = 2, 0, False
-    pending = [""]
-    while pending and not truncated:
-        rel = pending.pop()
-        try:
-            with os.scandir(os.path.join(key, rel) if rel else key) as listing:
-                entries = list(listing)
-        except OSError:
-            if not rel:
-                raise
-            continue
-        for entry in entries:
+    # Each folder the walk is in: its handle, its path from the key, and its entries still to look at.
+    levels: list[tuple[int, str, Iterator[os.DirEntry[str]]]] = []
+    fd = os.open(key, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        levels.append((fd, "", iter(_listing(fd))))
+    except OSError:
+        os.close(fd)
+        raise
+    try:
+        while levels and not truncated:
+            fd, rel, entries = levels[-1]
+            entry = next(entries, None)
+            if entry is None:
+                levels.pop()
+                os.close(fd)
+                continue
             looks += 1
             if looks > MAX_WALK_LOOKS:
                 truncated = True
@@ -275,8 +282,16 @@ def _walk(a: dict[str, Any]) -> dict[str, Any]:
                 continue
             if entry.is_dir(follow_symlinks=False):
                 hides = hidden and entry.name.startswith(".") and entry.name not in SHOWN_DOT_FOLDERS
-                if not (entry.name in skip or (not rel and entry.name in top) or hides):
-                    pending.append(path)
+                if entry.name in skip or (not rel and entry.name in top) or hides:
+                    continue
+                try:
+                    child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                except OSError:
+                    continue
+                try:
+                    levels.append((child, path, iter(_listing(child))))
+                except OSError:
+                    os.close(child)
                 continue
             if not entry.is_file(follow_symlinks=False):
                 continue
@@ -292,7 +307,16 @@ def _walk(a: dict[str, Any]) -> dict[str, Any]:
                 break
             files.append([path, st.st_size])
             cost += more
+    finally:
+        for fd, _, _ in levels:
+            os.close(fd)
     return {"files": files, "truncated": truncated, "cursor": cursor}
+
+
+def _listing(fd: int) -> list[os.DirEntry[str]]:
+    # Its entries' stats are taken through this handle too, so by no path that could hold a link.
+    with os.scandir(fd) as listing:
+        return list(listing)
 
 
 async def _run_process(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
