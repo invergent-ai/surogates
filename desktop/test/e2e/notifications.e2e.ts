@@ -208,4 +208,18 @@ describe("the app's notifications", () => {
     agent.tell({ kind: "progress_checkin", title: "Progress: 3 iterations, 2 min elapsed", session_id: CHAT });
     await expect.poll(async () => (await notices(app!)).at(-1)).toEqual({ title: "Progress: 3 iterations, 2 min elapsed", body: "Checked in." });
   });
+
+  it("follow the chat the window shows no more once the user logs out", async () => {
+    const client = await signedIn();
+    await focus(app!);
+    await moveTo(client, `/chat/${CHAT}`);
+    await hide(app!);
+    await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(1);
+    // The web client's own Log out, while the window is away.
+    void client.evaluate(() => window.surogateDesktop!.signOut()).catch(() => {});
+    await expect.poll(() => agent.chatStreams.get(CHAT)?.size).toBe(0);
+    const asked = agent.chatsAsked.length;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(agent.chatsAsked).toHaveLength(asked);
+  });
 });

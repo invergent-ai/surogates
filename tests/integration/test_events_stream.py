@@ -380,7 +380,7 @@ async def test_watch_follows_a_chat_from_its_newest_event_across_its_turns(
             assert response.status_code == 200
             events = await _read_sse_events(
                 response,
-                until_types={"session.complete"},
+                until_types={"stream.timeout"},
                 deadline_s=6.0,
                 ids=ids,
                 comments=comments,
@@ -388,10 +388,12 @@ async def test_watch_follows_a_chat_from_its_newest_event_across_its_turns(
     finally:
         await turn
 
+    # Then it ends at its longest, as every stream does, for the watcher to take up after the last id.
     assert events == [
         ("stream.start", "{}"),
         ("user.message", '{"content": "the next turn"}'),
         ("session.complete", "{}"),
+        ("stream.timeout", '{"reason": "max_duration_exceeded"}'),
     ]
     assert ids[0] == str(last)
     assert "keepalive" in comments

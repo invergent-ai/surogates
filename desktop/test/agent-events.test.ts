@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { type Api, Burst, followChat, followInbox, type InboxItem } from "../src/shell/agent-events.js";
 
@@ -117,6 +117,33 @@ describe("the inbox, followed", () => {
     await until(() => waits.length === 3);
     expect(waits).toEqual([0, 1, 2]);
     stop();
+  });
+
+  it("starts its backoff over once a stream has held for 30 s", async () => {
+    // Only the clock is the test's: the streams' own timers run as they do.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const agent = new FakeAgent();
+      const waits: number[] = [];
+      const stop = followInbox({
+        api: agent.api, agentId: "a", onError: () => {}, onItem: () => {}, delayMs: (attempt) => {
+          waits.push(attempt);
+          return 0;
+        },
+      });
+      await until(() => agent.streams.length === 1);
+      agent.streams[0]!.end();
+      await until(() => agent.streams.length === 2);
+      vi.setSystemTime(Date.now() + 30_000);
+      agent.streams[1]!.end();
+      await until(() => agent.streams.length === 3);
+      agent.streams[2]!.end();
+      await until(() => waits.length === 3);
+      expect(waits).toEqual([0, 0, 1]);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stops for good", async () => {
