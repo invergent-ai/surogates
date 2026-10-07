@@ -11,7 +11,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from surogates.sandbox.base import SandboxSpec, SandboxStatus
+from surogates.sandbox.base import SandboxSpec, SandboxStatus, SandboxUnavailableError
 
 if TYPE_CHECKING:
     from surogates.sandbox.base import Sandbox
@@ -66,6 +66,9 @@ class SandboxPool:
         self._locks: dict[str, asyncio.Lock] = {}
         # Guard for mutating the dicts themselves.
         self._global_lock = asyncio.Lock()
+        # Threads whose copy this pool has just made from the real files,
+        # not yet asked about: whether that loses work is the session's log's to say.
+        self._fresh: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -76,6 +79,10 @@ class SandboxPool:
 
         If the existing sandbox is not healthy (status != ``RUNNING``), it is
         destroyed and a fresh one is provisioned.
+
+        A *spec* for a thread's copy is refused a pod that holds none: a
+        thread's steps never run on, and its Stop never restores over, the
+        real files.
         """
         # Imported here: surogates.devices.sandbox imports this module.
         from surogates.devices.sandbox import DEVICE_SANDBOX_ID, is_device_owner
@@ -93,6 +100,10 @@ class SandboxPool:
                 # Health-check the existing sandbox.
                 status = await self._backend.status(sandbox_id)
                 if status == SandboxStatus.RUNNING:
+                    if "PROJECT_DIR" in spec.env and not self.holds_copy(session_id):
+                        raise SandboxUnavailableError(
+                            "This thread's sandbox holds no copy of the project's files, so its steps cannot run there",
+                        )
                     return sandbox_id
                 # Stale or failed -- clean up and reprovision.
                 logger.warning(
@@ -108,6 +119,8 @@ class SandboxPool:
             async with self._global_lock:
                 self._mapping[session_id] = sandbox_id
                 self._specs[session_id] = spec
+                if "PROJECT_DIR" in spec.env:
+                    self._fresh.add(session_id)
             logger.info(
                 "Session %s mapped to sandbox %s", session_id, sandbox_id
             )
@@ -141,8 +154,27 @@ class SandboxPool:
             )
         return await self._backend.execute(sandbox_id, name, input)
 
-    async def release_for_session(self, session_id: str) -> str | None:
+    def copy_fresh(self, session_id: str) -> bool:
+        """Whether this pool has just made *session_id*'s copy from the real files; asked once."""
+        if session_id not in self._fresh:
+            return False
+        self._fresh.discard(session_id)
+        return True
+
+    def sandbox_of(self, session_id: str) -> str | None:
+        """The sandbox *session_id* maps to now; None when it has none."""
+        return self._mapping.get(session_id)
+
+    def holds_copy(self, session_id: str) -> bool:
+        """Whether *session_id* has a pod now, and it is a thread's, over its copy."""
+        spec = self._specs.get(session_id)
+        return spec is not None and "PROJECT_DIR" in spec.env
+
+    async def release_for_session(self, session_id: str, *, only: str | None = None) -> str | None:
         """Detach the sandbox from *session_id*, returning its id.
+
+        With *only*, nothing is detached unless *session_id* still maps to
+        that sandbox: a later one is another turn's.
 
         In-memory only, so it is fast enough to stay on a latency-
         sensitive path. Callers that then destroy the returned sandbox in
@@ -152,7 +184,10 @@ class SandboxPool:
         """
         lock = await self._session_lock(session_id)
         async with lock:
+            if only is not None and self._mapping.get(session_id) != only:
+                return None
             self._specs.pop(session_id, None)
+            self._fresh.discard(session_id)
             return self._mapping.pop(session_id, None)
 
     async def destroy_released(

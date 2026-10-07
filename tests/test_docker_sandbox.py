@@ -415,3 +415,12 @@ class TestS3fsModeProvision:
         assert "SYS_ADMIN" not in joined
         assert f"{tmp_path}:/workspace" in joined
         await backend.aclose()
+
+
+async def test_a_threads_copy_is_refused_before_any_container_starts(healthz_transport):
+    docker = FakeDocker()
+    backend = _backend(docker, healthz_transport)
+    spec = SandboxSpec(resources=[], env={"PROJECT_DIR": "/project", "HISTORY_THREAD": "t1"})
+    with pytest.raises(SandboxUnavailableError, match="Kubernetes"):
+        await backend.provision(spec)
+    assert not [c for c in docker.calls if c[:1] == ["run"]]

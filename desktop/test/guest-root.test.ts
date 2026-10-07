@@ -69,6 +69,8 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     expect(await op("run", { command: "pwd; echo err >&2; exit 3", workdir: null, timeout: 10 })).toEqual({
       ok: { output: `${base}\n\nerr\n`, returncode: 3, timed_out: false },
     });
+    // A shell reports a command a signal ended as 128 + N.
+    expect(await op("run", { command: "kill -9 $$", workdir: null, timeout: 10 })).toEqual({ ok: { output: "", returncode: 137, timed_out: false } });
     mkdirSync(join(base, "sub"));
     expect(await op("run", { command: "pwd", workdir: "sub", timeout: 10 })).toEqual({
       ok: { output: `${join(base, "sub")}\n`, returncode: 0, timed_out: false },

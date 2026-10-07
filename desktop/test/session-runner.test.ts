@@ -7,12 +7,9 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { OUTPUT_CAP_CHARS, pyJsonLength } from "../src/files/answers.js";
-import { CANCELLED, type CommandEnd, SANDBOX_STOPPED } from "../src/guest/command.js";
+import type { CommandEnd } from "../src/guest/command.js";
 import type { FromRunner, SpawnRequest, ToRunner } from "../src/guest/protocol.js";
 import { type RunnerChild, SessionRunner } from "../src/guest/runner-process.js";
-import { type CommandContext, runCommand } from "../src/hosts/run.js";
-import { stopRunner } from "../src/hosts/session-runner.js";
 
 const RUNNER = fileURLToPath(new URL("../dist/guest/runner.js", import.meta.url));
 
@@ -21,11 +18,11 @@ let runners: SessionRunner[];
 let raw: ChildProcess[];
 let next = 0;
 
-// The runner as the host starts it, without srt: the protocol is the same.
+// The root runner without its namespaces, as the tests start it: the protocol is the same.
 function bare(args: string[] = [RUNNER]): ChildProcess {
   const child = spawn(process.execPath, args, {
     cwd: base,
-    env: { PATH: "/usr/bin:/bin", HOME: base, LANG: "C.UTF-8", ELECTRON_RUN_AS_NODE: "1" },
+    env: { PATH: "/usr/bin:/bin", HOME: base, LANG: "C.UTF-8" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   raw.push(child);
@@ -70,7 +67,6 @@ more();
 setInterval(() => {}, 1000);
 `;
 
-// Ids of their own: a bare runner's sweep reads every process's marker, other test files' too.
 const request = (command: string, background = false, extra: Partial<SpawnRequest> = {}): SpawnRequest => ({
   id: `sr-${next++}`, command, cwd: base, env: {}, pty: false, stdin: background, ...extra,
 });
@@ -106,7 +102,7 @@ afterEach(async () => {
   for (const started of runners) await started.stop();
   for (const child of raw) child.kill("SIGKILL");
   // A bare runner has no pid namespace: what it ran outlives one that is killed.
-  spawnSync("pkill", ["-KILL", "-f", "^sleep 6(48|57)$"]);
+  spawnSync("pkill", ["-KILL", "-f", "^sleep 648$"]);
   rmSync(base, { recursive: true, force: true });
 });
 
@@ -126,32 +122,32 @@ describe("the session runner", { timeout: 20_000 }, () => {
     });
   });
 
-  it("gives a command the runner's environment, the host's names and its marker, without Electron's flag", async () => {
+  it("gives a command the runner's environment and the host's names, and nothing to find it by", async () => {
     const started = await runner();
     const child = started.spawn(request("env", false, { env: { EXTRA: "1" } }));
     const lines = (await collect(child)).out.split("\n");
-    expect(lines).toContain(`SUROGATE_PROCESS=${child.id}`);
     expect(lines).toContain("EXTRA=1");
     expect(lines).toContain(`HOME=${base}`);
-    expect(lines.filter((line) => line.startsWith("ELECTRON_RUN_AS_NODE="))).toEqual([]);
+    // A command's cgroup holds all it starts in the guest: no variable marks it, for a command to clear.
+    expect(lines.filter((line) => line.startsWith("SUROGATE_PROCESS="))).toEqual([]);
   });
 
-  it("ends what a run leaves behind when its shell exits, setsid or not", async () => {
+  it("ends what a run leaves in its process group when its shell exits", async () => {
     const started = await runner();
     const begun = Date.now();
-    expect(await collect(started.spawn(request("sleep 641 & setsid sleep 642 & echo started")))).toEqual({
+    expect(await collect(started.spawn(request("sleep 641 & (sleep 642 &); echo started")))).toEqual({
       out: "started\n", err: "", end: { code: 0, signal: null },
     });
     expect(Date.now() - begun).toBeLessThan(5_000);
     await until(() => running("^sleep 64[12]$") === 0);
   });
 
-  it("keeps what a background process starts, and kills all of it, setsid and double forks too", async () => {
+  it("keeps what a background process starts in its process group, and kills all of it, double forks too", async () => {
     const started = await runner();
-    const child = started.spawn(request("sleep 643 & setsid sleep 644 & (sleep 645 &); sleep 646", true));
+    const child = started.spawn(request("sleep 643 & (sleep 645 &); sleep 646", true));
     const ended = collect(child);
     expect(await child.started).toEqual(expect.any(Number));
-    await until(() => running("^sleep 64[3-6]$") === 4);
+    await until(() => running("^sleep 64[3-6]$") === 3);
     child.kill();
     expect((await ended).end).toEqual({ code: null, signal: "SIGKILL" });
     await until(() => running("^sleep 64[3-6]$") === 0);
@@ -275,68 +271,5 @@ describe("the session runner", { timeout: 20_000 }, () => {
     expect(running("^head -c 300000000 /dev/zero$")).toBe(1);
     child.stdin?.end();
     await until(() => running("^head -c 300000000 /dev/zero$") === 0);
-  });
-});
-
-describe("run, in a session runner", { timeout: 20_000 }, () => {
-  const context = (): CommandContext => ({ folder: base, home: base, env: {}, claudeWasAbsent: false });
-  const run = (started: SessionRunner, command: string, timeout = 10, signal = new AbortController().signal) =>
-    runCommand({ command, workdir: null, timeout }, context(), signal, `sr-run-${next++}`, started);
-
-  it("answers as a command in a sandbox of its own does", async () => {
-    const started = await runner();
-    // It ran in the runner: the runner marks what it starts.
-    expect(await run(started, "echo $SUROGATE_PROCESS")).toMatchObject({ ok: { output: expect.stringMatching(/^sr-run-\d+\n$/) } });
-    expect(await run(started, "echo out; echo err >&2; exit 3")).toEqual({ ok: { output: "out\n\nerr\n", returncode: 3, timed_out: false } });
-    expect(await run(started, "kill -9 $$")).toEqual({ ok: { output: "", returncode: 137, timed_out: false } });
-    expect(await run(started, "a\0b")).toEqual({ ok: { output: "embedded null byte", returncode: -1, timed_out: false } });
-    const long = await run(started, "printf START; head -c 600000 /dev/zero | tr '\\000' x; printf END", 30);
-    const output = (long as { ok: { output: string } }).ok.output;
-    expect(output.startsWith("START") && output.endsWith("END")).toBe(true);
-    expect(pyJsonLength(output)).toBeLessThan(OUTPUT_CAP_CHARS + 200);
-  });
-
-  it("stops a command at its timeout, and everything it started", async () => {
-    const started = await runner();
-    expect(await run(started, "sleep 651 & setsid sleep 652 & (sleep 653 &); sleep 654", 1)).toEqual({
-      ok: { output: "Command timed out after 1 seconds", returncode: 124, timed_out: true },
-    });
-    await until(() => running("^sleep 65[1-4]$") === 0);
-  });
-
-  it("stops a command the session cancels", async () => {
-    const started = await runner();
-    const controller = new AbortController();
-    const answer = run(started, "setsid sleep 655 & sleep 656", 60, controller.signal);
-    await until(() => running("^sleep 65[56]$") === 2);
-    controller.abort();
-    expect(await answer).toEqual(CANCELLED);
-    await until(() => running("^sleep 65[56]$") === 0);
-  });
-
-  it("answers a command whose runner dies as interrupted", async () => {
-    const started = await runner();
-    const answer = run(started, "sleep 657");
-    await until(() => running("^sleep 657$") === 1);
-    raw[0]?.kill("SIGKILL");
-    expect(await answer).toEqual(SANDBOX_STOPPED);
-  });
-});
-
-describe("stopping a host's runner", () => {
-  it("waits out a runner that is up, however long it takes to go, and gives one still starting its time", async () => {
-    // As one that ignores the end of its stdin: it goes only at its SIGKILL, after the host's own time.
-    let gone = false;
-    const slow = {
-      stop: () => new Promise<void>((resolve) => setTimeout(() => {
-        gone = true;
-        resolve();
-      }, 300)),
-    };
-    await stopRunner(Promise.resolve(slow), slow, 50);
-    expect(gone).toBe(true);
-    const began = Date.now();
-    await stopRunner(new Promise(() => {}), null, 50);
-    expect(Date.now() - began).toBeLessThan(250);
   });
 });

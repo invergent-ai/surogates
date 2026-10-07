@@ -1,22 +1,14 @@
-// The sandbox for one folder (spec, Section 4): nothing readable but the system,
-// the app, the folder, its temp folder and the user's toolchains; nothing
-// writable but the folder and the temp folder; the network only to the package
-// hosts and to what the chat's user allowed for the chat.
-
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+// The file helper's sandbox (spec, Section 11, "The file host, still in srt"): nothing
+// readable but the system, the app, the folder and the helper's working folder; nothing
+// writable but the folder and that working folder; no network.
 
 import { inside } from "../files/paths.js";
-import { PACKAGE_HOSTS } from "../vm/egress.js";
 
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 
 const SYSTEM = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/proc", "/sys", "/dev", "/run/systemd/resolve"];
 // srt reads these in a policy path as a glob: allowRead widens, allowWrite drops the path.
 export const GLOB = /[*?[\]]/;
-// How deep srt's scan for nested protected names looks, from the folder: its maximum (its default is 3).
-const SCAN_DEPTH = 10;
-const TOOLCHAINS = [".nvm", ".pyenv", ".rustup", ".cargo/bin", ".local/bin", ".local/lib", "go", ".bun", ".deno", ".sdkman"];
 
 // srt binds its own temp folder read-write into every sandbox, a channel shared with all the others.
 const SRT_TMP = ["/tmp/claude", "/private/tmp/claude"];
@@ -66,33 +58,21 @@ export function isReserved(path: string): boolean {
 
 export interface PolicyInput {
   folder: string;
-  tmp: string;
-  home: string;
+  tmp: string; // the helper's working folder, which srt's placeholders go in
   appDirs: string[];
   bwrapPath?: string;
   socatPath?: string;
-  rgPath?: string;
-  domains?: readonly string[]; // the hosts the chat's user allowed, past the package hosts
 }
 
-export function sandboxPolicy(
-  { folder, tmp, home, appDirs, bwrapPath, socatPath, rgPath, domains = [] }: PolicyInput,
-): SandboxRuntimeConfig {
+export function sandboxPolicy({ folder, tmp, appDirs, bwrapPath, socatPath }: PolicyInput): SandboxRuntimeConfig {
   return {
     ...(bwrapPath ? { bwrapPath } : {}),
     ...(socatPath ? { socatPath } : {}),
-    // srt's scan for nested protected names (rg, from the folder) must not read the
-    // folder's .ignore, .rgignore or .gitignore: the agent writes those, and one
-    // naming a nested repo would leave its .git/config writable.
-    ripgrep: { command: rgPath ?? "rg", args: ["--no-ignore"] },
-    mandatoryDenySearchDepth: SCAN_DEPTH,
-    network: { allowedDomains: [...PACKAGE_HOSTS, ...domains], deniedDomains: [] },
+    // No host: the helper connects to nothing. An empty list, not none, keeps srt's own network namespace.
+    network: { allowedDomains: [], deniedDomains: [] },
     filesystem: {
       denyRead: ["/"],
-      allowRead: [
-        ...SYSTEM, ...appDirs, folder, tmp,
-        ...TOOLCHAINS.map((name) => join(home, name)).filter((path) => existsSync(path) && !GLOB.test(path)),
-      ],
+      allowRead: [...SYSTEM, ...appDirs, folder, tmp],
       allowWrite: [folder, tmp],
       // hideSrtTmp hides /tmp/claude under an empty tmpfs; this keeps it read-only
       // even where that tmpfs did not apply.

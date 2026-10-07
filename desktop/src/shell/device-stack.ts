@@ -92,10 +92,7 @@ export async function stopDevice(started: Promise<DeviceStack> | undefined, shar
 // The stack on *journal*. *made* holds its tools as soon as they are made, for a start that fails after.
 function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: { tools?: ToolLayer }): DeviceStack {
   // The tools ask the binder's approvals about the network; the binder exists by the time any host asks.
-  const network: NetworkApprovals = {
-    granted: (root) => binder.approvals.granted(root),
-    askNetwork: (root, asked, signal) => binder.approvals.askNetwork(root, asked, signal),
-  };
+  const network: NetworkApprovals = { askNetwork: (root, asked, signal) => binder.approvals.askNetwork(root, asked, signal) };
   const tools = options.tools(journal.bindings, network);
   made.tools = tools;
   // Each session's operations on the tools, counted as they run: the binder runs nothing else there.

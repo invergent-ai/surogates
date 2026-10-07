@@ -68,6 +68,13 @@ class _PodEntry:
     # SSH remote-access resources reaped alongside the pod.
     ssh_secret_name: str | None = None
     ssh_netpol_name: str | None = None
+    # Seconds the pod is given to stop when it is deleted: its manifest's.
+    grace: int = 0
+
+
+#: A thread's pod is given this long to stop, so its geesefs sidecar can
+#: finish uploading the real files a landing wrote.  Any other pod goes at once.
+_THREAD_POD_GRACE = 30
 
 
 #: How long a RUNNING pod status is trusted without re-reading it from the
@@ -247,6 +254,7 @@ class K8sSandbox:
             token=executor_token,
             ssh_secret_name=ssh_secret_name,
             ssh_netpol_name=ssh_netpol_name,
+            grace=pod_manifest.spec.termination_grace_period_seconds or 0,
         )
         self._pods[sandbox_id] = entry
 
@@ -373,6 +381,9 @@ class K8sSandbox:
         # Parse resources from spec for s3fs mount.  s3fs accepts
         # "bucket:/prefix" to mount a path inside the bucket.
         session_bucket_path = ""
+        # Where the files are mounted: /workspace, or /project in a
+        # thread's pod, whose /workspace is its copy on the pod's disk.
+        fuse_path = "/workspace"
         for res in spec.resources:
             if res.source_ref.startswith("s3://"):
                 source = res.source_ref[5:].rstrip("/")
@@ -381,6 +392,7 @@ class K8sSandbox:
                     session_bucket_path = f"{bucket}:/{path}"
                 else:
                     session_bucket_path = source
+                fuse_path = res.mount_path
                 break
 
         # Use the in-cluster S3 endpoint (reachable from inside the pod),
@@ -465,11 +477,15 @@ class K8sSandbox:
             volume_mounts=[
                 client.V1VolumeMount(
                     name="workspace",
-                    mount_path="/workspace",
+                    mount_path=fuse_path,
                     mount_propagation="HostToContainer",
                 ),
             ],
         )
+        if fuse_path != "/workspace":
+            sandbox_container.volume_mounts.append(
+                client.V1VolumeMount(name="copy", mount_path="/workspace"),
+            )
 
         # s3fs sidecar container — uses the entrypoint.sh from the image.
         # ``S3_REGION`` is what s3fs passes as ``-o endpoint=`` for SigV4
@@ -482,7 +498,19 @@ class K8sSandbox:
             client.V1EnvVar(name="S3_BUCKET_PATH", value=session_bucket_path),
             client.V1EnvVar(name="S3_ENDPOINT", value=s3_endpoint),
             client.V1EnvVar(name="S3_REGION", value=s3_region),
+            client.V1EnvVar(name="S3_MOUNT_POINT", value=fuse_path),
         ]
+        if fuse_path != "/workspace":
+            # A thread's real files, which other pods and the Library
+            # change: what geesefs saw of one is trusted for a second at most,
+            # and no disk cache keeps an old version.  A landing's check must
+            # see a save made since.  Not 0s: then every look costs a request
+            # to the bucket, and a large project's open outlasts its pod's
+            # ready timeout.
+            s3fs_env += [
+                client.V1EnvVar(name="GEESEFS_STAT_CACHE_TTL", value="1s"),
+                client.V1EnvVar(name="GEESEFS_CACHE_DIR", value=""),
+            ]
 
         s3fs_container = client.V1Container(
             name="s3fs",
@@ -497,7 +525,7 @@ class K8sSandbox:
             volume_mounts=[
                 client.V1VolumeMount(
                     name="workspace",
-                    mount_path="/workspace",
+                    mount_path=fuse_path,
                     mount_propagation="Bidirectional",
                 ),
                 client.V1VolumeMount(
@@ -523,6 +551,8 @@ class K8sSandbox:
                 ),
             ),
         ]
+        if fuse_path != "/workspace":
+            volumes.append(client.V1Volume(name="copy", empty_dir=client.V1EmptyDirVolumeSource()))
         automount_sa_token = None
         pod_security_context = None
 
@@ -586,6 +616,7 @@ class K8sSandbox:
             spec=client.V1PodSpec(
                 service_account_name=self._service_account,
                 active_deadline_seconds=_DEFAULT_ACTIVE_DEADLINE,
+                termination_grace_period_seconds=_THREAD_POD_GRACE if fuse_path != "/workspace" else None,
                 restart_policy="Never",
                 automount_service_account_token=automount_sa_token,
                 security_context=pod_security_context,
@@ -876,6 +907,17 @@ class K8sSandbox:
                     if self._is_pod_ready(pod):
                         return
                     phase = pod.status.phase if pod.status else "Unknown"
+                    # The daemon's exit, though the s3fs sidecar runs on and keeps
+                    # the pod Running; its reason is its termination message.
+                    ended = next((
+                        s.state.terminated for s in (pod.status and pod.status.container_statuses) or []
+                        if s.name == "sandbox" and s.state and s.state.terminated
+                    ), None)
+                    if ended is not None:
+                        raise RuntimeError(
+                            f"Sandbox pod {pod_name}'s daemon exited with {ended.exit_code}: "
+                            f"{(ended.message or ended.reason or '').strip()}"
+                        )
                     if phase in ("Failed", "Succeeded"):
                         raise RuntimeError(
                             f"Sandbox pod {pod_name} entered {phase} phase"
@@ -893,7 +935,7 @@ class K8sSandbox:
         try:
             await api.delete_namespaced_pod(
                 entry.pod_name, entry.namespace,
-                grace_period_seconds=0,
+                grace_period_seconds=entry.grace,
             )
         except ApiException as exc:
             if exc.status != 404:

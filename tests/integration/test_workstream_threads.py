@@ -14,6 +14,7 @@ from sqlalchemy import delete, select, update
 
 import surogates.harness.loop as loop_module
 import surogates.workstreams.threads as threads_module
+from surogates.workstreams import thread_refusal
 from surogates.coding_agents.run_core import execute_coding_run
 from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.db.agent_users import purge_user_account
@@ -21,7 +22,7 @@ from surogates.db.models import BoardNote, Event, InboxItem, Session, SessionCur
 from surogates.harness.budget import IterationBudget
 from surogates.harness.loop_context_replay import unread_reports
 from surogates.harness.slash_skill import build_deep_research_message
-from surogates.harness.tool_exec import _build_session_sandbox_spec, execute_single_tool
+from surogates.harness.tool_exec import SESSION_STARTING_TOOLS, _build_session_sandbox_spec, execute_single_tool
 from surogates.harness.turn_summarizer import TurnArtifact, TurnSummary
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.runtime import SlashCommandConfig
@@ -56,6 +57,7 @@ async def call_tool(api, session, name: str, *, gate=None, **arguments) -> dict:
     ToolRuntime(registry).register_builtins()
     state = api.app.state
     pod = MagicMock()
+    pod.copy_fresh.return_value = False
     message = await execute_single_tool(
         {"id": f"call_{name}", "function": {"name": name, "arguments": json.dumps(arguments)}},
         session=session,
@@ -132,6 +134,20 @@ async def test_a_master_starts_a_thread_in_its_own_pod(api):
     async with api.app.state.session_factory() as db:
         row = await db.get(WorkstreamThread, thread.id)
     assert (str(row.workstream_id), row.title, row.resolved_at) == (project["id"], "Draft A", None)
+
+
+async def test_a_threads_pod_mounts_the_real_files_beside_its_copy(api):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    tenant = SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id)
+    spec = await _build_session_sandbox_spec(thread, tenant, sandbox_session_key(thread))
+    [real] = spec.resources
+    assert real.mount_path == "/project"
+    assert (spec.env["PROJECT_DIR"], spec.env["HISTORY_THREAD"]) == ("/project", str(thread.id))
+    # The master, and the routine runs in its pod, work on the real files.
+    spec = await _build_session_sandbox_spec(master, tenant, sandbox_session_key(master))
+    assert [r.mount_path for r in spec.resources] == ["/workspace"]
+    assert "PROJECT_DIR" not in spec.env
 
 
 async def test_two_threads_get_two_pods(api):
@@ -1715,3 +1731,10 @@ async def test_a_report_lists_at_most_twenty_files(api):
     assert (await replayed(api, master))[-1]["content"].endswith(
         "\nFiles: " + ", ".join(files[:20]) + ", and 5 more",
     )
+
+
+@pytest.mark.parametrize("tool", sorted(SESSION_STARTING_TOOLS - {"send_worker_message", "unblock_task", "message_thread"}))
+async def test_a_thread_cannot_start_a_session_by_any_tool(api, tool):
+    thread = await start(api, await master_of(api, await create(api)))
+    # call_tool also pins that a refused call sets up no pod.
+    assert await call_tool(api, thread, tool) == {"error": thread_refusal(tool)}

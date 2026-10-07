@@ -120,6 +120,14 @@ if [ -n "${GEESEFS_CACHE_DIR}" ]; then
     GEESEFS_CACHE_ARGS=(--cache "${GEESEFS_CACHE_DIR}")
 fi
 
+# How long geesefs trusts what it last saw of a file or a folder (a minute
+# by default; it covers both). A thread's pod mounts the project's real
+# files, which other pods and the Library change, and asks for a second.
+GEESEFS_TTL_ARGS=()
+if [ -n "${GEESEFS_STAT_CACHE_TTL:-}" ]; then
+    GEESEFS_TTL_ARGS+=(--stat-cache-ttl "${GEESEFS_STAT_CACHE_TTL}")
+fi
+
 echo "Mounting s3://${S3_BUCKET_PATH} at ${MOUNT_POINT} (endpoint: ${S3_ENDPOINT}, region: ${S3_REGION}, cache: ${GEESEFS_CACHE_DIR:-off})"
 
 # geesefs answers SIGTERM with a plain `fusermount -u`, which fails with
@@ -145,6 +153,7 @@ geesefs \
     "${EXTRA_ARGS[@]}" \
     --memory-limit "${GEESEFS_MEMORY_LIMIT_MB}" \
     "${GEESEFS_CACHE_ARGS[@]}" \
+    "${GEESEFS_TTL_ARGS[@]}" \
     -f \
     "${BUCKET_SPEC}" "${MOUNT_POINT}" &
 GEESEFS_PID=$!

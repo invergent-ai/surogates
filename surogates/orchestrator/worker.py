@@ -2110,7 +2110,8 @@ async def run_worker(settings: Settings) -> None:
             default_model=model_id,
             session_factory=session_factory,
             saga_enabled=settings.saga.enabled,
-            saga_settings=settings.saga if settings.saga.enabled else None,
+            # A project's thread runs a saga whatever saga.enabled says.
+            saga_settings=settings.saga,
             log_policy_allowed=settings.governance.log_allowed,
             # Per-wake enforcement gate from the agent's runtime-config
             # governance projection (allow/deny lists + egress composed

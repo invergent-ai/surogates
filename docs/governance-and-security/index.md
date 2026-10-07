@@ -177,7 +177,7 @@ Agent writes 3 files, then runs a command that fails:
 
 | Tool Type | How It Rolls Back |
 |---|---|
-| **Builtin tools** (write_file, patch, terminal) | Restores a filesystem checkpoint taken before the tool executed |
+| **Builtin tools** (write_file, patch, terminal) | Restores a filesystem checkpoint taken before the tool executed. Only a project's threads take one: before every step, in the thread's copy of the project's files |
 | **MCP tools** (external services) | Calls a declared undo tool (e.g., `delete_jira_ticket` to undo `create_jira_ticket`) |
 
 ### Behavior
@@ -185,13 +185,14 @@ Agent writes 3 files, then runs a command that fails:
 - **Sequential execution**: When saga is active, tool calls are executed one at a time (no parallelization) to ensure deterministic ordering for rollback.
 - **Read-only tools are excluded**: Tools like `read_file`, `search_files`, `web_search`, and `skills_list` have no side effects and are not tracked by the saga.
 - **Crash recovery**: Saga state is reconstructed from the event log on harness restart. If the worker crashes mid-saga, the new worker can resume or compensate.
+- **One turn**: A turn's saga is completed when the turn ends, and a compensation ends its saga, so a stop never undoes an earlier turn's steps.
 - **Escalation**: If a compensation step itself fails (e.g., the undo tool errors), the saga enters an `escalated` state. An operator must intervene manually.
 
 ### Configuration
 
 ```yaml
 saga:
-  enabled: false              # disabled by default (opt-in)
+  enabled: false              # disabled by default (opt-in); a project's threads always run one
   default_step_timeout: 300   # max seconds per tool call
   default_max_retries: 2      # retries per step before failing
   retry_delay: 1.0            # initial retry delay (exponential backoff)

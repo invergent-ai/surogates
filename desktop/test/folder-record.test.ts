@@ -1,15 +1,13 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import {
-  FolderBusy, lockFolder, presentIn, readRecord, removePlaceholders, writeRecord,
-} from "../src/hosts/folder-record.js";
+import { FolderBusy, lockFolder, readRecord, writeRecord } from "../src/hosts/folder-record.js";
 
 // The built module, for a holder in another process (npm test builds first).
 const MODULE = new URL("../dist/hosts/folder-record.js", import.meta.url).href;
@@ -74,79 +72,30 @@ describe("the folder record", () => {
   it("is read back as written, and is nothing when missing or not a record", () => {
     const path = join(dir, "folders", "1-2.json");
     expect(readRecord(path)).toBeNull();
-    writeRecord(path, { state: "running", present: [".bashrc"], hooks: { "/f/.git/hooks/x": "1:2:3:4" }, processes: [] });
-    expect(readRecord(path)).toEqual({ state: "running", present: [".bashrc"], hooks: { "/f/.git/hooks/x": "1:2:3:4" }, processes: [] });
-    writeRecord(path, { state: "stopped", present: [], hooks: null, processes: [] });
-    expect(readRecord(path)).toEqual({ state: "stopped", present: [], hooks: null, processes: [] });
+    writeRecord(path, { state: "running", hooks: { "/f/.git/hooks/x": "1:2:3:4" }, processes: [] });
+    expect(readRecord(path)).toEqual({ state: "running", hooks: { "/f/.git/hooks/x": "1:2:3:4" }, processes: [] });
+    writeRecord(path, { state: "stopped", hooks: null, processes: [] });
+    expect(readRecord(path)).toEqual({ state: "stopped", hooks: null, processes: [] });
     expect(readdirSync(join(dir, "folders"))).toEqual(["1-2.json"]);
     writeFileSync(path, "{");
     expect(readRecord(path)).toBeNull();
-    writeFileSync(path, JSON.stringify({ state: "odd", present: [], hooks: null }));
+    writeFileSync(path, JSON.stringify({ state: "odd", hooks: null }));
     expect(readRecord(path)).toBeNull();
-    writeFileSync(path, JSON.stringify({ state: "running", present: [], hooks: [] }));
+    writeFileSync(path, JSON.stringify({ state: "running", hooks: [] }));
     expect(readRecord(path)).toBeNull();
+    // An earlier build's, with the placeholders srt left: read as a record of now.
+    writeFileSync(path, JSON.stringify({ state: "running", present: [".bashrc"], hooks: null, processes: [] }));
+    expect(readRecord(path)).toEqual({ state: "running", hooks: null, processes: [] });
   });
 
   it("keeps the handles of a host's background processes, and has none in a record without them", () => {
     const path = join(dir, "folders", "1-3.json");
     const handle = { id: "proc_0123456789ab", command: "sleep 1", cwd: "/f", task_id: "t", started_at: 1_700_000_000.5 };
-    writeRecord(path, { state: "stopped", present: [], hooks: null, processes: [handle] });
+    writeRecord(path, { state: "stopped", hooks: null, processes: [handle] });
     expect(readRecord(path)?.processes).toEqual([handle]);
-    writeFileSync(path, JSON.stringify({ state: "stopped", present: [], hooks: null, processes: [handle, { id: 1 }] }));
+    writeFileSync(path, JSON.stringify({ state: "stopped", hooks: null, processes: [handle, { id: 1 }] }));
     expect(readRecord(path)?.processes).toEqual([handle]);
-    writeFileSync(path, JSON.stringify({ state: "stopped", present: [], hooks: null }));
-    expect(readRecord(path)).toEqual({ state: "stopped", present: [], hooks: null, processes: [] });
-  });
-});
-
-describe("srt's placeholders", () => {
-  it("are listed by the names that are there", () => {
-    writeFileSync(join(folder, ".bashrc"), "");
-    mkdirSync(join(folder, ".claude", "commands"), { recursive: true });
-    expect(presentIn(folder)).toEqual([".bashrc", ".claude/commands", ".claude"]);
-  });
-
-  it("are removed after a crash only where provably srt's: empty and read-only, or an empty folder, over a name that was absent", () => {
-    // What srt leaves while a command runs: empty 0444 files, and the .claude folder.
-    for (const name of [".bashrc", ".vscode", ".mcp.json"]) writeFileSync(join(folder, name), "", { mode: 0o444 });
-    mkdirSync(join(folder, ".claude"));
-    writeFileSync(join(folder, ".claude", "commands"), "", { mode: 0o444 });
-    mkdirSync(join(folder, ".git"));
-    writeFileSync(join(folder, ".git", "hooks"), "", { mode: 0o444 });
-    // The user's: there before, or not empty, or writable, or a folder with something in it.
-    writeFileSync(join(folder, ".profile"), "", { mode: 0o444 });
-    writeFileSync(join(folder, ".zshrc"), "export A=1\n", { mode: 0o444 });
-    writeFileSync(join(folder, ".gitconfig"), "", { mode: 0o644 });
-    mkdirSync(join(folder, ".idea"));
-    writeFileSync(join(folder, ".idea", "x.xml"), "<x/>");
-    removePlaceholders(folder, [".profile"]);
-    expect(readdirSync(folder).sort()).toEqual([".git", ".gitconfig", ".idea", ".profile", ".zshrc"]);
-    expect(readdirSync(join(folder, ".git"))).toEqual([]);
-  });
-
-  it("never follows a .git that a command made a link, out of the folder", () => {
-    const outside = join(dir, "elsewhere");
-    mkdirSync(join(outside, "hooks"), { recursive: true });
-    writeFileSync(join(outside, "config"), "", { mode: 0o444 });
-    symlinkSync(outside, join(folder, ".git"));
-    removePlaceholders(folder, []);
-    expect(existsSync(join(outside, "hooks"))).toBe(true);
-    expect(existsSync(join(outside, "config"))).toBe(true);
-  });
-
-  it("keeps an empty read-only file that has another link", () => {
-    writeFileSync(join(folder, ".bashrc"), "", { mode: 0o444 });
-    linkSync(join(folder, ".bashrc"), join(folder, "notes"));
-    removePlaceholders(folder, []);
-    expect(existsSync(join(folder, ".bashrc"))).toBe(true);
-  });
-
-  it("keeps a link over a placeholder name, and what it points to", () => {
-    const target = join(dir, "target");
-    writeFileSync(target, "", { mode: 0o444 });
-    symlinkSync(target, join(folder, ".zshrc"));
-    removePlaceholders(folder, []);
-    expect(lstatSync(join(folder, ".zshrc")).isSymbolicLink()).toBe(true);
-    expect(existsSync(target)).toBe(true);
+    writeFileSync(path, JSON.stringify({ state: "stopped", hooks: null }));
+    expect(readRecord(path)).toEqual({ state: "stopped", hooks: null, processes: [] });
   });
 });

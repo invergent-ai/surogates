@@ -73,6 +73,7 @@ from surogates.harness.sanitize import (  # noqa: E402 — after TYPE_CHECKING b
 from surogates.harness.tool_exec import (  # noqa: E402 — after TYPE_CHECKING block
     SESSION_STARTING_TOOLS,
     SIBLING_ABORT_TOOLS,
+    is_concurrency_safe,
     is_parallelizable,
 )
 
@@ -238,7 +239,9 @@ class StreamingToolExecutor:
         fn = tool_call.get("function", {})
         tool_name = fn.get("name", "")
 
-        parallel = is_parallelizable(tool_name)
+        # Under a saga only read-only tools run side by side, as in the
+        # batch path: its steps are compensated one at a time, in order.
+        parallel = is_parallelizable(tool_name) and (self._saga is None or is_concurrency_safe(tool_name))
         tracked = TrackedTool(
             tool_call=tool_call,
             is_parallelizable=parallel,
@@ -621,6 +624,8 @@ class StreamingToolExecutor:
             _batch_has_duplicate_signatures,
         )
 
+        if self._saga is not None:
+            return  # a saga's steps run one at a time
         candidates: list[TrackedTool] = []
         for tool in self._tracked:
             if tool.is_parallelizable or tool.status == ToolStatus.COMPLETED:

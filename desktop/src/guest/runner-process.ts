@@ -1,7 +1,5 @@
 // The agent's side of a root runner (runner.ts): one command in it as a
-// RunnerChild, and the runner's questions answered by id. Until commands move
-// into the VM, a tool host speaks to its session runner through the same
-// classes (hosts/session-runner.ts).
+// RunnerChild, and the runner's questions answered by id.
 
 import type { ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -98,7 +96,7 @@ export class SessionRunner {
   private stopping = false;
   private stderr = "";
 
-  // *child* is the runner's process: srt's wrap of it, or, in the tests, the bare script.
+  // *child* is the runner's process: enter-root's, or, in the tests, the bare script.
   // *onLost* is told when it goes without being stopped; *readyMs* is how long it has to say it is ready.
   constructor(private readonly child: ChildProcess, onLost: () => void = () => {}, readyMs = READY_TIMEOUT_MS) {
     // A write to a runner that has died is not an error of its own: its exit is the one way out.

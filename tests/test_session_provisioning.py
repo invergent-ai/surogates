@@ -514,3 +514,34 @@ async def test_create_child_session_of_a_cloud_parent_cannot_set_execution():
         config={"execution": {"kind": "device", "device_id": str(uuid4())}},
     )
     assert "execution" not in store.create_session.await_args.kwargs["config"]
+
+
+@pytest.mark.asyncio
+async def test_a_project_threads_helpers_and_theirs_run_in_the_threads_copy_layout():
+    thread = _make_session(config={**_workspace_config(), "workstream_role": "thread"})
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+    await create_child_session(store=store, parent=thread, channel="delegation")
+    helper = _make_session(config=store.create_session.await_args.kwargs["config"], parent_id=thread.id)
+    # A helper's helper makes the thread's pod as the thread would, if it is first.
+    await create_child_session(store=store, parent=helper, channel="delegation")
+    cfg = store.create_session.await_args.kwargs["config"]
+    assert (cfg["sandbox_root_thread"], cfg["sandbox_root_session_id"]) == (True, str(thread.id))
+
+
+@pytest.mark.asyncio
+async def test_no_caller_names_a_session_a_threads_helper():
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+    storage = SimpleNamespace(
+        create_bucket=AsyncMock(),
+        resolve_workspace_path=lambda bucket, sid: f"/workspace/{bucket}/{sid}",
+    )
+    await create_agent_session(
+        store=store, storage=storage, settings=SimpleNamespace(storage=SimpleNamespace(bucket="tenant-bucket")),
+        org_id=uuid4(), user_id=uuid4(), agent_id="a-1", channel="web", config={"sandbox_root_thread": True},
+    )
+    assert "sandbox_root_thread" not in store.create_session.await_args.kwargs["config"]
+    # Nor a child of a session that is no thread's.
+    await create_child_session(
+        store=store, parent=_make_session(), channel="delegation", config={"sandbox_root_thread": True},
+    )
+    assert "sandbox_root_thread" not in store.create_session.await_args.kwargs["config"]
