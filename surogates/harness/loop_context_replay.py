@@ -141,14 +141,16 @@ _MAX_LISTED_FILES = 20
 _MAX_LISTED_LEFT_OUT = 10
 
 
-def _listed(files: list, limit: int = _MAX_LISTED_FILES) -> str:
-    """A report's ``Files:`` line, at most *limit* names and how many more.
-    An entry with neither a label nor a ref is skipped rather than failing
-    the master's every wake."""
+def _listed(files: list, limit: int = _MAX_LISTED_FILES, total: int | None = None) -> str:
+    """A report's ``Files:`` line, at most *limit* names and how many more,
+    of *total* when the payload counted more than it names.  An entry with
+    neither a label nor a ref is skipped rather than failing the master's
+    every wake."""
     labels = [_file_label(f.get("label") or f.get("ref") or "") for f in files if isinstance(f, dict)]
     labels = [label for label in labels if label]
-    if len(labels) > limit:
-        labels = [*labels[:limit], f"and {len(labels) - limit} more"]
+    count = max(len(labels), total if isinstance(total, int) else 0)
+    if count > limit:
+        labels = [*labels[:limit], f"and {count - limit} more"]
     return ", ".join(labels) or "none"
 
 
@@ -196,7 +198,7 @@ def _landing_lines(data: dict, kept: list, deleted: list) -> str:
         named = data.get(key)
         if isinstance(named, list) and named:
             names = [{"label": name} for name in named if isinstance(name, str)]
-            lines += f"\n{words}: {_listed(names, limit=_MAX_LISTED_LEFT_OUT)}"
+            lines += f"\n{words}: {_listed(names, limit=_MAX_LISTED_LEFT_OUT, total=data.get(f'{key}_count'))}"
     return lines
 
 

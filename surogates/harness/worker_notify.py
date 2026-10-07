@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 _MAX_RESULT_CHARS: int = 10_000
 
 
+#: The most excluded files and repositories a report's payload names.
+_MAX_LEFT_OUT_NAMED = 200
+
+
 async def _thread_title(session_factory: Any | None, worker_session_id: UUID) -> str | None:
     """The title of the project's thread *worker_session_id*; None for any other worker."""
     if session_factory is None:
@@ -187,10 +191,12 @@ async def notify_parent_on_completion(
             payload["title"] = title
             if files is not None:
                 payload["files"] = files
-            if landing is not None and landing["excluded"]:
-                payload["excluded"] = landing["excluded"]
-            if landing is not None and landing["repositories"]:
-                payload["repositories"] = landing["repositories"]
+            for key in ("excluded", "repositories") if landing is not None else ():
+                if landing[key]:
+                    # At most this many names, and how many there are in all.
+                    payload[key] = landing[key][:_MAX_LEFT_OUT_NAMED]
+                    if len(landing[key]) > _MAX_LEFT_OUT_NAMED:
+                        payload[f"{key}_count"] = len(landing[key])
             if landing is not None and landing["state"] != "completed":
                 payload["landing"] = landing["state"]
 

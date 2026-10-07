@@ -594,3 +594,16 @@ async def test_a_thread_whose_pod_was_remade_mid_turn_is_told_its_edits_are_gone
     assert second.startswith("[This thread's copy of the project's files was made again")
     # What it wrote before is gone with the old copy; what it wrote after lands.
     assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "b.md", "notes.txt"]
+
+
+async def test_a_reports_excluded_files_are_capped_in_its_payload_and_counted(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    await a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "for i in $(seq -w 1 250); do echo x > n$i.tmp; done && echo kept > kept.md"})),
+        _final_response("Kept a note."),
+    ], pool=SandboxPool(pods))
+    [report] = await reports(api, master)
+    assert (len(report["excluded"]), report["excluded_count"]) == (200, 250)
+    note = worker_note(EventType.WORKER_COMPLETE.value, report)["content"]
+    assert note.endswith(", n010.tmp, and 240 more")
