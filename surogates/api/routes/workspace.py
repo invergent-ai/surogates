@@ -575,37 +575,45 @@ async def get_workspace_file(
         )
 
     mime, _ = mimetypes.guess_type(path)
+    preview_bytes = _MAX_PDF_BYTES if is_pdf else _MAX_IMAGE_BYTES if is_image else _MAX_READ_BYTES
     async with workspace_files(request, session) as files:
         key = await files.resolve(path)
-        st = await files.stat(key)
-        if st is None or st.is_dir:
-            raise HTTPException(status_code=404, detail=f"File not found: {path}")
-        size = st.size
+        if isinstance(files, DeviceWorkspaceIO):
+            # Its size first, so a large file never crosses for a preview.
+            st = await files.stat(key)
+            if st is None or st.is_dir:
+                raise HTTPException(status_code=404, detail=f"File not found: {path}")
+            size = st.size
+            # A preview too large is refused below, unread; a text file is read only as far as it is shown.
+            too_large = (is_image or is_pdf) and size > preview_bytes
+            data = b"" if too_large else await files.read(key, max_bytes=preview_bytes)
+        else:
+            # As before: one read of the whole object, its size its length.
+            try:
+                data = await files.read(key)
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail=f"File not found: {path}") from None
+            size = len(data)
 
-        if is_image or is_pdf:
-            max_bytes = _MAX_PDF_BYTES if is_pdf else _MAX_IMAGE_BYTES
-            kind = "PDF" if is_pdf else "Image"
-            if size > max_bytes:
-                raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail=f"{kind} too large to preview ({size} bytes, limit {max_bytes}).",
-                )
-            content = base64.b64encode(await files.read(key)).decode("ascii")
-            return FileContentResponse(
-                path=path,
-                content=content,
-                size=size,
-                mime_type=mime or ("application/pdf" if is_pdf else "application/octet-stream"),
-                encoding="base64",
-                truncated=False,
+    if is_image or is_pdf:
+        kind = "PDF" if is_pdf else "Image"
+        if size > preview_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"{kind} too large to preview ({size} bytes, limit {preview_bytes}).",
             )
-
-        # Text file path.
-        data = await files.read(key, max_bytes=_MAX_READ_BYTES)
+        return FileContentResponse(
+            path=path,
+            content=base64.b64encode(data).decode("ascii"),
+            size=size,
+            mime_type=mime or ("application/pdf" if is_pdf else "application/octet-stream"),
+            encoding="base64",
+            truncated=False,
+        )
 
     return FileContentResponse(
         path=path,
-        content=data.decode("utf-8", errors="replace"),
+        content=data[:_MAX_READ_BYTES].decode("utf-8", errors="replace"),
         size=size,
         mime_type=mime,
         encoding="utf-8",

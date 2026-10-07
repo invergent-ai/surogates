@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi import BackgroundTasks, Response, UploadFile
+from fastapi import BackgroundTasks, HTTPException, Response, UploadFile
 
 from surogates.api.routes import workspace as workspace_route
 from surogates.api.routes import sessions as sessions_route
@@ -554,3 +554,42 @@ async def test_a_cloud_chats_slow_storage_is_written_as_before(monkeypatch):
     )
     assert uploaded.path == "a.txt"
     assert storage.objects[("ops-agent-bucket", f"{session_id}/a.txt")] == b"slow"
+
+
+class _ReadOnlyStorage(_RecordingStorage):
+    """Object storage that answers a read alone, as the file panel's open asks it: one GET, no HEAD."""
+
+    async def stat(self, bucket: str, key: str) -> dict:
+        raise AssertionError("a cloud chat's open reads the object directly")
+
+    async def read(self, bucket: str, key: str) -> bytes:
+        if "\x00" in key:
+            raise ValueError("embedded null byte")
+        return await super().read(bucket, key)
+
+
+async def test_a_cloud_chats_file_is_opened_with_one_read_as_before():
+    org_id = uuid4()
+    session_id = uuid4()
+    store = _Store(org_id)
+    store.session = SimpleNamespace(
+        id=session_id, org_id=org_id, agent_id="support-bot", status="active", channel="web",
+        config={"storage_bucket": "ops-agent-bucket"},
+    )
+    storage = _ReadOnlyStorage()
+    storage.objects[("ops-agent-bucket", f"{session_id}/a.txt")] = b"alpha"
+    storage.objects[("ops-agent-bucket", f"{session_id}/dot.png")] = b"\x89PNG"
+    request = _request(store, storage, _Redis())
+    tenant = _tenant(org_id, uuid4())
+
+    text = await workspace_route.get_workspace_file(session_id, request, path="a.txt", tenant=tenant)
+    assert (text.content, text.size, text.truncated) == ("alpha", 5, False)
+    image = await workspace_route.get_workspace_file(session_id, request, path="dot.png", tenant=tenant)
+    assert (image.content, image.size) == ("iVBORw==", 4)
+    with pytest.raises(HTTPException) as missing:
+        await workspace_route.get_workspace_file(session_id, request, path="missing.txt", tenant=tenant)
+    assert (missing.value.status_code, missing.value.detail) == (404, "File not found: missing.txt")
+    # A path storage cannot take is the user's error, not the server's.
+    with pytest.raises(HTTPException) as bad:
+        await workspace_route.get_workspace_file(session_id, request, path="a\x00b.txt", tenant=tenant)
+    assert bad.value.status_code == 400
