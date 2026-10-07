@@ -16,6 +16,8 @@ import {
 const ROOT_A = "11111111-1111-4111-8111-111111111111";
 const ROOT_B = "22222222-2222-4222-8222-222222222222";
 const SLEEP = "37.25";
+// What a search asks for when it is to stay running: only then does the fake rg sleep.
+const NEVER = "never-answers";
 
 // How many of the fake rg's sleeps are running, the sandbox's included.
 const sleeping = () => Number(spawnSync("pgrep", ["-fc", `^sleep ${SLEEP}$`], { encoding: "utf8" }).stdout.trim() || 0);
@@ -35,6 +37,8 @@ let identities: Map<string, { dev: number; ino: number; boot: string }>;
 let spawned: HostProcess[];
 let exits: number;
 let hosts: ToolHosts | null;
+// This process's PATH, which each test puts the fake rg's folder before, as a host forks with it.
+let ownPath: string | undefined;
 
 const op = (kind: string, args: Record<string, unknown>, sessionId = ROOT_A): Operation => ({
   id: `${kind}-${Math.random()}`, sessionId, callingSessionId: sessionId, invocationId: "call", ordinal: 1, kind, args, digest: "d",
@@ -48,7 +52,9 @@ function toolHosts(overrides: Partial<ToolHostsOptions> = {}): ToolHosts {
       return folder && made ? { folder, ...made } : undefined;
     },
     dataDir: join(base, "data"),
-    env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8", PATH: `${folders[ROOT_A]}/bin:/usr/bin:/bin` },
+    env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8" },
+    // The fake rg's folder: one of the app's, which the helper's sandbox reads.
+    appDirs: [...APP_DIRS, join(base, "tools")],
     spawnHost: () => {
       const host = forkHost();
       host.onExit(() => {
@@ -73,16 +79,20 @@ beforeEach(() => {
     const { dev, ino } = statSync(folder);
     identities.set(folder, { dev, ino, boot: BOOT_ID });
   }
-  // An rg that never answers, for operations that are still running; its sleep
-  // has a length only it uses, so the test can see it run and stop.
-  mkdirSync(join(folders[ROOT_A] ?? "", "bin"));
-  writeFileSync(join(folders[ROOT_A] ?? "", "bin", "rg"), `#!/bin/sh\nexec sleep ${SLEEP}\n`, { mode: 0o755 });
+  // An rg that never answers a search for NEVER, for operations that are still running, and
+  // is the real one otherwise, as srt's own scan runs it. The helper finds it on the host's
+  // own PATH, never in the folder. Its sleep has a length only it uses, so the test can see it run and stop.
+  mkdirSync(join(base, "tools"));
+  writeFileSync(join(base, "tools", "rg"), `#!/bin/sh\ncase "$*" in *${NEVER}*) exec sleep ${SLEEP};; esac\nexec /usr/bin/rg "$@"\n`, { mode: 0o755 });
+  ownPath = process.env.PATH;
+  process.env.PATH = `${join(base, "tools")}:${ownPath ?? ""}`;
   spawned = [];
   exits = 0;
   hosts = null;
 });
 
 afterEach(async () => {
+  process.env.PATH = ownPath;
   await hosts?.stop();
   // A host that failed to start, or timed out, is no longer in hosts and is on its way out. srt
   // cleans up /tmp only when a host exits by itself, so each is given the time before any is killed.
@@ -91,7 +101,7 @@ afterEach(async () => {
   rmSync(base, { recursive: true, force: true });
 });
 
-const slowSearch = () => op("ripgrep", { key: folders[ROOT_A], mode: "files", pattern: "*", glob: null, context: 0 });
+const slowSearch = () => op("ripgrep", { key: folders[ROOT_A], mode: "files", pattern: NEVER, glob: null, context: 0 });
 
 describe("a command elsewhere (the VM), under the hook guard", { timeout: 30_000 }, () => {
   it("is refused before it runs while a link at a protected name leads into the folder, and not for one that leads out of it", async () => {
@@ -207,8 +217,8 @@ describe("ToolHosts", { timeout: 30_000 }, () => {
     folders[ROOT_B] = folders[ROOT_A] ?? "";
     const executor = toolHosts({ idleMs: 500 });
     const busy = new AbortController();
-    const first = executor.run(op("run", { command: "sleep 31.5", workdir: null, timeout: 60 }), busy.signal);
-    await until(() => Number(spawnSync("pgrep", ["-fc", "^sleep 31.5$"], { encoding: "utf8" }).stdout.trim() || 0) >= 1, 20_000);
+    const first = executor.run(slowSearch(), busy.signal);
+    await until(() => sleeping() === 1, 20_000);
     expect(await executor.run(op("resolve", { path: "" }, ROOT_B), signal())).toMatchObject({
       error: { type: "unavailable", message: expect.stringMatching(/another chat on this computer/) },
     });
@@ -487,16 +497,13 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     });
   });
 
-  it("puts a host's network asks to the approvals for its root, and tells the host each answer, failing closed", async () => {
+  it("puts its root's network asks to the approvals for the root while something of it runs, failing closed", async () => {
     const asked: Array<[string, NetworkAsk]> = [];
     // The last throws at once, without a promise.
-    const choices: Array<NetworkAnswer | Error | "throw"> = [
-      "allow", "allow_session", "deny", new Error("no display"), "maybe" as NetworkAnswer, "throw",
-    ];
+    const choices: Array<NetworkAnswer | Error | "throw"> = ["allow", "allow_session", "deny", new Error("no display"), "throw"];
     const executor = toolHosts({
       spawnHost: fakeSpawn(answering),
       network: {
-        granted: () => [],
         askNetwork: (root, request) => {
           asked.push([root, request]);
           const choice = choices.shift();
@@ -506,53 +513,20 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
       },
     });
     await executor.run(resolve(), signal());
-    // A background process lives: its connections may ask.
-    fakes[0]?.say({ type: "processes", live: 1 });
-    for (let id = 1; id <= 6; id += 1) fakes[0]?.say({ type: "ask", id, host: "example.com", port: 443, privateNetwork: id === 5 });
-    await until(() => sent(0, "answer") === 6);
-    const answers = fakes[0]?.sent.filter((message) => message.type === "answer") ?? [];
-    expect(answers.sort((a, b) => a.id - b.id)).toEqual([
-      { type: "answer", id: 1, allow: true, remember: false },
-      { type: "answer", id: 2, allow: true, remember: true },
-      { type: "answer", id: 3, allow: false, remember: false },
-      { type: "answer", id: 4, allow: false, remember: false },
-      { type: "answer", id: 5, allow: false, remember: false },
-      { type: "answer", id: 6, allow: false, remember: false },
-    ]);
+    // A process of the root's lives in the guest: its connections may ask.
+    executor.processes(ROOT_A, { handles: [], live: 1 });
+    const answers: NetworkAnswer[] = [];
+    for (const privateNetwork of [false, false, false, true, false]) {
+      answers.push(await executor.ask(ROOT_A, { host: "example.com", port: 443, privateNetwork }));
+    }
+    expect(answers).toEqual(["allow", "allow_session", "deny", "deny", "deny"]);
     expect(asked.map(([root, request]) => [root, request.privateNetwork])).toEqual([
-      [ROOT_A, false], [ROOT_A, false], [ROOT_A, false], [ROOT_A, false], [ROOT_A, true], [ROOT_A, false],
+      [ROOT_A, false], [ROOT_A, false], [ROOT_A, false], [ROOT_A, true], [ROOT_A, false],
     ]);
     expect(asked[0]?.[1]).toEqual({ host: "example.com", port: 443, privateNetwork: false });
-  });
-
-  it("refuses every destination off the package hosts when it has no approvals to ask", async () => {
-    const executor = toolHosts({ spawnHost: fakeSpawn(answering) });
-    await executor.run(resolve(), signal());
-    fakes[0]?.say({ type: "processes", live: 1 });
-    fakes[0]?.say({ type: "ask", id: 1, host: "example.com", port: 443, privateNetwork: false });
-    await until(() => sent(0, "answer") === 1);
-    expect(fakes[0]?.sent.at(-1)).toEqual({ type: "answer", id: 1, allow: false, remember: false });
-    expect(fakes[0]?.sent[0]).toMatchObject({ type: "start", domains: [] });
-  });
-
-  it("denies an ask that comes once nothing of its root runs, without a prompt", async () => {
-    const asked: NetworkAsk[] = [];
-    const executor = toolHosts({
-      spawnHost: fakeSpawn(answering),
-      network: {
-        granted: () => [],
-        askNetwork: (_root, request) => {
-          asked.push(request);
-          return Promise.resolve("allow");
-        },
-      },
-    });
-    await executor.run(resolve(), signal());
-    // Late: its lookup outlasted the command that asked, which has answered.
-    fakes[0]?.say({ type: "ask", id: 1, host: "example.com", port: 443, privateNetwork: false });
-    await until(() => sent(0, "answer") === 1);
-    expect(fakes[0]?.sent.at(-1)).toEqual({ type: "answer", id: 1, allow: false, remember: false });
-    expect(asked).toEqual([]);
+    // A root with no host here has nothing that runs: denied, unasked.
+    expect(await executor.ask(ROOT_B, { host: "example.com", port: 443, privateNetwork: false })).toBe("deny");
+    expect(asked).toHaveLength(5);
   });
 
   it("dismisses the prompt of an ask that comes in the same moment as its root's last process ends", async () => {
@@ -560,7 +534,6 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
       spawnHost: fakeSpawn(answering),
       // A prompt that stays open until it is dismissed.
       network: {
-        granted: () => [],
         askNetwork: (_root, _request, dismissed) => new Promise((done) => {
           if (dismissed.aborted) done("deny");
           dismissed.addEventListener("abort", () => done("deny"));
@@ -568,24 +541,11 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
       },
     });
     await executor.run(resolve(), signal());
-    fakes[0]?.say({ type: "processes", live: 1 });
-    // As child-process IPC hands over the messages of one read: the ask, then its root's last process ended.
-    fakes[0]?.say({ type: "ask", id: 1, host: "example.com", port: 443, privateNetwork: false });
-    fakes[0]?.say({ type: "processes", live: 0 });
-    await until(() => sent(0, "answer") === 1, 1_000);
-    expect(fakes[0]?.sent.at(-1)).toEqual({ type: "answer", id: 1, allow: false, remember: false });
-  });
-
-  it("starts each host with what its root's user allowed for the chat", async () => {
-    const executor = toolHosts({
-      spawnHost: fakeSpawn(answering),
-      network: { granted: (root) => (root === ROOT_A ? ["example.com"] : []), askNetwork: () => Promise.resolve("deny") },
-    });
-    await executor.run(resolve(), signal());
-    await executor.run(op("resolve", { path: "" }, ROOT_B), signal());
-    expect(fakes.map((fake) => fake.sent[0])).toMatchObject([
-      { type: "start", domains: ["example.com"] }, { type: "start", domains: [] },
-    ]);
+    executor.processes(ROOT_A, { handles: [], live: 1 });
+    // The ask, then its root's last process ended, before its prompt was shown.
+    const answer = executor.ask(ROOT_A, { host: "example.com", port: 443, privateNetwork: false });
+    executor.processes(ROOT_A, { handles: [], live: 0 });
+    expect(await answer).toBe("deny");
   });
 
   it("dismisses a host's open network prompt when the host goes", async () => {
@@ -593,50 +553,21 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     const executor = toolHosts({
       spawnHost: fakeSpawn(readyOnly),
       network: {
-        granted: () => [],
         askNetwork: (_root, _request, dismissed) => {
           prompt = dismissed;
           return new Promise((settle) => dismissed.addEventListener("abort", () => settle("deny"), { once: true }));
         },
       },
     });
-    // The command that asks is still running when its host goes.
+    // The operation that asks is still running when its host goes.
     const running = executor.run(resolve(), signal());
     await until(() => sent(0, "op") === 1);
-    fakes[0]?.say({ type: "ask", id: 1, host: "example.com", port: 443, privateNetwork: false });
+    const answer = executor.ask(ROOT_A, { host: "example.com", port: 443, privateNetwork: false });
     await until(() => prompt !== undefined);
     expect(prompt?.aborted).toBe(false);
     // The computer's access ended: every host stops.
     await executor.end();
-    expect(prompt?.aborted).toBe(true);
-    expect(await running).toEqual(HOST_STOPPED);
-  });
-
-  it("dismisses a host's open network prompts once nothing of its root runs", async () => {
-    let prompt: AbortSignal | undefined;
-    const executor = toolHosts({
-      spawnHost: fakeSpawn(readyOnly),
-      network: {
-        granted: () => [],
-        askNetwork: (_root, _request, dismissed) => {
-          prompt = dismissed;
-          return new Promise((settle) => dismissed.addEventListener("abort", () => settle("deny"), { once: true }));
-        },
-      },
-    });
-    const command = new AbortController();
-    const running = executor.run(resolve(), command.signal);
-    await until(() => sent(0, "op") === 1);
-    fakes[0]?.say({ type: "ask", id: 1, host: "example.com", port: 443, privateNetwork: false });
-    await until(() => prompt !== undefined);
-    expect(prompt?.aborted).toBe(false);
-    // The command that asked ends: no connection of the root can still wait.
-    command.abort();
-    await running;
-    expect(prompt?.aborted).toBe(true);
-    // The dismissed prompt's denial is the host's answer.
-    await until(() => fakes[0]?.sent.at(-1)?.type === "answer");
-    expect(fakes[0]?.sent.at(-1)).toEqual({ type: "answer", id: 1, allow: false, remember: false });
+    expect([prompt?.aborted, await answer, await running]).toEqual([true, "deny", HOST_STOPPED]);
   });
 
   it("gives the binder the folder guards its hosts start with, and none without a HOME", async () => {
@@ -646,7 +577,7 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(start?.type).toBe("start");
     if (start?.type !== "start") return;
     expect(executor.guards()).toEqual({ home: start.env.HOME, dataDir: start.dataDir, appDirs: start.appDirs });
-    expect(toolHosts().guards().appDirs).toEqual(APP_DIRS);
+    expect(toolHosts({ appDirs: undefined }).guards().appDirs).toEqual(APP_DIRS);
     expect(() => toolHosts({ env: { PATH: "/usr/bin:/bin" } }).guards()).toThrow("the app's environment has no HOME");
   });
 
@@ -708,28 +639,15 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(sent(0, "stop")).toBe(0);
   });
 
-  it("does not stop a host while its background processes run, and stops it once they end", async () => {
-    const executor = toolHosts({ idleMs: 50, spawnHost: fakeSpawn((host, message) => {
-      readyOnly(host, message);
-      if (message.type === "op") {
-        host.say({ type: "processes", live: 1 });
-        host.say({ type: "result", id: message.id, outcome: { ok: message.id } });
-      }
-    }) });
-    await executor.run(op("start", { command: "sleep 1" }), signal());
-    await new Promise((done) => setTimeout(done, 250));
-    expect(sent(0, "stop")).toBe(0);
-    fakes[0]?.say({ type: "processes", live: 0 });
-    await until(() => sent(0, "stop") === 1, 1_000);
-  });
-
-  it("does not stop a host whose processes count comes after its last operation's answer", async () => {
+  it("does not stop a host while its root's processes in the guest run, the count coming after its last answer, and stops it once they end", async () => {
     const executor = toolHosts({ idleMs: 50, spawnHost: fakeSpawn(answering) });
-    await executor.run(op("start", { command: "sleep 1" }), signal());
+    await executor.run(resolve(), signal());
     // The idle stop is already armed when the count comes.
-    fakes[0]?.say({ type: "processes", live: 1 });
+    executor.processes(ROOT_A, { handles: [], live: 1 });
     await new Promise((done) => setTimeout(done, 250));
     expect(sent(0, "stop")).toBe(0);
+    executor.processes(ROOT_A, { handles: [], live: 0 });
+    await until(() => sent(0, "stop") === 1, 1_000);
   });
 
   it("stops a host that has had nothing to do once it is ready, whatever it heard of its root's processes elsewhere before", async () => {

@@ -40,7 +40,7 @@ export type FolderCheck =
 
 // A path as spelled, and as the file system resolves it. Where it does not exist yet, or cannot be
 // read, the part that exists is still resolved: a guard that is not there yet is still where its links lead.
-export function spellings(path: string): string[] {
+function spellings(path: string): string[] {
   const plain = resolve(path);
   const { path: real } = realpath(plain);
   return real === plain ? [plain] : [plain, real];

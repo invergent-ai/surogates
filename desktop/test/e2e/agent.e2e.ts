@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
@@ -31,8 +31,8 @@ afterEach(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-async function launched(env: Record<string, string> = {}): Promise<{ shell: ElectronApplication; page: Page }> {
-  const shell = await launch(home, env);
+async function launched(): Promise<{ shell: ElectronApplication; page: Page }> {
+  const shell = await launch(home);
   app = shell;
   await stubNative(shell);
   return { shell, page: await shellPage(shell) };
@@ -125,16 +125,14 @@ describe("the agent's capabilities", () => {
   });
 });
 
-describe("a folder asked for while the device starts", () => {
-  it("waits for the device, rather than saying this computer is not registered", async () => {
+describe("a folder asked for from a freshly launched app", () => {
+  it("answers no folder when its dialog is cancelled, rather than saying this computer is not registered", async () => {
     const first = await launched();
     await connect(first.page, origin);
     await signedInAndAdded(first.shell, first.page, agent);
     await quit(first.shell);
-    // A login shell that takes 3 s: the device starts only once it has answered.
-    const slow = join(home, "slow-shell");
-    writeFileSync(slow, "#!/bin/sh\nsleep 3\nexec /bin/bash \"$@\"\n", { mode: 0o755 });
-    const { shell } = await launched({ SHELL: slow });
+    // Asked as soon as the web client loads.
+    const { shell } = await launched();
     const client = await webClient(shell, origin);
     // The folder dialog is cancelled: the answer is no folder, not a refusal.
     expect(await client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"))).toBeNull();

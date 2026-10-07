@@ -1,8 +1,7 @@
 // The run kind's answers, wherever the command runs: its arguments checked as
 // the cloud checks them, its folder, and its output, timeout and cancel, as the
 // cloud's LocalWorkspaceIO.run and the reference laptop answer them. The guest
-// agent runs every command in a root runner; until commands move into the VM, a
-// tool host runs them too (hosts/run.ts).
+// agent runs every command in a root runner.
 
 import { accessSync, constants, statSync } from "node:fs";
 import { constants as osConstants } from "node:os";
@@ -30,7 +29,7 @@ export const SANDBOX_STOPPED = {
 // oom: the kernel ended one of its processes for memory, in the guest.
 export type CommandEnd = { code: number | null; signal: NodeJS.Signals | null; oom?: true } | { failed: string } | { lost: true };
 
-// What run needs of a running command, in a sandbox of its own or in a runner.
+// What run needs of a running command in a runner.
 export interface CommandChild {
   // Each chunk of its output, as it comes; err: from its stderr.
   onOutput(listener: (chunk: Buffer, err: boolean) => void): void;

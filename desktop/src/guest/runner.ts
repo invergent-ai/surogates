@@ -7,11 +7,10 @@
 // (--cgroups <folder>): each command gets a cgroup of its own there, which ends it
 // with everything it started; and the root's socket to the host proxy (--tunnel
 // <socket>), for the proxies it listens on before any command runs (listeners.ts).
-// Until commands move into the VM, a tool host runs it the same way, wrapped once in
-// srt, as the root's session runner, and finds a command's processes by its marker.
+// The host's tests start it bare, without either: a command's process group is then all it signals.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
@@ -24,22 +23,17 @@ import { listen } from "./listeners.js";
 import { KILL_GRACE_MS } from "./processes.js";
 import type { FromRunner, SpawnRequest, ToRunner } from "./protocol.js";
 
-// Every process a command starts inherits it, setsid or not: how the runner finds them all.
-export const MARKER = "SUROGATE_PROCESS";
-// The root's cgroup in the guest, or null under srt. A run's cgroup is in its run
-// folder, a background process's in its proc folder, where its memory is counted.
-// The root's socket to the host proxy in the guest; under srt, srt's own proxy.
+// The root's cgroup in the guest. A run's cgroup is in its run folder, a background
+// process's in its proc folder, where its memory is counted. And the root's socket to the host proxy.
 const { cgroups: CGROUPS = null, tunnel: TUNNEL = null } = parseArgs({ options: { cgroups: { type: "string" }, tunnel: { type: "string" } } }).values;
 // The cgroups of commands that have ended, each removed once nothing of it runs.
 const ended = new Set<string>();
-// A process can fork while a sweep goes by: a SIGKILL sweeps again until it finds none.
-const SWEEPS = 10;
 // What waits for a process that does not read its input stays in the runner's memory: this much, at most.
 const MAX_STDIN_BYTES = 1024 * 1024;
 
 interface Child {
   proc: ChildProcess;
-  // Its cgroup in the guest; null under srt. A run's is the runner's own to make and
+  // Its cgroup in the guest; null without --cgroups. A run's is the runner's own to make and
   // remove; a background process's, the agent's (root.ts, ProcessCgroups).
   cgroup: string | null;
   // A command with no stdin is a foreground run: what it leaves running ends with it.
@@ -55,9 +49,6 @@ const quote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 
 const children = new Map<string, Child>();
 const paused = new Set<Readable>();
-// srt's environment (the app's names, its proxy, TMPDIR), without the flag that makes Electron a Node.
-const base: NodeJS.ProcessEnv = { ...process.env };
-delete base.ELECTRON_RUN_AS_NODE;
 
 // A host that reads slowly leaves a command's output in that command's pipe, not in here.
 function say(message: FromRunner, from?: Readable | null): void {
@@ -86,9 +77,16 @@ function argv(request: SpawnRequest, env: NodeJS.ProcessEnv): [string, string[]]
 
 // Every process of the command: in the guest, each in its cgroup, which a SIGKILL
 // ends at once, whatever left the command's session or cleared its environment;
-// under srt, its group and its marker's.
-function signalAll(id: string, child: Child, signal: NodeJS.Signals): void {
-  if (!child.cgroup) return sweep(id, child.proc.pid, signal);
+// without --cgroups, its process group.
+function signalAll(child: Child, signal: NodeJS.Signals): void {
+  if (!child.cgroup) {
+    try {
+      if (child.proc.pid !== undefined) process.kill(-child.proc.pid, signal);
+    } catch {
+      // The group has gone.
+    }
+    return;
+  }
   try {
     if (signal === "SIGKILL") return writeFileSync(join(child.cgroup, "cgroup.kill"), "1");
     for (const member of readFileSync(join(child.cgroup, "cgroup.procs"), "utf8").split("\n").filter(Boolean)) {
@@ -131,32 +129,6 @@ function tidy(): void {
   }
 }
 
-// The command's process group, then every process in the sandbox that carries its
-// marker: one that called setsid or double-forked has left the group, not the
-// marker. The sandbox has its own pid namespace, so /proc lists only its processes.
-function sweep(id: string, pid: number | undefined, signal: NodeJS.Signals): void {
-  try {
-    if (pid !== undefined) process.kill(-pid, signal);
-  } catch {
-    // The group has gone.
-  }
-  const needle = `\0${MARKER}=${id}\0`;
-  for (let pass = 0; pass < (signal === "SIGKILL" ? SWEEPS : 1); pass += 1) {
-    let found = false;
-    for (const name of readdirSync("/proc")) {
-      if (!/^\d+$/.test(name) || Number(name) === process.pid) continue;
-      try {
-        if (!`\0${readFileSync(`/proc/${name}/environ`, "latin1")}`.includes(needle)) continue;
-        process.kill(Number(name), signal);
-        found = true;
-      } catch {
-        // Gone, or not ours to read.
-      }
-    }
-    if (!found) return;
-  }
-}
-
 function finish(id: string): void {
   const child = children.get(id);
   if (!child || child.done) return;
@@ -176,7 +148,7 @@ function start(request: SpawnRequest): void {
     say({ type: "error", id, message: "a process with this id is already running" });
     return;
   }
-  const env = CGROUPS ? { ...base, ...request.env } : { ...base, ...request.env, [MARKER]: id };
+  const env = { ...process.env, ...request.env };
   let [file, args] = argv(request, env);
   const cgroup = CGROUPS && join(CGROUPS, request.stdin ? "proc" : "run", id);
   const own = request.stdin ? null : cgroup;
@@ -217,7 +189,7 @@ function start(request: SpawnRequest): void {
   proc.on("exit", () => {
     child.exited = true;
     // As in a sandbox of its own: a run's leftovers end when its shell does.
-    if (child.foreground) signalAll(id, child, "SIGKILL");
+    if (child.foreground) signalAll(child, "SIGKILL");
     if (child.killed) finish(id);
   });
   proc.on("close", () => finish(id));
@@ -227,7 +199,7 @@ function signal(id: string, name: NodeJS.Signals): void {
   const child = children.get(id);
   if (!child) return;
   if (name === "SIGKILL") child.killed = true;
-  signalAll(id, child, name);
+  signalAll(child, name);
   // What outlives a SIGTERM ends once the registry's grace has passed, as the process itself would:
   // a leftover that ignores it, once the process has ended, has no SIGKILL to come but this.
   const { cgroup } = child;
@@ -282,10 +254,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     say({ type: "written", id: message.id });
   }
 });
-// The host is done with this sandbox. Everything in the runner's pid namespace
-// ends with it; outside a sandbox, as in the tests, so does each command.
+// The agent is done with this root: every command ends, and all it started.
 process.stdin.on("end", () => {
-  for (const [id, child] of children) signalAll(id, child, "SIGKILL");
+  for (const child of children.values()) signalAll(child, "SIGKILL");
   process.exit(0);
 });
 // Its proxies listen before any command runs: one that cannot ends the runner, and the root is not set up.

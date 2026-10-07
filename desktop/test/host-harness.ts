@@ -23,13 +23,12 @@ export class Harness {
   readonly child: ChildProcess;
   readonly exited: Promise<number | null>;
   stderr = "";
-  private readonly answered = new Set<number>();
 
   // Its own process group, as forkHost makes it: srt's socat bridges are the
   // host's children and outlive a host that is killed, unless the group goes.
-  // *env* is the host's own environment; omitted, it is this process's.
-  constructor(cwd?: string, env?: NodeJS.ProcessEnv) {
-    this.child = fork(HOST, [], { cwd, env, detached: true, stdio: ["ignore", "inherit", "pipe", "ipc"] });
+  // *env* is the host's own environment; omitted, it is this process's. *execPath* runs it; omitted, this process's node.
+  constructor(cwd?: string, env?: NodeJS.ProcessEnv, execPath?: string) {
+    this.child = fork(HOST, [], { cwd, env, ...(execPath ? { execPath } : {}), detached: true, stdio: ["ignore", "inherit", "pipe", "ipc"] });
     this.child.stderr?.on("data", (chunk: Buffer) => {
       this.stderr += chunk.toString();
     });
@@ -70,16 +69,6 @@ export class Harness {
       if (Date.now() > deadline) throw new Error(`timed out; got ${JSON.stringify(this.messages)}`);
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-  }
-
-  // Answers the oldest network ask not answered yet, once the host has sent it, and gives it.
-  async answer(allow: boolean, remember = false): Promise<Extract<FromHost, { type: "ask" }>> {
-    const ask = await this.until((messages) =>
-      messages.find((message): message is Extract<FromHost, { type: "ask" }> =>
-        message.type === "ask" && !this.answered.has(message.id)));
-    this.answered.add(ask.id);
-    this.send({ type: "answer", id: ask.id, allow, remember });
-    return ask;
   }
 
   async op(id: string, kind: string, args: Record<string, unknown>): Promise<unknown> {

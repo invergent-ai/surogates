@@ -16,7 +16,6 @@ import os
 import random
 import re
 import shutil
-import socket
 import subprocess
 import tempfile
 from pathlib import Path
@@ -375,12 +374,12 @@ async def test_the_app_answers_as_the_cloud_does(built_client, laptop_rig, link_
     app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)
     try:
         await app.until(connected)
-        for kind, template in SAME + SAME_FAILURES + SAME_RUN:
+        for kind, template in SAME + SAME_FAILURES:
             args = fill(template, folder)
             got = await on_app(laptop_rig, kind, args)
             want = await perform(cloud, kind, args)
             assert comparable(kind, args, got) == comparable(kind, args, want), (kind, args, got, want)
-        # Nothing appeared or went: no srt placeholders, no temporary files.
+        # Nothing appeared or went: no temporary files.
         assert sorted(os.listdir(folder)) == prepared
     finally:
         await app.close()
@@ -394,7 +393,7 @@ async def test_the_vm_runs_commands_as_the_cloud_does(
     folder = prepare(tmp_path)
     prepared = sorted(os.listdir(folder))
     cloud = LocalWorkspaceIO(str(folder))
-    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder, vm=True)
+    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)
     try:
         await app.until(connected)
         for kind, template in SAME_RUN + SAME_WHICH:
@@ -434,7 +433,7 @@ async def test_the_app_changes_files_as_the_cloud_does(built_client, laptop_rig,
         assert (folder / "big.bin").read_bytes() == big
         assert await on_app(laptop_rig, "delete", {"key": f"{folder}/a.txt"}) == {"ok": None}
         assert not (folder / "a.txt").exists()
-        # srt left nothing in the user's folder.
+        # Nothing was left in the user's folder.
         assert sorted(os.listdir(folder)) == sorted(
             [
                 ".git", "My Files ü.txt", "big.bin", "hard.txt", "huge.bin", "link-in", "link-out", "new", "pages",
@@ -489,9 +488,11 @@ async def test_the_app_pages_text_as_the_cloud_does(built_client, laptop_rig, li
         await app.close()
 
 
-async def test_the_app_runs_background_processes_as_the_cloud_does(
-    built_client, laptop_rig, link_url, tmp_path, journal_dir, monkeypatch,
+@VM
+async def test_the_vm_runs_background_processes_as_the_cloud_does(
+    built_client, built_agent_disk, laptop_rig, link_url, tmp_path, journal_dir, monkeypatch,
 ):
+    """Every background process in the root's runner in the guest, its registry in the agent: the same answers as the cloud's."""
     folder = prepare(tmp_path)
     # The cloud starts a process with $SHELL -lic, HOME at the folder. With bash, and a
     # .hushlogin there, Ubuntu's login files add nothing to its output; no case calls
@@ -511,34 +512,12 @@ async def test_the_app_runs_background_processes_as_the_cloud_does(
 
 
 @VM
-async def test_the_vm_runs_background_processes_as_the_cloud_does(
-    built_client, built_agent_disk, laptop_rig, link_url, tmp_path, journal_dir, monkeypatch,
-):
-    """Every background process in the root's runner in the guest, its registry in the agent: the same answers as the cloud's."""
-    folder = prepare(tmp_path)
-    # As the cross-check without the VM: the cloud's login shell adds nothing to the output.
-    monkeypatch.setenv("SHELL", "/bin/bash")
-    (folder / ".hushlogin").touch()
-    cloud = LocalWorkspaceIO(str(folder))
-    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder, vm=True)
-    try:
-        await app.until(connected)
-        # Task ids of its own: the cloud's registry is the whole test process's, and the srt cross-check's cases may be in it.
-        for steps in json.loads(json.dumps(PROCESS_CASES).replace('"cross-', '"vm-cross-')):
-            got = await play(lambda kind, args: on_app(laptop_rig, kind, args), steps)
-            want = await play(lambda kind, args: perform(cloud, kind, args), steps)
-            assert normalised(got) == normalised(want), (steps, got, want)
-    finally:
-        await app.close()
-
-
-@VM
 async def test_the_vm_runs_a_server_that_the_next_command_reaches(
     built_client, built_agent_disk, laptop_rig, link_url, tmp_path, journal_dir,
 ):
     """A background process and the commands after it share the root's network in the guest, as its own user there."""
     folder = prepare(tmp_path)
-    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder, vm=True)
+    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)
 
     async def start(command: str, pty: bool = False) -> str:
         started = await on_app(laptop_rig, "start", {
@@ -605,8 +584,19 @@ async def test_the_app_is_stricter_where_the_laptop_must_be(built_client, laptop
             "message": "This write named its data in a form this computer does not take, so it was not written",
         }}
         assert not (folder / "x.txt").exists()
+    finally:
+        await app.close()
+
+
+@VM
+async def test_the_vm_is_stricter_where_the_laptop_must_be(built_client, built_agent_disk, laptop_rig, link_url, tmp_path, journal_dir):
+    """What the app's commands do in the guest where the cloud's would not."""
+    folder = prepare(tmp_path)
+    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)
+    try:
+        await app.until(connected)
         home = os.environ["HOME"]
-        # The command's HOME is the app's, not the folder (the toolchains find themselves through it).
+        # The command's HOME is the user's home's path, not the folder.
         assert (await on_app(laptop_rig, "run", {"command": "echo $HOME", "workdir": None, "timeout": 10}))["ok"]["output"] == f"{home}\n"
         # A shell reports a signal as 128 + N.
         assert (await on_app(laptop_rig, "run", {"command": "kill -9 $$", "workdir": None, "timeout": 10}))["ok"]["returncode"] == 137
@@ -614,30 +604,9 @@ async def test_the_app_is_stricter_where_the_laptop_must_be(built_client, laptop
         started = asyncio.get_running_loop().time()
         answer = await on_app(laptop_rig, "run", {"command": "sleep 30 & echo started", "workdir": None, "timeout": 20})
         assert answer["ok"]["output"] == "started\n" and asyncio.get_running_loop().time() - started < 10
-        # A host off the package list is refused by the sandbox's proxy.
+        # A host off the package list is refused by the host proxy: with --folder nobody is asked.
         refused = await on_app(laptop_rig, "run", {"command": "curl -sS -o /dev/null https://example.com 2>&1", "workdir": None, "timeout": 20})
         assert "403" in refused["ok"]["output"]
-        # A later command reaches a server a background process started: they share the runner's sandbox.
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
-        started = await on_app(laptop_rig, "start", {
-            "command": f"python3 -m http.server {port} --bind 127.0.0.1", "workdir": None, "task_id": "strict",
-            "pty": False, "notify_on_complete": False, "watcher_interval": None,
-        })
-        assert started["ok"]["session_id"].startswith("proc_")
-        for _ in range(50):
-            fetched = await on_app(laptop_rig, "run", {"command": f"curl -sS http://127.0.0.1:{port}/a.txt", "workdir": None, "timeout": 10})
-            if fetched["ok"]["output"] == "alpha\nbeta\n":
-                break
-            await asyncio.sleep(0.2)
-        assert fetched["ok"]["output"] == "alpha\nbeta\n"
-        # A real terminal, which the cloud gives only with ptyprocess installed.
-        tty = await on_app(laptop_rig, "start", {
-            "command": "tty", "workdir": None, "task_id": "strict", "pty": True, "notify_on_complete": False, "watcher_interval": None,
-        })
-        waited = await on_app(laptop_rig, "wait", {"session_id": tty["ok"]["session_id"], "timeout": 10})
-        assert waited["ok"]["output"].startswith("/dev/pts/")
     finally:
         await app.close()
 

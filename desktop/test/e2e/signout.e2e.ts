@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
@@ -165,23 +165,24 @@ describe("a log out while a sign-in is finishing", () => {
   });
 });
 
-describe("a quit during a log out the agent cannot hear", () => {
-  it.each([["quits", false], ["is killed", true]])(
-    "%s mid-way: the next launch starts no device, and revokes it once the agent can hear it",
-    async (_name, killed) => {
+// The log out is held in its revoke: the agent stops reading the link, so the revoke waits out its 5 s,
+// and refuses a new link, so the revocation cannot be paid meanwhile.
+describe("a quit during a log out whose revoke the agent never confirms", () => {
+  it.each([
+    ["waits for the log out before it quits, and the next launch pays the revocation owed", false],
+    ["is killed with the revocation already saved as owed, and the next launch pays it", true],
+  ])(
+    "%s",
+    async (_title, killed) => {
       const first = await signedIn();
       await quit(first.shell);
-      // A login shell this slow keeps the device starting, and the log out waiting for it.
-      const slow = join(home, "slow-shell");
-      writeFileSync(slow, "#!/bin/sh\nsleep 4\n", { mode: 0o755 });
-      const shell = await launch(home, { SHELL: slow });
+      const shell = await launch(home);
       app = shell;
       await stubNative(shell);
       const page = await shellPage(shell);
-      await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connecting…");
-      // Gone once the app has launched: Playwright's launch can hang on a window whose agent cannot be reached.
-      const port = Number(new URL(origin).port);
-      await agent.stop();
+      await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+      agent.link.stall();
+      agent.link.refusing = true;
       await logOut(page);
       await expect.poll(() => asked(shell)).toContain(`Log out of ${host}?`);
       app = undefined;
@@ -195,12 +196,14 @@ describe("a quit during a log out the agent cannot hear", () => {
         expect(existsSync(state("devices/d"))).toBe(false);
       }
       expect(credentials()).toEqual([expect.objectContaining({ deviceId: "d", revoking: true })]);
-      await agent.start(port);
+      agent.link.refusing = false;
+      // The stalled link's revoke frame is read once it is dropped.
+      agent.link.drop();
       app = await launch(home);
       const again = await shellPage(app);
       await expect.poll(() => again.getAttribute("#device", "title")).toBe("Sign in to this agent to let it work on folders of this computer");
-      await expect.poll(() => revokes(), { timeout: 15_000 }).toBe(1);
-      await expect.poll(() => credentials()).toEqual([]);
+      await expect.poll(() => credentials(), { timeout: 15_000 }).toEqual([]);
+      expect(revokes()).toBeGreaterThanOrEqual(1);
       expect(existsSync(state("devices/d"))).toBe(false);
     },
   );

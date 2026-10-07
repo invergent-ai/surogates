@@ -1,7 +1,8 @@
 // Runs each operation on its root session's folder: one tool host per root,
 // started on that root's first operation (spec, Section 1). The folder comes from
-// the app's own record of the binding, never from the request. A host's commands
-// reach only the package hosts and what the chat's user allows: the approvals decide.
+// the app's own record of the binding, never from the request. What the root runs in
+// the VM asks the chat's approvals about the hosts its connections reach past the
+// package hosts.
 
 import { fork } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -43,7 +44,7 @@ const unavailable = (why: string): Outcome => ({
   error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${why}` },
 });
 
-// The hook guard around a process operation that runs elsewhere: its refusal before it
+// The hook guard around a process operation that runs in the VM: its refusal before it
 // and its look after it, its refusal alone, or neither.
 export type Guard = "around" | "before" | null;
 
@@ -114,8 +115,6 @@ export function forkHost(options: ForkOptions = {}): HostProcess {
 
 // Who decides what a root's commands may reach past the package hosts: the approvals.
 export interface NetworkApprovals {
-  // The hosts the chat's user allowed for the chat: each new tool host for the root starts with these.
-  granted(root: string): readonly string[];
   // A destination one of the root's commands asked for. Settles once *signal* aborts (its host went).
   askNetwork(root: string, asked: NetworkAsk, signal: AbortSignal): Promise<NetworkAnswer>;
 }
@@ -152,7 +151,7 @@ export class ToolHosts implements Executor {
   }
 
   /**
-   * *inner*, a process operation that runs elsewhere (the VM), while the root's host
+   * *inner*, a process operation that runs in the VM, while the root's host
    * holds the folder: its lock, and the hook guard as *guard* says (Host.guarded).
    */
   guarded(
@@ -166,14 +165,14 @@ export class ToolHosts implements Executor {
   }
 
   /**
-   * A destination one of *root*'s commands elsewhere (the VM) asked for, decided as its
-   * own commands' are: denied when the root has no host, or nothing of it runs.
+   * A destination one of *root*'s commands in the VM asked for: the approvals' to decide
+   * while something of the root runs, and denied when the root has no host, or nothing of it runs.
    */
   ask(root: string, asked: NetworkAsk): Promise<NetworkAnswer> {
     return this.hosts.get(root)?.ask(asked) ?? Promise.resolve("deny");
   }
 
-  /** A root's background processes elsewhere (the VM) changed: its host keeps their handles, and stays while any lives. */
+  /** A root's background processes in the VM changed: its host keeps their handles, and stays while any lives. */
   processes(root: string, change: ProcessesChange): void {
     this.hosts.get(root)?.processes(change);
   }
@@ -224,7 +223,6 @@ export class ToolHosts implements Executor {
       dataDir,
       env,
       appDirs: this.options.appDirs ?? APP_DIRS,
-      domains: [...(network?.granted(root) ?? [])],
       ...(bwrapPath ? { bwrapPath } : {}),
     };
     const ask = (asked: NetworkAsk, signal: AbortSignal): Promise<NetworkAnswer> =>
@@ -257,7 +255,7 @@ class Host {
   // Its open network prompts: dismissed when it goes, or once nothing of its root runs.
   private prompts = new AbortController();
   private letting: Promise<void> | null = null;
-  // The handles of its root's background processes elsewhere (the VM), which every
+  // The handles of its root's background processes in the VM, which every
   // operation there carries: from the folder's record at its start, then as they change.
   private handles: ProcessHandle[] = [];
   // Once its file host said ready: what came of its root's processes before is not its own.
@@ -323,7 +321,7 @@ class Host {
     });
   }
 
-  // Its root's processes elsewhere changed: the host's record keeps their handles, and a
+  // Its root's processes in the VM changed: the host's record keeps their handles, and a
   // host with any alive is never idle. Gone: those still running ended with their sandbox.
   // Until its file host is ready, a change is an earlier host's or an earlier guest's: its
   // operations reach the guest only after, and the record's handles, which ready brings, have all ended.
@@ -353,7 +351,6 @@ class Host {
     clearTimeout(this.idleTimer);
     if (this.running > 0 || this.live > 0 || this.gone) return;
     // No command or process of the root is left, so no connection waits on its prompts.
-    // ponytail: a process the session runner does not count (left behind by a start command) is refused without asking; srt does not say which command asked.
     this.prompts.abort();
     this.prompts = new AbortController();
     this.idleTimer = setTimeout(() => {
@@ -432,14 +429,6 @@ class Host {
       // A host that failed to start is exiting: the next operation starts a new one.
       this.onGone();
       this.settleStart(message.folder ? FOLDER_UNAVAILABLE : unavailable(message.message));
-    } else if (message.type === "processes") {
-      this.live = message.live;
-      this.idle();
-    } else if (message.type === "ask") {
-      const { id } = message;
-      void this.ask({ host: message.host, port: message.port, privateNetwork: message.privateNetwork }).then((choice) => {
-        this.send({ type: "answer", id, allow: choice === "allow" || choice === "allow_session", remember: choice === "allow_session" });
-      });
     } else {
       const answer = this.pending.get(message.id);
       this.pending.delete(message.id);
