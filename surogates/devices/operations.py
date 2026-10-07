@@ -85,7 +85,8 @@ OPEN_REQUESTS_PER_SESSION = 8
 
 # How long a request's rows are kept once the last of them closed.  A request
 # is never replayed: only the same request sent again reads them, a 202's
-# retry, within its prompt's ten minutes.
+# retry, which the web client gives up on after eleven minutes in all
+# (web/src/api/device-requests.ts), so no retry comes after they are gone.
 REQUEST_RETENTION = timedelta(hours=1)
 
 # What a change's ordinal 0 is answered: it is recorded as done at once, never
