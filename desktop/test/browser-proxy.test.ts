@@ -13,6 +13,17 @@ const names: Record<string, string[][]> = {
   "lan.example": [["192.168.1.5"]],
   "half-lan.example": [["93.184.215.14", "10.0.0.7"]],
   "refusing.example": [["192.0.2.1"]],
+  // IPv6 answers that carry an IPv4 address: through the NAT64 prefix (a site's, and a LAN's), its
+  // local-use prefix, 6to4, Teredo, IPv4-mapped and IPv4-compatible.
+  "nat64-site.example": [["64:ff9b::5db8:d70e"]],
+  "nat64-lan.example": [["64:ff9b::c0a8:101"]],
+  "nat64-local-use.example": [["64:ff9b:1::5db8:d70e"]],
+  "six-to-four.example": [["2002:5db8:d70e::1"]],
+  "teredo.example": [["2001:0:4136:e378:8000:63bf:3f57:fefe"]],
+  "mapped-lan.example": [["::ffff:192.168.1.1"]],
+  "compatible-lan.example": [["::c0a8:101"]],
+  // An answer with a zone id, which no URL spells.
+  "nat64-scoped.example": [["64:ff9b::5db8:d70e%eth0"]],
 };
 const resolve = (name: string) => {
   const seen = (lookups[name] = (lookups[name] ?? 0) + 1);
@@ -115,6 +126,30 @@ describe("the browser's proxy", () => {
       expect((await connect(authority)).status, authority).toBe(403);
     }
     expect(dialed).toEqual([]);
+  });
+
+  it("refuses an IPv4 address an IPv6 one carries as it refuses the IPv4 one, and 6to4, Teredo and local-use NAT64 whatever they carry", async () => {
+    for (const authority of [
+      // NAT64 to a LAN, this computer, the metadata address, and this computer's own public range.
+      "[64:ff9b::c0a8:101]:80", "[64:ff9b::7f00:1]:80", "[64:ff9b::a9fe:a9fe]:80", "[64:ff9b::c633:6407]:80", "nat64-lan.example:80",
+      "[64:ff9b:1::c0a8:101]:80", "[64:ff9b:1::5db8:d70e]:80", "nat64-local-use.example:80",
+      "[2002:c0a8:101::1]:443", "[2002:5db8:d70e::1]:443", "six-to-four.example:443",
+      "[2001:0:4136:e378:8000:63bf:3f57:fefe]:443", "teredo.example:443",
+      "[::ffff:192.168.1.1]:80", "mapped-lan.example:80", "[::192.168.1.1]:80", "compatible-lan.example:80",
+      "nat64-scoped.example:443",
+    ]) {
+      expect((await connect(authority)).status, authority).toBe(403);
+    }
+    expect(dialed).toEqual([]);
+  });
+
+  it("tunnels to a site past this computer through the NAT64 prefix, at the address it judged", async () => {
+    for (const authority of ["[64:ff9b::5db8:d70e]:443", "nat64-site.example:443"]) {
+      const { status, socket } = await connect(authority);
+      expect(status, authority).toBe(200);
+      socket.destroy();
+    }
+    expect(dialed).toEqual(["64:ff9b::5db8:d70e:443", "64:ff9b::5db8:d70e:443"]);
   });
 
   it("refuses what is no destination, and a name it cannot look up", async () => {

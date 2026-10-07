@@ -6,7 +6,7 @@
 // release gives the agent's browser no private network at all.
 
 import { createServer, type IncomingMessage, request as httpRequest, type Server, type ServerResponse } from "node:http";
-import type { Socket } from "node:net";
+import { BlockList, isIPv6, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 
 import { type Dial, destination, dialFirst, reach, type ReachOptions } from "../vm/egress.js";
@@ -21,16 +21,46 @@ export interface BrowserProxyOptions extends ReachOptions {
 export const CHECK_DOMAIN = ".proxy-check.invalid";
 const checkOf = (host: string): string | null => (host.endsWith(CHECK_DOMAIN) ? host.slice(0, -CHECK_DOMAIN.length) : null);
 
+const subnets = (ranges: Array<[string, number]>) => {
+  const list = new BlockList();
+  for (const [net, prefix] of ranges) list.addSubnet(net, prefix, "ipv6");
+  return list;
+};
+// NAT64's well-known prefix (RFC 6052): its translator dials the IPv4 address in the last 32 bits.
+const NAT64 = subnets([["64:ff9b::", 96]]);
+// IPv6 that carries an IPv4 address no site's own does: local-use NAT64 (RFC 8215), which maps
+// into a site's own IPv4 networks, 6to4 and Teredo. IPv4-mapped and -compatible are reach's.
+const CARRIERS = subnets([["64:ff9b:1::", 48], ["2002::", 16], ["2001::", 32]]);
+
+// The IPv4 address in an IPv6 address's last 32 bits. URL spells it in hex, "::" for its zeros.
+function lastIPv4(address: string): string {
+  const spelled = new URL(`http://[${address}]/`).hostname.slice(1, -1);
+  const tail = spelled.includes("::") ? spelled.slice(spelled.indexOf("::") + 2) : spelled;
+  const [hi = 0, lo = 0] = [0, 0, ...tail.split(":").filter(Boolean).map((word) => Number.parseInt(word, 16))].slice(-2);
+  return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+}
+
 /**
  * The addresses a request to *host*:*port* may be dialed at: those of one lookup, when every
- * one leads past this computer and its private networks. Null refuses it: no destination, this
- * computer's own, a private network, or a name not looked up in time.
+ * one leads past this computer and its private networks, an IPv4 address NAT64 carries too.
+ * Null refuses it: no destination, this computer's own, a private network, an address that
+ * carries IPv4 otherwise, or a name not looked up in time.
  */
 export async function admitted(host: string, port: number, options: ReachOptions = {}): Promise<string[] | null> {
   const found = destination(host, port);
   if (!found) return null;
-  const where = await reach(found.host, options).catch(() => null);
-  return where?.reach === "public" ? where.addresses : null;
+  try {
+    const where = await reach(found.host, options);
+    if (where?.reach !== "public") return null;
+    for (const address of where.addresses.filter((address) => isIPv6(address))) {
+      if (CARRIERS.check(address, "ipv6")) return null;
+      if (NAT64.check(address, "ipv6") && (await reach(lastIPv4(address), options))?.reach !== "public") return null;
+    }
+    return where.addresses;
+  } catch {
+    // A lookup or an interface read that threw, or an answer that does not parse (a zone id).
+    return null;
+  }
 }
 
 // CONNECT's target, host:port, an IPv6 address in brackets; null for anything else.
