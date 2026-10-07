@@ -135,7 +135,8 @@ export interface ToolHostsOptions {
   // lets it go first; told too when a host went by itself.
   release?(root: string): Promise<void>;
   // Told the folder's protected keys each time its host finds them changed, for a guest
-  // root's read-only binds. With it, each host names them, and guarded's work gets the latest.
+  // root's read-only binds, once no command of the root's that it looks after runs. With it,
+  // each host names them, and guarded's work gets the latest.
   protect?(root: string, keys: ProtectedKey[]): void;
 }
 
@@ -262,6 +263,11 @@ class Host {
   private readied = false;
   // Its folder's protected keys as its file host last named them.
   private keys: ProtectedKey[] = [];
+  // Commands of its root in flight that it looks after, and whether keys named meanwhile wait
+  // for the last of them to answer: bound under a command, git's own work in it would stop
+  // halfway, as srt's runner was not restarted under a run.
+  private commands = 0;
+  private unpushed = false;
 
   constructor(
     private readonly process: HostProcess,
@@ -313,14 +319,24 @@ class Host {
     operation: Operation, signal: AbortSignal, guard: Guard, inner: (signal: AbortSignal, ended: ProcessHandle[], keys: ProtectedKey[]) => Promise<Outcome>,
   ): Promise<Outcome> {
     return this.busy(async () => {
-      const failure = await this.ready(signal);
-      if (failure) return failure;
-      if (guard) {
-        const refused = await this.request({ type: "refusal", id: operation.id }, signal);
-        if (!("ok" in refused)) return refused;
+      if (guard === "around") this.commands += 1;
+      try {
+        const failure = await this.ready(signal);
+        if (failure) return failure;
+        if (guard) {
+          const refused = await this.request({ type: "refusal", id: operation.id }, signal);
+          if (!("ok" in refused)) return refused;
+        }
+        const outcome = await inner(signal, this.handles, this.keys);
+        return guard === "around" ? await this.request({ type: "after", id: operation.id, outcome }) : outcome;
+      } finally {
+        // Its after-look's keys came before its answer.
+        if (guard === "around") this.commands -= 1;
+        if (this.commands === 0 && this.unpushed) {
+          this.unpushed = false;
+          this.protect(this.keys);
+        }
       }
-      const outcome = await inner(signal, this.handles, this.keys);
-      return guard === "around" ? this.request({ type: "after", id: operation.id, outcome }) : outcome;
     });
   }
 
@@ -438,7 +454,8 @@ class Host {
       this.idle();
     } else if (message.type === "protected") {
       this.keys = message.keys;
-      this.protect(message.keys);
+      if (this.commands > 0) this.unpushed = true;
+      else this.protect(message.keys);
     } else if (message.type === "ask") {
       this.asked(message.id, { host: message.host, port: message.port, privateNetwork: message.privateNetwork });
     } else {

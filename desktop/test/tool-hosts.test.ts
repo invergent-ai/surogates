@@ -150,6 +150,18 @@ describe("a folder's protected keys, for a guest's read-only binds", { timeout: 
     ]);
   });
 
+  it("leave git's own working state unbound, a submodule's too, which git makes and removes as it works", () => {
+    const f = "/home/ana/project";
+    const keys = [
+      ".git/config", ".git/rebase-merge/git-rebase-todo", ".git/REBASE-APPLY/patch", ".git/sequencer/todo", ".git/worktrees/wt/commondir",
+      ".git/modules/lib/config", ".git/modules/lib/rebase-merge/done", "sub/.git/sequencer/head",
+    ];
+    expect(guestBinds(f, keys.map((key) => join(f, key)))).toEqual([
+      [`${f}/.git`, "rw"], [`${f}/.git/config`, "ro"],
+      [`${f}/.git/modules`, "rw"], [`${f}/.git/modules/lib`, "rw"], [`${f}/.git/modules/lib/config`, "ro"],
+    ]);
+  });
+
   it("are not named for an executor that binds none", async () => {
     const carried: ProtectedKey[][] = [];
     await command(toolHosts(), carried);

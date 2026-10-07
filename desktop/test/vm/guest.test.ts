@@ -1055,6 +1055,44 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     }
   });
 
+  it("leaves git's own state unbound, so a slow rebase, a cherry-pick sequence and a merge complete, and one stopped for a conflict goes on or is aborted in the next command", { timeout: 120_000 }, async () => {
+    const folder = join(dir, "folder");
+    const long = (line: string) => executor.run(operation("run", { command: line, workdir: null, timeout: 60 }), signal());
+    // A repository as the user has it: a topic of six commits on main, and a branch that changes main's file another way.
+    expect(spawnSync("bash", ["-c", [
+      "git init -q -b main . && git config user.email a@b && git config user.name a",
+      "echo base > base.txt && git add -A && git commit -qm base",
+      "git checkout -qb topic && for i in 1 2 3 4 5 6; do echo $i > t$i.txt && git add -A && git commit -qm t$i; done",
+      "git checkout -qb other main && echo other > base.txt && git commit -qam other",
+      "git checkout -q main && echo main > base.txt && git commit -qam main",
+    ].join(" && ")], { cwd: folder }).status).toBe(0);
+    // Each stops for base.txt's conflict.
+    const stopped = (start: string, state: string) => `${start} >/dev/null 2>&1; test -e .git/${state} && echo stopped`;
+    const resolved = "echo both > base.txt && git add base.txt && GIT_EDITOR=true";
+    try {
+      // The root's first command: from its answer on, the file host looks every 5 s.
+      expect(await command("true")).toMatchObject({ ok: { returncode: 0 } });
+      // Six picks a second apart, so a look comes while it runs, as the review's probe broke at pick 10 of 12.
+      expect(await long("git checkout -q topic && out=$(git rebase -q -x 'sleep 1' main 2>&1) || echo \"$out\"; git log --format=%s main..topic | tr '\\n' ' '")).toMatchObject({
+        ok: { output: "t6 t5 t4 t3 t2 t1 " },
+      });
+      expect(await command(stopped("git checkout -qb c1 other && git rebase main", "rebase-merge"))).toMatchObject({ ok: { output: "stopped\n" } });
+      expect(await command(`${resolved} git rebase --continue >/dev/null 2>&1; git log --format=%s -2 | tr '\\n' ' '`)).toMatchObject({ ok: { output: "other main " } });
+      expect(await command(stopped("git checkout -qb c2 other && git rebase main", "rebase-merge"))).toMatchObject({ ok: { output: "stopped\n" } });
+      expect(await command("git rebase --abort 2>&1; git rev-parse --abbrev-ref HEAD; git status --porcelain")).toMatchObject({ ok: { output: "c2\n" } });
+      expect(await command(stopped("git checkout -qb picks main && git cherry-pick topic~1 other topic", "sequencer"))).toMatchObject({ ok: { output: "stopped\n" } });
+      expect(await command(`${resolved} git cherry-pick --continue >/dev/null 2>&1; git log --format=%s -4 | tr '\\n' ' '`)).toMatchObject({ ok: { output: "t6 other t5 main " } });
+      expect(await command(stopped("git checkout -qb merged main && git merge other", "MERGE_HEAD"))).toMatchObject({ ok: { output: "stopped\n" } });
+      expect(await command(`${resolved} git commit -q --no-edit 2>&1; git log -1 --format=%p | wc -w`)).toMatchObject({ ok: { output: "2\n" } });
+      // Git's own state is gone from the host's repository, and its config is still read-only.
+      expect(["rebase-merge", "sequencer", "MERGE_HEAD"].filter((name) => existsSync(join(folder, ".git", name)))).toEqual([]);
+      expect(await command("(echo '[alias] x = !evil' >> .git/config) 2>&1 | sed 's/.*: //'")).toMatchObject({ ok: { output: "Read-only file system\n" } });
+      expect(readFileSync(join(folder, ".git", "config"), "utf8")).not.toContain("evil");
+    } finally {
+      for (const name of [".git", "base.txt", "t1.txt", "t2.txt", "t3.txt", "t4.txt", "t5.txt", "t6.txt"]) rmSync(join(folder, name), { recursive: true, force: true });
+    }
+  });
+
   it("shows a command what the file tools wrote just before it, each time, with nothing to wait for", async () => {
     const folder = join(dir, "folder");
     const key = join(folder, "lint.py");

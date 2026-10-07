@@ -142,6 +142,24 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
     expect(protectedOf).toEqual([[ROOT, [git, config]]]);
   });
 
+  it("tells the VM nothing a look finds while a command runs until the command answers, so git's work in it is not stopped halfway", async () => {
+    vmExecutor();
+    // The root's first command: from its answer on, the file host looks every 5 s.
+    expect(await run()).toEqual(ran("ran\n"));
+    const mcp = join(folder, ".mcp.json");
+    let during: Array<[string, ProtectedKey[]]> = [];
+    guest = async () => {
+      writeFileSync(mcp, "{}\n");
+      // Past the next look.
+      await new Promise((resolve) => setTimeout(resolve, 6_000));
+      during = [...protectedOf];
+      return ran("ran\n");
+    };
+    expect(await run()).toEqual(ran("ran\n"));
+    expect(during).toEqual([[ROOT, []]]);
+    expect(protectedOf).toEqual([[ROOT, []], [ROOT, [[mcp, statSync(mcp).ino, "ro"]]]]);
+  });
+
   it("answers a bind it cannot confirm, and a root it has no folder for, without the guest", async () => {
     vmExecutor();
     expect(await executor.run(op("bind", { folder, nonce: "n" }), signal())).toEqual(NOT_BOUND);

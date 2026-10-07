@@ -72,8 +72,8 @@ export function protectedInFolder(folder: string, key: string): boolean {
 }
 
 // What lies after a .git component. A paused rebase or cherry-pick keeps a todo
-// whose exec lines git runs on --continue.
-const GIT_STATE = new Set(["worktrees", "rebase-merge", "rebase-apply", "sequencer"]);
+// whose exec lines git runs on --continue. Git makes and removes each as it works.
+export const GIT_STATE: ReadonlySet<string> = new Set(["worktrees", "rebase-merge", "rebase-apply", "sequencer"]);
 
 // In the git folder itself, hooks and configs count only directly under it:
 // elsewhere (refs, logs) the names are a branch's or a tag's. A submodule's git

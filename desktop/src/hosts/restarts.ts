@@ -7,7 +7,7 @@ import { lstatSync } from "node:fs";
 import { join, relative } from "node:path";
 
 import { sandboxError } from "../files/answers.js";
-import { KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
+import { GIT_STATE, KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
 import { type BindMode, MAX_PROTECTED } from "../guest/protocol.js";
 import { SCAN_TIMEOUT_MS, listed, scanHooks } from "./hooks.js";
 import { GLOB } from "./policy.js";
@@ -91,16 +91,22 @@ export function extraDenies(folder: string, keys: Iterable<string>): string[] {
 // path it lies in, read-only; and, read-write, each folder above it that holds protected
 // names (KEY_FOLDERS) or lies in a .git folder. A command can then neither write a key in
 // place nor rename such a folder to make the key again. An ordinary folder above a key is
-// not bound: it stays the agent's to rename. Past MAX_PROTECTED it throws, and commands are
+// not bound: it stays the agent's to rename. Nor is git's own working state (GIT_STATE: a
+// rebase's, a cherry-pick's, a linked worktree's), which git makes, writes and removes as it
+// works, across commands too: bound, a rebase would stop halfway and could neither go on nor
+// be aborted. So what is held in a .git is the .git itself, and in its modules each folder down
+// to a submodule's git folder, all of which git keeps. Past MAX_PROTECTED it throws, and commands are
 // refused, as srt's extra denies were past their own: each is a bind in the root's
 // namespace, and its path goes over the control port.
 export function guestBinds(folder: string, keys: Iterable<string>): Array<[path: string, mode: BindMode]> {
   const binds = new Map<string, BindMode>();
   for (const key of keys) {
     const parts = outermost(folder, key.slice(folder.length + 1).split("/"));
+    const lower = parts.map((part) => part.toLowerCase());
+    if (GIT_STATE.has(lower.at(-1) ?? "") && lower.slice(0, -1).includes(".git")) continue;
     binds.set(join(folder, ...parts), "ro");
     for (let at = 1; at < parts.length; at += 1) {
-      const above = parts.slice(0, at).map((part) => part.toLowerCase());
+      const above = lower.slice(0, at);
       if (KEY_FOLDERS.has(above.at(-1) ?? "") || above.slice(0, -1).includes(".git")) {
         const path = join(folder, ...parts.slice(0, at));
         if (!binds.has(path)) binds.set(path, "rw");
