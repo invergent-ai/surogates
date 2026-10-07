@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -318,34 +320,34 @@ class TestExecuteHttp:
             await sandbox.aclose()
 
 
-_NO_CACHE = ("GEESEFS_STAT_CACHE_TTL", "GEESEFS_TYPE_CACHE_TTL", "GEESEFS_CACHE_DIR")
+_IMAGES = Path(__file__).parent.parent / "images"
+#: Every flag the geesefs the sidecar pins accepts, from its own --help.
+_GEESEFS_FLAGS = Path(__file__).parent / "fixtures" / "geesefs-v0.43.7-flags.txt"
 
 
-@pytest.mark.parametrize(("env", "flags", "absent"), [
-    # A thread's pod: every look at /project asks the bucket, and no disk cache keeps an old version.
-    ({"GEESEFS_STAT_CACHE_TTL": "0s", "GEESEFS_TYPE_CACHE_TTL": "0s", "GEESEFS_CACHE_DIR": ""},
-     ["--stat-cache-ttl 0s", "--type-cache-ttl 0s"], ["--cache"]),
-    # Any other pod: geesefs's own TTLs, and the disk cache.
-    ({"GEESEFS_CACHE_DIR": "{cache}"}, ["--cache {cache}"], ["--stat-cache-ttl", "--type-cache-ttl"]),
-])
-def test_the_sidecar_mounts_with_the_caches_its_pod_asks_for(tmp_path, env, flags, absent):
-    from pathlib import Path
-    import subprocess
-
+def run_sidecar(tmp_path: Path, env: dict[str, str]) -> str:
+    """The sidecar's entrypoint, run with *env* over a geesefs that refuses what the pinned one refuses; its argv."""
+    # The fixture is that version's: a new pin needs a new list.
+    assert "ARG GEESEFS_VERSION=v0.43.7" in (_IMAGES / "s3fs" / "Dockerfile").read_text()
     bin_dir, args = tmp_path / "bin", tmp_path / "geesefs-args"
     bin_dir.mkdir()
-    (bin_dir / "geesefs").write_text(f'#!/bin/sh\necho "$@" > {args}\n')
-    (bin_dir / "geesefs").chmod(0o755)
-    entrypoint = Path(__file__).parent.parent / "images" / "s3fs" / "entrypoint.sh"
-    env = {k: v.format(cache=tmp_path / "cache") for k, v in env.items()}
-    subprocess.run(
-        ["bash", str(entrypoint)], check=True, capture_output=True, timeout=30,
-        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "S3_BUCKET_PATH": "bucket:/w", "S3_ENDPOINT": "http://s3",
-             "S3_REGION": "eu-central-1", "S3_MOUNT_POINT": "/project", **env},
+    (bin_dir / "geesefs").write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do case "$a" in -*) '
+        f'grep -qxF -- "$a" {_GEESEFS_FLAGS} || {{ echo "flag provided but not defined: $a" >&2; exit 1; }} ;; '
+        "esac; done\n"
+        f'echo "$@" > {args}\n'
     )
-    called = args.read_text()
-    assert all(f.format(cache=tmp_path / "cache") in called for f in flags), called
-    assert not any(a in called for a in absent), called
+    (bin_dir / "geesefs").chmod(0o755)
+    ran = subprocess.run(
+        ["bash", str(_IMAGES / "s3fs" / "entrypoint.sh")], capture_output=True, text=True, timeout=30,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "S3_BUCKET_PATH": "bucket:/w", "S3_ENDPOINT": "http://s3",
+             "S3_REGION": "eu-central-1", "S3_MOUNT_POINT": "/project",
+             # The default disk cache folder is the image's, which this machine lacks.
+             "GEESEFS_CACHE_DIR": str(tmp_path / "cache"), **env},
+    )
+    assert ran.returncode == 0, ran.stderr
+    return args.read_text()
 
 
 class TestThreadPodLayout:
@@ -376,14 +378,19 @@ class TestThreadPodLayout:
         assert env["S3_MOUNT_POINT"] == "/project"
         assert volumes["copy"].empty_dir is not None
 
-    async def test_a_thread_pod_reads_its_real_files_from_the_bucket_never_from_a_cache(self, sandbox):
-        _, _, env, _ = await self.manifest(sandbox, "/project")
-        assert {k: env.get(k) for k in _NO_CACHE} == {
-            "GEESEFS_STAT_CACHE_TTL": "0s", "GEESEFS_TYPE_CACHE_TTL": "0s", "GEESEFS_CACHE_DIR": "",
-        }
-        # Other pods keep today's caches.
-        _, _, env, _ = await self.manifest(sandbox, "/workspace")
-        assert not set(_NO_CACHE) & set(env)
+    @pytest.mark.parametrize(("mount_path", "geesefs", "flags", "absent"), [
+        # A thread's pod: every look at /project asks the bucket, and no disk cache keeps an old version.
+        ("/project", {"GEESEFS_STAT_CACHE_TTL": "0s", "GEESEFS_CACHE_DIR": ""}, ["--stat-cache-ttl 0s"], ["--cache"]),
+        # Any other pod: geesefs's own TTL, and the disk cache.
+        ("/workspace", {}, ["--cache "], ["--stat-cache-ttl"]),
+    ])
+    async def test_a_pods_sidecar_mounts_with_flags_the_pinned_geesefs_takes(
+        self, sandbox, tmp_path, mount_path, geesefs, flags, absent,
+    ):
+        _, _, env, _ = await self.manifest(sandbox, mount_path)
+        assert {k: v for k, v in env.items() if k.startswith("GEESEFS_")} == geesefs
+        called = run_sidecar(tmp_path, geesefs)
+        assert all(f in called for f in flags) and not any(a in called for a in absent), called
 
     @pytest.mark.parametrize(("mount_path", "grace"), [("/project", 30), ("/workspace", 0)])
     async def test_a_thread_pod_goes_with_time_for_its_sidecar_to_finish(self, sandbox, mount_path, grace):

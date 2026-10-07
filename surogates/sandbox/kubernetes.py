@@ -506,7 +506,6 @@ class K8sSandbox:
             # old version.  A landing's check must see a save made since.
             s3fs_env += [
                 client.V1EnvVar(name="GEESEFS_STAT_CACHE_TTL", value="0s"),
-                client.V1EnvVar(name="GEESEFS_TYPE_CACHE_TTL", value="0s"),
                 client.V1EnvVar(name="GEESEFS_CACHE_DIR", value=""),
             ]
 

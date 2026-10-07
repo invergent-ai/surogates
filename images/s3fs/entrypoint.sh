@@ -121,14 +121,11 @@ if [ -n "${GEESEFS_CACHE_DIR}" ]; then
 fi
 
 # How long geesefs trusts what it last saw of a file or a folder (a minute
-# by default). A thread's pod mounts the project's real files, which other
-# pods and the Library change, and asks for 0s: each look asks the bucket.
+# by default; it covers both). A thread's pod mounts the project's real
+# files, which other pods and the Library change, and asks for a second.
 GEESEFS_TTL_ARGS=()
 if [ -n "${GEESEFS_STAT_CACHE_TTL:-}" ]; then
     GEESEFS_TTL_ARGS+=(--stat-cache-ttl "${GEESEFS_STAT_CACHE_TTL}")
-fi
-if [ -n "${GEESEFS_TYPE_CACHE_TTL:-}" ]; then
-    GEESEFS_TTL_ARGS+=(--type-cache-ttl "${GEESEFS_TYPE_CACHE_TTL}")
 fi
 
 echo "Mounting s3://${S3_BUCKET_PATH} at ${MOUNT_POINT} (endpoint: ${S3_ENDPOINT}, region: ${S3_REGION}, cache: ${GEESEFS_CACHE_DIR:-off})"
