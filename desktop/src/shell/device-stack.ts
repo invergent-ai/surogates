@@ -14,7 +14,7 @@ import type { NetworkApprovals } from "../hosts/tool-hosts.js";
 import type { Bindings } from "../journal/bindings.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
-import type { Welcome } from "../link/protocol.js";
+import type { Operation, Outcome, Welcome } from "../link/protocol.js";
 import { APP_CLOSED, type Executor } from "../operations/runner.js";
 
 // How long a quit waits for what runs to be recorded "closed by the app". An operation
@@ -30,6 +30,10 @@ export type Identity = Pick<Welcome, "deviceId" | "orgId" | "agentId" | "userId"
 export interface ToolLayer extends Executor {
   guards(): FolderGuards;
   stop(): Promise<void>;
+  // What the tools refuse anyway, before the chat's user is asked about it: null to ask as usual.
+  refusal?(operation: Operation): Outcome | null;
+  // A deleted chat's root: what the tools keep for it goes, such as its browser tabs.
+  retired?(root: string): void;
 }
 
 export interface DeviceStackOptions {
@@ -122,6 +126,8 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     guards: tools.guards(),
     agent: options.agent,
     hosts: counted,
+    refusal: (operation) => tools.refusal?.(operation) ?? null,
+    retired: (root) => tools.retired?.(root),
     approvalPrompts: options.approvalPrompts,
     onError: options.onError,
   });

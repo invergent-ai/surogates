@@ -16,7 +16,8 @@ import {
 import type { DesktopAccount } from "../../../web/src/lib/desktop-bridge-contract.js";
 import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow, Tier } from "../../../web/src/lib/projects-contract.js";
 import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
-import { type BrowserChoice, BrowserSetting, browserVersion, choiceRows, chosenBrowser, findBrowsers, KNOWN, unsupportedAt } from "../browser/choose.js";
+import { type BrowserChoice, BrowserSetting, browserVersion, choiceRows, chosenBrowser, findBrowsers, KNOWN, profileOf, profilesOf, unsupportedAt } from "../browser/choose.js";
+import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
@@ -483,8 +484,17 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     token: credential.token,
     agent: agent.name,
     identity: { deviceId: credential.deviceId, orgId: credential.orgId, agentId: credential.agentId, userId: credential.userId },
-    // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the VM.
-    tools: (bindings, network) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor() }),
+    // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the
+    // VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
+    tools: (bindings, network) => new Browsing({
+      tools: new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor() }),
+      browser: new BrowserClient(utilityBrowser),
+      bindingOf: (bound) => bindings.get(bound),
+      launch: () => {
+        const browser = chosenBrowser(browserSetting.get(), findBrowsers());
+        return browser && { executable: browser.executable, profile: profileOf(root, credential, browser) };
+      },
+    }),
     prompts,
     approvalPrompts: prompts,
     onStatus: (status) => {
@@ -694,10 +704,14 @@ let linkWaiting: OpenLink | null = null;
 
 /** A native message box, over *parent* when there is one: the button pressed. */
 async function messageBox(options: Electron.MessageBoxOptions, parent: BrowserWindow | undefined = main?.window): Promise<number> {
+  return (await messageBoxResult(options, parent)).response;
+}
+
+/** A native message box, over *parent* when there is one: the button pressed, and whether its checkbox was ticked. */
+async function messageBoxResult(options: Electron.MessageBoxOptions, parent: BrowserWindow | undefined = main?.window): Promise<Electron.MessageBoxReturnValue> {
   boxes += 1;
   try {
-    const { response } = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
-    return response;
+    return parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
   } finally {
     boxes -= 1;
     const link = boxes === 0 ? linkWaiting : null;
@@ -726,7 +740,7 @@ function cutOff(): string {
  */
 async function signOut(agent: Agent, removing: boolean): Promise<void> {
   if (signingOut) return;
-  const confirmed = await ask(removing
+  const options: Electron.MessageBoxOptions = removing
     ? {
       type: "warning", message: `Remove ${agent.name} from Surogate?`,
       detail: `You are logged out, this computer's access to ${agent.name} ends, and the folders it was given here are forgotten. Surogate then asks for an agent again.${cutOff()}`,
@@ -736,7 +750,13 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
       type: "warning", message: `Log out of ${agent.name}?`,
       detail: `This computer's access to ${agent.name} ends, and the folders it was given here are forgotten.${cutOff()}`,
       buttons: ["Log out", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
-    });
+    };
+  // What the agent's browser here is signed in to is the user's to keep or not (spec, Section 7), with a window or without.
+  const asked = { ...options, checkboxLabel: `Also forget the sites ${agent.name}'s browser on this computer is signed in to`, checkboxChecked: removing };
+  const { response, checkboxChecked: forgetBrowser } = await messageBoxResult(asked);
+  const confirmed = response === 0;
+  // Whose browser profiles they are, before the log out forgets the computer's credential.
+  const profiles = kept ? profilesOf(root, kept) : null;
   if (!confirmed || signingOut) return;
   const { promise, resolve: done } = Promise.withResolvers<void>();
   signingOut = promise;
@@ -751,6 +771,8 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
     signInAgain = false;
     sessionStore.clear();
     if (kept) await endDevice(kept);
+    // The browser closed with the device: its profiles can go now.
+    if (forgetBrowser && profiles) trying(() => rmSync(profiles, { recursive: true, force: true }));
     // Ended at the agent too, best effort: offline, the refresh token stays valid there until it expires.
     void ending?.end().catch(report);
     account = null;
