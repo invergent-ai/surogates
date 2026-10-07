@@ -376,7 +376,8 @@ describe("a root torn down", () => {
     expect(await which(manager)).toEqual({ ok: true });
     await manager.teardown("root-1");
     expect(await which(manager)).toEqual({ ok: true });
-    expect(asked).toEqual([["boot"], ["share"], ["setup", "root-1"], ["teardown", "root-1", R1], ["unshare", R1], ["share"], ["setup", "root-1"]]);
+    // Its last root gone, the guest stopped: the next operation boots another.
+    expect(asked).toEqual([["boot"], ["share"], ["setup", "root-1"], ["teardown", "root-1", R1], ["unshare", R1], ["boot"], ["share"], ["setup", "root-1"]]);
     await manager.stop();
   });
 
@@ -446,6 +447,8 @@ describe("a root's network, through the guest's net port", () => {
   it("starts a root set up again with nothing met, even by a connection that landed once it was torn down", async () => {
     const manager = new VmManager(options(), fakeVm(roots));
     await run(manager);
+    // Another root keeps the guest running past this one's teardown.
+    await run(manager, "root-2");
     const session = connectH2("http://guest", { createConnection: () => agentNet as Duplex });
     await manager.teardown("root-1");
     // As a connection still in flight at the teardown lands.
@@ -674,6 +677,74 @@ describe("a guest's lifecycle", () => {
     void vm.exited.then(() => events.push("gone"));
     return vm;
   };
+  // One whose agent cannot power off: its stop takes the power-off's bound, 300 ms.
+  const slowToStop = (events: string[]): BootVm => async (...args) => {
+    events.push("boot");
+    const vm = await fakeVm(roots, false)(...args);
+    void vm.exited.then(() => events.push("gone"));
+    return vm;
+  };
+
+  it("stops a guest once its last root's folder is let go, and boots another at once for the next operation", async () => {
+    const events: string[] = [];
+    const manager = new VmManager(options(), counted(events));
+    expect(await which(manager, "root-1")).toEqual({ ok: true });
+    expect(await which(manager, "root-2")).toEqual({ ok: true });
+    await manager.teardown("root-1");
+    // Another root is still set up in it.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(events).toEqual(["boot"]);
+    await manager.teardown("root-2");
+    await until(() => events.includes("gone"));
+    // A guest that stopped is no failure to back off from.
+    const begun = performance.now();
+    expect(await which(manager)).toEqual({ ok: true });
+    expect(performance.now() - begun).toBeLessThan(500);
+    expect(events).toEqual(["boot", "gone", "boot"]);
+    await manager.stop();
+  });
+
+  it("stops a guest booted for an operation cancelled while it booted", async () => {
+    const events: string[] = [];
+    let booted: (() => void) | null = null;
+    const slow: BootVm = async (...args) => {
+      await new Promise<void>((resolve) => {
+        booted = resolve;
+      });
+      return counted(events)(...args);
+    };
+    const manager = new VmManager(options(), slow);
+    const cancel = new AbortController();
+    const answer = which(manager, "root-1", cancel.signal);
+    cancel.abort();
+    expect(await answer).toEqual(CANCELLED);
+    await until(() => booted !== null);
+    booted!();
+    await until(() => events.includes("gone"));
+    expect(events).toEqual(["boot", "gone"]);
+    await manager.stop();
+  });
+
+  it("boots another for an operation that comes while its idle guest powers off, once that one has gone", async () => {
+    const events: string[] = [];
+    const manager = new VmManager({ ...options(), powerOffMs: 300 }, slowToStop(events));
+    expect(await which(manager)).toEqual({ ok: true });
+    await manager.teardown("root-1");
+    expect(await which(manager)).toEqual({ ok: true });
+    expect(events).toEqual(["boot", "gone", "boot"]);
+    await manager.stop();
+  });
+
+  it("stops once, when it is stopped while its idle guest powers off", async () => {
+    const events: string[] = [];
+    const manager = new VmManager({ ...options(), powerOffMs: 300 }, slowToStop(events));
+    expect(await which(manager)).toEqual({ ok: true });
+    await manager.teardown("root-1");
+    const begun = performance.now();
+    await manager.stop();
+    expect(performance.now() - begun).toBeLessThan(1_000);
+    expect(events).toEqual(["boot", "gone"]);
+  });
 
   it("answers what comes while a boot that failed backs off with that failure, and boots again once it has passed", async () => {
     let boots = 0;

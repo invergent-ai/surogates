@@ -358,6 +358,11 @@ export class Guest {
     return this.left && this.stopping === null;
   }
 
+  // Whether it holds no root, and runs on: nothing of any chat is in it.
+  get idle(): boolean {
+    return this.roots.size === 0 && !this.ended;
+  }
+
   private lose(): void {
     if (this.left) return;
     this.left = true;
@@ -381,6 +386,8 @@ export class VmManager {
   // Each boot waits out the last failure's backoff; what a boot that failed said, while it lasts.
   private readonly backoff = new Backoff();
   private failed: string | null = null;
+  // Operations and teardowns under way: a guest with none, and no root, stops.
+  private working = 0;
 
   // *told*: each change of a root's processes in its guests. *egress*: who lets a root's commands reach past the package hosts.
   constructor(
@@ -401,23 +408,33 @@ export class VmManager {
     // No backend for this OS yet: answered as a VM that cannot start is.
     if (!this.boot) return unavailable("is not available on this platform yet");
     if (this.failed && this.backoff.wait > 0 && !this.guest) return unavailable(`did not start: ${this.failed}`);
-    let guest: Guest | "aborted";
+    this.working += 1;
     try {
-      guest = await Promise.race([this.booted(this.boot), aborted(signal)]);
-    } catch (error) {
-      return unavailable(this.stopping ? "is stopping" : `did not start: ${describe(error)}`);
+      let guest: Guest | "aborted";
+      try {
+        guest = await Promise.race([this.booted(this.boot), aborted(signal)]);
+      } catch (error) {
+        return unavailable(this.stopping ? "is stopping" : `did not start: ${describe(error)}`);
+      }
+      if (guest === "aborted") return CANCELLED;
+      const failure = await Promise.race([guest.ready(operation.root, operation.folder, operation.ended), aborted(signal)]);
+      if (failure === "aborted") return CANCELLED;
+      if (failure) return this.stopping ? unavailable("is stopping") : failure;
+      return await guest.op(operation.root, operation.kind, operation.args, signal);
+    } finally {
+      this.done();
     }
-    if (guest === "aborted") return CANCELLED;
-    const failure = await Promise.race([guest.ready(operation.root, operation.folder, operation.ended), aborted(signal)]);
-    if (failure === "aborted") return CANCELLED;
-    if (failure) return this.stopping ? unavailable("is stopping") : failure;
-    return guest.op(operation.root, operation.kind, operation.args, signal);
   }
 
   /** Everything of *root* ends in the guest, if one runs: its folder is being let go. Never rejects. */
   async teardown(root: string): Promise<void> {
-    const guest = await this.guest?.catch(() => null);
-    await guest?.teardown(root);
+    this.working += 1;
+    try {
+      const guest = await this.guest?.catch(() => null);
+      await guest?.teardown(root);
+    } finally {
+      this.done();
+    }
   }
 
   // Its guest's runtime folder goes with it.
@@ -427,6 +444,16 @@ export class VmManager {
     const guest = await this.guest?.catch(() => null);
     await guest?.stop();
     rmSync(this.options.run, { recursive: true, force: true });
+  }
+
+  // Once nothing is under way: a guest that holds no root, its last one's folder let go or
+  // none ever added, stops (Section 11, Lifecycle). The next operation boots another.
+  private done(): void {
+    this.working -= 1;
+    if (this.working > 0 || this.stopping) return;
+    void this.guest?.then((guest) => {
+      if (this.working === 0 && guest.idle) void guest.stop();
+    }, () => {});
   }
 
   // The guest that runs, or a new one: a guest that went, or did not start, is booted

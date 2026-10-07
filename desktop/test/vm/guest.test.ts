@@ -98,6 +98,14 @@ const descriptors = (run: string) => {
   const children = spawnSync("pgrep", ["-P", String(daemon)], { encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean).map(Number);
   return [daemon, ...children].reduce((sum, pid) => sum + readdirSync(`/proc/${pid}/fd`).length, 0);
 };
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
 
 // The agent disk from the built agent, into *dir*.
@@ -1071,6 +1079,42 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
   });
 });
 
+describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest's memory", { timeout: 60_000 }, () => {
+  let dir: string;
+  let options: VmOptions;
+  let guest: Guest;
+  const pss = (pid: number) => Number(/^Pss:\s+(\d+)/m.exec(readFileSync(`/proc/${pid}/smaps_rollup`, "utf8"))?.[1] ?? 0) / 1024;
+
+  beforeAll(async () => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-memory-")));
+    mkdirSync(join(dir, "folder"));
+    options = {
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+      run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER,
+    };
+    guest = await Guest.boot(bootLinux, options);
+    expect(await guest.ready(ROOT, folderOf(join(dir, "folder")))).toBeNull();
+  });
+
+  afterAll(async () => {
+    await guest?.stop();
+    rmSync(options.run, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("gives this computer back the memory a command freed within 15 s, and logs what the guest costs it (M5)", async () => {
+    const qemu = Number(readFileSync(join(options.run, "qemu.pid"), "utf8"));
+    const before = pss(qemu);
+    // 1.2 GiB touched, then freed as the process exits.
+    const touched = "python3 -c 'b = bytearray(1200 * 2 ** 20); b[::4096] = b\"x\" * len(b[::4096])'";
+    expect(await guest.op(ROOT, "run", { command: touched, workdir: null, timeout: 60 }, signal())).toMatchObject({ ok: { returncode: 0 } });
+    const used = pss(qemu);
+    await until(() => pss(qemu) < before + 300, 15_000);
+    console.log(`M5: QEMU Pss ${before.toFixed(0)} MiB before, ${used.toFixed(0)} MiB after a 1.2 GiB command, ${pss(qemu).toFixed(0)} MiB once its pages were reported`);
+    expect(used).toBeGreaterThan(before + 900);
+  });
+});
+
 describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeout: 60_000 }, () => {
   let dir: string;
   let options: VmOptions;
@@ -1095,7 +1139,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("answers a cancel while the guest boots at once, and adds no folder for it", async () => {
+  it("answers a cancel while the guest boots at once, adds no folder for it, and powers off the guest it booted for nothing", async () => {
     managers.push(new VmManager(options));
     const cancel = new AbortController();
     const begun = performance.now();
@@ -1103,10 +1147,12 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     setTimeout(() => cancel.abort(), 100);
     expect(await answer).toEqual(CANCELLED);
     expect(performance.now() - begun).toBeLessThan(1_000);
-    // The boot goes on, for the next operation; the cancelled one's folder was never added.
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
-    expect(existsSync(join(options.run, "control.sock"))).toBe(true);
-    expect(existsSync(join(options.run, "vfs-1.sock"))).toBe(false);
+    // The boot goes on; the guest it brings holds no root, so it stops, and the cancelled operation's folder was never added.
+    await until(() => existsSync(join(options.run, "qemu.pid")));
+    const qemu = qemuPid();
+    await until(() => !alive(qemu));
+    expect(readFileSync(options.console, "utf8")).toContain("sysrq: Power Off");
+    expect(existsSync(join(options.run, "vfs-1.pid"))).toBe(false);
   });
 
   it("boots at a root's first operation, adds each root's folder, and answers there", async () => {
@@ -1248,6 +1294,21 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     await managers.at(-1)!.stop();
     managers.push(new VmManager(options));
     expect(await op(ROOT, a, "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+  });
+
+  it("powers its guest off once its last root has let its folder go, and boots another for the next operation", async () => {
+    const a = join(dir, "a");
+    await managers.at(-1)?.stop();
+    managers.push(new VmManager(options));
+    expect(await op(ROOT, a, "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+    const qemu = qemuPid();
+    const begun = performance.now();
+    await managers.at(-1)!.teardown(ROOT);
+    await until(() => !alive(qemu));
+    console.log(`idle stop: the guest powered off ${(performance.now() - begun).toFixed(0)} ms after its last root's teardown began`);
+    expect(readFileSync(options.console, "utf8")).toContain("sysrq: Power Off");
+    expect(await op(ROOT, a, "run", { command: "echo again", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "again\n" } });
+    expect(qemuPid()).not.toBe(qemu);
   });
 
   it("keeps a sessions disk its guest could not check aside, and boots on a new one", async () => {

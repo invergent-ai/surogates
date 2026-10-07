@@ -53,6 +53,9 @@ export function qemuArgs(disks: Disks, run: string, console: string, cpus = gues
     "-chardev", `file,id=console,path=${option(console)}`, "-device", "virtconsole,chardev=console",
     ...ports,
     "-device", "virtio-rng-pci", "-nic", "none",
+    // The guest gives back the memory it frees, within seconds: its free pages are
+    // reported, and QEMU drops them from the memfd. No balloon is ever inflated.
+    "-device", "virtio-balloon-pci,free-page-reporting=on",
     "-qmp", `unix:${option(join(run, "qmp.sock"))},server=on,wait=off`,
     "-pidfile", join(run, "qemu.pid"),
     "-sandbox", "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny",
