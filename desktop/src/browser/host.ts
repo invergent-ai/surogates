@@ -48,6 +48,9 @@ const BOUNDED: ReadonlySet<string> = new Set(["browser.navigate", "browser.evalu
 const LATE = Symbol("late");
 // How long a launch's proof that the proxy carries the browser's requests may take.
 const CHECK_MS = 15_000;
+// How long a new tab may take; and how long a browser that refused one may take to quit, as it does after its last tab.
+const TAB_MS = 10_000;
+const QUIT_MS = 2_000;
 export const PROXY_BYPASSED =
   "The agent's browser would not go through Surogate's proxy: its proxy settings are managed elsewhere on this computer, for example by a policy. So it is not used.";
 
@@ -65,6 +68,26 @@ export const said = (error: unknown): string => (error instanceof Error ? error.
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+// A new tab of *context*'s, or why not: a browser that is closing may never answer for one.
+function opened(context: BrowserContext): Promise<Page> {
+  let settle = (): void => {};
+  const refused = new Promise<never>((_, reject) => {
+    const timer = setTimeout(() => reject(new Error(`The computer's browser did not open a tab within ${TAB_MS / 1_000} s`)), TAB_MS);
+    const closed = () => reject(new Error("The computer's browser closed"));
+    context.once("close", closed);
+    settle = () => {
+      clearTimeout(timer);
+      context.off("close", closed);
+    };
+  });
+  const page = context.newPage();
+  return Promise.race([page, refused]).catch((error: unknown) => {
+    // One that comes after all is no session's.
+    void page.then((late) => late.close(), () => {}).catch(() => {});
+    throw error;
+  }).finally(settle);
+}
 
 /** How the browser is launched: headed, its sandbox on, over the pipe, and every request through the proxy on *port*. */
 export function launchOptions(executable: string, port: number, extra: readonly string[] = []) {
@@ -114,6 +137,10 @@ export interface BrowserHostOptions {
 export class BrowserHost {
   private proxy: { server: BrowserProxy; port: number } | null = null;
   private running: Promise<BrowserContext> | null = null;
+  // The browser in service: the one running's, once launched, until it closes or is being closed.
+  private live: BrowserContext | null = null;
+  // A browser being closed whole: the next launch waits for it, as the profile is still its.
+  private ending: Promise<void> | null = null;
   // Each calling session's pages: its tab first, then the popups it opened, in order.
   private readonly tabs = new Map<string, Page[]>();
   // The chat each calling session is of: its root's.
@@ -156,7 +183,8 @@ export class BrowserHost {
   /** A deleted chat: every tab of its sessions closes, with the popups they opened. */
   async forget(root: string): Promise<void> {
     const sessions = [...this.roots].filter(([, of]) => of === root).map(([session]) => session);
-    await Promise.all(sessions.map((session) => this.closeTab(session)));
+    // Together, so that closing the browser's last tabs closes it whole.
+    await this.closePages(sessions.flatMap((session) => this.untab(session)));
   }
 
   /** The browser closes, and with it every session's tab. */
@@ -164,7 +192,9 @@ export class BrowserHost {
     this.closing = true;
     const running = await this.running?.catch(() => null);
     this.running = null;
+    this.live = null;
     await running?.close().catch(() => {});
+    await this.ending;
     await this.proxy?.server.close();
     this.proxy = null;
   }
@@ -208,13 +238,39 @@ export class BrowserHost {
     const open = (this.tabs.get(session) ?? []).filter((page) => !page.isClosed());
     const newest = open.at(-1);
     if (newest) return { page: newest, opened: false };
-    const context = await this.browser(launch);
-    const spare = this.spare !== null && !this.spare.isClosed() ? this.spare : null;
-    this.spare = null;
-    const page = spare ?? (await context.newPage());
+    const page = await this.tab(launch);
     this.tabs.set(session, []);
     this.adopt(session, page);
     return { page, opened: true };
+  }
+
+  // A new tab: the new browser's first page, or one opened now. A browser that was closing
+  // refuses one or never answers: then the tab is opened in the next browser, once.
+  private async tab(launch: Launch, again = true): Promise<Page> {
+    const context = await this.browser(launch);
+    const spare = this.spare !== null && !this.spare.isClosed() ? this.spare : null;
+    this.spare = null;
+    if (spare) return spare;
+    try {
+      return await opened(context);
+    } catch (error) {
+      if (again && (await this.gone(context))) return this.tab(launch, false);
+      throw error;
+    }
+  }
+
+  // Whether *context* is out of service, or goes within QUIT_MS.
+  private async gone(context: BrowserContext): Promise<boolean> {
+    if (this.live === context) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, QUIT_MS);
+        context.once("close", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+    return this.live !== context;
   }
 
   // *page* is *session*'s, and so is every popup it opens. A file it asks for opens no dialog,
@@ -250,49 +306,76 @@ export class BrowserHost {
   }
 
   private async closeTab(session: string): Promise<boolean> {
-    const pages = this.tabs.get(session) ?? [];
-    this.tabs.delete(session);
-    this.unseen.delete(session);
-    this.roots.delete(session);
-    const open = pages.filter((page) => !page.isClosed());
+    const open = this.untab(session);
     await this.closePages(open);
     return open.length > 0;
   }
 
+  // *session* has no tab now: its open pages, to close.
+  private untab(session: string): Page[] {
+    const pages = this.tabs.get(session) ?? [];
+    this.tabs.delete(session);
+    this.unseen.delete(session);
+    this.roots.delete(session);
+    return pages.filter((page) => !page.isClosed());
+  }
+
   // Closed at once, a page stuck in a script too (about 500 ms). The browser quits with its last
-  // tab, and would refuse a new one meanwhile: then it is closed whole, and the next operation launches it.
+  // tab, and would refuse a new one meanwhile: then it is closed whole, taken out of service
+  // first, and the next operation launches another once it has gone.
   private async closePages(pages: Page[]): Promise<void> {
     const open = pages.filter((page) => !page.isClosed());
     const context = open[0]?.context();
     if (!context) return;
-    if (context.pages().every((page) => open.includes(page))) await context.close().catch(() => {});
-    else await Promise.all(open.map((page) => page.close().catch(() => {})));
+    if (!context.pages().every((page) => open.includes(page))) {
+      await Promise.all(open.map((page) => page.close().catch(() => {})));
+      return;
+    }
+    if (this.live === context) {
+      this.live = null;
+      this.running = null;
+      this.spare = null;
+    }
+    const ending = context.close().catch(() => {});
+    this.ending = ending;
+    await ending;
+    if (this.ending === ending) this.ending = null;
   }
 
-  // The browser that runs, or one launched now: a browser the user closed is launched again.
+  // The browser in service, or one launched now: a browser the user closed is launched again.
   private browser(launch: Launch): Promise<BrowserContext> {
     if (this.closing) return Promise.reject(new Error("The computer's browser is closing"));
-    this.running ??= this.launch(launch).catch((error: unknown) => {
-      this.running = null;
-      throw error;
-    });
+    if (this.running === null) {
+      const mine: Promise<BrowserContext> = this.launch(launch).catch((error: unknown) => {
+        if (this.running === mine) this.running = null;
+        throw error;
+      });
+      this.running = mine;
+    }
     return this.running;
   }
 
+  // A browser closed by its user, or gone: the next operation launches another, in new tabs. A
+  // browser already out of service changes nothing, whatever runs after it.
+  private retire(context: BrowserContext): void {
+    if (this.live !== context) return;
+    this.live = null;
+    this.running = null;
+    this.spare = null;
+    this.tabs.clear();
+    this.roots.clear();
+  }
+
   private async launch(launch: Launch): Promise<BrowserContext> {
+    // The browser before it has gone: a new one on its profile would hand itself to it.
+    await this.ending;
     this.proxy ??= await (async () => {
       const server = new BrowserProxy(this.options.proxy);
       return { server, port: await server.listen() };
     })();
     keepWebRtcProxied(launch.profile);
     const context = await chromium.launchPersistentContext(launch.profile, launchOptions(launch.executable, this.proxy.port, this.options.args));
-    context.on("close", () => {
-      // Closed by its user, or gone: the next operation launches it again, in new tabs.
-      this.running = null;
-      this.spare = null;
-      this.tabs.clear();
-      this.roots.clear();
-    });
+    context.on("close", () => this.retire(context));
     try {
       await this.bypassWorkers(context);
       this.spare = await this.proxied(context, this.proxy.server);
@@ -300,6 +383,7 @@ export class BrowserHost {
       await context.close().catch(() => {});
       throw error;
     }
+    this.live = context;
     return context;
   }
 

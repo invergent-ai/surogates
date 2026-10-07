@@ -107,6 +107,8 @@ const op = (session: string, kind: string, args: Record<string, unknown> = {}, r
   host.perform(launch, root, session, kind, args, new AbortController().signal) as Promise<{ ok?: any; error?: { type: string; message: string } }>;
 const script = async (session: string, code: string) => (await op(session, "browser.evaluate", { code })).ok?.value;
 const session = () => `session-${(next += 1)}`;
+// What *work* answers within *ms*, or "late".
+const within = <T>(ms: number, work: Promise<T>) => Promise.race([work, new Promise<"late">((done) => setTimeout(() => done("late"), ms))]);
 
 // How many pages the running browser has.
 const pages = async () => (await (host as unknown as { running: Promise<BrowserContext> }).running).pages().length;
@@ -310,6 +312,22 @@ describe.skipIf(!run)("the browser host", () => {
     expect(await op(b, "browser.close")).toEqual({ ok: { closed: true } });
     expect((await op(a, "browser.navigate", { url: "http://fixture.test/" })).ok?.opened).toBe(true);
   });
+
+  it("opens a tab in a fresh browser for an operation that comes while the browser closes with its last tab", async () => {
+    const [a, b] = [session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    // Another chat's first tab, asked for with the close of the only one.
+    expect(await within(10_000, Promise.all([op(b, "browser.navigate", { url: "http://fixture.test/second" }, "chat-2"), op(a, "browser.close", {}, "chat-1")]))).toEqual([
+      { ok: { url: "http://fixture.test/second", title: "Second", opened: true, notices: [] } },
+      { ok: { closed: true } },
+    ]);
+    // The closing session's own next operation, sent without waiting for its close.
+    expect(await within(10_000, Promise.all([op(b, "browser.close", {}, "chat-2"), op(b, "browser.navigate", { url: "http://fixture.test/" }, "chat-2")]))).toEqual([
+      { ok: { closed: true } },
+      { ok: { url: "http://fixture.test/", title: "Fixture", opened: true, notices: [] } },
+    ]);
+    expect(await pages()).toBe(1);
+  }, 40_000);
 
   it("closes a page that holds its main thread after it loaded, so a navigation answers within the bound too", async () => {
     await host.close();
