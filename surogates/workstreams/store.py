@@ -132,9 +132,16 @@ class WorkstreamStore:
             )
             await db.commit()
 
-    async def thread_facts(self, workstream_id: UUID, *, thread_id: UUID | None = None) -> list[ThreadFacts]:
+    async def thread_facts(
+        self, workstream_id: UUID, *, thread_id: UUID | None = None, with_files: bool = True,
+    ) -> list[ThreadFacts]:
         """What the rows of the project's threads are derived from, or only
-        *thread_id*'s.  A deleted thread is left out."""
+        *thread_id*'s.  A deleted thread is left out.
+
+        Without files, only each thread's newest turn summary is read, for
+        its status line, and a row's files are that turn's alone: reading
+        every summary is most of the cost of a project's rows.
+        """
         query = (
             select(WorkstreamThread, SessionRow.status, SessionRow.updated_at)
             .join(SessionRow, SessionRow.id == WorkstreamThread.session_id)
@@ -166,16 +173,17 @@ class WorkstreamStore:
             ))
             # The newest event of each type the rules read, per thread: the
             # ids first, aggregated from narrow rows, then those rows.  And
-            # every turn summary, for the files.
+            # every turn summary, for the files, or only the newest.
+            types = LATEST_TYPES if with_files else (*LATEST_TYPES, EventType.TURN_SUMMARY.value)
             newest = (
                 select(func.max(Event.id))
-                .where(Event.session_id.in_(ids), Event.type.in_(LATEST_TYPES))
+                .where(Event.session_id.in_(ids), Event.type.in_(types))
                 .group_by(Event.session_id, Event.type)
             )
             latest = await db.scalars(select(Event).where(Event.id.in_(newest)))
             summaries = await db.scalars(select(Event).where(
                 Event.session_id.in_(ids), Event.type == EventType.TURN_SUMMARY.value,
-            ))
+            )) if with_files else ()
             items_of, events_of = defaultdict(list), defaultdict(list)
             for item in items:
                 items_of[thread_of[item.session_id]].append(item)

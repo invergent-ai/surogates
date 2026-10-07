@@ -343,7 +343,9 @@ async def _list_threads_handler(arguments: dict[str, Any], **kwargs: Any) -> str
     now = datetime.now(timezone.utc)
     rows = [
         derive_thread(facts, now=now)
-        for facts in await WorkstreamStore(kwargs["session_factory"]).thread_facts(UUID(master_config["workstream_id"]))
+        for facts in await WorkstreamStore(kwargs["session_factory"]).thread_facts(
+            UUID(master_config["workstream_id"]), with_files=False,
+        )
     ]
     return json.dumps({"threads": [
         {"thread_id": row["id"], **{key: row[key] for key in ("title", "group", "reason", "status_line")}}
@@ -361,7 +363,7 @@ async def _read_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         return _error(f"No thread {thread_id} in this project.")
     projects = WorkstreamStore(kwargs["session_factory"])
     master_config = kwargs["session_config"]
-    found = await projects.thread_facts(UUID(master_config["workstream_id"]), thread_id=thread.id)
+    found = await projects.thread_facts(UUID(master_config["workstream_id"]), thread_id=thread.id, with_files=False)
     if not found:
         return _error(f"Thread {thread_id} was deleted.")
     row = derive_thread(found[0], now=datetime.now(timezone.utc))

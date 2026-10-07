@@ -29,6 +29,13 @@ LATEST_TYPES = tuple(t.value for t in (
 ))
 #: A thread with no activity for this long counts as resolved.
 QUIET_RESOLVES_AFTER = timedelta(days=7)
+#: What the shell takes of a project's answers (``desktop/src/shell/projects.ts``,
+#: which checks them against ``projects-contract.d.ts``): it refuses an answer
+#: with anything past one of these, and every row in it.  Lengths are UTF-16
+#: units, as the shell counts them.  A row's other fields stay inside the
+#: shell's limits by construction: a title is at most 256 units, a status line
+#: 200 code points.
+SHELL_LIMITS = {"rows": 500, "files": 200, "label": 500, "ref": 4096}
 _STATUS_LINE_MAX = 200
 
 
@@ -158,22 +165,32 @@ def _progress(data: dict[str, Any]) -> dict[str, int] | None:
 
 
 def _files(facts: ThreadFacts) -> list[dict[str, str]]:
-    """The files every turn summary named, newest first, each once."""
+    """The files every turn summary named, newest first, each once, at most
+    the shell's limit.  An entry the shell would refuse (not a file or an
+    artifact, no ref, or a label or ref too long) is left out: the shell
+    refuses every row over one such entry."""
     files: list[dict[str, str]] = []
-    seen: set[tuple[Any, Any]] = set()
+    seen: set[tuple[str, str]] = set()
     summaries = [e for e in facts.events if e.type == EventType.TURN_SUMMARY.value]
     for summary in sorted(summaries, key=lambda e: e.id, reverse=True):
         for artifact in summary.data.get("artifacts") or []:
-            if not isinstance(artifact, dict) or (artifact.get("kind"), artifact.get("ref")) in seen:
+            if not isinstance(artifact, dict) or artifact.get("kind") not in ("file", "artifact"):
                 continue
-            seen.add((artifact.get("kind"), artifact.get("ref")))
-            files.append({
-                "kind": artifact.get("kind"),
-                "label": artifact.get("label") or artifact.get("ref"),
-                "ref": artifact.get("ref"),
-                "thread_id": str(facts.id),
-            })
+            kind, ref, label = artifact["kind"], artifact.get("ref"), artifact.get("label")
+            if not isinstance(ref, str) or not ref or (kind, ref) in seen:
+                continue
+            label = label if isinstance(label, str) and label else ref
+            if _units(ref) > SHELL_LIMITS["ref"] or _units(label) > SHELL_LIMITS["label"]:
+                continue
+            seen.add((kind, ref))
+            files.append({"kind": kind, "label": label, "ref": ref, "thread_id": str(facts.id)})
+            if len(files) == SHELL_LIMITS["files"]:
+                return files
     return files
+
+
+def _units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
 
 
 def _line(text: Any) -> str | None:

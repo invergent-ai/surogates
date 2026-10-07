@@ -7,19 +7,21 @@ capability: with it off, every web session but the canonical one is hidden.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Annotated, Literal
+from datetime import datetime, timezone
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints, model_validator
 
 from surogates.api.routes.sessions import archive_session_tree
+from surogates.db.models import Workstream
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep, rate_limit_dep
 from surogates.session.provisioning import create_agent_session
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.workstreams import master_config
+from surogates.workstreams.derive import SHELL_LIMITS, derive_thread
 from surogates.workstreams.store import WorkstreamStore
 
 router = APIRouter(prefix="/workstreams")
@@ -117,6 +119,14 @@ def _store(request: Request) -> WorkstreamStore:
     return WorkstreamStore(request.app.state.session_factory)
 
 
+async def _project(request: Request, workstream_id: UUID, tenant: TenantContext, ctx: AgentRuntimeContext) -> Workstream:
+    """The signed-in user's live project *workstream_id*; 404 otherwise."""
+    project = await _store(request).get(workstream_id, **_owner(tenant, ctx))
+    if project is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
+    return project
+
+
 @router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
 async def create_project(
     body: ProjectCreate, request: Request, ctx: AgentRuntime, tenant: Tenant,
@@ -154,10 +164,7 @@ async def list_projects(request: Request, ctx: AgentRuntime, tenant: Tenant):
 
 @router.get("/{workstream_id}", response_model=ProjectOut)
 async def get_project(workstream_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant):
-    project = await _store(request).get(workstream_id, **_owner(tenant, ctx))
-    if project is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
-    return project
+    return await _project(request, workstream_id, tenant, ctx)
 
 
 @router.patch("/{workstream_id}", response_model=ProjectOut)
@@ -183,9 +190,20 @@ async def archive_project(
     The project's files are a boundary workspace, so they are kept, and so is
     its memory.
     """
-    project = await _store(request).get(workstream_id, **_owner(tenant, ctx))
-    if project is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
+    project = await _project(request, workstream_id, tenant, ctx)
     master = await request.app.state.session_store.get_session(project.master_session_id)
     await archive_session_tree(request, master, background_tasks)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{workstream_id}/threads")
+async def list_threads(
+    workstream_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant, thread_id: UUID | None = None,
+) -> list[dict[str, Any]]:
+    """The project's threads as the shell's ``ThreadRow``, in snake_case,
+    newest first and as many as the shell takes; or only *thread_id*'s, none
+    when it is not one of the project's live threads."""
+    project = await _project(request, workstream_id, tenant, ctx)
+    now = datetime.now(timezone.utc)
+    found = await _store(request).thread_facts(project.id, thread_id=thread_id)
+    return [derive_thread(facts, now=now) for facts in found[: SHELL_LIMITS["rows"]]]
