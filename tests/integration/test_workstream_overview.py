@@ -15,6 +15,7 @@ from sqlalchemy import select, text
 
 import surogates.api.routes.workstreams as workstreams_routes
 from surogates.db.models import InboxItem
+from surogates.jobs.inbox_expire import expire_inbox_items
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
@@ -417,6 +418,31 @@ async def test_an_approval_answered_in_the_inbox_is_heard_once_its_wait_is_over(
     assert (session_id, kind, groups[str(thread.id)]) == (str(thread.id), "user.message", "working")
 
 
+async def test_a_wait_the_sweeper_expires_is_heard_once_it_is_over(api, monkeypatch):
+    project = await create(api)
+    master = await master_of(api, project)
+    thread = await start(api, master)
+    store = api.app.state.session_store
+    # A thread whose turn ended asking for an approval, and a master whose
+    # turn ended asking a question: nothing is left to read either answer.
+    await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, {
+        "title": "Send the draft to finance?", "action_type": "approval",
+    })
+    await answered(api, thread, "Asked for the approval.")
+    await turn_ends(api, thread)
+    await asks(api, master, "Which quarter?")
+    await store.update_session_status(master.id, "completed")
+    assert (await summary_of(api, project))["waiting"] == 2
+    changes = heard(api, monkeypatch)
+    await expire_inbox_items(api.app.state.session_store)
+    ours = {session_id: (kind, groups) for session_id, kind, groups in changes if session_id in (str(thread.id), str(master.id))}
+    assert {session_id: kind for session_id, (kind, _) in ours.items()} == {
+        str(thread.id): "inbox.expired", str(master.id): "inbox.expired",
+    }
+    assert ours[str(thread.id)][1][str(thread.id)] == "idle"
+    assert (await summary_of(api, project))["waiting"] == 0
+
+
 async def test_a_masters_own_work_is_heard_only_where_it_changes_a_count_or_a_card(api, monkeypatch):
     project = await create(api)
     master = await master_of(api, project)
@@ -456,6 +482,8 @@ async def test_a_chat_outside_projects_publishes_on_no_projects_stream(api, monk
     listener = api.app.state.redis.pubsub()
     await listener.psubscribe("surogates:workstream:*")
     try:
+        # Its acknowledgement first: the read below then waits for a publish.
+        assert (await listener.get_message(timeout=1))["type"] == "psubscribe"
         await api.app.state.session_store.emit_event(UUID(chat.json()["id"]), EventType.SESSION_COMPLETE, {})
         assert await listener.get_message(ignore_subscribe_messages=True, timeout=0.5) is None
     finally:
@@ -559,6 +587,21 @@ async def test_a_resolve_reaches_the_projects_stream(api, monkeypatch):
         ("change", {"thread_id": tid, "type": "session.pause"}),
         ("change", {"thread_id": tid, "type": "thread.resolved"}),
     ]
+
+
+@pytest.mark.parametrize("working", [True, False], ids=["working", "idle"])
+async def test_a_resolve_by_the_coordinator_is_heard_once_it_is_resolved(api, monkeypatch, working):
+    project = await create(api)
+    master = await master_of(api, project)
+    thread = await start(api, master)
+    if not working:
+        await answered(api, thread, "Drafted the memo.")
+        await turn_ends(api, thread)
+    changes = heard(api, monkeypatch)
+    result = await call_tool(api, master, "resolve_thread", thread_id=str(thread.id))
+    assert result["status"] == "resolved", result
+    *_, (session_id, kind, groups) = changes
+    assert (session_id, kind, groups[str(thread.id)]) == (str(thread.id), "thread.resolved", "resolved")
 
 
 async def test_only_the_projects_live_threads_are_resolved_or_reopened(api, session_factory):

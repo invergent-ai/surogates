@@ -37,9 +37,11 @@ PROJECT_WIDE_TYPES = frozenset(t.value for t in (
     EventType.ASK_USER_QUESTION_RESPONSE,
     EventType.WORKER_SPAWNED, EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.THREAD_PROPOSED,
 ))
-#: The changes the routes name that are no event of a session's.
+#: The changes named that are no event of a session's: the routes' and the
+#: inbox sweeper's.
 RESOLVED = "thread.resolved"
 REOPENED = "thread.reopened"
+EXPIRED = "inbox.expired"
 
 _BOUNDARY = "workstream:"
 

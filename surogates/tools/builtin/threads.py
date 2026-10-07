@@ -18,6 +18,7 @@ from surogates.config import enqueue_session
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.workstreams import is_project_master
+from surogates.workstreams import stream as project_stream
 from surogates.workstreams.derive import GROUPS, derive_thread, question_of
 
 # The chat title's cap, since a thread's title is its chat's title.  Counted
@@ -383,6 +384,8 @@ async def _resolve_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     # A resolved thread's work is done, so one still working stops first.
     await _stop(thread, "resolved by the coordinator", **kwargs)
     await WorkstreamStore(kwargs["session_factory"]).resolve_thread(thread.id)
+    # After it is written, so whoever hears it reads the thread resolved.
+    await project_stream.publish_session(kwargs.get("redis"), thread, project_stream.RESOLVED)
     return json.dumps({"status": "resolved", "thread_id": str(thread.id)})
 
 
