@@ -18,7 +18,7 @@ import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import type { ProcessHandle } from "../../src/guest/processes.js";
 import type { BindMode, HostUser, ProtectedKey, Share } from "../../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
-import type { Operation } from "../../src/link/protocol.js";
+import type { Operation, Outcome } from "../../src/link/protocol.js";
 import { VmClient, vmOptions } from "../../src/vm/client.js";
 import { VmExecutor } from "../../src/vm/executor.js";
 import { bootLinux } from "../../src/vm/linux.js";
@@ -1075,6 +1075,40 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     console.log(`M4: ${stale} of 1000 commands right after a write saw the old file; a write and the command after it ${seen.toFixed(1)} ms, a patch and its lint ${((performance.now() - begun) / 50).toFixed(0)} ms`);
     expect(stale).toBe(0);
     rmSync(key, { force: true });
+  });
+
+  it("keeps the file tools in the folder while a command in the guest flips a folder of it into a link out of it, through 5 000 operations", { timeout: 300_000 }, async () => {
+    const folder = join(dir, "folder");
+    const outside = join(dir, "outside");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "only-outside"), "OUTSIDE\n");
+    // In the guest the link's target names nothing; on the host it leads out of the folder.
+    const flipper = `while :; do rm -rf sub; mkdir sub; echo inside > sub/inside; rm -rf sub; ln -s '${outside}' sub; done`;
+    const started = await executor.run(operation("start", background(flipper)), signal()) as { ok: { session_id: string } };
+    const tally: Record<string, number> = {};
+    const count = (kind: string, outcome: Outcome) => {
+      const error = "error" in outcome ? outcome.error as { type: string; code?: string } : null;
+      const key = `${kind} ${error ? error.code ?? error.type : "ok"}`;
+      tally[key] = (tally[key] ?? 0) + 1;
+    };
+    try {
+      for (let i = 0; i < 1_250; i += 1) {
+        count("write", await executor.run(operation("write", { key: join(folder, "sub", `x-${i}`), data: Buffer.from("m8\n").toString("base64") }), signal()));
+        const read = await executor.run(operation("read", { key: join(folder, "sub", "only-outside"), max_bytes: null }), signal());
+        expect("ok" in read && Buffer.from(String(read.ok), "base64").toString()).not.toBe("OUTSIDE\n");
+        count("read", read);
+        const listed = await executor.run(operation("list_dir", { key: join(folder, "sub") }), signal());
+        expect("ok" in listed && (listed.ok as string[]).includes("only-outside")).toBe(false);
+        count("list_dir", listed);
+        count("delete", await executor.run(operation("delete", { key: join(folder, "sub", "only-outside") }), signal()));
+      }
+    } finally {
+      await executor.run(operation("kill", { session_id: started.ok.session_id }), signal());
+      rmSync(join(folder, "sub"), { recursive: true, force: true });
+    }
+    console.log(`M8: 5 000 file operations against a guest command's flips: ${JSON.stringify(tally)}`);
+    expect(readdirSync(outside)).toEqual(["only-outside"]);
+    expect(readFileSync(join(outside, "only-outside"), "utf8")).toBe("OUTSIDE\n");
   });
 
   it("ends what a command left running once the chat's file host lets its folder go", async () => {
