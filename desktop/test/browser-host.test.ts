@@ -4,7 +4,7 @@
 //   npm run test:browser -- test/browser-host.test.ts
 // With the flag set anywhere else, they fail before any browser is launched.
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { connect as connectTcp } from "node:net";
 import { tmpdir, userInfo } from "node:os";
@@ -125,6 +125,25 @@ function processes(): Array<{ pid: string; args: string[] }> {
   });
 }
 
+// The sockets *pid* holds, by inode: none where its folder cannot be read, as a sandboxed renderer's.
+function sockets(pid: string): string[] {
+  try {
+    return readdirSync(`/proc/${pid}/fd`).flatMap((fd) => {
+      try {
+        return /^socket:\[(\d+)\]$/.exec(readlinkSync(`/proc/${pid}/fd/${fd}`))?.slice(1) ?? [];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
+// The TCP sockets listening on this computer, by inode.
+const listening = (): Set<string> => new Set(["/proc/net/tcp", "/proc/net/tcp6"].flatMap((table) =>
+  readFileSync(table, "utf8").split("\n").slice(1).map((row) => row.trim().split(/\s+/)).filter((fields) => fields[3] === "0A").map((fields) => fields[9] ?? "")));
+
 describe("the browser tests' gate", () => {
   it("names each thing that would put a test browser on the user's session", () => {
     expect(notIsolated({ WAYLAND_DISPLAY: "wayland-0", XDG_SESSION_TYPE: "wayland", HOME: userInfo().homedir, XDG_RUNTIME_DIR: "/run/user/1000", DISPLAY: ":4242" })).toEqual([
@@ -175,6 +194,10 @@ describe.skipIf(!run)("the browser host", () => {
     expect(main).toBeDefined();
     const args = main!.args;
     expect(args.some((arg) => arg.startsWith("--remote-debugging-port"))).toBe(false);
+    // And none is open: no process of the browser's listens, and it wrote no DevToolsActivePort.
+    const open = listening();
+    expect(processes().flatMap(({ pid }) => sockets(pid)).filter((inode) => open.has(inode))).toEqual([]);
+    expect(existsSync(join(profile, "DevToolsActivePort"))).toBe(false);
     expect(processes().some(({ args: other }) => other.includes("--no-sandbox"))).toBe(false);
     for (const weak of WEAKENING) expect(args).not.toContain(weak);
     const disabled = args.filter((arg) => arg.startsWith("--disable-features=")).join(",");
@@ -189,6 +212,18 @@ describe.skipIf(!run)("the browser host", () => {
     // WebRTC sends no UDP around the proxy.
     const prefs = JSON.parse(readFileSync(join(profile, "Default", "Preferences"), "utf8"));
     expect(prefs.webrtc.ip_handling_policy).toBe("disable_non_proxied_udp");
+    // And the browser keeps it: a connection the page makes gathers no UDP candidate.
+    expect(await script(a, `const connection = new RTCPeerConnection();
+connection.createDataChannel("probe");
+const found = [];
+const gathered = new Promise((done) => {
+  connection.onicecandidate = ({ candidate }) => (candidate ? found.push(candidate.candidate) : done());
+  setTimeout(done, 3000);
+});
+await connection.setLocalDescription(await connection.createOffer());
+await gathered;
+connection.close();
+return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
   });
 
   it("refuses this computer's own services to the page, whichever way it reaches, and to a navigation", async () => {
