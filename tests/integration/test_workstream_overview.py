@@ -30,7 +30,7 @@ from surogates.workstreams.store import WorkstreamStore
 from tests.test_steer_loop import _final_response, _make_loop_harness
 
 from . import test_workstream_threads as threads_tests
-from .conftest import issue_service_account_token
+from .conftest import issue_service_account_token, leave_mid_stream
 from .test_devices import add_user, api, next_control  # noqa: F401  (api is a fixture)
 from .test_workstream_threads import (
     PROPOSED,
@@ -569,31 +569,7 @@ async def test_a_client_that_leaves_the_stream_leaves_no_connection_behind(api):
     project = await create(api)
     redis = api.app.state.redis
     in_use = len(redis.connection_pool._in_use_connections)
-    path = f"/v1/workstreams/{project['id']}/stream"
-    left, requested = asyncio.Event(), asyncio.Event()
-
-    # The test client reads a response whole, so the client is driven over ASGI.
-    async def receive():
-        if not requested.is_set():
-            requested.set()
-            return {"type": "http.request", "body": b"", "more_body": False}
-        await left.wait()
-        return {"type": "http.disconnect"}
-
-    async def send(message):
-        if b"event: ready" in message.get("body", b""):
-            # It leaves while the relay waits for a change.
-            asyncio.get_running_loop().call_later(0.2, left.set)
-
-    scope = {
-        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET", "scheme": "http",
-        "path": path, "raw_path": path.encode(), "query_string": b"", "root_path": "",
-        "headers": [(key.lower().encode(), value.encode()) for key, value in api.auth().items()],
-        "client": ("127.0.0.1", 1), "server": ("test", 80),
-    }
-    async with asyncio.timeout(10):
-        await api.app(scope, receive, send)
-    assert left.is_set()
+    await leave_mid_stream(api.app, f"/v1/workstreams/{project['id']}/stream", api.auth(), after=b"event: ready")
     assert (await redis.pubsub_numsub(f"surogates:workstream:{project['id']}"))[0][1] == 0
     assert len(redis.connection_pool._in_use_connections) == in_use
 

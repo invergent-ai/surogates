@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 from datetime import datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 
+import anyio
 from fastapi import (
     APIRouter,
     Depends,
@@ -291,11 +293,11 @@ async def stream_inbox(
         except asyncio.CancelledError:
             return
         finally:
-            try:
-                await pubsub.unsubscribe(channel)
+            # Shielded: a client that leaves cancels the stream, and every
+            # await here again, which would keep the connection from its
+            # pool.  Closing it ends the subscription.
+            with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
                 await pubsub.aclose()
-            except Exception:
-                pass
 
     return EventSourceResponse(event_gen())
 
