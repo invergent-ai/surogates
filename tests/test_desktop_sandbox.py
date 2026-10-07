@@ -199,9 +199,9 @@ async def test_a_call_names_its_computer_and_a_resumed_one_skips_the_document_ca
     assert (resumed.identity, resumed.caches_documents) == (computer, False)
 
 
-async def test_only_a_session_on_the_computer_is_told_what_git_cannot_do_in_its_folder():
+async def test_only_a_session_on_the_computer_is_told_what_git_and_shared_mappings_cannot_do_in_its_folder():
     from surogates.harness.tool_schemas import describe_for_device
-    from surogates.tools.builtin.terminal import DEVICE_GIT_NOTE, TERMINAL_TOOL_DESCRIPTION
+    from surogates.tools.builtin.terminal import DEVICE_GIT_NOTE, DEVICE_MAPPING_NOTE, TERMINAL_TOOL_DESCRIPTION
 
     tools = ToolRegistry()
     ToolRuntime(tools).register_builtins()
@@ -210,8 +210,12 @@ async def test_only_a_session_on_the_computer_is_told_what_git_cannot_do_in_its_
     def terminal(described: list[dict]) -> str:
         return next(s["function"]["description"] for s in described if s["function"]["name"] == "terminal")
 
-    assert terminal(describe_for_device(schemas, device_session().config)) == f"{TERMINAL_TOOL_DESCRIPTION}{DEVICE_GIT_NOTE}\n"
+    assert terminal(describe_for_device(schemas, device_session().config)) == (
+        f"{TERMINAL_TOOL_DESCRIPTION}{DEVICE_GIT_NOTE}\n{DEVICE_MAPPING_NOTE}\n"
+    )
     assert "git init" in DEVICE_GIT_NOTE
+    # The guest serves a folder uncached and refuses a shared mapping of its files, as SQLite's WAL makes.
+    assert "WAL" in DEVICE_MAPPING_NOTE and "rollback journal" in DEVICE_MAPPING_NOTE
     for cloud in ({}, None, {"execution": {"kind": "cloud"}}):
         assert terminal(describe_for_device(schemas, cloud)) == TERMINAL_TOOL_DESCRIPTION
     # The registry's schema, which every session shares, keeps the cloud's text.

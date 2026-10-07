@@ -868,32 +868,35 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     }
   });
 
-  it("maps a folder's file for one process's own use, and refuses to share a mapping of it, as virtiofsd 1.10 serves an uncached file", async () => {
+  it("refuses a shared mapping of a folder's file, writable or read-only, so SQLite's WAL fails there plainly and works in the home folder", async () => {
     const mapped = await run([
       "python3 - <<'EOF'",
-      "import mmap, sqlite3",
+      "import mmap, os, sqlite3",
       "with open('mapped', 'w+b') as f:",
       "    f.write(b'x' * 4096)",
       "    f.flush()",
-      "    try:",
-      "        mmap.mmap(f.fileno(), 4096, mmap.MAP_SHARED)",
-      "        print('shared')",
-      "    except OSError as error:",
-      "        print('shared', error.errno)",
-      "    mmap.mmap(f.fileno(), 4096, mmap.MAP_PRIVATE)",
+      "    for access in (mmap.ACCESS_WRITE, mmap.ACCESS_READ):",
+      "        try:",
+      "            mmap.mmap(f.fileno(), 4096, access=access)",
+      "            print('shared')",
+      "        except OSError as error:",
+      "            print('shared', error.errno)",
+      "    mmap.mmap(f.fileno(), 4096, access=mmap.ACCESS_COPY)",
       "    print('private')",
-      "try:",
-      "    db = sqlite3.connect('wal.db')",
-      "    db.execute('pragma journal_mode=wal')",
-      "    db.execute('create table t (x)')",
-      "    print('wal')",
-      "except sqlite3.Error as error:",
-      "    print('wal', error)",
+      "for path in ('wal.db', os.path.expanduser('~/wal.db')):",
+      "    try:",
+      "        db = sqlite3.connect(path)",
+      "        db.execute('pragma journal_mode=wal')",
+      "        db.execute('create table t (x)')",
+      "        print('wal')",
+      "    except sqlite3.Error as error:",
+      "        print('wal', error)",
       "EOF",
-      "rm -f mapped wal.db wal.db-wal wal.db-shm",
+      "rm -f mapped wal.db wal.db-wal wal.db-shm ~/wal.db ~/wal.db-wal ~/wal.db-shm",
     ].join("\n"));
-    // A shared mapping of a file opened for direct I/O needs virtiofsd's --allow-mmap, which 1.10 has not; SQLite's WAL maps its index so.
-    expect(mapped).toEqual({ ok: { output: "shared 19\nprivate\nwal disk I/O error\n", returncode: 0, timed_out: false } });
+    // The folder is served uncached without --allow-mmap: a shared mapping fails with ENODEV, as the
+    // model's note says, rather than lose writes either side makes while it is mapped. The home is the guest's own disk.
+    expect(mapped).toEqual({ ok: { output: "shared 19\nshared 19\nprivate\nwal disk I/O error\nwal\n", returncode: 0, timed_out: false } });
   });
 
   it("runs the folder's own programs: a checked-in script, a built binary and a node_modules/.bin tool", async () => {
