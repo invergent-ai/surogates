@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from surogates.sandbox import history as history_module
 from surogates.sandbox.history import History, HistoryConflict, HistoryError
 from surogates.tools.utils.checkpoint_manager import _shadow_repo_path
 
@@ -410,3 +411,43 @@ def test_a_change_of_shape_is_left_out_and_never_fails_the_landing(tmp_path, pro
     assert (project / "plan.md").read_text() == "plan"
     assert (project / "Report.docx").read_bytes() == b"report v2"
     assert not list(outside.iterdir()) and not list(project.rglob("*.landing~"))
+
+
+def test_a_write_cut_short_leaves_the_real_file_whole_and_nothing_beside_it(tmp_path, project, monkeypatch):
+    history = opened(tmp_path, project)
+    (history.copy / "Report.docx").write_bytes(b"report v2")
+    [change] = history.commit_turn(author=THREAD_A, trailers=trailers("turn"))["changes"]
+    run = subprocess.run
+
+    def out_of_time(args, **kwargs):
+        if args[:2] == ["git", "cat-file"]:
+            kwargs["stdout"].write(b"half a rep")
+            raise subprocess.TimeoutExpired(args, 120)
+        return run(args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", out_of_time)
+        with pytest.raises(HistoryError, match="timed out"):
+            history.apply(change["path"], change["before"], change["after"])
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", lambda *_: (_ for _ in ()).throw(IsADirectoryError(21, "Is a directory")))
+        with pytest.raises(OSError):
+            history.apply(change["path"], change["before"], change["after"])
+    assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+    assert not list(project.rglob("*.landing~"))
+
+
+def test_a_git_killed_by_its_timeout_leaves_the_copy_usable(tmp_path, project, monkeypatch):
+    history = opened(tmp_path, project)
+    # A file-system monitor that git add runs while it holds the index's lock, and that outlasts it.
+    slow = tmp_path / "slow-monitor"
+    slow.write_text('#!/bin/sh\nexec >/dev/null 2>&1 </dev/null\n[ -e "$GIT_DIR/index.lock" ] && sleep 3\nexit 0\n')
+    slow.chmod(0o755)
+    git(history, "config", "core.fsmonitor", str(slow))
+    (history.copy / "Report.docx").write_bytes(b"report v2")
+    with monkeypatch.context() as patch:
+        patch.setattr(history_module, "_GIT_TIMEOUT", 1)
+        with pytest.raises(HistoryError, match="timed out"):
+            history.snapshot("before terminal")
+    git(history, "config", "--unset", "core.fsmonitor")
+    assert history.snapshot("before write_file") != git(history, "rev-parse", "refs/heads/main")

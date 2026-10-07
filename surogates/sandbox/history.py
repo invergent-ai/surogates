@@ -316,15 +316,20 @@ class History:
         # short leaves the real file whole.  History leaves out the *~ name.
         target.parent.mkdir(parents=True, exist_ok=True)
         staged = target.with_name(f"{target.name}.landing~")
-        with open(staged, "wb") as out:
-            result = subprocess.run(
-                ["git", "cat-file", "blob", blob], stdout=out, stderr=subprocess.PIPE,
-                env=_environ({"GIT_DIR": str(self.repo)}), timeout=_GIT_TIMEOUT,
-            )
-        if result.returncode != 0:
-            staged.unlink()
-            raise HistoryError(f"git cat-file failed: {result.stderr.decode(errors='replace').strip()}")
-        os.replace(staged, target)
+        try:
+            with open(staged, "wb") as out:
+                result = subprocess.run(
+                    ["git", "cat-file", "blob", blob], stdout=out, stderr=subprocess.PIPE,
+                    env=_environ({"GIT_DIR": str(self.repo)}), timeout=_GIT_TIMEOUT,
+                )
+            if result.returncode != 0:
+                raise HistoryError(f"git cat-file failed: {result.stderr.decode(errors='replace').strip()}")
+            os.replace(staged, target)
+        except subprocess.TimeoutExpired as exc:
+            raise HistoryError(f"git cat-file timed out after {_GIT_TIMEOUT}s") from exc
+        finally:
+            # Gone once renamed; whatever cut the write short, nothing is left beside the real file.
+            staged.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # Git
@@ -349,6 +354,8 @@ class History:
                 timeout=_GIT_TIMEOUT,
             )
         except subprocess.TimeoutExpired as exc:
+            # The git it killed held the index's lock, and no later git could run.
+            Path(f"{env.get('GIT_INDEX_FILE') or Path(env['GIT_DIR']) / 'index'}.lock").unlink(missing_ok=True)
             raise HistoryError(f"git {args[0]} timed out after {_GIT_TIMEOUT}s") from exc
         if result.returncode != 0:
             raise HistoryError(f"git {args[0]} failed: {result.stderr.strip()}")
