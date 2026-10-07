@@ -888,10 +888,8 @@ async def test_a_thread_is_told_only_of_work_since_its_last_landed_turn(api, mon
     assert not first.startswith("[This thread's copy") and after_the_pod_went.startswith("[This thread's copy")
 
 
-async def test_a_turn_after_a_landing_that_rolled_back_is_told_its_copy_lacks_that_work(api, monkeypatch, pods):
-    master = await master_of(api, await create(api))
-    thread = await a_thread(api, "Draft A", master)
-    store, pool = api.app.state.session_store, SandboxPool(pods)
+async def a_rolled_back_turn(api, monkeypatch, thread, pool) -> None:
+    """*thread*'s turn writes a.md, b.md and c.md, and its landing rolls back: the user saved c.md first."""
     apply = History.apply
 
     def a_save_lands_first(self, path, before, after):
@@ -905,6 +903,27 @@ async def test_a_turn_after_a_landing_that_rolled_back_is_told_its_copy_lacks_th
             calling(("terminal", {"command": "for f in a b c; do echo $f > $f.md; done"})),
             _final_response("Wrote three notes."),
         ], pool=pool, saga_settings=QUICK)
+
+
+async def test_a_turn_that_never_used_its_pod_does_not_count_as_landed(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await a_rolled_back_turn(api, monkeypatch, thread, pool)
+    # A question in between, answered with no tools: it lands nothing, so it is no landed turn.
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Which file did you start with?"})
+    await a_turn(api, monkeypatch, thread, [_final_response("It was a.md.")], pool=pool)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Try again."})
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "x.md", "content": "x"})), _final_response("Done."),
+    ], pool=pool)
+    assert (await last_writes(store, thread))[-1].startswith("[This thread's copy")
+
+
+async def test_a_turn_after_a_landing_that_rolled_back_is_told_its_copy_lacks_that_work(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await a_rolled_back_turn(api, monkeypatch, thread, pool)
     [report] = await reports(api, master)
     assert report["landing"] == "compensated"
     await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Try again."})
