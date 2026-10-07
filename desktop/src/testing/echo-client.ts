@@ -1,19 +1,18 @@
 // A device for the server's cross-check: it connects like the app, answers
 // `which`, and holds anything else until cancelled when --hold is given. With
-// --folder it answers every operation through the real tool hosts instead, with
-// that folder bound to every session. With --confirm it binds chats as the app
+// --folder it answers every operation as the app does instead, through the
+// VmExecutor: the file kinds in the chat's file host, the process kinds in the VM,
+// with that folder bound to every session. With --confirm it binds chats as the app
 // does: before it connects it confirms that folder, as a user accepting the sheet
 // would, and says the sheet ("sheet") and the folder and nonce the page would send
 // ("prepared"); then it answers a chat's bind operation against that confirmation,
-// and runs the chat's other operations through the real tool hosts. With --ask
+// and runs the chat's other operations through the VmExecutor. With --ask
 // WORD as well, those chats ask every time: each approval is said ("approval"),
 // and denied when what it asks about names WORD, allowed otherwise. A command's
 // connection to a host off the package list, other than this computer's own or one
 // that cannot be looked up, asks in either mode and is said as an "approval" event;
 // without --ask it is denied. One JSON line per event on stdout; a link that stops
 // itself says why as an "error" event.
-// With --vm as well, those operations go to the VmExecutor, which runs the process
-// kinds in the guest, as the app does; without it, to the tool hosts' own commands in srt.
 // The journal's file stays locked while this runs, so each op_ack the server sends is
 // said aloud as an "ack" event (one per frame, a repeat too): the cross-check reads
 // the file only after it quits.
@@ -27,7 +26,7 @@ import { Binder } from "../binding/binder.js";
 import { BOOT_ID } from "../binding/folder.js";
 import { connectDevice } from "../device.js";
 import { appEnvironment } from "../hosts/environment.js";
-import { type NetworkApprovals, ToolHosts } from "../hosts/tool-hosts.js";
+import type { NetworkApprovals } from "../hosts/tool-hosts.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import { VmClient, vmOptions } from "../vm/client.js";
@@ -42,14 +41,13 @@ const { values } = parseArgs({
     folder: { type: "string" },
     confirm: { type: "string" },
     ask: { type: "string" },
-    vm: { type: "boolean", default: false },
   },
 });
 // --folder binds every root by itself, so it cannot stand beside a confirmed folder; only a confirmed one asks.
-const usage = (values.folder && values.confirm) || (values.ask !== undefined && !values.confirm) || (values.vm && !values.folder && !values.confirm);
+const usage = (values.folder && values.confirm) || (values.ask !== undefined && !values.confirm);
 if (!values.url || !values.token || !values.journal || usage) {
   process.stderr.write(
-    "usage: echo-client --url URL --token TOKEN --journal PATH [--hold] [--folder PATH | --confirm PATH [--ask WORD]] [--vm]\n",
+    "usage: echo-client --url URL --token TOKEN --journal PATH [--hold] [--folder PATH | --confirm PATH [--ask WORD]]\n",
   );
   process.exit(2);
 }
@@ -82,10 +80,8 @@ const network: NetworkApprovals = {
 };
 const bindingOf = (root: string) => everyRoot ?? journal.bindings.get(root);
 const host = userInfo();
-const vm = values.vm ? new VmClient({ vm: vmOptions(dataDir, { uid: host.uid, gid: host.gid, name: host.username, home: env.HOME ?? host.homedir }) }) : null;
-const hosts = !values.folder && !values.confirm ? null
-  : vm ? new VmExecutor({ bindingOf, dataDir, env, network, vm })
-  : new ToolHosts({ bindingOf, dataDir, env, network });
+const vm = values.folder || values.confirm ? new VmClient({ vm: vmOptions(dataDir, { uid: host.uid, gid: host.gid, name: host.username, home: env.HOME ?? host.homedir }) }) : null;
+const hosts = vm ? new VmExecutor({ bindingOf, dataDir, env, network, vm }) : null;
 const { confirm, ask } = values;
 let refusal: string | null = null;
 const binder = confirm && hosts

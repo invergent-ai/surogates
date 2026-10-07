@@ -1,5 +1,5 @@
 """A command's connections to hosts off the package list, through the cloud's own
-terminal tool and the real app, its commands in srt or in the VM: this computer's
+terminal tool and the real app, its commands in the VM: this computer's
 own services are refused without asking, any other host is asked about, and each
 refusal reaches the agent as the proxy's 403 and the app's notice; a host its user
 allows goes through."""
@@ -67,24 +67,18 @@ def network_prompt(session_id: str, folder: str, host: str) -> dict:
     }
 
 
-# Commands in srt, the tool hosts' own, and in the VM, the app's.
-SANDBOXES = [pytest.param(False, id="srt"), pytest.param(True, id="vm", marks=VM)]
-
-
-@pytest.mark.parametrize("vm", SANDBOXES)
-async def test_refusals_reach_the_agent_through_the_terminal_tool(built_client, api, link_url, tmp_path, journal_dir, request, vm):
-    if vm:
-        request.getfixturevalue("built_agent_disk")
+@VM
+async def test_refusals_reach_the_agent_through_the_terminal_tool(built_client, built_agent_disk, api, link_url, tmp_path, journal_dir):
     folder = (tmp_path / "folder").resolve()
     folder.mkdir()
     device = await register(api)
     # Without --ask the chat works freely: only the network asks, and the echo client denies it.
-    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder, vm=vm)
+    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder)
     try:
         session_id, bound, terminal_call = await chat_on(app, api, device, folder)
-        # The root's own name, which only the guest gives a command: this ran in the VM, not in srt.
+        # The root's own name, which only the guest gives a command: this ran in the VM.
         named = await terminal_call("hostname")
-        assert (named["output"] == "surogate") == vm, named
+        assert named["output"] == "surogate", named
         own = await terminal_call(status("http://127.0.0.1:9/"))
         assert own["output"] == "403\n\nThis computer does not let a chat reach its own network services (127.0.0.1:9)"
         away = await terminal_call(status(f"http://{AWAY}:9/"))
@@ -96,15 +90,13 @@ async def test_refusals_reach_the_agent_through_the_terminal_tool(built_client, 
         await app.close()
 
 
-@pytest.mark.parametrize("vm", SANDBOXES)
-async def test_a_host_its_user_allows_goes_through_the_terminal_tool(built_client, api, link_url, tmp_path, journal_dir, request, vm):
-    if vm:
-        request.getfixturevalue("built_agent_disk")
+@VM
+async def test_a_host_its_user_allows_goes_through_the_terminal_tool(built_client, built_agent_disk, api, link_url, tmp_path, journal_dir):
     folder = (tmp_path / "folder").resolve()
     folder.mkdir()
     device = await register(api)
     # With --ask the chat asks every time, and the echo client allows what does not name the word.
-    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder, ask="denied", vm=vm)
+    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder, ask="denied")
     try:
         session_id, bound, terminal_call = await chat_on(app, api, device, folder)
         allowed = await terminal_call(status(f"http://{NEXT_DOOR}:9/"))

@@ -14,7 +14,7 @@ from surogates.tools.builtin import file_ops, terminal
 from surogates.tools.utils import process_registry
 
 from .test_desktop_bindings import bind_id
-from .test_desktop_file_operations import journal_dir  # noqa: F401  (fixture)
+from .test_desktop_file_operations import VM, built_agent_disk, journal_dir  # noqa: F401  (fixtures)
 from .test_desktop_link_client import built_client, client, connected  # noqa: F401  (fixture)
 from .test_device_sessions import local_chat
 from .test_devices import api, device_io, link_url, register  # noqa: F401  (fixtures)
@@ -25,7 +25,8 @@ pytestmark = [pytest.mark.desktop, pytest.mark.asyncio(loop_scope="session")]
 WORD = "denied"
 
 
-async def test_what_its_user_denies_reaches_each_tool_as_not_done(built_client, api, link_url, tmp_path, journal_dir):
+@VM
+async def test_what_its_user_denies_reaches_each_tool_as_not_done(built_client, built_agent_disk, api, link_url, tmp_path, journal_dir):
     folder = (tmp_path / "folder").resolve()
     folder.mkdir()
     device = await register(api)
