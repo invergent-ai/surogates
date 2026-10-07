@@ -281,7 +281,41 @@ describe("the Projects page", () => {
   });
 });
 
+// The app signed in to the fake agent, whose page is up and serves nothing until a test registers it.
+async function unserved(): Promise<{ shell: ElectronApplication; page: Page; client: Page }> {
+  agent.registerAfterMs = -1;
+  const shell = await launch(home);
+  app = shell;
+  await stubNative(shell);
+  const page = await shellPage(shell);
+  await connect(page, origin);
+  await signIn(shell, page, agent);
+  return { shell, page, client: await webClient(shell, origin) };
+}
+
+// What the page's preload answers *call*, sent as the main process sends one, or "no answer" after *waitMs*.
+const callPage = (shell: ElectronApplication, call: { id: number; method: string; args: unknown[]; deadline: number }, waitMs = 2_000) =>
+  shell.evaluate(({ webContents }, [url, sent, wait]) => new Promise((resolve) => {
+    const contents = webContents.getAllWebContents().find((found) => found.getURL().startsWith(url))!;
+    const timer = setTimeout(() => resolve("no answer"), wait);
+    contents.ipc.on("desktop:projects-answer", (_event, id: unknown, outcome: unknown) => {
+      if (id !== sent.id) return;
+      clearTimeout(timer);
+      resolve(outcome);
+    });
+    contents.send("desktop:projects", { type: "call", ...sent });
+  }), [origin, call, waitMs] as const);
+
 describe("the page's projects source", () => {
+  it("refuses the calls it holds once the page says it serves none", async () => {
+    const { shell, client } = await unserved();
+    const held = callPage(shell, { id: 999_990, method: "list", args: [], deadline: Date.now() + 60_000 }, 5_000);
+    // The call reaches the page's hold before the page says it serves nothing.
+    await pause(300);
+    await client.evaluate(() => window.surogateDesktop!.registerProjects(null));
+    expect(await held).toEqual({ error: "The agent's page serves no projects" });
+  });
+
   it("answers a call that reaches the page before it serves, once it serves, and drops one whose time ran out", async () => {
     // The page serves its projects only once the test says so.
     agent.registerAfterMs = -1;
