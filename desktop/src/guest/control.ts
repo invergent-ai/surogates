@@ -18,8 +18,14 @@ export interface ControlRoots {
   perform(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome>;
 }
 
-// What the control asks of the guest itself (root.ts).
+// What the control asks of the guest itself (root.ts): its clock, its runs' backstops, and its power.
 export interface ControlMachine {
+  // The guest's clock set to *now*, milliseconds since the epoch.
+  setClock(now: number): Promise<void>;
+  // The computer slept *ms*: every run's backstop falls that much later (Roots.woke).
+  woke(ms: number): void;
+  // The host said something: a backstop that waited to hear it goes on (Roots.heard).
+  heard(): void;
   // Every root's processes end, the sessions disk is written out and let go, and the guest powers off.
   powerOff(): Promise<void>;
 }
@@ -44,7 +50,7 @@ export class Control {
   // The operations still running, by id.
   private readonly running = new Map<number, AbortController>();
 
-  // Without *machine*, as in the tests, the guest's power is left alone.
+  // Without *machine*, as in the tests, the guest's clock and power are left alone.
   constructor(private readonly send: (message: FromAgent) => void, private readonly roots: ControlRoots, private readonly machine?: ControlMachine) {}
 
   hello(): void {
@@ -59,6 +65,7 @@ export class Control {
       return;
     }
     if (!isRecord(parsed) || typeof parsed.id !== "number") return;
+    this.machine?.heard();
     const message = parsed as ToAgent & Record<string, unknown>;
     const { id } = message;
     if (message.type === "done") {
@@ -101,6 +108,15 @@ export class Control {
     } else if (message.type === "teardown") {
       if (!isText(message.root) || !isShare(message.share)) return this.send({ type: "failed", id, message: malformed("teardown") });
       this.roots.teardown(message.root, message.share).then(
+        () => this.send({ type: "done", id }),
+        (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
+      );
+    } else if (message.type === "time") {
+      if (!Number.isFinite(message.now) || message.now <= 0 || !Number.isFinite(message.slept) || message.slept < 0) {
+        return this.send({ type: "failed", id, message: malformed("time") });
+      }
+      this.machine?.woke(message.slept);
+      (this.machine?.setClock(message.now) ?? Promise.resolve()).then(
         () => this.send({ type: "done", id }),
         (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
       );

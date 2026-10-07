@@ -55,7 +55,8 @@ beforeEach(async () => {
   const told: string[] = [];
   const own = children;
   lost = told;
-  roots = new Roots({ start: bare, uid: () => 10_000, kill: () => void own[0]?.kill("SIGKILL"), lost: (root) => told.push(root) });
+  // A run's backstop falls at its timeout: the host keeps the timeout in the app, and these tests are the agent's alone.
+  roots = new Roots({ start: bare, uid: () => 10_000, kill: () => void own[0]?.kill("SIGKILL"), lost: (root) => told.push(root), backstopMs: 0 });
   await roots.setup("root-1", base, R1, user);
 });
 
@@ -113,6 +114,7 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
       },
       uid: () => 10_000,
       kill: killLatest(children),
+      backstopMs: 0,
     });
     await stalled.setup("root-5", base, R1, user);
     const ask = (kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string) => stalled.perform("root-5", kind, args, signal, id);
@@ -128,16 +130,38 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
   });
 
   // A runner whose loop blocks on a stalled stat, or that a command stopped, reports no command's end.
-  it("answers a run's timeout while its runner is stopped, at the timeout and its grace", async () => {
+  it("answers a run's timeout while its runner is stopped, at its backstop", async () => {
     const runner = children[0] as ChildProcess;
     const running = op("run", { command: "sleep 5", workdir: null, timeout: 0.5 }, undefined, "op-8");
     await new Promise((resolve) => setTimeout(resolve, 200));
     runner.kill("SIGSTOP");
-    // 0.5 s, then 2 s of grace.
-    expect(await within(running, 3_000)).toEqual({ ok: { output: "Command timed out after 0.5 seconds", returncode: 124, timed_out: true } });
+    // Its timeout, and the backstop's margin, none here.
+    expect(await within(running, 1_500)).toEqual({ ok: { output: "Command timed out after 0.5 seconds", returncode: 124, timed_out: true } });
     // Back, it reports the command's end, which nothing waits for any more.
     runner.kill("SIGCONT");
     expect(await op("which", { name: "sh" }, undefined, "op-9")).toEqual({ ok: true });
+  });
+
+  it("falls a run's backstop later by each time the computer slept, and not while the host is silent, until it speaks", async () => {
+    const backstopped = new Roots({ start: bare, uid: () => 10_000, kill: killLatest(children), backstopMs: 200, hostSilenceMs: 300 });
+    await backstopped.setup("root-6", base, R1, user);
+    const timed = { ok: { output: "Command timed out after 0.3 seconds", returncode: 124, timed_out: true } };
+    const run = (id: string) => backstopped.perform("root-6", "run", { command: "sleep 5", workdir: null, timeout: 0.3 }, new AbortController().signal, id);
+    // Heard all along: its timeout and its margin, 0.5 s, and the second it slept.
+    const heard = setInterval(() => backstopped.heard(), 50);
+    let begun = performance.now();
+    const slept = run("op-20");
+    setTimeout(() => backstopped.woke(1_000), 100);
+    expect(await slept).toEqual(timed);
+    expect(performance.now() - begun).toBeGreaterThan(1_400);
+    clearInterval(heard);
+    // The host silent past 300 ms: due, it waits to hear the host, then gives it the margin again.
+    begun = performance.now();
+    const silent = run("op-21");
+    expect(await within(silent, 1_500)).toBe("no answer");
+    backstopped.heard();
+    expect(await silent).toEqual(timed);
+    expect(performance.now() - begun).toBeGreaterThan(1_650);
   });
 
   it("answers a run's cancel at once while its runner is stopped", async () => {

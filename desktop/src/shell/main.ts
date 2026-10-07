@@ -9,7 +9,7 @@ import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
 import {
-  app, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, safeStorage, session, shell, utilityProcess,
+  app, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, powerMonitor, safeStorage, session, shell, utilityProcess,
   type WebContents, webContents,
 } from "electron";
 
@@ -1518,6 +1518,8 @@ if (!app.requestSingleInstanceLock()) {
     });
     onSettingsKey(showSettings);
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
+    // The VM slept with the computer: at its wake its clock is set, and its keepalive starts afresh.
+    powerMonitor.on("resume", () => vm?.resume());
     const page = join(PAGES, "shell.html");
     main = new MainWindow({ states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed });
     wire(main, page);

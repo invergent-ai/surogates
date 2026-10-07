@@ -42,6 +42,9 @@ export type ToAgent =
   // Everything of a root ends, and its share's mount goes: the host is letting its folder
   // go, and removes the share from the guest next.
   | { type: "teardown"; id: number; root: string; share: Share }
+  // The computer woke: its clock now, in milliseconds since the epoch, and how long it slept.
+  // Every run's backstop in the guest falls that much later, whatever the guest's clock did.
+  | { type: "time"; id: number; now: number; slept: number }
   // The host's stop: every root ends, the sessions disk is written out, and the guest
   // powers off. Answered by the VM's exit.
   | { type: "shutdown"; id: number }

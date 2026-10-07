@@ -11,7 +11,7 @@ import { Control } from "./control.js";
 import { Network } from "./network.js";
 import { findPort, openPort } from "./port.js";
 import type { FromAgent } from "./protocol.js";
-import { CGROUPS, contain, enter, flushRoot, killRoot, powerOff, Roots, uidOf, unmountShare } from "./root.js";
+import { CGROUPS, contain, enter, flushRoot, killRoot, powerOff, Roots, setClock, uidOf, unmountShare } from "./root.js";
 
 // Anything the agent does not catch ends it at once, and with it tini and the guest
 // (vm/init). An exit would wait for each read of its ports in flight, which never returns,
@@ -52,7 +52,9 @@ const roots = new Roots({
   tunnels: (root, uid) => network.listen(root, uid),
   lost: (root) => say({ type: "lost", root }),
   handles: (root, handles, live) => say({ type: "handles", root, handles, live }),
+  // Past two of the host's pings unheard, it is asleep or gone (vm/manager.ts, PING_MS).
+  hostSilenceMs: 25_000,
 });
-const control = new Control(say, roots, { powerOff });
+const control = new Control(say, roots, { setClock, powerOff, woke: (ms) => roots.woke(ms), heard: () => roots.heard() });
 createInterface({ input: port, crlfDelay: Infinity }).on("line", (line) => control.receive(line));
 control.hello();

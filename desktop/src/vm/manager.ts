@@ -11,7 +11,7 @@ import { setTimeout as wait } from "node:timers/promises";
 import { Worker } from "node:worker_threads";
 
 import { BOOT_ID } from "../binding/folder.js";
-import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
+import { CANCELLED, SANDBOX_STOPPED, timedOut } from "../guest/command.js";
 import type { ProcessHandle } from "../guest/processes.js";
 import type { FromAgent, HostUser, Share } from "../guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
@@ -35,6 +35,9 @@ const SHARE_MS = 15_000;
 const FIRST_UID = 10_000;
 // From the shutdown asked to the VM's exit: past it, the VM is ended (Section 11, Lifecycle).
 const POWER_OFF_MS = 5_000;
+// This computer's wall clock past its monotonic one by more than this since the last look: it slept.
+const SLEPT_MS = 2_000;
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 export interface VmOptions extends Disks {
   run: string; // the backend's runtime folder, this user's own: on Linux, the sockets and pidfiles
@@ -196,6 +199,10 @@ export class Guest {
   private left = false;
   private readonly roots = new Map<string, Root>();
   private keepalive: NodeJS.Timeout | undefined;
+  // Pings in a row the agent has not answered.
+  private missed = 0;
+  // This computer's wall clock less its monotonic one, at the last look: the sleep is what it grew by since.
+  private offset = Date.now() - performance.now();
   private readonly shareMs: number;
   private readonly setupMs: number;
   private readonly powerOffMs: number;
@@ -223,11 +230,12 @@ export class Guest {
       if (entry) entry.setup = null;
     });
     control.onHandles((root, handles, live) => told(root, { handles, live }));
-    let missed = 0;
     let waiting = false;
     this.keepalive = setInterval(() => {
-      missed = waiting ? missed + 1 : 0;
-      if (missed >= MISSED) return this.lose();
+      // A tick may come before the wake's resume: the sleep is told whichever comes first.
+      this.wake();
+      this.missed = waiting ? this.missed + 1 : 0;
+      if (this.missed >= MISSED) return this.lose();
       if (waiting) return;
       waiting = true;
       void control.request({ type: "ping" }).then((pong) => {
@@ -271,8 +279,23 @@ export class Guest {
 
   // A run that answers carries what the root's connections could not reach since its last;
   // one that answers with an error leaves it for the next.
+  //
+  // A command's timeout is this computer's to keep, on its monotonic clock, which does not count
+  // its sleep: a command it slept through goes on at the wake, whatever the guest's clock did. At
+  // the timeout the command is cancelled in the guest, which ends it, and answered as timed out.
+  // The guest's own deadline is a backstop past it (guest/root.ts, Backstop).
   async op(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
-    const outcome = await this.control.op(root, kind, args, signal);
+    const { timeout } = args;
+    const timed = kind === "run" && typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0;
+    const expiry = new AbortController();
+    const timer = timed ? setTimeout(() => expiry.abort(), Math.min(timeout * 1000, MAX_TIMER_MS)) : undefined;
+    let outcome: Outcome;
+    try {
+      outcome = await this.control.op(root, kind, args, AbortSignal.any([signal, expiry.signal]));
+    } finally {
+      clearTimeout(timer);
+    }
+    if (timed && expiry.signal.aborted && !signal.aborted) outcome = timedOut(timeout);
     if (kind !== "run" || !("ok" in outcome)) return outcome;
     return withNotice(outcome, this.proxy.takeNotice(root));
   }
@@ -407,6 +430,25 @@ export class Guest {
     return this.roots.size === 0 && !this.ended;
   }
 
+  /**
+   * The computer woke: the guest is told the time and how long the computer slept, and the
+   * pings it missed meanwhile are not held against it.
+   */
+  resume(): void {
+    this.missed = 0;
+    this.wake(true);
+  }
+
+  // How long this computer slept since the last look, from its own two clocks, told the guest
+  // with the time when it slept, or when *asked* (a wake).
+  private wake(asked = false): void {
+    const offset = Date.now() - performance.now();
+    const slept = Math.max(0, offset - this.offset);
+    this.offset = offset;
+    if (this.ended || (!asked && slept < SLEPT_MS)) return;
+    void this.request({ type: "time", now: Date.now(), slept: slept < SLEPT_MS ? 0 : slept }, this.setupMs);
+  }
+
   private lose(): void {
     if (this.left) return;
     this.left = true;
@@ -479,6 +521,11 @@ export class VmManager {
     } finally {
       this.done();
     }
+  }
+
+  /** The computer woke: the guest that runs is told so. */
+  resume(): void {
+    void this.guest?.then((guest) => guest.resume(), () => {});
   }
 
   // Its guest's runtime folder goes with it.

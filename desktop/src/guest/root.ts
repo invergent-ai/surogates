@@ -76,10 +76,9 @@ const RUNNER_READY_MS = 5_000;
 // A runner that answers no question in this long is stopped, by one of its own
 // commands, or stuck in a stat of the folder that does not return: it is lost.
 const QUESTION_MS = 10_000;
-// How long past its timeout a run waits for its runner to report the command's
-// end. A runner that answers nothing, its loop blocked on a stalled stat or the
-// runner stopped by a command, holds no run longer than its timeout and this.
-const GRACE_MS = 2_000;
+// How far past a command's timeout its backstop in the guest falls (Backstop).
+const BACKSTOP_MS = 10_000;
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 // The commands' environment: the cloud's layout under the root's own HOME, and the user's names.
 // Their proxy variables name the root's runner's proxies, the commands' one way out; ALL_PROXY
@@ -152,12 +151,12 @@ async function mountShare(tag: string): Promise<string> {
   if (mounted.has(tag)) return share;
   await mkdir(share, { recursive: true });
   await chmod(SHARES, 0o700);
-  for (const deadline = Date.now() + MOUNT_MS; ;) {
+  for (const deadline = performance.now() + MOUNT_MS; ;) {
     try {
       await execute("/usr/bin/mount", ["-t", "virtiofs", "-o", "nosuid,nodev", tag, share]);
       break;
     } catch (error) {
-      if (Date.now() > deadline) throw error;
+      if (performance.now() > deadline) throw error;
       await new Promise((resolve) => setTimeout(resolve, MOUNT_RETRY_MS));
     }
   }
@@ -216,6 +215,11 @@ export async function powerOff(): Promise<void> {
   await flush(SESSIONS_DISK);
   await execute("/usr/bin/umount", [SESSIONS_DISK]).catch(() => {});
   await writeFile("/proc/sysrq-trigger", "o");
+}
+
+// The guest's clock set to *now*, milliseconds since the epoch.
+export async function setClock(now: number): Promise<void> {
+  await execute("/usr/bin/date", ["-u", "-s", `@${(now / 1000).toFixed(3)}`]);
 }
 
 // The root's runner in its own namespaces: mount, PID, IPC, UTS, network and
@@ -346,21 +350,78 @@ async function emptied(cgroup: string, ms = EMPTY_MS): Promise<void> {
   }
 }
 
-// *answer*, or the signal, or *ms* passing, whichever comes first: the runner's
-// view of the folder can stall, as a stat through virtiofs can.
-function first<T>(answer: Promise<T>, signal: AbortSignal, ms?: number): Promise<T | "cancelled" | "timeout"> {
+// *answer*, or the signal, or *late*, whichever comes first: the runner's view of the
+// folder can stall, as a stat through virtiofs can.
+function first<T>(answer: Promise<T>, signal: AbortSignal, late?: Promise<"timeout">): Promise<T | "cancelled" | "timeout"> {
   return new Promise((resolve) => {
     const done = (value: T | "cancelled" | "timeout") => {
-      clearTimeout(timer);
       signal.removeEventListener("abort", aborted);
       resolve(value);
     };
     const aborted = () => done("cancelled");
-    const timer = ms === undefined ? undefined : setTimeout(() => done("timeout"), Math.min(ms, 2 ** 31 - 1));
     if (signal.aborted) return done("cancelled");
     signal.addEventListener("abort", aborted, { once: true });
     void answer.then(done);
+    void late?.then(done);
   });
+}
+
+// What a run's backstop knows of the host: how long it has said nothing, and when it next speaks.
+export interface HostHeard {
+  silentFor(): number;
+  next(): Promise<void>;
+}
+
+/**
+ * A run's deadline in the guest, a backstop only (spec, Section 11, Lifecycle): this computer
+ * keeps the command's timeout on its own monotonic clock, which does not count its sleep, and
+ * ends the command there (vm/manager.ts, Guest.op). The backstop falls *margin* past that
+ * timeout, later by each time the computer slept (extend), and never while the host has been
+ * silent past *silence*: a guest whose clock counted the sleep wakes to find it due, and waits
+ * to hear the host, which ends the command itself if its time has come, then gives it the margin again.
+ */
+export class Backstop {
+  readonly fell: Promise<"timeout">;
+  private due: number;
+  private timer: NodeJS.Timeout | undefined;
+  private fall: () => void = () => {};
+  private ended = false;
+
+  constructor(ms: number, private readonly margin: number, private readonly host: HostHeard | null, private readonly silence: number) {
+    this.due = performance.now() + ms + margin;
+    this.fell = new Promise((resolve) => {
+      this.fall = () => resolve("timeout");
+    });
+    this.arm();
+  }
+
+  extend(ms: number): void {
+    this.due += ms;
+    this.arm();
+  }
+
+  end(): void {
+    this.ended = true;
+    clearTimeout(this.timer);
+  }
+
+  private arm(): void {
+    clearTimeout(this.timer);
+    if (this.ended) return;
+    this.timer = setTimeout(() => this.reached(), Math.min(Math.max(0, this.due - performance.now()), MAX_TIMER_MS));
+  }
+
+  private reached(): void {
+    if (this.host && this.host.silentFor() > this.silence) {
+      void this.host.next().then(() => {
+        this.due = Math.max(this.due, performance.now() + this.margin);
+        this.arm();
+      });
+      return;
+    }
+    if (performance.now() < this.due) return this.arm();
+    this.fall();
+  }
 }
 
 export class Root {
@@ -371,6 +432,8 @@ export class Root {
     readonly runner: SessionRunner,
     private readonly lose: () => Promise<void>,
     private readonly questionMs: number,
+    // A run's backstop, falling past its timeout of *ms* (Roots.backstop).
+    private readonly backstop: (ms: number) => Backstop,
   ) {}
 
   // Everything of the root ends; resolves once it has, and its runner has gone.
@@ -392,24 +455,28 @@ export class Root {
       const checked = runArgs(args);
       if (!("command" in checked)) return checked;
       // One for the whole run, its folder lookup and its command.
-      const deadline = Date.now() + checked.timeout * 1000 + GRACE_MS;
-      const { folder, home } = this.place;
-      const placed = await first(this.ask({ type: "place", id, folder, home, workdir: checked.workdir }), signal, checked.timeout * 1000);
-      if (placed === "cancelled") return CANCELLED;
-      if (placed === "timeout") return timedOut(checked.timeout);
-      if (!placed) return SANDBOX_STOPPED;
-      if (placed.type === "refused") return { error: placed.refusal };
-      if (placed.type !== "placed") return SANDBOX_STOPPED;
-      if (placed.unenterable) return ran(cannotEnter(placed.unenterable, placed.cwd), -1);
-      if (signal.aborted) return CANCELLED;
-      const child = this.runner.spawn({ id, command: checked.command, cwd: placed.cwd, env: {}, pty: false, stdin: false });
-      // The runner's report of its end, or the cancel, or the deadline. The kill
-      // waits in the runner's input, and a report after the answer settles nothing.
-      const ended = await first(supervise(child, checked.timeout, signal), signal, deadline - Date.now());
-      if (ended === "cancelled") return CANCELLED;
-      if (ended !== "timeout") return ended;
-      child.kill();
-      return timedOut(checked.timeout);
+      const backstop = this.backstop(checked.timeout * 1000);
+      try {
+        const { folder, home } = this.place;
+        const placed = await first(this.ask({ type: "place", id, folder, home, workdir: checked.workdir }), signal, backstop.fell);
+        if (placed === "cancelled") return CANCELLED;
+        if (placed === "timeout") return timedOut(checked.timeout);
+        if (!placed) return SANDBOX_STOPPED;
+        if (placed.type === "refused") return { error: placed.refusal };
+        if (placed.type !== "placed") return SANDBOX_STOPPED;
+        if (placed.unenterable) return ran(cannotEnter(placed.unenterable, placed.cwd), -1);
+        if (signal.aborted) return CANCELLED;
+        const child = this.runner.spawn({ id, command: checked.command, cwd: placed.cwd, env: {}, pty: false, stdin: false });
+        // The runner's report of its end, or the cancel, or the backstop. The kill
+        // waits in the runner's input, and a report after the answer settles nothing.
+        const ended = await first(supervise(child, signal), signal, backstop.fell);
+        if (ended === "cancelled") return CANCELLED;
+        if (ended !== "timeout") return ended;
+        child.kill();
+        return timedOut(checked.timeout);
+      } finally {
+        backstop.end();
+      }
     });
   }
 
@@ -457,6 +524,10 @@ export interface RootsOptions {
   // The root's socket for its connections to the host proxy, its guest user's, made before its namespaces (Network.listen); resolves with what closes it.
   tunnels?(root: string, uid: number): Promise<() => void>;
   questionMs?: number;
+  // How far past a run's timeout its backstop falls: BACKSTOP_MS by default.
+  backstopMs?: number;
+  // How long the host may say nothing before a backstop waits to hear it; without it, none waits (the tests).
+  hostSilenceMs?: number;
 }
 
 // The roots set up in this guest, by root session id.
@@ -473,8 +544,41 @@ export class Roots {
   private readonly registries = new Map<string, Processes>();
   // The roots whose end left something running that would not end.
   private readonly held = new Set<string>();
+  // Every run's backstop in this guest, and when the host was last heard, and who waits to hear it next.
+  private readonly backstops = new Set<Backstop>();
+  private heardAt = performance.now();
+  private readonly hearing = new Set<() => void>();
+  private readonly host: HostHeard = {
+    silentFor: () => performance.now() - this.heardAt,
+    next: () => new Promise((resolve) => void this.hearing.add(resolve)),
+  };
 
   constructor(private readonly options: RootsOptions) {}
+
+  /** The host spoke: a backstop that waited to hear it goes on. */
+  heard(): void {
+    this.heardAt = performance.now();
+    for (const go of this.hearing) go();
+    this.hearing.clear();
+  }
+
+  /** The computer slept *ms*: every run's backstop falls that much later. */
+  woke(ms: number): void {
+    for (const backstop of this.backstops) backstop.extend(ms);
+  }
+
+  // A run's backstop, kept in the set until it ends.
+  private backstop(ms: number): Backstop {
+    const silence = this.options.hostSilenceMs;
+    const made = new Backstop(ms, this.options.backstopMs ?? BACKSTOP_MS, silence === undefined ? null : this.host, silence ?? 0);
+    this.backstops.add(made);
+    const end = made.end.bind(made);
+    made.end = () => {
+      this.backstops.delete(made);
+      end();
+    };
+    return made;
+  }
 
   uid(root: string): number {
     return this.options.uid(root);
@@ -537,7 +641,7 @@ export class Roots {
       unlisten();
       throw error;
     }
-    listed = new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS);
+    listed = new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS, (ms) => this.backstop(ms));
     if (!this.registries.has(root)) this.registries.set(root, this.registry(root, ended));
     this.roots.set(root, listed);
   }

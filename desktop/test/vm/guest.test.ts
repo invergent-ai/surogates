@@ -943,6 +943,21 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     ].join(" && "))).toEqual({ ok: { output: "configured\nbuilt\ntool\n", returncode: 0, timed_out: false } });
   });
 
+  it("sets its clock to the time the host tells it at a wake, which its commands then see", async () => {
+    const ahead = Date.now() + 3_600_000;
+    expect(await guest.request({ type: "time", now: ahead, slept: 0 })).toMatchObject({ type: "done" });
+    const said = await run("date +%s") as { ok: { output: string } };
+    expect(Math.abs(Number(said.ok.output) - ahead / 1000)).toBeLessThan(5);
+    expect(await guest.request({ type: "time", now: Date.now(), slept: 0 })).toMatchObject({ type: "done" });
+  });
+
+  it("is timed out by this computer, which ends the command in the guest", async () => {
+    const begun = performance.now();
+    expect(await run("sleep 311", ROOT, 1)).toEqual({ ok: { output: "Command timed out after 1 seconds", returncode: 124, timed_out: true } });
+    expect(performance.now() - begun).toBeLessThan(3_000);
+    expect(await run("sleep 0.5; pgrep -c -f '^sleep 311$' || true")).toMatchObject({ ok: { output: "0\n" } });
+  });
+
   it("notes no shortage of memory for a background process a command ended with SIGKILL", async () => {
     const started = await guest.op(ROOT, "start", background("exec sleep 311"), signal()) as { ok: { session_id: string; pid: number } };
     expect(await run(`sleep 0.5; kill -KILL ${started.ok.pid}`)).toMatchObject({ ok: { returncode: 0 } });
@@ -1487,6 +1502,47 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
       await two?.stop();
       rmSync(runtime, { recursive: true, force: true });
     }
+  });
+
+  // M10, by hand: the computer sleeps during a command, put to sleep by `systemctl suspend` and
+  // woken by its user after at least three minutes. Behind SUROGATE_SUSPEND_TEST=1 as well: never on a
+  // computer others are using, as every process on it sleeps too. It checks the hypothesis that the
+  // guest's kvm-clock counts the sleep (its monotonic clock jumps, its wall clock does not lag), and
+  // pins what holds either way: a command the computer slept through is not timed out for the sleep.
+  it.skipIf(process.env.SUROGATE_SUSPEND_TEST !== "1")("finishes a command the computer slept through once it wakes, untimed-out for the sleep, its guest kept (M10)", { timeout: 900_000 }, async () => {
+    // A manager of its own, with the keepalive's own pace.
+    await managers.at(-1)?.stop();
+    managers.push(new VmManager(options));
+    const a = join(dir, "a");
+    const clocks = async () => {
+      const said = await op(ROOT, a, "run", { command: "cut -d' ' -f1 /proc/uptime; date +%s.%N", workdir: null, timeout: 10 }) as { ok: { output: string } };
+      const [uptime = 0, wall = 0] = said.ok.output.trim().split("\n").map(Number);
+      return { uptime, wall, hostWall: Date.now() / 1000, hostAwake: performance.now() / 1000 };
+    };
+    const qemu = (await clocks(), qemuPid());
+    const before = await clocks();
+    // Its timeout, 120 s, past its own 60 s and short of the sleep: a timeout kept on a clock that counted the sleep would end it.
+    const running = op(ROOT, a, "run", { command: "sleep 60; echo slept", workdir: null, timeout: 120 });
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    spawnSync("systemctl", ["suspend"]);
+    // Asleep, the wall clock goes on and the monotonic one does not: at the wake they are apart by the sleep.
+    const asleep = () => Date.now() / 1000 - before.hostWall - (performance.now() / 1000 - before.hostAwake);
+    await until(() => asleep() > 10, 600_000);
+    // As the shell does at powerMonitor's resume: the keepalive's tick may have told the guest first.
+    managers.at(-1)!.resume();
+    const ran = await running as { ok: { output: string; returncode: number; timed_out: boolean } };
+    const after = await clocks();
+    const awake = after.hostAwake - before.hostAwake;
+    console.log(
+      `M10: asleep ${asleep().toFixed(0)} s, ${awake.toFixed(0)} s awake; the guest's monotonic clock moved ${(after.uptime - before.uptime).toFixed(0)} s ` +
+      `(${(after.uptime - before.uptime - awake).toFixed(0)} s past the time awake: the sleep, if kvm-clock counts it); its wall clock is ` +
+      `${(after.wall - after.hostWall).toFixed(2)} s off this computer's; the command answered ${JSON.stringify(ran.ok)}`,
+    );
+    // Past the command's timeout and the guest's backstop, 130 s, or the run proves nothing of either.
+    expect(asleep()).toBeGreaterThan(150);
+    expect(ran.ok).toEqual({ output: "slept\n", returncode: 0, timed_out: false });
+    expect(qemuPid()).toBe(qemu);
+    expect(Math.abs(after.wall - after.hostWall)).toBeLessThan(2);
   });
 
   it("takes its guest's sockets and pidfiles with it when it stops", async () => {

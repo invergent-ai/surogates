@@ -376,6 +376,33 @@ describe("a manager that runs on", () => {
     return vm;
   };
 
+  it("starts no manager for a wake when none runs", () => {
+    let starts = 0;
+    const vm = vmOf(() => {
+      starts += 1;
+      return fake({ pongs: true, held: [] }, [], [], { count: 0 });
+    });
+    vm.resume();
+    expect(starts).toBe(0);
+  });
+
+  it("is kept at the computer's wake, told it, and the pings it missed asleep not held against it", async () => {
+    const answers = { pongs: false, held: [] as Array<() => void> };
+    const sent: ToManager[] = [];
+    const killed = { count: 0 };
+    const vm = vmOf(() => fake(answers, sent, [], killed));
+    const running = vm.perform(operation(), signal());
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    vm.resume();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    answers.pongs = true;
+    for (const pong of answers.held.splice(0)) pong();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(killed.count).toBe(0);
+    expect(sent.filter((message) => message.type === "resume")).toHaveLength(1);
+    expect(await within(running, 100)).toBe("no answer");
+  });
+
   it("is killed once it has answered no ping three times, what it ran answered as stopped by the sandbox", async () => {
     const killed = { count: 0 };
     const vm = vmOf(() => fake({ pongs: false, held: [] }, [], [], killed));

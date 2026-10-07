@@ -61,6 +61,8 @@ export type ToManager =
   | { type: "answer"; id: number; allow: boolean }
   // The keepalive, answered by a pong.
   | { type: "ping" }
+  // The computer woke from sleep (Electron's powerMonitor).
+  | { type: "resume" }
   | { type: "stop" };
 
 export type FromManager =
@@ -194,6 +196,12 @@ export class VmClient {
     const gone = new Promise<void>((resolve) => manager.onExit(resolve));
     manager.kill();
     await gone;
+  }
+
+  /** The computer woke: its manager is told, and the pings it missed meanwhile are not held against it. */
+  resume(): void {
+    this.missed = 0;
+    if (!this.stopping) this.manager?.send({ type: "resume" });
   }
 
   /** Asked about each root's destination off the package hosts, whichever device's it is. Returns what stops it. */

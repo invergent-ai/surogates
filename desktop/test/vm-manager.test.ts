@@ -77,7 +77,7 @@ const fakeVm = (roots?: ControlRoots, powers = true): BootVm => async () => {
     gone("");
   };
   if (roots) {
-    const machine = powers ? { powerOff: kill } : undefined;
+    const machine = powers ? { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill } : undefined;
     const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots, machine);
     createInterface({ input: guest }).on("line", (line) => control.receive(line));
     control.hello();
@@ -880,4 +880,89 @@ describe("a guest's lifecycle", () => {
     expect(events.slice(0, 3)).toEqual(["boot", "gone", "boot"]);
     await manager.stop();
   });
+});
+
+describe("a command's timeout", () => {
+  it("is this computer's to keep: at it the command is cancelled in the guest and answered as timed out", async () => {
+    let cancelled = false;
+    // An agent whose run never answers, as one whose backstop lies past the timeout.
+    const roots: ControlRoots = {
+      uid: () => 10_000, setup: async () => {}, teardown: async () => {},
+      perform: (_root, _kind, _args, signal) => new Promise((resolve) => signal.addEventListener("abort", () => {
+        cancelled = true;
+        resolve(CANCELLED);
+      })),
+    };
+    const manager = new VmManager(options(), fakeVm(roots));
+    const begun = performance.now();
+    const folder = { path: dir, ...statSync(dir) };
+    expect(await manager.perform({ id: "1", root: "root-1", folder, kind: "run", args: { command: "sleep 9", workdir: null, timeout: 0.3 } }, new AbortController().signal))
+      .toEqual({ ok: { output: "Command timed out after 0.3 seconds", returncode: 124, timed_out: true } });
+    expect(performance.now() - begun).toBeLessThan(1_000);
+    await until(() => cancelled);
+    await manager.stop();
+  });
+});
+
+describe("this computer's sleep", () => {
+  it("is told the guest at the next look, from this computer's own two clocks, with how long it slept", async () => {
+    const asked: Array<{ type: string; slept?: number }> = [];
+    const listening: BootVm = async (...args) => {
+      const vm = await fakeVm({ uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) })(...args);
+      createInterface({ input: agent as Duplex }).on("line", (line) => asked.push(JSON.parse(line) as { type: string; slept?: number }));
+      return vm;
+    };
+    const guest = await Guest.boot(listening, { ...options(), pingMs: 100 });
+    // The wall clock moves on 90 s, the monotonic one does not: as across a sleep.
+    const now = Date.now.bind(Date);
+    const spied = vi.spyOn(Date, "now").mockImplementation(() => now() + 90_000);
+    try {
+      await until(() => asked.some((message) => message.type === "time"));
+    } finally {
+      spied.mockRestore();
+    }
+    expect(asked.find((message) => message.type === "time")?.slept).toBeGreaterThan(89_000);
+    await guest.stop();
+  });
+});
+
+describe("a guest frozen while the computer slept", () => {
+  // A guest whose agent's answers wait in its port while it is frozen, and come at once when it
+  // thaws; *asked* gets each time request, and *gone* its VM's end.
+  const freezable = (frozen: { now: boolean; held: string[] }, asked: unknown[], gone: string[]): BootVm => async (...args) => {
+    const vm = await fakeVm({ uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) })(...args);
+    void vm.exited.then(() => gone.push("gone"));
+    const written = (agent as Duplex).write.bind(agent);
+    (agent as Duplex).write = ((line: string) => {
+      if (frozen.now) frozen.held.push(line);
+      else written(line);
+      return true;
+    }) as Duplex["write"];
+    createInterface({ input: agent as Duplex }).on("line", (line) => {
+      const message = JSON.parse(line) as { type: string };
+      if (message.type === "time") asked.push(message);
+    });
+    return vm;
+  };
+
+  for (const resumed of [true, false]) {
+    it(resumed ? "is kept at its wake, the pings it missed asleep not held against it, and told the time" : "is lost past three missed pings when nothing says the computer slept", async () => {
+      const frozen = { now: false, held: [] as string[] };
+      const asked: unknown[] = [];
+      const gone: string[] = [];
+      const manager = new VmManager({ ...options(), pingMs: 200 }, freezable(frozen, asked, gone));
+      const folder = { path: dir, ...statSync(dir) };
+      expect(await manager.perform({ id: "1", root: "root-1", folder, kind: "which", args: {} }, new AbortController().signal)).toEqual({ ok: true });
+      frozen.now = true;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      if (resumed) manager.resume();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      frozen.now = false;
+      for (const line of frozen.held.splice(0)) (agent as Duplex).write(line);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(gone).toEqual(resumed ? [] : ["gone"]);
+      if (resumed) expect(asked).toEqual([expect.objectContaining({ type: "time", now: expect.closeTo(Date.now(), -4) })]);
+      await manager.stop();
+    });
+  }
 });
