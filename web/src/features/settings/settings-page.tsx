@@ -9,6 +9,7 @@ import {
   Code2Icon,
   CreditCardIcon,
   GlobeIcon,
+  LaptopIcon,
   LinkIcon,
   Loader2Icon,
   type LucideIcon,
@@ -20,6 +21,7 @@ import { toast } from "sonner";
 import { CodingAgentsPanel } from "@invergent/agent-chat-react";
 import { surogatesWebChatAdapter } from "@/features/chat";
 import { BrowserProfilesTab } from "./browser-profiles-tab";
+import { DevicesTab } from "./devices-tab";
 import { PlanUsageTab } from "./plan-usage-tab";
 import { PasswordSection } from "./password-section";
 import { useAppStore } from "@/stores/app-store";
@@ -68,7 +70,8 @@ type TabId =
   | "channels"
   | "plan"
   | "coding-agents"
-  | "browser-profiles";
+  | "browser-profiles"
+  | "devices";
 
 const TAB_META: Record<
   TabId,
@@ -98,6 +101,11 @@ const TAB_META: Record<
     label: "Browser Profiles",
     blurb: "Saved logins its browser can reuse",
     Icon: GlobeIcon,
+  },
+  devices: {
+    label: "Devices",
+    blurb: "Computers that can work on your folders",
+    Icon: LaptopIcon,
   },
 };
 
@@ -175,6 +183,8 @@ export function SettingsPage() {
   // (not yet loaded / older backend) also hides it, since we cannot
   // claim a channel exists.
   const channelsEnabled = (linkableChannels?.length ?? 0) > 0;
+  // Devices only where the agent says it has local folders: an older one says nothing, and has no computers.
+  const devicesEnabled = useAppStore((s) => s.desktopSessions) === true;
 
   // Load sidebar + capability data.
   useEffect(() => {
@@ -198,6 +208,7 @@ export function SettingsPage() {
     "plan",
     ...(codingAgentsEnabled ? (["coding-agents"] as const) : []),
     ...(browserProfilesEnabled ? (["browser-profiles"] as const) : []),
+    ...(devicesEnabled ? (["devices"] as const) : []),
   ];
 
   // ── Profile tab state ──────────────────────────────────────────────
@@ -307,6 +318,7 @@ export function SettingsPage() {
                   Browser Profiles
                 </TabsTrigger>
               )}
+              {devicesEnabled && <TabsTrigger value="devices">Devices</TabsTrigger>}
             </TabsList>
 
             {!sectionOpen && (
@@ -502,6 +514,11 @@ export function SettingsPage() {
             {browserProfilesEnabled && (
               <TabsContent value="browser-profiles">
                 <BrowserProfilesTab />
+              </TabsContent>
+            )}
+            {devicesEnabled && (
+              <TabsContent value="devices">
+                <DevicesTab />
               </TabsContent>
             )}
             </div>
