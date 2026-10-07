@@ -19,8 +19,12 @@ if (origin !== undefined && window.top === window && location.origin === origin)
   const subscriptions = new Map<number, () => void>();
   // Calls that reach this page before it serves its projects, as one sent while its load
   // commits does: answered once it serves them, or refused once it says it serves none. One
-  // whose deadline has passed by then was refused by the main process already: it never runs.
-  const early: Array<Extract<ToPage, { type: "call" }>> = [];
+  // whose deadline has passed by then was refused by the main process already: it never runs,
+  // and goes from the hold as the next call comes.
+  let early: Array<Extract<ToPage, { type: "call" }>> = [];
+  // The page said it serves none (registerProjects(null)): a call is refused at once, not held.
+  let servesNone = false;
+  const NONE = "The agent's page serves no projects";
   // A source's methods, which must be its own: what the page hands over is a copy, and keeps no prototype.
   const METHODS = ["list", "get", "create", "update", "archive", "threads", "resolve", "reopen", "library", "routines", "subscribe"] as const;
   const answer = (id: number, outcome: { ok: unknown } | { error: string }) => ipcRenderer.send("desktop:projects-answer", id, outcome);
@@ -38,7 +42,9 @@ if (origin !== undefined && window.top === window && location.origin === origin)
       subscriptions.delete(message.id);
     } else if (!source) {
       // A subscription is made again once the page serves: the main process follows anew then.
-      if (message.type === "call") early.push(message);
+      if (message.type !== "call") return;
+      if (servesNone) answer(message.id, { error: NONE });
+      else early = [...early.filter((held) => Date.now() < held.deadline), message];
     } else if (message.type === "subscribe") {
       subscriptions.set(message.id, source.subscribe(message.projectId, (threadId) => {
         ipcRenderer.send("desktop:projects-changed", message.id, threadId);
@@ -71,10 +77,13 @@ if (origin !== undefined && window.top === window && location.origin === origin)
       for (const end of subscriptions.values()) end();
       subscriptions.clear();
       projects = source;
-      for (const message of early.splice(0)) {
+      servesNone = source === null;
+      const held = early;
+      early = [];
+      for (const message of held) {
         if (Date.now() >= message.deadline) continue;
         if (source) called(source, message);
-        else answer(message.id, { error: "The agent's page serves no projects" });
+        else answer(message.id, { error: NONE });
       }
       return ipcRenderer.invoke("desktop:registerProjects", source !== null);
     },

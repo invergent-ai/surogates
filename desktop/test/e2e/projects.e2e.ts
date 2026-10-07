@@ -316,6 +316,15 @@ describe("the page's projects source", () => {
     expect(await held).toEqual({ error: "The agent's page serves no projects" });
   });
 
+  it("refuses at once a call that comes after the page said it serves none, and holds none", async () => {
+    const { shell, client } = await unserved();
+    await client.evaluate(() => window.surogateDesktop!.registerProjects(null));
+    const started = Date.now();
+    expect(await callPage(shell, { id: 999_991, method: "list", args: [], deadline: Date.now() + 60_000 }))
+      .toEqual({ error: "The agent's page serves no projects" });
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   it("answers a call that reaches the page before it serves, once it serves, and drops one whose time ran out", async () => {
     // The page serves its projects only once the test says so.
     agent.registerAfterMs = -1;
