@@ -59,12 +59,15 @@ export async function quit(shell: ElectronApplication | undefined): Promise<void
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
 }
 
-/** Launch the shell with its state under *home*; *env* adds to its environment. */
-export function launch(home: string, env: Record<string, string> = {}): Promise<ElectronApplication> {
+/**
+ * Launch the shell with its state under *home*; *env* adds to its environment, and *args* to its
+ * arguments, as the system adds a link it opens.
+ */
+export function launch(home: string, env: Record<string, string> = {}, args: string[] = []): Promise<ElectronApplication> {
   return _electron.launch({
     executablePath: ELECTRON,
     // The basic store: no test leaves an item in the user's keyring.
-    args: [MAIN, "--password-store=basic"],
+    args: [MAIN, "--password-store=basic", ...args],
     env: { ...shellEnv(home), ...env },
     // Playwright adds --no-sandbox unless told: the app never runs without its sandbox.
     chromiumSandbox: true,

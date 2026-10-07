@@ -29,6 +29,7 @@ import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
 import { reauthorize, rebind, register } from "./computer.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
+import { linkIn, type OpenLink } from "./deep-link.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { letWindowClose, MainWindow } from "./main-window.js";
 import { appMenu, trayIcon, trayMenu } from "./menus.js";
@@ -1025,6 +1026,56 @@ function open(window: MainWindow, agent: Agent): void {
   });
 }
 
+// A link being opened: one that comes meanwhile only shows the window.
+let linking = false;
+
+/** Connect to the agent at *address*, once the user confirms it natively: why it did not, or null. One connection at a time. */
+async function connectTo(address: string): Promise<string | null> {
+  if (agents.get()) return "This app is already connected to an agent";
+  if (connecting) return "Surogate is already connecting";
+  connecting = true;
+  try {
+    const agent = await connectAgent(address, { get: getFollowing, store: agents, confirm: confirmAgent });
+    if (agent && main) open(main, agent);
+    changed();
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  } finally {
+    connecting = false;
+  }
+}
+
+/**
+ * Open a surogate:// link the system handed the app, in its window: the agent it names, at the page
+ * it names. An agent new to the app is connected to once the user confirms it, as the first run's
+ * Connect is; another agent than the one added is said, and opened not: the app works for one agent.
+ */
+async function openDeepLink(link: OpenLink): Promise<void> {
+  if (!main || leaving) return;
+  main.show();
+  // One link at a time: one that comes while a link, or the first run's Connect, is asked only shows the window.
+  if (linking || connecting) return;
+  linking = true;
+  try {
+    const agent = agents.get();
+    const host = new URL(link.origin).host;
+    if (!agent) {
+      const refused = await connectTo(link.origin);
+      if (refused) await ask({ type: "warning", message: `Surogate did not connect to ${host}`, detail: refused, buttons: ["OK"], noLink: true });
+    } else if (agent.origin !== link.origin) {
+      await ask({
+        type: "info", message: `Surogate works for ${agent.name}`,
+        detail: `This link is for ${host}. Remove ${agent.name} from Surogate to connect to another agent.`, buttons: ["OK"], noLink: true,
+      });
+    } else if (link.path !== "/") {
+      goWeb(link.path);
+    }
+  } finally {
+    linking = false;
+  }
+}
+
 async function confirmAgent(agent: Agent, typed: string): Promise<boolean> {
   const redirected = typed === agent.origin ? "" : `${typed} sent Surogate to ${agent.origin}. `;
   const options = {
@@ -1443,21 +1494,9 @@ function wire(window: MainWindow, page: string): void {
   };
   handle("shell:state", state);
   // One connection at a time: a second Enter while the first is asked waits for none.
-  handle("shell:connect", async (address) => {
-    if (agents.get()) return "This app is already connected to an agent";
-    if (connecting) return "Surogate is already connecting";
+  handle("shell:connect", (address) => {
     if (typeof address !== "string" || address.length > 2048) return "That is not a web address";
-    connecting = true;
-    try {
-      const agent = await connectAgent(address, { get: getFollowing, store: agents, confirm: confirmAgent });
-      if (agent) open(window, agent);
-      changed();
-      return null;
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error);
-    } finally {
-      connecting = false;
-    }
+    return connectTo(address);
   });
   handle("shell:sign-in", () => {
     const agent = agents.get();
@@ -1655,8 +1694,13 @@ async function quit(): Promise<void> {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on("second-instance", () => {
-    if (!leaving) main?.show();
+  // A second launch shows the window, and hands it the link it was started with, if any; once the quit
+  // goes on, it does neither.
+  app.on("second-instance", (_event, argv) => {
+    if (leaving) return;
+    main?.show();
+    const link = linkIn(argv);
+    if (link) void openDeepLink(link).catch(report);
   });
   // The device link stays up with the window closed (spec, Section 7).
   app.on("window-all-closed", () => {});
@@ -1711,15 +1755,23 @@ if (!app.requestSingleInstanceLock()) {
       rmSync(join(root, "devices", owed.deviceId), { recursive: true, force: true });
       revokeLater(owed);
     }
+    // The link the app was started with, once its window can show it.
+    const launched = linkIn(process.argv);
     const agent = agents.get();
-    if (!agent) return;
+    if (!agent) {
+      if (launched) void openDeepLink(launched).catch(report);
+      return;
+    }
     const remembered = sessionStore.get();
     if (remembered?.origin === agent.origin && remembered.agentId === agent.agentId) startSession(remembered);
     // Gated before the web client is attached: with nobody signed in, it never shows.
     changed();
     // A window no sign-in of the app's owns has nobody signed in: whatever an older one left there goes.
     const shown = main;
-    void (signedIn ? Promise.resolve() : clearWindow(agent)).catch(report).then(() => open(shown, agent));
+    void (signedIn ? Promise.resolve() : clearWindow(agent)).catch(report).then(() => {
+      open(shown, agent);
+      if (launched) void openDeepLink(launched).catch(report);
+    });
     kept = stored.find((credential) => !credential.revoking && credential.origin === agent.origin && credential.agentId === agent.agentId) ?? null;
     if (live(kept)) void startStack(agent, kept).catch(report);
     // An earlier try to add this computer did not end in a device: try again, once.
