@@ -117,7 +117,10 @@ export class BrowserProxy {
 
   close(): Promise<void> {
     for (const connection of this.carried) connection.destroy();
-    return new Promise((resolve) => this.server.close(() => resolve()));
+    const closed = new Promise<void>((resolve) => this.server.close(() => resolve()));
+    // Each of the browser's connections ends now, one kept alive too, not at its keep-alive timeout.
+    this.server.closeAllConnections();
+    return closed;
   }
 
   private keep(connection: Duplex): void {

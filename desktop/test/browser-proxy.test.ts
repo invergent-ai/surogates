@@ -1,4 +1,4 @@
-import { createServer as createHttp, type IncomingHttpHeaders, request, type Server as HttpServer } from "node:http";
+import { Agent, createServer as createHttp, type IncomingHttpHeaders, request, type Server as HttpServer } from "node:http";
 import { connect as connectTcp, createServer, type Server, type Socket } from "node:net";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -303,6 +303,21 @@ describe("the browser's proxy", () => {
     expect(proxy.checked("page0")).toBe(false);
     expect(proxy.checked("page1")).toBe(true);
     expect(proxy.checked(`page${CHECKS_KEPT}`)).toBe(true);
+  });
+
+  it("closes at once, with a browser's connection kept alive and a plain request still waiting on its site", async () => {
+    const kept = new Agent({ keepAlive: true });
+    await new Promise((done) => {
+      request({ host: "127.0.0.1", port, path: "http://example.com/", headers: { host: "example.com" }, agent: kept }, (answer) => answer.resume().on("end", done)).end();
+    });
+    const waiting = request({ host: "127.0.0.1", port, path: "http://example.com/never", headers: { host: "example.com" }, agent: new Agent({ keepAlive: true }) });
+    waiting.on("error", () => {});
+    waiting.end();
+    while (!seen.some(({ url }) => url === "/never")) await sleep(5);
+    const started = performance.now();
+    await proxy.close();
+    expect(performance.now() - started).toBeLessThan(1_000);
+    kept.destroy();
   });
 
   it("answers 400 for what is not a proxy's request", async () => {
