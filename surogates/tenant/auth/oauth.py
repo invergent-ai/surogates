@@ -6,7 +6,8 @@ A spent token presented again means the token has two holders, so the whole
 family is revoked, and so is every token issued in it later (RFC 9700,
 section 4.14.2).  A family ends FAMILY_LIFETIME after its browser sign-in,
 and when the computer it is bound to is revoked (``surogates.devices.store``).
-Only a token's SHA-256 digest is stored.
+The desktop's window has a web session of the same sign-in (``sid``), which
+ends with it.  Only a token's SHA-256 digest is stored.
 """
 
 from __future__ import annotations
@@ -106,6 +107,18 @@ class OAuthTokens:
             ))
             await db.commit()
         return RefreshGrant(spent.org_id, spent.user_id, spent.auth_time, spent.family_id, successor)
+
+    async def live(self, family_id: UUID) -> bool:
+        """Whether the sign-in *family_id* still lasts: not revoked, within FAMILY_LIFETIME, its account not deleted.
+
+        The desktop's window holds a web session of the same sign-in, which refreshes only while this is true.
+        """
+        async with self._sf() as db:
+            revoked, auth_time = (await db.execute(
+                select(func.bool_or(OAuthRefreshToken.revoked_at.is_not(None)), func.min(OAuthRefreshToken.auth_time))
+                .where(OAuthRefreshToken.family_id == family_id)
+            )).one()
+        return auth_time is not None and not revoked and auth_time > time.time() - FAMILY_LIFETIME.total_seconds()
 
     async def bind(self, family_id: UUID, device_id: UUID) -> None:
         """Bind a sign-in to the computer it added or restored: revoking the computer ends it."""

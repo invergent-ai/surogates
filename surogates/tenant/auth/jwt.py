@@ -239,10 +239,12 @@ def create_refresh_token(
     expires_days: int = 7,
     *,
     auth_time: int | None = None,
+    family_id: UUID | None = None,
 ) -> str:
     """Create a long-lived refresh token (carries no permissions).
 
     *auth_time* is when the user signed in: the access tokens it refreshes carry it.
+    *family_id* (``sid``) is the OAuth sign-in it belongs to: it refreshes only while that sign-in lasts.
     """
     now = int(time.time())
     payload: dict[str, Any] = {
@@ -256,6 +258,8 @@ def create_refresh_token(
     }
     if auth_time is not None:
         payload["auth_time"] = auth_time
+    if family_id is not None:
+        payload["sid"] = str(family_id)
     return jwt.encode(payload, _get_secret(), algorithm=_ALGORITHM)
 
 

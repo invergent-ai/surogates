@@ -37,6 +37,7 @@ from surogates.tenant.auth.jwt import (
     decode_token,
 )
 from surogates.tenant.auth.middleware import get_current_tenant
+from surogates.tenant.auth.oauth import OAuthTokens
 from surogates.tenant.context import TenantContext
 from surogates.tenant.models import UserResponse
 
@@ -599,6 +600,15 @@ async def refresh(body: RefreshRequest, request: Request) -> AccessTokenResponse
     org_id = UUID(payload["org_id"])
     user_id = UUID(payload["user_id"])
 
+    # Surogate Desktop's window holds a session of the desktop's sign-in (sid): it ends with it.
+    sid = payload.get("sid")
+    family_id = UUID(sid) if isinstance(sid, str) else None
+    if family_id is not None and not await OAuthTokens(request.app.state.session_factory).live(family_id):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="This sign-in has ended. Sign in again from Surogate Desktop.",
+        )
+
     # The sign-in's time, not the refresh's: a refresh is not a sign-in.
     signed_in = payload.get("auth_time")
     access_token = create_access_token(
@@ -606,6 +616,7 @@ async def refresh(body: RefreshRequest, request: Request) -> AccessTokenResponse
         user_id=user_id,
         permissions=USER_PERMISSIONS,
         auth_time=signed_in if isinstance(signed_in, int) else None,
+        family_id=family_id,
     )
 
     return AccessTokenResponse(access_token=access_token)

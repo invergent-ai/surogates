@@ -120,8 +120,9 @@ async def authorize(body: AuthorizeRequest, request: Request, ctx: AgentRuntime,
     if not _STATE.fullmatch(body.state) or not _CHALLENGE.fullmatch(body.code_challenge):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This sign-in request is malformed.")
     user_id = _user_of(tenant, ctx)
-    # Only the user's own sign-in in a browser allows the desktop: never a token the desktop holds.
-    if tenant.client_id is not None:
+    # Only the user's own sign-in in a browser allows the desktop: never a token of the desktop's
+    # sign-in, whether the desktop holds it or its window does.
+    if tenant.client_id is not None or tenant.oauth_family_id is not None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Allow Surogate Desktop from your browser's own sign-in.")
     if body.decision == "deny":
         return AuthorizeResponse(redirect_to=f"{body.redirect_uri}?{urlencode({'error': 'access_denied', 'state': body.state})}")
@@ -211,10 +212,17 @@ class WebCode(BaseModel):
 async def web_code(request: Request, ctx: AgentRuntime, tenant: Tenant) -> WebCode:
     """A one-time code for the desktop's window: its web client exchanges it for a session of its own."""
     user_id = _user_of(tenant, ctx)
-    if tenant.client_id != DESKTOP_CLIENT or tenant.auth_time is None:
+    family_id = tenant.oauth_family_id
+    if tenant.client_id != DESKTOP_CLIENT or tenant.auth_time is None or family_id is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only Surogate Desktop's own sign-in gives its window a session.")
+    # An access token outlives its sign-in by minutes: it mints nothing that would outlive it more.
+    if not await OAuthTokens(request.app.state.session_factory).live(family_id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This sign-in has ended. Sign in again from Surogate Desktop.")
     code = secrets.token_urlsafe(32)
-    record = {"org_id": str(tenant.org_id), "user_id": str(user_id), "auth_time": tenant.auth_time, "agent_id": ctx.agent_id}
+    record = {
+        "org_id": str(tenant.org_id), "user_id": str(user_id), "auth_time": tenant.auth_time, "agent_id": ctx.agent_id,
+        "family_id": str(family_id),
+    }
     await request.app.state.redis.set(_web_code_key(code), json.dumps(record), ex=CODE_TTL_S, nx=True)
     return WebCode(code=code)
 
@@ -226,10 +234,12 @@ async def web_session(body: WebCode, request: Request, ctx: AgentRuntime) -> Tok
     record = json.loads(raw) if raw is not None else None
     if record is None or record["agent_id"] != ctx.agent_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This sign-in code is not valid. Sign in again from Surogate.")
-    org_id, user_id = UUID(record["org_id"]), UUID(record["user_id"])
+    org_id, user_id, family_id = UUID(record["org_id"]), UUID(record["user_id"]), UUID(record["family_id"])
     if not await _user_exists(request, org_id, user_id):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This sign-in code is not valid. Sign in again from Surogate.")
+    # The desktop's sign-in (sid), but not its client: the window's session ends with that sign-in.
+    signed_in = {"auth_time": record["auth_time"], "family_id": family_id}
     return TokenResponse(
-        access_token=create_access_token(org_id, user_id, USER_PERMISSIONS, auth_time=record["auth_time"]),
-        refresh_token=create_refresh_token(org_id, user_id, auth_time=record["auth_time"]),
+        access_token=create_access_token(org_id, user_id, USER_PERMISSIONS, **signed_in),
+        refresh_token=create_refresh_token(org_id, user_id, **signed_in),
     )

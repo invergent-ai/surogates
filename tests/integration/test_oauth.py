@@ -276,3 +276,49 @@ async def test_the_desktop_cannot_allow_itself_another_sign_in(api):
     tokens = await signed_in(api)
     response = await authorize(api, pkce()[1], token=tokens["access_token"])
     assert response.status_code == 403
+
+
+async def window_session(api, access_token: str) -> dict:
+    minted = await api.client.post("/v1/auth/oauth/web-code", headers=api.auth(access_token))
+    assert minted.status_code == 200, minted.text
+    session = await api.client.post("/v1/auth/oauth/web-session", json={"code": minted.json()["code"]})
+    assert session.status_code == 200, session.text
+    return session.json()
+
+
+async def test_the_windows_session_ends_with_the_computer(api):
+    tokens = await signed_in(api)
+    device_id = await add_computer(api, tokens["access_token"])
+    web = await window_session(api, tokens["access_token"])
+    renewed = await api.client.post("/v1/auth/refresh", json={"refresh_token": web["refresh_token"]})
+    assert renewed.status_code == 200, renewed.text
+    # The window's tokens belong to the desktop's sign-in, so they end with it.
+    assert claims(renewed.json()["access_token"])["sid"] == claims(tokens["access_token"])["sid"]
+    assert (await api.client.delete(f"/v1/devices/{device_id}", headers=api.auth())).status_code == 204
+    assert (await api.client.post("/v1/auth/refresh", json={"refresh_token": web["refresh_token"]})).status_code == 401
+
+
+@pytest.mark.parametrize("ended", ["signed out", "thirty days old"])
+async def test_an_ended_sign_in_gives_its_window_no_session(api, ended):
+    if ended == "signed out":
+        tokens = await signed_in(api)
+        await api.client.post("/v1/auth/oauth/revoke", data={"token": tokens["refresh_token"], "client_id": CLIENT})
+        access_token = tokens["access_token"]
+    else:
+        signed_in_at = int(time.time()) - 31 * 86400
+        grant = await OAuthTokens(api.app.state.session_factory).issue(
+            org_id=api.org_id, user_id=api.user_id, agent_id=AGENT_ID, client_id=CLIENT, auth_time=signed_in_at,
+        )
+        access_token = create_access_token(
+            api.org_id, api.user_id, {"sessions:read"}, auth_time=signed_in_at, client_id=CLIENT, family_id=grant.family_id,
+        )
+    # The sign-in's access token lives on for minutes, but mints nothing that would outlive it.
+    response = await api.client.post("/v1/auth/oauth/web-code", headers=api.auth(access_token))
+    assert response.status_code == 403
+
+
+async def test_the_desktops_window_cannot_allow_another_sign_in_either(api):
+    tokens = await signed_in(api)
+    web = await window_session(api, tokens["access_token"])
+    response = await authorize(api, pkce()[1], token=web["access_token"])
+    assert response.status_code == 403
