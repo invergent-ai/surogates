@@ -389,14 +389,52 @@ describe("a protected name linked into the folder", () => {
     symlinkSync("cfg/gitconfig", join(folder, ".gitconfig"));
     symlinkSync("missing", join(folder, ".zshrc"));
     expect(await new HookGuard(folder).refusal()).toEqual(refused([
-      "Blocked: .gitconfig is a link to cfg/gitconfig in this folder.", ".idea/workspace.xml is a link to workspace.xml in this folder.",
+      "Blocked: .gitconfig is a link to cfg in this folder.", ".idea/workspace.xml is a link to workspace.xml in this folder.",
       ".vscode is a link to scripts in this folder.", ".zshrc is a link to missing in this folder.",
       "Make each a file, or point it outside the folder, to run commands here.",
     ].join(" ")));
   });
 
+  // A write through .git, .claude or a submodule's git folder reaches the config, hooks or commands under where it leads.
+  const layouts: Array<[string, () => void, string]> = [
+    ["a .git", () => {
+      mkdirSync(join(folder, "realgit"));
+      symlinkSync("realgit", join(folder, ".git"));
+    }, ".git is a link to realgit"],
+    [".claude", () => {
+      mkdirSync(join(folder, "dotclaude", "commands"), { recursive: true });
+      symlinkSync("dotclaude", join(folder, ".claude"));
+    }, ".claude is a link to dotclaude"],
+    ["a submodule's git folder", () => {
+      mkdirSync(join(folder, ".git", "modules"), { recursive: true });
+      mkdirSync(join(folder, "mods", "foo"), { recursive: true });
+      symlinkSync("../../mods/foo", join(folder, ".git", "modules", "foo"));
+    }, ".git/modules/foo is a link to mods/foo"],
+    ["a chain that leaves the folder and comes back", () => {
+      mkdirSync(join(folder, "config"));
+      symlinkSync(join(folder, "config", "mcp.json"), join(other, "hop"));
+      symlinkSync(join(other, "hop"), join(folder, ".mcp.json"));
+    }, ".mcp.json is a link to config/mcp.json"],
+    // b is a command's to make a folder of its own.
+    ["a chain through a link in the folder that leaves it again", () => {
+      symlinkSync(join(other, "c"), join(folder, "b"));
+      symlinkSync(join(folder, "b"), join(other, "a"));
+      symlinkSync(join(other, "a"), join(folder, ".vscode"));
+    }, ".vscode is a link to b"],
+  ];
+  for (const [title, layout, linked] of layouts) {
+    it(`refuses commands while ${title} links into the folder`, async () => {
+      layout();
+      expect(await new HookGuard(folder).refusal()).toEqual(refused(`Blocked: ${linked} in this folder. ${LINKED}`));
+    });
+  }
+
   it("lets commands run beside one linked out of the folder, or to a protected name in it, and a git hook linked to a script, which the guard stops", async () => {
     symlinkSync(other, join(folder, ".vscode"));
+    symlinkSync(other, join(folder, ".claude"));
+    mkdirSync(join(folder, "sub", ".git"), { recursive: true });
+    mkdirSync(join(folder, "x"));
+    symlinkSync("../sub/.git", join(folder, "x", ".git"));
     symlinkSync("/nowhere", join(folder, ".bashrc"));
     mkdirSync(join(folder, ".idea"));
     symlinkSync(".idea/mcp.json", join(folder, ".mcp.json"));

@@ -3,14 +3,14 @@
 // and srt protects a repository's hooks only when it was there before the command
 // started. So after every command the host looks through the whole folder and
 // makes each hook that is not the user's own, unchanged, non-executable: git skips
-// those. Nothing is deleted. The same look refuses commands while a protected name
-// is a link to a path in the folder that is not protected (linkedInto).
+// those. Nothing is deleted. The same look refuses commands while a protected name,
+// or a key place, is a link to a path in the folder that is not protected (linkedInto).
 
 import { access, constants, lstat, open, readdir, readlink, realpath, stat } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative } from "node:path";
 
 import { inside, realpath as followed } from "../files/paths.js";
-import { protectedInFolder } from "../files/protect.js";
+import { KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
 import type { Outcome } from "../link/protocol.js";
 
 export const SCAN_TIMEOUT_MS = 30_000;
@@ -25,8 +25,8 @@ export interface HookScan {
   // Every entry under one of the folder's protected names (protectedInFolder),
   // files and folders alike, but not a .git folder itself: a .git file is one.
   protectedKeys: Set<string>;
-  // Each of those that is a link, but for a git hook (the guard stops those), to what a
-  // write through it reaches in the folder that is not protected (linkedInto).
+  // Each link at a protected name or a key place (keyPlace), but for a git hook (the guard
+  // stops those), to what a write through it reaches in the folder that is not protected (linkedInto).
   links: Map<string, string>;
 }
 
@@ -74,17 +74,22 @@ async function describe(path: string): Promise<string | null> {
     : `${own}>`;
 }
 
-// What a write through the link at *path* reaches in the folder that is not protected, or null.
-// The guest's rule judges a write by the path it reaches, not by a link's name on the way. Where
-// the link's own target names counts as well as where it ends: a link on the way that lies in the
-// folder is a command's to swap for a folder of its own.
-// ponytail: a chain that leaves the folder and comes back in through a link there is judged by its
-// first step and its end only; follow each step if links like that turn up.
-async function linkedInto(folder: string, path: string): Promise<string | null> {
-  const named = await readlink(path).then((to) => resolve(dirname(path), to), () => null);
-  const end = followed(path);
-  const reached = [named, end.loop ? null : end.path];
-  return reached.find((to) => to !== null && inside(to, folder) && !protectedInFolder(folder, to)) ?? null;
+// Where the guest's rule refuses to move a folder to or from, since what it holds would arrive
+// unjudged: a KEY_FOLDERS leaf (.claude, .git), or a place at or under .git/modules or .git/worktrees.
+function keyPlace(folder: string, path: string): boolean {
+  const parts = path.slice(folder.length + 1).toLowerCase().split("/");
+  return KEY_FOLDERS.has(parts.at(-1) ?? "") || parts.some((part, i) => part === ".git" && (parts[i + 1] === "modules" || parts[i + 1] === "worktrees"));
+}
+
+// What a write through the link at *path* reaches in the folder that is not protected, or null:
+// where it ends, followed fully as a write follows it, or any link on the way there that lies in
+// the folder, which a command could swap for a folder of its own. The guest's rule judges a write
+// by the path it reaches, not by a link's name on the way.
+function linkedInto(folder: string, path: string): string | null {
+  const links = new Map<string, string | null>();
+  const end = followed(path, links);
+  const reached = [...(end.loop ? [] : [end.path]), ...[...links.keys()].filter((link) => link !== path)];
+  return reached.find((to) => inside(to, folder) && !protectedInFolder(folder, to)) ?? null;
 }
 
 // Never rejects. Linked folders are not followed; node_modules and git's object
@@ -119,11 +124,10 @@ export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1):
         return;
       }
       const name = entry.name.toLowerCase();
-      if (!(entry.isDirectory() && name === ".git") && protectedInFolder(folder, path)) {
-        scan.protectedKeys.add(path);
-        const to = entry.isSymbolicLink() && !isGitHook(folder, path) ? await linkedInto(folder, path) : null;
-        if (to !== null) scan.links.set(path, to);
-      }
+      const key = !(entry.isDirectory() && name === ".git") && protectedInFolder(folder, path);
+      if (key) scan.protectedKeys.add(path);
+      const to = entry.isSymbolicLink() && (key || keyPlace(folder, path)) && !isGitHook(folder, path) ? linkedInto(folder, path) : null;
+      if (to !== null) scan.links.set(path, to);
       if (entry.isDirectory()) {
         const store = gitFolder && name === "objects"
           && await lstat(join(path, "HEAD")).then(() => false, (error: NodeJS.ErrnoException) => error.code === "ENOENT");

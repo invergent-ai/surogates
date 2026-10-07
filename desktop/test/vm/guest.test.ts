@@ -1353,6 +1353,48 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     }
   });
 
+  // A write through .git or .claude reaches the config or the commands under where it leads; so does one
+  // through a chain that leaves the folder and comes back. Each layout returns what it made in the folder.
+  const layouts: Array<[string, (folder: string) => string[], string]> = [
+    ["a .git", (folder) => {
+      mkdirSync(join(folder, "realgit"));
+      writeFileSync(join(folder, "realgit", "config"), "[core]\n");
+      symlinkSync("realgit", join(folder, ".git"));
+      return [".git", "realgit"];
+    }, ".git is a link to realgit"],
+    [".claude", (folder) => {
+      mkdirSync(join(folder, "dotclaude", "commands"), { recursive: true });
+      symlinkSync("dotclaude", join(folder, ".claude"));
+      return [".claude", "dotclaude"];
+    }, ".claude is a link to dotclaude"],
+    ["a chain that leaves the folder and comes back", (folder) => {
+      mkdirSync(join(folder, "config"));
+      symlinkSync(join(folder, "config", "mcp.json"), join(dir, "hop"));
+      symlinkSync(join(dir, "hop"), join(folder, ".mcp.json"));
+      return [".mcp.json", "config", "../hop"];
+    }, ".mcp.json is a link to config/mcp.json"],
+  ];
+  for (const [title, layout, linked] of layouts) {
+    it(`refuses a command, before it runs, while ${title} links into the folder, and runs it once the link is gone`, async () => {
+      const folder = join(dir, "folder");
+      const made = layout(folder);
+      const clear = () => {
+        for (const name of [...made, "ran"]) rmSync(join(folder, name), { recursive: true, force: true });
+      };
+      try {
+        await command("true");
+        expect(await command("touch ran")).toEqual({
+          error: { type: "sandbox", message: `Blocked: ${linked} in this folder. Make it a file, or point it outside the folder, to run commands here.` },
+        });
+        expect(existsSync(join(folder, "ran"))).toBe(false);
+        clear();
+        expect(await command("echo ran")).toMatchObject({ ok: { output: "ran\n" } });
+      } finally {
+        clear();
+      }
+    });
+  }
+
   it("shows a command what the file tools wrote just before it, each time, with nothing to wait for", async () => {
     const folder = join(dir, "folder");
     const key = join(folder, "lint.py");
