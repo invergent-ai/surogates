@@ -6,7 +6,7 @@
 // client fills the centre's hole, in a WebContentsView of the agent's own partition
 // that stays on the agent's origin, as claude.ai fills Claude Desktop's window.
 
-import { app, BrowserWindow, net, screen, shell, type WebContents, WebContentsView, webContents } from "electron";
+import { BrowserWindow, net, screen, shell, type WebContents, WebContentsView, webContents } from "electron";
 
 import { reconnectDelayMs } from "../link/backoff.js";
 import { type Agent, partitionFor } from "./agents.js";
@@ -30,27 +30,6 @@ export function lockPage(contents: WebContents): void {
   contents.setWindowOpenHandler(() => ({ action: "deny" }));
   contents.session.setPermissionRequestHandler((_contents, _permission, grant) => grant(false));
   contents.session.setPermissionCheckHandler(() => false);
-}
-
-let openSettings = (): void => {};
-
-/** What Ctrl+Shift+, does, as in Claude Desktop. */
-export function onSettingsKey(open: () => void): void {
-  openSettings = open;
-}
-
-// Ctrl+Q quits, and Ctrl+Shift+, opens Settings, from the window's page and from every view in it.
-export function keys(contents: WebContents): void {
-  contents.on("before-input-event", (event, input) => {
-    if (input.type !== "keyDown" || !input.control || input.alt) return;
-    if (!input.shift && input.key.toLowerCase() === "q") {
-      event.preventDefault();
-      app.quit();
-    } else if (input.shift && input.code === "Comma") {
-      event.preventDefault();
-      openSettings();
-    }
-  });
 }
 
 const openOutside = (url: string): void => {
@@ -91,7 +70,6 @@ function confine(contents: WebContents, origin: string, onRefused: (url: string)
       return { action: "deny" };
     });
     popup.webContents.on("will-attach-webview", (event) => event.preventDefault());
-    keys(popup.webContents);
   });
   contents.session.setPermissionRequestHandler((_contents, permission, grant, details) =>
     grant(permitted(origin, permission, details.requestingUrl)));
@@ -150,7 +128,6 @@ export class MainWindow {
     });
     if (maximized) this.window.maximize();
     lockPage(this.window.webContents);
-    keys(this.window.webContents);
     this.window.webContents.once("did-finish-load", () => this.show());
     this.window.on("close", (event) => {
       // A place that cannot be kept, as on a full disk, is said, and the window still only hides.
@@ -217,7 +194,6 @@ export class MainWindow {
       this.showWeb(this.webShown);
       this.options.onChange();
     });
-    keys(contents);
     contents.on("did-start-loading", () => {
       web.failing = false;
     });
@@ -272,7 +248,6 @@ export class MainWindow {
     this.window.on("resize", fit);
     view.webContents.once("destroyed", () => this.window.off("resize", fit));
     lockPage(view.webContents);
-    keys(view.webContents);
     wire(view.webContents);
     this.settingsView = view;
     // Closed while its page still loads, the load ends with it, and nothing is left to say.
@@ -336,6 +311,13 @@ export class MainWindow {
 
   reload(): void {
     this.web?.view.webContents.reload();
+  }
+
+  /** The agent's page a step larger or smaller, or at its own size (0); never the window's own page, which the web client is placed by. */
+  zoom(step: -1 | 0 | 1): void {
+    const contents = this.web?.view.webContents;
+    if (!contents) return;
+    contents.setZoomLevel(step === 0 ? 0 : Math.min(3, Math.max(-3, contents.getZoomLevel() + step)));
   }
 
   private load(web: WebView, path: string): Promise<void> {

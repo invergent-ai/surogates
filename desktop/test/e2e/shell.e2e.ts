@@ -22,6 +22,10 @@ afterEach(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
+// The app's keys are its menu's, which reach only the window with the focus, as the keyboard does.
+const focused = (shell: ElectronApplication) =>
+  expect.poll(() => shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isFocused())).toBe(true);
+
 // An agent kept from an earlier run, at an address nothing answers on, and its user's sign-in, as
 // the basic store keeps it: the window shows its three columns.
 function seedAgent(): void {
@@ -210,6 +214,7 @@ describe("the shell", () => {
   it("closes Settings while its page still loads, and leaves no failure unhandled", async () => {
     app = await launch(home);
     await (await app.firstWindow()).waitForLoadState();
+    await focused(app);
     await app.evaluate(({ BrowserWindow }) => {
       const rejections: string[] = [];
       Object.assign(globalThis, { rejections });
@@ -229,8 +234,9 @@ describe("the shell", () => {
   it("quits on Ctrl+Q", async () => {
     app = await launch(home);
     await (await app.firstWindow()).waitForLoadState();
+    await focused(app);
     const closed = app.waitForEvent("close");
-    // As the keyboard sends it: Playwright's own key presses never reach before-input-event.
+    // As the keyboard sends it: Playwright's own key presses never reach the menu's accelerators.
     void app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]!.webContents.sendInputEvent({ type: "keyDown", keyCode: "Q", modifiers: ["control"] });
     }).catch(() => {});

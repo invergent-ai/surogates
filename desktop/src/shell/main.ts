@@ -28,7 +28,8 @@ import { bridgeHandlers } from "./bridge.js";
 import { reauthorize, rebind, register } from "./computer.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
-import { letWindowClose, MainWindow, onSettingsKey } from "./main-window.js";
+import { letWindowClose, MainWindow } from "./main-window.js";
+import { appMenu } from "./menus.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
@@ -1087,22 +1088,45 @@ function notifyAsking(): void {
   shown.show();
 }
 
+// A page of the web client in the centre: what the sidebar's links, New chat and a notification open.
+function goWeb(path: string): void {
+  if (!main) return;
+  choose();
+  show({ kind: "web" });
+  main.showWeb(true);
+  void main.go(path);
+}
+
+// The window's menu button opens the app's own menu, as Claude Desktop's does; the project's opens its own.
 function popup(which: unknown): void {
   const shown = main;
   const agent = agents.get();
   if (!shown) return;
-  const template: Electron.MenuItemConstructorOptions[] = which === "project"
-    ? [
+  const menu = which === "project"
+    ? Menu.buildFromTemplate([
       { label: "Reload", click: () => shown.reload() },
       { label: "Open in browser", enabled: agent !== null, click: () => agent && void shell.openExternal(agent.origin) },
-    ]
-    : [
-      { label: "Settings…", accelerator: "Ctrl+Shift+,", click: showSettings },
-      { type: "separator" },
-      { label: "Quit Surogate", accelerator: "Ctrl+Q", click: () => app.quit() },
-    ];
-  Menu.buildFromTemplate(template).popup({ window: shown.window });
+    ])
+    : Menu.getApplicationMenu();
+  menu?.popup({ window: shown.window });
 }
+
+// What the app's menu does: on the agent's page, or the window, which it shows first.
+const menuActions = {
+  newChat: () => {
+    main?.show();
+    goWeb("/chat");
+  },
+  settings: () => {
+    main?.show();
+    showSettings();
+  },
+  quit: () => app.quit(),
+  reload: () => main?.reload(),
+  zoom: (step: -1 | 0 | 1) => main?.zoom(step),
+  devTools: (which: "agent" | "window") => (which === "agent" ? main?.webContents() : main?.window.webContents)?.openDevTools({ mode: "detach" }),
+  documentation: () => openLink("help"),
+};
 
 function settingsState() {
   const agent = agents.get();
@@ -1320,10 +1344,7 @@ function wire(window: MainWindow, page: string): void {
   });
   handle("shell:go", (path) => {
     if (typeof path !== "string" || !webClientPath(path)) throw new Error("Not a page of the web client");
-    choose();
-    show({ kind: "web" });
-    window.showWeb(true);
-    window.go(path);
+    goWeb(path);
   });
   handle("shell:projects", () => {
     choose();
@@ -1516,7 +1537,8 @@ if (!app.requestSingleInstanceLock()) {
       main?.paint(dark);
       tellAppearance();
     });
-    onSettingsKey(showSettings);
+    // Electron's own menu goes: its reload, zoom and developer tools would act on the window's own pages.
+    Menu.setApplicationMenu(Menu.buildFromTemplate(appMenu(menuActions, !app.isPackaged)));
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
     const page = join(PAGES, "shell.html");
     main = new MainWindow({ states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed });
