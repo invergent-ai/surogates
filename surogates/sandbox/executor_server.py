@@ -41,6 +41,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request, Response
 
+from surogates.sandbox.base import MAX_FILE_BYTES
 from surogates.sandbox.history import History, HistoryError
 
 logger = logging.getLogger("tool-executor")
@@ -70,9 +71,6 @@ _MAX_READ_TIMESTAMPS = 1024
 
 # Tools whose success means the agent has now seen the file's content.
 _READ_TOOL_NAMES = frozenset({"read_file", "write_file", "patch"})
-
-# The most ``_file`` moves either way: the document cap.
-_MAX_FILE_BYTES = 50 * 1024 * 1024
 
 # A landing's steps, as ``_history`` actions, and the History method each runs.
 _HISTORY_STEPS = {"commit": "commit_turn", "apply": "apply", "unapply": "unapply", "record": "record"}
@@ -232,17 +230,17 @@ def _run_file(args: dict, workspace: str) -> str:
         if args.get("action") == "read":
             if not os.path.isfile(target):
                 return json.dumps({"error": f"{path} not found"})
-            if os.path.getsize(target) > _MAX_FILE_BYTES:
+            if os.path.getsize(target) > MAX_FILE_BYTES:
                 return json.dumps({"error": too_large})
             with open(target, "rb") as fh:
                 return json.dumps({"content_b64": base64.b64encode(fh.read()).decode()})
         if args.get("action") == "write":
             content = args.get("content_b64") or ""
             # Refused before it is decoded: base64 spends four characters on three bytes.
-            if len(content) > 4 * -(-_MAX_FILE_BYTES // 3):
+            if len(content) > 4 * -(-MAX_FILE_BYTES // 3):
                 return json.dumps({"error": too_large})
             data = base64.b64decode(content)
-            if len(data) > _MAX_FILE_BYTES:
+            if len(data) > MAX_FILE_BYTES:
                 return json.dumps({"error": too_large})
             os.makedirs(os.path.dirname(target), exist_ok=True)
             # Written beside the file, then renamed over it: a write cut short

@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
 
+#: The most a pod's ``_file`` moves either way: the document cap.
+MAX_FILE_BYTES = 50 * 1024 * 1024
+
 
 class SandboxUnavailableError(RuntimeError):
     """Raised when the sandbox subsystem itself is broken.

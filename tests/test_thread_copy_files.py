@@ -6,6 +6,7 @@ import base64
 import json
 import re
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -153,3 +154,33 @@ async def test_an_image_injected_after_a_tool_is_read_from_the_copy(thread):
     harness._storage = RealFiles({"chart.png": PNG + b"real"})
     session = SimpleNamespace(id=uuid4(), parent_id=None, config={**CONFIG, "sandbox_root_session_id": owner})
     assert await harness._read_workspace_image(session, "chart.png") == PNG + b"redrawn"
+
+
+async def test_a_threads_video_over_what_its_copy_takes_says_why_it_was_not_saved(thread, monkeypatch):
+    import httpx
+
+    from surogates.sandbox import copy_files
+    from surogates.tools.builtin.media_gen import _generate_video_handler
+    from tests.test_media_gen_tools import _patch_video_transport, _video_cfg
+
+    pool, owner, pods = thread
+    monkeypatch.setattr(copy_files, "MAX_FILE_BYTES", 4)
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    def handler(request):
+        if request.method == "POST":
+            return httpx.Response(202, json={"id": "job-1", "status": "pending"})
+        if "content" in str(request.url):
+            return httpx.Response(200, content=b"mp4-bytes")
+        return httpx.Response(200, json={
+            "id": "job-1", "status": "completed",
+            "unsigned_urls": ["https://openrouter.ai/api/v1/videos/job-1/content?index=0"],
+        })
+
+    _patch_video_transport(monkeypatch, handler)
+    result = json.loads(await _generate_video_handler(
+        {"prompt": "a rocket launch"}, media_gen=_video_cfg(), session_config=CONFIG,
+        storage=FakeStorage(), session_id=owner, sandbox_pool=pool, task_id=owner,
+    ))
+    assert "too large to save in the thread's copy (over 50 MiB)" in result["error"]
+    assert not (pods.copies[owner] / "media").exists()

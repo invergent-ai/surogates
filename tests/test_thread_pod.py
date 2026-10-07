@@ -103,7 +103,7 @@ async def test_a_pod_writes_and_reads_a_file_of_its_copy_for_the_harness(pods, m
     assert base64.b64decode(read["content_b64"]) == png
 
     assert "outside" in (await call(pods, pod, "_file", action="read", path="../project/Report.docx"))["error"]
-    monkeypatch.setattr(executor_server, "_MAX_FILE_BYTES", 4)
+    monkeypatch.setattr(executor_server, "MAX_FILE_BYTES", 4)
     assert "50 MiB" in (await call(pods, pod, "_file", action="read", path="images/chart.png"))["error"]
 
 
@@ -225,7 +225,7 @@ async def test_every_file_failure_answers_an_error_and_a_write_is_whole_or_not_a
     assert [p.name for p in copy.iterdir() if p.name.startswith("notes.md")] == ["notes.md"]
 
     # Over the cap, a write is refused before it is decoded.
-    monkeypatch.setattr(executor_server, "_MAX_FILE_BYTES", 4)
+    monkeypatch.setattr(executor_server, "MAX_FILE_BYTES", 4)
     monkeypatch.setattr(executor_server.base64, "b64decode", lambda *_: (_ for _ in ()).throw(ValueError("decoded first")))
     big = await call(pods, pod, "_file", action="write", path="big.bin", content_b64=base64.b64encode(b"1234567").decode())
     assert "50 MiB" in big["error"] and not (copy / "big.bin").exists()

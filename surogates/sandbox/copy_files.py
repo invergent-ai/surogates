@@ -15,7 +15,7 @@ import base64
 import json
 from typing import Any
 
-from surogates.sandbox.base import SandboxUnavailableError
+from surogates.sandbox.base import MAX_FILE_BYTES, SandboxUnavailableError
 from surogates.sandbox.pool import SandboxPool
 from surogates.workstreams import is_project_thread
 
@@ -50,6 +50,10 @@ async def _file(sandbox_pool: SandboxPool, owner: Any, request: dict[str, Any], 
     raise ValueError(said or "The thread's pod gave no answer")
 
 
+class TooLargeForCopy(ValueError):
+    """A file over what the thread's copy can take: its tool says so, rather than that it has no workspace."""
+
+
 async def read_copy(sandbox_pool: SandboxPool, owner: Any, path: str) -> bytes:
     """*path* from the copy in *owner*'s pod; ValueError when it cannot be read."""
     result = await _file(sandbox_pool, owner, {"action": "read", "path": path}, "content_b64")
@@ -60,5 +64,7 @@ async def write_copy(sandbox_pool: SandboxPool, owner: Any, path: str, data: byt
     """Write *path* into the copy in *owner*'s pod; ValueError when it cannot be written."""
     if not has_copy(sandbox_pool, owner):
         raise ValueError("The thread's pod holds no copy of the project's files")
+    if len(data) > MAX_FILE_BYTES:
+        raise TooLargeForCopy(f"{path} is too large to save in the thread's copy (over 50 MiB)")
     request = {"action": "write", "path": path, "content_b64": base64.b64encode(data).decode()}
     await _file(sandbox_pool, owner, request, "ok")

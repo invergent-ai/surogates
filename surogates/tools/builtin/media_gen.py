@@ -32,7 +32,7 @@ from uuid import uuid4
 import httpx
 
 from surogates.harness.message_utils import message_to_dict
-from surogates.sandbox.copy_files import write_copy, writes_to_copy
+from surogates.sandbox.copy_files import TooLargeForCopy, write_copy, writes_to_copy
 from surogates.storage.tenant import boundary_workspace_key, workspace_session_shim
 from surogates.tools.builtin.vision import (
     _extract_response_content,
@@ -389,16 +389,19 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     extension = _MIME_EXTENSIONS.get(mime_type, "png")
     relative_path = output_path or _default_media_path("image", extension)
 
-    saved = await _save_media_bytes(
-        data,
-        relative_path=relative_path,
-        workspace_path=kwargs.get("workspace_path"),
-        storage=kwargs.get("storage"),
-        session_id=kwargs.get("session_id"),
-        session_config=kwargs.get("session_config"),
-        sandbox_pool=kwargs.get("sandbox_pool"),
-        owner=kwargs.get("task_id"),
-    )
+    try:
+        saved = await _save_media_bytes(
+            data,
+            relative_path=relative_path,
+            workspace_path=kwargs.get("workspace_path"),
+            storage=kwargs.get("storage"),
+            session_id=kwargs.get("session_id"),
+            session_config=kwargs.get("session_config"),
+            sandbox_pool=kwargs.get("sandbox_pool"),
+            owner=kwargs.get("task_id"),
+        )
+    except TooLargeForCopy as exc:
+        return _json_error(str(exc))
     if not saved:
         return _json_error(
             "workspace_unavailable: generate_image requires a session "
@@ -563,16 +566,19 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         # can't be contradicted.
         await _settle_media_budget(cfg, billing, 0, media_ref)
 
-    saved = await _save_media_bytes(
-        data,
-        relative_path=relative_path,
-        workspace_path=kwargs.get("workspace_path"),
-        storage=kwargs.get("storage"),
-        session_id=kwargs.get("session_id"),
-        session_config=kwargs.get("session_config"),
-        sandbox_pool=kwargs.get("sandbox_pool"),
-        owner=kwargs.get("task_id"),
-    )
+    try:
+        saved = await _save_media_bytes(
+            data,
+            relative_path=relative_path,
+            workspace_path=kwargs.get("workspace_path"),
+            storage=kwargs.get("storage"),
+            session_id=kwargs.get("session_id"),
+            session_config=kwargs.get("session_config"),
+            sandbox_pool=kwargs.get("sandbox_pool"),
+            owner=kwargs.get("task_id"),
+        )
+    except TooLargeForCopy as exc:
+        return _json_error(str(exc))
     if not saved:
         return _json_error(
             "workspace_unavailable: generate_video requires a session "
@@ -745,11 +751,14 @@ async def _save_media_bytes(
     destination accepted the bytes.
 
     A thread writes them into its copy alone: they land with its turn, and
-    with no copy to write into they are not saved.
+    with no copy to write into they are not saved.  Bytes too large for
+    the copy raise ``TooLargeForCopy``, so the tool can say why.
     """
     if writes_to_copy(sandbox_pool, owner, session_config):
         try:
             await write_copy(sandbox_pool, owner, relative_path, data)
+        except TooLargeForCopy:
+            raise
         except ValueError as exc:
             logger.warning("Could not save generated media to the thread's copy %s: %s", relative_path, exc)
             return False
