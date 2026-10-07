@@ -22,7 +22,7 @@ import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../vm/client.js";
 import { VmExecutor } from "../vm/executor.js";
-import { type Agent, AgentStore, connectAgent, describeAgent, linksFor, linkUrl, partitionFor } from "./agents.js";
+import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
 import { reauthorize, rebind, register } from "./computer.js";
@@ -69,6 +69,34 @@ let signInAgain = false;
 let reloading = false;
 // The app's calls to the agent, through Chromium's network as the window's are.
 const apiFetch: Fetch = (url, init) => net.fetch(url, init);
+/**
+ * GET *url* through Chromium's network, telling *hop* each redirect before it is followed:
+ * net.fetch names neither the hops nor where they ended.
+ */
+const getFollowing: Get = (url, hop, signal) => new Promise((resolve, reject) => {
+  const request = net.request({ url, redirect: "manual" });
+  const fail = (error: unknown): void => {
+    request.abort();
+    reject(error);
+  };
+  signal.addEventListener("abort", () => fail(signal.reason), { once: true });
+  request.on("redirect", (_status, _method, to) => {
+    try {
+      hop(to);
+      request.followRedirect();
+    } catch (error) {
+      fail(error);
+    }
+  });
+  request.on("response", (response) => {
+    const chunks: Buffer[] = [];
+    response.on("data", (chunk) => chunks.push(chunk));
+    response.on("end", () => resolve(new Response(chunks.length > 0 ? Buffer.concat(chunks) : null, { status: response.statusCode })));
+    response.on("error", reject);
+  });
+  request.on("error", reject);
+  request.end();
+});
 // Devices logged out while the agent could not hear it, by device: each revoked on a link of its own once it can.
 const revocations = new Map<string, { done: Promise<void>; stop(): Promise<void> }>();
 // A log out under way, settled once it is done: a quit waits for it.
@@ -502,6 +530,31 @@ async function bindToComputer(agent: Agent, signal: AbortSignal): Promise<void> 
   }
 }
 
+/**
+ * The agent's capabilities, read again: a server that gained local folders since it was added now
+ * offers them. Kept while the agent is the one added; anything else is said and changes nothing.
+ */
+async function refreshAgent(agent: Agent): Promise<void> {
+  try {
+    const fresh = await readAgent(agent.origin, getFollowing);
+    if (fresh.origin !== agent.origin || fresh.agentId !== agent.agentId) {
+      report(new Error(`${agent.origin} now answers as agent ${fresh.agentId} at ${fresh.origin}: Surogate keeps the agent it added`));
+      return;
+    }
+    if (fresh.desktopSessions === agent.desktopSessions && fresh.multiSession === agent.multiSession) return;
+    // Removed while it was asked: it is not kept again.
+    const now = agents.get();
+    if (now?.origin !== agent.origin || now.agentId !== agent.agentId) return;
+    // In place: the bridge and the device hold this agent.
+    Object.assign(agent, { desktopSessions: fresh.desktopSessions, multiSession: fresh.multiSession });
+    agents.set(agent);
+    changed();
+    void registerComputer(agent);
+  } catch (error) {
+    report(error);
+  }
+}
+
 /** Revoke *credential*'s device on a link of its own, with the link's backoff, until the agent hears it; then forget it. */
 function revokeLater(credential: Credential): void {
   if (revocations.has(credential.deviceId) || credential.token === null) return;
@@ -759,6 +812,7 @@ async function signIn(agent: Agent): Promise<void> {
     }
     if (cancelled()) return;
     void registerComputer(agent);
+    void refreshAgent(agent);
   } catch (error) {
     if (!(error instanceof OAuthError && error.code === "cancelled")) {
       signInFailure = error instanceof Error ? error.message : String(error);
@@ -794,18 +848,23 @@ function bridge(contents: WebContents, agent: Agent): void {
     const owner = account ?? signedIn?.account ?? null;
     return kept !== null && (owner?.orgId !== kept.orgId || owner.userId !== kept.userId);
   };
-  const registered = (): DeviceStack => {
+  // The device, once started: a page asking while it still starts, as at a launch, waits for it.
+  const registered = async (): Promise<DeviceStack> => {
     if (anotherAccount()) throw new Error("This computer is registered with the agent for another account");
     if (kept?.token === null) throw new Error("This computer's access to the agent was revoked: restore it from Surogate's window");
-    if (!device?.stack) throw new Error("This computer is not registered with the agent");
-    return device.stack;
+    if (!device) throw new Error("This computer is not registered with the agent");
+    return device.stack ?? device.started;
   };
   const handlers = bridgeHandlers(agent.origin, {
-    getDevice: () => ({
-      device: kept && !anotherAccount() ? { deviceId: kept.deviceId, name: kept.name } : null,
-      // A revoked computer binds no folder until it is restored.
-      localFolders: !anotherAccount() && live(kept) && agent.desktopSessions && agent.multiSession,
-    }),
+    getDevice: () => {
+      // The capabilities as last read and kept: a sign-in's read reaches the file, not the agent this bridge was opened with.
+      const now = agents.get();
+      return {
+        device: kept && !anotherAccount() ? { deviceId: kept.deviceId, name: kept.name } : null,
+        // A revoked computer binds no folder until it is restored.
+        localFolders: !anotherAccount() && live(kept) && now?.desktopSessions === true && now.multiSession,
+      };
+    },
     signOut: () => signOut(agent, false),
     // A one-time code for the web client's own session, from the app's sign-in.
     webSignIn: async () => {
@@ -816,9 +875,9 @@ function bridge(contents: WebContents, agent: Agent): void {
       if (typeof code !== "string") throw new Error("The agent gave this window no session");
       return { code };
     },
-    prepareFolder: (choice, window) => preparing(window, (signal) => registered().binder.prepareFolder(choice, window, signal)),
+    prepareFolder: (choice, window) => preparing(window, async (signal) => (await registered()).binder.prepareFolder(choice, window, signal)),
     bindSession: async (sessionId, token, window) => {
-      await registered().binder.bindSession(sessionId, token, window);
+      await (await registered()).binder.bindSession(sessionId, token, window);
     },
     getAppearance: appearanceNow,
     setAccount: (reported) => {
@@ -997,7 +1056,7 @@ function wire(window: MainWindow, page: string): void {
     if (typeof address !== "string" || address.length > 2048) return "That is not a web address";
     connecting = true;
     try {
-      const agent = await connectAgent(address, { fetch: (url) => net.fetch(url), store: agents, confirm: confirmAgent });
+      const agent = await connectAgent(address, { get: getFollowing, store: agents, confirm: confirmAgent });
       if (agent) open(window, agent);
       changed();
       return null;
@@ -1210,6 +1269,7 @@ if (!app.requestSingleInstanceLock()) {
     if (live(kept)) void startStack(agent, kept).catch(report);
     // An earlier try to add this computer did not end in a device: try again, once.
     void registerComputer(agent);
+    void refreshAgent(agent);
   }).catch((error: unknown) => {
     // A start that fails is said, and ends the app: one left with no window would keep the
     // single-instance lock, and every later launch would hand it nothing.

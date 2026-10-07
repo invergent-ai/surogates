@@ -23,8 +23,8 @@ export const ROTATED = `surg_dev_${"r".repeat(44)}`;
 // The signed-in user, as /auth/me and the fake link's welcome name them.
 export const ACCOUNT = { name: "Flavius Burca", email: "flavius@example.com", userId: "u", orgId: "o" };
 
-// The routes a test can hold: who signed in, adding this computer, and reauthorizing it.
-type Held = "me" | "register" | "reauthorize";
+// The routes a test can hold: who the agent is, who signed in, adding this computer, and reauthorizing it.
+type Held = "config" | "me" | "register" | "reauthorize";
 
 function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
@@ -54,11 +54,14 @@ export class FakeAgent {
   signedInAgoS = 0;
   // True: the agent has no device left to restore.
   gone = false;
+  // Where /auth/config redirects, and where the web client's pages redirect, as a moved agent or a sign-on gateway does.
+  configRedirect: string | null = null;
+  pagesRedirect: string | null = null;
   // When the agent revoked the computer, as its device list says; null while it is active.
   revokedAt: string | null = null;
   // Routes that answer only once the test releases them, as a slow agent would, and how often each was asked.
   private readonly held = new Map<Held, Promise<void>>();
-  readonly asked: Record<Held, number> = { me: 0, register: 0, reauthorize: 0 };
+  readonly asked: Record<Held, number> = { config: 0, me: 0, register: 0, reauthorize: 0 };
   readonly link = new FakeLinkServer({ token: TOKEN });
   readonly registered: unknown[] = [];
   readonly deleted: string[] = [];
@@ -80,7 +83,14 @@ export class FakeAgent {
   private async answer(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const path = request.url ?? "/";
     const bearer = /^Bearer at-\d+$/.test(request.headers.authorization ?? "");
-    if (path === "/api/v1/auth/config") return json(response, 200, this.config);
+    if (path === "/api/v1/auth/config" && this.configRedirect) {
+      response.writeHead(302, { location: this.configRedirect }).end();
+      return;
+    }
+    if (path === "/api/v1/auth/config") {
+      await this.answered("config");
+      return json(response, 200, this.config);
+    }
     if (request.method === "POST" && path === "/api/v1/auth/oauth/token") {
       const form = Object.fromEntries(new URLSearchParams(await body(request)));
       this.oauth.push(form);
@@ -136,7 +146,11 @@ export class FakeAgent {
       return;
     }
     await this.pagesHeld;
-    const served = this.projects === null ? "" : `<script>(${serveProjects.toString()})(${JSON.stringify(this.projects).replace(/</g, "\\u003c")}, ${this.registerAfterMs})</script>`;
+    if (this.pagesRedirect && !path.startsWith("/api/")) {
+      response.writeHead(302, { location: this.pagesRedirect }).end();
+      return;
+    }
+    const served =this.projects === null ? "" : `<script>(${serveProjects.toString()})(${JSON.stringify(this.projects).replace(/</g, "\\u003c")}, ${this.registerAfterMs})</script>`;
     response.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><title>Fake agent</title><p>The web client</p>${served}`);
   }
 

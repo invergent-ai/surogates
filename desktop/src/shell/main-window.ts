@@ -58,8 +58,9 @@ const openOutside = (url: string): void => {
 };
 
 // The web client stays on the agent's origin, and gets no other powers. The one popup it may
-// open, the Composio sign-in, gets no bridge, and opens nothing further.
-function confine(contents: WebContents, origin: string): void {
+// open, the Composio sign-in, gets no bridge, and opens nothing further. A redirect of the page
+// elsewhere, as a single sign-on gateway sends one, is refused and told *onRefused*.
+function confine(contents: WebContents, origin: string, onRefused: (url: string) => void): void {
   contents.on("will-navigate", (event) => {
     if (sameOrigin(origin, event.url)) {
       // The agent's sign-in pages open only in the system browser: the window never shows a password form.
@@ -72,7 +73,9 @@ function confine(contents: WebContents, origin: string): void {
     openOutside(event.url);
   });
   contents.on("will-redirect", (event) => {
-    if (event.isMainFrame && !sameOrigin(origin, event.url)) event.preventDefault();
+    if (!event.isMainFrame || sameOrigin(origin, event.url)) return;
+    event.preventDefault();
+    onRefused(event.url);
   });
   contents.on("will-attach-webview", (event) => event.preventDefault());
   contents.setWindowOpenHandler(({ url, frameName }) => {
@@ -204,7 +207,11 @@ export class MainWindow {
     this.web = web;
     this.showWeb(this.webShown);
     const contents = view.webContents;
-    confine(contents, agent.origin);
+    confine(contents, agent.origin, (url) => {
+      web.unreachable = `${agent.name} sent Surogate to ${new URL(url).host}, which it does not open in its window`;
+      this.showWeb(this.webShown);
+      this.options.onChange();
+    });
     keys(contents);
     contents.on("did-start-loading", () => {
       web.failing = false;
@@ -213,7 +220,7 @@ export class MainWindow {
       // -3 is a load that another load replaced.
       if (!isMainFrame || code === -3) return;
       web.failing = true;
-      web.unreachable = description || "The agent did not answer";
+      web.unreachable = `Check your network connection (${description || "the agent did not answer"})`;
       this.showWeb(this.webShown);
       this.options.onChange();
       this.tryAgain(web);

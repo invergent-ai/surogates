@@ -281,7 +281,7 @@ async function render(): Promise<void> {
   byId("device-action-button").hidden = !state.deviceAction?.button;
   byId("unreachable").hidden = state.unreachable === null;
   byId("headline").textContent = state.agent ? `Couldn't connect to ${state.agent.name}` : "";
-  byId("why").textContent = state.unreachable ? `Check your network connection (${state.unreachable})` : "";
+  byId("why").textContent = state.unreachable ?? "";
 }
 
 // One connection at a time: the form waits for the answer.
