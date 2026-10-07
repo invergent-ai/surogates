@@ -56,6 +56,7 @@ async def call_tool(api, session, name: str, *, gate=None, **arguments) -> dict:
     ToolRuntime(registry).register_builtins()
     state = api.app.state
     pod = MagicMock()
+    pod.copy_remade.return_value = False
     message = await execute_single_tool(
         {"id": f"call_{name}", "function": {"name": name, "arguments": json.dumps(arguments)}},
         session=session,
