@@ -2,7 +2,7 @@
 // sections of rows, each a label, a description and its control. All text comes from
 // the main process and is set with textContent only.
 
-import { byId, fillIcons, markTheme, showText } from "./ui.js";
+import { asShown, byId, fillIcons, markTheme, showText } from "./ui.js";
 
 interface Appearance {
   theme: "system" | "light" | "dark";
@@ -78,7 +78,14 @@ function search(): void {
 const date = (iso: string | null) =>
   iso === null ? "Not registered" : new Date(iso).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
-// A line under a chat: what it holds, as text, and the button that ends it, named by what it ends.
+// What Electron puts before the main process's words: the name of the call it invoked.
+const INVOKED = /^Error invoking remote method '[^']*': (?:Error: )?/;
+const said = (error: unknown): string => (error instanceof Error ? error.message : String(error)).replace(INVOKED, "");
+
+// Why the user's last Take back or Stop failed: null once one goes through.
+let refused: string | null = null;
+
+// A line under a chat: what it holds, as text, and the button that ends it, named by what it ends, as it is shown.
 function line(text: string, action: string, name: string, act: () => Promise<void>): HTMLElement {
   const held = document.createElement("span");
   held.className = "line";
@@ -87,9 +94,13 @@ function line(text: string, action: string, name: string, act: () => Promise<voi
   const button = document.createElement("button");
   button.type = "button";
   button.textContent = action;
-  button.setAttribute("aria-label", `${action} ${name}`);
-  // Drawn again either way: a list that changed meanwhile shows what holds.
-  button.addEventListener("click", () => void act().finally(render));
+  button.setAttribute("aria-label", `${action} ${asShown(name)}`);
+  // Drawn again either way: a list that changed meanwhile shows what holds, and a refusal is said above it.
+  button.addEventListener("click", () => void act().then(() => {
+    refused = null;
+  }, (error: unknown) => {
+    refused = `Surogate did not ${action.toLowerCase()} ${name}: ${said(error)}.`;
+  }).finally(render));
   held.append(what, button);
   return held;
 }
@@ -119,6 +130,7 @@ function chatRow(chat: Folder["chats"][number]): HTMLElement {
 
 async function renderFolders(): Promise<void> {
   const folders = await settings.folders();
+  showText(byId("folders-failed"), refused ?? "");
   byId("folders-none").hidden = folders.length > 0;
   byId("folders").replaceChildren(...folders.map((folder) => {
     const group = document.createElement("div");

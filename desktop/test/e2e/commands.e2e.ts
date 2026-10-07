@@ -325,6 +325,39 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     });
   });
 
+  it("refuses a Take back for any host Settings does not show as the chat's own, and says so in the page: one never allowed, one of a chat not bound here, and one taken back", async () => {
+    const folder = join(home, "site");
+    mkdirSync(folder);
+    await bound(folder);
+    const reached = operation("run", { command: status("https://example.com/"), workdir: null, timeout: 60 });
+    await expect.poll(() => promptsShown(app!), { timeout: 30_000 }).toBe(1);
+    await press(await prompt(app!), "allow_session");
+    expect(await reached).toMatchObject({ ok: { returncode: 0 } });
+    const settings = await foldersSettings();
+    // Settings' own call, as a page talked into it would make it: what it was told.
+    const takeBack = (root: unknown, host: unknown) => settings.evaluate(([at, from]) =>
+      (window as unknown as { surogateSettings: { takeBack(root: unknown, host: unknown): Promise<void> } }).surogateSettings.takeBack(at, from)
+        .then(() => "taken back", (error: Error) => error.message), [root, host]);
+    const refused = "Error invoking remote method 'settings:take-back': Error: This chat cannot reach that host";
+    expect(await takeBack(CHAT, "example.org")).toBe(refused);
+    expect(await takeBack(OTHER, "example.com")).toBe(refused);
+    expect(await takeBack(42, "example.com")).toBe(refused);
+    expect(await takeBack(CHAT, ["example.com"])).toBe(refused);
+    expect(await takeBack(CHAT, "example.com")).toBe("taken back");
+    expect(await takeBack(CHAT, "example.com")).toBe(refused);
+    // Its button, drawn before the host was taken back: the page catches the refusal, says so, and draws the list again.
+    await settings.evaluate(() => {
+      const rejections: string[] = [];
+      Object.assign(window, { rejections });
+      window.addEventListener("unhandledrejection", (event) => rejections.push(String(event.reason)));
+    });
+    await settings.click("#folders .row .line button");
+    await expect.poll(() => settings.textContent("#folders-failed")).toBe("Surogate did not take back example.com: This chat cannot reach that host.");
+    expect(await settings.isVisible("#folders-failed")).toBe(true);
+    await expect.poll(() => settings.$$("#folders .row .line").then((lines) => lines.length)).toBe(0);
+    expect(await settings.evaluate(() => (window as unknown as { rejections: string[] }).rejections)).toEqual([]);
+  });
+
   it("stops a chat's background process from Settings, as the agent's own kill would, and no longer shows it", async () => {
     const folder = join(home, "watch");
     mkdirSync(folder);
@@ -335,7 +368,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     }) as { ok: { session_id: string } };
     const settings = await foldersSettings();
     await expect.poll(() => settings.textContent("#folders .row .line")).toBe("Runs sleep 600 #U+202EtxtStop");
-    expect(await settings.getAttribute("#folders .row .line button", "aria-label")).toBe("Stop sleep 600 #‮txt");
+    // Named as it is shown.
+    expect(await settings.getAttribute("#folders .row .line button", "aria-label")).toBe("Stop sleep 600 #U+202Etxt");
     await settings.click("#folders .row .line button");
     await expect.poll(() => settings.$$("#folders .row .line").then((lines) => lines.length)).toBe(0);
     // The agent finds it ended at its next look, as after its own kill.

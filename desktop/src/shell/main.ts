@@ -41,7 +41,7 @@ import { PreferencesStore } from "./preferences.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
-import { segments } from "./pages/ui.js";
+import { asShown } from "./pages/ui.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
@@ -1523,7 +1523,7 @@ async function confirmArchive(name: string): Promise<boolean> {
   if (!main) return false;
   const response = await messageBox({
     type: "warning",
-    message: `Archive ${segments(name).map((run) => run.text).join("")}?`,
+    message: `Archive ${asShown(name)}?`,
     detail: "It leaves your projects, with its conversation and its threads. Its files and its memory are kept.",
     buttons: ["Archive", "Cancel"],
     defaultId: 1,
