@@ -527,6 +527,23 @@ describe("the project dialog", () => {
     await expect.poll(() => texts(page, "#projects .project .name")).toContain("Late");
   });
 
+  it("makes one project for a Create clicked twice before the agent answers", async () => {
+    const { shell, page, client } = await signedIn();
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { lag: number } }).fakeProjects.lag = 1_000;
+    });
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    await dialog.fill("#name", "Twice");
+    await dialog.evaluate(() => {
+      document.querySelector<HTMLButtonElement>("#save")!.click();
+      document.querySelector<HTMLButtonElement>("#save")!.click();
+    });
+    await expect.poll(() => dialogOpen(shell), { timeout: 5_000 }).toBe(false);
+    expect(agent.projects!.projects.filter((project) => project.name === "Twice")).toHaveLength(1);
+  });
+
   it("opens nothing for a create that lands after its dialog closed, and leaves Settings opened since", async () => {
     const { shell, page, client } = await signedIn();
     const before = client.url();
@@ -595,14 +612,17 @@ describe("the project dialog", () => {
     await page.click("#new-project");
     let dialog = await projectDialog(shell);
     await dialog.fill("#name", "   ");
+    await dialog.fill("#goal", "Hire two analysts by December.");
     await dialog.click("#save");
     await expect.poll(() => dialog.textContent("#error")).toBe("Name the project.");
+    expect([await dialog.inputValue("#name"), await dialog.inputValue("#goal")]).toEqual(["   ", "Hire two analysts by December."]);
     await client.evaluate(() => {
       (window as unknown as { fakeProjects: { refusal: string | null } }).fakeProjects.refusal = "This agent keeps a single conversation, so it has no projects.";
     });
     await dialog.fill("#name", "Hiring brief");
     await dialog.click("#save");
     await expect.poll(() => dialog.textContent("#error")).toBe("This agent keeps a single conversation, so it has no projects.");
+    expect([await dialog.inputValue("#name"), await dialog.inputValue("#goal")]).toEqual(["Hiring brief", "Hire two analysts by December."]);
     // The dialog goes on the key's way down, before its way up.
     await dialog.press("#name", "Escape").catch(() => {});
     await expect.poll(() => dialogOpen(shell)).toBe(false);
