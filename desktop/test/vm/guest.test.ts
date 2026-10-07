@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { BOOT_ID } from "../../src/binding/folder.js";
+import { BOOT_ID, GUEST_SYSTEM } from "../../src/binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import type { ProcessHandle } from "../../src/guest/processes.js";
 import type { BindMode, HostUser, ProtectedKey, Share } from "../../src/guest/protocol.js";
@@ -412,6 +412,14 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     } finally {
       for (const name of [".git", ".vscode", ".mcp.json"]) rmSync(join(folder, name), { recursive: true, force: true });
     }
+  });
+
+  it("holds its tools in the folders a chat's folder may not be, hold or lie in, and in no other", async () => {
+    // Each folder of the image's, at its top and in its /opt and /var, that holds what the root's user can see.
+    const listed = await run('for d in /* /opt/* /var/*; do [ -d "$d" ] && [ ! -L "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ] && echo "$d"; done') as { ok: { output: string } };
+    // The root's own: its namespace's mounts, its home, and the folders of the two below.
+    const own = new Set(["/dev", "/home", "/opt", "/proc", "/run", "/sys", "/tmp", "/var", "/var/tmp"]);
+    expect(listed.ok.output.trim().split("\n").filter((folder) => !own.has(folder)).sort()).toEqual([...GUEST_SYSTEM].sort());
   });
 
   it("loads no kernel module for a command, and keeps the hardening a host's sysctl files would set", async () => {
