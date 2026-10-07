@@ -22,8 +22,11 @@ import { inFolderRefusal } from "../src/files/protect.js";
 const reads = vi.hoisted(() => ({ cap: Number.POSITIVE_INFINITY, calls: 0, next: [] as number[] }));
 // Run once as the file helper's next write begins: another writer, changing a file meanwhile.
 const meanwhile = vi.hoisted(() => ({ run: null as (() => void) | null }));
-// How many folder entries the file helper has read, however it read them; and whether its next opendir fails.
-const dirents = vi.hoisted(() => ({ read: 0, refuse: false }));
+// How many folder entries the file helper has read, however it read them; and which of its next opendirs fails,
+// counting from 1 (0: none).
+const dirents = vi.hoisted(() => ({ read: 0, refuse: 0 }));
+// The path of each lstat the file helper made.
+const lstats = vi.hoisted(() => ({ paths: [] as string[] }));
 // Each open the file helper made, by path and flags; and which of its next opens fails, counting from 1 (0: none).
 const opens = vi.hoisted(() => ({ made: [] as Array<{ path: string; flags: number }>, refuseAt: 0 }));
 vi.mock("node:fs", async (importOriginal) => {
@@ -47,8 +50,7 @@ vi.mock("node:fs", async (importOriginal) => {
     return entries;
   }) as typeof fs.readdirSync;
   const opendirSync = (...args: Parameters<typeof fs.opendirSync>) => {
-    if (dirents.refuse) {
-      dirents.refuse = false;
+    if (dirents.refuse > 0 && --dirents.refuse === 0) {
       throw Object.assign(new Error("EMFILE: too many open files, opendir"), { code: "EMFILE", errno: -24, syscall: "opendir" });
     }
     const dir = fs.opendirSync(...args);
@@ -67,7 +69,11 @@ vi.mock("node:fs", async (importOriginal) => {
     }
     return fs.openSync(path, flags ?? "r", mode);
   }) as typeof fs.openSync;
-  const mocked = { readSync, writeSync, readdirSync, opendirSync, openSync };
+  const lstatSync = ((...args: Parameters<typeof fs.lstatSync>) => {
+    lstats.paths.push(String(args[0]));
+    return fs.lstatSync(...args);
+  }) as typeof fs.lstatSync;
+  const mocked = { readSync, writeSync, readdirSync, opendirSync, openSync, lstatSync };
   return { ...fs, ...mocked, default: { ...fs, ...mocked } };
 });
 
@@ -692,9 +698,30 @@ describe("walk", () => {
 
   it("closes the key's handle when it cannot read the key", async () => {
     const handles = readdirSync("/proc/self/fd").length;
-    dirents.refuse = true;
+    dirents.refuse = 1;
     expect(await walk()).toMatchObject({ error: { type: "os", code: "EMFILE" } });
     expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
+  });
+
+  it("closes a folder's handle when it cannot read the folder, and says it stopped", async () => {
+    const handles = readdirSync("/proc/self/fd").length;
+    dirents.refuse = 2; // the key's listing, then sub's
+    expect((await walk()).ok.truncated).toBe(true);
+    expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
+  });
+
+  it("opens its key without following a link, and looks at each file through its folder's handle", async () => {
+    writeFileSync(join(folder, "sub", "b.md"), "b");
+    opens.made = [];
+    lstats.paths = [];
+    await walk();
+    // Its key is checked for links first; a link put in its place since is still not followed.
+    const key = opens.made.find((open) => open.path === folder);
+    expect(key !== undefined && (key.flags & constants.O_NOFOLLOW) !== 0).toBe(true);
+    // Never by a path that a folder swapped for a link on the way could take elsewhere.
+    expect(lstats.paths).not.toContain(join(folder, "a.txt"));
+    expect(lstats.paths).not.toContain(join(folder, "sub", "b.md"));
+    expect(lstats.paths.filter((path) => /^\/proc\/self\/fd\/\d+\/(a\.txt|b\.md)$/.test(path))).toHaveLength(2);
   });
 
   // *depth* folders, each in the last, under *top*, a file at the bottom: built through handles, as a command in the VM
