@@ -148,6 +148,37 @@ async def test_a_landing_whose_push_answer_was_lost_counts_and_is_not_put_back(a
     assert "landing" not in report and [(f["ref"], f["landing"]) for f in report["files"]] == [("a.md", "landed")]
 
 
+#: A try of a second, one retry, two seconds' wait before it.
+WAITS = SimpleNamespace(default_step_timeout=1, default_max_retries=1, retry_delay=2)
+
+
+async def test_a_landing_cancelled_while_it_waits_to_retry_a_push_whose_answer_was_lost_counts(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md")
+    call, pushed = landing_module._call, asyncio.Event()
+
+    async def the_push_answer_is_lost(sandbox_pool, owner, action, **arguments):
+        result = await call(sandbox_pool, owner, action, **arguments)
+        if action == "record":
+            pushed.set()
+            await asyncio.sleep(5)  # the try times out
+        return result
+
+    monkeypatch.setattr(landing_module, "_call", the_push_answer_is_lost)
+    turn = asyncio.create_task(ends(api, pool, thread, settings=WAITS))
+    await pushed.wait()
+    await asyncio.sleep(1.5)  # past the try, in the wait before the retry
+    turn.cancel()  # the worker shuts down, or its lease goes
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    # It pushed: it counts, and nothing is put back.
+    assert pods.real_names() == ["Report.docx", "a.md", "notes.txt"]
+    [row] = await rows(api, thread)
+    assert (row.saga_state, row.commit) == ("completed", git(pods.project / "_history", "rev-parse", "refs/heads/main"))
+
+
 async def test_a_landing_whose_main_moved_without_its_saga_is_put_back(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)

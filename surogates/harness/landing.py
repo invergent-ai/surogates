@@ -329,7 +329,8 @@ async def _settle(
     was in shows ``pending``.
     """
     record = next((s for s in saga.steps if s.tool_name == "history.record"), None)
-    if record is not None and (recovered or record.state is not StepState.PENDING):
+    # Whatever its state: a try that pushed shows ``pending`` again in its retry's wait.
+    if record is not None:
         looked = await asyncio.wait_for(_call(sandbox_pool, owner, "fetch", saga=saga.saga_id), record.timeout_seconds)
         if looked["has_saga"]:
             if saga.state is SagaState.RUNNING:
