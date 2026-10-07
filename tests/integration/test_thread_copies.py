@@ -617,13 +617,18 @@ async def test_a_reports_excluded_files_are_capped_in_its_payload_and_counted(ap
 
 async def test_a_thread_cannot_hand_work_to_a_helper_yet(api, monkeypatch, pods):
     thread = await a_thread(api)
-    await a_turn(api, monkeypatch, thread, [
+    # Bounded: a delegation let through waits on its helper, and would hang the test.
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("delegate_task", {"goal": "Summarise the report."})),
         _final_response("Summarised it myself."),
-    ], pool=SandboxPool(pods))
-    events = await api.app.state.session_store.get_events(thread.id, types=[EventType.TOOL_RESULT])
-    [answer] = [json.loads(e.data["content"]) for e in events if e.data["name"] == "delegate_task"]
+    ], pool=SandboxPool(pods)), 60)
+    store = api.app.state.session_store
+    [answer] = [json.loads(e.data["content"]) for e in await store.get_events(thread.id, types=[EventType.TOOL_RESULT])
+                if e.data["name"] == "delegate_task"]
     assert answer == {"error": "A thread can't hand work to a helper yet: do this step in the thread itself."}
+    # A call that never runs takes no snapshot of the copy.
+    [call] = await store.get_events(thread.id, types=[EventType.TOOL_CALL])
+    assert "checkpoint_hash" not in call.data
     # No helper started, and no pod was set up for a call that never ran.
     async with api.app.state.session_factory() as db:
         helpers = (await db.execute(text("SELECT count(*) FROM sessions WHERE parent_id = :id"), {"id": thread.id})).scalar()
