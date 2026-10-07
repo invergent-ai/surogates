@@ -9,7 +9,7 @@ import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
 import {
-  app, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, safeStorage, session, shell, utilityProcess,
+  app, BrowserWindow, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, safeStorage, session, shell, utilityProcess,
   type WebContents, webContents,
 } from "electron";
 
@@ -23,6 +23,7 @@ import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../vm/client.js";
 import { VmExecutor } from "../vm/executor.js";
 import { openAbout } from "./about.js";
+import { BURST, Burst, followInbox, type InboxItem } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
@@ -225,6 +226,7 @@ function bounds(value: unknown): Bounds {
 
 // What the window's page and an open Settings show changed: each reads its state again.
 function changed(): void {
+  followAgent();
   // The web client shows only while someone is signed in to the app, and has its session.
   main?.gate(signedIn === null || reloading);
   main?.window.webContents.send("shell:changed");
@@ -1077,6 +1079,62 @@ function state() {
 // The system's notifications, once the app is ready.
 let notifications: Notifications | null = null;
 
+// What an inbox item's notification says under its title, by its kind: the app's own words.
+const TOLD: Record<string, string> = {
+  input_required: "Asks you a question.",
+  action_required: "Needs you to do something.",
+  governance_gate: "Waits for your approval.",
+  task_complete: "Finished.",
+  progress_checkin: "Checked in.",
+};
+
+// The window is away: hidden, minimised, or behind another app's.
+const away = (): boolean => BrowserWindow.getFocusedWindow() === null;
+
+// A page of the web client, the window shown: what a notification's click opens.
+function openPage(path: string): void {
+  if (!main || !webClientPath(path)) return;
+  main.show();
+  goWeb(path);
+}
+
+const burst = new Burst();
+
+function tellItem(item: InboxItem): void {
+  if (!away()) return;
+  const told = burst.add(item);
+  if (told.length <= BURST) {
+    notifications?.show({
+      tag: `chat:${item.sessionId}`, title: item.title, body: TOLD[item.kind] ?? "Has something for you.", open: () => openPage(`/chat/${item.sessionId}`),
+    });
+    return;
+  }
+  // A flood, as after a night asleep, is one notice of how many came, which opens the inbox; the burst's own go.
+  for (const each of told) notifications?.close(`chat:${each.sessionId}`);
+  notifications?.show({ tag: "inbox", title: `${told.length} new items in your inbox`, body: "Open your inbox to see them.", open: () => openPage("/inbox") });
+}
+
+// What the agent tells, followed on the app's own sign-in, for whoever is signed in now: their inbox.
+// What comes for a sign-in that has ended meanwhile is told no more.
+let inbox: { session: DesktopSession; stop(): void } | null = null;
+
+function followAgent(): void {
+  const session = signedIn;
+  const agentId = agents.get()?.agentId ?? "";
+  const api = (path: string, init?: RequestInit) => session!.api(path, init);
+  if (inbox?.session !== session) {
+    inbox?.stop();
+    inbox = session && {
+      session,
+      stop: followInbox({
+        api, agentId, onError: report, onItem: (item) => {
+          if (signedIn === session) tellItem(item);
+        },
+      }),
+    };
+  }
+}
+
 // A prompt waits while the window is hidden: the system's notification says so, and opens the window.
 function notifyAsking(): void {
   notifications?.show({ tag: "asking", title: "Surogate is asking you something", body: "Open Surogate to answer.", open: () => main?.show() });
@@ -1086,7 +1144,17 @@ function notifyAsking(): void {
 function goWeb(path: string): void {
   if (!main) return;
   choose();
-  show({ kind: "web" });
+  // The open project's conversation, or a thread its pane lists, keeps the project open, with its
+  // crumb and Overview, as View thread does; any other page leaves it.
+  const open = view.kind === "project" && overview?.project.id === view.id ? view : null;
+  const chatId = path.startsWith("/chat/") ? path.slice("/chat/".length) : null;
+  const thread = open ? overview?.threads.find((found) => found.id === chatId) : undefined;
+  if (open && (thread || chatId === open.masterSessionId)) {
+    view = { ...open, thread: thread ? { id: thread.id, title: thread.title } : null };
+    changed();
+  } else {
+    show({ kind: "web" });
+  }
   main.showWeb(true);
   void main.go(path);
 }

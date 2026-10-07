@@ -81,6 +81,9 @@ export class FakeAgent {
   // Refresh tokens the agent still takes: a refresh spends one, as rotation does, and a revoke ends it.
   private readonly live = new Set<string>();
   private issued = 0;
+  // The user's inbox, by item id, and the inbox streams open on it.
+  readonly inbox = new Map<number, Record<string, unknown>>();
+  readonly inboxStreams = new Set<ServerResponse>();
   readonly server: Server = createServer((request, response) => void this.answer(request, response));
   private linked = false;
 
@@ -145,6 +148,22 @@ export class FakeAgent {
       this.link.token = ROTATED;
       return json(response, 200, { id: this.link.identity.device_id, name: "Laptop", token: ROTATED });
     }
+    if (path.startsWith("/api/v1/inbox") && bearer) {
+      const asked = new URL(path, "http://agent");
+      // As the agent answers on an address with no subdomain of its own: the agent named, or none.
+      if (asked.searchParams.get("agent_id") !== this.config.agent_id) return json(response, 400, { detail: "no agent_id in request" });
+      if (asked.pathname === "/api/v1/inbox/stream") {
+        // As the agent opens it: what waits unread, then each item as it comes.
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        const unread = [...this.inbox.values()].filter((item) => item.status === "pending").map((item) => item.id);
+        response.write(`event: snapshot\r\ndata: ${JSON.stringify({ unread_ids: unread })}\r\n\r\n`);
+        this.inboxStreams.add(response);
+        response.on("close", () => this.inboxStreams.delete(response));
+        return;
+      }
+      const found = this.inbox.get(Number(/^\/api\/v1\/inbox\/(\d+)$/.exec(asked.pathname)?.[1]));
+      return found ? json(response, 200, found) : json(response, 404, { detail: "Not found." });
+    }
     if (request.method === "DELETE" && path.startsWith("/api/v1/devices/") && bearer) {
       this.deleted.push(path.slice("/api/v1/devices/".length));
       response.writeHead(204).end();
@@ -162,6 +181,20 @@ export class FakeAgent {
     }
     const served =this.projects === null ? "" : `<script>(${serveProjects.toString()})(${JSON.stringify(this.projects).replace(/</g, "\\u003c")}, ${this.registerAfterMs})</script>`;
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(`<!doctype html><title>Fake agent</title><p>The web client</p>${served}`);
+  }
+
+  /** A new item in the user's inbox, as the agent makes one, told on every inbox stream open: its id. */
+  tell(item: { kind: string; title: string; session_id: string }): number {
+    const id = this.inbox.size + 1;
+    this.inbox.set(id, { id, status: "pending", ...item });
+    for (const stream of this.inboxStreams) stream.write(`event: item\r\ndata: ${JSON.stringify({ item_id: id, kind: item.kind })}\r\n\r\n`);
+    return id;
+  }
+
+  /** End every inbox stream, as a restart of the agent does. */
+  dropInbox(): void {
+    for (const stream of this.inboxStreams) stream.end();
+    this.inboxStreams.clear();
   }
 
   /** Hold *route*: it answers only once the returned release is called. */
