@@ -1575,6 +1575,18 @@ class SessionStore:
                 await self._restore_reasoning_counts(db, session_id, events)
         return events
 
+    async def last_event(
+        self, session_id: UUID, type: EventType, *, containing: dict[str, Any] | None = None,
+    ) -> Event | None:
+        """The session's latest *type* event whose data holds *containing*; None when it has none."""
+        stmt = select(EventRow).where(EventRow.session_id == session_id, EventRow.type == type.value)
+        if containing:
+            stmt = stmt.where(EventRow.data.contains(containing))
+        stmt = stmt.order_by(EventRow.id.desc()).limit(1)
+        async with self._sf() as db:
+            row = (await db.execute(stmt)).scalars().first()
+        return Event.model_validate(row) if row is not None else None
+
     async def _restore_reasoning_counts(
         self, db: AsyncSession, session_id: UUID, events: list[Event],
     ) -> None:

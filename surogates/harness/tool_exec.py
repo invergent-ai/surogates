@@ -189,11 +189,15 @@ COPY_REMADE = (
 )
 
 
-async def _copy_lost_work(store: Any, session_id: Any) -> bool:
-    """Whether the thread ran steps since its last turn end, the landing's: their changes were in a copy now gone."""
-    ends = await store.get_events(session_id, types=[EventType.SESSION_COMPLETE])
-    after = ends[-1].id if ends else None
-    return bool(await store.get_events(session_id, after=after, limit=1, types=[EventType.TOOL_RESULT]))
+async def _copy_lost_work(store: Any, session_id: Any, before: int) -> bool:
+    """Whether a step that could change the copy ran since the thread's last landed turn end, before event *before*.
+
+    Such a step is a ``tool.call`` taken after a snapshot: reads, plans and
+    refused calls take none, and change nothing.
+    """
+    landed = await store.last_event(session_id, EventType.SESSION_COMPLETE, containing={"landed": True})
+    calls = await store.get_events(session_id, after=landed.id if landed else None, types=[EventType.TOOL_CALL])
+    return any(c.id < before and "checkpoint_hash" in (c.data or {}) for c in calls)
 
 
 async def _snapshot_copy(
@@ -1856,7 +1860,9 @@ async def _run_single_tool(
     # this worker or another.
     if sandbox_pool is not None and is_project_thread(session.config):
         from surogates.sandbox.pool import sandbox_session_key
-        if sandbox_pool.copy_fresh(sandbox_session_key(session)) and await _copy_lost_work(store, session.id):
+        if sandbox_pool.copy_fresh(sandbox_session_key(session)) and await _copy_lost_work(
+            store, session.id, _call_event_id,
+        ):
             result_content = f"{COPY_REMADE}\n\n{result_content}"
 
     spill_pool = device_call if device_call is not None else sandbox_pool

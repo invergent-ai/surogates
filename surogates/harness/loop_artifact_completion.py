@@ -1032,6 +1032,13 @@ class ArtifactCompletionMixin:
         }
         if cost_tracker is not None:
             complete_data["cost_summary"] = cost_tracker.summary()
+        if is_project_thread(session.config) and self._sandbox_pool is not None:
+            # Whether every write of the turn landed: a later turn on a copy
+            # made afresh lost nothing since.  A rolled-back, failed or held
+            # landing leaves writes the next copy lacks.
+            complete_data["landed"] = landing is None or (
+                landing["state"] == "completed" and all(f.get("landing") == "landed" for f in landing["files"])
+            )
 
         # Two independent best-effort settlements (neither raises); run
         # them concurrently to halve the session-complete round trip when

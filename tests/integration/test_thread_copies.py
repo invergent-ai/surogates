@@ -688,7 +688,7 @@ async def test_a_crashed_turns_retry_is_told_its_copy_was_made_fresh(api, monkey
     async def crashes_after_its_first_step(session, *_, **__):
         await open_pod(pool, session)
         (pods.copies[str(session.id)] / "a.md").write_text("a")
-        await store.emit_event(session.id, EventType.TOOL_RESULT, {"tool_call_id": "c1", "name": "write_file", "content": "{}"})
+        await a_step_ran(store, session)
         raise RuntimeError("the worker crashed mid-step")
 
     harness._run_loop = crashes_after_its_first_step
@@ -726,6 +726,18 @@ async def test_a_threads_loop_starts_no_run_to_edit_a_copy_never_landed(api, mon
         runs = (await db.execute(text("SELECT count(*) FROM sessions WHERE parent_id = :id"), {"id": thread.id})).scalar()
     assert (runs, pods.pods) == (0, {})
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+
+
+async def a_step_ran(store, session) -> None:
+    """A step of *session*'s turn, in its log as the harness writes one: its call, taken after a snapshot, then its result."""
+    call = {"tool_call_id": "c1", "name": "write_file", "arguments": {}, "checkpoint_hash": "0" * 40}
+    await store.emit_event(session.id, EventType.TOOL_CALL, call)
+    await store.emit_event(session.id, EventType.TOOL_RESULT, {"tool_call_id": "c1", "name": "write_file", "content": "{}"})
+
+
+async def last_writes(store, thread) -> list[str]:
+    return [e.data["content"] for e in await store.get_events(thread.id, types=[EventType.TOOL_RESULT])
+            if e.data["name"] == "write_file"]
 
 
 def a_waking_thread_harness(api, monkeypatch, pool, turn):
@@ -794,7 +806,7 @@ async def test_a_turn_resumed_on_another_worker_is_told_its_copy_is_fresh_and_a_
     async def a_step_then_the_lease_goes(session, *_, **__):
         await open_pod(first_worker, session)
         (pods.copies[str(session.id)] / "a.md").write_text("a")
-        await store.emit_event(session.id, EventType.TOOL_RESULT, {"tool_call_id": "c1", "name": "write_file", "content": "{}"})
+        await a_step_ran(store, session)
         raise asyncio.CancelledError  # the lease went to another worker
 
     with pytest.raises(asyncio.CancelledError):
@@ -814,3 +826,75 @@ async def test_a_turn_resumed_on_another_worker_is_told_its_copy_is_fresh_and_a_
         calling(("write_file", {"path": "c.md", "content": "c"})), _final_response("Done."),
     ], pool=first_worker)
     assert not (await last_result()).startswith("[This thread's copy")
+
+
+PLAN_FIRST = [
+    calling(("skill_view", {"name": "docx"})),
+    calling(("todo", {"todos": [{"id": "1", "content": "Write it", "status": "in_progress"}]})),
+]
+
+
+async def test_a_turn_that_reads_and_plans_before_it_writes_is_not_told_its_copy_is_fresh(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    # The thread's first turn, then a turn after one that landed.
+    for n, name in enumerate(("a.md", "b.md")):
+        if n:
+            await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "And another."})
+        await a_turn(api, monkeypatch, thread, [
+            *PLAN_FIRST, calling(("write_file", {"path": name, "content": name})), _final_response("Done."),
+        ], pool=pool)
+        assert not (await last_writes(store, thread))[-1].startswith("[This thread's copy")
+
+
+async def test_a_thread_is_told_only_of_work_since_its_last_landed_turn(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    for n, name in enumerate(("a.md", "b.md")):  # two turns that land
+        if n:
+            await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "And another."})
+        await a_turn(api, monkeypatch, thread, [
+            calling(("write_file", {"path": name, "content": name})), _final_response("Done."),
+        ], pool=pool)
+    gone: list = []
+
+    async def the_pod_goes_once(harness):
+        if not gone:
+            gone.append(await pods.destroy(next(iter(pods.pods))))
+
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Two more."})
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "c.md", "content": "c"})),
+        calling(("memory", {"action": "add", "content": "Name: Ana"})),
+        calling(("write_file", {"path": "d.md", "content": "d"})),
+        _final_response("Done."),
+    ], pool=pool, during=the_pod_goes_once)
+    # Its first step lost nothing the last landed turn did not hold; its step after the pod went did.
+    first, after_the_pod_went = (await last_writes(store, thread))[-2:]
+    assert not first.startswith("[This thread's copy") and after_the_pod_went.startswith("[This thread's copy")
+
+
+async def test_a_turn_after_a_landing_that_rolled_back_is_told_its_copy_lacks_that_work(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    apply = History.apply
+
+    def a_save_lands_first(self, path, before, after):
+        if path == "c.md":
+            (self.project / "c.md").write_text("saved by you just now")
+        return apply(self, path, before, after)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(History, "apply", a_save_lands_first)
+        await a_turn(api, monkeypatch, thread, [
+            calling(("terminal", {"command": "for f in a b c; do echo $f > $f.md; done"})),
+            _final_response("Wrote three notes."),
+        ], pool=pool, saga_settings=QUICK)
+    [report] = await reports(api, master)
+    assert report["landing"] == "compensated"
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Try again."})
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "x.md", "content": "x"})), _final_response("Done."),
+    ], pool=pool)
+    assert (await last_writes(store, thread))[-1].startswith("[This thread's copy")
