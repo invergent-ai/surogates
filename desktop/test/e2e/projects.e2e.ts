@@ -527,6 +527,27 @@ describe("the project dialog", () => {
     await expect.poll(() => texts(page, "#projects .project .name")).toContain("Late");
   });
 
+  it("names each field by its label alone, describes it by its help, and gives the name the focus back after a refusal", async () => {
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click("#project-settings");
+    const dialog = await projectDialog(shell);
+    const named = (role: "textbox" | "combobox", name: string) => dialog.getByRole(role, { name, exact: true }).getAttribute("id");
+    expect(await named("textbox", "Goal")).toBe("goal");
+    expect(await named("textbox", "Instructions")).toBe("instructions");
+    expect(await named("combobox", "The conversation's model")).toBe("coordinator-tier");
+    expect(await named("combobox", "The threads' model")).toBe("thread-tier");
+    const described = (id: string) => dialog.$eval(`#${id}`, (field) =>
+      (field.getAttribute("aria-describedby") ?? "").split(" ").map((by) => document.getElementById(by)?.textContent).join(" "));
+    expect(await described("goal")).toBe("What the project is for. Its conversation and its threads see it.");
+    expect(await described("thread-tier")).toBe("A model above your plan's runs as your plan's.");
+    expect(await described("coordinator-tier")).toBe("A model above your plan's runs as your plan's.");
+    await dialog.fill("#name", " ");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error")).toBe("Name the project.");
+    expect(await dialog.evaluate(() => document.activeElement?.id)).toBe("name");
+  });
+
   it("makes one project for a Create clicked twice before the agent answers", async () => {
     const { shell, page, client } = await signedIn();
     await client.evaluate(() => {

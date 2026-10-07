@@ -58,7 +58,8 @@ async function render(): Promise<void> {
   byId<HTMLInputElement>("name").focus();
 }
 
-// One request at a time: the fields wait for its answer, which is said, or closes the dialog.
+// One request at a time: the fields wait for its answer, which is said, or closes the dialog. The
+// name has the focus back, which the fields' wait took from it, for the user to go on.
 async function asked(request: () => Promise<string | null>): Promise<void> {
   const fields = byId<HTMLFieldSetElement>("fields");
   if (fields.disabled) return;
@@ -70,6 +71,7 @@ async function asked(request: () => Promise<string | null>): Promise<void> {
     byId("error").textContent = error instanceof Error ? error.message : String(error);
   } finally {
     fields.disabled = false;
+    byId("name").focus();
   }
 }
 

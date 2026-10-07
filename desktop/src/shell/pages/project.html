@@ -13,12 +13,12 @@
       <fieldset id="fields">
         <h2 id="heading"></h2>
         <label class="field"><span>Name</span><input id="name" type="text" maxlength="256" autocomplete="off" spellcheck="false" /></label>
-        <label class="field"><span>Goal</span><span class="desc">What the project is for. Its conversation and its threads see it.</span><textarea id="goal" maxlength="2000" rows="3"></textarea></label>
+        <div class="field"><label for="goal">Goal</label><span class="desc" id="goal-desc">What the project is for. Its conversation and its threads see it.</span><textarea id="goal" maxlength="2000" rows="3" aria-describedby="goal-desc"></textarea></div>
         <div class="settings-only" id="settings-only">
-          <label class="field"><span>Instructions</span><span class="desc">How the project's threads work: the tone, the format, what to leave out. A thread started after a change follows it.</span><textarea id="instructions" maxlength="16000" rows="6"></textarea></label>
-          <label class="field"><span>The conversation's model</span><select id="coordinator-tier"><option value="">The agent's own</option><option value="basic">Basic</option><option value="pro">Pro</option></select></label>
-          <label class="field"><span>The threads' model</span><select id="thread-tier"><option value="">The agent's own</option><option value="basic">Basic</option><option value="pro">Pro</option></select></label>
-          <p class="desc">A model above your plan's runs as your plan's.</p>
+          <div class="field"><label for="instructions">Instructions</label><span class="desc" id="instructions-desc">How the project's threads work: the tone, the format, what to leave out. A thread started after a change follows it.</span><textarea id="instructions" maxlength="16000" rows="6" aria-describedby="instructions-desc"></textarea></div>
+          <label class="field"><span>The conversation's model</span><select id="coordinator-tier" aria-describedby="tier-desc"><option value="">The agent's own</option><option value="basic">Basic</option><option value="pro">Pro</option></select></label>
+          <label class="field"><span>The threads' model</span><select id="thread-tier" aria-describedby="tier-desc"><option value="">The agent's own</option><option value="basic">Basic</option><option value="pro">Pro</option></select></label>
+          <p class="desc" id="tier-desc">A model above your plan's runs as your plan's.</p>
         </div>
         <p class="error" id="error" role="alert"></p>
         <div class="actions">
