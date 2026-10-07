@@ -191,8 +191,10 @@ async def create_child_session(
         if field in parent_config:
             merged_config[field] = parent_config[field]
     # The user's package, as the parent's last turn pinned it: a helper's
-    # turn, often its only one, runs inside it as the parent's does.
-    if "entitlements" in parent_config:
+    # turn, often its only one, runs inside it as the parent's does.  Not a
+    # routine run's: it is not held, so nothing would refresh the copy once
+    # the package lapses.  It runs on the agent's own tier.
+    if "entitlements" in parent_config and channel != "scheduled":
         merged_config["entitlements"] = parent_config["entitlements"]
 
     if "execution" in parent_config:

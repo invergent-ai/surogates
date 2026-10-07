@@ -19,6 +19,7 @@ from surogates.memory.manager import MemoryManager
 from surogates.memory.r2_store import R2MemoryStore
 from surogates.orchestrator.worker import _build_r2_memory_keys
 from surogates.runtime import build_agent_runtime_context
+from surogates.scheduled.materialize import materialize_scheduled_run
 from surogates.scheduled.schedule import parse_schedule
 from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session.events import EventType
@@ -274,6 +275,26 @@ async def routine_made_in(monkeypatch, session, session_factory, prompt: str) ->
     call = {"cron_create": {"cron": "0 9 * * 1", "prompt": prompt, "name": prompt}}
     _, _, answered = await turn_calling(monkeypatch, session, call, session_factory=session_factory)
     assert json.loads(answered["call_cron_create"])["success"] is True
+
+
+async def test_a_routine_runs_on_the_agents_own_tier_whatever_package_made_it(api, monkeypatch, session_factory):
+    project = await create(api)
+    await pin(api, project, {"model_tier": "pro"})
+    master = await master_of(api, project)
+    await routine_made_in(monkeypatch, master, session_factory, "Check the cash report")
+    response = await api.client.get(f"/v1/scheduled-work?created_from_session_id={master.id}", headers=api.auth())
+    [routine] = response.json()["items"]
+    state = api.app.state
+    run = await state.session_store.get_session(await materialize_scheduled_run(
+        await ScheduledSessionStore(session_factory).get(UUID(routine["id"])),
+        session_store=state.session_store, scheduled_store=ScheduledSessionStore(session_factory),
+        storage=state.storage, settings=state.settings, redis=state.redis,
+    ))
+    # A routine run is not held, so nothing would refresh a copied pin: once
+    # the package lapses the master's still names pro.  It runs basic then,
+    # and so, the accepted cost, while the package lasts.
+    assert "entitlements" not in run.config
+    assert await model_of(run) == "basic-model"
 
 
 async def test_the_routines_are_the_schedules_the_master_made(api, monkeypatch, session_factory):
