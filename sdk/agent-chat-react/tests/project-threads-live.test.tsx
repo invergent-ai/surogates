@@ -80,9 +80,83 @@ function Live({ adapter }: { adapter: AgentChatAdapter }) {
 
 async function settle(): Promise<void> {
   await act(async () => {
-    for (let i = 0; i < 5; i++) await Promise.resolve();
+    for (let i = 0; i < 20; i++) await Promise.resolve();
   });
 }
+
+// The ids of the rows the hook holds.
+function Rows({ adapter }: { adapter: AgentChatAdapter }) {
+  const rows = useProjectThreads(adapter, "project-1");
+  return <span>{Object.keys(rows).sort().join(",")}</span>;
+}
+
+function mountRows(adapter: AgentChatAdapter): () => string | null {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  act(() => root?.render(<Rows adapter={adapter} />));
+  return () => container!.textContent;
+}
+
+describe("a project's rows", () => {
+  it("reads a failed read again at the next change, and loses no other read to it", async () => {
+    const stream = new FakeStream();
+    let failing = true;
+    const listProjectThreads = vi.fn(async ({ threadId }: { projectId: string; threadId?: string }) => {
+      if (threadId === "B" && failing) {
+        failing = false;
+        // Heard while B is read.
+        stream.emit("change", { thread_id: "D" });
+        throw new Error("Bad Gateway");
+      }
+      return [row({ id: threadId })];
+    });
+    const rows = mountRows({ ...NO_BROWSER_ADAPTER, listProjectThreads, openProjectStream: () => stream } as unknown as AgentChatAdapter);
+    // B and C are heard while A is read, and read together after it.
+    act(() => {
+      for (const threadId of ["A", "B", "C"]) stream.emit("change", { thread_id: threadId });
+    });
+    await settle();
+    expect(rows()).toBe("A,C,D");
+    act(() => stream.emit("change", { thread_id: "E" }));
+    await settle();
+    expect(rows()).toBe("A,B,C,D,E");
+    expect(listProjectThreads.mock.calls.map(([input]) => input.threadId)).toEqual(["A", "B", "C", "D", "E", "B"]);
+  });
+
+  it("drops a read that lands after the project's stream ended", async () => {
+    const stream = new FakeStream();
+    let land: () => void = () => {};
+    const listProjectThreads = vi.fn(() => new Promise<AgentChatThreadRow[]>((resolve) => {
+      land = () => resolve([row()]);
+    }));
+    const rows = mountRows({ ...NO_BROWSER_ADAPTER, listProjectThreads, openProjectStream: () => stream } as unknown as AgentChatAdapter);
+    act(() => stream.emit("ready"));
+    act(() => stream.onerror?.());
+    await act(async () => land());
+    await settle();
+    expect(listProjectThreads).toHaveBeenCalledTimes(1);
+    expect(rows()).toBe("");
+  });
+
+  it("calls the adapter's own methods, as a class instance's", async () => {
+    class ProjectAdapter {
+      readonly stream = new FakeStream();
+      readonly rows = [row()];
+      async listProjectThreads() {
+        return this.rows;
+      }
+      openProjectStream() {
+        return this.stream;
+      }
+    }
+    const adapter = new ProjectAdapter();
+    const rows = mountRows(adapter as unknown as AgentChatAdapter);
+    act(() => adapter.stream.emit("ready"));
+    await settle();
+    expect(rows()).toBe(THREAD);
+  });
+});
 
 describe("a thread's card, live", () => {
   it("moves from working to waiting on a question, to idle, to resolved, as the stream tells it", async () => {
