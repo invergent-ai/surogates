@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import os
 import uuid
 from datetime import timedelta
 from uuid import UUID
@@ -139,6 +141,33 @@ async def test_a_session_may_have_only_so_many_requests_open(api, session_factor
 
     await eventually(both_recorded)
     for task in (waiting, again, next_step):
+        await stop(task)
+
+
+async def test_a_burst_of_new_requests_opens_no_more_than_the_cap(api, session_factory, redis_client, monkeypatch):
+    monkeypatch.setattr(operations_module, "OPEN_REQUESTS_PER_SESSION", 2)
+    issued, root = await bound_device(api)
+    device_id = UUID(issued["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    # Uploads, as a message's attachments go all at once: each holds its count open while its data is stored.
+    data = os.urandom(4 * 1024 * 1024)
+    transfer = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    uploads = [
+        OperationRequest(**{
+            **_fields(asked(device_id, root)), "kind": "write",
+            "args": {"key": f"/folder/{n}.bin", "transfer": transfer}, "payload": data,
+        })
+        for n in range(10)
+    ]
+    burst = [asyncio.create_task(ops.run(upload, keep_open=True)) for upload in uploads]
+
+    async def settled() -> bool:
+        return sum(task.done() for task in burst) == 8
+
+    await eventually(settled, timeout=10.0)
+    assert all(isinstance(task.exception(), TooManyRequests) for task in burst if task.done())
+    assert len(await ops.pending(device_id, 1)) == 2
+    for task in burst:
         await stop(task)
 
 

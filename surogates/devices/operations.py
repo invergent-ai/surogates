@@ -219,6 +219,9 @@ async def _refuse_too_many_requests(db: AsyncSession, request: OperationRequest,
     )).scalar_one_or_none()
     if already is not None:
         return
+    # Held to the commit, so a burst of new requests counts one at a time: the
+    # device row's lock is FOR SHARE, and every one would pass the count together.
+    await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"device-requests:{request.calling_session_id}"))))
     open_requests = (await db.execute(
         select(func.count(func.distinct(DeviceOperation.invocation_id))).where(
             DeviceOperation.calling_session_id == request.calling_session_id,
@@ -635,8 +638,8 @@ class DeviceOperations:
                     )
                 return existing.id, existing.outcome
             # ponytail: the device row is locked FOR SHARE, so concurrent recorders can pass the
-            # count together and the limit is soft by their number.
-            # A request never parks: its HTTP wait is bounded, and its own cap bounds how many.
+            # parked count together and that limit is soft by their number.
+            # A request never parks: its HTTP wait is bounded, and its own cap, which holds exactly, bounds how many.
             if request.invocation_id.startswith(REQUEST_PREFIX):
                 if device.revoked_at is None:
                     await _refuse_too_many_requests(db, request, device)
