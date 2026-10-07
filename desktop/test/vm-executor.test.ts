@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
 import { APP_QUIT, type ProcessHandle, RUNNER_GONE } from "../src/guest/processes.js";
-import type { ProtectedKey } from "../src/guest/protocol.js";
 import { readRecord, writeRecord } from "../src/hosts/folder-record.js";
 import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
@@ -30,8 +29,6 @@ let torn: Array<[string, number]>;
 let guest: (operation: VmOperation, signal: AbortSignal) => Promise<Outcome>;
 // What the VM does with a root's teardown; by default, it answers at once.
 let tear: (root: string) => Promise<void>;
-// The protected keys the VM was told of between commands, by root.
-let protectedOf: Array<[string, ProtectedKey[]]>;
 // What the VM tells of a root's processes, while the executor listens.
 let heard: ((root: string, change: ProcessesChange) => void) | null;
 // Run as a file host's ready comes, before its root's host hears it.
@@ -84,7 +81,6 @@ function vmExecutor(idleMs?: number): VmExecutor {
           heard = null;
         };
       },
-      protect: (root, keys) => void protectedOf.push([root, keys]),
     },
   });
   return executor;
@@ -101,7 +97,6 @@ beforeEach(() => {
   guest = async () => ran("ran\n");
   tear = async () => {};
   heard = null;
-  protectedOf = [];
   beforeReady = () => {};
 });
 
@@ -124,40 +119,6 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
     ]);
     // One file host for the root, whatever runs where.
     expect(spawned).toHaveLength(1);
-  });
-
-  it("gives each kind that runs a command the folder's protected keys, read-only before it runs, and tells the VM those found between commands", async () => {
-    mkdirSync(join(folder, ".git"));
-    writeFileSync(join(folder, ".git", "config"), "[core]\n");
-    const git: ProtectedKey = [join(folder, ".git"), statSync(join(folder, ".git")).ino, "rw"];
-    const config: ProtectedKey = [join(folder, ".git", "config"), statSync(join(folder, ".git", "config")).ino, "ro"];
-    vmExecutor();
-    expect(await run()).toEqual(ran("ran\n"));
-    for (const [kind, args] of [["start", { command: "make watch" }], ["write_stdin", { session_id: "proc_000000000001", data: "y\n" }], ["which", { name: "sh" }], ["poll", { session_id: "proc_000000000001" }]] as const) {
-      await executor.run(op(kind, args), signal());
-    }
-    expect(sent.map((operation) => [operation.kind, operation.protect])).toEqual([
-      ["run", [git, config]], ["start", [git, config]], ["write_stdin", [git, config]], ["which", undefined], ["poll", undefined],
-    ]);
-    expect(protectedOf).toEqual([[ROOT, [git, config]]]);
-  });
-
-  it("tells the VM nothing a look finds while a command runs until the command answers, so git's work in it is not stopped halfway", async () => {
-    vmExecutor();
-    // The root's first command: from its answer on, the file host looks every 5 s.
-    expect(await run()).toEqual(ran("ran\n"));
-    const mcp = join(folder, ".mcp.json");
-    let during: Array<[string, ProtectedKey[]]> = [];
-    guest = async () => {
-      writeFileSync(mcp, "{}\n");
-      // Past the next look.
-      await new Promise((resolve) => setTimeout(resolve, 6_000));
-      during = [...protectedOf];
-      return ran("ran\n");
-    };
-    expect(await run()).toEqual(ran("ran\n"));
-    expect(during).toEqual([[ROOT, []]]);
-    expect(protectedOf).toEqual([[ROOT, []], [ROOT, [[mcp, statSync(mcp).ino, "ro"]]]]);
   });
 
   it("answers a bind it cannot confirm, and a root it has no folder for, without the guest", async () => {

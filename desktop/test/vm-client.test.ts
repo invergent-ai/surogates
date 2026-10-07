@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
-import type { ProtectedKey } from "../src/guest/protocol.js";
 import { forkManager, type FromManager, type ManagerProcess, VmClient, vmOptions } from "../src/vm/client.js";
 import { unavailable, type VmOperation, type VmOptions } from "../src/vm/manager.js";
 
@@ -249,22 +248,6 @@ describe("the VM manager's process", { timeout: 20_000 }, () => {
     expect(await vm.perform(operation(), signal())).toEqual({
       error: { type: "unavailable", message: "This computer's sandbox did not start: its manager exited" },
     });
-  });
-
-  it("tells its manager a root's protected keys, and starts none to do it", async () => {
-    const sent: unknown[] = [];
-    let started = 0;
-    const manager: ManagerProcess = { send: (message) => void sent.push(message), onMessage: () => {}, onExit: () => {}, kill: () => {} };
-    const vm = new VmClient({ vm: { kernel: "", rootfs: "", agentDisk: "", sessions: "", run: "", console: "", user: { uid: 1, gid: 1, name: "ana", home: "/home/ana" } }, spawn: () => {
-      started += 1;
-      return manager;
-    } });
-    const keys: ProtectedKey[] = [["/f/.git/config", 41, "ro"]];
-    vm.protect("root-1", keys);
-    expect(started).toBe(0);
-    void vm.perform(operation(), signal());
-    vm.protect("root-1", keys);
-    expect(sent.slice(1)).toEqual([expect.objectContaining({ type: "op" }), { type: "protect", root: "root-1", keys }]);
   });
 
   it("tears a root down through its manager, and starts none to do it", async () => {

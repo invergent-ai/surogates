@@ -11,7 +11,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BOOT_ID } from "../src/binding/folder.js";
 import { SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
-import type { ProtectedKey } from "../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { bootLinux, sweep } from "../src/vm/linux.js";
 import { type BootVm, bootFor, type Folder, Guest, type ProcessesChange, type VmBackend, VmManager, type VmOptions } from "../src/vm/manager.js";
@@ -320,7 +319,7 @@ describe("the VM manager on a guest", () => {
         });
       },
       teardown: async () => void asked.push("teardown"),
-      protect: async () => {},
+     
       perform: async () => ({ ok: true }),
     };
     const manager = new VmManager(options(), fakeVm(roots));
@@ -346,7 +345,7 @@ describe("a root torn down", () => {
       uid: () => 10_000,
       setup: async (root) => void asked.push(["setup", root]),
       teardown: async (root, share) => void asked.push(["teardown", root, share]),
-      protect: async () => {},
+     
       perform: async () => ({ ok: true }),
     };
     return async (...args) => {
@@ -389,117 +388,9 @@ describe("a root torn down", () => {
   });
 });
 
-describe("a root's protected keys in the guest", () => {
-  const KEYS: ProtectedKey[] = [["/f/.git", 40, "rw"], ["/f/.git/config", 41, "ro"]];
-  let asked: unknown[];
-  let refuse: boolean;
-  // Binds that take a while, as a few hundred do: what has been bound is told once they are.
-  let slow: boolean;
-  const roots = (): ControlRoots => ({
-    uid: () => 10_000,
-    setup: async (root) => void asked.push(["setup", root]),
-    teardown: async () => {},
-    protect: async (root, keys) => {
-      asked.push(["protect", root, keys]);
-      if (slow) {
-        await new Promise((resolve) => setTimeout(resolve, 300));
-        asked.push(["bound", root]);
-      }
-      if (refuse) throw new Error("Blocked: the computer could not make these protected files read-only in its sandbox");
-    },
-    perform: async (root, kind) => {
-      asked.push([kind, root]);
-      return { ok: true };
-    },
-  });
-  const run = (manager: VmManager, protect?: ProtectedKey[], kind = "run") => manager.perform({
-    id: `${kind}-${Math.random()}`, root: "root-1", folder: { path: dir, ...statSync(dir) }, kind, args: {}, ...(protect ? { protect } : {}),
-  }, new AbortController().signal);
-
-  beforeEach(() => {
-    asked = [];
-    refuse = false;
-    slow = false;
-  });
-
-  it("are made read-only after the root's setup and before its command, asked again only once they change or it is set up again", async () => {
-    const manager = new VmManager(options(), fakeVm(roots()));
-    expect(await run(manager, KEYS)).toEqual({ ok: true });
-    expect(await run(manager, KEYS)).toEqual({ ok: true });
-    // A kind that runs no command brings none.
-    expect(await run(manager, undefined, "poll")).toEqual({ ok: true });
-    const changed: ProtectedKey[] = [["/f/.git", 40, "rw"], ["/f/.git/config", 42, "ro"]];
-    expect(await run(manager, changed)).toEqual({ ok: true });
-    // The root's runner is lost: its namespace is made again, and its keys bound there again.
-    agent?.write(`${JSON.stringify({ type: "lost", root: "root-1" })}\n`);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(await run(manager, changed)).toEqual({ ok: true });
-    expect(asked).toEqual([
-      ["setup", "root-1"], ["protect", "root-1", KEYS], ["run", "root-1"], ["run", "root-1"], ["poll", "root-1"],
-      ["protect", "root-1", changed], ["run", "root-1"],
-      ["setup", "root-1"], ["protect", "root-1", changed], ["run", "root-1"],
-    ]);
-    await manager.stop();
-  });
-
-  it("refuse the root's command while they cannot be made read-only, and are asked again with the next", async () => {
-    const manager = new VmManager(options(), fakeVm(roots()));
-    refuse = true;
-    expect(await run(manager, KEYS)).toEqual({
-      error: { type: "sandbox", message: "Blocked: the computer could not make these protected files read-only in its sandbox" },
-    });
-    refuse = false;
-    expect(await run(manager, KEYS)).toEqual({ ok: true });
-    expect(asked).toEqual([["setup", "root-1"], ["protect", "root-1", KEYS], ["protect", "root-1", KEYS], ["run", "root-1"]]);
-    await manager.stop();
-  });
-
-  it("are made read-only as the root's file host finds them between commands, once a guest has the root set up", async () => {
-    const manager = new VmManager(options(), fakeVm(roots()));
-    await manager.protect("root-1", KEYS);
-    expect(await run(manager, undefined, "which")).toEqual({ ok: true });
-    await manager.protect("root-1", KEYS);
-    await manager.protect("root-1", KEYS);
-    await manager.protect("root-2", KEYS);
-    expect(asked).toEqual([["setup", "root-1"], ["which", "root-1"], ["protect", "root-1", KEYS]]);
-    await manager.stop();
-  });
-
-  // The root's runner is lost while a command's keys are being bound, and another operation of the root sets it up again first.
-  const lostWhileBinding = async (manager: VmManager, other: () => Promise<unknown>) => {
-    slow = true;
-    const first = run(manager, KEYS);
-    await until(() => asked.length === 2);
-    agent?.write(`${JSON.stringify({ type: "lost", root: "root-1" })}\n`);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(await other()).toEqual({ ok: true });
-    expect(await first).toEqual({ ok: true });
-  };
-
-  it("are bound again in a namespace set up again by a poll while they were being bound, before the command runs there", async () => {
-    const manager = new VmManager(options(), fakeVm(roots()));
-    await lostWhileBinding(manager, () => run(manager, undefined, "poll"));
-    expect(asked).toEqual([
-      ["setup", "root-1"], ["protect", "root-1", KEYS], ["setup", "root-1"], ["poll", "root-1"], ["bound", "root-1"],
-      ["protect", "root-1", KEYS], ["bound", "root-1"], ["run", "root-1"],
-    ]);
-    await manager.stop();
-  });
-
-  it("are bound in a namespace set up again by another command while they were being bound, before either command runs there", async () => {
-    const manager = new VmManager(options(), fakeVm(roots()));
-    await lostWhileBinding(manager, () => run(manager, KEYS));
-    expect(asked).toEqual([
-      ["setup", "root-1"], ["protect", "root-1", KEYS], ["setup", "root-1"], ["bound", "root-1"],
-      ["protect", "root-1", KEYS], ["bound", "root-1"], ["run", "root-1"], ["run", "root-1"],
-    ]);
-    await manager.stop();
-  });
-});
-
 describe("a root's processes in the guest", () => {
   it("are told as they change, refused whole past a registry's count or a handle's shape and size, and told gone with every root of a guest that goes", async () => {
-    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, protect: async () => {}, perform: async () => ({ ok: true }) };
+    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
     const told: Array<[string, ProcessesChange]> = [];
     const vms: VmBackend[] = [];
     const boot: BootVm = async (...args) => {
@@ -539,7 +430,7 @@ describe("a guest that goes", () => {
       uid: () => 10_000,
       setup: async () => {},
       teardown: async () => {},
-      protect: async () => {},
+     
       // A run that never ends; which answers at once.
       perform: (_root, kind) => new Promise((resolve) => kind === "which" && resolve({ ok: true })),
     };
@@ -572,7 +463,7 @@ describe("a guest that goes", () => {
 });
 
 describe("a chat's folder, checked again before it is shared", () => {
-  const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, protect: async () => {}, perform: async () => ({ ok: true }) };
+  const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
   const which = (manager: VmManager, root: string, folder: Folder) =>
     manager.perform({ id: `which-${root}`, root, folder, kind: "which", args: {} }, new AbortController().signal);
 
@@ -622,7 +513,7 @@ function stalledFolder(): { folder: Folder; release: () => void } {
 
 describe("a chat's folder on a mount that does not answer", () => {
   it("is answered as unavailable within the share's bound, and its root torn down without waiting on it", async () => {
-    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, protect: async () => {}, perform: async () => ({ ok: true }) };
+    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
     const manager = new VmManager({ ...options(), shareMs: 300 }, fakeVm(roots));
     const { folder, release } = stalledFolder();
     try {

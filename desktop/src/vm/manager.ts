@@ -12,7 +12,7 @@ import type { Duplex } from "node:stream";
 import { BOOT_ID } from "../binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
 import type { ProcessHandle } from "../guest/processes.js";
-import type { FromAgent, HostUser, ProtectedKey, Share } from "../guest/protocol.js";
+import type { FromAgent, HostUser, Share } from "../guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { ControlLink, type Request } from "./control.js";
@@ -107,8 +107,6 @@ export interface VmOperation {
   args: Record<string, unknown>;
   // The handles the host keeps of the root's background processes: a root new to the guest answers for them.
   ended?: ProcessHandle[];
-  // For a kind that runs a command: its folder's protected keys, read-only in the root's namespace before it runs.
-  protect?: ProtectedKey[];
 }
 
 export const unavailable = (why: string): Outcome => ({ error: { type: "unavailable", message: `This computer's sandbox ${why}` } });
@@ -131,9 +129,6 @@ const aborted = (signal: AbortSignal) => new Promise<"aborted">((resolve) => {
 interface Root {
   share: Promise<Share>; // how the agent mounts its folder, once added
   setup: Promise<Outcome | null> | null; // null once set up, or why not
-  // The protected keys read-only in its namespace since its setup, as last asked, and the ask under way.
-  bound: string;
-  binding: Promise<Outcome | null>;
 }
 
 // One boot of the guest, until it goes.
@@ -212,14 +207,13 @@ export class Guest {
   }
 
   /**
-   * Null once *root* is set up, its folder added, its processes' *ended* handles
-   * given, and *protect*'s keys read-only; otherwise the answer that says why not,
-   * and the next asks again.
+   * Null once *root* is set up, its folder added and its processes' *ended* handles
+   * given; otherwise the answer that says why not, and the next asks again.
    */
-  ready(root: string, folder: Folder, ended: ProcessHandle[] = [], protect?: ProtectedKey[]): Promise<Outcome | null> {
+  ready(root: string, folder: Folder, ended: ProcessHandle[] = []): Promise<Outcome | null> {
     let known = this.roots.get(root);
     if (!known) {
-      const entry: Root = { share: this.share(root, folder), setup: null, bound: "", binding: Promise.resolve(null) };
+      const entry: Root = { share: this.share(root, folder), setup: null };
       // A share that could not be added is tried again by the next operation.
       entry.share.catch(() => {
         if (this.roots.get(root) === entry) this.roots.delete(root);
@@ -238,8 +232,6 @@ export class Guest {
         if (this.left) return SANDBOX_STOPPED;
         return error instanceof FolderGone ? FOLDER_UNAVAILABLE : unavailable(`could not add this chat's folder: ${describe(error)}`);
       }
-      // A namespace of its own, with nothing bound in it yet.
-      entry.bound = "";
       const answer = await this.request({ type: "setup", root, folder: folder.path, share, ended }, SETUP_MS);
       if (answer?.type === "done") return null;
       entry.setup = null;
@@ -248,40 +240,7 @@ export class Guest {
       this.lose();
       return SANDBOX_STOPPED;
     })();
-    const { setup } = entry;
-    if (!protect) return setup;
-    return setup.then(async (failure) => {
-      if (failure) return failure;
-      const refused = await this.protect(root, protect);
-      // Set up again meanwhile, its runner lost: the keys go to the new namespace before the command does.
-      return refused ?? (entry.setup === setup ? null : this.ready(root, folder, ended, protect));
-    });
-  }
-
-  /**
-   * *keys* read-only in *root*'s namespace, once it is set up: null once they are, or
-   * the answer that refuses its command. Asked in turn, and only when they differ from
-   * what its namespace was last given; a root not set up has nothing to bind them in.
-   */
-  protect(root: string, keys: ProtectedKey[]): Promise<Outcome | null> {
-    const entry = this.roots.get(root);
-    const setup = entry?.setup;
-    if (!entry || !setup) return Promise.resolve(null);
-    const asked = JSON.stringify(keys);
-    entry.binding = entry.binding.then(async () => {
-      // Not set up, or set up again since: its next command brings them.
-      if ((await setup) !== null || entry.setup !== setup || entry.bound === asked) return null;
-      const answer = await this.request({ type: "protect", root, keys }, SETUP_MS);
-      if (!answer) {
-        // The agent is stuck, and the guest goes with it.
-        this.lose();
-        return SANDBOX_STOPPED;
-      }
-      if (answer.type === "failed") return { error: { type: "sandbox", message: answer.message } };
-      if (entry.setup === setup) entry.bound = asked;
-      return null;
-    });
-    return entry.binding;
+    return entry.setup;
   }
 
   /**
@@ -388,16 +347,10 @@ export class VmManager {
       return unavailable(this.stopping ? "is stopping" : `did not start: ${describe(error)}`);
     }
     if (guest === "aborted") return CANCELLED;
-    const failure = await Promise.race([guest.ready(operation.root, operation.folder, operation.ended, operation.protect), aborted(signal)]);
+    const failure = await Promise.race([guest.ready(operation.root, operation.folder, operation.ended), aborted(signal)]);
     if (failure === "aborted") return CANCELLED;
     if (failure) return this.stopping ? unavailable("is stopping") : failure;
     return guest.op(operation.root, operation.kind, operation.args, signal);
-  }
-
-  /** *keys*, found between *root*'s commands, read-only in its namespace if a guest has it set up. Never rejects. */
-  async protect(root: string, keys: ProtectedKey[]): Promise<void> {
-    const guest = await this.guest?.catch(() => null);
-    if (guest && !guest.ended) await guest.protect(root, keys);
   }
 
   /** Everything of *root* ends in the guest, if one runs: its folder is being let go. Never rejects. */

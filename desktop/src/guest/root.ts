@@ -7,15 +7,14 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { chmodSync, chownSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { chmod, chown, mkdir, readdir, readFile, rmdir, writeFile } from "node:fs/promises";
-import { join, posix, relative } from "node:path";
+import { join, posix } from "node:path";
 import { promisify } from "node:util";
 
 import { Failure } from "../files/answers.js";
-import { inside } from "../files/paths.js";
 import type { Outcome } from "../link/protocol.js";
 import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STOPPED, supervise, timedOut } from "./command.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
-import { type Answer, type BindMode, type HostUser, MAX_SHARES, type ProtectedKey, type Question, type Share } from "./protocol.js";
+import { type Answer, type HostUser, MAX_SHARES, type Question, type Share } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 
 // The sessions disk's folder of roots (vm/init), each named by its root session id.
@@ -37,14 +36,6 @@ const CGROUPS_MAX = 256;
 const EMPTY_MS = 3_000;
 const EMPTY_RETRY_MS = 10;
 const ENTER_ROOT = "/run/surogate/agent/enter-root";
-// Binds a root's protected keys, and the folders above them, in its namespace: on the agent
-// disk, which the root's /run/surogate/agent shows too.
-const PROTECT = "/run/surogate/agent/protect";
-// About a millisecond a bind, measured: MAX_PROTECTED take about a second, well inside the
-// host's 15 s for the request.
-const PROTECT_MS = 10_000;
-// How many paths a refusal names.
-const NAMED = 20;
 // The cloud's layout of the commands' environment, written by the image's build.
 const LAYOUT = "/etc/surogate/environment";
 const FIRST_UID = 10_000;
@@ -287,48 +278,6 @@ export async function killRoot(root: string): Promise<void> {
   }
 }
 
-// What became of each path a root's namespace was asked to bind: the inode it bound, or
-// absent (gone since the host looked), or failed (a link that leads nowhere).
-export type Bound = Map<string, number | "absent" | "failed">;
-
-/**
- * Each of *binds*, in order, bound over itself as its mode says, in the mount namespace of
- * the root whose unshare is *pid*, by vm/protect as the guest's root, in the root's own
- * view. A bind follows a link, as srt's deny did: a link's target is what is bound.
- */
-export function bindOver(pid: number, binds: ReadonlyArray<readonly [string, BindMode]>): Promise<Bound> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("/usr/bin/nsenter", ["--target", String(pid), "--mount", "--root", "--wd", "--", "/bin/bash", PROTECT], {
-      env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin" }, stdio: ["pipe", "pipe", "ignore"],
-    });
-    const chunks: Buffer[] = [];
-    let late = false;
-    const timer = setTimeout(() => {
-      late = true;
-      child.kill("SIGKILL");
-    }, PROTECT_MS);
-    child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
-    child.stdin.on("error", () => {});
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code !== 0) return reject(new Error(late ? "it did not finish in time" : `it stopped (${code})`));
-      // Each path, then its inode, nothing when absent, or ! when it could not be bound.
-      const parts = Buffer.concat(chunks).toString().split("\0");
-      const bound: Bound = new Map();
-      for (let at = 0; at + 1 < parts.length; at += 2) {
-        const said = parts[at + 1] ?? "";
-        bound.set(parts[at] ?? "", said === "" ? "absent" : said === "!" ? "failed" : Number(said));
-      }
-      resolve(bound);
-    });
-    child.stdin.end(binds.map(([path, mode]) => `${mode}\0${path}\0`).join(""));
-  });
-}
-
 // *answer*, or the signal, or *ms* passing, whichever comes first: the runner's
 // view of the folder can stall, as a stat through virtiofs can.
 function first<T>(answer: Promise<T>, signal: AbortSignal, ms?: number): Promise<T | "cancelled" | "timeout"> {
@@ -346,66 +295,15 @@ function first<T>(answer: Promise<T>, signal: AbortSignal, ms?: number): Promise
   });
 }
 
-// The refusal of a root's commands while *paths* are not bound: named relative to *folder*, at most NAMED of them.
-function refusal(folder: string, paths: readonly string[], why: string): string {
-  const names = paths.map((path) => relative(folder, path)).sort();
-  const listed = names.length > NAMED ? `${names.slice(0, NAMED).join(", ")} and ${names.length - NAMED} more` : names.join(", ");
-  return `Blocked: the computer could not make these protected files read-only in its sandbox, so commands cannot run here: ${listed}. ${why}`;
-}
-
 export class Root {
   private asked = 0;
-  // Each path bound in its namespace, by the inode it had.
-  private readonly bound = new Map<string, number>();
-  private protecting: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly place: Place,
     readonly runner: SessionRunner,
     private readonly lose: () => Promise<void>,
     private readonly questionMs: number,
-    private readonly bind: ((binds: Array<[string, BindMode]>) => Promise<Bound>) | null = null,
   ) {}
-
-  /**
-   * *keys*, the host's list of its folder's protected keys and the folders above them now,
-   * bound in its namespace: each not bound yet, or bound with another inode, and all that
-   * lies in a folder bound again, since a bind of a folder holds none of the binds below
-   * it. A host program that replaces one, as git config renames a new file over the old,
-   * takes the bind with it. One after another; rejects with the refusal while one cannot be bound.
-   */
-  protect(keys: readonly ProtectedKey[]): Promise<void> {
-    const done = this.protecting.then(() => this.bindKeys(keys));
-    this.protecting = done.catch(() => {});
-    return done;
-  }
-
-  private async bindKeys(keys: readonly ProtectedKey[]): Promise<void> {
-    const { folder } = this.place;
-    // Only paths in its folder are the host's to name; a folder before what lies in it.
-    const named = keys.filter(([path]) => path !== folder && inside(path, folder)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    const paths = new Set(named.map(([path]) => path));
-    for (const path of this.bound.keys()) if (!paths.has(path)) this.bound.delete(path);
-    const due: Array<[string, BindMode]> = [];
-    for (const [path, ino, mode] of named) {
-      if (this.bound.get(path) !== ino || due.some(([above]) => inside(path, above))) due.push([path, mode]);
-    }
-    if (!this.bind || due.length === 0) return;
-    const pathsDue = due.map(([path]) => path);
-    let bound: Bound;
-    try {
-      bound = await this.bind(due);
-    } catch {
-      throw new Error(refusal(folder, pathsDue, "Its sandbox did not finish binding them; the next command tries again."));
-    }
-    const stuck: string[] = [];
-    for (const path of pathsDue) {
-      const result = bound.get(path);
-      if (typeof result === "number") this.bound.set(path, result);
-      else if (result !== "absent") stuck.push(path);
-    }
-    if (stuck.length > 0) throw new Error(refusal(folder, stuck, "A link among them leads to nothing in this folder. Remove it, or make it lead to a file, to run commands here."));
-  }
 
   // Everything of the root ends; resolves once it has, and its runner has gone.
   async end(): Promise<void> {
@@ -484,8 +382,6 @@ export interface RootsOptions {
   handles?(root: string, handles: ProcessHandle[], live: number): void;
   // The roots' cgroups (CGROUPS): each background process gets one the agent makes in its root's proc.
   cgroups?: string;
-  // Binds each path over itself as its mode says, in the namespace of the root whose unshare is *pid* (bindOver).
-  protect?(pid: number, binds: Array<[string, BindMode]>): Promise<Bound>;
   // The mount of a share whose root was torn down goes (unmountShare).
   unmount?(share: Share): Promise<void>;
   questionMs?: number;
@@ -550,9 +446,7 @@ export class Roots {
       await runner.stop();
       throw error;
     }
-    const { protect } = this.options;
-    const pid = child.pid ?? 0;
-    listed = new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS, protect ? (binds) => protect(pid, binds) : null);
+    listed = new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS);
     if (!this.registries.has(root)) this.registries.set(root, this.registry(root, ended));
     this.roots.set(root, listed);
   }
@@ -588,11 +482,6 @@ export class Roots {
       },
     });
     return registry;
-  }
-
-  // *keys* read-only in *root*'s namespace; a root not set up has none, and nothing to protect. Rejects with the refusal.
-  async protect(root: string, keys: readonly ProtectedKey[]): Promise<void> {
-    await this.roots.get(root)?.protect(keys);
   }
 
   // Everything of *root* ends and it is forgotten, then the mount of *share*, its folder's,

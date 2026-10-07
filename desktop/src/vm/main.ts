@@ -49,8 +49,6 @@ function received(message: ToManager): void {
     answer(id, manager.perform(message.operation, controller.signal).finally(() => running.delete(id)));
   } else if (message.type === "teardown") {
     answer(message.id, (manager?.teardown(message.root) ?? Promise.resolve()).then(() => ({ ok: null })));
-  } else if (message.type === "protect") {
-    void manager?.protect(message.root, message.keys);
   } else if (message.type === "cancel") {
     running.get(message.id)?.abort();
   } else if (message.type === "stop") {

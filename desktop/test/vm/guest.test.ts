@@ -1235,7 +1235,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     });
   });
 
-  it("leaves git's own state unbound, so a slow rebase, a cherry-pick sequence and a merge complete, and one stopped for a conflict goes on or is aborted in the next command", { timeout: 120_000 }, async () => {
+  it("lets a slow rebase, a cherry-pick sequence and a merge complete under the rule, and one stopped for a conflict go on or be aborted in the next command", { timeout: 120_000 }, async () => {
     const folder = join(dir, "folder");
     const long = (line: string) => executor.run(operation("run", { command: line, workdir: null, timeout: 60 }), signal());
     // A repository as the user has it: a topic of six commits on main, and a branch that changes main's file another way.
@@ -1264,9 +1264,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
       expect(await command(`${resolved} git cherry-pick --continue >/dev/null 2>&1; git log --format=%s -4 | tr '\\n' ' '`)).toMatchObject({ ok: { output: "t6 other t5 main " } });
       expect(await command(stopped("git checkout -qb merged main && git merge other", "MERGE_HEAD"))).toMatchObject({ ok: { output: "stopped\n" } });
       expect(await command(`${resolved} git commit -q --no-edit 2>&1; git log -1 --format=%p | wc -w`)).toMatchObject({ ok: { output: "2\n" } });
-      // Git's own state is gone from the host's repository, and its config is still read-only.
+      // Git's own state is gone from the host's repository, and the rule still refuses a write to its config.
       expect(["rebase-merge", "sequencer", "MERGE_HEAD"].filter((name) => existsSync(join(folder, ".git", name)))).toEqual([]);
-      expect(await command("(echo '[alias] x = !evil' >> .git/config) 2>&1 | sed 's/.*: //'")).toMatchObject({ ok: { output: "Read-only file system\n" } });
+      expect(await command("(echo '[alias] x = !evil' >> .git/config) 2>&1 | sed 's/.*: //'")).toMatchObject({ ok: { output: "Operation not permitted\n" } });
       expect(readFileSync(join(folder, ".git", "config"), "utf8")).not.toContain("evil");
     } finally {
       for (const name of [".git", "base.txt", "t1.txt", "t2.txt", "t3.txt", "t4.txt", "t5.txt", "t6.txt"]) rmSync(join(folder, name), { recursive: true, force: true });
@@ -1329,20 +1329,25 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     }
   });
 
-  it("lets git add a linked worktree in the guest, and keeps read-only the files that send it to a config", { timeout: 60_000 }, async () => {
+  // A ceiling: a new linked worktree needs its .git file and its commondir, which the rule refuses, so git worktree
+  // add is the host's to run. One the user made on the host stays the user's: what would send it to a config is refused.
+  it("refuses git worktree add in the guest, in git's own words, and every write that would send the host's linked worktree to a config", { timeout: 60_000 }, async () => {
     const folder = join(dir, "folder");
     const admin = join(folder, ".git", "worktrees", "wt");
     const said = (line: string) => `(${line}) 2>&1 | sed 's/.*: //'`;
     expect(spawnSync("bash", ["-c", [
       "git init -q -b main . && git config user.email a@b && git config user.name a && git config extensions.worktreeConfig true",
       "echo base > base.txt && git add -A && git commit -qm base",
+      "git worktree add -q wt -b wtb && git -C wt config --worktree core.editor true",
     ].join(" && ")], { cwd: folder }).status).toBe(0);
     try {
-      expect(await command("git worktree add -q wt -b wtb 2>&1; git -C wt config --worktree core.editor true; git -C wt rev-parse --abbrev-ref HEAD")).toMatchObject({
-        ok: { output: "wtb\n" },
+      expect(await command("git worktree add -q wt2 -b wtb2 2>&1; echo rc=$?")).toMatchObject({
+        ok: { output: "fatal: could not open 'wt2/.git' for writing: Operation not permitted\nrc=128\n" },
       });
+      // git takes back what it had made of it.
+      expect([existsSync(join(folder, "wt2")), existsSync(join(folder, ".git", "worktrees", "wt2"))]).toEqual([false, false]);
       const commondir = readFileSync(join(admin, "commondir"), "utf8");
-      // The look after it binds them. A git folder of the command's own, whose config would run a program at the next status on the host.
+      // A git folder of the command's own, whose config would run a program at the next status on the host.
       expect(await command([
         "git init -q --bare evil.git && git -C evil.git config core.fsmonitor 'touch pwned'",
         said("echo \"$PWD/evil.git\" > .git/worktrees/wt/commondir"),
@@ -1350,22 +1355,13 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
         said("mv .git/worktrees/wt .git/worktrees/wt-old"),
         said("mv .git/worktrees .git/worktrees-old"),
         "git -C wt status --porcelain",
-        "git worktree add -q wt2 -b wtb2 2>&1 && echo added",
-      ].join("; "))).toMatchObject({
-        ok: { output: "Read-only file system\nRead-only file system\nDevice or resource busy\nDevice or resource busy\nadded\n" },
-      });
+      ].join("; "))).toMatchObject({ ok: { output: "Operation not permitted\n".repeat(4) } });
       expect(readFileSync(join(admin, "commondir"), "utf8")).toBe(commondir);
       expect(readFileSync(join(admin, "config.worktree"), "utf8")).not.toContain("fsmonitor");
       expect(spawnSync("git", ["-C", join(folder, "wt"), "status", "--porcelain"]).status).toBe(0);
       expect(existsSync(join(folder, "wt", "pwned"))).toBe(false);
-      // Its removal is the host's to do: the guest's stops at what is bound, and the host's prune finishes it.
-      expect(await command("git worktree remove --force wt 2>&1 | tail -1; test -e .git/worktrees/wt/commondir && echo kept")).toMatchObject({
-        ok: { output: "error: failed to delete '.git/worktrees/wt': Device or resource busy\nkept\n" },
-      });
-      expect(spawnSync("git", ["-C", folder, "worktree", "prune"]).status).toBe(0);
-      expect(existsSync(admin)).toBe(false);
     } finally {
-      for (const name of [".git", "wt", "wt2", "evil.git", "base.txt"]) rmSync(join(folder, name), { recursive: true, force: true });
+      for (const name of [".git", "wt", "evil.git", "base.txt"]) rmSync(join(folder, name), { recursive: true, force: true });
     }
   });
 

@@ -126,9 +126,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     expect(await lint()).toEqual(ran("broken\n"));
     expect(await patch("def f():\n    return 1\n")).toEqual({ ok: null });
     expect(await lint()).toEqual(ran("clean\n"));
-    // The folder's git config is read-only in the guest: git there runs no code the agent wrote.
+    // The guest refuses a command's write to the folder's git config: git there runs no code the agent wrote.
     const config = readFileSync(join(first, ".git", "config"), "utf8");
-    expect(await run("(echo '[core]\n\tfsmonitor = ./evil' >> .git/config) 2>&1 | sed 's/.*: //'")).toEqual(ran("Read-only file system\n"));
+    expect(await run("(echo '[core]\n\tfsmonitor = ./evil' >> .git/config) 2>&1 | sed 's/.*: //'")).toEqual(ran("Operation not permitted\n"));
     expect(readFileSync(join(first, ".git", "config"), "utf8")).toBe(config);
   });
 

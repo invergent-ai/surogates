@@ -23,16 +23,6 @@ export const MAX_SHARES = 8;
 // A backend whose share maps no owner, or maps them at the mount, adds its own kind.
 export type Share = { kind: "virtiofs"; tag: string };
 
-// How the agent binds a path over itself in a root's namespace: read-only, a protected key;
-// read-write, a folder above one, which the bind keeps from being renamed or removed.
-export type BindMode = "ro" | "rw";
-// A path in a root's folder to bind over itself (hosts/restarts.ts, guestBinds), its inode on
-// the host, and how: the agent binds it in the root's namespace, and again once the host
-// names it with another inode, or a folder above it is bound again.
-export type ProtectedKey = [path: string, ino: number, mode: BindMode];
-// The most a folder may have: past them its commands are refused.
-export const MAX_PROTECTED = 1024;
-
 // The control port, ai.surogate.control (spec, Section 11, Transport). The agent
 // says hello first, and the host answers it with its user; from then on the host
 // asks. Every request carries an id of its sender's, and its answer the same id.
@@ -45,8 +35,6 @@ export type ToAgent =
   // and the handles of its background processes the host keeps, which it answers for.
   | { type: "setup"; id: number; root: string; folder: string; share: Share; ended: ProcessHandle[] }
   | { type: "op"; id: number; root: string; kind: string; args: Record<string, unknown> }
-  // The root's protected keys now, each read-only in its namespace before its next command.
-  | { type: "protect"; id: number; root: string; keys: ProtectedKey[] }
   // Everything of a root ends, and its share's mount goes: the host is letting its folder
   // go, and removes the share from the guest next.
   | { type: "teardown"; id: number; root: string; share: Share }

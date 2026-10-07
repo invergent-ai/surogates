@@ -7,7 +7,7 @@
 // rest. A Node child process with an IPC channel.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { isIP, type Server } from "node:net";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -24,10 +24,9 @@ import { type FolderRecord, lockFolder, presentIn, readRecord, removePlaceholder
 import { type Destination, FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { HookGuard } from "./hooks.js";
 import { destination, GLOB, hideSrtTmp, quote, reach, sandboxPolicy } from "./policy.js";
-import { appeared, extraDenies, GRANT_CHANGED, guestBinds, identity, protectedKeys, srtTargets } from "./restarts.js";
+import { appeared, extraDenies, GRANT_CHANGED, identity, protectedKeys, srtTargets } from "./restarts.js";
 import { CANCELLED, unenterable, workdir } from "../guest/command.js";
 import { Processes } from "../guest/processes.js";
-import type { BindMode, ProtectedKey } from "../guest/protocol.js";
 import type { SessionRunner } from "../guest/runner-process.js";
 import { type CommandContext, runCommand } from "./run.js";
 import { startRunner, stopRunner } from "./session-runner.js";
@@ -79,10 +78,6 @@ const alive = () => (processes?.live ?? 0) > 0 || liveRunner !== null || guestCo
 // The root's runs from their refusal to the look after them, here or in the guest: while any is in
 // flight, the hook guard leaves paused rebases' todos alone, as a run's own rebase may be working through one.
 const runs = new Set<string>();
-// For a guest root's binds (HostStart.protect): what the latest look found to bind, each
-// with its inode when it was last named to the app.
-let naming = false;
-let named: ProtectedKey[] | null = null;
 // The live runner's protected keys, from a walk that started once it was up (performance.now()),
 // and each path its wrap denies writes to, as the wrap held it (restarts.ts identity).
 type Baseline = { keys: ReadonlySet<string>; since: number; targets: ReadonlyMap<string, string | null> };
@@ -146,8 +141,6 @@ process.on("message", (raw) => {
         if (message.run) runs.add(message.id);
         void guard?.refusal().then((refused) => {
           if (refused) runs.delete(message.id);
-          // A host program may have replaced one since the look, as git config renames a new file over the old.
-          if (naming && named) name(named.map(([path, , mode]) => [path, mode]));
           if (!failing) send({ type: "result", id: message.id, outcome: refused ?? { ok: null } });
         });
       }
@@ -222,7 +215,6 @@ async function start(message: HostStart): Promise<void> {
     throw new FolderUnavailable(`the folder ${message.folder} was replaced after it was confirmed for this chat`);
   }
   folder = { path, dev, ino };
-  naming = message.protect === true;
   // One host per folder. Then, if the host before this one was killed, what srt
   // left over the names that were absent when it started.
   const key = `${dev}-${ino}`;
@@ -532,8 +524,6 @@ async function openRunner(ready: CommandContext, onLost: () => void): Promise<{ 
 // decides with its own look, and a restart then cuts the others. Until then background
 // processes can write the new path, as a command in a sandbox of its own can.
 function seen(keys: ReadonlySet<string>, startedAt: number, between: boolean): void {
-  // Past the most a guest can bind, this throws, and the guard refuses commands.
-  if (naming && folder) name(guestBinds(folder.path, keys));
   const known = baseline;
   if (!liveRunner || deferred || !folder || !known || startedAt < known.since || (between && runnerRuns > 0)) return;
   const root = folder.path;
@@ -545,38 +535,6 @@ function seen(keys: ReadonlySet<string>, startedAt: number, between: boolean): v
   const changed = [...known.targets].filter(([path, was]) => identity(path) !== was).map(([path]) => path);
   const first = [...added, ...changed].sort()[0];
   if (first) restart(appeared(relative(root, first)));
-}
-
-// *binds* told to the app with their inodes now, when any differs from what it was last told.
-// A link is named by what it leads to on the host, which the guest has at the same path. One
-// that leads out of the folder is named for nothing: no write in the guest reaches the host
-// there. One that leads to nothing in the folder is named itself, which the guest refuses: a
-// write through it would make what it names, there.
-function name(binds: ReadonlyArray<readonly [string, BindMode]>): void {
-  if (!folder) return;
-  const root = folder.path;
-  const found = new Map<string, ProtectedKey>();
-  for (const [path, mode] of binds) {
-    try {
-      const stats = lstatSync(path);
-      let at: [string, number] = [path, stats.ino];
-      if (stats.isSymbolicLink()) {
-        // Each link followed, as a write would; past one that leads nowhere, the name a write would make.
-        const target = realpath(path);
-        if (!target.loop && !inside(target.path, root)) continue;
-        const led = target.loop ? undefined : lstatSync(target.path, { throwIfNoEntry: false });
-        if (led) at = [target.path, led.ino];
-      }
-      // Two links to one file: read-only over a hold.
-      if (found.get(at[0])?.[2] !== "ro") found.set(at[0], [...at, mode]);
-    } catch {
-      // Gone since the look.
-    }
-  }
-  const keys = [...found.values()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  if (named && JSON.stringify(keys) === JSON.stringify(named)) return;
-  named = keys;
-  send({ type: "protected", keys });
 }
 
 // A new runner, wrapped from the folder as it is now: srt then sees a new .git as a
