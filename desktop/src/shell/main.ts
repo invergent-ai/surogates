@@ -250,7 +250,7 @@ let wanted = new Set<string | null>();
 // open project changes, when the window comes to the front and when the project's stream says
 // so; only a thread's row when the stream names the thread. One refresh runs at a time, and asks
 // once more for whatever changed meanwhile, so an older answer never lands last. The open
-// project, once the page lists it no more, is left.
+// project, once the page lists it no more, is left for a new chat.
 async function refreshProjects(threadId: string | null = null): Promise<void> {
   if (!served) return;
   wanted.add(threadId);
@@ -265,8 +265,10 @@ async function refreshProjects(threadId: string | null = null): Promise<void> {
         listed = await projects.list();
         const open = view.kind === "project" ? view : null;
         if (open && !listed.some((project) => project.id === open.id)) {
+          // Archived elsewhere: its conversation or thread goes from the centre with it, as the dialog's archive takes it.
           overview = null;
           show({ kind: "web" });
+          main?.go("/chat");
         } else if (asked.has(null) || overview?.project.id !== open?.id) {
           await refreshOverview();
         } else {

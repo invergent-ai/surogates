@@ -239,6 +239,23 @@ describe("the Overview pane, at its edges", () => {
     expect(await page.textContent("#greeting-line")).toBe("Open a project to see its threads.");
   });
 
+  it("takes the centre to a new chat when the open project is archived elsewhere", async () => {
+    const { page, client } = await opened();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${QUESTION}`);
+    // Archived on another device: the page lists it no more, and says the project changed.
+    await expect.poll(async () => {
+      await client.evaluate((project) => {
+        const fake = (window as unknown as { fakeProjects?: Served }).fakeProjects;
+        if (!fake) return;
+        fake.data.projects = fake.data.projects.filter((found) => found.id !== project);
+        fake.changed(project, null);
+      }, REPORT).catch(() => {});
+      return page.textContent("#title");
+    }).toBe(new URL(origin).host);
+    await expect.poll(() => client.url()).toBe(`${origin}/chat`);
+  });
+
   it("opens only a thread of the project that is open, and says why it opened none", async () => {
     const { page, client } = await opened();
     const outcome = await page.evaluate(async ([budget, question]) => {
