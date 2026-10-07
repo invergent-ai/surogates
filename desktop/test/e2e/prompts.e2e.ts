@@ -48,6 +48,19 @@ const prepare = (client: Page) => client.evaluate(() => window.surogateDesktop!.
 
 const text = (page: Page, selector: string) => page.textContent(selector);
 
+// The left edge of each of the characters at *at* in *selector*'s text: drawn as written, they rise.
+async function lefts(page: Page, selector: string, at: (text: string) => number[]): Promise<number[]> {
+  return page.evaluate(([chosen, indices]) => {
+    const text = document.querySelector(chosen)!.firstChild as Text;
+    return indices.map((index) => {
+      const range = document.createRange();
+      range.setStart(text, index);
+      range.setEnd(text, index + 1);
+      return range.getBoundingClientRect().left;
+    });
+  }, [selector, at((await text(page, selector))!)] as const);
+}
+
 describe("the folder sheet", () => {
   it("binds the folder the user accepts in the desktop's own window, in the mode chosen there", async () => {
     const client = await signedIn();
@@ -135,16 +148,7 @@ describe("the folder sheet", () => {
     const prepared = prepare(client);
     const sheet = await prompt(app!);
     // Left edges of the alef, the slash after it, and the bet: as written, left to right.
-    const edges = await sheet.evaluate(() => {
-      const text = document.querySelector(".code")!.firstChild as Text;
-      const left = (at: number) => {
-        const range = document.createRange();
-        range.setStart(text, at);
-        range.setEnd(text, at + 1);
-        return range.getBoundingClientRect().left;
-      };
-      return [left(text.data.indexOf("א")), left(text.data.lastIndexOf("/")), left(text.data.indexOf("ב"))];
-    });
+    const edges = await lefts(sheet, ".code", (shown) => [shown.indexOf("א"), shown.lastIndexOf("/"), shown.indexOf("ב")]);
     expect(edges[0]).toBeLessThan(edges[1]!);
     expect(edges[1]).toBeLessThan(edges[2]!);
     await key(sheet, "Escape");
@@ -159,19 +163,26 @@ describe("the folder sheet", () => {
     const sheet = await prompt(app!);
     expect(await text(sheet, "#prompt-title")).toBe("Work in א.ב.txt?");
     // Left edges of the alef, the dot after it, and the bet: as written, left to right.
-    const edges = await sheet.evaluate(() => {
-      const text = document.querySelector("#prompt-title")!.firstChild as Text;
-      const left = (at: number) => {
-        const range = document.createRange();
-        range.setStart(text, at);
-        range.setEnd(text, at + 1);
-        return range.getBoundingClientRect().left;
-      };
-      return [left(text.data.indexOf("א")), left(text.data.indexOf(".")), left(text.data.indexOf("ב"))];
-    });
+    const edges = await lefts(sheet, "#prompt-title", (shown) => [shown.indexOf("א"), shown.indexOf("."), shown.indexOf("ב")]);
     expect(edges[0]).toBeLessThan(edges[1]!);
     expect(edges[1]).toBeLessThan(edges[2]!);
     await key(sheet, "Escape");
+    expect(await prepared).toBeNull();
+  });
+
+  it("names a right-to-left path in the order it is written when it says why a folder cannot be used", async () => {
+    // Inside the app's own state root: no chat may work there.
+    const hebrew = join(home, "surogate", "א", "ב");
+    const client = await signedIn(hebrew);
+    mkdirSync(hebrew, { recursive: true });
+    const prepared = prepare(client);
+    const refused = await prompt(app!);
+    expect(await text(refused, "#prompt-lead")).toContain(`the folder ${hebrew} holds`);
+    // Left edges of the alef, the slash after it, and the bet: as written, left to right.
+    const edges = await lefts(refused, "#prompt-lead", (shown) => [shown.indexOf("א"), shown.lastIndexOf("/"), shown.indexOf("ב")]);
+    expect(edges[0]).toBeLessThan(edges[1]!);
+    expect(edges[1]).toBeLessThan(edges[2]!);
+    await key(refused, "Escape");
     expect(await prepared).toBeNull();
   });
 

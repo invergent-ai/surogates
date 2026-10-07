@@ -1062,7 +1062,8 @@ body.settings-page {
 /* The desktop's prompts: a window of their own, 460 px wide, as Claude Desktop's local consent.
    What the agent sent and the user's paths are drawn in the order they are written, left to
    right, right-to-left letters included, so a path cannot be made to look like another; they
-   scroll whole. A title is drawn so too, for the names in it: its own words are English. */
+   scroll whole. A title, a lead and a note are drawn so too, for the names and paths in them:
+   their own words are English. */
 body.prompt-page {
   background: var(--panel);
   user-select: text;
@@ -1082,11 +1083,18 @@ body.prompt-page {
   overflow-wrap: anywhere;
 }
 
-/* ponytail: the whole title, as prompts are English only; its names in spans of their own once a prompt is translated. */
+/* ponytail: the whole title, lead and note, as prompts are English only; their names and paths in spans of their own once a prompt is translated. */
 .prompt h1,
+.prompt #prompt-lead,
+.prompt .note,
 .prompt .code {
   direction: ltr;
   unicode-bidi: bidi-override;
+}
+
+.prompt #prompt-lead,
+.prompt .note {
+  overflow-wrap: anywhere;
 }
 
 #prompt-details {
