@@ -21,14 +21,17 @@ from sse_starlette.sse import EventSourceResponse
 
 from surogates.api.routes.sessions import archive_session_tree
 from surogates.db.models import Workstream
+from surogates.harness.loop_artifacts import _coerce_modified_to_datetime
+from surogates.harness.turn_summarizer import is_platform_path
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep, rate_limit_dep
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
+from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.workstreams import master_config
 from surogates.workstreams import stream as project_stream
-from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread
+from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread, units, utc
 from surogates.workstreams.store import WorkstreamStore
 from surogates.workstreams.threads import start_thread, stop_thread
 
@@ -262,6 +265,39 @@ async def list_threads(
     now = datetime.now(timezone.utc)
     found = await _store(request).thread_facts(project.id, thread_id=thread_id)
     return [derive_thread(facts, now=now) for facts in found[: SHELL_LIMITS["rows"]]]
+
+
+@router.get("/{workstream_id}/library")
+async def project_library(
+    workstream_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant,
+) -> list[dict[str, Any]]:
+    """The project's files, newest first and as many as the shell takes:
+    the one workspace its master and threads share.  A file a thread's turn
+    summary named is that thread's, the last one to name it; every other
+    file the user added.  The platform's own files are left out."""
+    project = await _project(request, workstream_id, tenant, ctx)
+    master = await request.app.state.session_store.get_session(project.master_session_id)
+    prefix = boundary_workspace_prefix(master.config, master, master.id)
+    produced = await _store(request).produced(project.id)
+    entries: list[tuple[datetime, dict[str, Any]]] = []
+    for found in await request.app.state.storage.list_entries(master.config["storage_bucket"], prefix=prefix):
+        path = found["key"][len(prefix):]
+        if not path or path.endswith("/") or is_platform_path(path) or units(path) > SHELL_LIMITS["ref"]:
+            continue
+        modified = _coerce_modified_to_datetime(found.get("modified"))
+        thread_id = produced.get(path)
+        entries.append((modified or datetime.min.replace(tzinfo=timezone.utc), {
+            "path": path,
+            "origin": "added" if thread_id is None else "produced",
+            "thread_id": None if thread_id is None else str(thread_id),
+            "size": found.get("size"),
+            "updated_at": utc(modified),
+            # Every thread works in the cloud until local-folder threads.
+            "place": {"kind": "cloud"},
+        }))
+    # By the moment, not its text: "…:56Z" would sort after "…:56.5Z".
+    entries.sort(key=lambda entry: entry[0], reverse=True)
+    return [entry for _, entry in entries[: SHELL_LIMITS["library"]]]
 
 
 @router.get("/{workstream_id}/stream")

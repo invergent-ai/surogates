@@ -275,6 +275,23 @@ class WorkstreamStore:
             found = await db.execute(query)
             return {project: (latest, waiting, working) for project, latest, waiting, working in found}
 
+    async def produced(self, workstream_id: UUID) -> dict[str, UUID]:
+        """Each workspace file the project's threads produced, and the thread
+        whose turn summary named it last."""
+        async with self._sf() as db:
+            summaries = await db.execute(
+                select(Event.session_id, Event.data)
+                .join(WorkstreamThread, WorkstreamThread.session_id == Event.session_id)
+                .where(WorkstreamThread.workstream_id == workstream_id, Event.type == EventType.TURN_SUMMARY.value)
+                .order_by(Event.id)
+            )
+            produced: dict[str, UUID] = {}
+            for thread_id, data in summaries:
+                for artifact in (data or {}).get("artifacts") or []:
+                    if isinstance(artifact, dict) and artifact.get("kind") == "file" and isinstance(artifact.get("ref"), str):
+                        produced[artifact["ref"]] = thread_id
+        return produced
+
     async def masters(self, master_ids: list[UUID]) -> dict[UUID, tuple[datetime, bool]]:
         """Each master's last activity, and whether it waits on the user: a
         question or an approval pending in the project's conversation."""

@@ -35,8 +35,8 @@ QUIET_RESOLVES_AFTER = timedelta(days=7)
 #: with anything past one of these, and every row in it.  Lengths are UTF-16
 #: units, as the shell counts them.  A row's other fields stay inside the
 #: shell's limits by construction: a title is at most 256 units, a status line
-#: 200 code points.
-SHELL_LIMITS = {"rows": 500, "files": 200, "label": 500, "ref": 4096}
+#: 200 code points.  A Library entry's path is a ``ref``.
+SHELL_LIMITS = {"rows": 500, "files": 200, "label": 500, "ref": 4096, "library": 2000}
 _STATUS_LINE_MAX = 200
 
 
@@ -71,9 +71,9 @@ def derive_thread(facts: ThreadFacts, *, now: datetime) -> dict[str, Any]:
         "progress": _progress(todos.data if todos else {}),
         "files": _files(facts),
         "place": facts.place,
-        "created_at": _utc(facts.created_at),
-        "updated_at": _utc(facts.updated_at),
-        "resolved_at": _utc(facts.resolved_at),
+        "created_at": utc(facts.created_at),
+        "updated_at": utc(facts.updated_at),
+        "resolved_at": utc(facts.resolved_at),
     }
 
 
@@ -185,7 +185,7 @@ def _files(facts: ThreadFacts) -> list[dict[str, str]]:
             if not isinstance(ref, str) or not ref or (kind, ref) in seen:
                 continue
             label = label if isinstance(label, str) and label else ref
-            if _units(ref) > SHELL_LIMITS["ref"] or _units(label) > SHELL_LIMITS["label"]:
+            if units(ref) > SHELL_LIMITS["ref"] or units(label) > SHELL_LIMITS["label"]:
                 continue
             seen.add((kind, ref))
             files.append({"kind": kind, "label": label, "ref": ref, "thread_id": str(facts.id)})
@@ -194,7 +194,8 @@ def _files(facts: ThreadFacts) -> list[dict[str, str]]:
     return files
 
 
-def _units(text: str) -> int:
+def units(text: str) -> int:
+    """*text*'s length in UTF-16 units, as the shell counts it."""
     return len(text.encode("utf-16-le")) // 2
 
 
@@ -223,7 +224,8 @@ def aware(moment: datetime) -> datetime:
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
 
 
-def _utc(moment: datetime | None) -> str | None:
+def utc(moment: datetime | None) -> str | None:
+    """*moment* as the wire carries it: UTC, with a trailing ``Z``."""
     if moment is None:
         return None
     return aware(moment).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
 
+import surogates.api.routes.workspace as workspace_routes
 from surogates.harness.prompt import PromptBuilder
 from surogates.harness.session_llm import build_session_llm_clients
 from surogates.memory.manager import MemoryManager
@@ -18,11 +20,13 @@ from surogates.runtime import build_agent_runtime_context
 from surogates.scheduled.schedule import parse_schedule
 from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session.provisioning import create_child_session
+from surogates.storage.tenant import boundary_workspace_key
 from surogates.tenant.context import TenantContext
+from surogates.workstreams.derive import SHELL_LIMITS
 from tests.test_harness_resilience import _make_harness
 
-from .test_devices import api  # noqa: F401  (api is a fixture)
-from .test_workstream_threads import start
+from .test_devices import add_user, api  # noqa: F401  (api is a fixture)
+from .test_workstream_threads import start, turn_ends
 from .test_workstreams import create, master_of, patch, runtime, system_prompt, turn_calling
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -258,3 +262,101 @@ async def test_a_routines_name_is_kept_to_what_the_shell_shows(api, monkeypatch,
     response = await api.client.get(f"/v1/scheduled-work?created_from_session_id={master.id}", headers=api.auth())
     [routine] = response.json()["items"]
     assert routine["name"] == ("Check the cash report " + "and the ledger " * 40)[:200]
+
+
+async def upload(api, master, name: str, data: bytes, directory: str = "") -> None:
+    """The user adds a file to the project, as the web client uploads one to its master."""
+    query = f"?path={directory}" if directory else ""
+    response = await api.client.post(
+        f"/v1/sessions/{master.id}/workspace/upload{query}", files={"file": (name, data)}, headers=api.auth(),
+    )
+    assert response.status_code == 201, response.text
+
+
+async def written(api, session, path: str, data: bytes = b"x", *, modified: float | None = None) -> None:
+    """*session*'s pod writes *path* into the project's workspace, last
+    changed at *modified* (a POSIX time) when given."""
+    storage, bucket = api.app.state.storage, session.config["storage_bucket"]
+    key = boundary_workspace_key(session.config, session, str(session.id), path)
+    await storage.write(bucket, key, data)
+    if modified is not None:  # the tests' storage is a local disk
+        os.utime(storage._resolve(bucket, key), (modified, modified))
+
+
+async def library(api, project, token=None):
+    return await api.client.get(f"/v1/workstreams/{project['id']}/library", headers=api.auth(token))
+
+
+async def test_the_library_shows_an_upload_as_added_and_a_threads_file_as_produced(api):
+    project = await create(api)
+    master = await master_of(api, project)
+    await upload(api, master, "brief.pdf", b"%PDF-1.7 brief")
+    await upload(api, master, "notes.txt", b"call the auditors", directory="uploads")
+    thread = await start(api, master)
+    await written(api, thread, "threads/Draft A/A.docx", b"PK memo")
+    await turn_ends(api, thread, files=["threads/Draft A/A.docx"])
+
+    response = await library(api, project)
+    assert response.status_code == 200, response.text
+    entries = {entry["path"]: entry for entry in response.json()}
+    assert {path: (e["origin"], e["thread_id"], e["size"], e["place"]) for path, e in entries.items()} == {
+        "threads/Draft A/A.docx": ("produced", str(thread.id), 7, {"kind": "cloud"}),
+        "brief.pdf": ("added", None, 14, {"kind": "cloud"}),
+        "uploads/notes.txt": ("added", None, 17, {"kind": "cloud"}),
+    }
+    assert all(e["updated_at"].endswith("Z") for e in entries.values())
+    # An entry opens through the master's file route, over the same files.
+    opened = await api.client.get(
+        f"/v1/sessions/{master.id}/workspace/download", params={"path": "threads/Draft A/A.docx"}, headers=api.auth(),
+    )
+    assert (opened.status_code, opened.content) == (200, b"PK memo")
+
+
+async def test_a_file_two_threads_produced_is_the_last_ones(api):
+    project = await create(api)
+    master = await master_of(api, project)
+    first, second = await start(api, master), await start(api, master, title="Check A", goal="Check A.docx.")
+    await written(api, first, "A.docx")
+    await turn_ends(api, first, files=["A.docx"])
+    await turn_ends(api, second, files=["A.docx"])
+    [entry] = (await library(api, project)).json()
+    assert (entry["origin"], entry["thread_id"]) == ("produced", str(second.id))
+
+
+async def test_the_library_and_the_file_panel_leave_out_the_platforms_own_files(api, monkeypatch):
+    project = await create(api)
+    master = await master_of(api, project)
+    thread = await start(api, master)
+    await upload(api, master, "brief.pdf", b"brief")
+    # A coding tool's checkout, an artifact's payload, the whiteboard, bytecode.
+    for path in (
+        f".threads/{thread.id}/reports/README.md", f".threads/{thread.id}/reports/totals.py",
+        "_artifacts/a1/meta.json", "_whiteboard/canvas.json", "threads/Draft A/__pycache__/totals.cpython-312.pyc",
+    ):
+        await written(api, thread, path)
+    assert [e["path"] for e in (await library(api, project)).json()] == ["brief.pdf"]
+
+    # The panel's limit counts only what it can show.
+    monkeypatch.setattr(workspace_routes, "_MAX_ENTRIES", 3)
+    tree = await api.client.get(f"/v1/sessions/{master.id}/workspace/tree", headers=api.auth())
+    assert tree.status_code == 200, tree.text
+    assert ([e["path"] for e in tree.json()["entries"]], tree.json()["truncated"]) == (["threads", "brief.pdf"], False)
+
+
+async def test_the_library_lists_the_newest_files_the_shell_takes(api, monkeypatch):
+    project = await create(api)
+    master = await master_of(api, project)
+    # Newest first, within one second too: a whole second is older than half past it.
+    for name, modified in (("old.txt", 1_790_000_000), ("middle.txt", 1_790_000_001), ("new.txt", 1_790_000_001.5)):
+        await written(api, master, name, modified=modified)
+    # A path longer than the shell takes (4,096 units; 40 here) is left out.
+    await written(api, master, "reports/" + "a" * 40 + ".txt")
+    monkeypatch.setitem(SHELL_LIMITS, "ref", 40)
+    monkeypatch.setitem(SHELL_LIMITS, "library", 2)
+    assert [e["path"] for e in (await library(api, project)).json()] == ["new.txt", "middle.txt"]
+
+
+async def test_the_library_is_its_owners(api, session_factory):
+    project = await create(api)
+    _, other = await add_user(session_factory, api.org_id)
+    assert (await library(api, project, other)).status_code == 404
