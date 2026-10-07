@@ -254,4 +254,38 @@ describe("a later sign-in, which rotates this computer's token", () => {
     expect(credentials()).toEqual([expect.objectContaining({ deviceId: "d", plain: ROTATED })]);
     expect(await page.isVisible("#device-action")).toBe(false);
   });
+
+  it("is no log out when the app quits while the agent rotates it: the computer, its token, its folders and the sign-in stay", async () => {
+    const { shell } = await bound();
+    await quit(shell);
+    rmSync(join(home, "surogate", "session.json"));
+    const quitting = await launch(home);
+    await stubNative(quitting);
+    const page = await shellPage(quitting);
+    await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    const release = agent.hold("reauthorize");
+    await page.click("#sign-in-button");
+    await expect.poll(async () => (await opened(quitting)).length).toBe(1);
+    await agent.approve((await opened(quitting))[0]!);
+    await expect.poll(() => agent.asked.reauthorize).toBe(1);
+    const links = agent.link.connections;
+    // The user quits while the agent is still rotating the token, and it answers during the quit.
+    const closing = quit(quitting);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    release();
+    await closing;
+    // Nothing started on the new token, and nothing was revoked.
+    expect(agent.link.connections).toBe(links);
+    expect(agent.link.received.filter((frame) => frame.type === "revoke")).toEqual([]);
+    expect(agent.oauth.filter((form) => "token" in form)).toEqual([]);
+    expect(credentials()).toEqual([expect.objectContaining({ deviceId: "d", plain: ROTATED })]);
+    expect(credentials()[0]).not.toHaveProperty("revoking");
+    expect(existsSync(join(home, "surogate", "devices", "d", "journal.sqlite"))).toBe(true);
+    expect(existsSync(join(home, "surogate", "session.json"))).toBe(true);
+    // The next launch is signed in, and the computer runs on the new token.
+    app = await launch(home);
+    const again = await shellPage(app);
+    await expect.poll(() => again.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    expect(await again.isVisible("#sign-in")).toBe(false);
+  });
 });

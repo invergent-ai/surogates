@@ -58,8 +58,13 @@ let credentials: CredentialStore;
 let sessionStore: SessionStore;
 // Who is signed in to the app, with the agent: what adds this computer, and what the window's web client takes its session from.
 let signedIn: DesktopSession | null = null;
-// A sign-in under way in the system browser: starting another cancels it.
+// A sign-in under way in the system browser: starting another cancels it. Aborted with LOG_OUT by a
+// log out, which alone ends what it made; with QUIT by a quit, which keeps it; or by a sign-in started again.
 let signingIn: AbortController | null = null;
+const LOG_OUT = "log out";
+const QUIT = "quit";
+// Settled once the latest sign-in has stopped: what a quit waits for, so that a token the agent issued it is kept.
+let signedInOrStopped: Promise<void> = Promise.resolve();
 // Settled once every sign-in and Restore started so far has stopped: what a log out waits for.
 let underWay: Promise<unknown> = Promise.resolve();
 let signInFailure: string | null = null;
@@ -495,8 +500,9 @@ async function keepAndStart(agent: Agent, renewed: LiveCredential): Promise<void
  * Bind the sign-in that just happened to the computer kept for its account, before anything uses it:
  * revoking the computer then ends it too, and the window's session made from it. The device starts
  * again on the new token the agent issues for it. A sign-in the agent did not bind is ended rather
- * than run unbound; once it is bound, it stays, whatever the device does. Once *signal* aborts (a log
- * out), nothing is reauthorized, and a token the agent issued all the same revokes the computer.
+ * than run unbound; once it is bound, it stays, whatever the device does. Once *signal* aborts, nothing
+ * is reauthorized. A token the agent issued all the same revokes the computer when a log out aborted
+ * it; after a quit, it is kept, the only one the agent takes, and the device starts on it at the next launch.
  */
 async function bindToComputer(agent: Agent, signal: AbortSignal): Promise<void> {
   const session = signedIn;
@@ -518,10 +524,13 @@ async function bindToComputer(agent: Agent, signal: AbortSignal): Promise<void> 
       if (!signal.aborted) void retire(credential);
       return;
     }
-    if (signal.aborted) {
+    if (signal.reason === LOG_OUT) {
       // Logged out meanwhile: the computer goes with the log out, revoked with the token just issued, its only one.
       await stopDevice(device?.started, null).catch(report);
       await endDevice(renewed);
+    } else if (signal.reason === QUIT) {
+      kept = renewed;
+      trying(() => credentials.save(renewed));
     } else {
       await keepAndStart(agent, renewed);
     }
@@ -630,7 +639,7 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
   try {
     // A sign-in or a Restore under way is cancelled, and stops first: one that finished afterwards
     // would sign the user back in, or bring the computer back.
-    signingIn?.abort();
+    signingIn?.abort(LOG_OUT);
     restoringNow?.abort();
     await underWay;
     const ending = signedIn;
@@ -754,6 +763,7 @@ async function signIn(agent: Agent): Promise<void> {
   signingIn = attempt;
   const { promise: stopped, resolve: stop } = Promise.withResolvers<void>();
   underWay = Promise.all([underWay, stopped]);
+  signedInOrStopped = stopped;
   signInFailure = null;
   changed();
   try {
@@ -761,13 +771,14 @@ async function signIn(agent: Agent): Promise<void> {
       origin: agent.origin, computer: hostname(), fetch: apiFetch, signal: attempt.signal, open: (url) => shell.openExternal(url),
     });
     let started: DesktopSession | null = null;
-    // Cancelled once the browser came back, by a log out or a sign-in started again: what this sign-in
-    // holds is ended at the agent, and it goes no further.
+    // Cancelled once the browser came back: it goes no further. Tokens never kept are ended at the
+    // agent, as nothing here would end them. A sign-in already kept ends only with a log out: a quit
+    // leaves it saved, and a sign-in started again replaces it once it finishes.
     const cancelled = (): boolean => {
       if (!attempt.signal.aborted) return false;
       if (started === null) {
         void revokeTokens(agent.origin, tokens.refreshToken, apiFetch).catch(report);
-      } else if (signedIn === started) {
+      } else if (attempt.signal.reason === LOG_OUT && signedIn === started) {
         signedIn = null;
         void started.end().catch(report);
       }
@@ -1197,8 +1208,10 @@ async function quit(): Promise<void> {
       waiting = null;
     }
   }
-  // A sign-in under way closes its port in the browser's face; revocations still owed are tried at the next launch.
-  signingIn?.abort();
+  // A sign-in under way closes its port in the browser's face, and keeps what the agent already
+  // issued it; revocations still owed are tried at the next launch.
+  signingIn?.abort(QUIT);
+  await signedInOrStopped;
   // A log out under way finishes first: it keeps the revocation owed, and forgets the folders.
   await signingOut;
   await Promise.all([...revocations.values()].map((revoking) => revoking.stop()));
