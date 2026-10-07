@@ -125,6 +125,7 @@ export type {
   AgentChatInboxListInput,
   AgentChatInboxStatus,
   AgentChatInboxStreamEvent,
+  AgentChatProjectStream,
   AgentChatMissionEvent,
   AgentChatMissionEventSession,
   AgentChatMissionEventsPage,

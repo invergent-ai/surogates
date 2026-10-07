@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgentChatAdapterProvider } from "./adapter-context";
+import { useProjectThreads } from "./components/chat/use-project-threads";
 import { BrowserPane } from "./components/browser/browser-pane";
 import { useBrowserPreview } from "./components/browser/use-browser-preview";
 import { ChatThread } from "./components/chat/chat-thread";
@@ -175,6 +176,7 @@ export function AgentChat({
     && typeof sessionConfig.workstream_id === "string"
     ? sessionConfig.workstream_id
     : null;
+  const threadRows = useProjectThreads(adapter, projectId);
 
   // Reset right-stack pane defaults when the user flips view modes.
   // Simple mode hides the workspace pane; Expert mode shows it.
@@ -340,6 +342,7 @@ export function AgentChat({
         onOpenBilling,
         onOpenSession: onSessionChange,
         projectId,
+        threadRows,
       }}
     >
       <TooltipProvider>

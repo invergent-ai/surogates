@@ -542,6 +542,20 @@ export interface AgentChatInboxStreamEvent {
   lastEventId?: string;
 }
 
+/**
+ * A project's stream (GET /v1/workstreams/{id}/stream): ``ready`` once
+ * subscribed, then a ``change`` whose data is ``{"thread_id", "type"}``,
+ * naming the thread whose row changed, or null for a project-wide change.
+ */
+export interface AgentChatProjectStream {
+  addEventListener(
+    type: "ready" | "change",
+    listener: (event: AgentChatInboxStreamEvent) => void,
+  ): void;
+  close(): void;
+  onerror: (() => void) | null;
+}
+
 export interface AgentChatInboxEventStream {
   addEventListener(
     type: "item" | "snapshot",
@@ -984,6 +998,13 @@ export interface AgentChatAdapter {
     itemId: number;
   }): Promise<AgentChatInboxItem>;
   openInboxStream?(): AgentChatInboxEventStream;
+  /** A project's threads (GET /v1/workstreams/{projectId}/threads), or only *threadId*'s: none when it left. */
+  listProjectThreads?(input: {
+    projectId: string;
+    threadId?: string;
+  }): Promise<AgentChatThreadRow[]>;
+  /** The project's stream. It opens itself again after a failure; its ``onerror`` means the project is gone. */
+  openProjectStream?(input: { projectId: string }): AgentChatProjectStream;
   /** Start a thread a project's master proposed, from its card (POST /v1/workstreams/{projectId}/threads). */
   startProposedThread?(input: {
     projectId: string;

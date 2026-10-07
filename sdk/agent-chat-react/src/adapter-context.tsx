@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import type { AgentChatAdapter } from "./types";
+import type { AgentChatAdapter, AgentChatThreadRow } from "./types";
 
 export interface AgentChatAdapterContextValue {
   adapter: AgentChatAdapter;
@@ -12,6 +12,8 @@ export interface AgentChatAdapterContextValue {
   onOpenSession?: (sessionId: string) => void;
   /** The project whose master this conversation is, or null: its proposal cards start threads. */
   projectId?: string | null;
+  /** That project's threads, live, by id: what their cards show. */
+  threadRows?: Record<string, AgentChatThreadRow>;
 }
 
 const AgentChatAdapterContext =

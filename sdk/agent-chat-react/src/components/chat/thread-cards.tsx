@@ -9,9 +9,15 @@
 
 import { useState } from "react";
 import { useAgentChatAdapterContext } from "../../adapter-context";
-import type { AgentChatThreadProposal, AgentChatWorker, ChatMessage } from "../../types";
+import type { AgentChatThreadProposal, AgentChatThreadRow, AgentChatWorker, ChatMessage } from "../../types";
 import { Button } from "../ui/button";
 
+const GROUP_LABEL: Record<AgentChatThreadRow["group"], string> = {
+  waiting: "Waiting on you",
+  working: "Working",
+  idle: "Idle",
+  resolved: "Resolved",
+};
 const STATE_LABEL: Record<AgentChatWorker["state"], string> = {
   working: "Working",
   reported: "Reported",
@@ -32,17 +38,22 @@ export function ThreadCards({ message }: { message: ChatMessage }) {
 }
 
 function WorkerCard({ worker }: { worker: AgentChatWorker }) {
-  const { onFileSelect, onOpenSession } = useAgentChatAdapterContext();
-  const statusLine = firstLine(worker.report);
-  const files = worker.files;
+  const { onFileSelect, onOpenSession, threadRows } = useAgentChatAdapterContext();
+  // A project's thread shows its row, live; any other worker what its reports said.
+  const live = threadRows?.[worker.id];
+  const status = live
+    ? GROUP_LABEL[live.group] + (live.progress ? ` · ${live.progress.done}/${live.progress.total}` : "")
+    : STATE_LABEL[worker.state];
+  const statusLine = live ? live.statusLine : firstLine(worker.report);
+  const files = live ? live.files : worker.files;
   return (
-    <div data-testid="worker-card" className="my-2 rounded-lg border border-border px-3 py-2 text-sm">
+    <div data-testid="worker-card" data-group={live?.group} className="my-2 rounded-lg border border-border px-3 py-2 text-sm">
       <div className="flex items-center gap-2">
         <span className="min-w-0 flex-1 truncate font-medium text-foreground">
           <bdi>{worker.title ?? firstLine(worker.goal)}</bdi>
         </span>
         <span data-testid="worker-card-status" className="shrink-0 text-xs text-muted-foreground">
-          {STATE_LABEL[worker.state]}
+          {status}
         </span>
       </div>
       {statusLine && (
