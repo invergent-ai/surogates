@@ -196,13 +196,32 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       "(echo 1 > /sys/fs/cgroup/pids.max) 2>&1 | sed 's/.*: //'",
       "(echo 1 > /sys/fs/cgroup/init/cgroup.kill) 2>&1 | sed 's/.*: //'",
       "(mkdir /sys/fs/cgroup/mine) 2>&1 | sed 's/.*: //'",
+      "(mkdir /sys/fs/cgroup/proc/mine) 2>&1 | sed 's/.*: //'",
     ].join("; "))).toEqual({
       ok: {
-        output: expect.stringMatching(/^1\n0::\/run\/op-\d+\na run has no memory cgroup\nPermission denied\nPermission denied\nPermission denied\n$/),
+        output: expect.stringMatching(/^1\n0::\/run\/op-\d+\na run has no memory cgroup\nPermission denied\nPermission denied\nPermission denied\nPermission denied\n$/),
         returncode: 0,
         timed_out: false,
       },
     });
+  });
+
+  it("makes each background process's cgroup itself, which the root's user can enter and end but not make, and removes it once the process ends", async () => {
+    const started = await guest.op(ROOT, "start", background("sleep 310"), signal()) as { ok: { session_id: string } };
+    const { session_id } = started.ok;
+    const cgroup = `/sys/fs/cgroup/proc/${session_id}`;
+    expect(await run([
+      `stat -c %u ${cgroup} ${cgroup}/cgroup.procs ${cgroup}/cgroup.kill ${cgroup}/memory.max | tr '\\n' ' '; echo`,
+      // A memory cgroup a command made and removed again would hold guest memory no limit counts.
+      "(mkdir /sys/fs/cgroup/proc/mine) 2>&1 | sed 's/.*: //'",
+      `(mkdir ${cgroup}/below) 2>&1 | sed 's/.*: //'`,
+      `(rmdir ${cgroup}) 2>&1 | sed 's/.*: //'`,
+      `sh -c 'echo $$ > ${cgroup}/cgroup.procs && cut -d: -f3 /proc/self/cgroup'`,
+    ].join("; "))).toEqual({
+      ok: { output: `0 ${FIRST_UID} ${FIRST_UID} 0 \nPermission denied\nPermission denied\nPermission denied\n/proc/${session_id}\n`, returncode: 0, timed_out: false },
+    });
+    expect(await guest.op(ROOT, "kill", { session_id }, signal())).toEqual({ ok: { status: "killed", session_id } });
+    expect(await run("find /sys/fs/cgroup/proc -mindepth 1 -type d | wc -l")).toMatchObject({ ok: { output: "0\n" } });
   });
 
   it("stops a command that makes cgroups at its root's bound, none below a command's, and the guest keeps its memory", async () => {

@@ -5,7 +5,7 @@
 // starts is reachable from the next.
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { chmodSync, chownSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { chmodSync, chownSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { chmod, chown, mkdir, readdir, readFile, rmdir, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
@@ -22,7 +22,7 @@ export const SESSIONS = "/run/surogate/sessions/roots";
 // Each share's virtiofs mount, readable by root only.
 const SHARES = "/run/surogate/shares";
 // Each root's cgroup, under the one vm/init bounds below the guest's memory.
-const CGROUPS = "/sys/fs/cgroup/roots";
+export const CGROUPS = "/sys/fs/cgroup/roots";
 // How many processes one root may have of the guest's 32 768.
 const PIDS_MAX = 4096;
 // How many cgroups one root may have below its own: its runner's, its runs' and its
@@ -165,10 +165,11 @@ export async function enter(root: string, place: Place, share: Share, user: Host
   // No cgroup deeper than a command's, and at most CGROUPS_MAX.
   await writeFile(join(cgroup, "cgroup.max.descendants"), String(CGROUPS_MAX));
   await writeFile(join(cgroup, "cgroup.max.depth"), "2");
-  // Delegated to the root's user, so its runner can give each command a cgroup of its
-  // own in run or proc and move its processes between them; it sets none of the root's
-  // own limits, and makes no cgroup beside init, run and proc.
-  for (const path of [join(cgroup, "cgroup.procs"), join(cgroup, "run"), join(cgroup, "proc")]) await chown(path, uid, uid);
+  // Delegated to the root's user, so its runner can give each run a cgroup of its own in
+  // run and move its processes between the root's cgroups; it sets none of the root's own
+  // limits, and makes no cgroup beside init, run and proc, nor any in proc, whose cgroups
+  // the agent makes (ProcessCgroups).
+  for (const path of [join(cgroup, "cgroup.procs"), join(cgroup, "run")]) await chown(path, uid, uid);
   // In the root's cgroup before unshare runs, so it and everything it starts are
   // there, and the cgroup namespace it makes is rooted there. Each by its path:
   // never through the PATH made for the commands.
@@ -199,6 +200,46 @@ export async function contain(root: string, pid: number | undefined): Promise<vo
   await writeFile(join(cgroup, "init", "cgroup.procs"), String(pid));
   await writeFile(join(cgroup, "cgroup.subtree_control"), "+memory");
   await writeFile(join(cgroup, "proc", "cgroup.subtree_control"), "+memory");
+}
+
+/**
+ * The cgroups the agent makes for a root's background processes, in the root's proc
+ * folder (spec, Section 11, Cgroups), which only the agent writes. A memory cgroup a
+ * command made there and removed again would hold guest kernel memory that no limit
+ * counts, for as long as the page cache it charged lives. Each is the root's user's to
+ * enter and to end, through its cgroup.procs and cgroup.kill, which its runner writes;
+ * the agent removes it once nothing of it runs.
+ */
+export class ProcessCgroups {
+  // Ended processes whose cgroups still held what they left: tried again at each start.
+  private readonly ended = new Set<string>();
+
+  constructor(private readonly folder: string, private readonly uid: number) {}
+
+  // Made before the runner starts the process. Throws once the root has as many cgroups as it may.
+  make(id: string): void {
+    this.tidy();
+    const cgroup = join(this.folder, id);
+    mkdirSync(cgroup);
+    for (const file of ["cgroup.procs", "cgroup.kill"]) chownSync(join(cgroup, file), this.uid, this.uid);
+  }
+
+  // Once its process has ended: removed now, or once what it left has ended too.
+  end(id: string): void {
+    this.ended.add(id);
+    this.tidy();
+  }
+
+  private tidy(): void {
+    for (const id of this.ended) {
+      try {
+        rmdirSync(join(this.folder, id));
+        this.ended.delete(id);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") this.ended.delete(id);
+      }
+    }
+  }
 }
 
 // Everything of *root* ends at once, its runner and the namespaces' PID 1 among it,
@@ -315,6 +356,8 @@ export interface RootsOptions {
   lost?(root: string): void;
   // Told a root's process handles to keep, and how many of its processes live, each time they change.
   handles?(root: string, handles: ProcessHandle[], live: number): void;
+  // The roots' cgroups (CGROUPS): each background process gets one the agent makes in its root's proc.
+  cgroups?: string;
   questionMs?: number;
 }
 
@@ -386,9 +429,20 @@ export class Roots {
       if (!target) throw new Failure(NOT_SET_UP.error);
       return target;
     };
+    const cgroups = this.options.cgroups === undefined ? null : new ProcessCgroups(join(this.options.cgroups, root, "proc"), this.options.uid(root));
     const registry: Processes = new Processes({
       place: async (workdir, signal) => current().where(workdir, signal),
-      runner: async () => current().runner,
+      runner: async () => {
+        const { runner } = current();
+        // Its cgroup first: the runner moves the command's shell into it before the command runs.
+        return {
+          spawn: (request) => {
+            cgroups?.make(request.id);
+            return runner.spawn(request);
+          },
+        };
+      },
+      done: (id) => cgroups?.end(id),
       // The host's handles: one from before the app quit comes ended as the app quit,
       // so one still running ran in a guest that went.
       ended: lostWith(ended),

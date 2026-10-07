@@ -76,6 +76,8 @@ export interface ProcessesOptions {
   save?(handles: ProcessHandle[]): void;
   // Handles from before the app last quit.
   ended?: readonly ProcessHandle[];
+  // Told each process's id once, when it has ended: what was kept for it can go.
+  done?(id: string): void;
   now?(): number; // seconds
 }
 
@@ -450,6 +452,7 @@ export class Processes {
     this.running.delete(record.handle.id);
     this.finished.set(record.handle.id, record);
     for (const waiter of record.waiters) waiter();
+    this.options.done?.(record.handle.id);
     this.changed();
   }
 
