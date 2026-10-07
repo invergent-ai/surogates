@@ -37,7 +37,9 @@ const TAGS = [
   { label: "Multi-Tenant", icon: "◇" },
 ] as const;
 
-export function LoginPage() {
+// On its own route the page goes on to the app once signed in. Surogate Desktop's sign-in in the
+// system browser (authorize-page.tsx) shows it with *notice* instead, and goes on itself (*onSignedIn*).
+export function LoginPage({ notice, onSignedIn }: { notice?: string; onSignedIn?: () => void } = {}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const { resolvedTheme, setTheme } = useTheme();
   const navigate = useNavigate();
@@ -155,6 +157,11 @@ export function LoginPage() {
 
   const firebaseConfig = authConfig.firebase;
 
+  const signedIn = () => {
+    if (onSignedIn) onSignedIn();
+    else void navigate({ to: getPostAuthRoute() });
+  };
+
   const handleForgotPassword = async () => {
     if (!firebaseConfig) return;
     if (!email.trim()) {
@@ -196,7 +203,7 @@ export function LoginPage() {
     // stash is cleared either way and the user can edit their profile
     // later.
     await applyPendingProfile(user.email).catch(() => {});
-    void navigate({ to: getPostAuthRoute() });
+    signedIn();
   };
 
   /** Exchange the token only when the user's email is verified.
@@ -423,7 +430,7 @@ export function LoginPage() {
           token_type: string;
         };
         storeAuthTokens(payload.access_token, payload.refresh_token);
-        void navigate({ to: getPostAuthRoute() });
+        signedIn();
         return;
       }
 
@@ -549,7 +556,7 @@ export function LoginPage() {
             Sign in
           </h3>
           <p className="text-sm text-muted-foreground">
-            to access your agent
+            {notice ?? "to access your agent"}
           </p>
         </div>
 

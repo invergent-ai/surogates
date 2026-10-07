@@ -12,7 +12,7 @@ import { getDesktop, joinDesktop, leaveDesktop } from "@/lib/desktop-bridge";
 
 import { AppProvider } from "../provider";
 
-const BARE_ROUTES = ["/login", "/link"];
+const BARE_ROUTES = ["/login", "/link", "/oauth/authorize"];
 
 function RootLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
