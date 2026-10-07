@@ -39,7 +39,8 @@ async def authorize_commerce_turn(
     *,
     buyer: dict | None = None,
     channel: str | None = None,
-) -> None:
+    record: bool = True,
+) -> dict | None:
     """Gate one visitor message behind the agent's monetization mode.
 
     Free agents (the default, and every agent while the platform's
@@ -47,13 +48,15 @@ async def authorize_commerce_turn(
     immediately.  Monetized agents require a session-bound buyer
     identity and a successful ops-side token reservation; the receipt
     is pinned on ``session.config`` for the worker to settle after the
-    turn.  402 details are structured (``{"code", "buy_url"}``) so the
-    widget can render a paywall instead of a generic error.
+    turn, or with *record* off returned for the caller to pin
+    (:func:`reserve_commerce`).  402 details are structured
+    (``{"code", "buy_url"}``) so the widget can render a paywall
+    instead of a generic error.
     """
     payload = await runtime_commerce_payload(request, str(session.agent_id))
     mode = str(payload.get("commerce_mode") or "free")
     if mode == "free":
-        return
+        return None
     buy_url = payload.get("commerce_buy_url")
     if buyer is None:
         buyer = (session.config or {}).get("commerce_buyer") or {}
@@ -63,13 +66,14 @@ async def authorize_commerce_turn(
             detail={"code": "sign_in_required", "buy_url": buy_url},
         )
     try:
-        await reserve_commerce(
+        return await reserve_commerce(
             platform_client=getattr(request.app.state, "platform_client", None),
             session_store=getattr(request.app.state, "session_store", None),
             session=session,
             content=content,
             buyer=buyer,
             channel=channel,
+            record=record,
         )
     except CommercePaymentRequiredError as exc:
         raise HTTPException(
@@ -152,6 +156,26 @@ async def reserve_commerce(
             session.id, "commerce_reservations", hold,
         )
     return hold
+
+
+async def release_commerce_hold(platform_client, session, hold: dict) -> None:
+    """Give back at nothing spent a paid *hold* that was never pinned: its
+    turn will not run.  Best-effort; the ops reaper releases it otherwise."""
+    try:
+        await platform_client.commerce_debit(
+            session.agent_id,
+            entitlement_id=str(hold["entitlement_id"]),
+            reserved_tokens=hold["reserved_tokens"],
+            actual_tokens=0,
+            reservation_id=hold["reservation_id"] or None,
+        )
+    except Exception:
+        logger.warning(
+            "Releasing an unused paid hold failed for session %s; the ops "
+            "reaper will release it",
+            session.id,
+            exc_info=True,
+        )
 
 
 class AllowanceReserveError(RuntimeError):

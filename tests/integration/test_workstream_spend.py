@@ -333,6 +333,25 @@ async def test_a_paid_turn_a_refused_report_held_is_released(api, monkeypatch):
     assert (ran, ops.held[2:]) == ([], [("paid", "fb-flavius", "web")])
 
 
+async def test_a_message_the_allowance_refuses_leaves_no_paid_hold(api, monkeypatch):
+    await a_firebase_user(api)
+    master = await reported(api)
+    served(api, {**PAID, **CAPPED}, ops := Ops(allowance_left=False))
+    response = await api.client.post(
+        f"/v1/sessions/{master.id}/messages", json={"content": "Where are we?"}, headers=api.auth(),
+    )
+    assert response.status_code == 402, response.text
+    # The paid turn the route held goes back with nothing spent.
+    assert ops.spent == [("paid", "hold-1", 0)]
+    assert "commerce_reservations" not in (await api.app.state.session_store.get_session(master.id)).config
+    # The paid balance runs out and the allowance refills: the report's wake
+    # asks the paid plane, which refuses it.
+    ops.allowance_left, ops.paid_left = True, False
+    harness, ran = worker(api, monkeypatch, {**PAID, **CAPPED}, ops)
+    await harness.wake(master.id)
+    assert (ran, ops.held[2:]) == ([], [("paid", "fb-flavius", "web")])
+
+
 async def test_an_ops_outage_at_a_report_wake_leaves_the_master_as_it_was(api, monkeypatch):
     master = await reported(api)
     harness, ran = worker(api, monkeypatch, CAPPED, Down())

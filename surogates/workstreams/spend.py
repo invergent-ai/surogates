@@ -9,19 +9,17 @@ instead.  Ops is not involved beyond its existing planes.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from surogates.api.routes._commerce_turn import (
     buyer_identity,
     limit_notice,
+    release_commerce_hold,
     reserve_allowance,
     reserve_commerce,
 )
 from surogates.channels.memory_boundary import PROJECT_BOUNDARY_PREFIX
 from surogates.runtime.platform_client import AllowanceExhaustedError, CommercePaymentRequiredError
-
-logger = logging.getLogger(__name__)
 
 
 def admitted_at_wake(session: Any) -> bool:
@@ -84,26 +82,10 @@ async def admit_turn(
                 )
         except Exception:
             if paid is not None:
-                await _release(platform_client, session, paid)
+                await release_commerce_hold(platform_client, session, paid)
             raise
         if paid is not None:
             await session_store.append_session_config_list(session.id, "commerce_reservations", paid)
     except (AllowanceExhaustedError, CommercePaymentRequiredError) as exc:
         return limit_notice(exc.detail, payload.get("commerce_buy_url"))
     return None
-
-
-async def _release(platform_client: Any, session: Any, hold: dict) -> None:
-    """Give back at nothing spent the paid *hold* this turn took and will
-    not run on."""
-    try:
-        await platform_client.commerce_debit(
-            session.agent_id, entitlement_id=str(hold["entitlement_id"]),
-            reserved_tokens=hold["reserved_tokens"], actual_tokens=0,
-            reservation_id=hold["reservation_id"] or None,
-        )
-    except Exception:
-        logger.warning(
-            "Releasing a refused turn's paid hold failed for session %s; the ops reaper will release it",
-            session.id, exc_info=True,
-        )

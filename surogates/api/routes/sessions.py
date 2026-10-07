@@ -52,6 +52,7 @@ from surogates.api.routes._commerce_turn import (
     authorize_allowance_turn,
     authorize_commerce_turn,
     firebase_buyer_identity,
+    release_commerce_hold,
     runtime_commerce_payload,
 )
 from surogates.devices.operations import DeviceOperations
@@ -1375,6 +1376,7 @@ async def send_message(
     # Operator-provisioned accounts (database/external providers, no
     # Firebase uid) are the builder's own people and pass unmetered —
     # granting them access is the operator's explicit choice.
+    paid = None
     if session.channel == "web" and tenant.user_id is not None:
         payload = await runtime_commerce_payload(
             request, str(session.agent_id),
@@ -1382,12 +1384,15 @@ async def send_message(
         if str(payload.get("commerce_mode") or "free") != "free":
             buyer = await firebase_buyer_identity(request, tenant)
             if buyer is not None:
-                await authorize_commerce_turn(
+                # Pinned only once the allowance below takes the turn too: a
+                # hold left pinned is one a project's wake trusts unasked.
+                paid = await authorize_commerce_turn(
                     request,
                     session,
                     body.content,
                     buyer=buyer,
                     channel="web",
+                    record=False,
                 )
 
     # Per-user allowance (a slice of the operator's subscription) applies
@@ -1397,12 +1402,23 @@ async def send_message(
     # (kill-switch on + operator opt-in), so free/uncapped agents are
     # unaffected. The worker settles ``allowance_reservations`` after.
     if session.channel == "web" and tenant.user_id is not None:
-        await authorize_allowance_turn(
-            request,
-            session,
-            body.content,
-            end_user_id=str(tenant.user_id),
-            channel="web",
+        try:
+            await authorize_allowance_turn(
+                request,
+                session,
+                body.content,
+                end_user_id=str(tenant.user_id),
+                channel="web",
+            )
+        except Exception:
+            if paid is not None:
+                await release_commerce_hold(
+                    request.app.state.platform_client, session, paid,
+                )
+            raise
+    if paid is not None:
+        await store.append_session_config_list(
+            session_id, "commerce_reservations", paid,
         )
 
     event_data: dict = {"content": body.content}
