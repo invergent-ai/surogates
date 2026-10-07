@@ -203,8 +203,17 @@ export function WorkspacePanel({
 	const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 	const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
 	const sessionIdRef = useRef(sessionId);
+	// Aborted on unmount: an upload or a delete still waiting for the computer
+	// a local-folder chat's folder is on stops being sent again.
+	const changesRef = useRef<AbortController | null>(null);
 
 	sessionIdRef.current = sessionId;
+
+	useEffect(() => {
+		const changes = new AbortController();
+		changesRef.current = changes;
+		return () => changes.abort();
+	}, []);
 
 	const fetchTree = useCallback(async () => {
 		if (!sessionId) {
@@ -289,6 +298,7 @@ export function WorkspacePanel({
 					await adapter.uploadWorkspaceFile({
 						sessionId,
 						file: uploadedFile,
+						signal: changesRef.current?.signal,
 					});
 				}
 				setNotice(
@@ -311,7 +321,11 @@ export function WorkspacePanel({
 		async (path: string) => {
 			if (disabled || !sessionId) return;
 			try {
-				await adapter.deleteWorkspaceFile({ sessionId, path });
+				await adapter.deleteWorkspaceFile({
+					sessionId,
+					path,
+					signal: changesRef.current?.signal,
+				});
 				if (selectedPath === path) {
 					onSelectedPathChange(null);
 				}

@@ -4,6 +4,7 @@
 import { authFetch } from "./auth";
 import { errorDetailMessage } from "./_errors";
 import { untilAnswered } from "./device-requests";
+import { getSession } from "./sessions";
 
 export interface FileEntry {
   name: string;
@@ -110,10 +111,27 @@ export interface UploadResponse {
   size: number;
 }
 
+// Whether a chat works on a folder of its user's computer, by session: a chat's place never changes.
+const onDevice = new Map<string, Promise<boolean>>();
+
+function isOnDevice(sessionId: string): Promise<boolean> {
+  let known = onDevice.get(sessionId);
+  if (known === undefined) {
+    known = getSession(sessionId).then(
+      (session) => (session.config?.execution as { kind?: unknown } | undefined)?.kind === "device",
+    );
+    // Not known after all: asked again next time.
+    known.catch(() => onDevice.delete(sessionId));
+    onDevice.set(sessionId, known);
+  }
+  return known;
+}
+
 export async function uploadFile(
   sessionId: string,
   file: File,
   directory?: string,
+  signal?: AbortSignal,
 ): Promise<UploadResponse> {
   const params = new URLSearchParams();
   if (directory) params.append("path", directory);
@@ -121,11 +139,13 @@ export async function uploadFile(
   const formData = new FormData();
   formData.append("file", file);
 
-  const response = await untilAnswered((requestId) =>
-    authFetch(
-      `/api/v1/sessions/${sessionId}/workspace/upload?${new URLSearchParams([...params, ["request_id", requestId]])}`,
-      { method: "POST", body: formData },
-    ),
+  const response = await untilAnswered(
+    (requestId) =>
+      authFetch(
+        `/api/v1/sessions/${sessionId}/workspace/upload?${new URLSearchParams([...params, ["request_id", requestId]])}`,
+        { method: "POST", body: formData, signal },
+      ),
+    { onDevice: await isOnDevice(sessionId), signal },
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
@@ -144,12 +164,15 @@ export function getDownloadUrl(sessionId: string, path: string): string {
 export async function deleteFile(
   sessionId: string,
   path: string,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const response = await untilAnswered((requestId) =>
-    authFetch(
-      `/api/v1/sessions/${sessionId}/workspace/file?${new URLSearchParams({ path, request_id: requestId })}`,
-      { method: "DELETE" },
-    ),
+  const response = await untilAnswered(
+    (requestId) =>
+      authFetch(
+        `/api/v1/sessions/${sessionId}/workspace/file?${new URLSearchParams({ path, request_id: requestId })}`,
+        { method: "DELETE", signal },
+      ),
+    { onDevice: await isOnDevice(sessionId), signal },
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
