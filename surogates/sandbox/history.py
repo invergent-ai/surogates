@@ -23,6 +23,7 @@ import re
 import shutil
 import stat
 import subprocess
+import time
 from collections.abc import Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -128,6 +129,7 @@ class History:
             _TIMEOUT.reset(budget)
 
     def _open(self) -> None:
+        begun = int(time.time())
         fresh = not (self.repo / "HEAD").exists()
         try:
             if fresh:
@@ -161,6 +163,10 @@ class History:
                 self._main(*_as(you), "commit", "-q", "--allow-empty", "-m", "The project's files")
             elif self._main("write-tree") != self._tree(MAIN):
                 self._main(*_as(you), "commit", "-q", "-m", "Your changes")
+            if (self.repo / "index").is_file():
+                # geesefs gives whole seconds: an entry from the second the
+                # open began may be saved again unseen, so git reads it again.
+                os.utime(self.repo / "index", (begun, begun))
         except Exception:
             if fresh:
                 # Half made (a read of the real files failed): the next
@@ -534,7 +540,8 @@ class History:
         since; an entry the landing changed has neither, so it is read.
         """
         kept = self.repo / "kept.index"
-        shutil.copyfile(self.repo / "index", kept)
+        # With its time: the second its pod's open began.
+        shutil.copy2(self.repo / "index", kept)
         try:
             self._git(
                 ["read-tree", "-m", "-i", landing],
