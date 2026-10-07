@@ -45,6 +45,9 @@ from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import RevisionConflict, RipgrepError, WorkspaceIO
 from surogates.tools.workspace_io.local import CODE_UNITS
 
+# What the app asks its user about before it runs, in Ask every time (desktop/src/binding/approvals.ts).
+ASKED = {"run", "start", "write", "delete", "write_stdin"}
+
 _PROCESS_KINDS = {"start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"}
 
 # What a write whose data does not come whole and matching is answered, as the app answers it.
@@ -411,6 +414,8 @@ class FakeLaptop:
         self.reply = True
         # Received operations are neither run nor answered: a long command.
         self.hold = False
+        # Only those the app asks its user about in Ask every time are held: a prompt left open.
+        self.hold_asked = False
         self.cancelled: set[str] = set()
         # The type of every frame received after welcome, in order.
         self.frames: list[str] = []
@@ -503,8 +508,9 @@ class FakeLaptop:
     async def _handle(self, frame: dict[str, Any], ws: ClientConnection) -> None:
         operation_id = frame["id"]
         self.received.append(operation_id)
-        if operation_id in self.cancelled or (self.hold and operation_id not in self.outcomes):
-            # A cancelled operation is never run; a held one is still running.
+        held = self.hold or (self.hold_asked and frame["kind"] in ASKED)
+        if operation_id in self.cancelled or (held and operation_id not in self.outcomes):
+            # A cancelled operation is never run; a held one is still running, or still asked about.
             return
         if operation_id not in self.outcomes and frame["kind"] == "write":
             if _malformed_write(frame["args"]):

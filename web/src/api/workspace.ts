@@ -3,6 +3,7 @@
 //
 import { authFetch } from "./auth";
 import { errorDetailMessage } from "./_errors";
+import { untilAnswered } from "./device-requests";
 
 export interface FileEntry {
   name: string;
@@ -120,9 +121,11 @@ export async function uploadFile(
   const formData = new FormData();
   formData.append("file", file);
 
-  const response = await authFetch(
-    `/api/v1/sessions/${sessionId}/workspace/upload?${params}`,
-    { method: "POST", body: formData },
+  const response = await untilAnswered((requestId) =>
+    authFetch(
+      `/api/v1/sessions/${sessionId}/workspace/upload?${new URLSearchParams([...params, ["request_id", requestId]])}`,
+      { method: "POST", body: formData },
+    ),
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
@@ -142,10 +145,11 @@ export async function deleteFile(
   sessionId: string,
   path: string,
 ): Promise<void> {
-  const params = new URLSearchParams({ path });
-  const response = await authFetch(
-    `/api/v1/sessions/${sessionId}/workspace/file?${params}`,
-    { method: "DELETE" },
+  const response = await untilAnswered((requestId) =>
+    authFetch(
+      `/api/v1/sessions/${sessionId}/workspace/file?${new URLSearchParams({ path, request_id: requestId })}`,
+      { method: "DELETE" },
+    ),
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {

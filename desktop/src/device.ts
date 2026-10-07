@@ -62,6 +62,8 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
       onRejected: (id) => runner.rejected(id),
       onChunk: (id, seq, data) => runner.chunk(id, seq, data),
       onStatus: (status) => {
+        // The server answers the user's own requests "offline" now: none still asked about may run later.
+        if (status === "offline") runner.disconnected();
         if (SUSPENDING.includes(status)) {
           // What runs is recorded first; then what no operation holds ends too.
           void runner.suspend(ACCESS_ENDED).then(() => options.executor.end?.())

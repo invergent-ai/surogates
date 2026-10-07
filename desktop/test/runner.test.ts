@@ -11,7 +11,7 @@ import { connectDevice } from "../src/device.js";
 import { INTERRUPTED, OperationJournal } from "../src/journal/journal.js";
 import type { DeviceLink } from "../src/link/client.js";
 import { MAX_FRAME_CHARS, type Operation, type Outcome } from "../src/link/protocol.js";
-import { ACCESS_ENDED, APP_CLOSED, type Executor, TOO_LARGE } from "../src/operations/runner.js";
+import { ACCESS_ENDED, APP_CLOSED, DISMISSED, type Executor, TOO_LARGE } from "../src/operations/runner.js";
 import { FakeLinkServer } from "./fake-server.js";
 
 let dir: string;
@@ -604,6 +604,25 @@ describe("an operation the executor admits before it starts", () => {
     await server.until(() => results("a").length === 1);
     expect(results("a")[0]?.outcome).toEqual({ ok: "answered" });
     expect(gate.ran).toEqual([]);
+  });
+
+  it("is answered not run when the link drops while it waits, for the user's own request, and never runs", async () => {
+    const gate = new Gate(() => "hold");
+    await start(gate);
+    // An upload from the file panel, waiting for its user's answer; and a tool call's write beside it.
+    server.send({ ...opFrame("a", "write"), invocation_id: "request:upload-0001" });
+    server.send(opFrame("z", "write"));
+    await server.until(() => gate.asked.length === 2);
+    server.close(1011);
+    await server.until(() => server.connections === 2 && link?.status === "connected");
+    // Sent at the next welcome: its caller is told offline, so it must never land later.
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual(DISMISSED);
+    expect(server.hellos.at(-1)?.open).toEqual(["z"]);
+    // The tool call's is still asked about, and runs once allowed; the request's never does.
+    gate.release("z", null);
+    await server.until(() => results("z").length === 1);
+    expect(gate.ran).toEqual(["z"]);
   });
 
   it("records nothing when suspended while it waits, and leaves it open to be asked again", async () => {

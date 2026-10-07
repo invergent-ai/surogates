@@ -208,6 +208,25 @@ describe("a chat that asks every time", () => {
     expect(user.asked).toHaveLength(6);
   });
 
+  it("never asks about the whiteboard's canvas the chat's page saves, and asks about anything else there", async () => {
+    bind(ROOT, "ask");
+    user.auto = "deny";
+    const canvas = `${FOLDER}/_whiteboard/canvas.json`;
+    expect(await approvals.admit(op("write", { key: canvas, data: "" }), never())).toBeNull();
+    expect(user.asked).toEqual([]);
+    for (const operation of [
+      op("delete", { key: canvas }),
+      op("write", { key: `${FOLDER}/sub/_whiteboard/canvas.json`, data: "" }),
+      op("write", { key: `${FOLDER}/_whiteboard/../a.txt`, data: "" }),
+      // Only the canvas: an agent's write beside it is asked about, as anywhere else.
+      op("write", { key: `${FOLDER}/_whiteboard/other.json`, data: "" }),
+      op("write", { key: `${FOLDER}/_whiteboard/sub/x`, data: "" }),
+    ]) {
+      expect(await approvals.admit(operation, never())).toEqual(CHANGE_DENIED);
+    }
+    expect(user.asked).toHaveLength(5);
+  });
+
   it("asks about a kind it does not know, and in a chat whose mode it does not know", async () => {
     bind(ROOT, "ask");
     bind(OTHER, "maybe" as Mode);

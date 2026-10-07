@@ -508,3 +508,13 @@ async def test_a_cloud_chats_slow_storage_is_read_as_before(monkeypatch):
     storage.objects[("ops-agent-bucket", f"{session_id}/a.txt")] = b"slow"
     content = await workspace_route.get_workspace_file(session_id, request, path="a.txt", tenant=tenant)
     assert content.content == "slow"
+
+
+async def test_a_cloud_chats_slow_storage_is_written_as_before(monkeypatch):
+    monkeypatch.setattr(workspace_route, "CHANGE_WITHIN_S", 0.05)
+    session_id, storage, request, tenant = _slow_chat()
+    uploaded = await workspace_route.upload_file(
+        session_id, request, UploadFile(file=BytesIO(b"slow"), filename="a.txt"), path="", tenant=tenant,
+    )
+    assert uploaded.path == "a.txt"
+    assert storage.objects[("ops-agent-bucket", f"{session_id}/a.txt")] == b"slow"

@@ -24,8 +24,13 @@ export const UNASKED: ReadonlySet<string> = new Set([
   "wait", "kill", "list_processes",
 ]);
 
-// The harness's own files: the terminal spills long output here.
-const RESULTS = ".surogates-results";
+// Writes never asked about: under the folder at the top of a chat's folder where the
+// terminal spills long output, and to the one file the chat's page saves its
+// whiteboard's canvas in, every few seconds while the user draws. Anything else
+// under _whiteboard/ is asked about: the agent could write there, and the file
+// panel hides it.
+const UNASKED_FOLDERS = [".surogates-results"];
+const CANVAS = "_whiteboard/canvas.json";
 
 // The chat a prompt is for, and the session asking: a sub-agent of the chat when it is not the root.
 // A network prompt names the root: a connection is known by its root's socket, not by which session's command made it.
@@ -347,8 +352,9 @@ export class Approvals {
     // cannot carry a write that skips its prompt here out of this folder; a key that
     // is not already normal asks all the same.
     const key = operation.args.key;
-    const spill = typeof key === "string" && posix.normalize(key) === key && key.startsWith(`${binding.folder}/${RESULTS}/`);
-    if (operation.kind === "write" && spill) {
+    const unasked = typeof key === "string" && posix.normalize(key) === key
+      && (key === `${binding.folder}/${CANVAS}` || UNASKED_FOLDERS.some((name) => key.startsWith(`${binding.folder}/${name}/`)));
+    if (operation.kind === "write" && unasked) {
       return { answer: null };
     }
     return { binding };
