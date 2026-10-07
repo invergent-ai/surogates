@@ -72,9 +72,15 @@ export class CredentialStore {
 
   list(): Credential[] {
     const stored = this.stored();
-    // A token kept as it is while this computer had no secret store is sealed once it has one.
+    // A token kept as it is while this computer had no secret store is sealed once it has one. Best
+    // effort: one that cannot be sealed is no less safe than it was, so it is said, kept as it is,
+    // and sealed at a later read.
     if (seals(this.secrets) && stored.some((entry) => entry.plain !== undefined)) {
-      writeState(this.path, stored.map(({ plain, ...entry }) => (plain === undefined ? entry : { ...entry, ...seal(this.secrets, plain) })), 0o600);
+      try {
+        writeState(this.path, stored.map(({ plain, ...entry }) => (plain === undefined ? entry : { ...entry, ...seal(this.secrets, plain) })), 0o600);
+      } catch (error) {
+        report(this.onError, error);
+      }
     }
     const credentials: Credential[] = [];
     for (const { sealed, plain, ...identity } of stored) {

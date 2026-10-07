@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,6 +22,13 @@ class Secrets implements SecretStore {
   }
   decryptString(sealed: Buffer): string {
     return [...sealed.toString()].reverse().join("");
+  }
+}
+
+// A secret store that is there, but cannot seal: a locked keyring, or an encryption error.
+class Unsealing extends Secrets {
+  override encryptString(): Buffer {
+    throw new Error("the keyring is locked");
   }
 }
 
@@ -61,6 +68,23 @@ describe("the sign-in, as this computer keeps it", () => {
     expect(store(new Secrets("basic_text")).unencrypted()).toBe(true);
     expect(store().get()).toEqual(SIGNED_IN);
     expect(readFileSync(path, "utf8")).not.toContain("surg_rt_secret");
+    expect(store().unencrypted()).toBe(false);
+  });
+
+  it.each([
+    ["the secret store cannot seal", () => new Unsealing(), () => {}],
+    ["the file cannot be written", () => new Secrets(), () => chmodSync(dir, 0o500)],
+  ])("stays signed in when sealing a token kept as it is fails because %s, which is said once, and seals it at the next read", (_name, secrets, fail) => {
+    store(new Secrets("basic_text")).save(SIGNED_IN);
+    fail();
+    try {
+      expect(store(secrets()).get()).toEqual(SIGNED_IN);
+      expect(errors).toHaveLength(1);
+      expect(store(secrets()).unencrypted()).toBe(true);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    expect(store().get()).toEqual(SIGNED_IN);
     expect(store().unencrypted()).toBe(false);
   });
 

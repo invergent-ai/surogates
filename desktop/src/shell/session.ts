@@ -56,15 +56,24 @@ export class SessionStore {
       return null;
     }
     const { sealed, plain, ...signedIn } = stored;
+    let refreshToken: string;
     try {
-      const refreshToken = unseal(this.secrets, { sealed, plain });
-      // A token kept as it is while this computer had no secret store is sealed once it has one.
-      if (plain !== undefined && seals(this.secrets)) this.save({ ...signedIn, refreshToken });
-      return { ...signedIn, refreshToken };
+      refreshToken = unseal(this.secrets, { sealed, plain });
     } catch (error) {
       report(this.onError, error);
       return null;
     }
+    // A token kept as it is while this computer had no secret store is sealed once it has one. Best
+    // effort: one that cannot be sealed is no less safe than it was, so it is said, kept as it is,
+    // and sealed at a later read.
+    if (plain !== undefined && seals(this.secrets)) {
+      try {
+        this.save({ ...signedIn, refreshToken });
+      } catch (error) {
+        report(this.onError, error);
+      }
+    }
+    return { ...signedIn, refreshToken };
   }
 
   save(signedIn: SignedIn): void {
