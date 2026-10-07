@@ -78,10 +78,10 @@ MAX_WALK_FILES files, whose paths, each measured JSON-encoded plus 24, fit in
 MAX_PAYLOAD_BYTES; it looks at most MAX_WALK_LOOKS entries, for at most
 WALK_BUDGET_S seconds, since the folder's other operations wait behind it; and
 it enters folders at most MAX_WALK_DEPTH below key, since it holds a handle on
-each folder above the one it reads.  A folder under key it cannot enter (it
-cannot read it, it has no handle left, or a link took the folder's place)
-stops it too: what that folder holds is unknown.  truncated says one of these
-stopped it.  key itself unreadable is an os error.  Arguments it cannot take
+each folder above the one it reads.  A folder under key it may not read, or
+one a link took the place of, is left out, and it goes on.  Out of file
+handles (EMFILE, ENFILE) it stops too: what it has not reached is unknown.
+truncated says one of these stopped it.  key itself unreadable is an os error.  Arguments it cannot take
 are answered with a value error.
 
 An error names the exception the worker raises again:

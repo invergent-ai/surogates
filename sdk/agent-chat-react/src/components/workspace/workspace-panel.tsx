@@ -198,6 +198,8 @@ export function WorkspacePanel({
 	const [entries, setEntries] = useState<AgentChatWorkspaceEntry[]>([]);
 	const [treeLoading, setTreeLoading] = useState(false);
 	const [treeError, setTreeError] = useState<string | null>(null);
+	// The tree stopped short of the whole folder: at its caps, or a computer out of handles.
+	const [treeTruncated, setTreeTruncated] = useState(false);
 	const [notice, setNotice] = useState<string | null>(null);
 	const [uploading, setUploading] = useState(false);
 	const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
@@ -232,6 +234,7 @@ export function WorkspacePanel({
 			});
 			if (sessionIdRef.current !== requestedSessionId) return;
 			setEntries(tree.entries);
+			setTreeTruncated(tree.truncated);
 			setExpandedPaths(new Set(collectExpandedPaths(tree.entries)));
 		} catch (error) {
 			if (sessionIdRef.current !== requestedSessionId) return;
@@ -409,6 +412,12 @@ export function WorkspacePanel({
 			{notice && (
 				<div className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
 					{notice}
+				</div>
+			)}
+
+			{treeTruncated && entries.length > 0 && (
+				<div className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
+					Some files are not shown.
 				</div>
 			)}
 

@@ -756,7 +756,24 @@ describe("walk", () => {
     }
   }, 60_000);
 
-  it("stops at a folder it cannot enter, and says it stopped", async () => {
+  it.skipIf(process.getuid?.() === 0)("skips a folder it may not read, and lists every other file whole", async () => {
+    // A database's data folder bind-mounted into a project, owned by another user: as common as lost+found.
+    for (const name of ["data/postgres", "web", "src"]) mkdirSync(join(folder, name), { recursive: true });
+    writeFileSync(join(folder, "data", "postgres", "PG_VERSION"), "16");
+    writeFileSync(join(folder, "data", "seed.sql"), "x");
+    writeFileSync(join(folder, "web", "index.html"), "x");
+    writeFileSync(join(folder, "src", "main.ts"), "x");
+    chmodSync(join(folder, "data", "postgres"), 0o000);
+    try {
+      const walked = await walk();
+      expect(listed(walked)).toEqual([["a.txt", 6], ["data/seed.sql", 1], ["src/main.ts", 1], ["web/index.html", 1]]);
+      expect(walked.ok.truncated).toBe(false);
+    } finally {
+      chmodSync(join(folder, "data", "postgres"), 0o755);
+    }
+  });
+
+  it("stops at a folder it has no handle left to enter, and says it stopped", async () => {
     writeFileSync(join(folder, "sub", "b.txt"), "b");
     const handles = readdirSync("/proc/self/fd").length;
     opens.refuseAt = 2; // the key's, then sub's

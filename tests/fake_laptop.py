@@ -54,6 +54,8 @@ DISMISSED = {"error": {
     "type": "cancelled", "message": "This computer's link dropped before this was allowed, so it did not run",
 }}
 _REQUEST = "request:"
+# No file handle left, in the process or the system: what a walk has not reached is unknown.
+_OUT_OF_HANDLES = {errno.EMFILE, errno.ENFILE}
 
 _PROCESS_KINDS = {"start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"}
 
@@ -310,19 +312,22 @@ def _walk(a: dict[str, Any]) -> dict[str, Any]:
                 if len(levels) > MAX_WALK_DEPTH:
                     truncated = True
                     break
-                # A folder it cannot enter (unreadable, no handle left, a link in its place) stops it: what that
-                # folder holds is unknown.
+                # A folder it may not read, or a link in a folder's place, is left out. Out of handles, it stops:
+                # what the rest holds is unknown.
                 try:
                     child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-                except OSError:
-                    truncated = True
-                    break
+                except OSError as exc:
+                    if exc.errno in _OUT_OF_HANDLES:
+                        truncated = True
+                        break
+                    continue
                 try:
                     levels.append((child, path, os.scandir(child)))
-                except OSError:
+                except OSError as exc:
                     os.close(child)
-                    truncated = True
-                    break
+                    if exc.errno in _OUT_OF_HANDLES:
+                        truncated = True
+                        break
                 continue
             if not entry.is_file(follow_symlinks=False):
                 continue

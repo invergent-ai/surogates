@@ -423,8 +423,8 @@ function listDir(args: Record<string, unknown>, { folder }: Context): string[] {
 // the VM can swap a folder for a link between the walk seeing it and entering it. Depth first, each folder entered as
 // it is met, so a handle is held for each folder above the one being read, and no more: MAX_WALK_DEPTH of them at
 // most. Each folder is read an entry at a time, so one of a million entries costs no more than the walk looks at. A
-// folder it cannot enter (unreadable, no handle left, a link in its place) stops it, said truncated: what that folder
-// holds is unknown, and the walk must not be taken for whole.
+// folder it may not read, or one a link took the place of, is left out, and the walk goes on. Out of handles, it
+// stops, said truncated: what the rest holds is unknown, and the walk must not be taken for whole.
 function walk(args: Record<string, unknown>, { folder }: Context): { files: Array<[string, number]>; truncated: boolean; cursor: string } {
   const key = keyInFolder(folder, text(args, "key"));
   const { skip, skip_top: top, skip_hidden: hidden, since } = args;
@@ -489,16 +489,21 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
         let fd: number;
         try {
           fd = openSync(at, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-        } catch {
-          truncated = true;
-          break;
+        } catch (error) {
+          if (outOfHandles(error)) {
+            truncated = true;
+            break;
+          }
+          continue;
         }
         try {
           levels.push({ fd, rel: path, dir: listing(fd) });
-        } catch {
+        } catch (error) {
           closeSync(fd);
-          truncated = true;
-          break;
+          if (outOfHandles(error)) {
+            truncated = true;
+            break;
+          }
         }
         continue;
       }
@@ -523,6 +528,11 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
   }
   return { files, truncated, cursor };
 }
+
+// The process, or the system, has no file handle left: what a walk has not reached is unknown. Any other failure to
+// enter a folder (EACCES, EPERM, ELOOP, ENOTDIR) is that folder's alone.
+const outOfHandles = (error: unknown): boolean =>
+  error instanceof Error && ["EMFILE", "ENFILE"].includes((error as NodeJS.ErrnoException).code ?? "");
 
 // A folder the walk is in: its handle, its path from the key, and its entries, read as it goes.
 interface Level {

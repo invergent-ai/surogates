@@ -60,4 +60,28 @@ describe("WorkspacePanel", () => {
     root = null;
     expect(signals[0]?.aborted).toBe(true);
   });
+
+  it("says when the tree shows only some of the files", async () => {
+    const adapter = {
+      getWorkspaceTree: vi.fn().mockResolvedValue({
+        root: "r",
+        entries: [{ name: "a.txt", path: "a.txt", kind: "file" }],
+        truncated: true,
+      }),
+      uploadWorkspaceFile: vi.fn(),
+      deleteWorkspaceFile: vi.fn(),
+      getWorkspaceDownloadUrl: vi.fn(() => "#"),
+    } as unknown as AgentChatAdapter;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <TooltipProvider>
+          <WorkspacePanel adapter={adapter} sessionId="s-1" selectedPath={null} onSelectedPathChange={() => {}} />
+        </TooltipProvider>,
+      );
+    });
+    expect(container.textContent).toContain("Some files are not shown.");
+  });
 });

@@ -698,7 +698,25 @@ async def test_a_walk_goes_no_deeper_than_its_depth_and_says_so(wio, root):
         subprocess.run(["rm", "-rf", str(whole), str(deep)], check=True)
 
 
-async def test_a_walk_stops_at_a_folder_it_cannot_enter_and_says_so(wio, root, monkeypatch):
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a folder of mode 000")
+async def test_a_walk_skips_a_folder_it_may_not_read_and_lists_every_other_file_whole(wio, root):
+    # A database's data folder bind-mounted into a project, owned by another user: as common as lost+found.
+    for name in ("data/postgres", "web", "src"):
+        (root / name).mkdir(parents=True)
+    (root / "data" / "postgres" / "PG_VERSION").write_text("16")
+    (root / "data" / "seed.sql").write_text("x")
+    (root / "web" / "index.html").write_text("x")
+    (root / "src" / "main.ts").write_text("x")
+    (root / "data" / "postgres").chmod(0o000)
+    try:
+        walked = await wio.walk(str(root), skip=())
+        assert sorted(walked.files) == [("data/seed.sql", 1), ("src/main.ts", 1), ("web/index.html", 1)]
+        assert walked.truncated is False
+    finally:
+        (root / "data" / "postgres").chmod(0o755)
+
+
+async def test_a_walk_stops_at_a_folder_it_has_no_handle_left_to_enter_and_says_so(wio, root, monkeypatch):
     (root / "sub").mkdir()
     (root / "sub" / "b.txt").write_text("b")
     handles = len(os.listdir("/proc/self/fd"))
