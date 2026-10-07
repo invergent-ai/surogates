@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { CANCELLED } from "../src/guest/command.js";
 import { Control, type ControlRoots, NO_HELLO } from "../src/guest/control.js";
 import type { ProcessHandle } from "../src/guest/processes.js";
-import { type FromAgent, type HostUser, MAX_PROTECTED } from "../src/guest/protocol.js";
+import type { FromAgent, HostUser } from "../src/guest/protocol.js";
 import type { Outcome } from "../src/link/protocol.js";
 
 const USER: HostUser = { uid: 1000, gid: 1000, name: "someone", home: "/home/someone" };
@@ -26,10 +26,6 @@ function fakeRoots() {
     },
     teardown: async (root, share) => {
       calls.push(["teardown", root, share]);
-    },
-    protect: async (root, keys) => {
-      calls.push(["protect", root, keys]);
-      if (root === "stuck") throw new Error("Blocked: the computer could not make these protected files read-only in its sandbox");
     },
     perform: (root, kind, args, signal, id) => {
       calls.push(["perform", root, kind, args, id]);
@@ -171,7 +167,6 @@ describe("the agent's control port", () => {
       uid: () => 10_000,
       setup: async () => {},
       teardown: async () => {},
-      protect: async () => {},
       perform: () => Promise.reject(new Error("broken")),
     };
     new Control((message) => sent.push(message), roots).receive(JSON.stringify({ type: "op", id: 1, root: "r", kind: "run", args: {} }));
@@ -192,24 +187,5 @@ describe("the agent's control port", () => {
       { type: "done", id: 1 },
     ]);
     expect(calls).toEqual([["teardown", "root-1", share]]);
-  });
-
-  it("makes a root's protected keys read-only when the host names them, and refuses a list that is not one", async () => {
-    const { sent, calls, tell, settle } = control();
-    const keys = [["/home/someone/project/.git", 40, "rw"], ["/home/someone/project/.git/config", 41, "ro"], ["/home/someone/project/.vscode", 42, "ro"]];
-    tell({ type: "protect", id: 1, root: "root-1", keys });
-    tell({ type: "protect", id: 2, root: "stuck", keys });
-    const bad = [
-      [3, "x"], [4, [["/a", "41", "ro"]]], [5, [["/a", 41]]], [6, [["/a", 41, "rwx"]]],
-      [7, Array.from({ length: MAX_PROTECTED + 1 }, (_, n) => [`/a/${n}`, n, "ro"])],
-    ] as const;
-    for (const [id, list] of bad) tell({ type: "protect", id, root: "root-1", keys: list });
-    await settle();
-    expect(sent).toEqual([
-      ...[3, 4, 5, 6, 7].map((id) => ({ type: "failed", id, message: "The agent cannot take this protect request" })),
-      { type: "done", id: 1 },
-      { type: "failed", id: 2, message: "Blocked: the computer could not make these protected files read-only in its sandbox" },
-    ]);
-    expect(calls).toEqual([["protect", "root-1", keys], ["protect", "stuck", keys]]);
   });
 });

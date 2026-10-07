@@ -72,8 +72,9 @@ function joinRealPath(path: string, rest: string, seen: Map<string, string | nul
 
 // os.path.realpath of an absolute path, and whether it ran into a symlink loop.
 // realpath ends with abspath(), which tidies the part a loop left unresolved.
-export function realpath(path: string): { path: string; loop: boolean } {
-  const [resolved, ok] = joinRealPath("", path, new Map());
+// *links* gets each link it went through, as its path was spelled when it got there.
+export function realpath(path: string, links = new Map<string, string | null>()): { path: string; loop: boolean } {
+  const [resolved, ok] = joinRealPath("", path, links);
   if (ok) return { path: resolved || "/", loop: false };
   // normpath keeps exactly two leading slashes, which posix.normalize folds into one.
   const lead = resolved.startsWith("//") && !resolved.startsWith("///") ? "/" : "";

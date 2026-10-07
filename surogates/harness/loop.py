@@ -82,6 +82,7 @@ from surogates.workstreams import is_project_master, master_refusal
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
+    describe_for_device,
     drop_unusable_tools,
     filter_schemas_for_tenant,
 )
@@ -1997,6 +1998,7 @@ class AgentHarness(
             # contract, so prose and schema cannot disagree.
             is_whiteboard=getattr(self._prompt, "has_whiteboard", False),
         )
+        tool_schemas = describe_for_device(tool_schemas, session.config)
         # The model may call only what it was sent.  The registry is the
         # worker's, so it also holds what this session's gates took away.
         offered_tools = frozenset(s["function"]["name"] for s in tool_schemas)

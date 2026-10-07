@@ -4,11 +4,11 @@
 
 import { spawnSync } from "node:child_process";
 import {
-  closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync,
+  closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, symlinkSync,
   watch, writeFileSync,
 } from "node:fs";
 import { networkInterfaces, tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -17,7 +17,7 @@ import { type ApprovalAnswer, type ApprovalPrompts, type ApprovalRequest, Approv
 import { BOOT_ID, GUEST_SYSTEM } from "../../src/binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import type { ProcessHandle } from "../../src/guest/processes.js";
-import type { BindMode, HostUser, ProtectedKey, Share } from "../../src/guest/protocol.js";
+import type { HostUser, Share } from "../../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
 import { OperationJournal } from "../../src/journal/journal.js";
 import type { Operation, Outcome } from "../../src/link/protocol.js";
@@ -153,6 +153,12 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
         type: "failed", message,
       }));
     }
+  });
+
+  it("activates the bpf LSM and attaches all eleven rule hooks before sessions run", () => {
+    // No command runs as the guest's root: its init says what it found on the console, before it starts the agent.
+    const said = /surogate: the protected-names rule attached (\d+) of \d+ hooks, under the LSMs (\S+)/.exec(readFileSync(options.console, "utf8"));
+    expect(said?.slice(1)).toEqual(["11", expect.stringMatching(/\bbpf\b/)]);
   });
 
   it("runs a root's background process in its runner, where the next command reaches it, and answers for it", async () => {
@@ -371,50 +377,224 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     });
   });
 
-  it("makes a root's protected files read-only in its namespace and their .git unmovable, binds them again once the host replaces them, and refuses a link that leads nowhere", async () => {
-    // A repository as git init makes it, and an editor's settings beside it.
-    expect(spawnSync("git", ["init", "-q", folder]).status).toBe(0);
-    mkdirSync(join(folder, ".vscode"));
-    writeFileSync(join(folder, ".vscode", "settings.json"), "{}\n");
-    const key = (name: string, mode: BindMode = "ro"): ProtectedKey => [join(folder, name), lstatSync(join(folder, name)).ino, mode];
-    // The .git folder held over itself, then the keys in it.
-    const protect = (...names: string[]) => guest.request({ type: "protect", root: ROOT, keys: [key(".git", "rw"), ...names.map((name) => key(name))] });
-    const writes = [
-      "(echo '[alias] x = !evil' >> .git/config) 2>&1 | sed 's/.*: //'",
-      "(touch .git/hooks/post-checkout) 2>&1 | sed 's/.*: //'",
-      "(echo '{\"x\": 1}' > .vscode/settings.json) 2>&1 | sed 's/.*: //'",
-      "(mv .git moved) 2>&1 | sed 's/.*: //'",
-    ].join("; ");
-    const evil = "(echo '[alias] x = !evil' >> .git/config) 2>&1 | sed 's/.*: //'; (mv .git moved) 2>&1 | sed 's/.*: //'";
-    try {
-      expect(await protect(".git/config", ".git/hooks", ".vscode")).toMatchObject({ type: "done" });
-      const config = readFileSync(join(folder, ".git", "config"), "utf8");
-      // git still reads its config, and commits.
-      expect(await run(`${writes}; git status --porcelain .vscode; git -c user.email=a@b -c user.name=a commit -q --allow-empty -m x && echo committed`)).toEqual({
-        ok: {
-          output: "Read-only file system\nRead-only file system\nRead-only file system\nDevice or resource busy\n?? .vscode/\ncommitted\n", returncode: 0, timed_out: false,
-        },
+  // A repository the user made, shared with a root of its own: the rule refuses its commands' writes to
+  // what the host's git and editors act on, whatever the route, and leaves git's own work and the rest alone.
+  describe("the protected-names rule", () => {
+    const RULE = "root-rule";
+    // From a file in DEEP/10 up to .vscode is twelve components, the walk's bound; from one in DEEP/10/11, thirteen.
+    const DEEP = "deep/.vscode/1/2/3/4/5/6/7/8/9";
+    let shared: string;
+    let repo: string;
+    // What the host has at *path* in the repository: its inode, links, mode and, for a file, its bytes.
+    const state = (path: string) => {
+      const stats = lstatSync(join(repo, path), { throwIfNoEntry: false });
+      return stats && { ino: stats.ino, nlink: stats.nlink, mode: stats.mode, bytes: stats.isFile() ? readFileSync(join(repo, path), "utf8") : null };
+    };
+    const inRepo = async (command: string, at = "repo") => ((await run(`cd ${at}; ${command}`, RULE)) as { ok: { output: string } }).ok.output;
+
+    beforeAll(async () => {
+      shared = join(dir, "rule");
+      repo = join(shared, "repo");
+      mkdirSync(repo, { recursive: true });
+      expect(spawnSync("bash", ["-c", "git init -q -b master && git config user.email a@b && git config user.name a && echo a > a.txt && git add -A && git commit -qm a && git init -q sub"], { cwd: repo }).status).toBe(0);
+      // A submodule's git folder, a linked worktree's, and the user's own hook, which is not executable.
+      for (const [path, text] of [
+        [".git/modules/foo/config", "[core]\n"], [".git/worktrees/wt/commondir", "../..\n"], [".git/worktrees/wt/HEAD", "ref: refs/heads/wt\n"], [".git/hooks/post-merge", "#!/bin/sh\n"],
+      ] as const) {
+        mkdirSync(dirname(join(repo, path)), { recursive: true });
+        writeFileSync(join(repo, path), text);
+      }
+      mkdirSync(join(repo, DEEP, "10", "11"), { recursive: true });
+      expect(await guest.ready(RULE, folderOf(shared))).toBeNull();
+    });
+
+    afterAll(async () => {
+      await guest.teardown(RULE);
+      rmSync(shared, { recursive: true, force: true });
+    });
+
+    it("refuses: a hard link out of .git/config, so a write through the link leaves the host's config as it was", async () => {
+      const config = state(".git/config");
+      expect(await inRepo("ln .git/config cfg-link 2>&1; echo '[core] hooksPath = ../evil' >> cfg-link")).toContain("Operation not permitted");
+      expect(state(".git/config")).toEqual(config);
+    });
+
+    // git config on the host renames a new file over the old one: the rule judges the path, whichever file is there.
+    it("refuses: a write to a .git/config the host's git config replaced since", async () => {
+      expect(spawnSync("git", ["-C", repo, "config", "core.editor", "true"]).status).toBe(0);
+      const config = state(".git/config");
+      expect(await inRepo("echo '[alias] x = !evil' >> .git/config 2>&1")).toContain("Operation not permitted");
+      expect(state(".git/config")).toEqual(config);
+    });
+
+    it("refuses: a .git remade under a folder a command moved aside, and the moved repository keeps its config", async () => {
+      const config = state("sub/.git/config");
+      expect(await inRepo("mv sub sub-old && { mkdir -p sub/.git && echo '[core] fsmonitor = ../evil' > sub/.git/config; } 2>&1")).toContain("Operation not permitted");
+      expect([state("sub/.git"), state("sub-old/.git/config")]).toEqual([undefined, config]);
+    });
+
+    // Each refused with the rule's EPERM, and the host's file at the case's path as it was, or still absent.
+    const refuse = [
+      ["hook create", "printf '#!/bin/sh\\n' > .git/hooks/pre-commit", ".git/hooks/pre-commit"],
+      ["hook append via fd", "exec 3>>.git/hooks/post-merge", ".git/hooks/post-merge"],
+      ["hooks subdir", "mkdir .git/hooks/x", ".git/hooks/x"],
+      ["hook symlink", "ln -s /bin/true .git/hooks/post-commit", ".git/hooks/post-commit"],
+      ["hook hardlink", "echo x > e; ln e .git/hooks/pre-push", ".git/hooks/pre-push"],
+      ["hook chmod +x", "chmod +x .git/hooks/post-merge", ".git/hooks/post-merge"],
+      ["config append", "echo '[core]' >> .git/config", ".git/config"],
+      ["config truncate", ": > .git/config", ".git/config"],
+      ["core.hooksPath", "printf '[core]\\n  hooksPath = ../evil\\n' >> .git/config", ".git/config"],
+      ["gitconfig", "echo x > .gitconfig", ".gitconfig"],
+      ["vscode dir", "mkdir .vscode", ".vscode"],
+      ["mcp.json", "echo x > .mcp.json", ".mcp.json"],
+      ["rename to .gitmodules", "echo x > m; mv m .gitmodules", ".gitmodules"],
+      ["claude commands", "mkdir -p .claude; mkdir .claude/commands", ".claude/commands"],
+      ["a FIFO at a protected name", "mkfifo .mcp.json", ".mcp.json"],
+      ["a socket at a protected name", "python3 -c \"import socket; socket.socket(socket.AF_UNIX).bind('.git/hooks/pre-push')\"", ".git/hooks/pre-push"],
+      ["a directory renamed into .claude", "mkdir -p cl/commands && echo x > cl/commands/evil.md && mv -T cl .claude", ".claude/commands"],
+      ["a directory renamed into .git/modules/<name>", "mkdir sm && echo '[core] fsmonitor = ../evil' > sm/config && mv sm .git/modules/bar", ".git/modules/bar"],
+      ["a directory renamed into .git/worktrees/<name>", "mkdir wtx && echo /evil > wtx/commondir && mv wtx .git/worktrees/wtx", ".git/worktrees/wtx"],
+      ["within-bound deep key", "mkdir -p a/b/c && echo x > a/b/c/.mcp.json", "a/b/c/.mcp.json"],
+      ["a key twelve components up, the walk's bound", `echo x > ${DEEP}/10/x`, `${DEEP}/10/x`],
+      ["C1 gitdir-pointer file", "mkdir d; echo 'gitdir: ./evil' > d/.git", "d/.git"],
+      ["C1 mkdir sub/.git", "mkdir s2; mkdir s2/.git", "s2/.git"],
+      ["C2 submodule config", "echo x >> .git/modules/foo/config", ".git/modules/foo/config"],
+      ["C3 worktree commondir", "echo x >> .git/worktrees/wt/commondir", ".git/worktrees/wt/commondir"],
+      // What a dependency folder holds goes unjudged, and would carry its editor's and agent's folders out.
+      ["a directory renamed out of node_modules", "mkdir -p node_modules/p/.vscode && echo x > node_modules/p/.vscode/tasks.json && mv node_modules/p planted", "planted"],
+      ["node_modules itself renamed", "mkdir -p nm/node_modules/q/.idea && mv nm/node_modules nm/plain", "nm/plain"],
+      ["a directory exchanged out of site-packages", "mkdir -p lib/site-packages/r/.vscode outside-r && python3 -c \"import ctypes; libc = ctypes.CDLL(None, use_errno=True); import os; libc.renameat2(-100, b'lib/site-packages/r', -100, b'outside-r', 2) == 0 or exit(os.strerror(ctypes.get_errno()))\"", "outside-r/.vscode"],
+      ["C1 mv .git (I3)", "mv .git x", ".git"],
+    ] as const;
+    for (const [name, command, path] of refuse) {
+      it(`refuses: ${name}`, async () => {
+        const before = state(path);
+        const output = await inRepo(`{ ${command}; } 2>&1; echo rc=$?`);
+        expect(output).toContain("Operation not permitted");
+        expect(output).toMatch(/rc=[1-9]\d*\n$/);
+        expect(state(path)).toEqual(before);
       });
-      expect(readFileSync(join(folder, ".git", "config"), "utf8")).toBe(config);
-      // git config on the host renames a new file over the old one, which takes the guest's bind with it.
-      expect(spawnSync("git", ["-C", folder, "config", "core.editor", "true"]).status).toBe(0);
-      expect(await protect(".git/config", ".git/hooks", ".vscode")).toMatchObject({ type: "done" });
-      expect(await run(evil)).toMatchObject({ ok: { output: "Read-only file system\nDevice or resource busy\n" } });
-      // .git made again on the host, its files moved into it: the folder's bind goes with the binds in it, and the files keep their inodes.
-      renameSync(join(folder, ".git"), join(folder, ".git-host"));
-      mkdirSync(join(folder, ".git"));
-      for (const name of readdirSync(join(folder, ".git-host"))) renameSync(join(folder, ".git-host", name), join(folder, ".git", name));
-      rmSync(join(folder, ".git-host"), { recursive: true });
-      expect(await protect(".git/config", ".git/hooks", ".vscode")).toMatchObject({ type: "done" });
-      expect(await run(evil)).toMatchObject({ ok: { output: "Read-only file system\nDevice or resource busy\n" } });
-      expect(readFileSync(join(folder, ".git", "config"), "utf8")).not.toContain("evil");
-      symlinkSync("missing", join(folder, ".mcp.json"));
-      expect(await protect(".git/config", ".git/hooks", ".vscode", ".mcp.json")).toEqual(expect.objectContaining({
-        type: "failed", message: expect.stringContaining("could not make these protected files read-only in its sandbox, so commands cannot run here: .mcp.json."),
-      }));
-    } finally {
-      for (const name of [".git", ".vscode", ".mcp.json"]) rmSync(join(folder, name), { recursive: true, force: true });
     }
+
+    // Refused by the rule at the move itself, not by a mount held over .git.
+    it("C1/I3: mv .git is refused at the mv itself and the host repo is intact", async () => {
+      const [git, config] = [state(".git"), state(".git/config")];
+      expect(await inRepo("mv .git x 2>&1; echo mv=$?; ls .git/HEAD >/dev/null 2>&1; echo head=$?")).toMatch(/Operation not permitted\nmv=1\nhead=0\n$/);
+      expect([state(".git"), state(".git/config"), state("x")]).toEqual([git, config, undefined]);
+    });
+
+    const allow = [
+      ["ordinary write", "echo x > notes.txt"],
+      ["I1 branch named hooks", "git branch hooks"],
+      ["I1 branch named config", "git branch config"],
+      ["a ref file directly", "echo 0000000000000000000000000000000000000000 > .git/refs/heads/zz"],
+      // Removed again, as git does once a rebase ends.
+      ["git-state rebase todo", "mkdir -p .git/rebase-merge && echo x > .git/rebase-merge/git-rebase-todo && rm -r .git/rebase-merge"],
+      ["worktree op file", "echo x > .git/worktrees/wt/HEAD"],
+      ["a file renamed in a submodule's git folder, as git writes one", "echo x > .git/modules/foo/HEAD.lock && mv .git/modules/foo/HEAD.lock .git/modules/foo/HEAD"],
+      // Removed again: the root's later git would read it.
+      ["home gitconfig (own disk)", "echo x > $HOME/.gitconfig && rm $HOME/.gitconfig"],
+      ["a FIFO at an ordinary name", "mkfifo plain-fifo"],
+      ["a hard link of an ordinary file", "echo x > plain && ln plain plain-link"],
+      ["an ordinary directory renamed", "mkdir plain-dir && mv plain-dir plain-dir2"],
+      ["an editor's folder below node_modules, as a package ships one", "mkdir -p node_modules/t/.idea && echo x > node_modules/t/.idea/x.xml"],
+      ["a directory renamed within node_modules, as npm retires one", "mkdir -p node_modules/s/.vscode && mv node_modules/s node_modules/.s-retired"],
+      ["a directory renamed into node_modules", "mkdir plain-in && mv plain-in node_modules/plain-in"],
+      ["a file renamed out of node_modules", "echo x > node_modules/f.js && mv node_modules/f.js f.js"],
+      // A ceiling the rule names: past its walk, a protected name above is not seen.
+      ["a key thirteen components up, past the walk's bound", `echo x > ${DEEP}/10/11/x`],
+    ] as const;
+    for (const [name, command] of allow) {
+      it(`allows: ${name}`, async () => {
+        expect(await inRepo(`{ ${command}; } 2>&1; echo rc=$?`)).toBe("rc=0\n");
+      });
+    }
+
+    // Git's own work in a repository the user has: its transient state, and the folders and files it
+    // moves, are none the rule refuses. A new repository, or a linked worktree's admin files, are.
+    describe("git's transient state", () => {
+      let upstream: string;
+      // A superproject the user set up on the host, with its submodule one commit behind what it records,
+      // and a linked worktree beside it in the share.
+      const WORKTREE = () => join(shared, "work-wt");
+      beforeAll(() => {
+        upstream = join(dir, "rule-upstream");
+        const made = spawnSync("bash", ["-c", [
+          "set -e",
+          `git init -q -b master "${upstream}" && cd "${upstream}" && git config user.email a@b && git config user.name a`,
+          "echo 1 > f && git add f && git commit -qm one && echo 2 > f && git commit -qam two",
+          'cd "$0" && git init -q -b master work && cd work && git config user.email a@b && git config user.name a',
+          "echo w > w.txt && git add w.txt && git commit -qm w",
+          `git -c protocol.file.allow=always submodule add -q "${upstream}" lib && git commit -qm lib`,
+          "git -C lib checkout -q HEAD~1",
+          `git worktree add -q "${WORKTREE()}" -b wtb`,
+        ].join("\n"), shared], { encoding: "utf8" });
+        expect(made.status, made.stderr).toBe(0);
+      });
+
+      afterAll(() => rmSync(upstream, { recursive: true, force: true }));
+
+      it("lets git rebase, merge-with-conflict and cherry-pick finish in an existing repo", async () => {
+        const s = `rm -rf .git/rebase-merge
+          git checkout -q -b feat && echo c > c.txt && git add c.txt && git commit -qm feat
+          git checkout -q master && echo d > d.txt && git add d.txt && git commit -qm master
+          git rebase -q master feat && echo REBASE_OK
+          git checkout -q master
+          git checkout -q -b f2 && echo e > a.txt && git commit -qam f2
+          git checkout -q master && echo f > a.txt && git commit -qam m2
+          git merge f2 >/dev/null 2>&1; test -e .git/MERGE_HEAD && echo CONFLICTED
+          echo resolved > a.txt && git add a.txt && git commit -qm resolved && echo MERGE_OK
+          git checkout -q -b f3 && echo g > g.txt && git add g.txt && git commit -qm g
+          git checkout -q master && git cherry-pick f3 && echo CHERRY_OK`;
+        const r = await inRepo(s);
+        for (const m of ["REBASE_OK", "CONFLICTED", "MERGE_OK", "CHERRY_OK"]) expect(r).toContain(m);
+        expect(state(".git/rebase-merge")).toBeUndefined();
+      });
+
+      it("refuses git init / clone of a new repo in the share", async () => {
+        expect(await inRepo("git init -q new 2>&1; echo rc=$?; git clone -q . cloned 2>&1; echo rc=$?")).toMatch(
+          /Operation not permitted[\s\S]*rc=[1-9]\d*\n[\s\S]*Operation not permitted[\s\S]*rc=[1-9]\d*\n$/,
+        );
+        expect([state("new/.git"), state("cloned/.git")]).toEqual([undefined, undefined]);
+        // The agent makes its own repositories in its home, which the rule does not guard.
+        expect(await inRepo('git init -q "$HOME/own" && echo made; rm -rf "$HOME/own"')).toBe("made\n");
+      });
+
+      it("lets git gc, in a repository and in its submodule's git folder, and git worktree move finish in an existing repo", async () => {
+        expect(await inRepo("git -C lib gc -q 2>&1; echo rc=$?; git gc -q 2>&1; echo rc=$?", "work")).toBe("rc=0\nrc=0\n");
+        const moved = `${WORKTREE()}-moved`;
+        expect(await inRepo(`git worktree move "${WORKTREE()}" "${moved}" 2>&1; git -C "${moved}" rev-parse --abbrev-ref HEAD`, "work")).toBe("wtb\n");
+        expect(readFileSync(join(shared, "work", ".git", "worktrees", "work-wt", "gitdir"), "utf8")).toBe(`${moved}/.git\n`);
+        expect(spawnSync("git", ["-C", moved, "status", "--porcelain"], { encoding: "utf8" })).toMatchObject({ status: 0, stdout: "" });
+      });
+
+      // Ceilings, each at a file that sends git to a config. git submodule update rewrites the submodule's
+      // core.worktree, renaming its config.lock over .git/modules/<name>/config; a new linked worktree needs
+      // its .git file and its commondir, and a removed one loses them.
+      it("refuses git submodule update, worktree add and worktree remove, at the files that send git to a config", async () => {
+        const work = join(shared, "work");
+        const config = readFileSync(join(work, ".git", "modules", "lib", "config"), "utf8");
+        expect(await inRepo([
+          "git submodule update --init 2>&1; echo rc=$?; git -C lib log -1 --format=%s",
+          // Its lock is git's to make; the rename over the config is what the rule refuses.
+          "touch .git/modules/lib/config.lock && echo locked; mv .git/modules/lib/config.lock .git/modules/lib/config 2>&1; rm .git/modules/lib/config.lock",
+          `git worktree add -q "${shared}/wt-new" -b wt-new 2>&1; echo rc=$?`,
+          'git worktree add -q "$HOME/wt-home" -b wt-home 2>&1; echo rc=$?; rm -rf "$HOME/wt-home"',
+          `git worktree remove --force "${WORKTREE()}-moved" 2>&1; echo rc=$?`,
+        ].join("; "), "work")).toBe([
+          `error: could not write config file ${work}/.git/modules/lib/config: Operation not permitted`,
+          "fatal: could not set 'core.worktree' to '../../../lib'", "rc=128", "one",
+          "locked", "mv: cannot move '.git/modules/lib/config.lock' to '.git/modules/lib/config': Operation not permitted",
+          `fatal: could not open '${shared}/wt-new/.git' for writing: Operation not permitted`, "rc=128",
+          "fatal: could not open '.git/worktrees/wt-home/commondir' for writing: Operation not permitted", "rc=128",
+          `error: failed to delete '${WORKTREE()}-moved': Operation not permitted`,
+          "error: failed to delete '.git/worktrees/work-wt': Operation not permitted", "rc=255", "",
+        ].join("\n"));
+        expect(readFileSync(join(work, ".git", "modules", "lib", "config"), "utf8")).toBe(config);
+        expect([`${WORKTREE()}-moved/.git`, join(work, ".git", "worktrees", "work-wt", "commondir"), `${shared}/wt-new/.git`].map((path) => existsSync(path)))
+          .toEqual([true, true, false]);
+      });
+    });
   });
 
   it("holds its tools in the folders a chat's folder may not be, hold or lie in, and in no other", async () => {
@@ -1109,28 +1289,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     });
   });
 
-  it("refuses a command's write to a git config a command made, a rename to make it again, and a write to one a host program replaced since", async () => {
-    const folder = join(dir, "folder");
-    const evil = (config: string) => `(echo '[alias] x = !evil' >> ${config}) 2>&1 | sed 's/.*: //'`;
-    // What a command can do in one go: move the repository's git folder aside, make it again, and write its config.
-    const rebuild = (git: string) => `(mv ${git} ${git}-old && mkdir ${git} && cp -a ${git}-old/. ${git}/ && echo '[core] fsmonitor = ./evil' >> ${git}/config) 2>&1 | sed 's/.*: //'`;
-    try {
-      // The look after a command finds the repository it made: read-only from the next command on.
-      expect(await command("git init -q . && git init -q sub && mkdir sub/.vscode && echo made")).toMatchObject({ ok: { output: "made\n" } });
-      expect(await command(`${evil(".git/config")}; ${evil("sub/.git/config")}`)).toMatchObject({ ok: { output: "Read-only file system\nRead-only file system\n" } });
-      expect(await command(`${rebuild(".git")}; ${rebuild("sub/.git")}; (mv sub/.vscode vscode-old) 2>&1 | sed 's/.*: //'`)).toMatchObject({
-        ok: { output: "Device or resource busy\nDevice or resource busy\nDevice or resource busy\n" },
-      });
-      // git config on the host renames a new file over the old one, which takes the guest's bind with it.
-      expect(spawnSync("git", ["-C", folder, "config", "core.editor", "true"]).status).toBe(0);
-      expect(await command(evil(".git/config"))).toMatchObject({ ok: { output: "Read-only file system\n" } });
-      for (const config of [join(folder, ".git", "config"), join(folder, "sub", ".git", "config")]) expect(readFileSync(config, "utf8")).not.toContain("evil");
-    } finally {
-      for (const name of [".git", "sub", ".git-old", "vscode-old"]) rmSync(join(folder, name), { recursive: true, force: true });
-    }
-  });
-
-  it("leaves git's own state unbound, so a slow rebase, a cherry-pick sequence and a merge complete, and one stopped for a conflict goes on or is aborted in the next command", { timeout: 120_000 }, async () => {
+  it("lets a slow rebase, a cherry-pick sequence and a merge complete under the rule, and one stopped for a conflict go on or be aborted in the next command", { timeout: 120_000 }, async () => {
     const folder = join(dir, "folder");
     const long = (line: string) => executor.run(operation("run", { command: line, workdir: null, timeout: 60 }), signal());
     // A repository as the user has it: a topic of six commits on main, and a branch that changes main's file another way.
@@ -1159,29 +1318,93 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
       expect(await command(`${resolved} git cherry-pick --continue >/dev/null 2>&1; git log --format=%s -4 | tr '\\n' ' '`)).toMatchObject({ ok: { output: "t6 other t5 main " } });
       expect(await command(stopped("git checkout -qb merged main && git merge other", "MERGE_HEAD"))).toMatchObject({ ok: { output: "stopped\n" } });
       expect(await command(`${resolved} git commit -q --no-edit 2>&1; git log -1 --format=%p | wc -w`)).toMatchObject({ ok: { output: "2\n" } });
-      // Git's own state is gone from the host's repository, and its config is still read-only.
+      // Git's own state is gone from the host's repository, and the rule still refuses a write to its config.
       expect(["rebase-merge", "sequencer", "MERGE_HEAD"].filter((name) => existsSync(join(folder, ".git", name)))).toEqual([]);
-      expect(await command("(echo '[alias] x = !evil' >> .git/config) 2>&1 | sed 's/.*: //'")).toMatchObject({ ok: { output: "Read-only file system\n" } });
+      expect(await command("(echo '[alias] x = !evil' >> .git/config) 2>&1 | sed 's/.*: //'")).toMatchObject({ ok: { output: "Operation not permitted\n" } });
       expect(readFileSync(join(folder, ".git", "config"), "utf8")).not.toContain("evil");
     } finally {
       for (const name of [".git", "base.txt", "t1.txt", "t2.txt", "t3.txt", "t4.txt", "t5.txt", "t6.txt"]) rmSync(join(folder, name), { recursive: true, force: true });
     }
   });
 
-  it("lets git add a linked worktree in the guest, and keeps read-only the files that send it to a config", { timeout: 60_000 }, async () => {
+  // The host's git rebase --continue runs a paused rebase's exec steps outside the sandbox, and the rule lets
+  // commands write git's transient state: the look after a command comments out each step it added.
+  it("strips a command-planted rebase exec line on the host, but not git's own", async () => {
+    const folder = join(dir, "folder");
+    const todo = join(folder, ".git", "rebase-merge", "git-rebase-todo");
+    const steps = join(dir, "steps.log");
+    expect(spawnSync("bash", ["-c", [
+      "git init -q -b main . && git config user.email a@b && git config user.name a",
+      "for i in 1 2 3; do echo $i > f$i.txt && git add -A && git commit -qm c$i; done",
+    ].join(" && ")], { cwd: folder }).status).toBe(0);
+    // A command of the chat's first: from its answer on, the file host looks every 5 s.
+    expect(await command("git log --oneline | wc -l")).toMatchObject({ ok: { output: "3\n" } });
+    // Then the user's own rebase -x, on the host, stopped before its first pick: its exec steps are the
+    // user's git's, and a look while nothing of the chat's runs takes them as the user's.
+    expect(spawnSync("bash", ["-c", `GIT_SEQUENCE_EDITOR='sed -i 1ibreak' git rebase -q -i -x 'echo user-step >> ${steps}' HEAD~2`], { cwd: folder }).status).toBe(0);
+    const own = readFileSync(todo, "utf8");
+    expect(own.match(/^exec /gm)).toHaveLength(2);
+    await new Promise((resolve) => setTimeout(resolve, 6_000));
+    expect(readFileSync(todo, "utf8")).toBe(own);
+    try {
+      // The rule lets the write through; the look after the command comments it out, and says so.
+      expect(await command(`echo 'exec touch ${folder}/pwned' >> .git/rebase-merge/git-rebase-todo && echo planted`)).toMatchObject({
+        ok: { output: expect.stringMatching(/^planted\n\nThe computer removed a step .*: \.git\/rebase-merge\/git-rebase-todo$/) },
+      });
+      expect(readFileSync(todo, "utf8")).toBe(`${own}# Surogate removed a step that appeared while the chat's commands could write: exec touch ${folder}/pwned\n`);
+      // The user's git goes on, with its own steps and none of the command's.
+      expect(spawnSync("git", ["rebase", "--continue"], { cwd: folder }).status).toBe(0);
+      expect(existsSync(join(folder, "pwned"))).toBe(false);
+      expect(readFileSync(steps, "utf8")).toBe("user-step\nuser-step\n");
+    } finally {
+      for (const name of [".git", "f1.txt", "f2.txt", "f3.txt", "pwned"]) rmSync(join(folder, name), { recursive: true, force: true });
+      rmSync(steps, { force: true });
+    }
+  });
+
+  it("runs every exec step of a guest rebase -x that runs as one long command, with no notice, and strips those of one paused at a command's end", async () => {
+    const folder = join(dir, "folder");
+    const long = (line: string) => executor.run(operation("run", { command: line, workdir: null, timeout: 60 }), signal());
+    expect(spawnSync("bash", ["-c", [
+      "git init -q -b main . && git config user.email a@b && git config user.name a",
+      "for i in 1 2 3 4 5 6 7; do echo $i > f$i.txt && git add -A && git commit -qm c$i; done",
+    ].join(" && ")], { cwd: folder }).status).toBe(0);
+    try {
+      // From its answer on, the file host looks every 5 s: at least one look comes while the rebase's eight seconds run.
+      expect(await command("true")).toMatchObject({ ok: { returncode: 0 } });
+      expect(await long("git rebase -q -x 'sleep 1.3; echo step >> steps.log' HEAD~6 2>&1; wc -l < steps.log")).toMatchObject({ ok: { output: "6\n" } });
+      expect(existsSync(join(folder, ".git", "rebase-merge"))).toBe(false);
+      // One the command leaves paused: the look after it comments out the steps it wrote.
+      expect(await command("GIT_SEQUENCE_EDITOR='sed -i 1ibreak' git rebase -q -i -x 'touch guest-step' HEAD~2 >/dev/null 2>&1; echo paused")).toMatchObject({
+        ok: { output: expect.stringMatching(/^paused\n\nThe computer removed a step .*: \.git\/rebase-merge\/git-rebase-todo$/) },
+      });
+      const todo = readFileSync(join(folder, ".git", "rebase-merge", "git-rebase-todo"), "utf8");
+      expect(todo.match(/^# Surogate removed a step that appeared while the chat's commands could write: exec touch guest-step$/gm)).toHaveLength(2);
+      expect(todo).not.toMatch(/^exec /m);
+    } finally {
+      for (const name of [".git", "steps.log", "f1.txt", "f2.txt", "f3.txt", "f4.txt", "f5.txt", "f6.txt", "f7.txt"]) rmSync(join(folder, name), { recursive: true, force: true });
+    }
+  });
+
+  // A ceiling: a new linked worktree needs its .git file and its commondir, which the rule refuses, so git worktree
+  // add is the host's to run. One the user made on the host stays the user's: what would send it to a config is refused.
+  it("refuses git worktree add in the guest, in git's own words, and every write that would send the host's linked worktree to a config", { timeout: 60_000 }, async () => {
     const folder = join(dir, "folder");
     const admin = join(folder, ".git", "worktrees", "wt");
     const said = (line: string) => `(${line}) 2>&1 | sed 's/.*: //'`;
     expect(spawnSync("bash", ["-c", [
       "git init -q -b main . && git config user.email a@b && git config user.name a && git config extensions.worktreeConfig true",
       "echo base > base.txt && git add -A && git commit -qm base",
+      "git worktree add -q wt -b wtb && git -C wt config --worktree core.editor true",
     ].join(" && ")], { cwd: folder }).status).toBe(0);
     try {
-      expect(await command("git worktree add -q wt -b wtb 2>&1; git -C wt config --worktree core.editor true; git -C wt rev-parse --abbrev-ref HEAD")).toMatchObject({
-        ok: { output: "wtb\n" },
+      expect(await command("git worktree add -q wt2 -b wtb2 2>&1; echo rc=$?")).toMatchObject({
+        ok: { output: "fatal: could not open 'wt2/.git' for writing: Operation not permitted\nrc=128\n" },
       });
+      // git takes back what it had made of it.
+      expect([existsSync(join(folder, "wt2")), existsSync(join(folder, ".git", "worktrees", "wt2"))]).toEqual([false, false]);
       const commondir = readFileSync(join(admin, "commondir"), "utf8");
-      // The look after it binds them. A git folder of the command's own, whose config would run a program at the next status on the host.
+      // A git folder of the command's own, whose config would run a program at the next status on the host.
       expect(await command([
         "git init -q --bare evil.git && git -C evil.git config core.fsmonitor 'touch pwned'",
         said("echo \"$PWD/evil.git\" > .git/worktrees/wt/commondir"),
@@ -1189,45 +1412,117 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
         said("mv .git/worktrees/wt .git/worktrees/wt-old"),
         said("mv .git/worktrees .git/worktrees-old"),
         "git -C wt status --porcelain",
-        "git worktree add -q wt2 -b wtb2 2>&1 && echo added",
-      ].join("; "))).toMatchObject({
-        ok: { output: "Read-only file system\nRead-only file system\nDevice or resource busy\nDevice or resource busy\nadded\n" },
-      });
+      ].join("; "))).toMatchObject({ ok: { output: "Operation not permitted\n".repeat(4) } });
       expect(readFileSync(join(admin, "commondir"), "utf8")).toBe(commondir);
       expect(readFileSync(join(admin, "config.worktree"), "utf8")).not.toContain("fsmonitor");
       expect(spawnSync("git", ["-C", join(folder, "wt"), "status", "--porcelain"]).status).toBe(0);
       expect(existsSync(join(folder, "wt", "pwned"))).toBe(false);
-      // Its removal is the host's to do: the guest's stops at what is bound, and the host's prune finishes it.
-      expect(await command("git worktree remove --force wt 2>&1 | tail -1; test -e .git/worktrees/wt/commondir && echo kept")).toMatchObject({
-        ok: { output: "error: failed to delete '.git/worktrees/wt': Device or resource busy\nkept\n" },
-      });
-      expect(spawnSync("git", ["-C", folder, "worktree", "prune"]).status).toBe(0);
-      expect(existsSync(admin)).toBe(false);
     } finally {
-      for (const name of [".git", "wt", "wt2", "evil.git", "base.txt"]) rmSync(join(folder, name), { recursive: true, force: true });
+      for (const name of [".git", "wt", "evil.git", "base.txt"]) rmSync(join(folder, name), { recursive: true, force: true });
     }
   });
 
-  it("binds what a protected name's link leads to in the folder, and runs commands beside one linked out of it", async () => {
+  it("runs commands beside a protected name linked out of the folder, or to a protected name in it, whose file the rule keeps", async () => {
     const folder = join(dir, "folder");
     // An editor's settings shared with a sibling worktree, which the guest does not have.
     const shared = join(dir, "shared-vscode");
     mkdirSync(shared);
     writeFileSync(join(shared, "settings.json"), "{}\n");
     symlinkSync(shared, join(folder, ".vscode"));
+    mkdirSync(join(folder, ".idea"));
+    writeFileSync(join(folder, ".idea", "mcp.json"), "{}\n");
+    symlinkSync(".idea/mcp.json", join(folder, ".mcp.json"));
+    try {
+      expect(await command("echo ran; echo '{\"x\": 1}' 2>/dev/null > .mcp.json || echo refused")).toMatchObject({ ok: { output: "ran\nrefused\n" } });
+      expect(await command("echo ran")).toMatchObject({ ok: { output: "ran\n" } });
+      expect([readFileSync(join(folder, ".idea", "mcp.json"), "utf8"), readFileSync(join(shared, "settings.json"), "utf8")]).toEqual(["{}\n", "{}\n"]);
+    } finally {
+      for (const name of [".vscode", ".mcp.json", ".idea"]) rmSync(join(folder, name), { recursive: true, force: true });
+      rmSync(shared, { recursive: true, force: true });
+    }
+  });
+
+  // The rule judges a write by the path it reaches: through this link, mcp.json, which it does not keep.
+  it("refuses a command, before it runs, while a protected name links to a file in the folder the rule does not keep, and runs it once the name is a file", async () => {
+    const folder = join(dir, "folder");
     writeFileSync(join(folder, "mcp.json"), "{}\n");
     symlinkSync("mcp.json", join(folder, ".mcp.json"));
-    const write = (name: string) => `(echo '{"x": 1}' > ${name}) 2>&1 | sed 's/.*: //'`;
     try {
-      // The look after a command names the links the host made.
-      expect(await command("echo ran")).toMatchObject({ ok: { output: "ran\n" } });
-      expect(await command(`echo ran; ${write(".mcp.json")}; ${write("mcp.json")}`)).toMatchObject({
-        ok: { output: "ran\nRead-only file system\nRead-only file system\n" },
+      // A look sees the link the host made, at the host's start or after this command: commands are refused from the next one.
+      await command("true");
+      expect(await command("touch ran")).toEqual({
+        error: { type: "sandbox", message: "Blocked: .mcp.json is a link to mcp.json in this folder. Make it a file or folder of its own, or point it outside the folder or at a protected name, to run commands here." },
       });
-      expect([readFileSync(join(folder, "mcp.json"), "utf8"), readFileSync(join(shared, "settings.json"), "utf8")]).toEqual(["{}\n", "{}\n"]);
+      expect(existsSync(join(folder, "ran"))).toBe(false);
+      rmSync(join(folder, ".mcp.json"));
+      writeFileSync(join(folder, ".mcp.json"), "{}\n");
+      expect(await command("touch ran && echo ran")).toMatchObject({ ok: { output: "ran\n" } });
     } finally {
-      for (const name of [".vscode", ".mcp.json", "mcp.json"]) rmSync(join(folder, name), { force: true });
-      rmSync(shared, { recursive: true, force: true });
+      for (const name of [".mcp.json", "mcp.json", "ran"]) rmSync(join(folder, name), { force: true });
+    }
+  });
+
+  // A write through .git or .claude reaches the config or the commands under where it leads; so does one
+  // through a chain that leaves the folder and comes back. Each layout returns what it made in the folder.
+  const layouts: Array<[string, (folder: string) => string[], string]> = [
+    ["a .git", (folder) => {
+      mkdirSync(join(folder, "realgit"));
+      writeFileSync(join(folder, "realgit", "config"), "[core]\n");
+      symlinkSync("realgit", join(folder, ".git"));
+      return [".git", "realgit"];
+    }, ".git is a link to realgit"],
+    [".claude", (folder) => {
+      mkdirSync(join(folder, "dotclaude", "commands"), { recursive: true });
+      symlinkSync("dotclaude", join(folder, ".claude"));
+      return [".claude", "dotclaude"];
+    }, ".claude is a link to dotclaude"],
+    ["a chain that leaves the folder and comes back", (folder) => {
+      mkdirSync(join(folder, "config"));
+      symlinkSync(join(folder, "config", "mcp.json"), join(dir, "hop"));
+      symlinkSync(join(dir, "hop"), join(folder, ".mcp.json"));
+      return [".mcp.json", "config", "../hop"];
+    }, ".mcp.json is a link to config/mcp.json"],
+  ];
+  for (const [title, layout, linked] of layouts) {
+    it(`refuses a command, before it runs, while ${title} links into the folder, and runs it once the link is gone`, async () => {
+      const folder = join(dir, "folder");
+      const made = layout(folder);
+      const clear = () => {
+        for (const name of [...made, "ran"]) rmSync(join(folder, name), { recursive: true, force: true });
+      };
+      try {
+        await command("true");
+        expect(await command("touch ran")).toEqual({
+          error: { type: "sandbox", message: `Blocked: ${linked} in this folder. Make it a file or folder of its own, or point it outside the folder or at a protected name, to run commands here.` },
+        });
+        expect(existsSync(join(folder, "ran"))).toBe(false);
+        clear();
+        expect(await command("echo ran")).toMatchObject({ ok: { output: "ran\n" } });
+      } finally {
+        clear();
+      }
+    });
+  }
+
+  // A command can unpack an editor's folder below node_modules (the rule leaves dependency folders alone),
+  // and a link outside it would show that folder where editors read it.
+  it("refuses a command, before it runs, while a link a command made leads into a dependency folder, and runs it once the link is gone", async () => {
+    const folder = join(dir, "folder");
+    const clear = () => {
+      for (const name of ["node_modules", "sub", "ran"]) rmSync(join(folder, name), { recursive: true, force: true });
+    };
+    try {
+      expect(await command("mkdir -p node_modules/p/.vscode && echo '{}' > node_modules/p/.vscode/tasks.json && ln -s node_modules/p sub && echo made")).toMatchObject({
+        ok: { output: "made\n" },
+      });
+      expect(await command("touch ran")).toEqual({
+        error: { type: "sandbox", message: "Blocked: sub leads into node_modules. Remove the link to run commands here." },
+      });
+      expect(existsSync(join(folder, "ran"))).toBe(false);
+      rmSync(join(folder, "sub"));
+      expect(await command("echo ran")).toMatchObject({ ok: { output: "ran\n" } });
+    } finally {
+      clear();
     }
   });
 
@@ -1369,6 +1664,29 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
       ok: { output: `${USER.home}/.local/lib/python3.12/site-packages/cowsay/__init__.py\n`, returncode: 0, timed_out: false },
     });
     expect(prompts).toEqual([]);
+  });
+
+  // The rule leaves what package managers unpack alone: iconv-lite's tarball holds an .idea folder.
+  it("installs an npm package that ships an editor's folder into the shared folder, every file of it", async () => {
+    try {
+      const npm = async (spec: string) => {
+        const installed = await command(`npm install --no-audit --no-fund --no-update-notifier --cache ~/npm-cache ${spec} 2>&1; echo rc=$?`, 180);
+        const { output } = (installed as { ok: { output: string } }).ok;
+        expect(output).toMatch(/(added|changed) \d+ packages?[^]*\nrc=0\n$/);
+        expect(output).not.toMatch(/TAR_ENTRY_ERROR|EPERM|not permitted/);
+      };
+      await npm("iconv-lite@0.6.3");
+      expect(readdirSync(join(folder, "node_modules", "iconv-lite", ".idea"))).toContain("codeStyles");
+      // Another version: npm renames the installed one aside within node_modules first, then unpacks this one.
+      await npm("iconv-lite@0.6.2");
+      expect(JSON.parse(readFileSync(join(folder, "node_modules", "iconv-lite", "package.json"), "utf8")).version).toBe("0.6.2");
+      // One with a program: npm links it in node_modules/.bin, a link inside the dependency folder, and commands still run.
+      await npm("semver@7.6.3");
+      expect(await command("readlink node_modules/.bin/semver")).toMatchObject({ ok: { output: "../semver/bin/semver.js\n" } });
+      expect(prompts).toEqual([]);
+    } finally {
+      for (const name of ["node_modules", "package.json", "package-lock.json"]) rmSync(join(folder, name), { recursive: true, force: true });
+    }
   });
 
   it("asks once for a site's connections in flight, lets them through once allowed, and every port of a host allowed for the session", async () => {

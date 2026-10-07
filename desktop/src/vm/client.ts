@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
-import type { HostUser, ProtectedKey } from "../guest/protocol.js";
+import type { HostUser } from "../guest/protocol.js";
 import type { NetworkAnswer, NetworkAsk } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { type ProcessesChange, unavailable, type VmOperation, type VmOptions } from "./manager.js";
@@ -51,8 +51,6 @@ export type ToManager =
   | { type: "cancel"; id: string }
   // Everything of a root ends in the guest: its folder is being let go. Answered as a result.
   | { type: "teardown"; id: string; root: string }
-  // A root's protected keys, found between its commands: read-only in its namespace.
-  | { type: "protect"; root: string; keys: ProtectedKey[] }
   // The app's answer to an ask of the host proxy's.
   | { type: "answer"; id: number; allow: boolean }
   | { type: "stop" };
@@ -170,11 +168,6 @@ export class VmClient {
     const gone = new Promise<void>((resolve) => manager.onExit(resolve));
     manager.kill();
     await gone;
-  }
-
-  /** A root's protected keys found between its commands: read-only in its namespace, if a manager runs. */
-  protect(root: string, keys: ProtectedKey[]): void {
-    if (!this.stopping) this.manager?.send({ type: "protect", root, keys });
   }
 
   /** Asked about each root's destination off the package hosts, whichever device's it is. Returns what stops it. */
