@@ -8,6 +8,7 @@ server-owned: the session create route strips them from client config.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from uuid import UUID
 
@@ -57,18 +58,37 @@ def master_config(
     }
 
 
-def thread_config(workstream_id: UUID | str, *, title: str, tier: str | None) -> dict[str, Any]:
+#: Names Windows keeps for its devices, with or without an extension.
+_WINDOWS_DEVICE = re.compile(r"(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.|$)", re.IGNORECASE)
+
+
+def thread_folder(title: str) -> str:
+    """Where a thread saves the files it makes: ``threads/<its title>/``, the
+    title made a folder name on every system, a Windows laptop's included."""
+    name = " ".join(re.sub(r'[\x00-\x1f\x7f/\\:*?"<>|]', " ", title).split()).strip(". ")[:80].rstrip(". ")
+    if _WINDOWS_DEVICE.match(name):
+        name = f"thread {name}"
+    return f"threads/{name or 'thread'}/"
+
+
+def thread_config(project: Any, *, title: str) -> dict[str, Any]:
     """The project's keys a thread is created with.
 
     Built afresh, never copied from the master, so a thread carries neither
-    the coordinator's role nor its strict mode.  The title is its session
-    instructions, so the thread knows the name its work is filed under.
+    the coordinator's role nor its strict mode.  Its session instructions
+    are its title, its folder and a copy of the project's instructions: a
+    later change reaches new threads, never one already started.
     """
     config: dict[str, Any] = {
-        "workstream_id": str(workstream_id),
+        "workstream_id": str(project.id),
         "workstream_role": THREAD,
-        "system": f"Thread: {title}",
+        "system": "\n\n".join(part for part in (
+            # The name is folded onto its line, so no line of it reads as one
+            # the server wrote; the title is one line already.
+            f"Project: {' '.join(project.name.split())}\nThread: {title}\nFolder: {thread_folder(title)}",
+            project.instructions,
+        ) if part),
     }
-    if tier is not None:
-        config["workstream_tier"] = tier
+    if project.thread_tier is not None:
+        config["workstream_tier"] = project.thread_tier
     return config

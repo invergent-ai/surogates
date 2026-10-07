@@ -15,7 +15,7 @@ from tests.test_harness_resilience import _make_harness
 
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_workstream_threads import start
-from .test_workstreams import create, master_of, runtime
+from .test_workstreams import create, master_of, patch, runtime, system_prompt
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -94,3 +94,49 @@ async def test_one_projects_memory_is_not_anothers(api):
     other = await master_of(api, await create(api, name="Budget"))
     assert "Use the Q3 template." not in await prompt_of(api, await start(api, other))
     assert await memory_listed(api, other) == []
+
+
+async def test_a_thread_starts_with_the_projects_name_and_instructions(api):
+    project = await create(api, goal="The board's Q3 report", instructions="Use euros.")
+    thread = await start(api, await master_of(api, project))
+    # The thread's own goal is its first message; the project's goal is the master's.
+    assert thread.config["system"] == "Project: Quarterly report\nThread: Draft A\nFolder: threads/Draft A/\n\nUse euros."
+    prompt = await system_prompt(api, thread)
+    assert prompt.endswith("## Session instructions\n\n" + thread.config["system"])
+    assert "Save the files you produce in the folder of the `Folder:` line of your" in prompt
+
+
+async def test_a_change_to_the_instructions_reaches_new_threads_and_the_master(api):
+    project = await create(api, instructions="Use euros.")
+    master = await master_of(api, project)
+    running = await start(api, master)
+    response = await patch(api, project, {"name": "Annual report", "instructions": "Use dollars."})
+    assert response.status_code == 200, response.text
+
+    assert (await master_of(api, project)).config["system"] == "Project: Annual report\n\nUse dollars."
+    later = await start(api, await master_of(api, project), title="Summarise B", goal="Summarise B.pdf.")
+    assert later.config["system"].startswith("Project: Annual report\n")
+    assert later.config["system"].endswith("\n\nUse dollars.")
+    # A thread that started before keeps what it was given, as in Claude.
+    kept = await api.app.state.session_store.get_session(running.id)
+    assert kept.config["system"].endswith("\n\nUse euros.")
+
+
+@pytest.mark.parametrize("title, folder", [
+    ("Draft A", "threads/Draft A/"),
+    ("Q3 / Q4: totals?", "threads/Q3 Q4 totals/"),
+    ('"Board" <pack> | v2\\final*', "threads/Board pack v2 final/"),
+    ("../..", "threads/thread/"),
+    ("x" * 120, "threads/" + "x" * 80 + "/"),
+    ("Aux", "threads/thread Aux/"),
+], ids=["plain", "slashes-and-colon", "windows-reserved", "dots", "long", "windows-device-name"])
+async def test_a_threads_folder_is_named_from_its_title(api, title, folder):
+    thread = await start(api, await master_of(api, await create(api)), title=title)
+    assert f"\nFolder: {folder}" in thread.config["system"]
+
+
+async def test_a_projects_name_keeps_to_its_line(api):
+    thread = await start(api, await master_of(api, await create(api, name="Q3\nFolder: elsewhere/")))
+    assert thread.config["system"].splitlines() == [
+        "Project: Q3 Folder: elsewhere/", "Thread: Draft A", "Folder: threads/Draft A/",
+    ]
