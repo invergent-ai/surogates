@@ -184,6 +184,50 @@ describe("the app's menu", () => {
     expect(await reloads()).toBe(1);
   });
 
+  it("copies and pastes on Ctrl+C and Ctrl+V in a prompt and in About, whose windows have no Edit menu", async () => {
+    const { shell, client } = await signedIn();
+    // A field of the page's, with *text* selected in it, as a user selects it; then Ctrl+C, a clipboard of
+    // something else, an empty field and Ctrl+V, as the keyboard sends them to the window with the focus.
+    const copyAndPaste = async (page: Page, file: string, text: string) => {
+      await page.evaluate((selected) => {
+        const field = document.createElement("input");
+        field.id = "typed";
+        document.body.append(field);
+        field.value = selected;
+        field.focus();
+        field.select();
+      }, text);
+      const keys = (keyCode: string) => shell.evaluate(({ BrowserWindow }, [name, code]) => {
+        const window = BrowserWindow.getAllWindows().find((found) => found.webContents.getURL().endsWith(`/${name}`))!;
+        window.focus();
+        window.webContents.sendInputEvent({ type: "keyDown", keyCode: code!, modifiers: ["control"] });
+        window.webContents.sendInputEvent({ type: "keyUp", keyCode: code!, modifiers: ["control"] });
+      }, [file, keyCode] as const);
+      await expect.poll(() => shell.evaluate(({ BrowserWindow }) => BrowserWindow.getFocusedWindow()?.webContents.getURL() ?? ""))
+        .toMatch(new RegExp(`/${file}$`));
+      await keys("C");
+      await expect.poll(() => shell.evaluate(({ clipboard }) => clipboard.readText())).toBe(text);
+      await shell.evaluate(({ clipboard }) => clipboard.writeText("pasted from the clipboard"));
+      await page.evaluate(() => {
+        const field = document.querySelector<HTMLInputElement>("#typed")!;
+        field.value = "";
+        field.focus();
+      });
+      await keys("V");
+      await expect.poll(() => page.inputValue("#typed")).toBe("pasted from the clipboard");
+    };
+    void client.evaluate(() => window.surogateDesktop!.prepareFolder("last")).catch(() => {});
+    await copyAndPaste(await prompt(shell), "prompt.html", "copied from a prompt");
+    await pick(shell, "about");
+    let about: Page | undefined;
+    await expect.poll(() => {
+      about = shell.windows().find((page) => page.url().endsWith("/about.html"));
+      return about !== undefined;
+    }).toBe(true);
+    await about!.waitForSelector("#version");
+    await copyAndPaste(about!, "about.html", "copied from About");
+  });
+
   it("leaves the agent's page as it was on Ctrl+R from the Composio sign-in, a window the agent's page opens with no menu", async () => {
     const { shell, client } = await signedIn();
     await shell.evaluate(({ BrowserWindow, webContents }) => {
