@@ -502,7 +502,7 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
   });
 
   it("says once why a host could not be spawned", async () => {
-    const written = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const written = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const host = forkHost({ execPath: "/nonexistent/node" });
       let gone = false;
@@ -512,7 +512,7 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
       await until(() => gone, 2_000);
       await new Promise((resolve) => setTimeout(resolve, 100));
       const said = written.mock.calls.map(([text]) => String(text)).filter((text) => text.startsWith("the file host"));
-      expect(said).toEqual(["the file host could not start: spawn /nonexistent/node ENOENT\n"]);
+      expect(said).toEqual(["the file host could not start: spawn /nonexistent/node ENOENT"]);
       host.kill();
     } finally {
       written.mockRestore();

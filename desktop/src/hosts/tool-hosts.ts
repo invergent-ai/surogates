@@ -106,7 +106,9 @@ export function forkHost(options: ForkOptions = {}): HostProcess {
   // a missing or broken bin/node answers every operation unavailable, and this line tells it.
   child.on("error", (error) => {
     if (child.pid !== undefined || exited) return;
-    process.stderr.write(`the file host could not start: ${error.message}\n`);
+    // console.error, never stderr itself: in Electron's main, a write to a stderr whose reader has gone
+    // is an uncaught error that stalls the app; the console ignores it.
+    console.error(`the file host could not start: ${error.message}`);
     gone();
   });
   child.on("exit", gone);
