@@ -386,21 +386,34 @@ describe("the page's projects source", () => {
   it("refuses a source whose methods are not its own, as a class instance's are, and keeps the one it serves", async () => {
     const { page, client } = await signedIn();
     const refused = await client.evaluate(async () => {
+      // Every method a source has, on its prototype: refused only because the copy keeps no prototype.
+      const nothing = () => Promise.resolve([]);
       class Source {
-        async list() {
-          return [];
-        }
+        list() { return nothing(); }
+        get() { return nothing(); }
+        create() { return nothing(); }
+        update() { return nothing(); }
+        archive() { return Promise.resolve(); }
+        threads() { return nothing(); }
+        resolve() { return nothing(); }
+        reopen() { return nothing(); }
+        library() { return nothing(); }
+        routines() { return nothing(); }
+        subscribe() { return () => {}; }
       }
+      const source = new Source();
       try {
-        await window.surogateDesktop!.registerProjects(new Source() as never);
+        await window.surogateDesktop!.registerProjects(source as never);
         return "registered";
       } catch (error) {
         return (error as Error).message;
       }
     });
     expect(refused).toContain("A projects source's methods must be its own properties");
-    await page.click("#open-projects");
-    await expect.poll(() => texts(page, "#cards .card .name")).toEqual(["Quarterly report", "Hiring plan", "Budget"]);
+    // The source it serves still answers: a project's read opens it, where a source swapped in would refuse it.
+    await opened(page, client, REPORT);
+    await expect.poll(() => page.textContent("#title")).toBe("Quarterly report");
+    expect(await page.isVisible("#failure")).toBe(false);
   });
 });
 
