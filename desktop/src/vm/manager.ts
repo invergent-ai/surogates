@@ -10,7 +10,7 @@ import type { Duplex } from "node:stream";
 import { setTimeout as wait } from "node:timers/promises";
 import { Worker } from "node:worker_threads";
 
-import { BOOT_ID } from "../binding/folder.js";
+import { confirmedFolder } from "../binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED, timedOut } from "../guest/command.js";
 import type { ProcessHandle } from "../guest/processes.js";
 import { type FromAgent, HELD, type HostUser, type Share } from "../guest/protocol.js";
@@ -353,9 +353,7 @@ export class Guest {
     const looked = await Promise.race([look(folder.path), late(deadline - performance.now())]);
     if (looked === "late") throw new Error(`it did not answer within ${this.shareMs / 1000} s`);
     const { found, real } = looked;
-    // A reboot can renumber the folder's mount: after one, only the inode is compared, as the file host does.
-    const rebooted = Boolean(folder.boot) && BOOT_ID !== "" && folder.boot !== BOOT_ID;
-    if (!found?.directory || (!rebooted && found.dev !== folder.dev) || found.ino !== folder.ino || real !== folder.path) throw new FolderGone();
+    if (!found?.directory || !confirmedFolder(folder, found) || real !== folder.path) throw new FolderGone();
     const given = await this.request({ type: "uid", root }, Math.max(0, deadline - performance.now()));
     if (!given) {
       this.lose();

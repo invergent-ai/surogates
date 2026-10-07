@@ -409,7 +409,7 @@ SIGN_INS = "/v1/auth/oauth/sign-ins"
 
 async def test_a_user_sees_their_desktop_sign_ins_and_ends_one_as_for_a_lost_laptop(api):
     bound = await signed_in(api)
-    await add_computer(api, bound["access_token"])
+    device_id = await add_computer(api, bound["access_token"])
     loose = await signed_in(api)
     renewed = (await refresh(api, loose["refresh_token"])).json()
     web = await window_session(api, renewed["access_token"])
@@ -418,8 +418,8 @@ async def test_a_user_sees_their_desktop_sign_ins_and_ends_one_as_for_a_lost_lap
     sign_ins = {sign_in["id"]: sign_in for sign_in in listed.json()}
     family = {name: claims(tokens["access_token"])["sid"] for name, tokens in {"bound": bound, "loose": loose}.items()}
     assert set(sign_ins) == set(family.values())
-    assert sign_ins[family["bound"]]["device_name"] == "ThinkPad"
-    assert sign_ins[family["loose"]]["device_name"] is None
+    assert (sign_ins[family["bound"]]["device_id"], sign_ins[family["bound"]]["device_name"]) == (device_id, "ThinkPad")
+    assert (sign_ins[family["loose"]]["device_id"], sign_ins[family["loose"]]["device_name"]) == (None, None)
     assert sign_ins[family["loose"]]["last_used_at"] >= sign_ins[family["loose"]]["created_at"]
     # A sign-in bound to no computer can be ended too: the desktop and its window are both signed out.
     assert (await api.client.delete(f"{SIGN_INS}/{family['loose']}", headers=api.auth())).status_code == 204
