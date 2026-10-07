@@ -16,6 +16,8 @@ export const MAX_WALK_LOOKS = 200_000;
 export const SHOWN_DOT_FOLDERS: ReadonlySet<string> = new Set([".github", ".vscode"]);
 // How far a walk's cursor is set back: a filesystem stamps changes by a coarser clock, a FAT folder's in 2 s ticks.
 export const WALK_MARGIN_NS = 2_000_000_000n;
+// How long a walk looks, as LINK_SCAN_MS bounds the binder's scan: the folder's other operations wait behind it.
+export const WALK_BUDGET_MS = 5_000;
 export const READ_TOO_LARGE = "File too large to read from a local folder (over 50 MiB)";
 export const WRITE_TOO_LARGE = "File too large to write to a local folder (over 50 MiB)";
 

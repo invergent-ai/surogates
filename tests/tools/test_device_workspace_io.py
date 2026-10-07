@@ -32,6 +32,7 @@ from surogates.devices.workspace import (
 from surogates.tools.builtin import file_ops
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import FileStat, LinePage, LocalWorkspaceIO, RevisionConflict, RipgrepError
+from tests import fake_laptop
 from tests.fake_laptop import BAD_PAGE, BAD_WALK, CONFLICT, InProcessRunner, perform
 
 
@@ -611,6 +612,15 @@ async def test_a_walk_never_enters_a_folder_swapped_for_a_link_meanwhile(wio, ro
         swapper.kill()
         swapper.wait()
     assert leaked == set()
+
+
+async def test_the_reference_laptops_walk_stops_once_its_time_is_up_and_says_so(root, monkeypatch):
+    (root / "a.txt").write_text("a")
+    monkeypatch.setattr(fake_laptop, "WALK_BUDGET_S", -1)  # up before the first entry
+    walked = await perform(LocalWorkspaceIO(str(root)), "walk", {
+        "key": str(root), "skip": [], "skip_top": [], "skip_hidden": False, "since": None,
+    })
+    assert walked["ok"]["files"] == [] and walked["ok"]["truncated"] is True
 
 
 async def test_a_walk_stops_at_its_cap_and_says_so(wio, root):

@@ -70,8 +70,9 @@ stamps changes by a coarser clock than the one the computer reads, a FAT
 folder's in two-second ticks.  So a walk since it lists what changed after it
 by that computer's clock, whatever the server's says.  It lists at most
 MAX_WALK_FILES files, whose paths, each measured JSON-encoded plus 24, fit in
-MAX_PAYLOAD_BYTES; it looks at most MAX_WALK_LOOKS entries.  truncated says one
-of these caps stopped it.  A folder under key it cannot read is left out; key
+MAX_PAYLOAD_BYTES; it looks at most MAX_WALK_LOOKS entries, for at most
+WALK_BUDGET_S seconds, since the folder's other operations wait behind it.
+truncated says one of these caps stopped it.  A folder under key it cannot read is left out; key
 itself unreadable is an os error.  Arguments it cannot take are answered with a
 value error.
 
@@ -163,6 +164,7 @@ MAX_WALK_FILES = 5_000
 SHOWN_DOT_FOLDERS = (".github", ".vscode")
 MAX_WALK_LOOKS = 200_000
 WALK_MARGIN_NS = 2_000_000_000
+WALK_BUDGET_S = 5
 TOO_LARGE = "Too large for one operation on a local folder (over 1.5 MiB)"
 READ_TOO_LARGE = "File too large to read from a local folder (over 50 MiB)"
 WRITE_TOO_LARGE = "File too large to write to a local folder (over 50 MiB)"

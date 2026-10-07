@@ -35,6 +35,7 @@ from surogates.devices.workspace import (
     OUTPUT_CAP_CHARS,
     READ_TOO_LARGE,
     SHOWN_DOT_FOLDERS,
+    WALK_BUDGET_S,
     WALK_MARGIN_NS,
     WRITE_TOO_LARGE,
     is_well_formed,
@@ -253,6 +254,7 @@ def _walk(a: dict[str, Any]) -> dict[str, Any]:
     ):
         raise ValueError(BAD_WALK)
     cursor = str(time.time_ns() - WALK_MARGIN_NS)
+    deadline = time.monotonic() + WALK_BUDGET_S
     after = None if since is None else int(since)
     files: list[list[Any]] = []
     cost, looks, truncated = 2, 0, False
@@ -273,7 +275,7 @@ def _walk(a: dict[str, Any]) -> dict[str, Any]:
                 os.close(fd)
                 continue
             looks += 1
-            if looks > MAX_WALK_LOOKS:
+            if looks > MAX_WALK_LOOKS or time.monotonic() > deadline:
                 truncated = True
                 break
             path = f"{rel}/{entry.name}" if rel else entry.name

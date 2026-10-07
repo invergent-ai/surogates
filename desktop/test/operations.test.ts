@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WALK_FILES, MAX_WRITE_BYTES, READ_TOO_LARGE,
-  WALK_MARGIN_NS, WRITE_TOO_LARGE,
+  WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "../src/files/answers.js";
 import { BAD_PAGE, BAD_WALK, type Context, perform, revisionOf } from "../src/files/operations.js";
 import { inFolderRefusal } from "../src/files/protect.js";
@@ -636,6 +636,15 @@ describe("walk", () => {
     }
     expect(Atomics.load(state, 1)).toBeGreaterThan(100);
     expect([...leaked]).toEqual([]);
+  });
+
+  it("stops once its time is up and says it did", async () => {
+    // The clock as the walk reads it: its start, then past its budget at the first entry.
+    let reads = 0;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => (reads++ === 0 ? 0 : WALK_BUDGET_MS + 1));
+    const walking = walk(); // the walk itself is synchronous: it is done once this returns
+    clock.mockRestore();
+    expect((await walking).ok).toMatchObject({ files: [], truncated: true });
   });
 
   it("stops at its cap and says it did", async () => {

@@ -20,7 +20,7 @@ import { isBase64, type Outcome } from "../link/protocol.js";
 import {
   conflict, Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WALK_FILES,
   MAX_WALK_LOOKS, MAX_WRITE_BYTES, OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE, sandboxError,
-  SHOWN_DOT_FOLDERS, valueError, WALK_MARGIN_NS, WRITE_TOO_LARGE,
+  SHOWN_DOT_FOLDERS, valueError, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "./answers.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
@@ -417,7 +417,7 @@ function listDir(args: Record<string, unknown>, { folder }: Context): string[] {
 // under the key named in skip_top, and with skip_hidden a dot-folder other than SHOWN_DOT_FOLDERS. A name that is not
 // UTF-8 is left out: read as bytes, it does not survive the round trip, and its decoded twin could be another file.
 // Since a cursor, only the files whose mtime or ctime is at or after it. The cursor is this computer's clock as the
-// walk began, less WALK_MARGIN_NS.
+// walk began, less WALK_MARGIN_NS. It stops after WALK_BUDGET_MS: every other operation on the folder waits for it.
 //
 // Each folder is entered through a handle on its parent, never by its path, and never through a link: a command in
 // the VM can swap a folder for a link between the walk seeing it and entering it. Depth first, each folder entered as
@@ -432,6 +432,7 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
     throw valueError(BAD_WALK);
   }
   const cursor = String(BigInt(Date.now()) * 1_000_000n - WALK_MARGIN_NS);
+  const deadline = performance.now() + WALK_BUDGET_MS;
   const after = since === null ? null : BigInt(since);
   const skipped = new Set<string>(skip);
   const skippedTop = new Set<string>(top);
@@ -453,7 +454,7 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
         continue;
       }
       looks += 1;
-      if (looks > MAX_WALK_LOOKS) {
+      if (looks > MAX_WALK_LOOKS || performance.now() > deadline) {
         truncated = true;
         break;
       }
