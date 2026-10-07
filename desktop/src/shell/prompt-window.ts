@@ -66,12 +66,19 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
   const send = (channel: string, ...args: unknown[]) => {
     if (!contents.isDestroyed()) contents.send(channel, ...args);
   };
-  // Shown, or focused again: what allows waits out the input protection from now.
+  // Shown, or focused again: what allows waits out the input protection from now, on the
+  // monotonic clock, which no change of the system's time moves.
   const arm = () => {
-    armedAt = Date.now() + INPUT_PROTECTION_MS;
+    armedAt = performance.now() + INPUT_PROTECTION_MS;
     clearTimeout(arming);
     send("prompt:armed", false);
     arming = setTimeout(() => send("prompt:armed", true), INPUT_PROTECTION_MS);
+  };
+  // Not focused: what allows is held back, so the press that focuses it again begins held back.
+  const disarm = () => {
+    armedAt = Number.POSITIVE_INFINITY;
+    clearTimeout(arming);
+    send("prompt:armed", false);
   };
   const close = () => {
     if (closing || window.isDestroyed()) return;
@@ -87,14 +94,14 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
       return handler(...args);
     });
   };
-  handle("prompt:state", () => ({ content, waiting: options.queue.waiting(), armed: Date.now() >= armedAt }));
+  handle("prompt:state", () => ({ content, waiting: options.queue.waiting(), armed: performance.now() >= armedAt }));
   // True once taken; false for a press that allows anything before the input protection has passed.
   handle("prompt:answer", (pressed, chosen) => {
     const offered = content.buttons.find((candidate) => candidate.id === pressed);
     if (!offered) throw new Error("Not a button of this prompt");
     const choice = content.choice === null ? null : content.choice.options.find((option) => option.value === chosen)?.value;
     if (choice === undefined) throw new Error("Not an option of this prompt");
-    if (offered.allows && Date.now() < armedAt) return false;
+    if (offered.allows && performance.now() < armedAt) return false;
     answer ??= { button: offered.id, choice };
     close();
     return true;
@@ -108,6 +115,13 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
     arm();
   };
   window.on("focus", arm);
+  window.on("blur", disarm);
+  // The app's window focused while the prompt is up over it, as a notification's click or a second
+  // launch shows it: the prompt takes the focus, so the keyboard and a screen reader are on it.
+  const pass = () => {
+    if (!closing && !window.isDestroyed() && window.isVisible()) window.focus();
+  };
+  parent.on("focus", pass);
   window.once("ready-to-show", () => {
     if (parent.isVisible() && !parent.isMinimized()) return reveal();
     options.unseen();
@@ -121,6 +135,7 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
     signal.removeEventListener("abort", close);
     parent.off("show", reveal);
     parent.off("restore", reveal);
+    parent.off("focus", pass);
     if (failure !== null) reject(failure);
     else resolve(answer);
   });

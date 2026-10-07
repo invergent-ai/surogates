@@ -48,6 +48,10 @@ const prepare = (client: Page) => client.evaluate(() => window.surogateDesktop!.
 
 const text = (page: Page, selector: string) => page.textContent(selector);
 
+// Whether the focused window is a prompt.
+const focusedPrompt = (shell: ElectronApplication) =>
+  shell.evaluate(({ BrowserWindow }) => BrowserWindow.getFocusedWindow()?.webContents.getURL().endsWith("/prompt.html") ?? false);
+
 // The left edge of each of the characters at *at* in *selector*'s text: drawn as written, they rise.
 async function lefts(page: Page, selector: string, at: (text: string) => number[]): Promise<number[]> {
   return page.evaluate(([chosen, indices]) => {
@@ -140,6 +144,27 @@ describe("the folder sheet", () => {
       await key(sheet, "Escape");
       expect(await prepared).toBeNull();
     }
+  });
+
+  it("holds back what allows again once focus leaves it, and takes the focus back from the app's window", async () => {
+    const client = await signedIn();
+    const prepared = prepare(client);
+    const sheet = await prompt(app!);
+    const answer = () => sheet.evaluate(() =>
+      (window as unknown as { surogatePrompt: { answer(b: string, c: string | null): Promise<boolean> } }).surogatePrompt.answer("accept", "free"));
+    await expect.poll(() => sheet.getAttribute('[data-id="accept"]', "aria-disabled")).toBe("false");
+    // The app's window focused under it: the prompt has the focus again, and its protection starts again.
+    await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => !window.webContents.getURL().endsWith("/prompt.html"))!.focus());
+    await expect.poll(() => focusedPrompt(app!)).toBe(true);
+    expect(await answer()).toBe(false);
+    await expect.poll(() => sheet.getAttribute('[data-id="accept"]', "aria-disabled")).toBe("false");
+    // Focus gone elsewhere: held back while it is away.
+    await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/prompt.html"))!.blur());
+    await expect.poll(() => sheet.getAttribute('[data-id="accept"]', "aria-disabled")).toBe("true");
+    expect(await answer()).toBe(false);
+    expect(await promptsShown(app!)).toBe(1);
+    await key(sheet, "Escape");
+    expect(await prepared).toBeNull();
   });
 
   it("takes nothing from a sentence typed as it opens", async () => {
@@ -257,8 +282,15 @@ describe("the folder sheet", () => {
     await expect.poll(() => app!.windows().some((page) => page.url().endsWith("/prompt.html"))).toBe(true);
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(await promptsShown(app!)).toBe(0);
-    await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.show());
+    // As the app shows its window, from a notification's click or a second launch: shown, then focused.
+    await app!.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0]!;
+      window.show();
+      window.focus();
+    });
     await expect.poll(() => promptsShown(app!)).toBe(1);
+    // Focused, not the app's window under it: the keyboard and a screen reader are on the prompt.
+    await expect.poll(() => focusedPrompt(app!)).toBe(true);
     await press(await prompt(app!), "accept");
     expect(await prepared).toMatchObject({ folder });
   });
