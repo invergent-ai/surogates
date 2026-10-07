@@ -351,3 +351,31 @@ class TestThreadPodLayout:
         assert main == {"/workspace": "workspace"}
         assert env["S3_MOUNT_POINT"] == "/workspace"
         assert "copy" not in volumes
+
+
+class TestWaitForReady:
+    """A pod whose daemon gives up fails its provision with the daemon's reason."""
+
+    # Running: the s3fs sidecar outlives the daemon, so the pod never reaches Failed.
+    @pytest.mark.parametrize("phase", ["Failed", "Running"])
+    async def test_a_daemon_that_exits_fails_the_wait_with_its_termination_message(self, sandbox, phase):
+        from types import SimpleNamespace as NS
+
+        gave_up = NS(exit_code=1, reason="Error", message="copy not made: the project's files could not be read\n")
+        pod = NS(status=NS(phase=phase, conditions=[], container_statuses=[
+            NS(name="s3fs", state=NS(terminated=None)),
+            NS(name="sandbox", state=NS(terminated=gave_up)),
+        ]))
+
+        class Watch:
+            def stream(self, *args, **kwargs):
+                async def events():
+                    yield {"object": pod}
+                return events()
+
+            def stop(self):
+                pass
+
+        with patch("surogates.sandbox.kubernetes.watch.Watch", Watch), \
+             pytest.raises(RuntimeError, match="exited with 1: copy not made: the project's files could not be read$"):
+            await sandbox._wait_for_ready(MagicMock(), "sandbox-x")

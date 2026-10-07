@@ -887,6 +887,17 @@ class K8sSandbox:
                     if self._is_pod_ready(pod):
                         return
                     phase = pod.status.phase if pod.status else "Unknown"
+                    # The daemon's exit, though the s3fs sidecar runs on and keeps
+                    # the pod Running; its reason is its termination message.
+                    ended = next((
+                        s.state.terminated for s in (pod.status and pod.status.container_statuses) or []
+                        if s.name == "sandbox" and s.state and s.state.terminated
+                    ), None)
+                    if ended is not None:
+                        raise RuntimeError(
+                            f"Sandbox pod {pod_name}'s daemon exited with {ended.exit_code}: "
+                            f"{(ended.message or ended.reason or '').strip()}"
+                        )
                     if phase in ("Failed", "Succeeded"):
                         raise RuntimeError(
                             f"Sandbox pod {pod_name} entered {phase} phase"
