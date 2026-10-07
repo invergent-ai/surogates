@@ -185,6 +185,16 @@ describe.skipIf(!run)("the browser host's process", () => {
     await expect.poll(() => browserOf(profile).length, { timeout: 5_000 }).toBe(0);
   });
 
+  it("closes its headed browser when it is stopped, as the app's quit stops it", async () => {
+    profile = mkdtempSync(join(tmpdir(), "sb-profile-"));
+    const client = new BrowserClient();
+    const launch = { executable: EXECUTABLE!, profile };
+    expect(await client.perform(launch, operation("op-1", "browser.navigate", { url: "http://127.0.0.1:9/" }), new AbortController().signal)).toMatchObject({ error: { type: "browser" } });
+    expect(browserOf(profile).length).toBeGreaterThan(0);
+    await client.stop();
+    expect(browserOf(profile)).toEqual([]);
+  });
+
   it("launches a browser the user picked once, headless, and says its version", async () => {
     const client = new BrowserClient();
     try {
