@@ -1101,6 +1101,15 @@ body.settings-page {
   margin-top: 36px;
 }
 
+/* A folder's path, as a heading over its chats: written left to right, whole, and wrapped anywhere. */
+.folder-path {
+  margin: 24px 0 4px;
+  font: 13px/1.5 ui-monospace, "Noto Sans Mono", monospace;
+  direction: ltr;
+  unicode-bidi: isolate;
+  overflow-wrap: anywhere;
+}
+
 .row {
   display: flex;
   align-items: center;
@@ -1245,7 +1254,8 @@ body.prompt-page {
   overflow-wrap: anywhere;
 }
 
-.prompt .special {
+.prompt .special,
+.settings-content .special {
   padding: 0 3px;
   border-radius: 4px;
   background: var(--accent);

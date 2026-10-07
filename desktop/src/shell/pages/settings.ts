@@ -2,7 +2,7 @@
 // sections of rows, each a label, a description and its control. All text comes from
 // the main process and is set with textContent only.
 
-import { byId, fillIcons, markTheme } from "./ui.js";
+import { byId, fillIcons, markTheme, showText } from "./ui.js";
 
 interface Appearance {
   theme: "system" | "light" | "dark";
@@ -20,8 +20,15 @@ interface State {
   links: { usage: boolean };
 }
 
+// A folder this computer's chats work on, and each chat on it (folders.ts).
+interface Folder {
+  folder: string;
+  chats: Array<{ root: string; title: string; mode: "free" | "ask" }>;
+}
+
 interface Settings {
   state(): Promise<State>;
+  folders(): Promise<Folder[]>;
   set(key: string, value: string): Promise<void>;
   link(which: "usage"): Promise<void>;
   close(): Promise<void>;
@@ -69,7 +76,41 @@ function search(): void {
 const date = (iso: string | null) =>
   iso === null ? "Not registered" : new Date(iso).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
+// A chat's row: its title, as text, and its mode. Its title is what a search finds it by.
+function chatRow(chat: Folder["chats"][number]): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "row";
+  row.dataset.label = chat.title;
+  const label = document.createElement("div");
+  label.className = "label";
+  const title = document.createElement("span");
+  showText(title, chat.title);
+  const mode = document.createElement("span");
+  mode.className = "desc";
+  mode.textContent = chat.mode === "free" ? "Works freely" : "Asks every time";
+  label.append(title, mode);
+  row.append(label);
+  return row;
+}
+
+async function renderFolders(): Promise<void> {
+  const folders = await settings.folders();
+  byId("folders-none").hidden = folders.length > 0;
+  byId("folders").replaceChildren(...folders.map((folder) => {
+    const group = document.createElement("div");
+    group.className = "folder";
+    const path = document.createElement("h3");
+    path.className = "folder-path";
+    showText(path, folder.folder);
+    group.append(path, ...folder.chats.map(chatRow));
+    return group;
+  }));
+  // Rows drawn since the search was typed are searched too.
+  search();
+}
+
 async function render(): Promise<void> {
+  void renderFolders();
   const state = await settings.state();
   const chosen: Record<string, string> = { ...state.appearance, ...state.preferences };
   for (const control of document.querySelectorAll<HTMLElement>("[data-setting]")) {

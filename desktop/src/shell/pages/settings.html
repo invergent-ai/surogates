@@ -19,7 +19,7 @@
           <button class="item selected" type="button" data-section="general" data-icon="settings">General</button>
           <button class="item" type="button" data-section="account" data-icon="circle-user-round">Account</button>
           <button class="item" type="button" data-section="computer" data-icon="laptop">This computer</button>
-          <button class="item" type="button" data-section="folders" data-icon="folder-lock" disabled title="Comes later">Folders and permissions<span class="later">Later</span></button>
+          <button class="item" type="button" data-section="folders" data-icon="folder-lock">Folders and permissions</button>
           <button class="item" type="button" data-link="usage" data-icon="gauge">Usage<span class="external" data-icon="external-link"></span></button>
         </div>
         <div class="nav-group">
@@ -114,6 +114,11 @@
             <div class="label"><span>Registered agents</span><span class="desc">The agents this computer works for.</span></div>
             <span class="value" id="agents"></span>
           </div>
+        </section>
+        <section data-section="folders" hidden>
+          <h2>Folders and permissions</h2>
+          <p class="desc" id="folders-none">No chat works on a folder of this computer.</p>
+          <div id="folders"></div>
         </section>
       </main>
     </div>

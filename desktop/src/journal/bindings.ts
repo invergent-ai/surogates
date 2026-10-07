@@ -91,6 +91,13 @@ export class Bindings {
     return read(select.get(root) as Row | undefined);
   }
 
+  /** Every binding, the first bound first. */
+  all(): Binding[] {
+    const select = this.db.prepare(`SELECT * FROM bindings ORDER BY bound_at, rowid`);
+    select.setReadBigInts(true);
+    return (select.all() as unknown as Row[]).map((row) => read(row)!);
+  }
+
   /** Every folder a chat is bound to, once each, the first bound first: what a restore names. */
   folders(): string[] {
     const rows = this.db.prepare(`SELECT folder FROM bindings GROUP BY folder ORDER BY MIN(bound_at), MIN(rowid)`).all() as Array<{ folder: string }>;

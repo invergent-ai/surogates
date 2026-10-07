@@ -23,7 +23,7 @@ import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../vm/client.js";
 import { VmExecutor } from "../vm/executor.js";
 import { openAbout } from "./about.js";
-import { BURST, Burst, followChat, followInbox, type InboxItem } from "./agent-events.js";
+import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { autostartFile, HIDDEN, LAUNCHER, loginRefusal, setStartAtLogin, startsAtLogin } from "./autostart.js";
 import { AppearanceStore, Theme } from "./appearance.js";
@@ -32,6 +32,7 @@ import { reauthorize, rebind, register } from "./computer.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
 import { linkIn, type OpenLink } from "./deep-link.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
+import { type FolderRow, listFolders } from "./folders.js";
 import { letWindowClose, MainWindow } from "./main-window.js";
 import { appMenu, trayIcon, trayMenu } from "./menus.js";
 import { Notifications } from "./notifications.js";
@@ -1403,6 +1404,37 @@ async function setPreference(key: "keepRunning" | "developer", value: unknown): 
 
 const onOff = (on: boolean) => (on ? "on" : "off");
 
+// Each bound chat's title, read on the app's own sign-in, and kept once the agent named it. One it
+// names not yet, or whose read failed, is read once each time Settings opens, not at each redraw.
+// ponytail: kept for the app's life, one per chat bound here: a chat renamed meanwhile keeps its old title until the next launch.
+const titles = new Map<string, string>();
+const reads = new Map<string, Promise<string>>(); // this opening of Settings' own
+
+function chatTitle(root: string): Promise<string> {
+  const known = titles.get(root);
+  if (known !== undefined) return Promise.resolve(known);
+  const session = signedIn;
+  if (!session) return Promise.resolve("A chat");
+  let read = reads.get(root);
+  if (!read) {
+    read = titleOf((path, init) => session.api(path, init), agents.get()?.agentId ?? "", root).then((title) => {
+      if (title !== "A chat") titles.set(root, title);
+      return title;
+    }, (error: unknown) => {
+      report(error);
+      return "A chat";
+    });
+    reads.set(root, read);
+  }
+  return read;
+}
+
+// Settings → Folders and permissions: the folders this computer works on for its device's account.
+const folderRows = (): Promise<FolderRow[]> => {
+  const stack = device?.stack;
+  return stack ? listFolders(stack.bindings, chatTitle) : Promise.resolve([]);
+};
+
 function settingsState() {
   const agent = agents.get();
   const { keepRunning, developer } = preferences.get();
@@ -1558,6 +1590,8 @@ function showProject(editing: Opened | null): void {
 function showSettings(): void {
   const page = join(PAGES, "settings.html");
   main?.openSettings(page, PAGES_PRELOAD, (contents) => {
+    // A chat named not yet is asked about again, once.
+    reads.clear();
     const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
       contents.ipc.handle(channel, (event, ...args: unknown[]) => {
         if (!ownPage(event.senderFrame, page)) throw new Error("Not Settings' own page");
@@ -1565,6 +1599,7 @@ function showSettings(): void {
       });
     };
     handle("settings:state", settingsState);
+    handle("settings:folders", folderRows);
     // A theme in effect that changes reaches the web client through the theme's own paint.
     handle("settings:set", async (key, value) => {
       if (key === "keepRunning" || key === "developer") return setPreference(key, value);

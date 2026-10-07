@@ -200,7 +200,7 @@ describe("Settings", () => {
     await settings.fill("#settings-search", "");
     // Off surogate.ai Usage stays gone, the search cleared too.
     expect(await texts(settings, ".settings-nav .item")).toEqual([
-      "General", "Account", "This computer", "Folders and permissionsLater", "SkillsLater", "ConnectorsLater",
+      "General", "Account", "This computer", "Folders and permissions", "SkillsLater", "ConnectorsLater",
     ]);
     expect(await texts(settings, ".settings-nav h3")).toEqual(["Settings", "Customize"]);
   });
@@ -232,7 +232,6 @@ describe("Settings", () => {
     expect(await settings.textContent("#connection")).toBe("Connected as Laptop");
     expect(await settings.textContent("#added")).toMatch(/^\w+ \d+, \d{4}$/);
     expect(await settings.textContent("#agents")).toBe(origin.replace("http://", ""));
-    expect(await settings.isDisabled('[data-section="folders"]')).toBe(true);
     // What changes while it is open shows at once.
     await client.evaluate(() => window.surogateDesktop!.setAccount(null));
     await settings.click('[data-section="account"]');
