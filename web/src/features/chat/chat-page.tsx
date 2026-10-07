@@ -303,7 +303,7 @@ export function ChatPage() {
           </div>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            {sessionId && <LocalChatBar sessionId={sessionId} />}
+            {sessionId && <LocalChatBar key={sessionId} sessionId={sessionId} />}
             <AgentChat
               sessionId={sessionId ?? null}
               adapter={chatAdapter}

@@ -20,15 +20,11 @@ export function LocalChatBar({ sessionId }: { sessionId: string }) {
   const [failure, setFailure] = useState<string | null>(null);
   const desktop = folderCalls(getDesktop());
 
-  // ponytail: the chat and the computers are read once per chat opened; a revocation made
-  // meanwhile shows at the next open.
+  // ponytail: the chat and the computers are read once per chat opened (the page keys the bar by
+  // its chat, so each chat's starts empty); a revocation made meanwhile shows at the next open.
   useEffect(() => {
     let live = true;
     let stop = () => {};
-    setConfig(null);
-    setDevices(null);
-    setHere(null);
-    setFailure(null);
     void getSession(sessionId).then((session) => {
       const chat = localChatOf(sessionId, session.config, null, null);
       // A chat in the cloud has no bar, and asks nothing of the computers.
@@ -89,10 +85,8 @@ export function LocalChatBar({ sessionId }: { sessionId: string }) {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() =>
-                run(() => switchMode(desktop, chat.root, mode === "free" ? "ask" : "free")
-                  // The desktop keeps the mode it allows: shown again from there, whatever was pressed.
-                  .finally(() => desktop.getBinding(chat.root).then(setHere, () => {})))}
+              // The desktop keeps the mode it allows, and tells of each change: the mode shown is its.
+              onClick={() => run(() => switchMode(desktop, chat.root, mode === "free" ? "ask" : "free"))}
             >
               {mode === "free" ? "Ask every time" : "Let it work freely…"}
             </Button>
