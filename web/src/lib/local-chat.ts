@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // A chat on a folder of this computer, as the web client makes one in Surogate Desktop
-// (desktop design, Section 8). Every import here is a file of web/src named with its extension,
-// so a node test runs it.
+// (desktop design, Section 8). Its one value import is a file of web/src named with its
+// extension, and node strips its type-only import, so a node test runs it.
 
 import { onDeviceOf } from "../api/device-requests.ts";
 import type {

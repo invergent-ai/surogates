@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // The user's computers and Surogate Desktop sign-ins at this agent, as Settings → Devices shows
-// them (desktop design, Section 8). Every import here is a package or a file of web/src named
-// with its extension, so a node test runs it.
+// them (desktop design, Section 8). Its value imports are a package and a file of web/src named
+// with its extension, and node strips its type-only import, so a node test runs it.
 
 import { formatDistance } from "date-fns";
 
