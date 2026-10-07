@@ -1610,28 +1610,14 @@ async def run_worker(settings: Settings) -> None:
         )
         from surogates.tools.builtin.media_gen import MediaGenConfig
 
-        # Per-buyer model tier: when the sender's package pins a tier
-        # that differs from the agent's own, the main slot is built on
-        # the opposite-tier endpoint ops projected for exactly this.
-        # Ops projects ``llm_tier_pro`` only for basic-tier agents and
-        # ``llm_tier_basic`` only for pro-tier agents, so a pin that
-        # matches the agent's own tier (or a BYO agent / old config)
-        # finds no endpoint and is a no-op; the proxy meters by
-        # endpoint role so billing follows the swap.
-        from surogates.runtime.entitlements import entitled_model_tier
-
-        pinned_tier = entitled_model_tier(session.config)
-        tier_override = {
-            "pro": ctx.llm_tier_pro,
-            "basic": ctx.llm_tier_basic,
-        }.get(pinned_tier)
-
+        # The main slot is the tier the sender's package pins, else the
+        # session's project's tier, else the agent's own.
         llm_bundle = await build_session_llm_clients(
             ctx, vault=credential_vault,
             user_id=credential.user_id,
             service_account_id=credential.service_account_id,
             settings=settings,
-            main_endpoint_override=tier_override,
+            session_config=session.config,
         )
 
         if not llm_bundle.main.model:

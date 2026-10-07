@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
 
 from surogates.harness.prompt import PromptBuilder
+from surogates.harness.session_llm import build_session_llm_clients
 from surogates.memory.manager import MemoryManager
 from surogates.memory.r2_store import R2MemoryStore
 from surogates.orchestrator.worker import _build_r2_memory_keys
+from surogates.runtime import build_agent_runtime_context
+from surogates.session.provisioning import create_child_session
 from surogates.tenant.context import TenantContext
 from tests.test_harness_resilience import _make_harness
 
@@ -140,3 +145,62 @@ async def test_a_projects_name_keeps_to_its_line(api):
     assert thread.config["system"].splitlines() == [
         "Project: Q3 Folder: elsewhere/", "Thread: Draft A", "Folder: threads/Draft A/",
     ]
+
+
+def endpoint(name: str) -> dict:
+    return {"model": f"{name}-model", "base_url": f"https://{name}.example/v1", "api_key_ref": f"vault://{name}"}
+
+
+async def model_of(session, *, pro_projected: bool = True) -> str:
+    """The model *session*'s worker builds its main slot on, for a basic agent.
+
+    Ops projects the pro endpoint for every hosted basic agent; a BYO agent
+    has none.
+    """
+    ctx = build_agent_runtime_context({
+        "agent_id": session.agent_id, "org_id": str(session.org_id), "project_id": "test-project",
+        "enabled": True, "version": 1, "storage_key_prefix": PREFIX,
+        "llm_main": endpoint("basic"), "llm_tier_pro": endpoint("pro") if pro_projected else None,
+    })
+    vault = SimpleNamespace(resolve_ref=AsyncMock(return_value="sk-test"))
+    bundle = await build_session_llm_clients(ctx, vault=vault, user_id=session.user_id, session_config=session.config)
+    try:
+        return bundle.main.model
+    finally:
+        await bundle.aclose()
+
+
+async def test_the_coordinator_and_the_threads_run_on_their_projects_tiers(api):
+    project = await create(api)
+    await patch(api, project, {"coordinator_tier": "pro"})
+    master = await master_of(api, project)
+    plain = await start(api, master)
+    await patch(api, project, {"coordinator_tier": None, "thread_tier": "pro"})
+    pro = await start(api, await master_of(api, project), title="Summarise B", goal="Summarise B.pdf.")
+    assert [await model_of(s) for s in (master, plain, pro, await master_of(api, project))] == [
+        "pro-model", "basic-model", "pro-model", "basic-model",
+    ]
+    # A BYO agent has no other tier's endpoint, so a project's tier changes nothing.
+    assert await model_of(pro, pro_projected=False) == "basic-model"
+
+
+async def test_the_users_package_tier_wins_over_the_projects(api):
+    project = await create(api)
+    await patch(api, project, {"thread_tier": "pro"})
+    master = await master_of(api, project)
+    # The master's last message pinned the user's package, which keeps them on basic.
+    await api.app.state.session_store.reconcile_session_config_key(master.id, "entitlements", {"model_tier": "basic"})
+    thread = await start(api, await master_of(api, project))
+    assert thread.config["entitlements"] == {"model_tier": "basic"}
+    assert await model_of(thread) == "basic-model"
+
+
+async def test_a_threads_helper_runs_under_the_users_package(api):
+    project = await create(api)
+    store = api.app.state.session_store
+    package = {"model_tier": "basic", "capabilities": ["code"]}
+    await store.reconcile_session_config_key((await master_of(api, project)).id, "entitlements", package)
+    thread = await start(api, await master_of(api, project))
+    # A helper's turn, often its only one, runs before any hold of its own pins the package.
+    helper = await create_child_session(store=store, parent=thread, channel="delegation")
+    assert helper.config["entitlements"] == package

@@ -21,6 +21,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from surogates.runtime.context import AgentRuntimeContext, LLMEndpoint
+from surogates.runtime.entitlements import entitled_model_tier
 
 __all__ = [
     "ResolvedLLM",
@@ -145,6 +146,22 @@ async def _resolve_vault_ref(
     return None
 
 
+def _main_endpoint(ctx: AgentRuntimeContext, session_config: dict | None) -> LLMEndpoint:
+    """The main slot's endpoint: the tier the sender's package pins, else
+    the tier the session's project gives it, else the agent's own.
+
+    Ops projects ``llm_tier_pro`` only for basic-tier agents and
+    ``llm_tier_basic`` only for pro-tier agents, so a tier that is the
+    agent's own, or any tier on a BYO agent, finds no endpoint and keeps
+    ``llm_main``; the proxy meters by endpoint role, so billing follows
+    the swap.  Client and model swap together: the tier lives in the
+    endpoint URL, so a bare model-string swap would misroute.
+    """
+    config = session_config or {}
+    tier = entitled_model_tier(config) or config.get("workstream_tier")
+    return {"pro": ctx.llm_tier_pro, "basic": ctx.llm_tier_basic}.get(tier) or ctx.llm_main
+
+
 async def build_session_llm_clients(
     ctx: AgentRuntimeContext,
     *,
@@ -152,7 +169,7 @@ async def build_session_llm_clients(
     user_id: Any = None,
     service_account_id: Any = None,
     settings: Any = None,
-    main_endpoint_override: "LLMEndpoint | None" = None,
+    session_config: dict | None = None,
 ) -> SessionLLMClients:
     """Build the per-session LLM bundle.
 
@@ -233,12 +250,7 @@ async def build_session_llm_clients(
         return slot
 
     try:
-        # Per-buyer model tier: the worker passes the opposite-tier
-        # endpoint when the sender's package pins a tier that differs
-        # from the agent's own. Client and model swap TOGETHER — the
-        # tier lives in the endpoint URL, so a bare model-string swap
-        # would misroute (see resilience.py's pro-fallback rationale).
-        main = await _resolve(main_endpoint_override or ctx.llm_main)
+        main = await _resolve(_main_endpoint(ctx, session_config))
         summary = await _opt(ctx.llm_summary)
         vision = await _opt(ctx.llm_vision)
         advisor = await _opt(ctx.llm_advisor)

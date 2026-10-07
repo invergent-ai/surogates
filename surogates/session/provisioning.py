@@ -185,6 +185,10 @@ async def create_child_session(
     for field in _BOUNDARY_SHARING_FIELDS:
         if field in parent_config:
             merged_config[field] = parent_config[field]
+    # The user's package, as the parent's last turn pinned it: a helper's
+    # turn, often its only one, runs inside it as the parent's does.
+    if "entitlements" in parent_config:
+        merged_config["entitlements"] = parent_config["entitlements"]
 
     if "execution" in parent_config:
         merged_config["execution"] = parent_config["execution"]
@@ -227,8 +231,8 @@ async def create_thread_session(
     sandbox root instead: ``sandbox_root_session_id`` is its own id, and the
     children it delegates to share its pod.  It keeps the master's workspace
     fields and boundaries, so every pod mounts the project's one workspace,
-    and the master's identity.  It takes no ``execution``: a cloud thread
-    runs in the cloud whatever the master does.
+    the master's identity and the user's package.  It takes no
+    ``execution``: a cloud thread runs in the cloud whatever the master does.
     """
     session_id = uuid4()
     merged_config = dict(config)
@@ -238,6 +242,10 @@ async def create_thread_session(
     for field in _BOUNDARY_SHARING_FIELDS:
         if field in parent_config:
             merged_config[field] = parent_config[field]
+    # The user's package, as the master's last message pinned it: it bounds
+    # the thread's first turn, and its tier wins over the project's.
+    if "entitlements" in parent_config:
+        merged_config["entitlements"] = parent_config["entitlements"]
     merged_config["sandbox_root_session_id"] = str(session_id)
     return await store.create_session(
         session_id=session_id,
