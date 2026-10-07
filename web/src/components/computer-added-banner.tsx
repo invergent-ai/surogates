@@ -10,6 +10,7 @@ import { useEffect, useState } from "react";
 
 import { type Device, listDevices } from "@/api/devices";
 import { addedNotice, addedNotices, dismissedNotices, dismissNotice } from "@/lib/devices";
+import { useAppStore } from "@/stores/app-store";
 
 // Storage can be refused (a private window, blocked site data): the notice still shows, and still goes for the page.
 const storage = (): Storage | null => {
@@ -24,9 +25,18 @@ export function ComputerAddedBanner() {
   const navigate = useNavigate();
   const [devices, setDevices] = useState<Device[]>([]);
   const [dismissed, setDismissed] = useState(() => dismissedNotices(storage()));
+  const desktopSessions = useAppStore((s) => s.desktopSessions);
+  const fetchCapabilities = useAppStore((s) => s.fetchCapabilities);
+
+  // Read here too: the Agents, Missions and Skills pages read no config of the agent's.
+  useEffect(() => {
+    if (desktopSessions === null) void fetchCapabilities();
+  }, [desktopSessions, fetchCapabilities]);
 
   // ponytail: read once per page shown; a computer added meanwhile shows at the next page.
   useEffect(() => {
+    // An agent without local folders has no computer to tell of.
+    if (desktopSessions !== true) return;
     let live = true;
     void listDevices().then((rows) => {
       if (live) setDevices(rows);
@@ -34,7 +44,7 @@ export function ComputerAddedBanner() {
     return () => {
       live = false;
     };
-  }, []);
+  }, [desktopSessions]);
 
   const notices = addedNotices(devices, new Date(), dismissed);
   if (notices.length === 0) return null;
