@@ -434,6 +434,9 @@ const overlayOpen = (shell: ElectronApplication, page: string) => shell.evaluate
   BrowserWindow.getAllWindows()[0]!.contentView.children
     .some((view) => (view as Electron.WebContentsView).webContents.getURL().endsWith(file)), page);
 const dialogOpen = (shell: ElectronApplication) => overlayOpen(shell, "/project.html");
+// Click *selector* on the dialog, which closes it: the dialog can go before the click is acknowledged,
+// and that it went is what tells the click landed.
+const clickClosing = (dialog: Page, selector: string) => dialog.click(selector, { noWaitAfter: true }).catch(() => {});
 
 describe("the project dialog", () => {
   it("makes a new project from its name and goal, lists it at once, and opens its conversation", async () => {
@@ -446,7 +449,7 @@ describe("the project dialog", () => {
     expect(await dialog.isVisible("#archive")).toBe(false);
     await dialog.fill("#name", "  Hiring brief ");
     await dialog.fill("#goal", "Hire two analysts by December.");
-    await dialog.click("#save");
+    await clickClosing(dialog, "#save");
     await expect.poll(() => dialogOpen(shell)).toBe(false);
     const made = agent.projects!.projects.find((project) => project.name === "Hiring brief")!;
     expect(made.goal).toBe("Hire two analysts by December.");
@@ -465,14 +468,14 @@ describe("the project dialog", () => {
     await dialog.fill("#name", "Q3 report");
     await dialog.fill("#instructions", "Write in French.");
     await dialog.selectOption("#thread-tier", "pro");
-    await dialog.click("#save");
+    await clickClosing(dialog, "#save");
     await expect.poll(() => dialogOpen(shell)).toBe(false);
     await expect.poll(() => page.textContent("#title")).toBe("Q3 report");
     expect(agent.projects!.projects.find((project) => project.id === REPORT))
       .toMatchObject({ name: "Q3 report", instructions: "Write in French.", coordinatorTier: null, threadTier: "pro" });
     await page.click("#project-settings");
     dialog = await projectDialog(shell);
-    await dialog.click("#archive");
+    await clickClosing(dialog, "#archive");
     await expect.poll(() => dialogOpen(shell)).toBe(false);
     const asked = await shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string }> }).asked);
     expect(asked.at(-1)!.message).toBe("Archive Q3 report?");
@@ -511,7 +514,7 @@ describe("the project dialog", () => {
         expect(await dialog.isEnabled(field), field).toBe(false);
       }
       expect(await dialog.evaluate(() => document.activeElement?.id)).toBe("cancel");
-      await dialog.click("#cancel");
+      await clickClosing(dialog, "#cancel");
       await expect.poll(() => dialogOpen(shell)).toBe(false);
     });
   }
@@ -570,8 +573,10 @@ describe("the project dialog", () => {
     expect([await dialog.textContent("#save"), await dialog.getAttribute("#form", "aria-busy")]).toEqual(["Creating…", "true"]);
     await expect.poll(() => dialogOpen(shell), { timeout: 5_000 }).toBe(false);
     await expect.poll(() => page.textContent("#title")).toBe("Busy");
-    // The new project's conversation is a load of its own: its page is as slow again.
-    await client.waitForLoadState();
+    // The new project's conversation is a load of its own, which can start after the title shows: its
+    // page is as slow again, once it has loaded.
+    const busy = agent.projects!.projects.find((project) => project.name === "Busy")!;
+    await client.waitForURL(`${origin}/chat/${busy.masterSessionId}`);
     await client.evaluate(() => {
       (window as unknown as { fakeProjects: { lag: number } }).fakeProjects.lag = 1_500;
     });
@@ -633,7 +638,7 @@ describe("the project dialog", () => {
       Object.assign(fake.data.projects.find((found) => found.id === project)!, { goal: "Changed elsewhere", instructions: "Also elsewhere" });
     }, REPORT);
     await dialog.selectOption("#thread-tier", "pro");
-    await dialog.click("#save");
+    await clickClosing(dialog, "#save");
     await expect.poll(() => dialogOpen(shell)).toBe(false);
     expect(agent.projects!.projects.find((project) => project.id === REPORT)).toMatchObject({
       name: "Quarterly report", goal: "Changed elsewhere", instructions: "Also elsewhere", threadTier: "pro",
