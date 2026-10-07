@@ -89,6 +89,8 @@ export class FakeAgent {
   readonly titles = new Map<string, string>();
   readonly chatStreams = new Map<string, Set<ServerResponse>>();
   readonly chatsAsked: string[] = [];
+  // What a chat's event stream answers, when not the stream: an agent out of reach answers 503.
+  chatStatus = 200;
   private lastEvent = 100;
   readonly server: Server = createServer((request, response) => void this.answer(request, response));
   private linked = false;
@@ -158,6 +160,7 @@ export class FakeAgent {
     if (events && bearer) {
       const [, chat, query] = events as unknown as [string, string, string];
       this.chatsAsked.push(`${chat}?${query}`);
+      if (this.chatStatus !== 200) return json(response, this.chatStatus, {});
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.write(": connected\r\n\r\n");
       // A chat between its turns is completed, as the agent leaves one: a stream that does not watch ends there.

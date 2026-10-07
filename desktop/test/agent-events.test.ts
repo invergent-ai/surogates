@@ -166,7 +166,7 @@ describe("the chat the window shows, followed", () => {
     const agent = new FakeAgent();
     agent.titles.set(CHAT, "Quarterly report");
     const ended: string[] = [];
-    const stop = following(agent, ended);
+    const { stop } = following(agent, ended);
     await until(() => agent.streams.length === 1);
     agent.streams[0]!.send("id: 5\r\nevent: stream.start\r\ndata: {}\r\n\r\n");
     // As the agent ends a stream at its longest: the follow takes up after the start's cursor.
@@ -189,6 +189,19 @@ describe("the chat the window shows, followed", () => {
     ]);
     expect(ended).toEqual(["Quarterly report", "A chat"]);
     stop();
+  });
+
+  it("says it has started only once the chat's stream has, whatever was refused before", async () => {
+    const agent = new FakeAgent();
+    agent.status = 503;
+    const chat = following(agent, []);
+    expect(chat.started()).toBe(false);
+    // Refused, then opened again: still nothing heard of the chat.
+    await until(() => agent.streams.length === 1);
+    expect(chat.started()).toBe(false);
+    agent.streams[0]!.send("id: 5\r\nevent: stream.start\r\ndata: {}\r\n\r\n");
+    await until(() => chat.started());
+    chat.stop();
   });
 
   it("follows a chat archived, or gone, no more", async () => {

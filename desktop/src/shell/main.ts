@@ -1211,10 +1211,11 @@ function openPage(path: string): void {
 const burst = new Burst();
 
 // Once the quit goes on, nothing more is told: the user is done with the app. The end of a turn in
-// the chat followed is told by its follow, though the inbox has it too while no page streams the chat.
+// the chat followed is told by its follow, though the inbox has it too while no page streams the chat;
+// before the follow has started, it may never hear of that turn, and the inbox tells it.
 function tellItem(item: InboxItem): void {
   if (leaving || !away()) return;
-  if (item.kind === "task_complete" && chat?.id === item.sessionId) return;
+  if (item.kind === "task_complete" && chat?.id === item.sessionId && chat.started()) return;
   const told = burst.add(item);
   if (told.length <= BURST) {
     notifications?.show({
@@ -1246,7 +1247,7 @@ function showing(url: string): void {
 // inbox, and the chat the web client shows while the window is away. What comes for a sign-in that
 // has ended meanwhile is told no more, and nothing is followed once the quit goes on.
 let inbox: { session: DesktopSession; stop(): void } | null = null;
-let chat: { session: DesktopSession; id: string; stop(): void } | null = null;
+let chat: { session: DesktopSession; id: string; stop(): void; started(): boolean } | null = null;
 
 function followAgent(): void {
   const session = leaving ? null : signedIn;
@@ -1269,7 +1270,7 @@ function followAgent(): void {
     chat = session && watched !== null
       ? {
         session, id: watched,
-        stop: followChat({
+        ...followChat({
           api, agentId, onError: report, sessionId: watched, onTurnEnd: (title) => {
             if (signedIn === session) tellTurnEnd(watched, title);
           },

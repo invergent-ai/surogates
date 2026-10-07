@@ -119,9 +119,9 @@ const GONE: ReadonlySet<unknown> = new Set(["archived", "session_not_found"]);
  * Follow chat *sessionId* across its turns (watch=1): *onTurnEnd* hears the chat's title each time one
  * of its turns ends. It starts at the chat's newest event, and takes up after the last event it heard,
  * stream.start's included, whenever its stream closes. Only a chat archived or gone ends it, short of
- * the returned stop.
+ * stop. Until *started*, it has heard nothing of the chat: a turn that ends meanwhile it never tells.
  */
-export function followChat(options: FollowOptions & { sessionId: string; onTurnEnd(title: string): void }): () => void {
+export function followChat(options: FollowOptions & { sessionId: string; onTurnEnd(title: string): void }): { stop(): void; started(): boolean } {
   let after = -1;
   const told = async (): Promise<void> => {
     try {
@@ -143,7 +143,7 @@ export function followChat(options: FollowOptions & { sessionId: string; onTurnE
     if (event.type === "session.complete") void told();
     else if (event.type === "session.done" && GONE.has(parsed(event.data)?.reason)) stop();
   });
-  return stop;
+  return { stop, started: () => after >= 0 };
 }
 
 // More than this many items close together are told as one notice: a night asleep, or an agent's own burst.

@@ -266,6 +266,20 @@ describe("the app's notifications", () => {
     await expect.poll(async () => (await notices(app!)).at(-1)).toEqual({ title: "Progress: 3 iterations, 2 min elapsed", body: "Checked in." });
   });
 
+  it("tell a turn's end in the chat the window shows from the inbox while the chat's follow has not started", async () => {
+    const client = await signedIn();
+    await focus(app!);
+    await moveTo(client, `/chat/${CHAT}`);
+    // The agent out of reach as the window goes away: the chat's follow is refused, and hears nothing of it.
+    agent.chatStatus = 503;
+    await hide(app!);
+    await expect.poll(() => agent.chatsAsked.length).toBe(1);
+    await expect.poll(() => agent.inboxStreams.size).toBe(1);
+    // No page streams the chat, so the agent puts the turn's end in the inbox: only the inbox can tell it.
+    agent.tell({ kind: "task_complete", title: "Quarterly report", session_id: CHAT });
+    await expect.poll(() => notices(app!)).toEqual([{ title: "Quarterly report", body: "Finished." }]);
+  });
+
   it("follow the chat the window shows no more once the user logs out", async () => {
     const client = await signedIn();
     await focus(app!);
