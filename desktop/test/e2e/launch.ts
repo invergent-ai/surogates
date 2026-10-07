@@ -61,11 +61,23 @@ export function shellEnv(home: string): Record<string, string> {
 
 /**
  * A second launch with *args*, as the system's link handler starts one: in the test's session,
- * with the basic store, it hands the running app its arguments and exits. Its exit code.
+ * with the basic store, it hands the running app its arguments and exits. Its exit code. One that
+ * has not exited within 10 s found no app to hand them to, and became the app: it is killed, and
+ * the test is told.
  */
 export async function secondLaunch(home: string, ...args: string[]): Promise<number | null> {
-  const second = spawn(ELECTRON, [MAIN, "--password-store=basic", ...args], { env: shellEnv(home), stdio: "ignore" });
-  const [code] = (await once(second, "exit")) as [number | null];
+  const second = spawn(ELECTRON, [MAIN, "--password-store=basic", ...args], { env: shellEnv(home), stdio: "ignore", detached: true });
+  let late: NodeJS.Timeout | undefined;
+  const code = await Promise.race([
+    once(second, "exit").then(([exited]) => exited as number | null),
+    new Promise<"running">((resolve) => {
+      late = setTimeout(resolve, 10_000, "running");
+    }),
+  ]);
+  clearTimeout(late);
+  if (code === "running") process.kill(-second.pid!, "SIGKILL");
+  await gone(second.pid);
+  if (code === "running") throw new Error("A second launch found no app to hand its arguments to, and was killed after 10 s");
   return code;
 }
 

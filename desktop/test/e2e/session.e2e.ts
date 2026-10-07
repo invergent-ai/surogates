@@ -79,6 +79,14 @@ describe("the tests' own session", () => {
     expect(await handed).toContain("--password-store=basic");
   });
 
+  it("ends a second launch that finds no app to hand its arguments to, and says so", async () => {
+    // With no app running, the second launch becomes one, and would run on past the test.
+    await expect(secondLaunch(home)).rejects.toThrow("A second launch found no app to hand its arguments to");
+    // It has gone: the next launch is the app, with its window, not a second launch handing it on.
+    app = await launch(home);
+    await app.firstWindow();
+  }, 30_000);
+
   it.each([
     ["on the desktop's display", { DISPLAY: ":0" }],
     ["with no display", { DISPLAY: undefined }],
