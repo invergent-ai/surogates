@@ -3,7 +3,7 @@
 import type { ProcessHandle } from "../guest/processes.js";
 import type { Outcome } from "../link/protocol.js";
 
-// A destination a command asked srt's proxy for: its host as srt compares it, and its port (policy.ts destination).
+// A destination a command in the guest asked the host proxy for: its host as a grant names it, and its port (vm/egress.ts destination).
 export interface Destination {
   host: string;
   port: number;
@@ -38,10 +38,6 @@ export type ToHost =
   | HostStart
   | { type: "op"; id: string; kind: string; args: Record<string, unknown> }
   | { type: "cancel"; id: string }
-  // A filesystem grant changed: the session runner, if one is up, is wrapped again.
-  | { type: "restart"; reason: "grant" }
-  // The app's answer to a network ask. With remember, its host goes through from now on, on every port, without asking.
-  | { type: "answer"; id: number; allow: boolean; remember: boolean }
   // The hook guard around a command that runs in the VM: why it may not run, answered
   // {ok: null} when it may; then the look after it, answered with its outcome and the look's notice.
   // run: a run, which an after ends, not a start or input to a process.
@@ -57,12 +53,7 @@ export type FromHost =
   | { type: "ready"; processes: ProcessHandle[] }
   // folder: the bound folder is not there, is not a folder, or was replaced; the app answers folder_unavailable.
   | { type: "failed"; message: string; folder?: true }
-  | { type: "result"; id: string; outcome: Outcome }
-  // How many background processes are alive: a host with any is never idle.
-  | { type: "processes"; live: number }
-  // A command asked for a destination off the list, and its connection waits for the app's answer.
-  // One at a time per destination: the connections asking meanwhile wait for the same answer.
-  | { type: "ask"; id: number; host: string; port: number; privateNetwork: boolean };
+  | { type: "result"; id: string; outcome: Outcome };
 
 export const FOLDER_UNAVAILABLE: Outcome = {
   error: { type: "folder_unavailable", message: "The folder for this chat is no longer available on this computer" },

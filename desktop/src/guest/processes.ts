@@ -2,8 +2,7 @@
 // write_stdin and list_processes, answered in the shapes of the cloud's process
 // registry (surogates/tools/utils/process_registry.py). The records live in the
 // guest agent, one registry a root (root.ts), not in its runner, so they outlive
-// it; their handles go to the host, which keeps them. Until commands move into the
-// VM, a tool host keeps a registry of its own too (hosts/host.ts).
+// it; their handles go to the host, which keeps them.
 
 import { randomBytes } from "node:crypto";
 import { constants as osConstants } from "node:os";
@@ -108,9 +107,9 @@ interface Tracked {
   waiters: Set<() => void>;
 }
 
-// The handles of a root whose guest went: each process still running ended with it.
-export const lostWith = (handles: readonly ProcessHandle[]): ProcessHandle[] =>
-  handles.map((handle) => handle.ended ? handle : { ...handle, ended: { exit_code: null, output: "", note: RUNNER_GONE } });
+// The handles of a root whose guest went: each process still running ended with it, as *note* says.
+export const lostWith = (handles: readonly ProcessHandle[], note = RUNNER_GONE): ProcessHandle[] =>
+  handles.map((handle) => handle.ended ? handle : { ...handle, ended: { exit_code: null, output: "", note } });
 
 const notFound = (id: string) => ({ status: "not_found", error: `No process with ID ${id}` });
 // The answers that carry a restart's notice as a note of their own.

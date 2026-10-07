@@ -11,7 +11,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
-import { readRecord } from "../src/hosts/folder-record.js";
+import { FINISHED_TTL_SECONDS } from "../src/guest/processes.js";
+import { readRecord, writeRecord } from "../src/hosts/folder-record.js";
 import { FOLDER_UNAVAILABLE, type HostStart } from "../src/hosts/messages.js";
 import { bound, Harness, PACKAGE } from "./host-harness.js";
 
@@ -285,6 +286,37 @@ describe("a tool host", { timeout: 30_000 }, () => {
     harness.send({ ...start, folder: "/" });
     expect(await harness.op("1", "resolve", { path: "a.txt" })).toEqual({ ok: `${folder}/a.txt` });
     expect(harness.messages.some((message) => message.type === "failed")).toBe(false);
+  });
+
+  it("runs no command: the kinds that would are its helper's to refuse, as kinds it does not do", async () => {
+    const harness = host();
+    await ready(harness);
+    const proof = join(base, "ran");
+    const touch = `touch '${proof}'`;
+    for (const [kind, args] of [
+      ["run", { command: touch, workdir: null, timeout: 10 }],
+      ["start", { command: touch, workdir: null, task_id: "t", pty: false, notify_on_complete: false, watcher_interval: null }],
+      ["write_stdin", { session_id: "proc_000000000001", data: `${touch}\n` }],
+      ["which", { name: "sh" }],
+      ["poll", { session_id: "proc_000000000001" }],
+      ["list_processes", { task_id: "t" }],
+    ] as const) {
+      expect(await harness.op(kind, kind, args)).toEqual({ error: { type: "unsupported", message: `This computer cannot do '${kind}' yet` } });
+    }
+    expect(existsSync(proof)).toBe(false);
+  });
+
+  it("drops a handle older than the cloud keeps one from the folder's record", async () => {
+    const old = {
+      id: "proc_000000000001", command: "echo old", cwd: folder, task_id: "t", started_at: Date.now() / 1000 - FINISHED_TTL_SECONDS - 60,
+      ended: { exit_code: 0, output: "old\n", note: null },
+    };
+    writeRecord(recordOf(), { state: "stopped", hooks: null, processes: [old] });
+    const harness = host();
+    expect(await ready(harness)).toEqual({ type: "ready", processes: [] });
+    await harness.stop();
+    expect(await harness.exited).toBe(0);
+    expect(readRecord(recordOf())?.processes).toEqual([]);
   });
 
   it("goes quietly when its helper is gone before an operation reaches it", async () => {

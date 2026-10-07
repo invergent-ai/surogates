@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,7 +11,6 @@ import { Binder, type FolderPrompts } from "../src/binding/binder.js";
 import { BOOT_ID } from "../src/binding/folder.js";
 import { connectDevice } from "../src/device.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
-import { ToolHosts } from "../src/hosts/tool-hosts.js";
 import type { Mode } from "../src/journal/bindings.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { DeviceLink } from "../src/link/client.js";
@@ -651,30 +650,26 @@ describe("approvals over the link", () => {
     expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
   });
 
-  it("gives a command its whole timeout once it is allowed, however long its prompt was open", { timeout: 30_000 }, async () => {
-    const folder = join(base, "notes");
-    const home = join(base, "home");
-    mkdirSync(folder);
-    mkdirSync(home);
-    const { dev, ino } = statSync(folder);
-    journal.bindings.add({ root: ROOT, nonce: "n".repeat(16), folder, dev, ino, boot: BOOT_ID, mode: "ask", boundAt: 1 });
-    const tools = new ToolHosts({
-      bindingOf: (root) => journal.bindings.get(root),
-      dataDir: join(base, "data"),
-      env: { HOME: home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
-    });
-    try {
-      await connect(user, tools);
-      const run = op("run", { command: "sleep 0.45; echo done", workdir: null, timeout: 1 });
-      server.send(frame(run));
-      await vi.waitFor(() => expect(user.open).toHaveLength(1));
-      // Longer than the command's whole timeout.
-      await new Promise((resolve) => setTimeout(resolve, 1_500));
-      user.answer("allow");
-      await server.until(() => results(run.id).length === 1, 20_000);
-      expect(results(run.id)[0]?.outcome).toEqual({ ok: { output: "done\n", returncode: 0, timed_out: false } });
-    } finally {
-      await tools.stop();
-    }
+  it("gives a command its whole timeout once it is allowed, however long its prompt was open: the tools have it only from then", { timeout: 30_000 }, async () => {
+    bind(ROOT, "ask");
+    let reached = 0;
+    const tools: Executor = {
+      run: (operation, signal) => {
+        reached = performance.now();
+        return hosts.run(operation, signal);
+      },
+    };
+    await connect(user, tools);
+    const run = op("run", { command: "sleep 0.45; echo done", workdir: null, timeout: 1 });
+    server.send(frame(run));
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    // Longer than the command's whole timeout.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    const allowed = performance.now();
+    user.answer("allow");
+    await server.until(() => results(run.id).length === 1, 20_000);
+    // The guest's timeout runs from the command's start in the guest, so from here.
+    expect(reached).toBeGreaterThanOrEqual(allowed);
+    expect(results(run.id)[0]?.outcome).toEqual({ ok: "ran run" });
   });
 });

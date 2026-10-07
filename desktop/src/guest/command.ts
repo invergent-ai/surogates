@@ -1,8 +1,7 @@
 // The run kind's answers, wherever the command runs: its arguments checked as
 // the cloud checks them, its folder, and its output, timeout and cancel, as the
 // cloud's LocalWorkspaceIO.run and the reference laptop answer them. The guest
-// agent runs every command in a root runner; until commands move into the VM, a
-// tool host runs them too (hosts/run.ts).
+// agent runs every command in a root runner.
 
 import { accessSync, constants, statSync } from "node:fs";
 import { constants as osConstants } from "node:os";

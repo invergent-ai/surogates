@@ -353,7 +353,6 @@ class Host {
     clearTimeout(this.idleTimer);
     if (this.running > 0 || this.live > 0 || this.gone) return;
     // No command or process of the root is left, so no connection waits on its prompts.
-    // ponytail: a process the session runner does not count (left behind by a start command) is refused without asking; srt does not say which command asked.
     this.prompts.abort();
     this.prompts = new AbortController();
     this.idleTimer = setTimeout(() => {
@@ -432,14 +431,6 @@ class Host {
       // A host that failed to start is exiting: the next operation starts a new one.
       this.onGone();
       this.settleStart(message.folder ? FOLDER_UNAVAILABLE : unavailable(message.message));
-    } else if (message.type === "processes") {
-      this.live = message.live;
-      this.idle();
-    } else if (message.type === "ask") {
-      const { id } = message;
-      void this.ask({ host: message.host, port: message.port, privateNetwork: message.privateNetwork }).then((choice) => {
-        this.send({ type: "answer", id, allow: choice === "allow" || choice === "allow_session", remember: choice === "allow_session" });
-      });
     } else {
       const answer = this.pending.get(message.id);
       this.pending.delete(message.id);

@@ -315,7 +315,7 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
   it("gives the guest the handles the folder's record kept from before the app quit, each ended as the app quit", async () => {
     const { dev, ino } = statSync(folder);
     const handle: ProcessHandle = { id: "proc_000000000001", command: "sleep 9", cwd: folder, task_id: "t", started_at: Date.now() / 1000 };
-    writeRecord(join(base, "data", "folders", `${dev}-${ino}.json`), { state: "stopped", present: [], hooks: null, processes: [handle] });
+    writeRecord(join(base, "data", "folders", `${dev}-${ino}.json`), { state: "stopped", hooks: null, processes: [handle] });
     vmExecutor();
     expect(await executor.run(op("poll", { session_id: handle.id }), signal())).toEqual(ran("ran\n"));
     expect(sent[0]?.ended).toEqual([{ ...handle, ended: { exit_code: null, output: "", note: APP_QUIT } }]);
@@ -355,7 +355,7 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
     const record = join(base, "data", "folders", `${dev}-${ino}.json`);
     const handle: ProcessHandle = { id: "proc_000000000001", command: "sleep 9", cwd: folder, task_id: "t", started_at: Date.now() / 1000 };
     const quit = { ...handle, ended: { exit_code: null, output: "", note: APP_QUIT } };
-    writeRecord(record, { state: "stopped", present: [], hooks: null, processes: [handle] });
+    writeRecord(record, { state: "stopped", hooks: null, processes: [handle] });
     vmExecutor(200);
     // Crossing the file host's ready, once its record is read: a change of the root's from the guest, then a gone, when it goes.
     beforeReady = () => {
