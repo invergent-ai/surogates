@@ -20,6 +20,7 @@ from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from tests.test_steer_loop import _final_response, _make_loop_harness
+from tests.test_wake_stranded_user_message import _harness
 
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_workstream_threads import start
@@ -193,6 +194,8 @@ async def a_saga_left_open(api, chat, *, compensating: bool) -> str:
     (True, EventType.SESSION_FAIL, "escalated"),  # lost while it was being put back
     (True, EventType.SESSION_PAUSE, "escalated"),  # a stop's, lost once it was put back
     (True, EventType.SESSION_STOPPED, "escalated"),  # a channel stop's
+    (False, EventType.SESSION_PAUSE, "escalated"),  # a stop whose worker was lost before it put anything back
+    (False, EventType.SESSION_STOPPED, "escalated"),
 ])
 async def test_a_saga_a_turn_left_open_is_closed_before_the_next_turn_starts_its_own(
     api, monkeypatch, compensating, end, status,
@@ -207,6 +210,20 @@ async def test_a_saga_a_turn_left_open_is_closed_before_the_next_turn_starts_its
     [closed, (_, started), (_, done)] = sagas[-3:]
     assert closed == (EventType.SAGA_COMPLETE.value, {**closed[1], "saga_id": left_open, "status": status, "steps_executed": 1})
     assert started["saga_id"] != left_open and done["saga_id"] == started["saga_id"]
+
+
+async def test_a_stopped_turn_still_putting_back_keeps_its_saga_from_the_next_turn(api, monkeypatch):
+    chat = await a_chat(api)
+    store = api.app.state.session_store
+    await a_saga_left_open(api, chat, compensating=False)
+    await store.emit_event(chat.id, EventType.SESSION_PAUSE, {})  # the pause route's, before its turn hears it
+    unwinding = await store.try_acquire_lease(chat.id, "worker-stopped", ttl_seconds=60)
+    await store.emit_event(chat.id, EventType.USER_MESSAGE, {"content": "Go on."})
+    monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
+    # The next turn waits for the stopped one's lease, so it never closes a saga still being put back.
+    assert await _harness(store).wake(chat.id) == "lease_held"
+    assert [t for t, _ in await saga_events(api, chat.id) if t == EventType.SAGA_COMPLETE.value] == []
+    await store.release_lease(chat.id, unwinding.lease_token)
 
 
 async def test_a_turn_retried_after_a_crash_keeps_its_saga(api, monkeypatch):

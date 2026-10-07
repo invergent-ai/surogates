@@ -3311,20 +3311,24 @@ class AgentHarness(
         lost, leaves its saga open; the next turn must start its own.  A
         stop's pause, or a channel stop's ``session.stopped``, ends a turn
         too.  It is closed ``completed`` if it was running, as a failed
-        turn's is, and ``escalated`` if it was being put back.
+        turn's is, and ``escalated`` if it was being put back or was
+        stopped, since nothing put its steps back.  A stopped turn still
+        putting back holds the session's lease, so no new turn reaches here
+        until it has finished.
         """
         from surogates.governance.events import saga_complete_event
         from surogates.governance.saga.state_machine import SagaState
 
-        ends = (
-            EventType.SESSION_COMPLETE.value, EventType.SESSION_FAIL.value,
-            EventType.SESSION_PAUSE.value, EventType.SESSION_STOPPED.value,
-        )
+        stops = (EventType.SESSION_PAUSE.value, EventType.SESSION_STOPPED.value)
+        ends = (EventType.SESSION_COMPLETE.value, EventType.SESSION_FAIL.value, *stops)
         ended = max((e.id for e in events if e.type in ends), default=None)
         if ended is None:
             return
         started = {e.data.get("saga_id"): e.id for e in events if e.type == EventType.SAGA_START.value}
         for stale in [s for s in saga.active_sagas if started.get(s.saga_id, ended) < ended]:
+            start = started[stale.saga_id]
+            if stale.state is SagaState.RUNNING and any(e.type in stops and e.id > start for e in events):
+                stale.transition(SagaState.COMPENSATING)  # the only way a running saga escalates
             status = SagaState.COMPLETED if stale.state is SagaState.RUNNING else SagaState.ESCALATED
             stale.transition(status)
             await self._store.emit_event(
