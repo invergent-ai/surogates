@@ -178,8 +178,7 @@ class ProcessSandbox:
         """Handle internal ``_checkpoint`` commands.
 
         Supported actions:
-        - ``take`` — snapshot the workspace (deduped per turn).
-        - ``new_turn`` — reset per-turn dedup.
+        - ``take`` — snapshot the workspace.
         - ``latest_hash`` — return the latest checkpoint hash.
         - ``list`` — list available checkpoints.
         - ``restore`` — restore to a checkpoint.
@@ -199,10 +198,6 @@ class ProcessSandbox:
             entry.checkpoint_mgr = CheckpointManager(enabled=True)
 
         mgr = entry.checkpoint_mgr
-
-        if action == "new_turn":
-            mgr.new_turn()
-            return json.dumps({"success": True, "action": "new_turn"})
 
         if action == "take":
             reason = args.get("reason", "auto")

@@ -195,10 +195,8 @@ def _dir_file_count(path: str) -> int:
 class CheckpointManager:
     """Manages automatic filesystem checkpoints.
 
-    Designed to be owned by the harness.  Call ``new_turn()`` at the start of
-    each conversation turn and ``ensure_checkpoint(dir, reason)`` before
-    any file-mutating tool call.  The manager deduplicates so at most one
-    snapshot is taken per directory per turn.
+    Call ``ensure_checkpoint(dir, reason)`` before a step that may change
+    files: the snapshot is what undoing the step restores.
 
     Parameters
     ----------
@@ -211,26 +209,18 @@ class CheckpointManager:
     def __init__(self, enabled: bool = False, max_snapshots: int = 50):
         self.enabled = enabled
         self.max_snapshots = max_snapshots
-        self._checkpointed_dirs: Set[str] = set()
         self._git_available: Optional[bool] = None  # lazy probe
-
-    # ------------------------------------------------------------------
-    # Turn lifecycle
-    # ------------------------------------------------------------------
-
-    def new_turn(self) -> None:
-        """Reset per-turn dedup.  Call at the start of each agent iteration."""
-        self._checkpointed_dirs.clear()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def ensure_checkpoint(self, working_dir: str, reason: str = "auto") -> bool:
-        """Take a checkpoint if enabled and not already done this turn.
+        """Take a checkpoint of *working_dir*, if enabled.
 
-        Returns True if a checkpoint was taken, False otherwise.
-        Never raises — all errors are silently logged.
+        Returns True when its latest checkpoint is its state: one was taken
+        now, or nothing changed since the last.  Never raises — all errors
+        are silently logged.
         """
         if not self.enabled:
             return False
@@ -249,12 +239,6 @@ class CheckpointManager:
         if abs_dir in ("/", str(Path.home())):
             logger.debug("Checkpoint skipped: directory too broad (%s)", abs_dir)
             return False
-
-        # Already checkpointed this turn?
-        if abs_dir in self._checkpointed_dirs:
-            return False
-
-        self._checkpointed_dirs.add(abs_dir)
 
         try:
             return self._take(abs_dir, reason)
@@ -493,9 +477,9 @@ class CheckpointManager:
             allowed_returncodes={1},
         )
         if ok_diff:
-            # No changes to commit
-            logger.debug("Checkpoint skipped: no changes in %s", working_dir)
-            return False
+            # No changes to commit: the latest checkpoint is the state.
+            logger.debug("Checkpoint unchanged in %s", working_dir)
+            return True
 
         # Commit
         ok, _, err = _run_git(

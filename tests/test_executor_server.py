@@ -14,6 +14,7 @@ import pytest
 import uvicorn
 
 from surogates.sandbox import executor_server
+from surogates.tools.utils import checkpoint_manager
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI_PATH = os.path.join(REPO_ROOT, "images", "sandbox", "tool-executor")
@@ -242,3 +243,17 @@ class TestHealthzRequireFuse:
         async with _make_client(app) as client:
             resp = await client.get("/healthz")
             assert resp.status_code == 503
+
+
+def test_a_checkpoint_take_answers_the_workspaces_snapshot_whether_or_not_it_changed(tmp_path, monkeypatch):
+    monkeypatch.setattr(checkpoint_manager, "CHECKPOINT_BASE", tmp_path / "checkpoints")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.md").write_text("a")
+
+    def take() -> dict:
+        return json.loads(executor_server._run_checkpoint({"action": "take", "reason": "before a step"}, str(workspace)))
+
+    first, unchanged = take(), take()
+    (workspace / "a.md").write_text("b")
+    assert first["hash"] == unchanged["hash"] != take()["hash"]

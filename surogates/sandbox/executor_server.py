@@ -155,9 +155,6 @@ def _run_checkpoint(args: dict, workspace: str) -> str:
     mgr = CheckpointManager(enabled=True)
     logger.info("checkpoint action=%s", action)
 
-    if action == "new_turn":
-        mgr.new_turn()
-        return json.dumps({"success": True, "action": "new_turn"})
     if action == "take":
         reason = args.get("reason", "auto")
         file_path = args.get("file_path")
