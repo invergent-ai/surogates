@@ -19,8 +19,9 @@ import { lostWith, type Placed, type ProcessHandle, Processes } from "./processe
 import { type Answer, type HostUser, MAX_SHARES, type Question, ROOT_ID, type Share } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 
-// The sessions disk's folder of roots (vm/init), each named by its root session id.
-export const SESSIONS = "/run/surogate/sessions/roots";
+// The sessions disk (vm/init), and its folder of roots, each named by its root session id.
+const SESSIONS_DISK = "/run/surogate/sessions";
+export const SESSIONS = `${SESSIONS_DISK}/roots`;
 // Each share's virtiofs mount, readable by root only.
 const SHARES = "/run/surogate/shares";
 // Each root's cgroup, under the one vm/init bounds below the guest's memory.
@@ -37,6 +38,9 @@ const CGROUPS_MAX = 256;
 // a stat of a stalled share cannot end until the share answers.
 const EMPTY_MS = 3_000;
 const EMPTY_RETRY_MS = 10;
+// How long a shutdown waits for every root's processes, killed together, to end: inside the
+// host's 5 s from its shutdown to the guest's power-off.
+const KILLED_MS = 1_000;
 const ENTER_ROOT = "/run/surogate/agent/enter-root";
 // The cloud's layout of the commands' environment, written by the image's build.
 const LAYOUT = "/etc/surogate/environment";
@@ -167,6 +171,38 @@ export async function unmountShare(share: Share): Promise<void> {
   await rmdir(path).catch(() => {});
 }
 
+// *path*'s filesystem written out, that one alone (syncfs, as sync -f does): never sync(2),
+// which writes out every filesystem in the guest, and waits for good on a share that stalled.
+// True once it has been, false if it has not within *ms*, its sync left waiting.
+function flush(path: string, ms = Infinity): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = ms === Infinity ? undefined : setTimeout(() => resolve(false), ms);
+    execFile("/usr/bin/sync", ["-f", path], (error) => {
+      clearTimeout(timer);
+      resolve(!error);
+    });
+  });
+}
+
+/**
+ * The guest's stop: every root's processes end at once, every share and the sessions disk are
+ * written out, each alone, and the guest powers off. Only the sessions disk could lose writes to
+ * a power cut: the image and the agent disk are read-only, and the shares are written through.
+ */
+export async function powerOff(): Promise<void> {
+  await writeFile(join(CGROUPS, "cgroup.kill"), "1").catch(() => {});
+  // Killed, they end at once; one waiting on a share that stalled cannot, and the guest powers off around it.
+  await emptied(CGROUPS, KILLED_MS).catch(() => {});
+  // A share that stalled answers no flush: it is left to its bound.
+  await Promise.all([...mounted].map((tag) => flush(join(SHARES, tag), KILLED_MS)));
+  // Written out first: a root whose process cannot end still holds the disk in its own
+  // namespace, so the unmount here may leave it mounted there. Unmounted by its last holder,
+  // it is clean, and the next boot's check has nothing to replay.
+  await flush(SESSIONS_DISK);
+  await execute("/usr/bin/umount", [SESSIONS_DISK]).catch(() => {});
+  await writeFile("/proc/sysrq-trigger", "o");
+}
+
 // The root's runner in its own namespaces: mount, PID, IPC, UTS, network and
 // cgroup, as util-linux's unshare makes them, and enter-root builds them. Ending
 // the runner's stdin ends the runner, then tini, the namespaces' PID 1, and
@@ -279,8 +315,15 @@ export async function killRoot(root: string): Promise<void> {
   if (!ROOT_ID.test(root)) return;
   const cgroup = join(CGROUPS, root);
   await writeFile(join(cgroup, "cgroup.kill"), "1");
-  for (const deadline = Date.now() + EMPTY_MS; !/^populated 0$/m.test(await readFile(join(cgroup, "cgroup.events"), "utf8"));) {
-    if (Date.now() > deadline) throw new Error(`the processes of ${root} have not ended`);
+  await emptied(cgroup).catch(() => {
+    throw new Error(`the processes of ${root} have not ended`);
+  });
+}
+
+// Resolves once *cgroup* holds no process, or rejects if it still does after *ms*.
+async function emptied(cgroup: string, ms = EMPTY_MS): Promise<void> {
+  for (const deadline = performance.now() + ms; !/^populated 0$/m.test(await readFile(join(cgroup, "cgroup.events"), "utf8"));) {
+    if (performance.now() > deadline) throw new Error("not emptied");
     await new Promise((resolve) => setTimeout(resolve, EMPTY_RETRY_MS));
   }
 }

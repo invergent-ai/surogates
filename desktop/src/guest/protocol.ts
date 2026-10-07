@@ -42,6 +42,9 @@ export type ToAgent =
   // Everything of a root ends, and its share's mount goes: the host is letting its folder
   // go, and removes the share from the guest next.
   | { type: "teardown"; id: number; root: string; share: Share }
+  // The host's stop: every root ends, the sessions disk is written out, and the guest
+  // powers off. Answered by the VM's exit.
+  | { type: "shutdown"; id: number }
   | { type: "cancel"; id: number }; // the op of that id
 
 export type FromAgent =

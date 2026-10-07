@@ -31,6 +31,8 @@ const SETUP_MS = 15_000;
 const SHARE_MS = 15_000;
 // The agent gives its roots uids from here up.
 const FIRST_UID = 10_000;
+// From the shutdown asked to the VM's exit: past it, the VM is ended (Section 11, Lifecycle).
+const POWER_OFF_MS = 5_000;
 
 export interface VmOptions extends Disks {
   run: string; // the backend's runtime folder, this user's own: on Linux, the sockets and pidfiles
@@ -39,6 +41,7 @@ export interface VmOptions extends Disks {
   cpus?: number;
   pingMs?: number;
   shareMs?: number;
+  powerOffMs?: number;
 }
 
 /**
@@ -152,7 +155,10 @@ export class Guest {
   private readonly roots = new Map<string, Root>();
   private keepalive: NodeJS.Timeout | undefined;
   private readonly shareMs: number;
+  private readonly powerOffMs: number;
   private readonly proxy: NetProxy;
+  // Its own stop, once asked: a guest that goes without one was lost.
+  private stopping: Promise<void> | null = null;
 
   private constructor(
     options: VmOptions,
@@ -187,6 +193,7 @@ export class Guest {
     }, options.pingMs ?? PING_MS);
     this.keepalive.unref();
     this.shareMs = options.shareMs ?? SHARE_MS;
+    this.powerOffMs = options.powerOffMs ?? POWER_OFF_MS;
     // Each connection a root's command makes, judged with the root the agent named.
     this.proxy = new NetProxy(vm.net, { egress });
   }
@@ -320,15 +327,33 @@ export class Guest {
     await this.vm.unshare(share, performance.now() + this.shareMs).catch(() => this.lose());
   }
 
-  // Settles once all of the VM has gone.
+  /**
+   * The guest's own stop, the spike's sync before kill: its agent ends every root, writes
+   * the sessions disk out and lets it go, and powers the guest off. A VM still running
+   * POWER_OFF_MS after the ask is ended. Settles once all of it has gone.
+   */
   stop(): Promise<void> {
-    this.lose();
-    return this.vm.kill();
+    this.stopping ??= (async () => {
+      if (!this.left) {
+        // A guest powering off answers no ping.
+        clearInterval(this.keepalive);
+        void this.control.request({ type: "shutdown" });
+        await Promise.race([this.vm.exited, late(this.powerOffMs)]);
+      }
+      this.lose();
+      await this.vm.kill();
+    })();
+    return this.stopping;
   }
 
-  // Whether it has gone, though all of its VM may not have yet.
+  // Whether it has gone, or is stopping, though all of its VM may not have gone yet.
   get ended(): boolean {
-    return this.left;
+    return this.left || this.stopping !== null;
+  }
+
+  // Whether it went without its own stop: it crashed, or was ended as stuck.
+  get lost(): boolean {
+    return this.left && this.stopping === null;
   }
 
   private lose(): void {

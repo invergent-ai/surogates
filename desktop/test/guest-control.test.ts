@@ -188,4 +188,13 @@ describe("the agent's control port", () => {
     ]);
     expect(calls).toEqual([["teardown", "root-1", share]]);
   });
+
+  it("powers the guest off at the host's shutdown, and answers nothing: the VM's exit is the answer", async () => {
+    const sent: FromAgent[] = [];
+    let powered = 0;
+    const agent = new Control((message) => sent.push(message), fakeRoots().roots, { powerOff: async () => void (powered += 1) });
+    agent.receive(JSON.stringify({ type: "shutdown", id: 1 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect([powered, sent]).toEqual([1, []]);
+  });
 });

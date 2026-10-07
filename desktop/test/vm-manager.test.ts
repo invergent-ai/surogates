@@ -60,32 +60,28 @@ let agentNet: Duplex | undefined;
 
 // A VM whose control port reaches the guest's own Control on *roots*, with no QEMU:
 // what the agent is asked, and when. Without roots, an agent that never says hello.
-const fakeVm = (roots?: ControlRoots): BootVm => async () => {
+// *powers*: its agent powers the fake VM off at a shutdown, as the guest's ends QEMU.
+const fakeVm = (roots?: ControlRoots, powers = true): BootVm => async () => {
   const [host, guest] = duplexPair();
   agent = guest;
   const [net, guestNet] = duplexPair();
   agentNet = guestNet;
-  if (roots) {
-    const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots);
-    createInterface({ input: guest }).on("line", (line) => control.receive(line));
-    control.hello();
-  }
   let gone = (_said: string) => {};
   const exited = new Promise<string>((resolve) => {
     gone = resolve;
   });
-  return {
-    control: host,
-    net,
-    exited,
-    share: async () => ({ kind: "virtiofs", tag: "r1" }),
-    unshare: async () => {},
-    kill: async () => {
-      host.destroy();
-      net.destroy();
-      gone("");
-    },
+  const kill = async () => {
+    host.destroy();
+    net.destroy();
+    gone("");
   };
+  if (roots) {
+    const machine = powers ? { powerOff: kill } : undefined;
+    const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots, machine);
+    createInterface({ input: guest }).on("line", (line) => control.receive(line));
+    control.hello();
+  }
+  return { control: host, net, exited, share: async () => ({ kind: "virtiofs", tag: "r1" }), unshare: async () => {}, kill };
 };
 
 // *answer*, or "no answer" once *ms* pass.
@@ -607,6 +603,35 @@ describe("a chat's folder on a mount that does not answer", () => {
     } finally {
       release();
     }
+  });
+});
+
+describe("a guest's stop", () => {
+  const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+
+  it("asks the guest to power off, and settles once it has, asked once however often it is stopped", async () => {
+    const asked: string[] = [];
+    const listening: BootVm = async (...args) => {
+      const vm = await fakeVm(roots)(...args);
+      createInterface({ input: agent as Duplex }).on("line", (line) => asked.push((JSON.parse(line) as { type: string }).type));
+      return vm;
+    };
+    const guest = await Guest.boot(listening, options());
+    const begun = performance.now();
+    await Promise.all([guest.stop(), guest.stop()]);
+    expect(performance.now() - begun).toBeLessThan(500);
+    expect(asked.filter((type) => type === "shutdown")).toHaveLength(1);
+    expect([guest.ended, guest.lost]).toEqual([true, false]);
+  });
+
+  it("ends a VM still running once the power-off's bound has passed", async () => {
+    // An agent with no power to switch off: the shutdown goes unheeded.
+    const guest = await Guest.boot(fakeVm(roots, false), { ...options(), powerOffMs: 300 });
+    const begun = performance.now();
+    await guest.stop();
+    expect(performance.now() - begun).toBeGreaterThanOrEqual(290);
+    expect(performance.now() - begun).toBeLessThan(1_000);
+    expect([guest.ended, guest.lost]).toEqual([true, false]);
   });
 });
 

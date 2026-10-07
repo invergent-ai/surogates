@@ -56,6 +56,13 @@ const FILES = [
 ].join("\n");
 // s_feature_incompat, in the superblock at 1024.
 const INCOMPAT = 1024 + 0x60;
+// Its folder's virtiofsd for the newest share in *run*: the daemon, and the child that serves the share.
+const shareDaemons = (run: string) => {
+  const daemon = newestDaemon(run);
+  return [daemon, ...spawnSync("pgrep", ["-P", String(daemon)], { encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean).map(Number)];
+};
+// A background process that looks in its folder a second after it starts: once the share has stalled, it waits there.
+const STUCK = "env -i /usr/bin/setsid /usr/bin/nohup /bin/sh -c '/usr/bin/sleep 1; /usr/bin/stat ./stuck' < /dev/null > /dev/null 2>&1 & echo started";
 
 const signal = () => new AbortController().signal;
 const background = (command: string) => ({ command, workdir: null, task_id: "vm", pty: false, notify_on_complete: false, watcher_interval: null });
@@ -914,6 +921,60 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       "chmod +x node_modules/tool/bin/cli.js && ln -s ../tool/bin/cli.js node_modules/.bin/tool && ./node_modules/.bin/tool",
       "rm -rf configure built node_modules",
     ].join(" && "))).toEqual({ ok: { output: "configured\nbuilt\ntool\n", returncode: 0, timed_out: false } });
+  });
+
+  it("writes a home's file out at its stop, with no sync of its own, and leaves the sessions disk nothing to recover", async () => {
+    expect(await run("echo written > ~/written; head -c 50000000 /dev/urandom > ~/big")).toMatchObject({ ok: { returncode: 0 } });
+    const begun = performance.now();
+    await guest.stop();
+    const stopped = performance.now() - begun;
+    console.log(`stop: the guest powered off ${stopped.toFixed(0)} ms after its shutdown was asked`);
+    // debugfs reads the disk as it lies, replaying no journal: what it shows was written out.
+    const debugfs = (request: string) => spawnSync("debugfs", ["-R", request, options.sessions], { encoding: "utf8" }).stdout;
+    expect(debugfs(`cat /roots/${ROOT}/home/written`)).toBe("written\n");
+    expect(/Size: (\d+)/.exec(debugfs(`stat /roots/${ROOT}/home/big`))?.[1]).toBe("50000000");
+    expect(spawnSync("dumpe2fs", ["-h", options.sessions], { encoding: "utf8" }).stdout).not.toMatch(/^Filesystem features:.*needs_recovery/m);
+    // Its agent's power-off, well inside the 5 s past which the VM is ended. 7.0 prints no
+    // "reboot: Power down" after this line, as 6.8 did.
+    expect(stopped).toBeLessThan(2_000);
+    expect(readFileSync(options.console, "utf8")).toContain("sysrq: Power Off");
+    guest = await Guest.boot(bootLinux, options);
+    expect(await setUp(ROOT, folder)).toMatchObject({ type: "done" });
+    expect(await run("rm ~/big; cat ~/written")).toEqual({ ok: { output: "written\n", returncode: 0, timed_out: false } });
+  });
+
+  it("powers off around a process waiting on a share that stalled, and keeps what its home was written", async () => {
+    const STALLED = "4f5a6b7c-8d9e-4f0a-9b1c-2d3e4f5a6b7c";
+    const path = join(dir, "stalled");
+    mkdirSync(path);
+    expect(await guest.ready(STALLED, folderOf(path))).toBeNull();
+    const daemons = shareDaemons(options.run);
+    expect(await guest.op(STALLED, "start", background(STUCK), signal())).toMatchObject({ ok: { session_id: expect.any(String) } });
+    expect(await run("echo kept > ~/kept-stalled", STALLED)).toMatchObject({ ok: { returncode: 0 } });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    for (const pid of daemons) process.kill(pid, "SIGSTOP");
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      const begun = performance.now();
+      await guest.stop();
+      console.log(`stop around a stalled share: ${(performance.now() - begun).toFixed(0)} ms`);
+      // The guest powers off around it; QEMU, whose device stop waits on the stopped daemon, is ended at the bound.
+      expect(performance.now() - begun).toBeLessThan(6_000);
+      expect(readFileSync(options.console, "utf8")).toContain("sysrq: Power Off");
+    } finally {
+      for (const pid of daemons) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Gone with its guest.
+        }
+      }
+    }
+    guest = await Guest.boot(bootLinux, options);
+    expect(await setUp(ROOT, folder)).toMatchObject({ type: "done" });
+    expect(await guest.ready(STALLED, folderOf(path))).toBeNull();
+    expect(await run("cat ~/kept-stalled", STALLED)).toEqual({ ok: { output: "kept\n", returncode: 0, timed_out: false } });
+    await guest.teardown(STALLED);
   });
 
   it("repairs a sessions disk the quick check cannot, and keeps the homes on it", async () => {

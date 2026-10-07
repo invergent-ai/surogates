@@ -10,7 +10,7 @@ import { Control } from "./control.js";
 import { Network } from "./network.js";
 import { findPort, openPort } from "./port.js";
 import type { FromAgent } from "./protocol.js";
-import { CGROUPS, contain, enter, killRoot, Roots, uidOf, unmountShare } from "./root.js";
+import { CGROUPS, contain, enter, killRoot, powerOff, Roots, uidOf, unmountShare } from "./root.js";
 
 const port = await openPort(await findPort("ai.surogate.control"));
 const network = new Network(await openPort(await findPort("ai.surogate.net")));
@@ -21,6 +21,6 @@ const roots = new Roots({
   lost: (root) => say({ type: "lost", root }),
   handles: (root, handles, live) => say({ type: "handles", root, handles, live }),
 });
-const control = new Control(say, roots);
+const control = new Control(say, roots, { powerOff });
 createInterface({ input: port, crlfDelay: Infinity }).on("line", (line) => control.receive(line));
 control.hello();
