@@ -47,8 +47,9 @@ export type ToAgent =
   | { type: "op"; id: number; root: string; kind: string; args: Record<string, unknown> }
   // The root's protected keys now, each read-only in its namespace before its next command.
   | { type: "protect"; id: number; root: string; keys: ProtectedKey[] }
-  // Everything of a root ends, its share left mounted: the host is letting its folder go.
-  | { type: "teardown"; id: number; root: string }
+  // Everything of a root ends, and its share's mount goes: the host is letting its folder
+  // go, and removes the share from the guest next.
+  | { type: "teardown"; id: number; root: string; share: Share }
   | { type: "cancel"; id: number }; // the op of that id
 
 export type FromAgent =

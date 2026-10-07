@@ -17,8 +17,9 @@ import { type ProcessesChange, unavailable, type VmOperation, type VmOptions } f
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
 export const MANAGER = join(PACKAGE, "dist", "vm", "main.js");
 const STOP_MS = 5_000;
-// Past the manager's own bounds on a teardown: 15 s for a setup under way, 15 s for the agent's answer.
-const TEARDOWN_MS = 35_000;
+// Past the manager's own bounds on a teardown: 15 s for a setup under way, 15 s for the
+// agent's answer, and 15 s for the share's removal.
+const TEARDOWN_MS = 50_000;
 
 /**
  * The VM's files for an app whose data is *dataDir*: the sessions disk and the

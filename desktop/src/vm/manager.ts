@@ -60,6 +60,15 @@ export interface VmBackend {
    * and so does one that leaves the VM unable to share again: it rejects once the VM has gone.
    */
   share(folder: string, uid: number, deadline: number): Promise<Share>;
+  /**
+   * *share*, as share gave it, out of the running guest once the guest has let it go, and
+   * its folder served no more: its place takes the next share. Rejects with why not by
+   * *deadline* (performance.now()), once the VM has gone: a guest that does not let a
+   * folder go is given no other. The agent's unmount is lazy, so the guest may still hold
+   * the share when this is asked, until the deadline. Whether a tag comes again is the
+   * backend's: Linux's never does within a boot, and one whose places are fixed may.
+   */
+  unshare(share: Share, deadline: number): Promise<void>;
   /** Ends the VM at once; settles once all of it has gone. Its runtime files go at the next boot, or with the manager. */
   kill(): Promise<void>;
 }
@@ -301,7 +310,11 @@ export class Guest {
     return this.vm.share(folder.path, uid, deadline);
   }
 
-  /** Everything of *root* ends in the guest, its share left in place; its next operation sets it up again. */
+  /**
+   * Everything of *root* ends in the guest, then its folder leaves it; its next operation
+   * shares the folder and sets it up again. A guest that does not answer, or does not let
+   * the folder go, is lost, the root's processes with it.
+   */
   async teardown(root: string): Promise<void> {
     const entry = this.roots.get(root);
     if (!entry) return;
@@ -309,8 +322,13 @@ export class Guest {
     // does not land within SETUP_MS loses the guest, the root's processes with it.
     if ((await Promise.race([entry.setup, late(SETUP_MS)])) === "late") return this.lose();
     entry.setup = null;
+    // One that could not be added has left already.
+    const share = await entry.share.catch(() => null);
+    if (this.roots.get(root) === entry) this.roots.delete(root);
+    if (!share) return;
     // Unanswered: the agent is stuck, and the guest goes, the root's processes with it.
-    if (!(await this.request({ type: "teardown", root }, SETUP_MS))) this.lose();
+    if (!(await this.request({ type: "teardown", root, share }, SETUP_MS))) return this.lose();
+    await this.vm.unshare(share, performance.now() + this.shareMs).catch(() => this.lose());
   }
 
   // Settles once all of the VM has gone.

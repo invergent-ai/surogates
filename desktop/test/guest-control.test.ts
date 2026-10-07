@@ -24,8 +24,8 @@ function fakeRoots() {
       calls.push(["setup", root, folder, share, user, ended]);
       if (root === "broken") throw new Error("the session runner exited: no namespaces");
     },
-    teardown: async (root) => {
-      calls.push(["teardown", root]);
+    teardown: async (root, share) => {
+      calls.push(["teardown", root, share]);
     },
     protect: async (root, keys) => {
       calls.push(["protect", root, keys]);
@@ -179,16 +179,19 @@ describe("the agent's control port", () => {
     expect(sent).toEqual([{ type: "result", id: 1, outcome: { error: { type: "other", message: "Error: broken" } } }]);
   });
 
-  it("tears a root down when the host asks, and answers once it has", async () => {
+  it("tears a root down and lets its share's mount go when the host asks, and answers once it has", async () => {
     const { sent, calls, tell, settle } = control();
-    tell({ type: "teardown", id: 1, root: "root-1" });
-    tell({ type: "teardown", id: 2 });
+    const share = { kind: "virtiofs", tag: "r12" };
+    tell({ type: "teardown", id: 1, root: "root-1", share });
+    tell({ type: "teardown", id: 2, root: "root-1" });
+    tell({ type: "teardown", id: 3, root: "root-1", share: { kind: "plan9", tag: "r12" } });
     await settle();
     expect(sent).toEqual([
       { type: "failed", id: 2, message: "The agent cannot take this teardown request" },
+      { type: "failed", id: 3, message: "The agent cannot take this teardown request" },
       { type: "done", id: 1 },
     ]);
-    expect(calls).toEqual([["teardown", "root-1"]]);
+    expect(calls).toEqual([["teardown", "root-1", share]]);
   });
 
   it("makes a root's protected keys read-only when the host names them, and refuses a list that is not one", async () => {

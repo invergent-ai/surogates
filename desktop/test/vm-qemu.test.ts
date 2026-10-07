@@ -106,6 +106,26 @@ describe("QEMU's machine protocol", () => {
     qmp.close();
   });
 
+  it("tells an event's listeners its data between the answers, until they stop listening", async () => {
+    const qmp = await Qmp.open(connect(join(dir, "qmp.sock")));
+    answer = (command, socket) => {
+      const id = (command.arguments as { id: string }).id;
+      socket.write('{"return": {}}\n');
+      socket.write(`${JSON.stringify({ event: "DEVICE_DELETED", data: { device: id, path: `/machine/peripheral/${id}` }, timestamp: { seconds: 1, microseconds: 2 } })}\n`);
+    };
+    const heard: unknown[] = [];
+    try {
+      const stop = qmp.on("DEVICE_DELETED", (data) => heard.push(data));
+      await qmp.execute("device_del", { id: "fs1" });
+      await qmp.execute("query-status", { id: "x" });
+      stop();
+      await qmp.execute("device_del", { id: "fs2" });
+      expect(heard).toEqual([{ device: "fs1", path: "/machine/peripheral/fs1" }, { device: "x", path: "/machine/peripheral/x" }]);
+    } finally {
+      qmp.close();
+    }
+  });
+
   it("fails to open a monitor QEMU closes before its greeting, or that never greets by the deadline", async () => {
     greeting = "close";
     await expect(Qmp.open(connect(join(dir, "qmp.sock")))).rejects.toThrow("QEMU's monitor closed");

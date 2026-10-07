@@ -211,14 +211,32 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
   it("tears a root down: its work ends, no loss is told, and it can be set up again", async () => {
     const running = op("run", { command: "sleep 3", workdir: null, timeout: 10 }, undefined, "op-15");
     await new Promise((resolve) => setTimeout(resolve, 200));
-    await roots.teardown("root-1");
+    await roots.teardown("root-1", R1);
     expect(await running).toEqual(SANDBOX_STOPPED);
     expect(lost).toEqual([]);
     expect(await op("which", { name: "sh" }, undefined, "op-16")).toEqual(NOT_SET_UP);
     // Nothing set up: nothing to end.
-    await roots.teardown("root-1");
+    await roots.teardown("root-1", R1);
     await roots.setup("root-1", base, R1, user);
     expect(await op("which", { name: "sh" }, undefined, "op-17")).toEqual({ ok: true });
+  });
+
+  it("lets its share's mount go once everything of it has ended, and lets it go for a root not set up too", async () => {
+    const order: string[] = [];
+    const own: ChildProcess[] = [];
+    const unmounting = new Roots({
+      start: () => {
+        const child = bare();
+        own.push(child);
+        child.once("exit", () => order.push("ended"));
+        return child;
+      },
+      uid: () => 10_000, kill: () => void own.at(-1)?.kill("SIGKILL"), unmount: async (share) => void order.push(`unmount ${share.tag}`),
+    });
+    await unmounting.setup("root-3", base, { kind: "virtiofs", tag: "r7" }, user);
+    await unmounting.teardown("root-3", { kind: "virtiofs", tag: "r7" });
+    await unmounting.teardown("root-4", { kind: "virtiofs", tag: "r8" });
+    expect(order).toEqual(["ended", "unmount r7", "unmount r8"]);
   });
 
   it("tells the host of a lost root once everything of it has ended, and of one that cannot be ended once its runner is stopped", async () => {
@@ -274,7 +292,7 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
       kill: (root) => void runners.get(root)?.kill("SIGKILL"),
     });
     const setting = own.setup("root-2", base, R1, user);
-    await own.teardown("root-2");
+    await own.teardown("root-2", R1);
     await setting;
     expect(await own.perform("root-2", "which", { name: "sh" }, new AbortController().signal, "op-19")).toEqual(NOT_SET_UP);
     await own.setup("root-2", base, R1, user);
@@ -331,7 +349,7 @@ describe("a root's background processes", { timeout: 20_000 }, () => {
     }, uid: () => 10_000, kill: (root) => void runners.get(root)?.kill("SIGKILL") });
     for (let n = 1; n <= 8; n += 1) await eight.setup(`root-${n}`, base, R1, user);
     await expect(eight.setup("root-9", base, R1, user)).rejects.toThrow("This computer's sandbox holds 8 chats already");
-    await eight.teardown("root-8");
+    await eight.teardown("root-8", R1);
     await eight.setup("root-9", base, R1, user);
   });
 
@@ -417,7 +435,7 @@ describe("a root's background processes", { timeout: 20_000 }, () => {
     try {
       const session_id = (await begin(own, "root-5", "sleep 695")).ok.session_id as string;
       await until(() => told.at(-1) === 1);
-      await own.teardown("root-5");
+      await own.teardown("root-5", R1);
       await new Promise((resolve) => setTimeout(resolve, 200));
       // What the teardown ended is not told: the host keeps the process as it started, and it ended as the app quit.
       expect(told).toEqual([1]);

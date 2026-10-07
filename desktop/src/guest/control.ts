@@ -13,7 +13,7 @@ export const NO_HELLO = "The host has not answered hello";
 export interface ControlRoots {
   uid(root: string): number;
   setup(root: string, folder: string, share: Share, user: HostUser, ended: ProcessHandle[]): Promise<void>;
-  teardown(root: string): Promise<void>;
+  teardown(root: string, share: Share): Promise<void>;
   // Rejects with the refusal for the root's commands.
   protect(root: string, keys: ProtectedKey[]): Promise<void>;
   // Never rejects: whatever goes wrong is an outcome.
@@ -97,8 +97,8 @@ export class Control {
           this.send({ type: "result", id, outcome });
         });
     } else if (message.type === "teardown") {
-      if (!isText(message.root)) return this.send({ type: "failed", id, message: malformed("teardown") });
-      this.roots.teardown(message.root).then(
+      if (!isText(message.root) || !isShare(message.share)) return this.send({ type: "failed", id, message: malformed("teardown") });
+      this.roots.teardown(message.root, message.share).then(
         () => this.send({ type: "done", id }),
         (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
       );

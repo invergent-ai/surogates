@@ -67,7 +67,7 @@ export function virtiofsdArgs(folder: string, socket: string, guestUid: number, 
 }
 
 // QEMU's monitor: a greeting, the capabilities' negotiation, then one command at a
-// time, answered in turn by "return" or "error"; events come in between and are skipped.
+// time, answered in turn by "return" or "error"; events come in between, to whoever listens.
 export class Qmp {
   private readonly waiting: Array<{ resolve: (value: unknown) => void; reject: (error: Error) => void }> = [];
   private greet: (error?: Error) => void = () => {};
@@ -75,6 +75,8 @@ export class Qmp {
     this.greet = (error) => (error ? reject(error) : resolve());
   });
   private closed = false;
+  // What listens for each event, by its name.
+  private readonly listeners = new Map<string, Set<(data: Record<string, unknown>) => void>>();
 
   private constructor(private readonly socket: Socket) {
     // Nobody may be waiting for it when the monitor closes.
@@ -138,6 +140,14 @@ export class Qmp {
     });
   }
 
+  /** Told the data of each *event* QEMU sends, until what it returns is called. */
+  on(event: string, listener: (data: Record<string, unknown>) => void): () => void {
+    const listening = this.listeners.get(event) ?? new Set();
+    this.listeners.set(event, listening);
+    listening.add(listener);
+    return () => void listening.delete(listener);
+  }
+
   // Once QEMU closed it, or a command went unanswered: no command reaches QEMU again.
   get gone(): boolean {
     return this.closed;
@@ -156,6 +166,11 @@ export class Qmp {
       return;
     }
     if ("QMP" in message) return this.greet();
+    if (typeof message.event === "string") {
+      const data = (typeof message.data === "object" && message.data !== null ? message.data : {}) as Record<string, unknown>;
+      for (const listener of this.listeners.get(message.event) ?? []) listener(data);
+      return;
+    }
     if (!("return" in message) && !("error" in message)) return;
     const waiter = this.waiting.shift();
     if ("return" in message) waiter?.resolve(message.return);

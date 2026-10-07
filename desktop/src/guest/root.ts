@@ -49,7 +49,8 @@ const NAMED = 20;
 const LAYOUT = "/etc/surogate/environment";
 const FIRST_UID = 10_000;
 const ROOT_ID = /^[A-Za-z0-9_-]{1,64}$/;
-const TAG = /^r[0-9]{1,3}$/;
+// A share's number in its guest is never used again there, so it grows with every folder added.
+const TAG = /^r[1-9][0-9]{0,8}$/;
 // Any name a passwd line can hold, as directories join AD users (ana@corp.example):
 // no ':', newline, NUL or '/', no leading '-', at most 256 characters.
 const NAME = /^(?!-)[^:\n\0/]{1,256}$/;
@@ -148,6 +149,16 @@ async function mountShare(tag: string): Promise<string> {
   }
   mounted.add(tag);
   return share;
+}
+
+// A share's mount goes, lazily: a process of its root's stuck in a share that stalled
+// keeps it until it lets go. The host removes the share from the guest next.
+export async function unmountShare(share: Share): Promise<void> {
+  if (!TAG.test(share.tag)) return;
+  mounted.delete(share.tag);
+  const path = join(SHARES, share.tag);
+  await execute("/usr/bin/umount", ["-l", path]).catch(() => {});
+  await rmdir(path).catch(() => {});
 }
 
 // The root's runner in its own namespaces: mount, PID, IPC, UTS, network and
@@ -467,6 +478,8 @@ export interface RootsOptions {
   cgroups?: string;
   // Binds each path over itself as its mode says, in the namespace of the root whose unshare is *pid* (bindOver).
   protect?(pid: number, binds: Array<[string, BindMode]>): Promise<Bound>;
+  // The mount of a share whose root was torn down goes (unmountShare).
+  unmount?(share: Share): Promise<void>;
   questionMs?: number;
 }
 
@@ -574,17 +587,20 @@ export class Roots {
     await this.roots.get(root)?.protect(keys);
   }
 
-  // Everything of *root* ends and it is forgotten, its share left mounted: the host
-  // is letting its folder go. Its next operation sets it up again.
-  async teardown(root: string): Promise<void> {
+  // Everything of *root* ends and it is forgotten, then the mount of *share*, its folder's,
+  // goes: the host is letting the folder go, and removes the share next. Its next
+  // operation shares its folder and sets it up again.
+  async teardown(root: string, share: Share): Promise<void> {
     // A setup under way lands first, and what it set up ends with the rest.
     await this.starting.get(root)?.catch(() => {});
     this.registries.delete(root);
     const target = this.roots.get(root);
-    if (!target) return;
-    // Out of the list first: the end of its runner is no loss to tell.
-    this.roots.delete(root);
-    await target.end();
+    if (target) {
+      // Out of the list first: the end of its runner is no loss to tell.
+      this.roots.delete(root);
+      await target.end();
+    }
+    await this.options.unmount?.(share);
   }
 
   // One process operation's outcome. Never rejects. A root whose runner cannot answer

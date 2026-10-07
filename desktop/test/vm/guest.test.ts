@@ -67,6 +67,12 @@ const folderOf = (path: string): Folder => {
   const { dev, ino } = statSync(path);
   return { path, dev, ino };
 };
+// The pid of the newest share's virtiofsd in the runtime folder *run*: each share has a number of its own.
+const newestDaemon = (run: string) => {
+  const newest = Math.max(...readdirSync(run).map((name) => Number(/^vfs-(\d+)\.pid$/.exec(name)?.[1] ?? 0)));
+  return Number(readFileSync(join(run, `vfs-${newest}.pid`), "utf8"));
+};
+const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
 
 // The agent disk from the built agent, into *dir*.
 function agentDisk(dir: string): string {
@@ -492,15 +498,46 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     await new Promise((resolve) => setTimeout(resolve, 2_500));
   });
 
-  it("holds a folder for each root up to its eight root ports, and says why it takes no ninth", async () => {
+  it("holds a folder for each root up to its eight root ports, says why it takes no ninth, and takes it once one has left", async () => {
     // Two are in; six more, then one too many.
-    for (let n = 3; n <= 9; n += 1) {
-      const path = join(dir, `more-${n}`);
+    const more = Array.from({ length: 7 }, (_, n) => {
+      const path = join(dir, `more-${n + 3}`);
       mkdirSync(path);
-      const added = guest.share(`root-${n}`, folderOf(path));
-      if (n <= 8) expect(await added).toEqual({ kind: "virtiofs", tag: `r${n}` });
-      else await expect(added).rejects.toThrow("it holds 8 folders already, its most until the app restarts");
+      return [`root-${n + 3}`, folderOf(path)] as const;
+    });
+    for (const [root, shared] of more.slice(0, 6)) expect(await guest.ready(root, shared)).toBeNull();
+    const [ninth, its] = more[6]!;
+    expect(await guest.ready(ninth, its)).toEqual({
+      error: { type: "unavailable", message: "This computer's sandbox could not add this chat's folder: it holds 8 folders already, each of a chat at work" },
+    });
+    await guest.teardown("root-3");
+    expect(await guest.ready(ninth, its)).toBeNull();
+    expect(await guest.op(ninth, "run", { command: "pwd", workdir: null, timeout: 10 }, signal())).toMatchObject({ ok: { output: `${its.path}\n` } });
+    for (const [root] of more.slice(1)) await guest.teardown(root);
+  });
+
+  it("adds and removes a root's folder again and again, two roots at once, each time on a root port another has let go", async () => {
+    const roots = [["root-a", join(dir, "cycle-a")], ["root-b", join(dir, "cycle-b")]] as const;
+    for (const [, path] of roots) mkdirSync(path, { recursive: true });
+    const added: number[] = [];
+    const removed: number[] = [];
+    for (let cycle = 0; cycle < 20; cycle += 1) {
+      await Promise.all(roots.map(async ([root, path]) => {
+        writeFileSync(join(path, "cycle"), `${cycle}\n`);
+        let begun = performance.now();
+        expect(await guest.ready(root, folderOf(path))).toBeNull();
+        added.push(performance.now() - begun);
+        expect(await guest.op(root, "run", { command: "cat cycle", workdir: null, timeout: 10 }, signal())).toMatchObject({ ok: { output: `${cycle}\n` } });
+        begun = performance.now();
+        await guest.teardown(root);
+        removed.push(performance.now() - begun);
+      }));
     }
+    expect(guest.ended).toBe(false);
+    console.log(
+      `M3: a folder added and its root set up in ${median(added).toFixed(0)} ms (median, max ${Math.max(...added).toFixed(0)}), ` +
+      `torn down and removed in ${median(removed).toFixed(0)} ms (median, max ${Math.max(...removed).toFixed(0)}), 40 cycles, none failed`,
+    );
   });
 
   it("repairs a sessions disk the quick check cannot, and keeps the homes on it", async () => {
@@ -667,7 +704,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
   it("stops a guest whose folder's virtiofsd goes, and boots a new one for the next operation", async () => {
     const running = op(ROOT, join(dir, "a"), "run", { command: "sleep 30", workdir: null, timeout: 60 });
     await new Promise((resolve) => setTimeout(resolve, 500));
-    process.kill(Number(readFileSync(join(options.run, "vfs-1.pid"), "utf8")), "SIGKILL");
+    process.kill(newestDaemon(options.run), "SIGKILL");
     expect(await running).toEqual(SANDBOX_STOPPED);
     expect(await op(ROOT, join(dir, "a"), "run", { command: "echo again", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "again\n" } });
   });
@@ -736,26 +773,43 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     for (const root of [...busy, "fifth"]) await managers.at(-1)!.teardown(root);
   });
 
-  it("sets a root up again only once everything of it has ended, and says why not until then", async () => {
+  it("loses a guest that does not let a torn-down root's folder go, and boots a new one for the next operation", async () => {
+    // A removal's bound of its own: the share's. The manager before it stops first, so its guest has let the disks go.
+    await managers.at(-1)?.stop();
+    managers.push(new VmManager({ ...options, shareMs: 3_000 }));
     const a = join(dir, "a");
+    expect(await op(ROOT, a, "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
     // Its folder's virtiofsd: the daemon, and the child that serves the share.
-    const daemon = Number(readFileSync(join(options.run, "vfs-1.pid"), "utf8"));
+    const daemon = newestDaemon(options.run);
     const share = [daemon, ...spawnSync("pgrep", ["-P", String(daemon)], { encoding: "utf8" }).stdout.trim().split("\n").map(Number)];
-    // A process that looks in the folder once its share has stalled: until the share answers, it cannot end.
+    const qemu = qemuPid();
+    // A process that looks in the folder once its share has stalled: the guest cannot let the share go while it waits.
     const stuck = "env -i /usr/bin/setsid /usr/bin/nohup /bin/sh -c '/usr/bin/sleep 1; /usr/bin/stat ./stuck' < /dev/null > /dev/null 2>&1 & echo started";
     expect(await op(ROOT, a, "start", background(stuck))).toMatchObject({ ok: { session_id: expect.any(String) } });
     await new Promise((resolve) => setTimeout(resolve, 500));
     for (const pid of share) process.kill(pid, "SIGSTOP");
     try {
       await new Promise((resolve) => setTimeout(resolve, 1_500));
+      const begun = performance.now();
       await managers.at(-1)!.teardown(ROOT);
-      expect(await op(ROOT, a, "run", { command: "echo back", workdir: null, timeout: 10 })).toEqual({
-        error: { type: "unavailable", message: "This computer's sandbox could not set up this chat: what this chat ran before has not ended yet" },
-      });
+      // The agent's 3 s for the root's processes to end, then the removal's 3 s.
+      expect(performance.now() - begun).toBeLessThan(10_000);
+      expect(() => process.kill(qemu, 0)).toThrow();
     } finally {
-      for (const pid of share) process.kill(pid, "SIGCONT");
+      for (const pid of share) {
+        try {
+          process.kill(pid, "SIGCONT");
+        } catch {
+          // Gone with its guest.
+        }
+      }
     }
     expect(await op(ROOT, a, "run", { command: "echo back", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "back\n" } });
+    expect(qemuPid()).not.toBe(qemu);
+    // The tests after this one bound a share by the default 15 s, with a guest running.
+    await managers.at(-1)!.stop();
+    managers.push(new VmManager(options));
+    expect(await op(ROOT, a, "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
   });
 
   it("stops a guest that has not added a root's folder in 15 s, and answers as stopped by the sandbox", async () => {
