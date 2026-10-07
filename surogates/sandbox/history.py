@@ -19,7 +19,7 @@ import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from surogates.tools.utils.checkpoint_manager import DEFAULT_EXCLUDES
 
@@ -138,10 +138,13 @@ class History:
 
         ``changes`` are the files the turn changed since its base whose real
         file is still the base's version, or already the turn's.
-        ``overlapped`` are those whose real file changed otherwise since: a
-        landing leaves them out.  ``commit`` is None when the turn changed
-        nothing since its base.  ``repositories`` are the folders holding a
-        git repository that the turn wrote into: they never land.
+        ``overlapped`` are those whose real file changed otherwise since, or
+        that the real files cannot take as a file (a folder is there, or a
+        file where its folder would be): a landing leaves them out.  A
+        rename's two sides, and a file and a folder of one name, are left
+        out together.  ``commit`` is None when the turn changed nothing
+        since its base.  ``repositories`` are the folders holding a git
+        repository that the turn wrote into: they never land.
         """
         self._add_all(self._copy)
         excluded, repositories = self._excluded()
@@ -151,16 +154,15 @@ class History:
             return {"commit": None, "changes": [], "overlapped": [], **left_out}
         self._copy(*_as(author), "commit", "-q", "--allow-empty", "-m", "Turn", "-m", _block(trailers))
         turn = self._copy("rev-parse", "HEAD")
-        changes, overlapped = [], []
-        raw = self._main("diff", "--raw", "-z", "--no-renames", "--no-abbrev", base, turn).split("\0")
-        for meta, path in zip(raw[0::2], raw[1::2]):
-            _, _, old, new, _ = meta.split(" ")
-            real, before, after = self._real(path), _blob(old), _blob(new)
-            if real in (before, after):
-                # A real file already as the turn left it lands as a no-op.
-                changes.append({"path": path, "before": real, "after": after})
-            else:
-                overlapped.append({"path": path})
+        versions, links = self._diff(base, turn)
+        real = {path: self._real(path) for path in versions if self._fits(path)}
+        held = _together({p for p, kept in versions.items() if p not in real or real[p] not in kept}, links)
+        changes = [
+            # A real file already as the turn left it lands as a no-op.
+            {"path": path, "before": real[path], "after": versions[path][1]}
+            for path in sorted(versions) if path not in held
+        ]
+        overlapped = [{"path": path} for path in sorted(held)]
         return {"commit": turn, "changes": changes, "overlapped": overlapped, **left_out}
 
     def apply(self, path: str, before: str | None, after: str | None) -> dict:
@@ -228,6 +230,38 @@ class History:
         self._main("update-ref", self.branch, landing)
         self._main("update-ref", self.base, landing)
         return {"commit": landing}
+
+    def _diff(self, base: str, turn: str) -> tuple[dict[str, tuple[str | None, str | None]], list[tuple[str, str]]]:
+        """Each file the turn changed since *base*, as ``(before, after)``, and the pairs that land together.
+
+        A pair is a rename's two sides, or a file and a folder of one name.
+        """
+        fields = iter(self._main("diff", "--raw", "-z", "-M", "--no-abbrev", base, turn).split("\0"))
+        versions: dict[str, tuple[str | None, str | None]] = {}
+        links: list[tuple[str, str]] = []
+        for meta in fields:
+            if not meta:
+                break
+            _, _, old, new, status = meta.split(" ")
+            if status.startswith("R"):
+                source, target = next(fields), next(fields)
+                versions[source], versions[target] = (_blob(old), None), (None, _blob(new))
+                links.append((source, target))
+            else:
+                versions[next(fields)] = (_blob(old), _blob(new))
+        links += [(p, str(folder)) for p in versions for folder in PurePosixPath(p).parents if str(folder) in versions]
+        return versions, links
+
+    def _fits(self, path: str) -> bool:
+        """Whether the real files can take a file at *path*: inside them, not a folder, under no file."""
+        try:
+            target = self._inside(path)
+        except HistoryError:
+            return False
+        folder = target.parent
+        while not folder.exists():
+            folder = folder.parent
+        return folder.is_dir() and not target.is_dir()
 
     def _add_all(self, git: Callable[..., str]) -> None:
         """``git add -A``, leaving out every folder that holds a git repository.
@@ -328,8 +362,15 @@ def _environ(env: dict[str, str]) -> dict[str, str]:
 
 
 def _pattern(name: str) -> str:
-    """An exclude pattern that matches *name* alone.  A newline, which a pattern cannot hold, matches any one character."""
+    """An exclude pattern for *name* alone.  A newline, which a pattern cannot hold, matches any one character."""
     return re.sub(r"([\\*?\[])", r"\\\1", name).replace("\n", "?")
+
+
+def _together(held: set[str], links: list[tuple[str, str]]) -> set[str]:
+    """*held*, and every path linked to one held: a pair lands whole or not at all."""
+    while more := ({b for a, b in links if a in held} | {a for a, b in links if b in held}) - held:
+        held |= more
+    return held
 
 
 def _as(author: dict[str, str]) -> list[str]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -365,3 +366,47 @@ def test_a_thread_that_clones_or_inits_a_repository_in_its_copy_still_lands_its_
     assert (out["repositories"], out["excluded"]) == (["clone/", "hello/"], [])
     assert (project / "summary.md").read_text() == "a summary"
     assert not (project / "clone").exists() and not (project / "hello").exists()
+
+
+def test_a_rename_onto_a_name_someone_took_since_lands_neither_side(tmp_path, project):
+    (project / "Draft.docx").write_bytes(b"the draft")
+    (project / "Old.docx").write_bytes(b"an old version")
+    history = opened(tmp_path, project)
+    (history.copy / "Draft.docx").rename(history.copy / "Final.docx")
+    (history.copy / "Old.docx").rename(history.copy / "Archived.docx")
+    (project / "Final.docx").write_bytes(b"your own final")
+    out = landed(history)
+    assert out["overlapped"] == [{"path": "Draft.docx"}, {"path": "Final.docx"}]
+    # The draft survives; a rename nobody crossed lands whole.
+    assert (project / "Draft.docx").read_bytes() == b"the draft"
+    assert (project / "Final.docx").read_bytes() == b"your own final"
+    assert sorted(c["path"] for c in out["changes"]) == ["Archived.docx", "Old.docx"]
+    assert (project / "Archived.docx").read_bytes() == b"an old version" and not (project / "Old.docx").exists()
+
+
+def test_a_change_of_shape_is_left_out_and_never_fails_the_landing(tmp_path, project):
+    (project / "notes").mkdir()
+    (project / "notes" / "a.md").write_text("a")
+    (project / "plan.md").write_text("plan")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (project / "linked").symlink_to(outside)  # a real folder that is a link out of the project
+    history = opened(tmp_path, project)
+    shutil.rmtree(history.copy / "notes")
+    (history.copy / "notes").write_text("notes, one file")  # a folder becomes a file
+    (history.copy / "plan.md").unlink()
+    (history.copy / "plan.md").mkdir()
+    (history.copy / "plan.md" / "q1.md").write_text("q1")  # a file becomes a folder
+    (history.copy / "linked").unlink()
+    (history.copy / "linked").mkdir()
+    (history.copy / "linked" / "x.md").write_text("x")
+    (history.copy / "Report.docx").write_bytes(b"report v2")
+    out = landed(history)
+    assert [c["path"] for c in out["changes"]] == ["Report.docx"]
+    assert [o["path"] for o in out["overlapped"]] == [
+        "linked", "linked/x.md", "notes", "notes/a.md", "plan.md", "plan.md/q1.md",
+    ]
+    assert (project / "notes" / "a.md").read_text() == "a"
+    assert (project / "plan.md").read_text() == "plan"
+    assert (project / "Report.docx").read_bytes() == b"report v2"
+    assert not list(outside.iterdir()) and not list(project.rglob("*.landing~"))
