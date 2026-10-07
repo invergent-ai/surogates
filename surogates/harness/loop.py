@@ -773,8 +773,10 @@ class AgentHarness(
         in place of the raw command replay rebuilt.  Nothing when that
         message ran no skill, or replay folded it into another."""
         raw = _latest_user_event_text(all_events)
+        # This message's skill, not one the same words ran before.
+        typed_at = max((event.id for event in all_events if event.type == EventType.USER_MESSAGE.value), default=0)
         if not any(
-            event.type == EventType.SKILL_INVOKED.value and event.data.get("raw_message") == raw
+            event.type == EventType.SKILL_INVOKED.value and event.id > typed_at and event.data.get("raw_message") == raw
             for event in all_events
         ):
             return

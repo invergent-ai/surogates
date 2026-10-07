@@ -354,14 +354,15 @@ async def test_the_library_shows_an_upload_as_added_and_a_threads_file_as_produc
     assert (opened.status_code, opened.content) == (200, b"PK memo")
 
 
-async def test_a_file_two_threads_produced_is_the_last_ones(api):
+@pytest.mark.parametrize("ref", ["./A.docx", "/workspace/A.docx"])
+async def test_a_file_two_threads_produced_is_the_last_ones(api, ref):
     project = await create(api)
     master = await master_of(api, project)
     first, second = await start(api, master), await start(api, master, title="Check A", goal="Check A.docx.")
     await written(api, first, "A.docx")
     # Last by event id, not the thread started last; a ref as the model gave it.
     await turn_ends(api, second, files=["A.docx"])
-    await turn_ends(api, first, files=["./A.docx"])
+    await turn_ends(api, first, files=[ref])
     [entry] = (await library(api, project)).json()
     assert (entry["origin"], entry["thread_id"]) == ("produced", str(first.id))
 
@@ -422,12 +423,15 @@ async def test_the_library_is_its_owners(api, session_factory):
 BOARD_PACK = "Lay the pack out as the board likes it: one page per figure."
 
 
-async def reported_after(api, text: str, ran: tuple[EventType, dict] | None):
+async def reported_after(api, text: str, ran: tuple[EventType, dict] | None, before=()):
     """A master whose last message was *text*, which its wake ran as *ran*
-    (an event and its data), and whose thread has reported since."""
+    (an event and its data), after *before*'s events, and whose thread has
+    reported since."""
     master = await master_of(api, await create(api))
     thread = await start(api, master)
     store = api.app.state.session_store
+    for event in before:
+        await store.emit_event(master.id, *event)
     await store.emit_event(master.id, EventType.USER_MESSAGE, {"content": text})
     if ran is not None:
         await store.emit_event(master.id, *ran)
@@ -462,12 +466,17 @@ async def test_a_report_wake_reads_the_skill_the_users_last_message_ran(api, mon
     assert len(await api.app.state.session_store.get_events(master.id, types=[EventType.SKILL_INVOKED])) == 1
 
 
-@pytest.mark.parametrize("text, ran", [
-    ("/cfo Check the Q3 margins", (EventType.EXPERT_DELEGATION, {"expert": "cfo"})),
-    ("Draft the Q3 pack", None),
-], ids=["expert", "plain"])
-async def test_a_report_wake_runs_nothing_the_users_last_message_asked_for(api, monkeypatch, text, ran):
-    master = await reported_after(api, text, ran)
+@pytest.mark.parametrize("text, ran, before", [
+    ("/cfo Check the Q3 margins", (EventType.EXPERT_DELEGATION, {"expert": "cfo"}), ()),
+    ("Draft the Q3 pack", None, ()),
+    # The same command ran as a skill once, before an expert took its name.
+    ("/board-pack Q3", (EventType.EXPERT_DELEGATION, {"expert": "board-pack"}), (
+        (EventType.USER_MESSAGE, {"content": "/board-pack Q3"}),
+        (EventType.SKILL_INVOKED, {"skill": "board-pack", "raw_message": "/board-pack Q3", "staged_at": None}),
+    )),
+], ids=["expert", "plain", "a_skill_it_ran_before"])
+async def test_a_report_wake_runs_nothing_the_users_last_message_asked_for(api, monkeypatch, text, ran, before):
+    master = await reported_after(api, text, ran, before)
     harness, handed = waking(api, monkeypatch)
     dispatch = skills_answering(harness)
     await harness.wake(master.id)

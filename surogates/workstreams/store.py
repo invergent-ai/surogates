@@ -290,8 +290,9 @@ class WorkstreamStore:
             for thread_id, artifacts in summaries:
                 for artifact in artifacts if isinstance(artifacts, list) else []:
                     if isinstance(artifact, dict) and artifact.get("kind") == "file" and isinstance(artifact.get("ref"), str):
-                        # The model's argument as given: ``./a.docx`` is ``a.docx``.
-                        produced[posixpath.normpath(artifact["ref"])] = thread_id
+                        # The model's argument as given: ``./a.docx`` and
+                        # ``/workspace/a.docx`` are ``a.docx``.
+                        produced[posixpath.normpath(artifact["ref"]).removeprefix("/workspace/")] = thread_id
         return produced
 
     async def masters(self, master_ids: list[UUID]) -> dict[UUID, tuple[datetime, bool]]:
