@@ -190,6 +190,32 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("quitting", () => {
     await answer(shell, 0);
   });
 
+  it("hides the window, asking nothing more, when it is closed with Keep running off while a quit waits for the threads", async () => {
+    mkdirSync(join(home, "surogate"), { recursive: true });
+    writeFileSync(join(home, "surogate", "preferences.json"), JSON.stringify({ keepRunning: false }));
+    const { shell } = await bound();
+    agent.link.send(op("run-7", "run", { command: "sleep 605", workdir: null, timeout: 900 }));
+    await expect.poll(() => sleeping(605), { timeout: 30_000 }).toBe(1);
+    const shown = () => shell.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.isVisible());
+    const close = () => shell.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.close());
+    // Closed: the quit asks, and is told to wait for them, and the window stays.
+    await answer(shell, 1);
+    await close();
+    await expect.poll(async () => (await asked(shell)).at(-1)?.message).toBe("Surogate is still working");
+    expect(await shown()).toBe(true);
+    const questions = (await asked(shell)).length;
+    // Closed again while the quit waits: the window goes, as with Keep running on, and nothing more is asked.
+    await close();
+    await expect.poll(shown).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect((await asked(shell)).length).toBe(questions);
+    expect(await sleeping(605)).toBe(1);
+    // Quit now, so the test's own quit goes through the app's.
+    await answer(shell, 0);
+  });
+
   it("waits for the threads when told to, and quits once they finish", async () => {
     const { shell } = await bound();
     agent.link.send(op("run-3", "run", { command: "sleep 601", workdir: null, timeout: 900 }));

@@ -1914,7 +1914,9 @@ if (!app.requestSingleInstanceLock()) {
     powerMonitor.on("resume", () => vm?.resume());
     const page = join(PAGES, "shell.html");
     main = new MainWindow({
-      states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed, quitsOnClose: () => !preferences.get().keepRunning,
+      states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed,
+      // A quit already waiting for the threads asks nothing more: the window hides meanwhile, as with Keep running on.
+      quitsOnClose: () => !preferences.get().keepRunning && !waiting,
       // Started at login: the window waits for the user, in the tray or at the next launch.
       hidden: process.argv.includes(HIDDEN),
     });
