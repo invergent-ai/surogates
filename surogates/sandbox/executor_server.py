@@ -25,15 +25,20 @@ probes it).
 from __future__ import annotations
 
 import asyncio
+import base64
 import hmac
 import json
 import logging
 import multiprocessing
 import os
+import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
+
+from surogates.sandbox.history import History, HistoryError
 
 logger = logging.getLogger("tool-executor")
 
@@ -62,6 +67,12 @@ _MAX_READ_TIMESTAMPS = 1024
 
 # Tools whose success means the agent has now seen the file's content.
 _READ_TOOL_NAMES = frozenset({"read_file", "write_file", "patch"})
+
+# The most ``_file`` moves either way: the document cap.
+_MAX_FILE_BYTES = 50 * 1024 * 1024
+
+# A landing's steps, as ``_history`` actions, and the History method each runs.
+_HISTORY_STEPS = {"commit": "commit_turn", "apply": "apply", "unapply": "unapply", "record": "record"}
 
 
 def _record_read(name: str, args: dict, workspace: str, result: str) -> None:
@@ -175,11 +186,72 @@ def _run_checkpoint(args: dict, workspace: str) -> str:
     })
 
 
+def _run_copy_checkpoint(args: dict, history: History) -> str:
+    """``_checkpoint`` in a thread's pod: snapshots are commits on its
+    branch, taken in its copy, and a restore removes the files they lack."""
+    action = args.get("action", "take")
+    try:
+        if action == "take":
+            return json.dumps({"success": True, "action": "take", "hash": history.snapshot(args.get("reason", "auto"))})
+        if action == "restore":
+            history.restore(args.get("hash", ""))
+            return json.dumps({"success": True, "restored_to": args.get("hash", "")[:8]})
+    except HistoryError as exc:
+        return json.dumps({"success": False, "error": str(exc)})
+    return json.dumps({"success": False, "error": f"Unknown checkpoint action: {action}"})
+
+
+def _run_history(args: dict, history: History | None) -> str:
+    """``_history``: one step of a landing, run on the pod's history."""
+    if history is None:
+        return json.dumps({"error": "This pod has no copy of a project's files"})
+    step = dict(args)
+    method = _HISTORY_STEPS.get(step.pop("action", None))
+    if method is None:
+        return json.dumps({"error": f"Unknown history action: {args.get('action')}"})
+    try:
+        return json.dumps(getattr(history, method)(**step))
+    # A real file's write can time out or fail on the mount, past git's own errors.
+    except (HistoryError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def _run_file(args: dict, workspace: str) -> str:
+    """``_file``: read or write one file of the workspace, base64, up to 50 MiB.
+
+    In a thread's pod the workspace is its copy: the harness tools that
+    would reach the project's files through object storage come here.
+    """
+    path = str(args.get("path") or "")
+    root = os.path.realpath(workspace)
+    target = os.path.realpath(os.path.join(root, path))
+    if not path or os.path.commonpath([root, target]) != root or target == root:
+        return json.dumps({"error": f"{path} is outside the workspace"})
+    too_large = f"{path} is over the 50 MiB a file may be"
+    if args.get("action") == "read":
+        if not os.path.isfile(target):
+            return json.dumps({"error": f"{path} not found"})
+        if os.path.getsize(target) > _MAX_FILE_BYTES:
+            return json.dumps({"error": too_large})
+        with open(target, "rb") as fh:
+            return json.dumps({"content_b64": base64.b64encode(fh.read()).decode()})
+    if args.get("action") == "write":
+        data = base64.b64decode(args.get("content_b64") or "")
+        if len(data) > _MAX_FILE_BYTES:
+            return json.dumps({"error": too_large})
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as fh:
+            fh.write(data)
+        return json.dumps({"ok": True, "bytes": len(data)})
+    return json.dumps({"error": f"Unknown file action: {args.get('action')}"})
+
+
 def run_tool(
     name: str,
     args: dict,
     workspace: str,
     read_timestamps: dict | None = None,
+    history: History | None = None,
 ) -> str:
     """Dispatch one tool call through the real handlers.
 
@@ -189,6 +261,8 @@ def run_tool(
     *read_timestamps* is the parent's record of files read this session,
     seeded into the child's tracker so read-dependent guards (blind
     overwrite, staleness) can see reads that happened in earlier forks.
+
+    *history* is a thread's pod's: its checkpoints are its copy's.
     """
     if read_timestamps:
         from surogates.tools.builtin.file_ops import seed_read_timestamps
@@ -196,7 +270,13 @@ def run_tool(
         seed_read_timestamps(read_timestamps)
 
     if name == "_checkpoint":
+        if history is not None:
+            return _run_copy_checkpoint(args, history)
         return _run_checkpoint(args, workspace)
+    if name == "_history":
+        return _run_history(args, history)
+    if name == "_file":
+        return _run_file(args, workspace)
     if name == "_code":
         # The payload may carry a credential on launch; never log args.
         from surogates.coding_agents.pod_runner import dispatch as code_dispatch
@@ -242,6 +322,7 @@ def _child_main(
     args: dict,
     workspace: str,
     read_timestamps: dict | None = None,
+    history: History | None = None,
 ) -> None:
     """Entry point of the forked child: run the tool, ship the result."""
     # The forked thread inherits the parent's "running event loop"
@@ -250,7 +331,7 @@ def _child_main(
     # this line is belt-and-braces against that hook changing.
     asyncio._set_running_loop(None)
     try:
-        result = run_tool(name, args, workspace, read_timestamps)
+        result = run_tool(name, args, workspace, read_timestamps, history)
     except BaseException as exc:  # never die without reporting
         result = json.dumps({"exit_code": 1, "output": "", "error": str(exc)})
     try:
@@ -260,7 +341,7 @@ def _child_main(
 
 
 async def execute_in_child(
-    name: str, args: dict, workspace: str, timeout: float,
+    name: str, args: dict, workspace: str, timeout: float, history: History | None = None,
 ) -> str:
     """Fork a child, run *name* in it, and return its result JSON.
 
@@ -273,7 +354,7 @@ async def execute_in_child(
     parent_conn, child_conn = _MP.Pipe(duplex=False)
     proc = _MP.Process(
         target=_child_main,
-        args=(child_conn, name, args, workspace, dict(_READ_TIMESTAMPS)),
+        args=(child_conn, name, args, workspace, dict(_READ_TIMESTAMPS), history),
         daemon=True,
     )
     proc.start()
@@ -324,23 +405,49 @@ def create_app(
     max_concurrency: int = MAX_CONCURRENCY,
     default_timeout: int = DEFAULT_TIMEOUT,
     require_fuse: bool = True,
+    history: History | None = None,
 ) -> FastAPI:
     """Build the daemon's FastAPI app.
 
     ``token`` and ``workspace`` are injected (instead of read from env
     inside the handlers) so tests can construct isolated apps.
+
+    A thread's pod has a *history*: the project's real files are mounted at
+    its ``project``, and ``workspace`` is the thread's copy, made from them
+    before the pod reports ready.
     """
     app = FastAPI()
     sem = asyncio.Semaphore(max_concurrency)
+    mount = str(history.project) if history is not None else workspace
+    opened = history is None
+    # Why the copy can never be made in this pod: it stays not ready.
+    failed: str | None = None
+    open_lock = asyncio.Lock()
 
     @app.get("/healthz")
     async def healthz() -> Response:
+        nonlocal opened, failed
         # When the workspace is not a FUSE mount (Docker bind-mount or
         # ephemeral), the FUSE check is the wrong readiness signal; the
         # backend disables it via require_fuse=False.
-        if not require_fuse or workspace_mounted(workspace, mounts_path):
-            return Response(content="ok", status_code=200)
-        return Response(content="workspace not mounted", status_code=503)
+        if require_fuse and not workspace_mounted(mount, mounts_path):
+            return Response(content="workspace not mounted", status_code=503)
+        async with open_lock:
+            if failed is None and not opened:
+                try:
+                    await asyncio.to_thread(history.open)
+                except (HistoryError, OSError) as exc:
+                    logger.error("The thread's copy was not made: %s", exc)
+                    # open() starts over only while it has no repository:
+                    # once made, a copy may be half checked out, so a
+                    # retry cannot make it again.
+                    if (history.repo / "HEAD").exists():
+                        failed = str(exc)
+                    return Response(content=f"copy not made: {exc}", status_code=503)
+                opened = True
+        if failed is not None:
+            return Response(content=f"copy not made: {failed}", status_code=503)
+        return Response(content="ok", status_code=200)
 
     @app.post("/execute")
     async def execute(request: Request) -> Response:
@@ -371,7 +478,7 @@ def create_app(
             logger.info("→ %s %s", name, preview)
 
         async with sem:
-            result = await execute_in_child(name, args, workspace, timeout)
+            result = await execute_in_child(name, args, workspace, timeout, history)
         logger.info("← %s (%d bytes)", name, len(result))
         return Response(content=result, media_type="application/json")
 
@@ -398,6 +505,19 @@ def main() -> None:
     # /healthz ready once the registry has loaded. Defaults on for K8s.
     require_fuse = os.environ.get("TOOL_EXECUTOR_REQUIRE_FUSE", "1") != "0"
 
+    # A thread's pod: the real files at PROJECT_DIR, its copy at the
+    # workspace, and the history in the pod's home.
+    project = os.environ.get("PROJECT_DIR")
+    history = None
+    if project:
+        from surogates.tools.utils.checkpoint_manager import _shadow_repo_path
+
+        history = History(
+            repo=_shadow_repo_path(project, base=Path.home() / ".surogates" / "history"),
+            project=Path(project), copy=Path(workspace),
+            thread=os.environ["HISTORY_THREAD"], user=os.environ.get("USER_ID", ""),
+        )
+
     logger.info("Loading tool registry...")
     init_registry()
     logger.info("Registry loaded; serving on 0.0.0.0:%d", port)
@@ -405,7 +525,7 @@ def main() -> None:
     import uvicorn
 
     uvicorn.run(
-        create_app(token=token, workspace=workspace, require_fuse=require_fuse),
+        create_app(token=token, workspace=workspace, require_fuse=require_fuse, history=history),
         host="0.0.0.0",
         port=port,
         log_level="warning",
