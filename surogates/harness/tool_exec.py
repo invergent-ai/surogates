@@ -34,7 +34,9 @@ from surogates.harness.tool_guardrails import (
 from surogates.tools.coerce import coerce_tool_args
 from surogates.runtime.governance import floor_gate
 from surogates.runtime.turn_slots import turn_activity
+from surogates.sandbox.history import PROJECT_MOUNT
 from surogates.storage.tenant import boundary_workspace_prefix
+from surogates.workstreams import is_project_thread, thread_refusal
 
 # ---------------------------------------------------------------------------
 # Path sanitisation — replace workspace absolute paths with __WORKSPACE__
@@ -116,8 +118,16 @@ async def _build_session_sandbox_spec(
         )
 
     storage_bucket = session.config.get("storage_bucket", "")
+    # A project's thread works on its own copy: its pod mounts the real
+    # files at /project, and /workspace, the path the model and the tools
+    # know, is the copy.  The layout is the pod's root's: a thread's helper
+    # makes the thread's pod, if it is the first to need it.
+    copy = bool(storage_bucket) and (
+        is_project_thread(session.config) or bool(session.config.get("sandbox_root_thread"))
+    )
+    mount_path = PROJECT_MOUNT if copy else _WORKSPACE_MOUNT_PATH
     has_workspace_mount = any(
-        r.mount_path == _WORKSPACE_MOUNT_PATH for r in sandbox_spec.resources
+        r.mount_path == mount_path for r in sandbox_spec.resources
     )
     if storage_bucket and not has_workspace_mount:
         sandbox_spec.resources.append(
@@ -130,9 +140,12 @@ async def _build_session_sandbox_spec(
                         sandbox_owner,
                     ),
                 ),
-                mount_path=_WORKSPACE_MOUNT_PATH,
+                mount_path=mount_path,
             ),
         )
+    if copy:
+        sandbox_spec.env["PROJECT_DIR"] = PROJECT_MOUNT
+        sandbox_spec.env["HISTORY_THREAD"] = sandbox_owner
     # Pass through skill-declared env vars to the sandbox pod.  Only
     # matters at provisioning time — env is baked into the pod spec.
     if not sandbox_spec.env.get("_passthrough_done"):
@@ -165,6 +178,55 @@ async def _build_session_sandbox_spec(
     )
     await _apply_ssh_access(session, tenant, sandbox_spec, credential_vault)
     return sandbox_spec
+
+
+#: The first tool result on a thread's copy made afresh, when work it did
+#: since its last landed turn was in a copy that is gone.  It says what is
+#: known, not why the copy was made again: a pod lost, a turn cut off, a Stop.
+COPY_REMADE = (
+    "[This thread's copy of the project's files was made again from the project's files. "
+    "Changes this thread made after its last landed turn are not in it. "
+    "Check the files before making any of those changes again.]"
+)
+
+
+async def _copy_lost_work(store: Any, session_id: Any, before: int) -> bool:
+    """Whether a step that could change the copy ran since the thread's last landed turn end, before event *before*.
+
+    Such a step is a ``tool.call`` taken after a snapshot: reads, plans and
+    refused calls take none, and change nothing.
+    """
+    landed = await store.last_event(session_id, EventType.SESSION_COMPLETE, containing={"landed": True})
+    return await store.has_event(
+        session_id, EventType.TOOL_CALL,
+        after=landed.id if landed else None, before=before, with_key="checkpoint_hash",
+    )
+
+
+async def _snapshot_copy(
+    session: Any, tenant: Any, sandbox_pool: Any, credential_vault: Any, *, reason: str,
+) -> str | None:
+    """A snapshot of the thread's copy, as a commit on its branch.
+
+    The pod is provisioned first if the turn has none yet.  None when the
+    snapshot cannot be taken: the step then runs without one.
+    """
+    from surogates.sandbox.pool import sandbox_session_key
+
+    owner = sandbox_session_key(session)
+    try:
+        spec = await _build_session_sandbox_spec(session, tenant, owner, credential_vault=credential_vault)
+        await sandbox_pool.ensure(owner, spec)
+        # Only a copy is snapshotted: a restore never reaches the real files.
+        if not sandbox_pool.holds_copy(owner):
+            return None
+        taken = json.loads(await sandbox_pool.execute(
+            owner, "_checkpoint", json.dumps({"action": "take", "reason": reason}),
+        ))
+    except Exception:
+        logger.warning("Snapshot %s failed for session %s", reason, session.id, exc_info=True)
+        return None
+    return taken.get("hash")
 
 
 async def _apply_ssh_access(
@@ -401,6 +463,14 @@ SESSION_STARTING_TOOLS: frozenset[str] = DELEGATION_TOOLS | frozenset({
     "propose_threads",
 })
 
+# A project's thread starts no session: whatever a helper or a routine run
+# edits would stay in a copy the thread never lands.  Every session-starting
+# tool is refused, so a new one is too, but those that only reach a child
+# that already exists.
+THREAD_REFUSED_TOOLS: frozenset[str] = SESSION_STARTING_TOOLS - {
+    "send_worker_message", "unblock_task", "message_thread",
+}
+
 MAX_TOOL_WORKERS: int = 8
 
 # Read-only tools that never participate in saga tracking — they have no
@@ -415,10 +485,8 @@ SAGA_EXCLUDED_TOOLS: frozenset[str] = frozenset({
     "skill_view",
     "skills_list",
     # Saga compensation restores a sandbox checkpoint (see
-    # governance/saga/compensator.py), and checkpoints are stashed only for
-    # file-mutating tools.  ``todo`` mutates the event log, not the
-    # workspace, so a journaled step would carry no checkpoint_hash and its
-    # rollback could only raise.
+    # governance/saga/compensator.py).  ``todo`` mutates the event log, not
+    # the workspace, so restoring a checkpoint could never undo it.
     "todo",
     "web_crawl",
     "web_extract",
@@ -1250,13 +1318,28 @@ async def _run_single_tool(
     sanitized_args = _sanitize_paths(tool_args, workspace_path)
 
     # Emit TOOL_CALL event.
-    # Include checkpoint hash if the harness stashed one (file-mutating tools).
     tool_call_data: dict[str, Any] = {
         "tool_call_id": tool_call_id,
         "name": tool_name,
         "arguments": sanitized_args,
     }
-    checkpoint_hash = tc.get("_checkpoint_hash")
+    checkpoint_hash = None
+    # In a project's thread every saga step starts from a snapshot of its
+    # copy, taken right before it runs: a stop puts the copy back however
+    # the step changed it.  A call refused below for not being offered or
+    # allowed, for arguments that are not JSON, or for starting a helper, never
+    # runs, so it takes none.
+    allowed = session.config.get("tool_allow_list")
+    if (
+        saga is not None and replay_of is None and not on_device and sandbox_pool is not None
+        and tool_name not in SAGA_EXCLUDED_TOOLS and is_project_thread(session.config)
+        and (offered_tools is None or tool_name in offered_tools)
+        and (not allowed or tool_name in allowed) and parse_error is None
+        and tool_name not in THREAD_REFUSED_TOOLS
+    ):
+        checkpoint_hash = await _snapshot_copy(
+            session, tenant, sandbox_pool, credential_vault, reason=f"before {tool_name}",
+        )
     if checkpoint_hash:
         tool_call_data["checkpoint_hash"] = checkpoint_hash
 
@@ -1625,6 +1708,8 @@ async def _run_single_tool(
 
         if image_dispatched:
             pass  # result_content already set by the image branch.
+        elif tool_name in THREAD_REFUSED_TOOLS and is_project_thread(session.config):
+            result_content = json.dumps({"error": thread_refusal(tool_name)})
         elif device_call is not None and tool_name in UNAVAILABLE_TOOLS:
             result_content = refusal(tool_name)
         elif replay_of is not None and location != ToolLocation.SANDBOX:
@@ -1771,6 +1856,17 @@ async def _run_single_tool(
         make_sandbox_writer,
         maybe_persist_tool_result,
     )
+
+    # A thread on a copy just made is told, by that step's result whatever the
+    # tool, when the log says work since its last landing was in a copy now
+    # gone: its pod stopped mid-turn, or the turn was cut off and resumed, on
+    # this worker or another.
+    if sandbox_pool is not None and is_project_thread(session.config):
+        from surogates.sandbox.pool import sandbox_session_key
+        if sandbox_pool.copy_fresh(sandbox_session_key(session)) and await _copy_lost_work(
+            store, session.id, _call_event_id,
+        ):
+            result_content = f"{COPY_REMADE}\n\n{result_content}"
 
     spill_pool = device_call if device_call is not None else sandbox_pool
     if spill_pool is not None:

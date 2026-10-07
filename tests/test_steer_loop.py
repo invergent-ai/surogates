@@ -44,7 +44,6 @@ def _make_loop_harness(*, session_store: Any, budget: IterationBudget | None = N
     harness._advisor_max_tokens = 0
     harness._pending_advisor_messages = []
     harness._slash_commands = SimpleNamespace(commands=set())
-    harness._checkpoints_enabled = False
     harness._saga_enabled = False
     harness._saga_settings = None
     harness._log_policy_allowed = False
@@ -85,7 +84,6 @@ def _make_loop_harness(*, session_store: Any, budget: IterationBudget | None = N
     harness._compress_context_callback = MagicMock(return_value=lambda *a, **k: None)
     # Collaborators on the tool-execution path (used only by the mid-tool
     # steer test). Mocked so a tool-calling iteration can run end-to-end.
-    harness._inject_checkpoint_hashes = AsyncMock(return_value=None)
     harness._dynamic_loop_wait_succeeded = MagicMock(return_value=False)
     harness._active_executor = None
     harness._credential_vault = None

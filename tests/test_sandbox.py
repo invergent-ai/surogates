@@ -11,6 +11,7 @@ import pytest
 from surogates.sandbox.base import SandboxSpec, SandboxStatus
 from surogates.sandbox.pool import SandboxPool
 from surogates.sandbox.process import ProcessSandbox
+from surogates.tools.utils import checkpoint_manager
 
 
 class TestProcessSandbox:
@@ -30,6 +31,19 @@ class TestProcessSandbox:
         # echo reads stdin but just prints a newline; the important thing
         # is that the command ran successfully.
         await sandbox.destroy(sandbox_id)
+
+    @pytest.mark.asyncio
+    async def test_every_checkpoint_take_answers_a_snapshot_of_the_workspace(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(checkpoint_manager, "CHECKPOINT_BASE", tmp_path)
+        sandbox = ProcessSandbox()
+        sandbox_id = await sandbox.provision(SandboxSpec())
+        hashes = []
+        for content in ("a", "b"):
+            (sandbox._sandboxes[sandbox_id].workdir / "a.md").write_text(content)
+            taken = await sandbox.execute(sandbox_id, "_checkpoint", json.dumps({"action": "take"}))
+            hashes.append(json.loads(taken).get("hash"))
+        await sandbox.destroy(sandbox_id)
+        assert None not in hashes and hashes[0] != hashes[1]
 
     @pytest.mark.asyncio
     async def test_execute_respects_timeout(self):

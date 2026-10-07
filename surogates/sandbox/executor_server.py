@@ -5,7 +5,9 @@ load the tool registry once (the ~7.5 CPU-second import cost is paid
 during pod startup, before the port binds), then serve HTTP:
 
     POST /execute   {"name": ..., "args": {...}, "timeout": 300}
-    GET  /healthz   -> 200 when $WORKSPACE_DIR has a live FUSE mount
+    GET  /healthz   -> 200 when $WORKSPACE_DIR has a live FUSE mount; in a
+                       thread's pod, when $PROJECT_DIR has one and the
+                       thread's copy is made
 
 Each ``/execute`` forks a child process (``multiprocessing`` fork
 context — the warm registry is inherited copy-on-write) that runs the
@@ -25,15 +27,22 @@ probes it).
 from __future__ import annotations
 
 import asyncio
+import base64
 import hmac
 import json
 import logging
 import multiprocessing
 import os
+import subprocess
 import sys
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
+
+from surogates.sandbox.base import MAX_FILE_BYTES
+from surogates.sandbox.history import History, HistoryError
 
 logger = logging.getLogger("tool-executor")
 
@@ -62,6 +71,9 @@ _MAX_READ_TIMESTAMPS = 1024
 
 # Tools whose success means the agent has now seen the file's content.
 _READ_TOOL_NAMES = frozenset({"read_file", "write_file", "patch"})
+
+# A landing's steps, as ``_history`` actions, and the History method each runs.
+_HISTORY_STEPS = {"commit": "commit_turn", "apply": "apply", "unapply": "unapply", "record": "record"}
 
 
 def _record_read(name: str, args: dict, workspace: str, result: str) -> None:
@@ -141,19 +153,12 @@ def _run_checkpoint(args: dict, workspace: str) -> str:
     mgr = CheckpointManager(enabled=True)
     logger.info("checkpoint action=%s", action)
 
-    if action == "new_turn":
-        mgr.new_turn()
-        return json.dumps({"success": True, "action": "new_turn"})
     if action == "take":
-        reason = args.get("reason", "auto")
-        file_path = args.get("file_path")
-        workdir = workspace
-        if file_path:
-            workdir = mgr.get_working_dir_for_path(file_path)
-        ok = mgr.ensure_checkpoint(workdir, reason)
+        # Always the workspace: a restore puts back the workspace.
+        ok = mgr.ensure_checkpoint(workspace, args.get("reason", "auto"))
         result: dict = {"success": ok, "action": "take"}
         if ok:
-            h = mgr.latest_hash(workdir)
+            h = mgr.latest_hash(workspace)
             if h:
                 result["hash"] = h
         logger.info("checkpoint take: %s", "ok" if ok else "skipped")
@@ -175,11 +180,86 @@ def _run_checkpoint(args: dict, workspace: str) -> str:
     })
 
 
+def _run_copy_checkpoint(args: dict, history: History) -> str:
+    """``_checkpoint`` in a thread's pod: snapshots are commits on its
+    branch, taken in its copy, and a restore removes the files they lack."""
+    action = args.get("action", "take")
+    try:
+        if action == "take":
+            return json.dumps({"success": True, "action": "take", "hash": history.snapshot(args.get("reason", "auto"))})
+        if action == "restore":
+            history.restore(args.get("hash", ""))
+            return json.dumps({"success": True, "restored_to": args.get("hash", "")[:8]})
+    except HistoryError as exc:
+        return json.dumps({"success": False, "error": str(exc)})
+    return json.dumps({"success": False, "error": f"Unknown checkpoint action: {action}"})
+
+
+def _run_history(args: dict, history: History | None) -> str:
+    """``_history``: one step of a landing, run on the pod's history."""
+    if history is None:
+        return json.dumps({"error": "This pod has no copy of a project's files"})
+    step = dict(args)
+    method = _HISTORY_STEPS.get(step.pop("action", None))
+    if method is None:
+        return json.dumps({"error": f"Unknown history action: {args.get('action')}"})
+    try:
+        return json.dumps(getattr(history, method)(**step))
+    # A real file's write can time out or fail on the mount, past git's own errors.
+    except (HistoryError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def _run_file(args: dict, workspace: str) -> str:
+    """``_file``: read or write one file of the workspace, base64, up to 50 MiB.
+
+    In a thread's pod the workspace is its copy: the harness tools that
+    would reach the project's files through object storage come here.
+    """
+    path = str(args.get("path") or "")
+    try:
+        root = os.path.realpath(workspace)
+        target = os.path.realpath(os.path.join(root, path))
+        if not path or os.path.commonpath([root, target]) != root or target == root:
+            return json.dumps({"error": f"{path} is outside the workspace"})
+        too_large = f"{path} is over the 50 MiB a file may be"
+        if args.get("action") == "read":
+            if not os.path.isfile(target):
+                return json.dumps({"error": f"{path} not found"})
+            if os.path.getsize(target) > MAX_FILE_BYTES:
+                return json.dumps({"error": too_large})
+            with open(target, "rb") as fh:
+                return json.dumps({"content_b64": base64.b64encode(fh.read()).decode()})
+        if args.get("action") == "write":
+            content = args.get("content_b64") or ""
+            # Refused before it is decoded: base64 spends four characters on three bytes.
+            if len(content) > 4 * -(-MAX_FILE_BYTES // 3):
+                return json.dumps({"error": too_large})
+            data = base64.b64decode(content)
+            if len(data) > MAX_FILE_BYTES:
+                return json.dumps({"error": too_large})
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            # Written beside the file, then renamed over it: a write cut short
+            # leaves the file whole.  A short name, so a file's near the length
+            # limit fits too; history leaves out the *~ name.
+            staged = Path(target).with_name(f".~{os.urandom(4).hex()}.file~")
+            try:
+                staged.write_bytes(data)
+                os.replace(staged, target)
+            finally:
+                staged.unlink(missing_ok=True)
+            return json.dumps({"ok": True, "bytes": len(data)})
+        return json.dumps({"error": f"Unknown file action: {args.get('action')}"})
+    except (OSError, ValueError) as exc:  # a bad name or encoding, a folder in the way, a full disk
+        return json.dumps({"error": str(exc)})
+
+
 def run_tool(
     name: str,
     args: dict,
     workspace: str,
     read_timestamps: dict | None = None,
+    history: History | None = None,
 ) -> str:
     """Dispatch one tool call through the real handlers.
 
@@ -189,6 +269,8 @@ def run_tool(
     *read_timestamps* is the parent's record of files read this session,
     seeded into the child's tracker so read-dependent guards (blind
     overwrite, staleness) can see reads that happened in earlier forks.
+
+    *history* is a thread's pod's: its checkpoints are its copy's.
     """
     if read_timestamps:
         from surogates.tools.builtin.file_ops import seed_read_timestamps
@@ -196,7 +278,13 @@ def run_tool(
         seed_read_timestamps(read_timestamps)
 
     if name == "_checkpoint":
+        if history is not None:
+            return _run_copy_checkpoint(args, history)
         return _run_checkpoint(args, workspace)
+    if name == "_history":
+        return _run_history(args, history)
+    if name == "_file":
+        return _run_file(args, workspace)
     if name == "_code":
         # The payload may carry a credential on launch; never log args.
         from surogates.coding_agents.pod_runner import dispatch as code_dispatch
@@ -242,6 +330,7 @@ def _child_main(
     args: dict,
     workspace: str,
     read_timestamps: dict | None = None,
+    history: History | None = None,
 ) -> None:
     """Entry point of the forked child: run the tool, ship the result."""
     # The forked thread inherits the parent's "running event loop"
@@ -250,7 +339,7 @@ def _child_main(
     # this line is belt-and-braces against that hook changing.
     asyncio._set_running_loop(None)
     try:
-        result = run_tool(name, args, workspace, read_timestamps)
+        result = run_tool(name, args, workspace, read_timestamps, history)
     except BaseException as exc:  # never die without reporting
         result = json.dumps({"exit_code": 1, "output": "", "error": str(exc)})
     try:
@@ -260,7 +349,7 @@ def _child_main(
 
 
 async def execute_in_child(
-    name: str, args: dict, workspace: str, timeout: float,
+    name: str, args: dict, workspace: str, timeout: float, history: History | None = None,
 ) -> str:
     """Fork a child, run *name* in it, and return its result JSON.
 
@@ -273,7 +362,7 @@ async def execute_in_child(
     parent_conn, child_conn = _MP.Pipe(duplex=False)
     proc = _MP.Process(
         target=_child_main,
-        args=(child_conn, name, args, workspace, dict(_READ_TIMESTAMPS)),
+        args=(child_conn, name, args, workspace, dict(_READ_TIMESTAMPS), history),
         daemon=True,
     )
     proc.start()
@@ -310,6 +399,19 @@ async def execute_in_child(
         await asyncio.to_thread(proc.join, 5)
 
 
+def _give_up(reason: str, log: str | Path = "/dev/termination-log") -> None:
+    """Stop the daemon for good, *reason* the pod's termination message.
+
+    The pod fails at once, and its provision with it, rather than staying
+    not ready until the ready timeout.
+    """
+    try:
+        Path(log).write_text(reason)
+    except OSError:
+        logger.warning("Could not write the pod's termination message", exc_info=True)
+    os._exit(1)
+
+
 def _token_ok(auth_header: str, token: str) -> bool:
     if not auth_header.startswith("Bearer "):
         return False
@@ -324,23 +426,53 @@ def create_app(
     max_concurrency: int = MAX_CONCURRENCY,
     default_timeout: int = DEFAULT_TIMEOUT,
     require_fuse: bool = True,
+    history: History | None = None,
+    give_up: Callable[[str], None] | None = None,
 ) -> FastAPI:
     """Build the daemon's FastAPI app.
 
     ``token`` and ``workspace`` are injected (instead of read from env
     inside the handlers) so tests can construct isolated apps.
+
+    A thread's pod has a *history*: the project's real files are mounted at
+    its ``project``, and ``workspace`` is the thread's copy, made from them
+    before the pod reports ready.  When it can never be made in this pod,
+    *give_up* is called with the reason.
     """
     app = FastAPI()
     sem = asyncio.Semaphore(max_concurrency)
+    mount = str(history.project) if history is not None else workspace
+    opened = history is None
+    # Why the copy can never be made in this pod: it stays not ready.
+    failed: str | None = None
+    open_lock = asyncio.Lock()
 
     @app.get("/healthz")
     async def healthz() -> Response:
+        nonlocal opened, failed
         # When the workspace is not a FUSE mount (Docker bind-mount or
         # ephemeral), the FUSE check is the wrong readiness signal; the
         # backend disables it via require_fuse=False.
-        if not require_fuse or workspace_mounted(workspace, mounts_path):
-            return Response(content="ok", status_code=200)
-        return Response(content="workspace not mounted", status_code=503)
+        if require_fuse and not workspace_mounted(mount, mounts_path):
+            return Response(content="workspace not mounted", status_code=503)
+        async with open_lock:
+            if failed is None and not opened:
+                try:
+                    await asyncio.to_thread(history.open)
+                except (HistoryError, OSError) as exc:
+                    logger.error("The thread's copy was not made: %s", exc)
+                    # open() starts over only while it has no repository:
+                    # once made, a copy may be half checked out, so a
+                    # retry cannot make it again.
+                    if (history.repo / "HEAD").exists():
+                        failed = str(exc)
+                        if give_up is not None:
+                            give_up(f"copy not made: {failed}")
+                    return Response(content=f"copy not made: {exc}", status_code=503)
+                opened = True
+        if failed is not None:
+            return Response(content=f"copy not made: {failed}", status_code=503)
+        return Response(content="ok", status_code=200)
 
     @app.post("/execute")
     async def execute(request: Request) -> Response:
@@ -363,15 +495,24 @@ def create_app(
                 media_type="application/json",
             )
 
-        # The _code payload may carry a credential — never log its args.
-        if name == "_code":
-            logger.info("→ _code")
+        # The _code payload may carry a credential, and _file's a whole file:
+        # never log their args.
+        if name in ("_code", "_file"):
+            logger.info("→ %s", name)
         else:
             preview = json.dumps(args, default=str)[:200]
             logger.info("→ %s %s", name, preview)
 
+        if name == "_history" and history is not None and require_fuse and not workspace_mounted(mount, mounts_path):
+            # The sidecar went, and /project is an empty folder: a landing
+            # written there would never reach the bucket.
+            return Response(
+                content=json.dumps({"error": f"The project's files are not mounted at {mount}"}),
+                media_type="application/json",
+            )
+
         async with sem:
-            result = await execute_in_child(name, args, workspace, timeout)
+            result = await execute_in_child(name, args, workspace, timeout, history)
         logger.info("← %s (%d bytes)", name, len(result))
         return Response(content=result, media_type="application/json")
 
@@ -398,6 +539,23 @@ def main() -> None:
     # /healthz ready once the registry has loaded. Defaults on for K8s.
     require_fuse = os.environ.get("TOOL_EXECUTOR_REQUIRE_FUSE", "1") != "0"
 
+    # A thread's pod: the real files at PROJECT_DIR, its copy at the
+    # workspace, and the history in the pod's home.
+    project = os.environ.get("PROJECT_DIR")
+    history = None
+    if project:
+        from surogates.tools.utils.checkpoint_manager import _shadow_repo_path
+
+        user = os.environ.get("USER_ID")
+        if not user:
+            logger.error("USER_ID is required in a thread's pod: the project's history is made as its user")
+            sys.exit(1)
+        history = History(
+            repo=_shadow_repo_path(project, base=Path.home() / ".surogates" / "history"),
+            project=Path(project), copy=Path(workspace),
+            thread=os.environ["HISTORY_THREAD"], user=user,
+        )
+
     logger.info("Loading tool registry...")
     init_registry()
     logger.info("Registry loaded; serving on 0.0.0.0:%d", port)
@@ -405,7 +563,7 @@ def main() -> None:
     import uvicorn
 
     uvicorn.run(
-        create_app(token=token, workspace=workspace, require_fuse=require_fuse),
+        create_app(token=token, workspace=workspace, require_fuse=require_fuse, history=history, give_up=_give_up),
         host="0.0.0.0",
         port=port,
         log_level="warning",

@@ -78,7 +78,9 @@ from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
 from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
-from surogates.workstreams import is_project_master, master_refusal
+from surogates.sandbox.copy_files import has_copy, read_copy
+from surogates.sandbox.pool import sandbox_session_key
+from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
@@ -105,7 +107,7 @@ if TYPE_CHECKING:
     from surogates.harness.context import ContextCompressor
     from surogates.harness.prompt import PromptBuilder
     from surogates.memory.manager import MemoryManager
-    from surogates.sandbox.pool import SandboxPool, sandbox_session_key
+    from surogates.sandbox.pool import SandboxPool
     from surogates.session.models import Session, SessionLease
     from surogates.session.store import SessionStore
     from surogates.tools.registry import ToolRegistry
@@ -360,6 +362,11 @@ _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
     "goal", "mission", "auto-research", "code", "deep-research",
 })
 
+# The commands a project's thread refuses: a routine's runs, a mission's
+# tasks, a research's experiments and helpers would all edit a copy the
+# thread never lands, and so would a coding agent, whose turn never lands.
+_PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "mission", "auto-research", "deep-research", "code"})
+
 
 #: A first-person intention to act, sitting at the very end of the message:
 #: "Let me take a screenshot to see the current state of the video."
@@ -470,7 +477,6 @@ class AgentHarness(
         browser_pool: BrowserPool | None = None,
         browser_control: BrowserControlStore | None = None,
         storage: Any | None = None,
-        checkpoints_enabled: bool = False,
         saga_enabled: bool = False,
         saga_settings: Any | None = None,
         api_client: Any | None = None,
@@ -624,11 +630,6 @@ class AgentHarness(
         # during the current turn even when produced indirectly
         # (terminal scripts, execute_code).
         self._turn_started_at: datetime | None = None
-
-        # Checkpoint flag — when enabled, the harness tells the sandbox
-        # to take filesystem snapshots before file-mutating operations.
-        # The actual checkpoint logic runs inside the sandbox (not here).
-        self._checkpoints_enabled = checkpoints_enabled
 
         # Saga orchestration flag — when enabled, side-effecting tool
         # calls are tracked as saga steps with automatic compensation
@@ -1063,6 +1064,12 @@ class AgentHarness(
             and is_project_master(session.config)
         ):
             return master_refusal(name)
+        if (
+            name in _PROJECT_THREAD_REFUSED_COMMANDS
+            and session is not None
+            and is_project_thread(session.config)
+        ):
+            return thread_refusal(f"/{name}")
         if self._slash_command_enabled(name, session):
             return None
         return f"/{name} is disabled for this agent."
@@ -1140,6 +1147,9 @@ class AgentHarness(
         lease: Any | None = None
         renewal_task: asyncio.Task[None] | None = None
         device_token: Token[frozenset[str]] | None = None
+        # Set when this turn itself is cut off, by a crash or a cancel: an
+        # exception a caller is handling around this wake is not this turn's.
+        cut_off = False
 
         try:
             # Connection health: proactively clean up dead connections
@@ -1571,6 +1581,7 @@ class AgentHarness(
             await self._run_loop(session, messages, system_prompt, lease, cost_tracker=cost_tracker, all_events=all_events)
 
         except Exception as _harness_exc:
+            cut_off = True
             logger.exception("Harness crash for session %s", session_id)
             info = classify_harness_error(_harness_exc)
             try:
@@ -1594,8 +1605,29 @@ class AgentHarness(
             # The parent hears of a crash only when the dispatcher stops
             # retrying it (``Orchestrator._report_failure_to_parent``).
             raise
+        except BaseException:  # a cancel: the lease went to another worker, or the worker stops
+            cut_off = True
+            raise
         finally:
             leave_device_session(device_token)
+
+            # A thread's turn cut off outside its landing, by a cancel or a
+            # crash, leaves a copy that never landed: its pod goes, so no
+            # later turn on this worker goes on with that copy.
+            if (
+                cut_off and session is not None
+                and is_project_thread(session.config) and self._sandbox_pool is not None
+            ):
+                from surogates.harness.landing import putting_back
+
+                owner = sandbox_session_key(session)
+                # A landing of this turn still putting files back needs its
+                # pod, and lets it go itself once it is done: no second wait.
+                if not putting_back(owner):
+                    try:
+                        await asyncio.shield(self._sandbox_pool.destroy_for_session(owner))
+                    except BaseException:
+                        logger.warning("Could not let the copy of %s go", session_id, exc_info=True)
 
             # Stop the background renewal task before touching the
             # lease.  ``None`` when the wake bailed before the lease
@@ -1744,9 +1776,11 @@ class AgentHarness(
         - Invalid tool call recovery
         - Per-session cost tracking
         """
+        self._turn_after_event_id = max((e.id for e in all_events or []), default=0)
         # --- Saga orchestrator ---
         saga = None
-        if self._saga_enabled:
+        # A project's thread always runs one: its steps are undone in its copy.
+        if self._saga_enabled or is_project_thread(session.config):
             from surogates.governance.saga import SagaOrchestrator
             saga_kwargs = {}
             if self._saga_settings is not None:
@@ -1756,6 +1790,8 @@ class AgentHarness(
                     "retry_delay": self._saga_settings.retry_delay,
                 }
             saga = SagaOrchestrator(**saga_kwargs)
+            # Its turn's end completes it: _complete_session and _fail_session read it here.
+            self._turn_saga = saga
             # Reconstruct any in-progress saga from the event log.
             if all_events:
                 saga_events = [
@@ -1764,6 +1800,7 @@ class AgentHarness(
                 ]
                 if saga_events:
                     saga.reconstruct_from_events(saga_events)
+                    await self._close_stale_sagas(saga, session, all_events)
             # Create a fresh saga for this wake cycle if none is active.
             if not saga.active_sagas:
                 from surogates.governance.events import saga_start_event
@@ -2052,16 +2089,6 @@ class AgentHarness(
             # message starts a new turn, while ``iteration`` keeps climbing
             # for budget/loop control.
             turn_iteration_index = iteration - 1 - turn_base_iteration
-
-            # --- Checkpoint: reset per-turn dedup in sandbox ---
-            if self._checkpoints_enabled and self._sandbox_pool:
-                try:
-                    await self._sandbox_pool.execute(
-                        sandbox_session_key(session), "_checkpoint",
-                        '{"action": "new_turn"}',
-                    )
-                except (ValueError, Exception):
-                    pass  # No sandbox provisioned yet — that's fine.
 
             # --- Memory manager: on_turn_start hook ---
             if self._memory_manager is not None:
@@ -3043,18 +3070,11 @@ class AgentHarness(
             messages.append(assistant_message)
 
             # 7. Execute tool calls.
-            # Checkpoint before file-mutating tools (write_file, patch).
-            # The checkpoint hash is stashed on the tool call dict so
-            # execute_single_tool can include it in the TOOL_CALL event,
-            # enabling the web UI to offer per-tool-call rollback.
-            await self._inject_checkpoint_hashes(tool_calls_raw, session)
-
             if use_streaming_exec:
                 # ── Streaming executor path ──────────────────────────
                 # Some or all tools started executing during LLM streaming.
-                # Checkpoint hashes were injected above — non-concurrent
-                # tools (write_file, patch) are still QUEUED at this point
-                # because they are never concurrency-safe.
+                # Non-concurrent tools (write_file, patch) are still QUEUED
+                # at this point because they are never concurrency-safe.
 
                 # Wait for all tools to complete (concurrent ones may
                 # already be done, sequential ones start now). Publish the
@@ -3120,7 +3140,6 @@ class AgentHarness(
                 make_sandbox_writer,
             )
             if self._sandbox_pool is not None:
-                from surogates.sandbox.pool import sandbox_session_key
                 _spill_writer = make_sandbox_writer(
                     self._sandbox_pool, sandbox_session_key(session),
                 )
@@ -3347,60 +3366,6 @@ class AgentHarness(
             iteration_index=max(iteration - 1 - turn_base_iteration, 0),
         )
 
-        # --- Saga finalization ---
-        # Mark all active sagas as completed on normal loop exit.
-        if saga is not None:
-            await self._finalize_sagas(saga, session)
-
-    # ------------------------------------------------------------------
-    # Checkpoint injection
-    # ------------------------------------------------------------------
-
-    async def _inject_checkpoint_hashes(
-        self,
-        tool_calls: list[dict[str, Any]],
-        session: Session,
-    ) -> None:
-        """Stash checkpoint hashes on file-mutating tool call dicts.
-
-        Before ``write_file`` or ``patch`` execute, a filesystem snapshot
-        is taken via the sandbox's ``_checkpoint`` command.  The resulting
-        hash is stored on the tool call dict so ``execute_single_tool``
-        can include it in the ``TOOL_CALL`` event, enabling per-tool-call
-        rollback from the web UI.
-
-        No-op when checkpoints are disabled or no sandbox is available.
-        """
-        if not self._checkpoints_enabled or self._sandbox_pool is None:
-            return
-
-        import json as _json
-
-        for tc in tool_calls:
-            fn = tc.get("function", {})
-            tool_name = fn.get("name", "")
-            if tool_name not in ("write_file", "patch"):
-                continue
-            try:
-                args = _json.loads(fn.get("arguments", "{}"))
-                file_path = args.get("path", "")
-                if not file_path:
-                    continue
-                cp_input = _json.dumps({
-                    "action": "take",
-                    "reason": f"before {tool_name}",
-                    "file_path": file_path,
-                })
-                cp_result = await self._sandbox_pool.execute(
-                    sandbox_session_key(session), "_checkpoint", cp_input,
-                )
-                cp_data = _json.loads(cp_result)
-                cp_hash = cp_data.get("hash")
-                if cp_hash:
-                    tc["_checkpoint_hash"] = cp_hash
-            except Exception:
-                logger.debug("Checkpoint before %s failed", tool_name, exc_info=True)
-
     async def _read_workspace_image(
         self,
         session: "Session",
@@ -3426,6 +3391,10 @@ class AgentHarness(
                     session.id, path,
                 )
                 return None
+            owner = sandbox_session_key(session)
+            if has_copy(self._sandbox_pool, owner):
+                # A thread sees the image as its copy has it.
+                return await read_copy(self._sandbox_pool, owner, path) or None
             root_id = workspace_root_id(session)
             key = boundary_workspace_key(cfg, session, root_id, path)
             data = await self._storage.read(bucket, key)
@@ -3466,6 +3435,39 @@ class AgentHarness(
                     "Failed to finalize saga %s", active.saga_id, exc_info=True,
                 )
 
+    async def _close_stale_sagas(self, saga: Any, session: Any, events: list[Any]) -> None:
+        """Close each active saga started before the log's last turn end.
+
+        A turn the dispatcher failed itself, or whose ``saga.complete`` was
+        lost, leaves its saga open; the next turn must start its own.  A
+        stop's pause, or a channel stop's ``session.stopped``, ends a turn
+        too.  It is closed ``completed`` if it was running, as a failed
+        turn's is, and ``escalated`` if it was being put back or was
+        stopped, since nothing put its steps back.  A stopped turn still
+        putting back holds the session's lease, so no new turn reaches here
+        until it has finished.
+        """
+        from surogates.governance.events import saga_complete_event
+        from surogates.governance.saga.state_machine import SagaState
+
+        stops = (EventType.SESSION_PAUSE.value, EventType.SESSION_STOPPED.value)
+        ends = (EventType.SESSION_COMPLETE.value, EventType.SESSION_FAIL.value, *stops)
+        ended = max((e.id for e in events if e.type in ends), default=None)
+        if ended is None:
+            return
+        started = {e.data.get("saga_id"): e.id for e in events if e.type == EventType.SAGA_START.value}
+        for stale in [s for s in saga.active_sagas if started.get(s.saga_id, ended) < ended]:
+            start = started[stale.saga_id]
+            if stale.state is SagaState.RUNNING and any(e.type in stops and e.id > start for e in events):
+                stale.transition(SagaState.COMPENSATING)  # the only way a running saga escalates
+            status = SagaState.COMPLETED if stale.state is SagaState.RUNNING else SagaState.ESCALATED
+            stale.transition(status)
+            await self._store.emit_event(
+                session.id,
+                EventType.SAGA_COMPLETE,
+                saga_complete_event(stale.saga_id, status=status.value, steps_executed=len(stale.steps)),
+            )
+
     async def _compensate_sagas(self, saga: Any, session: Any, reason: str) -> None:
         """Compensate all active sagas on interrupt/crash/failure.
 
@@ -3475,7 +3477,7 @@ class AgentHarness(
         """
         from functools import partial
 
-        from surogates.governance.events import saga_compensate_event
+        from surogates.governance.events import saga_compensate_event, saga_complete_event
         from surogates.governance.saga.compensator import compensate_step
         from surogates.governance.saga.state_machine import SagaState
 
@@ -3493,10 +3495,16 @@ class AgentHarness(
                 continue
 
             try:
-                # Ensure the sandbox is still available for compensation
-                # (it may have been destroyed on a prior crash).
-                if self._sandbox_pool is not None:
-                    try:
+                # Capture count before compensate() transitions steps
+                # away from COMMITTED (after which committed_steps is empty).
+                committed_count = len(active.committed_steps)
+                try:
+                    # Ensure the sandbox is still available for compensation
+                    # (it may have been destroyed on a prior crash).  Only a
+                    # step that can be undone needs it.
+                    if self._sandbox_pool is not None and any(
+                        s.is_compensable for s in active.committed_steps
+                    ):
                         from surogates.harness.tool_exec import _build_session_sandbox_spec
                         sandbox_owner = sandbox_session_key(session)
                         sandbox_spec = await _build_session_sandbox_spec(
@@ -3504,25 +3512,23 @@ class AgentHarness(
                             credential_vault=self._credential_vault,
                         )
                         await self._sandbox_pool.ensure(sandbox_owner, sandbox_spec)
-                    except Exception:
-                        logger.warning(
-                            "Cannot provision sandbox for saga compensation "
-                            "in session %s — marking saga as escalated",
-                            session.id,
-                        )
-                        active.transition(SagaState.ESCALATED)
-                        active.error = "Sandbox unavailable for compensation"
-                        continue
-
-                # Capture count before compensate() transitions steps
-                # away from COMMITTED (after which committed_steps is empty).
-                committed_count = len(active.committed_steps)
-                compensator = partial(
-                    compensate_step,
-                    sandbox_pool=self._sandbox_pool,
-                    session_id=sandbox_session_key(session),
-                )
-                failed = await saga.compensate(active.saga_id, compensator)
+                except Exception:
+                    logger.warning(
+                        "Cannot provision sandbox for saga compensation "
+                        "in session %s — marking saga as escalated",
+                        session.id,
+                    )
+                    active.transition(SagaState.COMPENSATING)
+                    active.transition(SagaState.ESCALATED)
+                    active.error = "Sandbox unavailable for compensation"
+                    failed = active.committed_steps
+                else:
+                    compensator = partial(
+                        compensate_step,
+                        sandbox_pool=self._sandbox_pool,
+                        session_id=sandbox_session_key(session),
+                    )
+                    failed = await saga.compensate(active.saga_id, compensator)
                 failed_ids = [s.step_id for s in failed]
                 await self._store.emit_event(
                     session.id,
@@ -3532,6 +3538,16 @@ class AgentHarness(
                         steps_rolled_back=committed_count - len(failed),
                         reason=reason,
                         failed_steps=failed_ids if failed_ids else None,
+                    ),
+                )
+                # The saga is over: a rebuilt one must not take later steps.
+                await self._store.emit_event(
+                    session.id,
+                    EventType.SAGA_COMPLETE,
+                    saga_complete_event(
+                        active.saga_id,
+                        status=active.state.value,
+                        steps_executed=len(active.steps),
                     ),
                 )
             except Exception:

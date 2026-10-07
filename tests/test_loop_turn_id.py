@@ -58,7 +58,6 @@ def _make_loop_harness(
     harness._advisor_model = ""
     harness._advisor_max_calls_per_turn = 0
     harness._advisor_max_tokens = 0
-    harness._checkpoints_enabled = False
     harness._saga_enabled = False
     harness._saga_settings = None
     harness._log_policy_allowed = False

@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+from surogates.governance.saga.compensator import compensate_step
 from surogates.governance.saga.state_machine import (
     SagaState,
     SagaStep,
@@ -332,3 +333,23 @@ class TestRetryAllExhausted:
         assert call_count == 3  # 1 initial + 2 retries
         assert step.state == StepState.FAILED
         assert step.retry_count == 2
+
+
+class TestCompensateStep:
+
+    @pytest.mark.asyncio
+    async def test_an_mcp_step_runs_its_undo_tool_and_then_restores_its_snapshot(self):
+        """In a thread an MCP step has both: its undo tool, then its copy put back."""
+        calls = []
+
+        class Pool:
+            async def execute(self, session_id, name, input):
+                calls.append(name)
+                return '{"success": true}'
+
+        step = SagaStep(
+            step_id="s1", tool_name="create_ticket", tool_call_id="tc1", arguments={},
+            compensation_tool="delete_ticket", checkpoint_hash="abc123",
+        )
+        await compensate_step(step, sandbox_pool=Pool(), session_id="s")
+        assert calls == ["delete_ticket", "_checkpoint"]

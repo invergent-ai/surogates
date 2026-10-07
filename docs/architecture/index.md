@@ -154,7 +154,9 @@ Two compensation strategies are used depending on the tool type:
 - **Builtin tools** (file writes, patches, commands): filesystem checkpoints are restored automatically.
 - **MCP tools** (external services): a declared undo tool is called (e.g., `delete_ticket` to undo `create_ticket`).
 
-Saga is opt-in (`saga.enabled: true` in config). When active, tool calls are forced sequential to ensure deterministic ordering for rollback. Read-only tools (search, list, view) are excluded from tracking. Saga state is reconstructed from the event log on crash recovery.
+Saga is opt-in (`saga.enabled: true` in config), except in a project's threads, which always run one. When active, tool calls are forced sequential to ensure deterministic ordering for rollback. Read-only tools (search, list, view) are excluded from tracking. A turn's saga is completed when the turn ends, so a later rollback never reaches an earlier turn. Saga state is reconstructed from the event log on crash recovery.
+
+A project's thread works on its own copy of the project's files, a git worktree in its pod. Each of its steps starts from a snapshot of the copy, so a stop puts the copy back, and the real files change only when the turn lands, as one saga of its own: commit the turn, apply each file, record the landing.
 
 See [Governance and Security](../governance-and-security/index.md#saga-multi-step-tool-chains-with-automatic-rollback) for configuration and details.
 
