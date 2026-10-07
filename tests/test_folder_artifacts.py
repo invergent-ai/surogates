@@ -13,6 +13,7 @@ from surogates.artifacts.models import ArtifactKind
 from surogates.artifacts.store import ArtifactLimitError, ArtifactNotFoundError, ArtifactStore, FolderArtifacts
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.session.events import EventType
+from surogates.tools.builtin.artifact import _create_artifact_handler
 from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.fake_laptop import InProcessRunner
 
@@ -123,3 +124,27 @@ async def test_what_the_routes_would_refuse_is_refused_and_announces_nothing(fil
     assert events.emitted == []
     assert await artifacts.get_artifact(str(uuid4())) is None
     assert await artifacts.get_artifact("not-an-id") is None
+
+
+async def test_create_artifact_on_a_local_folder_makes_it_there_without_the_api(files, folder):
+    events, session_id, root = Events(), uuid4(), str(uuid4())
+    made = json.loads(await _create_artifact_handler(
+        {"name": "notes", "kind": "markdown", "spec": {"content": "# Notes"}},
+        workspace_io=files, session_store=events, session_id=str(session_id), task_id=root,
+    ))
+    assert made["success"] is True, made
+    # Under its root chat's folder: a sub-agent's call makes them where its root lists them.
+    assert (folder / ".surogates-results" / "artifacts" / root / made["artifact_id"] / "v1.json").is_file()
+    assert [kind for _, kind, _ in events.emitted] == [EventType.ARTIFACT_CREATED]
+
+
+async def test_a_failed_revision_on_a_local_folder_hands_back_what_the_folder_holds(files, monkeypatch):
+    kwargs = {"workspace_io": files, "session_store": Events(), "session_id": str(uuid4()), "task_id": str(uuid4())}
+    made = json.loads(await _create_artifact_handler({"name": "t", "kind": "markdown", "spec": {"content": "a"}}, **kwargs))
+    monkeypatch.setattr(store_module, "MAX_ARTIFACT_BYTES", 10)
+    failed = json.loads(await _create_artifact_handler(
+        {"name": "t", "kind": "markdown", "spec": {"content": "a much longer body"}, "artifact_id": made["artifact_id"]},
+        **kwargs,
+    ))
+    assert failed["success"] is False
+    assert failed["current"] == {"kind": "markdown", "spec": {"content": "a"}, "version": 1}

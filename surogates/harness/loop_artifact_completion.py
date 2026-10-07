@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from surogates.artifacts.store import FolderArtifacts
 from surogates.channels.constants import DIRECT_UI_CHANNELS, REALTIME_CHANNELS
+from surogates.devices.binding import device_of
 from surogates.harness.loop_artifacts import (
     _FENCE_RE,
     _PROMOTABLE_FENCES,
@@ -31,8 +33,10 @@ from surogates.harness.loop_messages import (
 )
 from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
+from surogates.session.files import HARNESS_WITHIN_S, session_files
 from surogates.session.inbox_payload import raises_completion_inbox_item
 from surogates.harness.landing import land_turn
+from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams import is_project_master, is_project_thread
 from surogates.workstreams.spend import admitted_at_wake
 
@@ -172,7 +176,9 @@ class ArtifactCompletionMixin:
         fences and promote the first one into an artifact via the API.
 
         Only fires when:
-        - an API client is wired (``self._api_client``),
+        - an API client is wired (``self._api_client``), or the session
+          is on a local folder, where it is made in the folder, within
+          ``HARNESS_WITHIN_S``,
         - the content contains at least one promotable fence (svg/html),
         - the fence body parses as non-empty.
 
@@ -181,7 +187,8 @@ class ArtifactCompletionMixin:
         but swallowed — a failed auto-promotion must not derail the
         turn.
         """
-        if self._api_client is None or not assistant_content:
+        on_device = device_of(session.config) is not None
+        if (self._api_client is None and not on_device) or not assistant_content:
             return
 
         match = _FENCE_RE.search(assistant_content)
@@ -198,9 +205,17 @@ class ArtifactCompletionMixin:
             kind, spec_key = mapping
             name = _derive_artifact_name(kind, messages)
             try:
-                await self._api_client.create_artifact(
-                    name=name, kind=kind, spec={spec_key: body},
-                )
+                if on_device:
+                    async with asyncio.timeout(HARNESS_WITHIN_S), session_files(
+                        session, storage=self._storage, session_factory=self._session_factory, redis=self._redis,
+                    ) as files:
+                        await FolderArtifacts(files, self._store, session.id, sandbox_session_key(session)).create_artifact(
+                            name=name, kind=kind, spec={spec_key: body},
+                        )
+                else:
+                    await self._api_client.create_artifact(
+                        name=name, kind=kind, spec={spec_key: body},
+                    )
                 logger.info(
                     "Session %s: promoted ```%s fence to %s artifact",
                     session.id, lang, kind,

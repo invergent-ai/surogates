@@ -49,6 +49,8 @@ from surogates.devices.waits import DeviceWaitNotice
 from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
 from surogates.governance.policy import GovernanceGate
 from surogates.harness.device_replay import replay_unanswered
+from surogates.harness import loop_artifact_completion
+from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
 from surogates.harness.tool_exec import execute_single_tool
 from surogates.runtime.turn_slots import TurnSlots, current_turn
 from surogates.session.events import EventType
@@ -3201,3 +3203,71 @@ async def test_a_recording_waits_for_a_delete_in_flight_and_is_refused(laptop_ri
         await asyncio.gather(deleting, return_exceptions=True)
         if running is not None:
             await stop(running)
+
+
+async def test_an_artifact_is_made_in_the_folder_under_its_tool_call(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store = SessionStore(session_factory)
+    result = await tool_call(
+        rig, store, builtin_tools(), "call_1", "create_artifact",
+        {"name": "notes", "kind": "markdown", "spec": {"content": "# Notes"}},
+        redis_client=redis_client, session_factory=session_factory,
+    )
+    made = json.loads(result["content"])
+    assert made["success"] is True, made
+    assert (rig.folder / ".surogates-results" / "artifacts" / str(rig.root) / made["artifact_id"] / "v1.json").is_file()
+    # Under the call: a resumed call finds them, and is reported interrupted.
+    call_event = await call_event_of(store, rig.root, "call_1")
+    async with session_factory() as db:
+        invocations = set((await db.execute(
+            select(DeviceOperation.invocation_id)
+            .where(DeviceOperation.root_session_id == rig.root, DeviceOperation.kind != BIND)
+        )).scalars())
+    assert invocations == {f"{call_event}:call_1"}
+    [created] = await store.get_events(rig.root, types=[EventType.ARTIFACT_CREATED])
+    assert created.data["artifact_id"] == made["artifact_id"]
+
+
+async def test_a_fenced_svg_is_promoted_into_the_folder(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store = SessionStore(session_factory)
+    harness = SimpleNamespace(
+        _api_client=None, _storage=None, _session_factory=session_factory, _redis=redis_client, _store=store,
+    )
+    await ArtifactCompletionMixin._promote_fenced_artifacts(
+        harness, await store.get_session(rig.root), "Here:\n```svg\n<svg viewBox='0 0 1 1'></svg>\n```", [],
+    )
+    [created] = await store.get_events(rig.root, types=[EventType.ARTIFACT_CREATED])
+    assert (rig.folder / ".surogates-results" / "artifacts" / str(rig.root) / created.data["artifact_id"] / "v1.json").is_file()
+
+
+async def test_a_fenced_svg_waits_on_no_computer_that_is_away(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    store = SessionStore(session_factory)
+    harness = SimpleNamespace(
+        _api_client=None, _storage=None, _session_factory=session_factory, _redis=redis_client, _store=store,
+    )
+    # The laptop never connected: said at once, and the reply goes on without it.
+    await asyncio.wait_for(ArtifactCompletionMixin._promote_fenced_artifacts(
+        harness, await store.get_session(rig.root), "```svg\n<svg></svg>\n```", [],
+    ), 5.0)
+    assert await store.get_events(rig.root, types=[EventType.ARTIFACT_CREATED]) == []
+
+
+async def test_a_fenced_svg_waits_no_longer_than_its_bound_on_a_computer_that_does_not_answer(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    rig.laptop.hold = True  # online, but answers nothing
+    monkeypatch.setattr(loop_artifact_completion, "HARNESS_WITHIN_S", 0.5)
+    store = SessionStore(session_factory)
+    harness = SimpleNamespace(
+        _api_client=None, _storage=None, _session_factory=session_factory, _redis=redis_client, _store=store,
+    )
+    await asyncio.wait_for(ArtifactCompletionMixin._promote_fenced_artifacts(
+        harness, await store.get_session(rig.root), "```svg\n<svg></svg>\n```", [],
+    ), 3.0)
+    assert await store.get_events(rig.root, types=[EventType.ARTIFACT_CREATED]) == []

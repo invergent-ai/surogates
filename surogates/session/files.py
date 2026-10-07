@@ -34,6 +34,12 @@ from surogates.tools.workspace_io import StorageWorkspaceIO, WorkspaceFiles
 
 logger = logging.getLogger(__name__)
 
+# How long the harness waits for a local folder's computer outside a tool
+# call: what it reads or writes there for itself (the folder's project
+# context, the turn's files, an artifact promoted from a reply) is best
+# effort, and a turn waits on it no longer than this.
+HARNESS_WITHIN_S = 10.0
+
 
 class ComputerAway(Exception):
     """The session's files are on a computer that is offline, or that no longer has local access."""
