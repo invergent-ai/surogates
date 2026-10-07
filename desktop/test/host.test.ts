@@ -4,6 +4,7 @@ import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
   symlinkSync, writeFileSync,
 } from "node:fs";
+import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -523,6 +524,54 @@ describe("a tool host's own sandbox", { timeout: 30_000 }, () => {
     await ready(host());
     await until(() => left.filter(alive).length === 0);
     expect(sockets().filter((name) => before.includes(name))).toEqual([]);
+  });
+
+  it("has srt's proxy refuse every connection from its helper's sandbox, through its sockets and with its credential", async () => {
+    const harness = host();
+    await ready(harness);
+    // A server on this computer that the sandbox would reach, were a connection let through.
+    const server = createServer((socket) => socket.end());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as { port: number };
+    try {
+      const http = sockets().find((name) => name.startsWith("claude-http"));
+      expect(http).toBeDefined();
+      // The sandbox's credential, which srt puts on the wrap's command line in HTTP_PROXY.
+      const wraps = spawnSync("pgrep", ["-P", String(harness.child.pid)], { encoding: "utf8" }).stdout.split("\n").filter(Boolean);
+      const lines = wraps.map((pid) => {
+        try {
+          return readFileSync(`/proc/${pid}/cmdline`, "latin1");
+        } catch {
+          return "";
+        }
+      }).join(" ");
+      const credential = /http:\/\/([^:@\s'"]+:[0-9a-f]{32})@/.exec(lines)?.[1];
+      expect(credential).toBeDefined();
+      const answer = await new Promise<string>((resolve) => {
+        const socket = connect(join(srtTmp(), http ?? ""));
+        let got = "";
+        const timer = setTimeout(() => {
+          socket.destroy();
+          resolve(`no answer: ${got}`);
+        }, 8_000);
+        socket.on("data", (chunk: Buffer) => {
+          got += chunk.toString();
+          if (!got.includes("\r\n")) return;
+          clearTimeout(timer);
+          socket.destroy();
+          resolve(got.split("\r\n")[0] ?? "");
+        });
+        socket.on("error", (error) => {
+          clearTimeout(timer);
+          resolve(`error: ${error.message}`);
+        });
+        const auth = Buffer.from(decodeURIComponent(credential ?? "")).toString("base64");
+        socket.write(`CONNECT localhost:${port} HTTP/1.1\r\nHost: localhost:${port}\r\nProxy-Authorization: Basic ${auth}\r\n\r\n`);
+      });
+      expect(answer).toMatch(/ 403 /);
+    } finally {
+      server.close();
+    }
   });
 
   it("leaves no socket behind when its helper dies", async () => {
