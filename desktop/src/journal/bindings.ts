@@ -79,6 +79,11 @@ export class Bindings {
     this.db.prepare(`INSERT OR IGNORE INTO domains (root, domain) SELECT root, ? FROM bindings WHERE root = ?`).run(domain, root);
   }
 
+  /** Take *domain* back from a root: its next connection there asks again. One never allowed changes nothing. */
+  disallowDomain(root: string, domain: string): void {
+    this.db.prepare(`DELETE FROM domains WHERE root = ? AND domain = ?`).run(root, domain);
+  }
+
   /** What a root's user allowed for it past the package hosts, in the order allowed. */
   domains(root: string): string[] {
     const rows = this.db.prepare(`SELECT domain FROM domains WHERE root = ? ORDER BY rowid`).all(root) as Array<{ domain: string }>;

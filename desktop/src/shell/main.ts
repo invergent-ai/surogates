@@ -1600,6 +1600,14 @@ function showSettings(): void {
     };
     handle("settings:state", settingsState);
     handle("settings:folders", folderRows);
+    // A host a chat's user let it reach, taken back: the chat's next connection there asks again.
+    handle("settings:take-back", (root, host) => {
+      const bindings = device?.stack?.bindings;
+      if (!bindings || typeof root !== "string" || typeof host !== "string" || !bindings.domains(root).includes(host)) {
+        throw new Error("This chat cannot reach that host");
+      }
+      bindings.disallowDomain(root, host);
+    });
     // A theme in effect that changes reaches the web client through the theme's own paint.
     handle("settings:set", async (key, value) => {
       if (key === "keepRunning" || key === "developer") return setPreference(key, value);

@@ -23,12 +23,13 @@ interface State {
 // A folder this computer's chats work on, and each chat on it (folders.ts).
 interface Folder {
   folder: string;
-  chats: Array<{ root: string; title: string; mode: "free" | "ask" }>;
+  chats: Array<{ root: string; title: string; mode: "free" | "ask"; hosts: string[] }>;
 }
 
 interface Settings {
   state(): Promise<State>;
   folders(): Promise<Folder[]>;
+  takeBack(root: string, host: string): Promise<void>;
   set(key: string, value: string): Promise<void>;
   link(which: "usage"): Promise<void>;
   close(): Promise<void>;
@@ -76,7 +77,23 @@ function search(): void {
 const date = (iso: string | null) =>
   iso === null ? "Not registered" : new Date(iso).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
-// A chat's row: its title, as text, and its mode. Its title is what a search finds it by.
+// A line under a chat: what it holds, as text, and the button that ends it, named by what it ends.
+function line(text: string, action: string, name: string, act: () => Promise<void>): HTMLElement {
+  const held = document.createElement("span");
+  held.className = "line";
+  const what = document.createElement("span");
+  showText(what, text);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = action;
+  button.setAttribute("aria-label", `${action} ${name}`);
+  // Drawn again either way: a list that changed meanwhile shows what holds.
+  button.addEventListener("click", () => void act().finally(render));
+  held.append(what, button);
+  return held;
+}
+
+// A chat's row: its title, as text, its mode, and each host its user let it reach. Its title is what a search finds it by.
 function chatRow(chat: Folder["chats"][number]): HTMLElement {
   const row = document.createElement("div");
   row.className = "row";
@@ -88,7 +105,8 @@ function chatRow(chat: Folder["chats"][number]): HTMLElement {
   const mode = document.createElement("span");
   mode.className = "desc";
   mode.textContent = chat.mode === "free" ? "Works freely" : "Asks every time";
-  label.append(title, mode);
+  label.append(title, mode, ...chat.hosts.map((host) =>
+    line(`Reaches ${host}, on every port`, "Take back", host, () => settings.takeBack(chat.root, host))));
   row.append(label);
   return row;
 }

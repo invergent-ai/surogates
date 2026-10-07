@@ -84,6 +84,20 @@ async function bind(client: Page, folder: string, chat = CHAT): Promise<void> {
   expect(await operation("bind", { folder, nonce: prepared.nonce }, "bind", 0, chat)).toEqual({ ok: null });
 }
 
+// Settings, open over the window on Folders and permissions, once it shows a chat.
+async function foldersSettings(): Promise<Page> {
+  await (await shellPage(app!)).click("#open-settings");
+  let found: Page | undefined;
+  await expect.poll(() => {
+    found = app!.windows().find((page) => page.url().endsWith("/settings.html"));
+    return found !== undefined;
+  }).toBe(true);
+  await found!.waitForSelector(".settings-nav .item");
+  await found!.click('[data-section="folders"]');
+  await found!.waitForSelector("#folders .row");
+  return found!;
+}
+
 // A curl to *url* in the guest: its response's status, then its proxy's answer to CONNECT (000 for none).
 const status = (url: string, flags = "") => `curl -sS --max-time 20 ${flags} -o /dev/null -w '%{http_code} %{http_connect}\\n' ${url} 2>/dev/null`;
 
@@ -286,6 +300,29 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     // Its other ports too, for the rest of the chat, unasked, whatever the site answers: a refusal would come with a notice.
     expect(await run(status("http://example.com/"))).toEqual({ ok: { output: expect.stringMatching(/^\d{3} 000\n$/), returncode: 0, timed_out: false } });
     expect(await promptsShown(app!)).toBe(0);
+  });
+
+  it("takes a site allowed for the chat back in Settings, after which the chat's next connection to it asks again", async () => {
+    const folder = join(home, "site");
+    mkdirSync(folder);
+    await bound(folder);
+    const run = (command: string) => operation("run", { command, workdir: null, timeout: 60 });
+    const reached = run(status("https://example.com/"));
+    await expect.poll(() => promptsShown(app!), { timeout: 30_000 }).toBe(1);
+    await press(await prompt(app!), "allow_session");
+    expect(await reached).toMatchObject({ ok: { returncode: 0 } });
+    const settings = await foldersSettings();
+    expect(await settings.textContent("#folders .row .line")).toBe("Reaches example.com, on every portTake back");
+    expect(await settings.getAttribute("#folders .row .line button", "aria-label")).toBe("Take back example.com");
+    await settings.click("#folders .row .line button");
+    await expect.poll(() => settings.$$("#folders .row .line").then((lines) => lines.length)).toBe(0);
+    const again = run(status("https://example.com/"));
+    await expect.poll(() => promptsShown(app!), { timeout: 30_000 }).toBe(1);
+    await press(await prompt(app!), "deny");
+    expect(await again).toEqual({
+      // curl's own exit for a tunnel its proxy refused.
+      ok: { output: "000 403\n\nThis computer did not allow network access to example.com:443.", returncode: 56, timed_out: false },
+    });
   });
 
   it("runs a background server in the folder, which the agent's next command reaches, and stops it with the app", async () => {

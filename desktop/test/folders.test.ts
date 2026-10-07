@@ -34,10 +34,19 @@ describe("Settings → Folders and permissions", () => {
     bind(FIRST, "/home/me/notes", "free", 1);
     bind(SECOND, "/home/me/taxes", "ask", 2);
     bind(THIRD, "/home/me/notes", "ask", 3);
+    journal.bindings.allowDomain(THIRD, "example.com");
+    journal.bindings.allowDomain(THIRD, "[::1]");
     const titles: Record<string, string> = { [FIRST]: "Quarterly report", [SECOND]: "Receipts", [THIRD]: "A chat" };
     expect(await listFolders(journal.bindings, async (root) => titles[root]!)).toEqual([
-      { folder: "/home/me/notes", chats: [{ root: FIRST, title: "Quarterly report", mode: "free" }, { root: THIRD, title: "A chat", mode: "ask" }] },
-      { folder: "/home/me/taxes", chats: [{ root: SECOND, title: "Receipts", mode: "ask" }] },
+      {
+        folder: "/home/me/notes",
+        chats: [
+          { root: FIRST, title: "Quarterly report", mode: "free", hosts: [] },
+          // The hosts its user let it reach, in the order allowed.
+          { root: THIRD, title: "A chat", mode: "ask", hosts: ["example.com", "[::1]"] },
+        ],
+      },
+      { folder: "/home/me/taxes", chats: [{ root: SECOND, title: "Receipts", mode: "ask", hosts: [] }] },
     ]);
   });
 
