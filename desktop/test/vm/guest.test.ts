@@ -182,7 +182,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
   });
 
   it("activates the bpf LSM and attaches all eleven rule hooks before sessions run", () => {
-    // No command runs as the guest's root: its init says what it found on the console, before it starts the agent.
+    // No command runs as the guest's root: its agent says on the console what the init's load of the rule found, before its hello.
     const said = /surogate: the protected-names rule attached (\d+) of \d+ hooks, under the LSMs (\S+)/.exec(readFileSync(options.console, "utf8"));
     expect(said?.slice(1)).toEqual(["11", expect.stringMatching(/\bbpf\b/)]);
   });
@@ -994,6 +994,26 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     expect(await guest.ready(STALLED, folderOf(path))).toBeNull();
     expect(await run("cat ~/kept-stalled", STALLED)).toEqual({ ok: { output: "kept\n", returncode: 0, timed_out: false } });
     await guest.teardown(STALLED);
+  });
+
+  it("fails the boot before its hello when the guest-kernel rule cannot load, and says why", async () => {
+    // QEMU, with the bpf LSM left out of the guest kernel's command line: the rule has nothing to attach to.
+    const bin = join(dir, "no-bpf");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "qemu-system-x86_64"), `#!/bin/sh\nfor arg; do shift; set -- "$@" "$(printf '%s' "$arg" | sed 's/,bpf$//')"; done\nexec /usr/bin/qemu-system-x86_64 "$@"\n`, { mode: 0o755 });
+    await guest.stop();
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      const begun = performance.now();
+      await expect(Guest.boot(bootLinux, options)).rejects.toThrow("The VM exited");
+      expect(performance.now() - begun).toBeLessThan(10_000);
+    } finally {
+      process.env.PATH = path;
+    }
+    expect(readFileSync(options.console, "utf8")).toContain("surogate: the bpf LSM is not active; refusing to run commands unprotected");
+    guest = await Guest.boot(bootLinux, options);
+    expect(await setUp(ROOT, folder)).toMatchObject({ type: "done" });
   });
 
   it("repairs a sessions disk the quick check cannot, and keeps the homes on it", async () => {
