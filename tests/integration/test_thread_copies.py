@@ -15,7 +15,9 @@ import pytest
 from sqlalchemy import text
 
 from surogates.governance.saga import SagaOrchestrator
+import surogates.harness.loop as loop_module
 from surogates.harness import loop_artifact_completion, tool_exec
+from surogates.runtime import SlashCommandConfig
 from surogates.harness.loop_context_replay import worker_note
 from surogates.harness.tool_exec import _build_session_sandbox_spec
 from surogates.sandbox.history import History
@@ -27,6 +29,7 @@ from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry
 from tests.test_steer_loop import _final_response
 from tests.thread_pods import ThreadPods
+from tests.test_wake_slash_command_gate import _harness as a_waking_harness
 
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_turn_sagas import a_turn, calling, saga_events, stop
@@ -622,3 +625,24 @@ async def test_a_thread_cannot_hand_work_to_a_helper_yet(api, monkeypatch, pods)
     async with api.app.state.session_factory() as db:
         helpers = (await db.execute(text("SELECT count(*) FROM sessions WHERE parent_id = :id"), {"id": thread.id})).scalar()
     assert (helpers, pods.pods) == (0, {})
+
+
+@pytest.mark.parametrize("cut", [asyncio.CancelledError, RuntimeError])
+async def test_a_thread_turn_cut_off_outside_its_landing_lets_its_copy_go(api, monkeypatch, pods, cut):
+    thread = await a_thread(api)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Edit the report."})
+    monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
+    harness = a_waking_harness(store, SlashCommandConfig())
+    harness._compressor.prune_stale_browser_states.side_effect = lambda messages: messages
+    harness._redis, harness._session_factory, harness._sandbox_pool = api.app.state.redis, api.app.state.session_factory, pool
+
+    async def a_turn_cut_off(session, *_, **__):
+        await open_pod(pool, session)  # its first step made its copy
+        raise cut("the turn's lease went to another worker" if cut is RuntimeError else None)
+
+    harness._run_loop = a_turn_cut_off
+    with pytest.raises(cut):
+        await harness.wake(thread.id)
+    # No later turn on this worker goes on with a copy of a turn that never landed.
+    assert (pool.holds_copy(str(thread.id)), pods.pods) == (False, {})

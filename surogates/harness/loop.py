@@ -21,6 +21,7 @@ import json
 import re
 import logging
 import os
+import sys
 import traceback
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -1591,6 +1592,18 @@ class AgentHarness(
             raise
         finally:
             leave_device_session(device_token)
+
+            # A thread's turn cut off outside its landing, by a cancel or a
+            # crash, leaves a copy that never landed: its pod goes, so no
+            # later turn on this worker goes on with that copy.
+            if (
+                sys.exc_info()[0] is not None and session is not None
+                and is_project_thread(session.config) and self._sandbox_pool is not None
+            ):
+                try:
+                    await asyncio.shield(self._sandbox_pool.destroy_for_session(sandbox_session_key(session)))
+                except BaseException:
+                    logger.warning("Could not let the copy of %s go", session_id, exc_info=True)
 
             # Stop the background renewal task before touching the
             # lease.  ``None`` when the wake bailed before the lease
