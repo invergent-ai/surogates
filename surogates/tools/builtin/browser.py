@@ -65,7 +65,7 @@ def build_browser_screenshot_key(
     )
 from surogates.devices.workspace import DeviceOperationError
 from surogates.tools.registry import ToolRegistry, ToolSchema
-from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR
+from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
 logger = logging.getLogger(__name__)
@@ -971,6 +971,7 @@ async def _screenshot_in_folder(png_bytes: bytes, result: dict[str, Any], worksp
     """
     relative_path = f"{_DEVICE_SCREENSHOT_DIR}/{_new_screenshot_path()}"
     try:
+        await keep_out_of_git(workspace_io)
         await workspace_io.write(await workspace_io.resolve(relative_path), png_bytes)
     except (OSError, WorkspaceSandboxError, DeviceOperationError) as exc:
         return json.dumps({

@@ -52,7 +52,7 @@ from surogates.artifacts.models import (
 )
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.session.events import EventType
-from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR
+from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 from surogates.tools.workspace_io import WorkspaceFiles
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,7 @@ class ArtifactStore:
         return (await self._files.read(key)).decode("utf-8")
 
     async def _write(self, path: str, text: str) -> None:
+        await keep_out_of_git(self._files)
         key = await self._files.resolve(f"{self._folder}/{path}")
         await self._files.write(key, text.encode("utf-8"))
 

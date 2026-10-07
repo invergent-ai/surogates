@@ -27,7 +27,11 @@ import json
 import logging
 import os
 import uuid
-from typing import Any, Awaitable, Callable
+import weakref
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+if TYPE_CHECKING:
+    from surogates.devices.workspace import DeviceWorkspaceIO
 
 from surogates.tools.utils.budget_config import (
     DEFAULT_PREVIEW_SIZE_CHARS,
@@ -51,6 +55,34 @@ WORKSPACE_STORAGE_DIR = ".surogates-results"
 
 _BUDGET_TOOL_NAME = "__budget_enforcement__"
 
+# What keeps the harness's own files in a folder of the user's computer out
+# of its git: the folder is often a repository, whose .gitignore does not
+# know this folder, as pytest's cache keeps itself out.
+_GITIGNORE = b"*\n"
+
+# The WorkspaceIOs that already have it: one tool call's, or one request's.
+_KEPT_OUT: "weakref.WeakSet[DeviceWorkspaceIO]" = weakref.WeakSet()
+
+
+async def keep_out_of_git(files: Any) -> None:
+    """Before the harness writes under WORKSPACE_STORAGE_DIR in a local folder: its ``.gitignore`` of ``*``, when absent.
+
+    So a ``git add -A`` in the folder adds no spill, artifact, staged skill
+    or screenshot.  Asked once per *files*, so a call or a request asks for
+    the same operations on a fresh worker.  A cloud workspace gets nothing,
+    as before.
+    """
+    # Here, not at the top: the device stack imports this package.
+    from surogates.devices.workspace import DeviceWorkspaceIO
+
+    if not isinstance(files, DeviceWorkspaceIO) or files in _KEPT_OUT:
+        return
+    key = await files.resolve(f"{WORKSPACE_STORAGE_DIR}/.gitignore")
+    if await files.stat(key) is None:
+        await files.write(key, _GITIGNORE)
+    _KEPT_OUT.add(files)
+
+
 # (path, content) -> wrote successfully
 ResultWriter = Callable[[str, str], Awaitable[bool]]
 
@@ -60,6 +92,8 @@ def make_sandbox_writer(sandbox_pool: Any, sandbox_owner: str) -> ResultWriter:
 
     async def _write(file_path: str, content: str) -> bool:
         try:
+            # A local folder's tool call writes through its DeviceCall, whose folder it is.
+            await keep_out_of_git(getattr(sandbox_pool, "workspace_io", None))
             output = await sandbox_pool.execute(
                 sandbox_owner,
                 "write_file",

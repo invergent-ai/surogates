@@ -40,7 +40,7 @@ from surogates.storage.backend import StorageBackend
 from surogates.storage.keys import prefixed
 from surogates.storage.tenant import session_workspace_key
 from surogates.tools.builtin.skill_validation import GRAPH_FILE
-from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR
+from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -440,6 +440,7 @@ async def stage_in_folder(
             return base
     except FileNotFoundError:
         pass
+    await keep_out_of_git(files)
     for path in linked_files:
         await files.write(await files.resolve(f"{base}/{path}"), await fetch(path))
     await files.write(marker, owner.encode())

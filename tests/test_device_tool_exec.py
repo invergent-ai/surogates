@@ -153,7 +153,10 @@ async def test_containment_is_left_to_the_computer():
     registry.get("read_file").handler.assert_called_once()
 
 
-async def test_an_oversized_result_spills_onto_the_computer():
+async def test_an_oversized_result_spills_onto_the_computer(monkeypatch):
+    # The folder's ignore file is asked for through the call too; this computer answers nothing.
+    kept_out = AsyncMock()
+    monkeypatch.setattr("surogates.tools.utils.tool_result_storage.keep_out_of_git", kept_out)
     registry = registry_with("search_files", output="x" * 150_000, max_result_size=200_000)
     registry.register(
         "write_file",
@@ -166,6 +169,7 @@ async def test_an_oversized_result_spills_onto_the_computer():
     assert isinstance(write.call_args.kwargs["workspace_io"], DeviceWorkspaceIO)
     # The spill reuses the runner of the call that produced the result.
     assert write.call_args.kwargs["workspace_io"] is registry.get("search_files").handler.call_args.kwargs["workspace_io"]
+    kept_out.assert_awaited_once_with(write.call_args.kwargs["workspace_io"])
 
 
 async def test_a_committed_result_marks_what_the_call_read_consumed_after_the_commit(monkeypatch):
