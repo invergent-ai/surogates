@@ -361,16 +361,15 @@ async def _expand_note_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         )
         from surogates.session.attachment_ingest import workspace_root_id
         from surogates.storage.tenant import boundary_workspace_prefix
+        from surogates.tools.workspace_io import StorageWorkspaceIO
 
         artifact_store = ArtifactStore(
-            storage,
-            session_id=target_sid,
-            bucket=bucket,
-            key_prefix=boundary_workspace_prefix(
-                target.config,
-                target,
-                workspace_root_id(target),
+            StorageWorkspaceIO(
+                storage,
+                bucket=bucket,
+                prefix=boundary_workspace_prefix(target.config, target, workspace_root_id(target)),
             ),
+            session_id=target_sid,
         )
         try:
             payload = await artifact_store.get_payload(artifact_id)

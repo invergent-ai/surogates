@@ -20,6 +20,7 @@ from surogates.artifacts.store import ArtifactStore
 from surogates.config import Settings
 from surogates.devices.operations import DeviceOperations
 from surogates.tenant.context import TenantContext
+from surogates.tools.workspace_io import StorageWorkspaceIO
 
 pytestmark = pytest.mark.asyncio
 
@@ -492,12 +493,7 @@ async def test_workspace_pdf_files_are_read_as_base64_previews():
 async def test_artifact_store_writes_under_session_prefix():
     storage = _RecordingStorage()
     session_id = uuid4()
-    store = ArtifactStore(
-        storage,
-        session_id=session_id,
-        bucket="ops-agent-bucket",
-        key_prefix=f"{session_id}/",
-    )
+    store = ArtifactStore(StorageWorkspaceIO(storage, bucket="ops-agent-bucket", prefix=f"{session_id}/"), session_id=session_id)
 
     meta = await store.create(
         name="notes",

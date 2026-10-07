@@ -2,12 +2,17 @@
 
 Artifacts are authored by the LLM via the ``create_artifact`` tool and
 listed/fetched by the chat UI.  Payloads never travel on the event log;
-the UI loads them on-demand through these routes.
+the UI loads them on-demand through these routes.  A local-folder chat's
+are read from its folder, by its own user only; its agent makes them in the
+folder itself (``surogates.artifacts.store.FolderArtifacts``), so the two
+routes that make one refuse such a chat.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
@@ -23,13 +28,15 @@ from surogates.artifacts.store import (
     ArtifactLimitError,
     ArtifactNotFoundError,
     ArtifactStore,
+    artifact_event,
 )
+from surogates.api.routes.workspace import workspace_files
+from surogates.devices.binding import device_of
+from surogates.sandbox.pool import sandbox_session_key
+from surogates.session.files import session_files
 from surogates.session.events import EventType
-from surogates.api.session_guards import require_session_visible
+from surogates.api.session_guards import require_device_access, require_session_visible
 from surogates.session.store import SessionNotFoundError, SessionStore
-from surogates.storage.backend import StorageBackend
-from surogates.session.attachment_ingest import workspace_root_id
-from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
@@ -70,10 +77,6 @@ def _get_session_store(request: Request) -> SessionStore:
     return store
 
 
-def _get_storage(request: Request) -> StorageBackend:
-    return request.app.state.storage
-
-
 def _require_service_account_api_route(
     request: Request,
     tenant: TenantContext,
@@ -89,13 +92,13 @@ def _require_service_account_api_route(
         )
 
 
-async def _resolve_storage_bucket(
+async def _resolve_session(
     request: Request,
     store: SessionStore,
     session_id: UUID,
     tenant: TenantContext,
-) -> tuple[object, str]:
-    """Fetch the session, verify tenant access, return ``(session, bucket)``."""
+) -> Any:
+    """Fetch the session and verify tenant access."""
     try:
         session = await store.get_session(session_id)
     except SessionNotFoundError:
@@ -115,7 +118,41 @@ async def _resolve_storage_bucket(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Session {session_id} has no agent bucket.",
         )
-    return session, bucket
+    return session
+
+
+@asynccontextmanager
+async def _artifact_files(request: Request, session: Any) -> AsyncIterator[Any]:
+    """A chat's files for these routes: a local folder's as the file panel reaches
+    them, its answers included; a cloud chat's workspace with its errors as they
+    always were."""
+    if device_of(session.config) is not None:
+        async with workspace_files(request, session) as files:
+            yield files
+        return
+    async with session_files(
+        session,
+        storage=request.app.state.storage,
+        session_factory=request.app.state.session_factory,
+        redis=request.app.state.redis,
+    ) as files:
+        yield files
+
+
+def _store(files: Any, session: Any) -> ArtifactStore:
+    return ArtifactStore(files, session_id=session.id, root=sandbox_session_key(session))
+
+
+def _refuse_local_folder(session: Any) -> None:
+    """409 for a chat on a local folder: its agent makes its artifacts in the folder, under its tool call."""
+    if device_of(session.config) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "local_folder",
+                "message": "A chat on a local folder has its artifacts made by its agent, in its folder",
+            },
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -134,16 +171,10 @@ async def list_artifacts(
 ) -> ArtifactListResponse:
     """List every artifact that belongs to the session, oldest first."""
     store = _get_session_store(request)
-    session, bucket = await _resolve_storage_bucket(request, store, session_id, tenant)
-    artifact_store = ArtifactStore(
-        _get_storage(request),
-        session_id=session_id,
-        bucket=bucket,
-        key_prefix=boundary_workspace_prefix(
-            session.config, session, workspace_root_id(session),
-        ),
-    )
-    artifacts = await artifact_store.list()
+    session = await _resolve_session(request, store, session_id, tenant)
+    await require_device_access(request, session, tenant)
+    async with _artifact_files(request, session) as files:
+        artifacts = await _store(files, session).list()
     return ArtifactListResponse(artifacts=artifacts)
 
 
@@ -164,20 +195,15 @@ async def get_artifact(
     """Fetch a single artifact's metadata and full payload."""
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session, bucket = await _resolve_storage_bucket(request, store, session_id, tenant)
-    artifact_store = ArtifactStore(
-        _get_storage(request),
-        session_id=session_id,
-        bucket=bucket,
-        key_prefix=boundary_workspace_prefix(
-            session.config, session, workspace_root_id(session),
-        ),
-    )
+    session = await _resolve_session(request, store, session_id, tenant)
+    await require_device_access(request, session, tenant)
     try:
-        meta = await artifact_store.get_meta(artifact_id)
-        payload = await artifact_store.get_payload(
-            artifact_id, version=meta.version,
-        )
+        async with _artifact_files(request, session) as files:
+            artifact_store = _store(files, session)
+            meta = await artifact_store.get_meta(artifact_id)
+            payload = await artifact_store.get_payload(
+                artifact_id, version=meta.version,
+            )
     except ArtifactNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -207,7 +233,9 @@ async def create_artifact(
     bucket and is fetched by the UI via :func:`get_artifact`.
     """
     store = _get_session_store(request)
-    session, bucket = await _resolve_storage_bucket(request, store, session_id, tenant)
+    session = await _resolve_session(request, store, session_id, tenant)
+    await require_device_access(request, session, tenant)
+    _refuse_local_folder(session)
 
     try:
         body.validate_spec()
@@ -217,35 +245,18 @@ async def create_artifact(
             detail=exc.errors(),
         )
 
-    artifact_store = ArtifactStore(
-        _get_storage(request),
-        session_id=session_id,
-        bucket=bucket,
-        key_prefix=boundary_workspace_prefix(
-            session.config, session, workspace_root_id(session),
-        ),
-    )
     try:
-        meta = await artifact_store.create(
-            name=body.name, kind=body.kind, spec=body.spec,
-        )
+        async with _artifact_files(request, session) as files:
+            meta = await _store(files, session).create(
+                name=body.name, kind=body.kind, spec=body.spec,
+            )
     except ArtifactLimitError as exc:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=str(exc),
         )
 
-    await store.emit_event(
-        session_id,
-        EventType.ARTIFACT_CREATED,
-        {
-            "artifact_id": str(meta.artifact_id),
-            "name": meta.name,
-            "kind": meta.kind.value,
-            "version": meta.version,
-            "size": meta.size,
-        },
-    )
+    await store.emit_event(session_id, EventType.ARTIFACT_CREATED, artifact_event(meta))
     return meta
 
 
@@ -269,7 +280,9 @@ async def update_artifact(
     updated version supersedes the old rendering without a second card.
     """
     store = _get_session_store(request)
-    session, bucket = await _resolve_storage_bucket(request, store, session_id, tenant)
+    session = await _resolve_session(request, store, session_id, tenant)
+    await require_device_access(request, session, tenant)
+    _refuse_local_folder(session)
 
     try:
         body.validate_spec()
@@ -279,18 +292,11 @@ async def update_artifact(
             detail=exc.errors(),
         )
 
-    artifact_store = ArtifactStore(
-        _get_storage(request),
-        session_id=session_id,
-        bucket=bucket,
-        key_prefix=boundary_workspace_prefix(
-            session.config, session, workspace_root_id(session),
-        ),
-    )
     try:
-        meta = await artifact_store.update(
-            artifact_id, name=body.name, kind=body.kind, spec=body.spec,
-        )
+        async with _artifact_files(request, session) as files:
+            meta = await _store(files, session).update(
+                artifact_id, name=body.name, kind=body.kind, spec=body.spec,
+            )
     except ArtifactNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -302,16 +308,6 @@ async def update_artifact(
             detail=str(exc),
         )
 
-    await store.emit_event(
-        session_id,
-        EventType.ARTIFACT_UPDATED,
-        {
-            "artifact_id": str(meta.artifact_id),
-            "name": meta.name,
-            "kind": meta.kind.value,
-            "version": meta.version,
-            "size": meta.size,
-        },
-    )
+    await store.emit_event(session_id, EventType.ARTIFACT_UPDATED, artifact_event(meta))
 
     return meta
