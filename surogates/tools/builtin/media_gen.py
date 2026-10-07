@@ -33,6 +33,7 @@ import httpx
 
 from surogates.harness.message_utils import message_to_dict
 from surogates.sandbox.copy_files import TooLargeForCopy, write_copy, writes_to_copy
+from surogates.tools.builtin.artifact import artifact_client
 from surogates.storage.tenant import boundary_workspace_key, workspace_session_shim
 from surogates.tools.builtin.vision import (
     _extract_response_content,
@@ -314,9 +315,12 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
 
     # Validate a user-supplied output path BEFORE spending provider quota.
     try:
-        output_path = _normalize_output_path(arguments.get("output_path"), default="")
-    except WorkspaceSandboxError as exc:
+        output_path = _normalize_output_path(arguments.get("output_path"), default="", root=_folder_root(kwargs))
+        taken = await _refuse_existing(kwargs.get("workspace_io"), output_path) if output_path else None
+    except (OSError, WorkspaceSandboxError) as exc:
         return _json_error(str(exc))
+    if taken is not None:
+        return _json_error(taken)
 
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     input_images = arguments.get("input_images") or []
@@ -332,6 +336,7 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
                 session_config=kwargs.get("session_config"),
                 sandbox_pool=kwargs.get("sandbox_pool"),
                 owner=kwargs.get("task_id"),
+                workspace_io=kwargs.get("workspace_io"),
             )
         except (ValueError, WorkspaceSandboxError) as exc:
             return _json_error(str(exc))
@@ -399,8 +404,9 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
             session_config=kwargs.get("session_config"),
             sandbox_pool=kwargs.get("sandbox_pool"),
             owner=kwargs.get("task_id"),
+            workspace_io=kwargs.get("workspace_io"),
         )
-    except TooLargeForCopy as exc:
+    except (TooLargeForCopy, OSError, WorkspaceSandboxError) as exc:
         return _json_error(str(exc))
     if not saved:
         return _json_error(
@@ -413,7 +419,7 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         "model": getattr(response, "model", model),
     }
     if await _create_media_artifact(
-        kwargs.get("api_client"),
+        artifact_client(kwargs),
         kind="image",
         path=relative_path,
         mime_type=mime_type,
@@ -446,9 +452,13 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         relative_path = _normalize_output_path(
             arguments.get("output_path"),
             default=_default_media_path("video", "mp4"),
+            root=_folder_root(kwargs),
         )
-    except WorkspaceSandboxError as exc:
+        taken = await _refuse_existing(kwargs.get("workspace_io"), relative_path)
+    except (OSError, WorkspaceSandboxError) as exc:
         return _json_error(str(exc))
+    if taken is not None:
+        return _json_error(taken)
 
     body: dict[str, Any] = {"model": model, "prompt": prompt}
     duration = arguments.get("duration")
@@ -470,6 +480,7 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
                 session_config=kwargs.get("session_config"),
                 sandbox_pool=kwargs.get("sandbox_pool"),
                 owner=kwargs.get("task_id"),
+                workspace_io=kwargs.get("workspace_io"),
             )
         except (ValueError, WorkspaceSandboxError) as exc:
             return _json_error(str(exc))
@@ -576,8 +587,9 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
             session_config=kwargs.get("session_config"),
             sandbox_pool=kwargs.get("sandbox_pool"),
             owner=kwargs.get("task_id"),
+            workspace_io=kwargs.get("workspace_io"),
         )
-    except TooLargeForCopy as exc:
+    except (TooLargeForCopy, OSError, WorkspaceSandboxError) as exc:
         return _json_error(str(exc))
     if not saved:
         return _json_error(
@@ -587,7 +599,7 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
 
     result: dict[str, Any] = {"path": relative_path, "model": model, "job_id": job_id}
     if await _create_media_artifact(
-        kwargs.get("api_client"),
+        artifact_client(kwargs),
         kind="video",
         path=relative_path,
         mime_type="video/mp4",
@@ -716,14 +728,43 @@ def _default_media_path(kind: str, extension: str) -> str:
     return f"media/{kind}s/{kind}-{timestamp}-{uuid4().hex[:8]}.{extension}"
 
 
-def _normalize_output_path(raw: Any, *, default: str) -> str:
+async def _refuse_existing(workspace_io: Any, relative_path: str) -> str | None:
+    """write_file's refusal of a blind overwrite, when a local folder already has *relative_path*; else None.
+
+    Generated media never replaces a file of the user's, read or not: the
+    model names another file.  None in the cloud (no *workspace_io*), as before.
+    """
+    if workspace_io is None or await workspace_io.stat(await workspace_io.resolve(relative_path)) is None:
+        return None
+    return (
+        f"Refusing to overwrite '{relative_path}': it already exists. "
+        "Name a new file for the generated media, or delete this one first."
+    )
+
+
+def _folder_root(kwargs: dict[str, Any]) -> str | None:
+    """A local folder's own path, which its agent sees it at, or None in the cloud."""
+    workspace_io = kwargs.get("workspace_io")
+    return None if workspace_io is None else workspace_io.root
+
+
+def _normalize_output_path(raw: Any, *, default: str, root: str | None = None) -> str:
     """Clean a user-supplied workspace-relative output path.
 
-    Empty input yields *default*.  Absolute paths are re-rooted into the
-    workspace by stripping the leading slash; ``..`` traversal is
-    rejected outright.
+    Empty input yields *default*.  A path inside a local folder (*root*,
+    the folder's own path) is taken from the folder's top, and an absolute
+    one outside it is left for the computer to refuse.  In the cloud,
+    absolute paths are re-rooted into the workspace by stripping the
+    leading slash.  ``..`` traversal is rejected outright.
     """
-    path = str(raw or "").strip().lstrip("/")
+    path = str(raw or "").strip()
+    folder = (root or "").rstrip("/")
+    if folder and path.startswith("/"):
+        if not path.startswith(f"{folder}/"):
+            # Outside the folder: the computer's to refuse, in its own words.
+            return path
+        path = path[len(folder) + 1:]
+    path = path.lstrip("/")
     if not path:
         return default
     parts = PurePosixPath(path)
@@ -742,6 +783,7 @@ async def _save_media_bytes(
     session_config: dict[str, Any] | None,
     sandbox_pool: Any | None = None,
     owner: Any | None = None,
+    workspace_io: Any | None = None,
 ) -> bool:
     """Dual-write generated bytes: local workspace and/or object storage.
 
@@ -753,7 +795,18 @@ async def _save_media_bytes(
     A thread writes them into its copy alone: they land with its turn, and
     with no copy to write into they are not saved.  Bytes too large for
     the copy raise ``TooLargeForCopy``, so the tool can say why.
+
+    A chat on a local folder writes them into the folder alone, through its
+    tool call's *workspace_io*, never over a file there: what the computer
+    refuses, its user's denial included, is raised for the tool to say.
     """
+    if workspace_io is not None:
+        # Again at the write: a default name, or a file made meanwhile.
+        taken = await _refuse_existing(workspace_io, relative_path)
+        if taken is not None:
+            raise FileExistsError(taken)
+        await workspace_io.write(await workspace_io.resolve(relative_path), data)
+        return True
     if writes_to_copy(sandbox_pool, owner, session_config):
         try:
             await write_copy(sandbox_pool, owner, relative_path, data)
