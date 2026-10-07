@@ -114,11 +114,17 @@ export function segments(text: string, keep = ""): Array<{ text: string; special
 
 /** Set *element*'s text to *text*, whole, with each special character marked as its code point: never markup. */
 export function showText(element: HTMLElement, text: string, keep = ""): void {
-  element.replaceChildren(...segments(text, keep).map(({ text: run, special }) => {
-    if (!special) return document.createTextNode(run);
+  // Built apart and set at once: a text of any number of runs, where one argument per run would overflow the stack.
+  const runs = document.createDocumentFragment();
+  for (const { text: run, special } of segments(text, keep)) {
+    if (!special) {
+      runs.append(run);
+      continue;
+    }
     const mark = document.createElement("span");
     mark.className = "special";
     mark.textContent = run;
-    return mark;
-  }));
+    runs.append(mark);
+  }
+  element.replaceChildren(runs);
 }

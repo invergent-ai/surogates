@@ -3,13 +3,13 @@
 // in the VM: a denied command never reaches it, and the file kinds run in the root's file host.
 
 import { linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { dataHome, key, launch, press, prompt, promptsShown, quit, shellPage, stubNative } from "./launch.js";
+import { dataHome, key, launch, MAIN, press, prompt, promptsShown, quit, shellPage, stubNative } from "./launch.js";
 
 let home: string;
 let folder: string;
@@ -233,5 +233,50 @@ describe("the folder sheet", () => {
     await expect.poll(() => promptsShown(app!)).toBe(1);
     await press(await prompt(app!), "accept");
     expect(await prepared).toMatchObject({ folder });
+  });
+});
+
+describe("a prompt's text", () => {
+  it("shows a command of 200 000 special characters whole, its end reachable, and its buttons answer", async () => {
+    await signedIn();
+    const command = `${"\u200B".repeat(200_000)}echo END`;
+    const shell = dirname(MAIN);
+    // A prompt window of the app's own, as an approval opens one, over the app's window.
+    const answered = app!.evaluate(({ BrowserWindow }, [module, page, preload, value]) => {
+      // The app's own module, as its main process loaded it: an evaluated function has no import().
+      const load = process.getBuiltinModule("node:module").createRequire(module);
+      const { openPrompt } = load(module) as typeof import("../../src/shell/prompt-window.js");
+      return openPrompt({
+        parent: BrowserWindow.getAllWindows()[0]!,
+        page,
+        preload,
+        content: {
+          title: "Run a command?",
+          lead: "A command of special characters.",
+          details: [{ label: "Command", value, code: true, keep: "\n\t" }],
+          notes: [],
+          choice: null,
+          buttons: [{ id: "deny", label: "Deny", allows: false }, { id: "allow", label: "Allow once", allows: true }],
+          focus: "deny",
+          cancel: "deny",
+          enter: null,
+          height: 400,
+        },
+        queue: { waiting: () => 0, onChange: () => () => {} },
+        unseen: () => {},
+      }, new AbortController().signal);
+    }, [join(shell, "prompt-window.js"), join(shell, "pages", "prompt.html"), join(shell, "pages-preload.cjs"), command] as const);
+    const asked = await prompt(app!);
+    expect(await text(asked, ".code")).toBe(`${"U+200B".repeat(200_000)}echo END`);
+    // Scrolled to its end, the last line is in view.
+    const seen = await asked.evaluate(() => {
+      const body = document.querySelector(".prompt-body")!;
+      body.scrollTop = body.scrollHeight;
+      const end = document.querySelector(".code")!.getBoundingClientRect().bottom;
+      return body.scrollHeight > body.clientHeight && end <= body.getBoundingClientRect().bottom + 1;
+    });
+    expect(seen).toBe(true);
+    await press(asked, "allow");
+    expect(await answered).toEqual({ button: "allow", choice: null });
   });
 });
