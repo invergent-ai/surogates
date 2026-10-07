@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -133,9 +134,9 @@ class WorkstreamStore:
             await db.commit()
 
     async def thread_facts(
-        self, workstream_id: UUID, *, thread_id: UUID | None = None, with_files: bool = True,
+        self, *workstream_ids: UUID, thread_id: UUID | None = None, with_files: bool = True,
     ) -> list[ThreadFacts]:
-        """What the rows of the project's threads are derived from, or only
+        """What the rows of the projects' threads are derived from, or only
         *thread_id*'s.  A deleted thread is left out.
 
         Without files, only each thread's newest turn summary is read, for
@@ -145,7 +146,7 @@ class WorkstreamStore:
         query = (
             select(WorkstreamThread, SessionRow.status, SessionRow.updated_at)
             .join(SessionRow, SessionRow.id == WorkstreamThread.session_id)
-            .where(WorkstreamThread.workstream_id == workstream_id, SessionRow.status != "archived")
+            .where(WorkstreamThread.workstream_id.in_(workstream_ids), SessionRow.status != "archived")
         )
         if thread_id is not None:
             query = query.where(WorkstreamThread.session_id == thread_id)
@@ -191,7 +192,7 @@ class WorkstreamStore:
                 events_of[event.session_id].append(event)
         return [
             ThreadFacts(
-                id=thread.session_id, title=thread.title, status=status,
+                id=thread.session_id, workstream_id=thread.workstream_id, title=thread.title, status=status,
                 created_at=thread.created_at, updated_at=updated_at, resolved_at=thread.resolved_at,
                 # Every thread works in the cloud until local-folder threads.
                 place={"kind": "cloud"},
@@ -199,6 +200,24 @@ class WorkstreamStore:
             )
             for thread, status, updated_at in sorted(threads, key=lambda found: found[2], reverse=True)
         ]
+
+    async def masters(self, master_ids: list[UUID]) -> dict[UUID, tuple[datetime, bool]]:
+        """Each master's last activity, and whether it waits on the user: a
+        question or an approval pending in the project's conversation."""
+        asking = (
+            select(InboxItem.id)
+            .where(
+                InboxItem.session_id == SessionRow.id,
+                InboxItem.kind.in_(WAITING_KINDS),
+                InboxItem.status == "pending",
+            )
+            .exists()
+        )
+        async with self._sf() as db:
+            found = await db.execute(
+                select(SessionRow.id, SessionRow.updated_at, asking).where(SessionRow.id.in_(master_ids))
+            )
+            return {master_id: (updated_at, asks) for master_id, updated_at, asks in found}
 
     async def latest_report(self, master_id: UUID, thread_id: UUID) -> Event | None:
         """The last report *thread_id* sent its master, as the master read it."""

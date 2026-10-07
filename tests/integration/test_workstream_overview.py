@@ -139,3 +139,55 @@ async def test_a_question_that_expired_waits_until_the_reply(api):
     await turn_ends(api, thread)
     [row] = await rows(api, project)
     assert (row["group"], row["status_line"]) == ("idle", "Did the work.")
+
+
+async def summary_of(api, project: dict) -> dict:
+    listed = await api.client.get("/v1/workstreams", headers=api.auth())
+    assert listed.status_code == 200, listed.text
+    [found] = [summary for summary in listed.json() if summary["id"] == project["id"]]
+    got = await api.client.get(f"/v1/workstreams/{project['id']}", headers=api.auth())
+    assert {key: got.json()[key] for key in found} == found
+    return found
+
+
+async def test_a_project_counts_its_threads_waiting_on_the_user_and_working(api):
+    project = await create(api)
+    assert (project["waiting"], project["working"]) == (0, 0)
+    await threads_in_every_state(api, await master_of(api, project))
+    summary = await summary_of(api, project)
+    assert (summary["waiting"], summary["working"]) == (4, 2)
+
+
+async def test_an_open_question_in_the_master_counts_as_waiting(api):
+    project = await create(api)
+    master = await master_of(api, project)
+    store = api.app.state.session_store
+    # A turn's end in the master is news, not a question.
+    await store.emit_event(master.id, EventType.INBOX_TASK_COMPLETE, {
+        "outcome": "success", "summary": "Started a thread.", "duration_seconds": 1, "session_title": "Quarterly report",
+    })
+    assert (await summary_of(api, project))["waiting"] == 0
+    await asks(api, master, "Which quarter?")
+    assert (await summary_of(api, project))["waiting"] == 1
+
+
+async def test_a_project_is_as_recent_as_its_latest_activity(api):
+    budget = await create(api, name="Budget")
+    thread = await start(api, await master_of(api, budget))
+    hiring = await create(api, name="Hiring")
+    listed = (await api.client.get("/v1/workstreams", headers=api.auth())).json()
+    assert [summary["id"] for summary in listed][:2] == [hiring["id"], budget["id"]]
+    # Work in a thread is the project's activity.
+    await answered(api, thread, "Drafted the memo.")
+    listed = (await api.client.get("/v1/workstreams", headers=api.auth())).json()
+    assert [summary["id"] for summary in listed][:2] == [budget["id"], hiring["id"]]
+    [row] = await rows(api, budget)
+    assert listed[0]["updated_at"] == row["updated_at"]
+
+
+async def test_the_list_answers_no_more_projects_than_the_shell_takes(api, monkeypatch):
+    monkeypatch.setitem(SHELL_LIMITS, "rows", 2)
+    for name in ("Budget", "Hiring", "Audit"):
+        await create(api, name=name)
+    listed = await api.client.get("/v1/workstreams", headers=api.auth())
+    assert [summary["name"] for summary in listed.json()] == ["Audit", "Hiring"]

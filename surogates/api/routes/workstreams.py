@@ -7,6 +7,7 @@ capability: with it off, every web session but the canonical one is hidden.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
@@ -21,7 +22,7 @@ from surogates.session.provisioning import create_agent_session
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.workstreams import master_config
-from surogates.workstreams.derive import SHELL_LIMITS, derive_thread
+from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread
 from surogates.workstreams.store import WorkstreamStore
 
 router = APIRouter(prefix="/workstreams")
@@ -92,6 +93,9 @@ class ProjectSummaryOut(BaseModel):
     icon: str | None
     created_at: datetime
     updated_at: datetime
+    # Threads waiting on the user, plus one for an open question in the master.
+    waiting: int = 0
+    working: int = 0
 
 
 class ProjectOut(ProjectSummaryOut):
@@ -127,6 +131,32 @@ async def _project(request: Request, workstream_id: UUID, tenant: TenantContext,
     return project
 
 
+async def _described(request: Request, projects: list[Workstream]) -> list[ProjectOut]:
+    """*projects* as the shell lists them, the latest active first: each with
+    its counts, and its latest activity, the row's, its master's or a
+    thread's, whichever is newest."""
+    if not projects:
+        return []
+    store = _store(request)
+    threads = defaultdict(list)
+    for facts in await store.thread_facts(*(project.id for project in projects), with_files=False):
+        threads[facts.workstream_id].append(facts)
+    masters = await store.masters([project.master_session_id for project in projects])
+    now = datetime.now(timezone.utc)
+    described = []
+    for project in projects:
+        seen, asking = masters[project.master_session_id]
+        groups = [derive_thread(facts, now=now)["group"] for facts in threads[project.id]]
+        described.append(ProjectOut.model_validate(project).model_copy(update={
+            "waiting": groups.count("waiting") + asking,
+            "working": groups.count("working"),
+            "updated_at": max(aware(moment) for moment in (
+                project.updated_at, seen, *(facts.updated_at for facts in threads[project.id]),
+            )),
+        }))
+    return sorted(described, key=lambda project: project.updated_at, reverse=True)
+
+
 @router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
 async def create_project(
     body: ProjectCreate, request: Request, ctx: AgentRuntime, tenant: Tenant,
@@ -147,7 +177,7 @@ async def create_project(
     )
     try:
         await sessions.update_session_title(master.id, body.name)
-        return await _store(request).create(
+        project = await _store(request).create(
             id=workstream_id, master_session_id=master.id,
             name=body.name, goal=body.goal, instructions=body.instructions, **owner,
         )
@@ -155,16 +185,20 @@ async def create_project(
         # A master with no project could be neither listed nor archived.
         await sessions.update_session_status(master.id, "archived")
         raise
+    [described] = await _described(request, [project])
+    return described
 
 
 @router.get("", response_model=list[ProjectSummaryOut])
 async def list_projects(request: Request, ctx: AgentRuntime, tenant: Tenant):
-    return await _store(request).list(**_owner(tenant, ctx))
+    # The latest active, as many as the shell takes.
+    return (await _described(request, await _store(request).list(**_owner(tenant, ctx))))[: SHELL_LIMITS["rows"]]
 
 
 @router.get("/{workstream_id}", response_model=ProjectOut)
 async def get_project(workstream_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant):
-    return await _project(request, workstream_id, tenant, ctx)
+    [described] = await _described(request, [await _project(request, workstream_id, tenant, ctx)])
+    return described
 
 
 @router.patch("/{workstream_id}", response_model=ProjectOut)
@@ -177,7 +211,8 @@ async def change_project(
     )
     if project is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
-    return project
+    [described] = await _described(request, [project])
+    return described
 
 
 @router.delete("/{workstream_id}", status_code=status.HTTP_204_NO_CONTENT)

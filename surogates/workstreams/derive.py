@@ -44,6 +44,7 @@ class ThreadFacts:
     """What a thread's row is derived from, as the store reads it."""
 
     id: UUID
+    workstream_id: UUID
     title: str
     status: str  # sessions.status
     created_at: datetime
@@ -84,7 +85,7 @@ def _state(facts: ThreadFacts, latest: dict[str, Any], now: datetime) -> tuple[s
         return "waiting", *waiting
     if facts.status == "active":
         return "working", *_working(latest)
-    if now - _aware(facts.updated_at) > QUIET_RESOLVES_AFTER:
+    if now - aware(facts.updated_at) > QUIET_RESOLVES_AFTER:
         return "resolved", None, _quiet_line(latest)
     return "idle", None, _quiet_line(latest)
 
@@ -213,12 +214,12 @@ def _id(event: Any) -> int:
     return event.id if event is not None else 0
 
 
-def _aware(moment: datetime) -> datetime:
-    # sessions' times are naive UTC; a browser would read them as local time.
+def aware(moment: datetime) -> datetime:
+    """*moment* in UTC: sessions' times are naive UTC, and a browser would read them as local time."""
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
 
 
 def _utc(moment: datetime | None) -> str | None:
     if moment is None:
         return None
-    return _aware(moment).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return aware(moment).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
