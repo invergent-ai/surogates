@@ -1151,6 +1151,11 @@ body.settings-page {
   padding: 0;
 }
 
+.segmented button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
 .segmented button[aria-pressed="true"] {
   border-color: var(--border);
   background: var(--row);

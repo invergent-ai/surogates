@@ -1,5 +1,5 @@
 import { once } from "node:events";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,7 +8,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { ACCOUNT, connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { dataHome, launch, quit, secondLaunch, shellPage, stubNative } from "./launch.js";
+import { dataHome, ELECTRON, launch, MAIN, quit, secondLaunch, shellPage, stubNative } from "./launch.js";
 
 let home: string;
 let agent: FakeAgent;
@@ -254,6 +254,65 @@ describe("Settings → General", () => {
     shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message?: string }> }).asked.map((options) => options.message));
   const hold = (shell: ElectronApplication) => shell.evaluate(() => Object.assign(globalThis, { hold: true }));
   const release = (shell: ElectronApplication) => shell.evaluate(() => (globalThis as unknown as { release(): void }).release());
+
+  it("starts at login from an entry in the user's own autostart folder, once it is on, and hidden", async () => {
+    const { shell, page } = await signedIn();
+    // The test's own config folder, as its session's XDG_CONFIG_HOME: never the user's.
+    const entry = join(home, "c", "autostart", "surogate.desktop");
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    expect(await pressed(settings, "startAtLogin")).toBe("off");
+    await settings.click('[data-setting="startAtLogin"] [data-value="on"]');
+    await expect.poll(() => pressed(settings, "startAtLogin")).toBe("on");
+    // A development build starts itself: its Electron, on its main.
+    expect(readFileSync(entry, "utf8").split("\n").find((line) => line.startsWith("Exec="))).toBe(`Exec=${ELECTRON} ${MAIN} --hidden`);
+    await settings.click('[data-setting="startAtLogin"] [data-value="off"]');
+    await expect.poll(() => pressed(settings, "startAtLogin")).toBe("off");
+    expect(existsSync(entry)).toBe(false);
+  });
+
+  // The main window, once there is one: whether its page still loads, and whether it shows.
+  const mainWindow = () => app!.evaluate(({ BrowserWindow }) => {
+    const [main] = BrowserWindow.getAllWindows();
+    return main ? { loading: main.webContents.isLoading(), visible: main.isVisible() } : null;
+  });
+
+  it("shows no window when it starts at login, until it is launched again", async () => {
+    app = await launch(home, {}, ["--hidden"]);
+    await expect.poll(async () => (await mainWindow())?.loading).toBe(false);
+    expect((await mainWindow())?.visible).toBe(false);
+    expect(await secondLaunch(home)).toBe(0);
+    await expect.poll(async () => (await mainWindow())?.visible).toBe(true);
+  });
+
+  it("shows no window when it starts at login with the window left maximised", async () => {
+    // Maximising a window shows it: one started hidden is maximised once it is first shown.
+    mkdirSync(join(home, "surogate"), { recursive: true });
+    writeFileSync(join(home, "surogate", "window-state.json"), JSON.stringify({ main: { x: 0, y: 0, width: 1000, height: 700, maximized: true } }));
+    app = await launch(home, {}, ["--hidden"]);
+    await expect.poll(async () => (await mainWindow())?.loading).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect((await mainWindow())?.visible).toBe(false);
+    expect(await secondLaunch(home)).toBe(0);
+    await expect.poll(async () => (await mainWindow())?.visible).toBe(true);
+  });
+
+  it("does not start at login from a build whose path GNOME would not start, and says so", async () => {
+    // This build's Electron, as a folder whose name holds a % would give it.
+    const percent = join(home, "percent.cjs");
+    writeFileSync(percent, `process.execPath = ${JSON.stringify("/opt/100%/electron")};`);
+    app = await launch(home, {}, [], [percent]);
+    await shellPage(app);
+    await app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("settings")!.click());
+    const settings = await settingsPage(app);
+    expect(await settings.textContent("#login-refused")).toBe("This build cannot start at login: GNOME does not start a program whose path holds a %.");
+    expect(await settings.isDisabled('[data-setting="startAtLogin"] [data-value="on"]')).toBe(true);
+    // Asked all the same, as the page could ask: refused, and nothing is written.
+    const set = settings.evaluate(() => (globalThis as unknown as { surogateSettings: { set(key: string, value: string): Promise<void> } })
+      .surogateSettings.set("startAtLogin", "on"));
+    await expect(set).rejects.toThrow("GNOME does not start a program whose path holds a %");
+    expect(existsSync(join(home, "c", "autostart"))).toBe(false);
+  });
 
   it("quits when the window is closed once Keep running is off, and keeps the choice", async () => {
     const { shell, page } = await signedIn();

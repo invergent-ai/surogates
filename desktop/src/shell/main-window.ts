@@ -95,6 +95,7 @@ export interface MainWindowOptions {
   dark: boolean;
   onChange(): void; // what the centre shows changed
   quitsOnClose(): boolean; // asked as the window closes: true quits the app, through its quit's questions, where it would hide
+  hidden: boolean; // not shown once its page has loaded
 }
 
 export class MainWindow {
@@ -129,9 +130,13 @@ export class MainWindow {
       backgroundColor: background,
       webPreferences: { preload: options.preload, sandbox: true, contextIsolation: true, nodeIntegration: false },
     });
-    if (maximized) this.window.maximize();
+    if (maximized) {
+      // Maximising shows a window: one started hidden is maximised once it is first shown.
+      if (options.hidden) this.window.once("show", () => this.window.maximize());
+      else this.window.maximize();
+    }
     lockPage(this.window.webContents);
-    this.window.webContents.once("did-finish-load", () => this.show());
+    if (!options.hidden) this.window.webContents.once("did-finish-load", () => this.show());
     this.window.on("close", (event) => {
       // A place that cannot be kept, as on a full disk, is said, and the window still hides, or quits.
       try {

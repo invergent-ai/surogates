@@ -14,6 +14,7 @@ interface Appearance {
 interface State {
   appearance: Appearance;
   preferences: Record<string, "on" | "off">;
+  startAtLoginRefused: string | null;
   account: { name: string; email: string } | null;
   computer: { name: string; connection: string; added: string | null; organisation: string | null; agents: string[] };
   links: { usage: boolean };
@@ -76,6 +77,11 @@ async function render(): Promise<void> {
       option.setAttribute("aria-pressed", String(option.dataset.value === chosen[control.dataset.setting ?? ""]));
     }
   }
+  // A build that cannot start at login says why, and its control does nothing.
+  const refused = byId("login-refused");
+  refused.textContent = state.startAtLoginRefused ?? "";
+  refused.hidden = state.startAtLoginRefused === null;
+  for (const option of document.querySelectorAll<HTMLButtonElement>('[data-setting="startAtLogin"] button')) option.disabled = !refused.hidden;
   byId("email").textContent = state.account?.email ?? "Not signed in";
   byId("name").textContent = state.account?.name ?? "";
   byId("organisation").textContent = state.computer.organisation ?? "";

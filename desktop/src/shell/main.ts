@@ -25,6 +25,7 @@ import { VmExecutor } from "../vm/executor.js";
 import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
+import { autostartFile, HIDDEN, LAUNCHER, loginRefusal, setStartAtLogin, startsAtLogin } from "./autostart.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
 import { reauthorize, rebind, register } from "./computer.js";
@@ -61,6 +62,10 @@ app.setPath("userData", join(root, "electron"));
 const states = new WindowStates(join(root, "window-state.json"));
 const appearance = new AppearanceStore(join(root, "settings.json"));
 const preferences = new PreferencesStore(join(root, "preferences.json"));
+// Start at login's entry, in the user's XDG config folder; and what it starts: the installed app's
+// launcher, or a development build's Electron on this main.
+const autostart = autostartFile(app.getPath("appData"));
+const loginCommand = (): string[] => (app.isPackaged ? [LAUNCHER] : [process.execPath, import.meta.filename]);
 const agents = new AgentStore(join(root, "agent.json"));
 let main: MainWindow | null = null;
 let theme: Theme;
@@ -1403,7 +1408,9 @@ function settingsState() {
   const { keepRunning, developer } = preferences.get();
   return {
     appearance: appearance.get(),
-    preferences: { keepRunning: onOff(keepRunning), developer: onOff(developer) },
+    preferences: { startAtLogin: onOff(startsAtLogin(autostart)), keepRunning: onOff(keepRunning), developer: onOff(developer) },
+    // Why this build cannot start at login, or null.
+    startAtLoginRefused: loginRefusal(loginCommand()),
     account,
     computer: {
       name: hostname(),
@@ -1561,6 +1568,10 @@ function showSettings(): void {
     // A theme in effect that changes reaches the web client through the theme's own paint.
     handle("settings:set", async (key, value) => {
       if (key === "keepRunning" || key === "developer") return setPreference(key, value);
+      if (key === "startAtLogin") {
+        if (value !== "on" && value !== "off") throw new Error(`No setting startAtLogin = ${String(value)}`);
+        return setStartAtLogin(autostart, value === "on", loginCommand());
+      }
       if (key !== "theme") {
         appearance.set(String(key), value);
         tellAppearance();
@@ -1828,6 +1839,8 @@ if (!app.requestSingleInstanceLock()) {
     const page = join(PAGES, "shell.html");
     main = new MainWindow({
       states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed, quitsOnClose: () => !preferences.get().keepRunning,
+      // Started at login: the window waits for the user, in the tray or at the next launch.
+      hidden: process.argv.includes(HIDDEN),
     });
     wire(main, page);
     // In the tray where the desktop has one; GNOME without one shows the window at the next launch.
