@@ -5,7 +5,9 @@ load the tool registry once (the ~7.5 CPU-second import cost is paid
 during pod startup, before the port binds), then serve HTTP:
 
     POST /execute   {"name": ..., "args": {...}, "timeout": 300}
-    GET  /healthz   -> 200 when $WORKSPACE_DIR has a live FUSE mount
+    GET  /healthz   -> 200 when $WORKSPACE_DIR has a live FUSE mount; in a
+                       thread's pod, when $PROJECT_DIR has one and the
+                       thread's copy is made
 
 Each ``/execute`` forks a child process (``multiprocessing`` fork
 context — the warm registry is inherited copy-on-write) that runs the
@@ -33,6 +35,7 @@ import multiprocessing
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -223,27 +226,40 @@ def _run_file(args: dict, workspace: str) -> str:
     would reach the project's files through object storage come here.
     """
     path = str(args.get("path") or "")
-    root = os.path.realpath(workspace)
-    target = os.path.realpath(os.path.join(root, path))
-    if not path or os.path.commonpath([root, target]) != root or target == root:
-        return json.dumps({"error": f"{path} is outside the workspace"})
-    too_large = f"{path} is over the 50 MiB a file may be"
-    if args.get("action") == "read":
-        if not os.path.isfile(target):
-            return json.dumps({"error": f"{path} not found"})
-        if os.path.getsize(target) > _MAX_FILE_BYTES:
-            return json.dumps({"error": too_large})
-        with open(target, "rb") as fh:
-            return json.dumps({"content_b64": base64.b64encode(fh.read()).decode()})
-    if args.get("action") == "write":
-        data = base64.b64decode(args.get("content_b64") or "")
-        if len(data) > _MAX_FILE_BYTES:
-            return json.dumps({"error": too_large})
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        with open(target, "wb") as fh:
-            fh.write(data)
-        return json.dumps({"ok": True, "bytes": len(data)})
-    return json.dumps({"error": f"Unknown file action: {args.get('action')}"})
+    try:
+        root = os.path.realpath(workspace)
+        target = os.path.realpath(os.path.join(root, path))
+        if not path or os.path.commonpath([root, target]) != root or target == root:
+            return json.dumps({"error": f"{path} is outside the workspace"})
+        too_large = f"{path} is over the 50 MiB a file may be"
+        if args.get("action") == "read":
+            if not os.path.isfile(target):
+                return json.dumps({"error": f"{path} not found"})
+            if os.path.getsize(target) > _MAX_FILE_BYTES:
+                return json.dumps({"error": too_large})
+            with open(target, "rb") as fh:
+                return json.dumps({"content_b64": base64.b64encode(fh.read()).decode()})
+        if args.get("action") == "write":
+            content = args.get("content_b64") or ""
+            # Refused before it is decoded: base64 spends four characters on three bytes.
+            if len(content) > 4 * -(-_MAX_FILE_BYTES // 3):
+                return json.dumps({"error": too_large})
+            data = base64.b64decode(content)
+            if len(data) > _MAX_FILE_BYTES:
+                return json.dumps({"error": too_large})
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            # Written beside the file, then renamed over it: a write cut short
+            # leaves the file whole.  History leaves out the *~ name.
+            staged = Path(f"{target}.file~")
+            try:
+                staged.write_bytes(data)
+                os.replace(staged, target)
+            finally:
+                staged.unlink(missing_ok=True)
+            return json.dumps({"ok": True, "bytes": len(data)})
+        return json.dumps({"error": f"Unknown file action: {args.get('action')}"})
+    except (OSError, ValueError) as exc:  # a bad name or encoding, a folder in the way, a full disk
+        return json.dumps({"error": str(exc)})
 
 
 def run_tool(
@@ -391,6 +407,19 @@ async def execute_in_child(
         await asyncio.to_thread(proc.join, 5)
 
 
+def _give_up(reason: str, log: str | Path = "/dev/termination-log") -> None:
+    """Stop the daemon for good, *reason* the pod's termination message.
+
+    The pod fails at once, and its provision with it, rather than staying
+    not ready until the ready timeout.
+    """
+    try:
+        Path(log).write_text(reason)
+    except OSError:
+        logger.warning("Could not write the pod's termination message", exc_info=True)
+    os._exit(1)
+
+
 def _token_ok(auth_header: str, token: str) -> bool:
     if not auth_header.startswith("Bearer "):
         return False
@@ -406,6 +435,7 @@ def create_app(
     default_timeout: int = DEFAULT_TIMEOUT,
     require_fuse: bool = True,
     history: History | None = None,
+    give_up: Callable[[str], None] | None = None,
 ) -> FastAPI:
     """Build the daemon's FastAPI app.
 
@@ -414,7 +444,8 @@ def create_app(
 
     A thread's pod has a *history*: the project's real files are mounted at
     its ``project``, and ``workspace`` is the thread's copy, made from them
-    before the pod reports ready.
+    before the pod reports ready.  When it can never be made in this pod,
+    *give_up* is called with the reason.
     """
     app = FastAPI()
     sem = asyncio.Semaphore(max_concurrency)
@@ -443,6 +474,8 @@ def create_app(
                     # retry cannot make it again.
                     if (history.repo / "HEAD").exists():
                         failed = str(exc)
+                        if give_up is not None:
+                            give_up(f"copy not made: {failed}")
                     return Response(content=f"copy not made: {exc}", status_code=503)
                 opened = True
         if failed is not None:
@@ -470,9 +503,10 @@ def create_app(
                 media_type="application/json",
             )
 
-        # The _code payload may carry a credential — never log its args.
-        if name == "_code":
-            logger.info("→ _code")
+        # The _code payload may carry a credential, and _file's a whole file:
+        # never log their args.
+        if name in ("_code", "_file"):
+            logger.info("→ %s", name)
         else:
             preview = json.dumps(args, default=str)[:200]
             logger.info("→ %s %s", name, preview)
@@ -512,10 +546,14 @@ def main() -> None:
     if project:
         from surogates.tools.utils.checkpoint_manager import _shadow_repo_path
 
+        user = os.environ.get("USER_ID")
+        if not user:
+            logger.error("USER_ID is required in a thread's pod: the project's history is made as its user")
+            sys.exit(1)
         history = History(
             repo=_shadow_repo_path(project, base=Path.home() / ".surogates" / "history"),
             project=Path(project), copy=Path(workspace),
-            thread=os.environ["HISTORY_THREAD"], user=os.environ.get("USER_ID", ""),
+            thread=os.environ["HISTORY_THREAD"], user=user,
         )
 
     logger.info("Loading tool registry...")
@@ -525,7 +563,7 @@ def main() -> None:
     import uvicorn
 
     uvicorn.run(
-        create_app(token=token, workspace=workspace, require_fuse=require_fuse, history=history),
+        create_app(token=token, workspace=workspace, require_fuse=require_fuse, history=history, give_up=_give_up),
         host="0.0.0.0",
         port=port,
         log_level="warning",

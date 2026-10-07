@@ -114,7 +114,7 @@ async def test_a_pod_without_a_copy_refuses_history_steps(tmp_path):
     assert "no copy" in response.json()["error"]
 
 
-def a_thread_app(tmp_path):
+def a_thread_app(tmp_path, **kwargs):
     project, copy = tmp_path / "project", tmp_path / "workspace"
     project.mkdir()
     copy.mkdir()
@@ -123,7 +123,7 @@ def a_thread_app(tmp_path):
         repo=_shadow_repo_path(str(project), base=tmp_path / "home"),
         project=project, copy=copy, thread="t1", user="u1",
     )
-    app = executor_server.create_app(token="t", workspace=str(copy), require_fuse=False, history=history)
+    app = executor_server.create_app(token="t", workspace=str(copy), require_fuse=False, history=history, **kwargs)
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://pod"), copy
 
 
@@ -144,8 +144,9 @@ async def test_a_thread_pod_makes_its_copy_again_after_a_failed_read_of_the_real
     assert (copy / "Report.docx").read_bytes() == b"report v1"
 
 
-async def test_a_thread_pod_whose_copy_was_half_made_stays_not_ready(tmp_path, monkeypatch):
-    client, _ = a_thread_app(tmp_path)
+async def test_a_thread_pod_whose_copy_was_half_made_gives_up_with_its_reason(tmp_path, monkeypatch):
+    reasons: list[str] = []
+    client, _ = a_thread_app(tmp_path, give_up=reasons.append)
     git = History._git
 
     def cut_short(self, args, **kwargs):
@@ -162,6 +163,26 @@ async def test_a_thread_pod_whose_copy_was_half_made_stays_not_ready(tmp_path, m
     # Not made again over the half-made copy: the pod is replaced.
     assert (first.status_code, again.status_code) == (503, 503)
     assert again.text == first.text == "copy not made: git worktree timed out after 120s"
+    # It gives up at once, with its reason, rather than waiting out the ready timeout.
+    assert reasons == ["copy not made: git worktree timed out after 120s"]
+
+
+def test_a_daemon_that_gives_up_leaves_its_reason_as_the_pods_termination_message(tmp_path, monkeypatch):
+    exits: list[int] = []
+    monkeypatch.setattr(executor_server.os, "_exit", exits.append)
+    executor_server._give_up("copy not made: no space left", log=tmp_path / "termination-log")
+    assert ((tmp_path / "termination-log").read_text(), exits) == ("copy not made: no space left", [1])
+
+
+def test_a_thread_pod_without_its_user_refuses_to_start(tmp_path, monkeypatch, caplog):
+    env = {"TOOL_EXECUTOR_TOKEN": "t", "PROJECT_DIR": str(tmp_path), "HISTORY_THREAD": "t1", "WORKSPACE_DIR": str(tmp_path / "w")}
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("USER_ID", raising=False)
+    monkeypatch.setattr(executor_server, "init_registry", lambda: pytest.fail("started without a user"))
+    with pytest.raises(SystemExit) as exited:
+        executor_server.main()
+    assert exited.value.code == 1 and "USER_ID" in caplog.text
 
 
 async def test_a_history_step_that_times_out_answers_an_error(pods, monkeypatch):
@@ -176,3 +197,35 @@ async def test_a_history_step_that_times_out_answers_an_error(pods, monkeypatch)
     answer = await call(pods, pod, "_history", action="apply", **turn["changes"][0])
     assert list(answer) == ["error"] and "timed out after 120 seconds" in answer["error"]
     assert (await pods.pods[pod].get("/healthz")).status_code == 200
+
+
+async def test_every_file_failure_answers_an_error_and_a_write_is_whole_or_not_at_all(pods, monkeypatch):
+    pod = await a_pod(pods)
+    copy = pods.copies["t1"]
+    (copy / "folder").mkdir()
+    (copy / "notes.md").write_text("notes v1")
+    x = base64.b64encode(b"x").decode()
+    for args in (
+        {"action": "write", "path": "notes.md", "content_b64": "not base64"},
+        {"action": "write", "path": "folder", "content_b64": x},
+        {"action": "write", "path": "Report.docx/x", "content_b64": x},
+        {"action": "read", "path": "a\0b"},
+        {"action": "write", "path": "../project/x", "content_b64": x},
+    ):
+        answer = await call(pods, pod, "_file", **args)
+        assert list(answer) == ["error"], (args, answer)
+    assert not (pods.project / "x").exists()
+
+    # A write that cannot finish leaves the file as it was, and nothing beside it.
+    with monkeypatch.context() as patch:
+        patch.setattr(executor_server.os, "replace", lambda *_: (_ for _ in ()).throw(OSError(28, "No space left")))
+        answer = await call(pods, pod, "_file", action="write", path="notes.md", content_b64=x)
+    assert "No space left" in answer["error"]
+    assert (copy / "notes.md").read_text() == "notes v1"
+    assert [p.name for p in copy.iterdir() if p.name.startswith("notes.md")] == ["notes.md"]
+
+    # Over the cap, a write is refused before it is decoded.
+    monkeypatch.setattr(executor_server, "_MAX_FILE_BYTES", 4)
+    monkeypatch.setattr(executor_server.base64, "b64decode", lambda *_: (_ for _ in ()).throw(ValueError("decoded first")))
+    big = await call(pods, pod, "_file", action="write", path="big.bin", content_b64=base64.b64encode(b"1234567").decode())
+    assert "50 MiB" in big["error"] and not (copy / "big.bin").exists()
