@@ -27,7 +27,7 @@ class Lines:
 
 DEFAULTS: dict[str, Lines] = {
     "ro": Lines(
-        greeting="Bună ziua! Cu ce vă pot ajuta?",
+        greeting="Bună ziua! Sunt asistentul virtual. Cu ce vă pot ajuta?",  # says it is an AI (EU AI Act art. 50)
         filler="O clipă, verific.",
         still_there="Mai sunteți acolo?",
         goodbye="Vă mulțumesc că ați sunat. O zi bună!",
@@ -38,7 +38,7 @@ DEFAULTS: dict[str, Lines] = {
         choices="Variante: {}.",
     ),
     "en": Lines(
-        greeting="Hello! How can I help you?",
+        greeting="Hello! I'm the virtual assistant. How can I help you?",
         filler="One moment, let me check.",
         still_there="Are you still there?",
         goodbye="Thank you for calling. Have a nice day!",
