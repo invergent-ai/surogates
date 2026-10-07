@@ -23,9 +23,10 @@ import { absolutePath, commandEnvironment, makeCaches } from "./environment.js";
 import { type FolderRecord, lockFolder, presentIn, readRecord, removePlaceholders, writeRecord } from "./folder-record.js";
 import { type Destination, FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { HookGuard } from "./hooks.js";
-import { destination, GLOB, hideSrtTmp, quote, reach, sandboxPolicy } from "./policy.js";
+import { GLOB, hideSrtTmp, quote, sandboxPolicy } from "./policy.js";
 import { appeared, extraDenies, GRANT_CHANGED, guestBinds, identity, protectedKeys, srtTargets } from "./restarts.js";
 import { CANCELLED, unenterable, workdir } from "../guest/command.js";
+import { destination, reach } from "../vm/egress.js";
 import { Processes } from "../guest/processes.js";
 import type { BindMode, ProtectedKey } from "../guest/protocol.js";
 import type { SessionRunner } from "../guest/runner-process.js";
@@ -271,7 +272,7 @@ async function start(message: HostStart): Promise<void> {
   // never judges a listed literal again: such a grant is left out while it is.
   const domains: string[] = [];
   for (const domain of message.domains) {
-    if (isIP(domain.replace(/^\[(.*)\]$/, "$1")) && (await reach(domain).catch(() => "own")) === "own") continue;
+    if (isIP(domain.replace(/^\[(.*)\]$/, "$1")) && ((await reach(domain).catch(() => null))?.reach ?? "own") === "own") continue;
     domains.push(domain);
   }
   const policy = sandboxPolicy({ folder: path, tmp, home, appDirs, bwrapPath, socatPath, rgPath, domains });
@@ -396,7 +397,7 @@ function askApp({ host, port }: NetworkHostPattern): Promise<boolean> {
 // on a private network.
 async function decide(found: Destination, key: string): Promise<boolean> {
   // A lookup or an interface read that throws refuses, as a name that cannot be looked up does.
-  const where = await reach(found.host).catch(() => null);
+  const where = (await reach(found.host).catch(() => null))?.reach ?? null;
   if (where === "own") own.add(key);
   if (where === null) unknown.add(key);
   if ((where !== "public" && where !== "private") || stopping) return false;
