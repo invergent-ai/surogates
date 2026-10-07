@@ -453,6 +453,17 @@ describe("a tool host's own sandbox", { timeout: 30_000 }, () => {
     expect(readFileSync(join(folder, "given-path"), "utf8").split(":")[0]).toBe(tools);
   });
 
+  it("never runs a program from the folder through a relative entry of the host's PATH, wherever the host starts", async () => {
+    const proof = join(folder, "ran-relative");
+    mkdirSync(join(folder, "bin"));
+    writeFileSync(join(folder, "bin", "rg"), `#!/bin/sh\necho "$0" >> '${proof}'\nexec /usr/bin/rg "$@"\n`, { mode: 0o755 });
+    // Started outside the folder, so bin is no folder of it here; the helper would resolve it against the folder.
+    const harness = host({}, base, { ...process.env, PATH: `bin:${process.env.PATH ?? ""}` });
+    await ready(harness);
+    expect(await harness.op("1", "ripgrep", { key: folder, mode: "files", pattern: "*.txt", glob: null, context: 0 })).toEqual({ ok: `${folder}/a.txt\n` });
+    expect(existsSync(proof)).toBe(false);
+  });
+
   it.each([
     ["under a file (ENOTDIR)", () => "/etc/passwd/bin"],
     ["in a loop of links (ELOOP)", () => {
