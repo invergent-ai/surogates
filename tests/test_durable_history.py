@@ -385,14 +385,23 @@ def test_the_opens_git_has_the_pods_ready_bound_and_a_steps_git_its_own(tmp_path
     assert set(timeouts) == {120}
 
 
-def test_a_save_in_the_second_a_pod_read_the_file_reaches_the_next_copy(tmp_path, project):
+def test_a_save_in_the_second_a_pod_read_the_file_reaches_the_next_copy(tmp_path, project, monkeypatch):
     first = a_pod(tmp_path, project)
     (first.copy / "A.md").write_text("by A")
     land(first, "saga:a")
+    add_all = History._add_all
+
+    def a_large_projects_read(self, git):
+        add_all(self, git)
+        time.sleep(1.1)
+        os.utime(self.repo / "index")  # git writes the index seconds after it read notes.txt
+
     time.sleep(1 - time.time() % 1)  # the start of a second
     second = int(time.time())
     os.utime(project / "notes.txt", (second, second))  # geesefs shows whole seconds
-    pod = a_pod(tmp_path, project)  # its open reads notes.txt in that second
+    with monkeypatch.context() as patch:
+        patch.setattr(History, "_add_all", a_large_projects_read)
+        pod = a_pod(tmp_path, project)  # its open reads notes.txt in that second
     (project / "notes.txt").write_text("v9 notes\n")  # saved again in that second, the same size
     os.utime(project / "notes.txt", (second, second))
     (pod.copy / "B.md").write_text("by B")
