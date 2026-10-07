@@ -341,6 +341,9 @@ class History:
         if now != main:
             self._fetch(now)
             if now is not None and saga in self._message(now):
+                # The push moved them all: so does this pod.
+                for ref in (MAIN, self.branch, self.base, self.synced):
+                    self._main("update-ref", ref, now)
                 return {"commit": now}
             raise HistoryConflict("main moved in the project's history since the landing began")
         self._fetch(main)

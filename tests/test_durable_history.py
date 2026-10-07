@@ -394,3 +394,28 @@ def test_a_kept_index_git_cannot_read_is_left_out_and_the_pod_opens(tmp_path, pr
     (project / "_history" / "index").write_bytes(b"DIRC\x00\x00\x00\x02 not an index")
     pod = a_pod(tmp_path, project)
     assert sorted(p.name for p in pod.copy.iterdir()) == ["A.md", "Report.docx", "notes.txt"]
+
+
+def test_a_record_found_by_its_saga_leaves_its_pod_ready_for_the_next_landing(tmp_path, project, monkeypatch):
+    history = a_pod(tmp_path, project)
+    (history.copy / "a.md").write_text("a")
+    main = history.fetch()["main"]
+    turn = history.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "turn"]])
+    applied = [history.apply(c["path"], c["before"], c["after"]) for c in turn["changes"]]
+    record = {"turn": turn["commit"], "applied": applied, "author": A, "trailers": [["Surogate-Saga", "saga:1"]], "main": main}
+    put = History._put_durable
+
+    def written_then_failed(self, name, source):
+        put(self, name, source)
+        if name == "packed-refs":
+            raise OSError(5, "Input/output error")  # the push counts; its answer is lost
+
+    with monkeypatch.context() as patch:
+        patch.setattr(History, "_put_durable", written_then_failed)
+        with pytest.raises(OSError):
+            history.record(**record)
+    landed = history.record(**record)  # the step's retry finds it by its saga
+    assert git(project / "_history", "rev-parse", "refs/heads/main") == landed["commit"]
+    (history.copy / "b.md").write_text("b")
+    land(history, "saga:2")
+    assert (project / "b.md").read_text() == "b"
