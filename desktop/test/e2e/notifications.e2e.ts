@@ -136,8 +136,8 @@ describe("the app's notifications", () => {
   it("tell of a turn that ends in the chat the window shows, followed across its turns only while the window is away", async () => {
     const client = await signedIn();
     agent.titles.set(CHAT, "Quarterly report");
-    await moveTo(client, `/chat/${CHAT}`);
     await focus(app!);
+    await moveTo(client, `/chat/${CHAT}`);
     // In front, the window's own page tells the user: the app follows nothing.
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(agent.chatsAsked).toEqual([]);
