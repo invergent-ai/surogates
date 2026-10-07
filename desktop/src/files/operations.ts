@@ -19,8 +19,8 @@ import { dirname, join, resolve } from "node:path";
 import { isBase64, type Outcome } from "../link/protocol.js";
 import {
   conflict, Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WALK_FILES,
-  MAX_WALK_LOOKS, MAX_WRITE_BYTES, OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE, sandboxError,
-  SHOWN_DOT_FOLDERS, valueError, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
+  MAX_WALK_DEPTH, MAX_WALK_LOOKS, MAX_WRITE_BYTES, OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE,
+  sandboxError, SHOWN_DOT_FOLDERS, valueError, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "./answers.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
@@ -421,8 +421,10 @@ function listDir(args: Record<string, unknown>, { folder }: Context): string[] {
 //
 // Each folder is entered through a handle on its parent, never by its path, and never through a link: a command in
 // the VM can swap a folder for a link between the walk seeing it and entering it. Depth first, each folder entered as
-// it is met, so a handle is held for each folder above the one being read, and no more. Each folder is read an entry
-// at a time, so one of a million entries costs no more than the walk looks at.
+// it is met, so a handle is held for each folder above the one being read, and no more: MAX_WALK_DEPTH of them at
+// most. Each folder is read an entry at a time, so one of a million entries costs no more than the walk looks at. A
+// folder it cannot enter (unreadable, no handle left, a link in its place) stops it, said truncated: what that folder
+// holds is unknown, and the walk must not be taken for whole.
 function walk(args: Record<string, unknown>, { folder }: Context): { files: Array<[string, number]>; truncated: boolean; cursor: string } {
   const key = keyInFolder(folder, text(args, "key"));
   const { skip, skip_top: top, skip_hidden: hidden, since } = args;
@@ -479,17 +481,24 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
       if (entry.isDirectory()) {
         const hides = hidden && name.startsWith(".") && !SHOWN_DOT_FOLDERS.has(name);
         if (skipped.has(name) || (!level.rel && skippedTop.has(name)) || hides) continue;
+        // The key is the first level: this folder would be levels.length below it.
+        if (levels.length > MAX_WALK_DEPTH) {
+          truncated = true;
+          break;
+        }
         let fd: number;
         try {
           fd = openSync(at, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
         } catch {
-          // A folder under the key it cannot read, or one a link took the place of, is left out.
-          continue;
+          truncated = true;
+          break;
         }
         try {
           levels.push({ fd, rel: path, dir: listing(fd) });
         } catch {
           closeSync(fd);
+          truncated = true;
+          break;
         }
         continue;
       }

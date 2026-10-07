@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import {
-  type BigIntStats, chmodSync, linkSync, mkdirSync, mkdtempSync, type ReadPosition, readdirSync, readFileSync, realpathSync, rmSync,
-  statSync, symlinkSync, truncateSync, utimesSync, writeFileSync,
+  type BigIntStats, chmodSync, closeSync, constants, linkSync, mkdirSync, mkdtempSync, openSync, type ReadPosition, readdirSync,
+  readFileSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +11,7 @@ import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WALK_FILES, MAX_WALK_LOOKS, MAX_WRITE_BYTES,
+  MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WALK_DEPTH, MAX_WALK_FILES, MAX_WALK_LOOKS, MAX_WRITE_BYTES,
   READ_TOO_LARGE, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "../src/files/answers.js";
 import { BAD_PAGE, BAD_WALK, type Context, perform, revisionOf } from "../src/files/operations.js";
@@ -24,6 +24,8 @@ const reads = vi.hoisted(() => ({ cap: Number.POSITIVE_INFINITY, calls: 0, next:
 const meanwhile = vi.hoisted(() => ({ run: null as (() => void) | null }));
 // How many folder entries the file helper has read, however it read them; and whether its next opendir fails.
 const dirents = vi.hoisted(() => ({ read: 0, refuse: false }));
+// Each open the file helper made, by path and flags; and which of its next opens fails, counting from 1 (0: none).
+const opens = vi.hoisted(() => ({ made: [] as Array<{ path: string; flags: number }>, refuseAt: 0 }));
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
   const readSync = (
@@ -58,7 +60,14 @@ vi.mock("node:fs", async (importOriginal) => {
     };
     return dir;
   };
-  const mocked = { readSync, writeSync, readdirSync, opendirSync };
+  const openSync = ((path: Parameters<typeof fs.openSync>[0], flags?: Parameters<typeof fs.openSync>[1], mode?: Parameters<typeof fs.openSync>[2]) => {
+    opens.made.push({ path: String(path), flags: typeof flags === "number" ? flags : -1 });
+    if (opens.refuseAt > 0 && --opens.refuseAt === 0) {
+      throw Object.assign(new Error("EMFILE: too many open files, open"), { code: "EMFILE", errno: -24, syscall: "open" });
+    }
+    return fs.openSync(path, flags ?? "r", mode);
+  }) as typeof fs.openSync;
+  const mocked = { readSync, writeSync, readdirSync, opendirSync, openSync };
   return { ...fs, ...mocked, default: { ...fs, ...mocked } };
 });
 
@@ -685,6 +694,49 @@ describe("walk", () => {
     const handles = readdirSync("/proc/self/fd").length;
     dirents.refuse = true;
     expect(await walk()).toMatchObject({ error: { type: "os", code: "EMFILE" } });
+    expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
+  });
+
+  // *depth* folders, each in the last, under *top*, a file at the bottom: built through handles, as a command in the VM
+  // could build it, past what a path can name.
+  const chain = (top: string, depth: number) => {
+    mkdirSync(top);
+    let fd = openSync(top, constants.O_RDONLY | constants.O_DIRECTORY);
+    try {
+      for (let level = 0; level < depth; level++) {
+        mkdirSync(`/proc/self/fd/${fd}/d`);
+        const child = openSync(`/proc/self/fd/${fd}/d`, constants.O_RDONLY | constants.O_DIRECTORY);
+        closeSync(fd);
+        fd = child;
+      }
+      writeFileSync(`/proc/self/fd/${fd}/bottom.txt`, "");
+    } finally {
+      closeSync(fd);
+    }
+  };
+
+  it("goes no deeper than its depth, and says it stopped", async () => {
+    const whole = join(folder, "whole");
+    const deep = join(folder, "deep");
+    try {
+      chain(whole, MAX_WALK_DEPTH);
+      chain(deep, MAX_WALK_DEPTH + 1);
+      expect((await walk({ key: whole })).ok).toMatchObject({ files: [[`${"d/".repeat(MAX_WALK_DEPTH)}bottom.txt`, 0]], truncated: false });
+      expect((await walk({ key: deep })).ok).toMatchObject({ files: [], truncated: true });
+    } finally {
+      // rmSync names each path whole, and these are past what a path can name.
+      execFileSync("rm", ["-rf", whole, deep]);
+    }
+  }, 60_000);
+
+  it("stops at a folder it cannot enter, and says it stopped", async () => {
+    writeFileSync(join(folder, "sub", "b.txt"), "b");
+    const handles = readdirSync("/proc/self/fd").length;
+    opens.refuseAt = 2; // the key's, then sub's
+    const walked = await walk();
+    opens.refuseAt = 0;
+    expect(walked.ok.truncated).toBe(true);
+    expect(walked.ok.files).not.toContainEqual(["sub/b.txt", 1]);
     expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
   });
 

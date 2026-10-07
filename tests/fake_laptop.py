@@ -29,6 +29,7 @@ from surogates.devices.workspace import (
     MAX_NAMES,
     MAX_PAYLOAD_BYTES,
     MAX_READ_BYTES,
+    MAX_WALK_DEPTH,
     MAX_WALK_FILES,
     MAX_WALK_LOOKS,
     MAX_WRITE_BYTES,
@@ -305,14 +306,23 @@ def _walk(a: dict[str, Any]) -> dict[str, Any]:
                 hides = hidden and entry.name.startswith(".") and entry.name not in SHOWN_DOT_FOLDERS
                 if entry.name in skip or (not rel and entry.name in top) or hides:
                     continue
+                # The key is the first level: this folder would be len(levels) below it.
+                if len(levels) > MAX_WALK_DEPTH:
+                    truncated = True
+                    break
+                # A folder it cannot enter (unreadable, no handle left, a link in its place) stops it: what that
+                # folder holds is unknown.
                 try:
                     child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                 except OSError:
-                    continue
+                    truncated = True
+                    break
                 try:
                     levels.append((child, path, os.scandir(child)))
                 except OSError:
                     os.close(child)
+                    truncated = True
+                    break
                 continue
             if not entry.is_file(follow_symlinks=False):
                 continue

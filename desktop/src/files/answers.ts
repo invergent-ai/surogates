@@ -12,6 +12,8 @@ export const OUTPUT_CAP_CHARS = 256 * 1024;
 export const MAX_NAMES = 10_000;
 export const MAX_WALK_FILES = 5_000;
 export const MAX_WALK_LOOKS = 200_000;
+// How deep below its key a walk enters folders: it holds a handle on each folder above the one it reads.
+export const MAX_WALK_DEPTH = 2_000;
 // The hidden folders the file panel's tree still shows: a walk that skips hidden ones enters these.
 export const SHOWN_DOT_FOLDERS: ReadonlySet<string> = new Set([".github", ".vscode"]);
 // How far a walk's cursor is set back: a filesystem stamps changes by a coarser clock, a FAT folder's in 2 s ticks.

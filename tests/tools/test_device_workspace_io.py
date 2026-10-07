@@ -662,6 +662,64 @@ async def test_a_walk_reads_a_folder_no_further_than_it_looks_and_closes_every_f
     assert len(os.listdir("/proc/self/fd")) == handles
 
 
+def _chain(top: Path, depth: int) -> None:
+    """*depth* folders, each in the last, under *top*, a file at the bottom: built through handles, as a command
+    in the VM could build it, past what a path can name."""
+    fd = os.open(top, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for _ in range(depth):
+            os.mkdir("d", dir_fd=fd)
+            child = os.open("d", os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        os.close(os.open("bottom.txt", os.O_WRONLY | os.O_CREAT, dir_fd=fd))
+    finally:
+        os.close(fd)
+
+
+async def test_a_walk_goes_no_deeper_than_its_depth_and_says_so(wio, root):
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    # Two handles a level, as the app holds them: raised as Node raises its own.
+    resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+    whole, deep = root / "whole", root / "deep"
+    whole.mkdir()
+    deep.mkdir()
+    try:
+        _chain(whole, workspace.MAX_WALK_DEPTH)
+        _chain(deep, workspace.MAX_WALK_DEPTH + 1)
+        walked = await wio.walk(str(whole), skip=())
+        assert (walked.files, walked.truncated) == ([("d/" * workspace.MAX_WALK_DEPTH + "bottom.txt", 0)], False)
+        walked = await wio.walk(str(deep), skip=())
+        assert (walked.files, walked.truncated) == ([], True)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+        subprocess.run(["rm", "-rf", str(whole), str(deep)], check=True)
+
+
+async def test_a_walk_stops_at_a_folder_it_cannot_enter_and_says_so(wio, root, monkeypatch):
+    (root / "sub").mkdir()
+    (root / "sub" / "b.txt").write_text("b")
+    handles = len(os.listdir("/proc/self/fd"))
+    real_open, opened = os.open, 0
+
+    def out_of_handles(*args, **kwargs):
+        nonlocal opened
+        opened += 1
+        if opened == 2:  # the key's, then sub's
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(os, "open", out_of_handles)
+    walked = await wio.walk(str(root), skip=())
+    monkeypatch.undo()
+    # What it could not enter is unknown: not said whole.
+    assert walked.truncated is True
+    assert ("sub/b.txt", 1) not in walked.files
+    assert len(os.listdir("/proc/self/fd")) == handles
+
+
 async def test_a_walk_stops_at_its_cap_and_says_so(wio, root):
     (root / "many").mkdir()
     for name in range(workspace.MAX_WALK_FILES + 1):

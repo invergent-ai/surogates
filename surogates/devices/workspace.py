@@ -76,10 +76,13 @@ folder's in two-second ticks.  So a walk since it lists what changed after it
 by that computer's clock, whatever the server's says.  It lists at most
 MAX_WALK_FILES files, whose paths, each measured JSON-encoded plus 24, fit in
 MAX_PAYLOAD_BYTES; it looks at most MAX_WALK_LOOKS entries, for at most
-WALK_BUDGET_S seconds, since the folder's other operations wait behind it.
-truncated says one of these caps stopped it.  A folder under key it cannot
-read is left out; key itself unreadable is an os error.  Arguments it cannot
-take are answered with a value error.
+WALK_BUDGET_S seconds, since the folder's other operations wait behind it; and
+it enters folders at most MAX_WALK_DEPTH below key, since it holds a handle on
+each folder above the one it reads.  A folder under key it cannot enter (it
+cannot read it, it has no handle left, or a link took the folder's place)
+stops it too: what that folder holds is unknown.  truncated says one of these
+stopped it.  key itself unreadable is an os error.  Arguments it cannot take
+are answered with a value error.
 
 An error names the exception the worker raises again:
 
@@ -168,6 +171,7 @@ MAX_NAMES = 10_000
 MAX_WALK_FILES = 5_000
 SHOWN_DOT_FOLDERS = (".github", ".vscode")
 MAX_WALK_LOOKS = 200_000
+MAX_WALK_DEPTH = 2_000
 WALK_MARGIN_NS = 2_000_000_000
 WALK_BUDGET_S = 5
 TOO_LARGE = "Too large for one operation on a local folder (over 1.5 MiB)"
