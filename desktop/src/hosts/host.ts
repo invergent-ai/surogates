@@ -70,10 +70,12 @@ let processes: Processes | null = null;
 let runner: Promise<SessionRunner> | null = null;
 let liveRunner: SessionRunner | null = null;
 let watching: NodeJS.Timeout | null = null;
-// Once a command of this root's has run in the guest: what it left running there, or
-// a cancelled one still ending, can write a hook at any time, so the look every
+// Once a command of this root's may have run in the guest (from its refusal on): what it left
+// running there, or a cancelled one still ending, can write a hook at any time, so the look every
 // WATCH_MS goes on until the host stops.
 let guestCommands = false;
+// What of the root's can write the folder at any time, besides a command it runs.
+const alive = () => (processes?.live ?? 0) > 0 || liveRunner !== null || guestCommands;
 // For a guest root's binds (HostStart.protect): what the latest look found to bind, each
 // with its inode when it was last named to the app.
 let naming = false;
@@ -135,6 +137,7 @@ process.on("message", (raw) => {
       // A command for a folder replaced since the start would run on the replacement.
       if (!sameFolder()) send({ type: "result", id: message.id, outcome: FOLDER_UNAVAILABLE });
       else {
+        guestCommands = true;
         void guard?.refusal().then((refused) => {
           // A host program may have replaced one since the look, as git config renames a new file over the old.
           if (naming && named) name(named.map(([path, , mode]) => [path, mode]));
@@ -247,7 +250,8 @@ async function start(message: HostStart): Promise<void> {
   // Its first look finds the user's own hooks, while srt starts. After a killed
   // host, that host's are the user's, and the look catches what its commands left.
   // Commands can write the folder and the session's temp folder: a hook linked into either is theirs.
-  guard = new HookGuard(path, { inherited, known: running, writable: [path, ...spellings(tmp)], seen });
+  // A command's start records the exec steps in paused rebases as the user's only while nothing else of the chat's could write them.
+  guard = new HookGuard(path, { inherited, known: running, writable: [path, ...spellings(tmp)], seen, writing: () => alive() || commands.size > 1 });
   mkdirSync(tmp, { recursive: true });
   makeCaches(tmp);
   const env = commandEnvironment(message.env, tmp);
@@ -437,7 +441,6 @@ function answered(id: number, allow: boolean, remember: boolean): void {
 function watchHooks(): void {
   if (watching || !guard || stopping) return;
   const hooks = guard;
-  const alive = () => (processes?.live ?? 0) > 0 || liveRunner !== null || guestCommands;
   watching = setTimeout(() => void (async () => {
     // A folder replaced since the start is not this chat's: no look or runner goes over it.
     if (!sameFolder()) return void stop(1);
