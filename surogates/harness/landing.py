@@ -41,6 +41,11 @@ _PUTTING_BACK: dict[str, asyncio.Future] = {}
 _TEARDOWNS: set[asyncio.Future] = set()
 
 
+def putting_back(owner: str) -> bool:
+    """Whether a landing of *owner* is still putting files back; it lets its pod go itself once done."""
+    return owner in _PUTTING_BACK
+
+
 async def put_back_settled(owner: str) -> bool:
     """Whether no landing of *owner* is still putting files back, waiting within its bound for one."""
     pending = _PUTTING_BACK.get(owner)
@@ -205,7 +210,8 @@ async def _after_cancel(put_back: asyncio.Future, sandbox_pool: Any, owner: str)
     """
     if not await put_back_settled(owner):
         logger.warning("The cancelled landing of %s is still putting files back", owner)
-        put_back.add_done_callback(lambda _: _let_go(sandbox_pool, owner))
+        waited_on = sandbox_pool.sandbox_of(owner)
+        put_back.add_done_callback(lambda _: _let_go(sandbox_pool, owner, waited_on))
         return
     try:
         await asyncio.shield(sandbox_pool.destroy_for_session(owner))
@@ -213,11 +219,16 @@ async def _after_cancel(put_back: asyncio.Future, sandbox_pool: Any, owner: str)
         logger.warning("The cancelled landing of %s did not let its pod go", owner, exc_info=True)
 
 
-def _let_go(sandbox_pool: Any, owner: str) -> None:
-    """Destroy *owner*'s pod in the background, kept until done."""
-    going = asyncio.ensure_future(sandbox_pool.destroy_for_session(owner))
+def _let_go(sandbox_pool: Any, owner: str, sandbox_id: str | None) -> None:
+    """Destroy *owner*'s pod *sandbox_id* in the background, kept until done; a later turn's pod stays."""
+    going = asyncio.ensure_future(_destroy_if_still(sandbox_pool, owner, sandbox_id))
     _TEARDOWNS.add(going)
     going.add_done_callback(_TEARDOWNS.discard)
+
+
+async def _destroy_if_still(sandbox_pool: Any, owner: str, sandbox_id: str | None) -> None:
+    if sandbox_id is not None and (released := await sandbox_pool.release_for_session(owner, only=sandbox_id)):
+        await sandbox_pool.destroy_released(released, owner)
 
 
 async def _put_back(saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str) -> list[SagaStep]:

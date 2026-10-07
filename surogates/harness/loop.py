@@ -1618,12 +1618,12 @@ class AgentHarness(
                 cut_off and session is not None
                 and is_project_thread(session.config) and self._sandbox_pool is not None
             ):
-                from surogates.harness.landing import put_back_settled
+                from surogates.harness.landing import putting_back
 
                 owner = sandbox_session_key(session)
                 # A landing of this turn still putting files back needs its
-                # pod, and lets it go itself once it is done.
-                if await put_back_settled(owner):
+                # pod, and lets it go itself once it is done: no second wait.
+                if not putting_back(owner):
                     try:
                         await asyncio.shield(self._sandbox_pool.destroy_for_session(owner))
                     except BaseException:

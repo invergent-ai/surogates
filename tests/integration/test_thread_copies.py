@@ -792,8 +792,17 @@ async def test_a_cut_off_turns_slow_put_back_finishes_before_its_pod_goes(api, m
 
     harness = a_waking_thread_harness(api, monkeypatch, pool, writes_five_and_lands)
     harness._saga_settings = QUICK
+    settled, waits = landing_module.put_back_settled, []
+
+    async def counted(owner):
+        waits.append(owner)
+        return await settled(owner)
+
+    monkeypatch.setattr(landing_module, "put_back_settled", counted)
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(asyncio.create_task(harness.wake(thread.id)), 60)
+    # One bounded wait, the landing's: the wake's end leaves the pod to the put-back.
+    assert waits == [str(thread.id)]
     async with asyncio.timeout(30):  # the put-back, then its pod's going
         while landing_module._PUTTING_BACK or landing_module._TEARDOWNS:
             await asyncio.sleep(0.1)

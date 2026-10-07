@@ -161,13 +161,20 @@ class SandboxPool:
         self._fresh.discard(session_id)
         return True
 
+    def sandbox_of(self, session_id: str) -> str | None:
+        """The sandbox *session_id* maps to now; None when it has none."""
+        return self._mapping.get(session_id)
+
     def holds_copy(self, session_id: str) -> bool:
         """Whether *session_id* has a pod now, and it is a thread's, over its copy."""
         spec = self._specs.get(session_id)
         return spec is not None and "PROJECT_DIR" in spec.env
 
-    async def release_for_session(self, session_id: str) -> str | None:
+    async def release_for_session(self, session_id: str, *, only: str | None = None) -> str | None:
         """Detach the sandbox from *session_id*, returning its id.
+
+        With *only*, nothing is detached unless *session_id* still maps to
+        that sandbox: a later one is another turn's.
 
         In-memory only, so it is fast enough to stay on a latency-
         sensitive path. Callers that then destroy the returned sandbox in
@@ -177,6 +184,8 @@ class SandboxPool:
         """
         lock = await self._session_lock(session_id)
         async with lock:
+            if only is not None and self._mapping.get(session_id) != only:
+                return None
             self._specs.pop(session_id, None)
             self._fresh.discard(session_id)
             return self._mapping.pop(session_id, None)

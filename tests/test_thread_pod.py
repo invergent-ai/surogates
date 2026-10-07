@@ -274,3 +274,27 @@ async def test_a_pool_says_once_that_it_made_a_copy_and_never_after_the_turn(pod
     await pool.release_for_session("t1")  # the turn ends untold
     # A later turn on this worker hears nothing of an earlier turn's copy.
     assert pool.copy_fresh("t1") is False
+
+
+async def test_a_slow_put_back_lets_go_only_the_pod_it_waited_on(pods, monkeypatch):
+    import asyncio
+
+    from surogates.harness import landing
+
+    monkeypatch.setattr(landing, "_PUT_BACK_BOUND", 0.05)
+    pool = SandboxPool(pods)
+    spec = SandboxSpec(env={"PROJECT_DIR": "/project", "HISTORY_THREAD": "t1", "USER_ID": "u1"})
+    await pool.ensure("t1", spec)
+    put_back = asyncio.get_running_loop().create_future()
+    monkeypatch.setitem(landing._PUTTING_BACK, "t1", put_back)
+    await landing._after_cancel(put_back, pool, "t1")  # not done in time: its pod waits for it
+    # A later turn of the thread, here, has a pod of its own by the time the put-back ends.
+    await pool.destroy_for_session("t1")
+    await pool.ensure("t1", spec)
+    later = set(pods.pods)
+    put_back.set_result([])
+    async with asyncio.timeout(5):
+        while landing._TEARDOWNS or not put_back.done():
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+    assert set(pods.pods) == later and pool.holds_copy("t1")
