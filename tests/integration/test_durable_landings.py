@@ -263,6 +263,9 @@ async def a_landing_killed(api, monkeypatch, pool, thread, *, after: str) -> Non
         with pytest.raises(asyncio.CancelledError):
             await ends(api, pool, thread)
     landing_module._PUTTING_BACK.pop(str(thread.id)).cancel()
+    async with asyncio.timeout(10):  # its pod goes in the background: before the thread's next opens
+        while pool.holds_copy(str(thread.id)):
+            await asyncio.sleep(0.05)
     async with api.app.state.session_factory() as db:  # its lease runs out, as a dead worker's does
         await db.execute(text("DELETE FROM session_leases WHERE session_id = :id"), {"id": thread.id})
         await db.commit()
