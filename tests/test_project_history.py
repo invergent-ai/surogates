@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -21,6 +22,18 @@ def opened(tmp_path: Path, project: Path, thread: str = "t1") -> History:
     )
     history.open()
     return history
+
+
+def a_repository(folder: Path, *, committed: bool = True) -> None:
+    """A git repository in *folder*, with a commit or, as a fresh ``git init`` leaves it, none."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "README.md").write_text("a repository")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    for args in (["init", "-q"], *([["add", "-A"], ["commit", "-qm", "first"]] if committed else [])):
+        subprocess.run(
+            ["git", "-C", str(folder), "-c", "user.name=u", "-c", "user.email=u@x", *args],
+            env=env, capture_output=True, check=True,
+        )
 
 
 def git(history: History, *args: str) -> str:
@@ -322,3 +335,33 @@ def test_the_pods_own_git_settings_never_reach_the_history(tmp_path, project, mo
     for commit in (out["turn"], out["commit"]):
         assert git(history, "log", "-1", "--format=%an <%ae>", commit) == "Draft A <thread:t1@surogate>"
     assert not (tmp_path / "hook ran").exists()
+
+
+def test_a_users_folder_holding_a_git_repository_is_left_out_of_the_copy_and_the_landing(tmp_path, project):
+    a_repository(project / "app")
+    a_repository(project / "scratch [v2]*", committed=False)  # git init ran, nothing committed
+    history = opened(tmp_path, project)
+    assert not (history.copy / "app").exists() and not (history.copy / "scratch [v2]*").exists()
+    (history.copy / "app").mkdir()
+    (history.copy / "app" / "notes.md").write_text("by the thread")
+    (history.copy / "Report.docx").write_bytes(b"report v2")
+    out = landed(history)
+    assert [c["path"] for c in out["changes"]] == ["Report.docx"]
+    # The thread's write there is named, apart from the excluded files.
+    assert (out["repositories"], out["excluded"]) == (["app/"], [])
+    assert not (project / "app" / "notes.md").exists()
+
+
+def test_a_thread_that_clones_or_inits_a_repository_in_its_copy_still_lands_its_turn(tmp_path, project):
+    history = opened(tmp_path, project)
+    a_repository(history.copy / "clone")  # "clone X and write me a summary"
+    history.snapshot("before terminal")
+    a_repository(history.copy / "hello", committed=False)  # cargo new
+    a_repository(history.copy / ".threads" / "pod-1")  # the coding tool's checkout
+    history.snapshot("before write_file")
+    (history.copy / "summary.md").write_text("a summary")
+    out = landed(history)
+    assert [c["path"] for c in out["changes"]] == ["summary.md"]
+    assert (out["repositories"], out["excluded"]) == (["clone/", "hello/"], [])
+    assert (project / "summary.md").read_text() == "a summary"
+    assert not (project / "clone").exists() and not (project / "hello").exists()

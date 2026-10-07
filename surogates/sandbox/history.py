@@ -14,8 +14,10 @@ pod opens.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -90,7 +92,7 @@ class History:
                 (self.repo / "info").mkdir(exist_ok=True)
                 (self.repo / "info" / "exclude").write_text("\n".join(HISTORY_EXCLUDES) + "\n")
                 (self.repo / "info" / "attributes").write_text(_ATTRIBUTES)
-                self._main("add", "-A")
+                self._add_all(self._main)
                 name, email = self.user, f"user:{self.user}@surogate"
                 self._main(
                     "-c", f"user.name={name}", "-c", f"user.email={email}",
@@ -113,7 +115,7 @@ class History:
 
     def snapshot(self, reason: str) -> str:
         """Commit the copy on the branch if it changed; the branch's tip."""
-        self._copy("add", "-A")
+        self._add_all(self._copy)
         if self._copy("diff", "--cached", "--name-only"):
             self._copy("commit", "-q", "-m", reason)
         return self._copy("rev-parse", "HEAD")
@@ -138,13 +140,15 @@ class History:
         file is still the base's version, or already the turn's.
         ``overlapped`` are those whose real file changed otherwise since: a
         landing leaves them out.  ``commit`` is None when the turn changed
-        nothing since its base.
+        nothing since its base.  ``repositories`` are the folders holding a
+        git repository that the turn wrote into: they never land.
         """
-        self._copy("add", "-A")
-        excluded = self._excluded()
+        self._add_all(self._copy)
+        excluded, repositories = self._excluded()
+        left_out = {"excluded": excluded, "repositories": repositories}
         base = self._main("rev-parse", self.base)
         if not self._copy("diff", "--cached", "--name-only", base):
-            return {"commit": None, "changes": [], "overlapped": [], "excluded": excluded}
+            return {"commit": None, "changes": [], "overlapped": [], **left_out}
         self._copy(*_as(author), "commit", "-q", "--allow-empty", "-m", "Turn", "-m", _block(trailers))
         turn = self._copy("rev-parse", "HEAD")
         changes, overlapped = [], []
@@ -157,7 +161,7 @@ class History:
                 changes.append({"path": path, "before": real, "after": after})
             else:
                 overlapped.append({"path": path})
-        return {"commit": turn, "changes": changes, "overlapped": overlapped, "excluded": excluded}
+        return {"commit": turn, "changes": changes, "overlapped": overlapped, **left_out}
 
     def apply(self, path: str, before: str | None, after: str | None) -> dict:
         """Write the turn's version of *path* into the real files, if the real file is still *before*.
@@ -225,14 +229,33 @@ class History:
         self._main("update-ref", self.base, landing)
         return {"commit": landing}
 
-    def _excluded(self) -> list[str]:
-        """The excluded files and folders in the copy, at most ten.
+    def _add_all(self, git: Callable[..., str]) -> None:
+        """``git add -A``, leaving out every folder that holds a git repository.
+
+        Git takes such a folder for a submodule: a link to a commit, not
+        its files, and an add that fails while it has none.  Each one is
+        written to the excludes, which ``main`` and every copy share.
+        """
+        # Listed file by file, git names a folder only for a repository it will not go into.
+        found = [n for n in git("ls-files", "-z", "--others", "--exclude-standard").split("\0") if n.endswith("/")]
+        if found:
+            with open(self.repo / "info" / "exclude", "a") as out:
+                out.writelines(f"/{_pattern(n)}\n" for n in found)
+        git("add", "-A")
+
+    def _excluded(self) -> tuple[list[str], list[str]]:
+        """The excluded files and folders in the copy, and its folders holding a git repository; at most ten each.
 
         A copy starts with none, so the turn made them.  The platform's own
         folders are left out.
         """
         out = self._copy("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory")
-        return sorted(n for n in out.split("\0") if n and not n.startswith(PLATFORM_EXCLUDES))[:10]
+        names = sorted(n for n in out.split("\0") if n and not n.startswith(PLATFORM_EXCLUDES))
+        repositories = {
+            n for n in names
+            if n.endswith("/") and ((self.copy / n / ".git").exists() or (self.project / n / ".git").exists())
+        }
+        return [n for n in names if n not in repositories][:10], sorted(repositories)[:10]
 
     def _inside(self, path: str) -> Path:
         """*path* in the real files; refused if it would leave them."""
@@ -302,6 +325,11 @@ def _environ(env: dict[str, str]) -> dict[str, str]:
     """The pod's environment for a git with *env*: none of the pod's own git variables reach it."""
     inherited = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
     return {**inherited, **env, **_HERMETIC}
+
+
+def _pattern(name: str) -> str:
+    """An exclude pattern that matches *name* alone.  A newline, which a pattern cannot hold, matches any one character."""
+    return re.sub(r"([\\*?\[])", r"\\\1", name).replace("\n", "?")
 
 
 def _as(author: dict[str, str]) -> list[str]:
