@@ -81,7 +81,7 @@ from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.sandbox.pool import sandbox_session_key
-from surogates.workstreams import is_project_master, is_project_thread, master_refusal
+from surogates.workstreams import THREAD_CANNOT_DELEGATE, is_project_master, is_project_thread, master_refusal
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
@@ -361,6 +361,11 @@ def _slash_command_name(content: str | None) -> str | None:
 _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
     "goal", "mission", "auto-research", "code", "deep-research",
 })
+
+# The commands that start sessions from a project's thread, which starts
+# none: a routine's runs, a mission's tasks, a research's experiments and
+# helpers would all edit a copy the thread never lands.
+_PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "mission", "auto-research", "deep-research"})
 
 
 #: A first-person intention to act, sitting at the very end of the message:
@@ -1059,6 +1064,12 @@ class AgentHarness(
             and is_project_master(session.config)
         ):
             return master_refusal(name)
+        if (
+            name in _PROJECT_THREAD_REFUSED_COMMANDS
+            and session is not None
+            and is_project_thread(session.config)
+        ):
+            return THREAD_CANNOT_DELEGATE
         if self._slash_command_enabled(name, session):
             return None
         return f"/{name} is disabled for this agent."

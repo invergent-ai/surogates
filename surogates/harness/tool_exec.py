@@ -36,7 +36,7 @@ from surogates.runtime.governance import floor_gate
 from surogates.runtime.turn_slots import turn_activity
 from surogates.sandbox.history import PROJECT_MOUNT
 from surogates.storage.tenant import boundary_workspace_prefix
-from surogates.workstreams import HELPER_TOOLS, THREAD_CANNOT_DELEGATE, is_project_thread
+from surogates.workstreams import THREAD_CANNOT_DELEGATE, is_project_thread
 
 # ---------------------------------------------------------------------------
 # Path sanitisation — replace workspace absolute paths with __WORKSPACE__
@@ -447,6 +447,14 @@ SESSION_STARTING_TOOLS: frozenset[str] = DELEGATION_TOOLS | frozenset({
     "message_thread",
     "propose_threads",
 })
+
+# A project's thread starts no session: whatever a helper or a routine run
+# edits would stay in a copy the thread never lands.  Every session-starting
+# tool is refused, so a new one is too, but those that only reach a child
+# that already exists.
+THREAD_REFUSED_TOOLS: frozenset[str] = SESSION_STARTING_TOOLS - {
+    "send_worker_message", "unblock_task", "message_thread",
+}
 
 MAX_TOOL_WORKERS: int = 8
 
@@ -1312,7 +1320,7 @@ async def _run_single_tool(
         and tool_name not in SAGA_EXCLUDED_TOOLS and is_project_thread(session.config)
         and (offered_tools is None or tool_name in offered_tools)
         and (not allowed or tool_name in allowed) and parse_error is None
-        and tool_name not in HELPER_TOOLS
+        and tool_name not in THREAD_REFUSED_TOOLS
     ):
         checkpoint_hash = await _snapshot_copy(
             session, tenant, sandbox_pool, credential_vault, reason=f"before {tool_name}",
@@ -1685,7 +1693,7 @@ async def _run_single_tool(
 
         if image_dispatched:
             pass  # result_content already set by the image branch.
-        elif tool_name in HELPER_TOOLS and is_project_thread(session.config):
+        elif tool_name in THREAD_REFUSED_TOOLS and is_project_thread(session.config):
             result_content = json.dumps({"error": THREAD_CANNOT_DELEGATE})
         elif device_call is not None and tool_name in UNAVAILABLE_TOOLS:
             result_content = refusal(tool_name)

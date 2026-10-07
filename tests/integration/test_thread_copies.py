@@ -693,3 +693,28 @@ async def test_a_crashed_turns_retry_is_told_its_copy_was_made_fresh(api, monkey
     ], pool=pool)
     [first] = [e.data["content"] for e in await store.get_events(thread.id, types=[EventType.TOOL_RESULT])]
     assert first.startswith("[This thread's copy of the project's files was made again"), first
+
+
+async def test_a_thread_refuses_every_tool_that_starts_a_session():
+    from surogates.harness.tool_exec import SESSION_STARTING_TOOLS, THREAD_REFUSED_TOOLS
+
+    # Derived from the harness's own list: a new spawning tool is refused by default.
+    assert THREAD_REFUSED_TOOLS == SESSION_STARTING_TOOLS - {"send_worker_message", "unblock_task", "message_thread"}
+    assert {"delegate_task", "spawn_worker", "spawn_task", "dispatch_experiments", "cron_create"} <= THREAD_REFUSED_TOOLS
+
+
+async def test_a_threads_loop_starts_no_run_to_edit_a_copy_never_landed(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "/loop 5m Add a line to Report.docx."})
+    monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
+    harness = a_waking_harness(store, SlashCommandConfig())
+    harness._compressor.prune_stale_browser_states.side_effect = lambda messages: messages
+    harness._redis, harness._session_factory, harness._sandbox_pool = api.app.state.redis, api.app.state.session_factory, pool
+    await asyncio.wait_for(harness.wake(thread.id), 60)
+    [answer] = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
+    assert answer == "A thread can't hand work to a helper yet: do this step in the thread itself."
+    async with api.app.state.session_factory() as db:
+        runs = (await db.execute(text("SELECT count(*) FROM sessions WHERE parent_id = :id"), {"id": thread.id})).scalar()
+    assert (runs, pods.pods) == (0, {})
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"

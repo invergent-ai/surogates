@@ -14,6 +14,7 @@ from sqlalchemy import delete, select, update
 
 import surogates.harness.loop as loop_module
 import surogates.workstreams.threads as threads_module
+from surogates.workstreams import THREAD_CANNOT_DELEGATE
 from surogates.coding_agents.run_core import execute_coding_run
 from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.db.agent_users import purge_user_account
@@ -21,7 +22,7 @@ from surogates.db.models import BoardNote, Event, InboxItem, Session, SessionCur
 from surogates.harness.budget import IterationBudget
 from surogates.harness.loop_context_replay import unread_reports
 from surogates.harness.slash_skill import build_deep_research_message
-from surogates.harness.tool_exec import _build_session_sandbox_spec, execute_single_tool
+from surogates.harness.tool_exec import SESSION_STARTING_TOOLS, _build_session_sandbox_spec, execute_single_tool
 from surogates.harness.turn_summarizer import TurnArtifact, TurnSummary
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.runtime import SlashCommandConfig
@@ -1730,3 +1731,10 @@ async def test_a_report_lists_at_most_twenty_files(api):
     assert (await replayed(api, master))[-1]["content"].endswith(
         "\nFiles: " + ", ".join(files[:20]) + ", and 5 more",
     )
+
+
+@pytest.mark.parametrize("tool", sorted(SESSION_STARTING_TOOLS - {"send_worker_message", "unblock_task", "message_thread"}))
+async def test_a_thread_cannot_start_a_session_by_any_tool(api, tool):
+    thread = await start(api, await master_of(api, await create(api)))
+    # call_tool also pins that a refused call sets up no pod.
+    assert await call_tool(api, thread, tool) == {"error": THREAD_CANNOT_DELEGATE}
