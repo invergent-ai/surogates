@@ -26,7 +26,10 @@ export const NOT_FINISHED =
 export interface UntilAnsweredOptions {
   /** A local-folder chat's change: sent again until it is answered. */
   onDevice: boolean;
-  /** Stops the sending: the promise rejects with the signal's reason. */
+  /**
+   * Stops a local-folder chat's sending: the promise rejects with the signal's reason. A
+   * cloud chat's one send never sees it, so closing the panel never cuts an upload short.
+   */
   signal?: AbortSignal;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
@@ -49,20 +52,21 @@ async function changeOf(response: Response): Promise<string | null> {
 
 /**
  * Sends a change under one new request id until it is answered with anything but 202 or 429.
- * *send* gets the change to name in place of the body, or null to send it whole.
+ * *send* gets the change to name in place of the body, or null to send it whole, and the
+ * signal its fetch stops with: none for a cloud chat's, which runs as it always did.
  */
 export async function untilAnswered(
-  send: (requestId: string, change: string | null) => Promise<Response>,
+  send: (requestId: string, change: string | null, signal: AbortSignal | undefined) => Promise<Response>,
   { onDevice, signal, sleep = pause, now = Date.now }: UntilAnsweredOptions,
 ): Promise<Response> {
   const requestId = crypto.randomUUID().replaceAll("-", "");
-  if (!onDevice) return send(requestId, null);
+  if (!onDevice) return send(requestId, null, undefined);
   const started = now();
   let change: string | null = null;
   for (let wait = RETRY_FIRST_MS; ; ) {
     signal?.throwIfAborted();
     try {
-      const response = await send(requestId, change);
+      const response = await send(requestId, change, signal);
       if (response.status === 428 && change !== null) {
         // The server holds no such change: sent whole, at once.
         change = null;

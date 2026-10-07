@@ -140,13 +140,14 @@ export async function uploadFile(
   formData.append("file", file);
 
   const response = await untilAnswered(
-    (requestId, change) =>
+    // The panel's signal stops only a local-folder chat's sending: untilAnswered hands it on for those alone.
+    (requestId, change, sending) =>
       authFetch(
         `/api/v1/sessions/${sessionId}/workspace/upload?${new URLSearchParams([...params, ["request_id", requestId]])}`,
         // Sent again by its change, the file does not cross again.
         change === null
-          ? { method: "POST", body: formData, signal }
-          : { method: "POST", headers: { "X-Change-Digest": change }, signal },
+          ? { method: "POST", body: formData, signal: sending }
+          : { method: "POST", headers: { "X-Change-Digest": change }, signal: sending },
       ),
     { onDevice: await isOnDevice(sessionId), signal },
   );
@@ -170,10 +171,10 @@ export async function deleteFile(
   signal?: AbortSignal,
 ): Promise<void> {
   const response = await untilAnswered(
-    (requestId) =>
+    (requestId, _change, sending) =>
       authFetch(
         `/api/v1/sessions/${sessionId}/workspace/file?${new URLSearchParams({ path, request_id: requestId })}`,
-        { method: "DELETE", signal },
+        { method: "DELETE", signal: sending },
       ),
     { onDevice: await isOnDevice(sessionId), signal },
   );

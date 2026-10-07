@@ -117,3 +117,15 @@ test("sends a change told to wait its turn again, under the same request id, as 
   assert.equal(new Set(sent).size, 1);
   assert.deepEqual(slept, [RETRY_FIRST_MS, 2000, 4000]);
 });
+
+test("hands its signal to a local-folder chat's sends only: a cloud chat's one fetch has none, as before", async () => {
+  const stop = new AbortController();
+  const signals = [];
+  const send = async (_requestId, _change, signal) => {
+    signals.push(signal);
+    return new Response(null, { status: 201 });
+  };
+  await untilAnswered(send, { onDevice: true, signal: stop.signal, sleep: async () => {} });
+  await untilAnswered(send, { onDevice: false, signal: stop.signal, sleep: async () => {} });
+  assert.deepEqual(signals, [stop.signal, undefined]);
+});
