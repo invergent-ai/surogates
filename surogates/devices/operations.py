@@ -33,7 +33,13 @@ from surogates.db.models import Session as SessionRow
 from surogates.devices.binding import BIND, RETIRE, binding_of, device_of
 from surogates.devices.presence import DevicePresence, control_channel
 from surogates.devices.store import REVOKED_OUTCOME
-from surogates.devices.workspace import CHUNK_BYTES, DeviceOperationError, is_well_formed, transfer_of
+from surogates.devices.workspace import (
+    CHUNK_BYTES,
+    RESULT_TRANSFERS,
+    DeviceOperationError,
+    is_well_formed,
+    transfer_of,
+)
 from surogates.runtime.turn_slots import turn_detached, turn_waiting
 
 if TYPE_CHECKING:
@@ -961,9 +967,10 @@ class DeviceOperations:
         "unwanted": the operation is closed, or the journal no longer has it
         (a request reaped since), so its data is not needed.
         "rejected": another device's, asked for with a different digest, or
-        not a read, closed or not: whether another device's operation is
-        closed is not this one's to learn.  "busy": another connection started this
-        transfer at the same moment, or its last chunk landed meanwhile.
+        of a kind whose result is never a transfer, closed or not: whether
+        another device's operation is closed is not this one's to learn.
+        "busy": another connection started this transfer at the same moment,
+        or its last chunk landed meanwhile.
         "stale": rotated-out or revoked credentials.
 
         A device sends one transfer at a time, so what it left half-sent
@@ -981,7 +988,7 @@ class DeviceOperations:
             )).one_or_none()
             if row is None:
                 return "unwanted"
-            if row.device_id != device_id or row.digest != digest or row.kind != "read":
+            if row.device_id != device_id or row.digest != digest or row.kind not in RESULT_TRANSFERS:
                 return "rejected"
             if row.completed_at is not None:
                 return "unwanted"
@@ -1160,7 +1167,7 @@ async def reap_transfers(session_factory: async_sessionmaker[AsyncSession]) -> i
             delete(DeviceTransfer)
             .where(or_(
                 of_operation(DeviceOperation.kind == "write", closed),
-                and_(of_operation(DeviceOperation.kind == "read"), or_(
+                and_(of_operation(DeviceOperation.kind.in_(RESULT_TRANSFERS)), or_(
                     DeviceTransfer.consumed_at < func.now() - RETAIN_CONSUMED,
                     and_(DeviceTransfer.received < DeviceTransfer.size, of_operation(closed)),
                     and_(DeviceTransfer.consumed_at.is_(None), DeviceTransfer.created_at < func.now() - ORPHAN_AFTER),
@@ -1207,7 +1214,7 @@ def _whole(chunks: list[bytes], transfer: dict[str, Any]) -> bytes | None:
 class JournalRunner:
     """The operations of one tool call, numbered in the order its handler asks for them.
 
-    A read answered with a transfer comes back as ``{"ok": <its bytes>}``.
+    A read or a screenshot answered with a transfer comes back as ``{"ok": <its bytes>}``.
     """
 
     def __init__(

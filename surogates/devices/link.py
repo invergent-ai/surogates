@@ -92,7 +92,8 @@ op_result: one it sends anyway, with the operation's digest, is acknowledged
 with an op_ack as a duplicate and changes nothing.
 
 A read's data of more than MAX_PAYLOAD_BYTES, and at most MAX_READ_BYTES, is
-a transfer, named by its size and the SHA-256 of the data in lowercase hex.
+a transfer, and so is a screenshot's (RESULT_TRANSFERS), named by its size
+and the SHA-256 of the data in lowercase hex.
 The app sends its result header, then the data in chunks, in order, with at
 most TRANSFER_WINDOW chunks the server has not acknowledged.  It sends one
 transfer at a time on a connection: the next header goes after an op_ack or
@@ -105,9 +106,9 @@ answered unwanted, and so is the next chunk after it closes; the chunks
 already on their way behind an unwanted are dropped.  A connection that ends
 mid-transfer loses it: on the next one the app sends the header again and the
 data from chunk 0, and whatever the device left half-sent goes.  A transfer
-for an operation that is not a read is answered rejected; it, a malformed
-header, a chunk out of order or of the wrong size, and a header while another
-transfer is under way are protocol errors.
+for an operation whose kind's result is never one is answered rejected; it,
+a malformed header, a chunk out of order or of the wrong size, and a header
+while another transfer is under way are protocol errors.
 
 A write's data of more than MAX_PAYLOAD_BYTES, and at most MAX_WRITE_BYTES, is
 a transfer the other way: the op's args name it by size and SHA-256 in place of
@@ -489,7 +490,7 @@ class _Link:
             # Named first: the app drops it, rather than send it again at every welcome.
             await self.send({"type": "rejected", "id": str(operation_id)})
             raise self._refused(
-                CLOSE_PROTOCOL, "transfer for an operation this device was not given, or not a read",
+                CLOSE_PROTOCOL, "transfer for an operation this device was not given, or whose result is never one",
                 operation_id, size, started,
             )
         if status == "busy":

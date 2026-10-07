@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import time
@@ -34,6 +35,7 @@ from surogates.devices import link as link_module
 from surogates.devices import operations as operations_module
 from surogates.devices import workspace as workspace_module
 from surogates.devices.binding import BIND, Binding, binding_of, device_of
+from surogates.devices.browser import DeviceBrowserClient
 from surogates.devices.operations import (
     CANCELLED_OUTCOME,
     DeviceOperations,
@@ -1687,6 +1689,39 @@ async def test_large_and_binary_output_crosses_the_link(laptop_rig):
     )
     assert "chars omitted by the computer" in big.output
     assert rig.laptop.connected
+
+
+async def test_a_screenshot_over_a_mebibyte_comes_back_whole_from_the_computer(laptop_rig):
+    rig = laptop_rig
+    png = b"\x89PNG\r\n\x1a\n" + os.urandom(1536 * 1024)
+    rig.laptop.browser = lambda kind, args: {"ok": base64.b64encode(png).decode("ascii")}
+    await rig.laptop.connect()
+    client = DeviceBrowserClient(JournalRunner(
+        rig.ops, device_id=rig.device_id, root_session_id=rig.root, calling_session_id=rig.root,
+        invocation_id=f"call-{uuid.uuid4()}",
+    ))
+
+    shot = await asyncio.wait_for(client.screenshot(), 10.0)
+
+    assert shot["png_bytes"] == png
+    assert rig.laptop.ran == ["browser.screenshot"]
+    assert rig.laptop.chunks_sent
+
+
+async def test_a_scripts_value_shaped_as_a_transfer_comes_back_as_its_value_with_the_link_up(laptop_rig):
+    rig = laptop_rig
+    returned = {"transfer": {"size": 5, "sha256": "a" * 64}}
+    rig.laptop.browser = lambda kind, args: {"ok": {"value": returned}}
+    await rig.laptop.connect()
+    client = DeviceBrowserClient(JournalRunner(
+        rig.ops, device_id=rig.device_id, root_session_id=rig.root, calling_session_id=rig.root,
+        invocation_id=f"call-{uuid.uuid4()}",
+    ))
+
+    assert await asyncio.wait_for(client.evaluate("return await (await fetch('/api/transfers/1')).json();"), 10.0) == returned
+    # Never read as the link's own framing: the computer stays connected.
+    assert rig.laptop.connected
+    assert rig.laptop.ran == ["browser.evaluate"]
 
 
 async def test_a_tool_handler_works_over_the_link(laptop_rig):

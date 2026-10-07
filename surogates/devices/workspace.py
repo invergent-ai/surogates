@@ -175,6 +175,9 @@ MAX_WALK_DEPTH = 2_000
 WALK_MARGIN_NS = 2_000_000_000
 WALK_BUDGET_S = 5
 TOO_LARGE = "Too large for one operation on a local folder (over 1.5 MiB)"
+# The kinds whose data in a result may be a transfer: a read's, and a screenshot's
+# (surogates.devices.browser).  Every other result fits in its frame.
+RESULT_TRANSFERS = frozenset({"read", "browser.screenshot"})
 READ_TOO_LARGE = "File too large to read from a local folder (over 50 MiB)"
 WRITE_TOO_LARGE = "File too large to write to a local folder (over 50 MiB)"
 
@@ -250,6 +253,11 @@ class DeviceWorkspaceIO:
         self.root = root
         self.identity = identity
         self.caches_documents = caches_documents
+
+    @property
+    def runner(self) -> OperationRunner:
+        """The tool call's runner: the browser tools reach the computer through it too."""
+        return self._runner
 
     async def _call(self, kind: str, *, payload: bytes | None = None, **args: Any) -> Any:
         if len(json.dumps(args)) > MAX_MESSAGE_CHARS:
