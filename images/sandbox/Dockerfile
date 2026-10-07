@@ -181,9 +181,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends clang llvm libb
 COPY --from=kernel /kernel/boot/vmlinuz-${KERNEL} /vmlinuz
 COPY desktop/vm/rule.bpf.c desktop/vm/rule-match.h /src/
 # zstd stops with an error at the bytes after the payload; bpftool refuses anything but a whole vmlinux.
+# Each lsm/<hook> program must take as many arguments as bpf_lsm_<hook> in the BTF (its FUNC_PROTO's vlen):
+# the verifier loads one that does not, which then reads the wrong ones, or the hook's return slot as one.
 RUN at=$(LC_ALL=C grep -aboP '\x28\xb5\x2f\xfd' /vmlinuz | head -1 | cut -d: -f1) \
     && { tail -c +$((at + 1)) /vmlinuz | zstd -dcq > /vmlinux || true; } \
     && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format c > /src/vmlinux.h \
+    && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format raw | awk ' \
+        FNR == NR && $2 == "FUNC_PROTO" { for (i = 3; i <= NF; i++) if ($i ~ /^vlen=/) vlen[substr($1, 2, length($1) - 2)] = substr($i, 6); next; } \
+        FNR == NR && $2 == "FUNC" && $3 ~ /^.bpf_lsm_/ { proto[substr($3, 10, length($3) - 10)] = substr($4, 9); next; } \
+        FNR == NR { next; } \
+        hook != "" && !/BPF_PROG\(/ { print "lsm/" hook ": no BPF_PROG on the line after its SEC" > "/dev/stderr"; bad = 1; hook = ""; } \
+        hook != "" { args = $0; sub(/.*BPF_PROG\(/, "", args); sub(/\).*/, "", args); n = gsub(/,/, "", args); want = vlen[proto[hook]]; \
+          if (want == "") { print "lsm/" hook ": the pinned kernel has no bpf_lsm_" hook > "/dev/stderr"; bad = 1; } \
+          else if (n != want) { print "lsm/" hook ": its program takes " n " arguments, and bpf_lsm_" hook " in the pinned kernel takes " want > "/dev/stderr"; bad = 1; } \
+          checked++; hook = ""; } \
+        /^SEC\("lsm\// { hook = $0; sub(/^SEC\("lsm\//, "", hook); sub(/".*/, "", hook); } \
+        END { if (bad || !checked) exit 1; print checked " lsm programs take as many arguments as their hooks"; }' \
+        - /src/rule.bpf.c \
     && clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I/src -c /src/rule.bpf.c -o /rule.bpf.o
 
 # ── Surogate Desktop's VM guest ─────────────────────────────────────
