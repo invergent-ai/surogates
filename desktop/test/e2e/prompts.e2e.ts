@@ -79,6 +79,9 @@ describe("the folder sheet", () => {
     expect(await sheet.getAttribute('[data-id="accept"]', "aria-disabled")).toBe("true");
     expect(await sheet.evaluate(() => (document.activeElement as HTMLInputElement).value)).toBe("free");
     expect(await sheet.getAttribute(".prompt", "role")).toBe("alertdialog");
+    // Described by what it asks about too, not by its lead alone: a screen reader names the folder as it opens.
+    expect(await sheet.evaluate(() => document.querySelector(".prompt")!.getAttribute("aria-describedby")!.split(" ")
+      .map((id) => document.getElementById(id)!.textContent).join(" | "))).toContain(` | Folder${folder}`);
     await sheet.check('input[value="ask"]');
     await press(sheet, "accept");
     expect(await prepared).toMatchObject({ folder, mode: "ask" });
