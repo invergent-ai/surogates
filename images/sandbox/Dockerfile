@@ -183,8 +183,11 @@ COPY desktop/vm/rule.bpf.c desktop/vm/rule-match.h /src/
 # zstd stops with an error at the bytes after the payload; bpftool refuses anything but a whole vmlinux.
 # Each lsm/<hook> program must take as many arguments as bpf_lsm_<hook> in the BTF (its FUNC_PROTO's vlen):
 # the verifier loads one that does not, which then reads the wrong ones, or the hook's return slot as one.
+# The check counts the commas of the BPF_PROG( line after each SEC, so it misjudges a declaration split
+# across lines, or one that also takes the optional trailing int ret: keep each on one line, without ret.
 RUN at=$(LC_ALL=C grep -aboP '\x28\xb5\x2f\xfd' /vmlinuz | head -1 | cut -d: -f1) \
     && { tail -c +$((at + 1)) /vmlinuz | zstd -dcq > /vmlinux || true; } \
+    && { test -s /vmlinux || { echo "no vmlinux decompressed from /vmlinuz" >&2; exit 1; }; } \
     && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format c > /src/vmlinux.h \
     && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format raw | awk ' \
         FNR == NR && $2 == "FUNC_PROTO" { for (i = 3; i <= NF; i++) if ($i ~ /^vlen=/) vlen[substr($1, 2, length($1) - 2)] = substr($i, 6); next; } \
