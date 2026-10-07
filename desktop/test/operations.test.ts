@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import {
-  type BigIntStats, chmodSync, closeSync, constants, linkSync, mkdirSync, mkdtempSync, openSync, type ReadPosition, readdirSync,
-  readFileSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync,
+  type BigIntStats, chmodSync, closeSync, constants, type Dirent, linkSync, mkdirSync, mkdtempSync, openSync,
+  type ReadPosition, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,9 +23,9 @@ import { inFolderRefusal } from "../src/files/protect.js";
 const reads = vi.hoisted(() => ({ cap: Number.POSITIVE_INFINITY, calls: 0, next: [] as number[] }));
 // Run once as the file helper's next write begins: another writer, changing a file meanwhile.
 const meanwhile = vi.hoisted(() => ({ run: null as (() => void) | null }));
-// How many folder entries the file helper has read, however it read them; and which of its next opendirs fails,
-// counting from 1 (0: none).
-const dirents = vi.hoisted(() => ({ read: 0, refuse: 0 }));
+// How many folder entries the file helper has read, however it read them; which of its next opendirs fails,
+// counting from 1 (0: none); and how many hidden folders its next opendir lists before what is on disk.
+const dirents = vi.hoisted(() => ({ read: 0, refuse: 0, hidden: 0 }));
 // The path of each lstat the file helper made.
 const lstats = vi.hoisted(() => ({ paths: [] as string[] }));
 // Each open the file helper made, by path and flags; and which of its next opens fails, counting from 1 (0: none).
@@ -55,7 +56,14 @@ vi.mock("node:fs", async (importOriginal) => {
     }
     const dir = fs.opendirSync(...args);
     const next = dir.readSync.bind(dir);
+    let hidden = dirents.hidden;
+    dirents.hidden = 0;
     dir.readSync = () => {
+      if (hidden > 0) {
+        hidden -= 1;
+        dirents.read += 1;
+        return { name: Buffer.from(`.${hidden}`), isDirectory: () => true, isFile: () => false } as unknown as Dirent;
+      }
       const entry = next();
       if (entry !== null) dirents.read += 1;
       return entry;
@@ -810,14 +818,14 @@ describe("walk", () => {
   });
 
   it("stops past its looks, a folder it does not enter counted too", async () => {
-    // Hidden, so none is entered: each is one look.
+    // Hidden, so none is entered: each is one look. Listed by the folder's Dir, none of them made on disk.
     mkdirSync(join(folder, "dirs"));
-    for (let i = 0; i < MAX_WALK_LOOKS; i++) mkdirSync(join(folder, "dirs", `.${i}`));
     const hidden = { key: join(folder, "dirs"), skip_hidden: true };
+    dirents.hidden = MAX_WALK_LOOKS;
     expect((await walk(hidden)).ok).toMatchObject({ files: [], truncated: false });
-    mkdirSync(join(folder, "dirs", ".one-more"));
+    dirents.hidden = MAX_WALK_LOOKS + 1;
     expect((await walk(hidden)).ok).toMatchObject({ files: [], truncated: true });
-  }, 60_000);
+  });
 
   it("fails as its folder does, and refuses a key or arguments it cannot take", async () => {
     expect(await walk({ key: `${folder}/a.txt` })).toMatchObject({ error: { type: "os", code: "ENOTDIR" } });
