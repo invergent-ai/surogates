@@ -124,11 +124,16 @@ _INPUT_ERRNOS = frozenset({errno.ENAMETOOLONG, errno.EINVAL})
 
 
 def _change(*parts: str | bytes) -> str:
-    """Names what a change does, so that its request id cannot be sent again with another."""
+    """Names what a change does, so that its request id cannot be sent again with another.
+
+    Up to 50 MB of an upload: its caller runs it off the event loop.
+    """
     digest = hashlib.sha256()
     for part in parts:
         data = part.encode("utf-8", "surrogatepass") if isinstance(part, str) else part
-        digest.update(len(data).to_bytes(8, "big") + data)
+        # Two updates, not one of the two joined: that would copy the data first.
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
     return digest.hexdigest()
 
 
@@ -691,10 +696,9 @@ async def upload_file(
         )
 
     request_id = request_id or uuid4().hex
+    change = await asyncio.to_thread(_change, "upload", key, contents)
     try:
-        async with workspace_files(
-            request, session, request_id=request_id, change=_change("upload", key, contents), access=access,
-        ) as files:
+        async with workspace_files(request, session, request_id=request_id, change=change, access=access) as files:
             await files.write(await files.resolve(key), contents)
     except StillWaiting:
         return _waiting(request_id)

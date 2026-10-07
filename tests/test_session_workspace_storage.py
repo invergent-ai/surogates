@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import threading
 from types import SimpleNamespace
 from io import BytesIO
 from unittest.mock import AsyncMock
@@ -593,3 +595,23 @@ async def test_a_cloud_chats_file_is_opened_with_one_read_as_before():
     with pytest.raises(HTTPException) as bad:
         await workspace_route.get_workspace_file(session_id, request, path="a\x00b.txt", tenant=tenant)
     assert bad.value.status_code == 400
+
+
+async def test_an_uploads_change_is_named_off_the_event_loop(monkeypatch):
+    # Up to 50 MB hashed: the api's other requests share its loop.
+    named: list[bool] = []
+    real = workspace_route._change
+
+    def change(*parts):
+        named.append(threading.current_thread() is threading.main_thread())
+        return real(*parts)
+
+    monkeypatch.setattr(workspace_route, "_change", change)
+    session_id, storage, request, tenant = _slow_chat()
+    await workspace_route.upload_file(
+        session_id, request, UploadFile(file=BytesIO(b"data"), filename="a.txt"), path="", tenant=tenant,
+    )
+    assert named == [False]
+    # Each part length-prefixed, as before.
+    framed = b"".join(len(part).to_bytes(8, "big") + part for part in (b"upload", b"a.txt", b"data"))
+    assert real("upload", "a.txt", b"data") == hashlib.sha256(framed).hexdigest()
