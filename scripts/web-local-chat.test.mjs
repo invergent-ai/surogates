@@ -10,6 +10,9 @@ const THIS_COMPUTER = { device: { deviceId: "d-1", name: "Flavius's ThinkPad" },
 const NONE = { device: null, localFolders: false };
 const AGENT = { desktopSessions: true, multiSession: true };
 const UNREAD = { desktopSessions: null, multiSession: null };
+// What the line under the composer showed when the message was sent.
+const SHOWN_HERE = { local: true };
+const SHOWN_CLOUD = { local: false };
 
 function bridge({ device = THIS_COMPUTER, prepared = PREPARED, bind = async () => {} } = {}) {
   const calls = [];
@@ -59,7 +62,7 @@ function agent({ online = true, refuse = null, config = AGENT } = {}) {
 test("confirms the folder on this computer, makes the chat with it, then binds it, and never sends the server the token", async () => {
   const desktop = bridge();
   const server = agent();
-  assert.deepEqual(await createChat(desktop, AGENT, "last", server), { id: "s-1" });
+  assert.deepEqual(await createChat(desktop, AGENT, "last", SHOWN_HERE, server), { id: "s-1" });
   assert.deepEqual(server.made, [{ kind: "device", device_id: "d-1", folder: "/home/flavius/notes", nonce: "n".repeat(43) }]);
   assert.deepEqual(desktop.calls, [["getDevice"], ["prepareFolder", "last"], ["bindSession", "s-1", "t".repeat(43)]]);
   assert.equal(JSON.stringify(server.made).includes("t".repeat(43)), false);
@@ -71,7 +74,7 @@ test("makes the first chat after this computer was added in its folder, though t
   assert.equal(newChatPlace(await desktop.getDevice(), AGENT, "last").local, false);
   desktop.device = THIS_COMPUTER;
   const server = agent();
-  await createChat(desktop, AGENT, "last", server);
+  await createChat(desktop, AGENT, "last", SHOWN_CLOUD, server);
   assert.deepEqual(server.made, [{ kind: "device", device_id: "d-1", folder: "/home/flavius/notes", nonce: "n".repeat(43) }]);
 });
 
@@ -79,18 +82,36 @@ test("makes a chat in the cloud where this computer can work on no folder when i
   for (const device of [NONE, { device: THIS_COMPUTER.device, localFolders: false }]) {
     const desktop = bridge({ device });
     const server = agent();
-    await createChat(desktop, AGENT, "last", server);
+    await createChat(desktop, AGENT, "last", SHOWN_CLOUD, server);
     assert.deepEqual([server.made, desktop.calls], [[undefined], [["getDevice"]]]);
   }
   const server = agent();
-  await createChat(undefined, AGENT, "last", server);
+  await createChat(undefined, AGENT, "last", SHOWN_CLOUD, server);
   assert.deepEqual(server.made, [undefined]);
+});
+
+test("makes no chat in the cloud where the line under the composer said this computer, and says why", async () => {
+  // Its access ended after the line was drawn: revoked, or the agent ended its token.
+  for (const [device, why] of [
+    [{ device: THIS_COMPUTER.device, localFolders: false }, "Local access revoked"],
+    [NONE, "Surogate can't work on folders of this computer for this account"],
+  ]) {
+    const desktop = bridge({ device });
+    const server = agent();
+    await assert.rejects(createChat(desktop, AGENT, "last", SHOWN_HERE, server), {
+      message: `${why}, so this chat was not made. Send it again to make it in the cloud.`,
+    });
+    assert.deepEqual([server.made, desktop.calls], [[], [["getDevice"]]]);
+    // Sent again, under the line that now says the cloud: made there.
+    await createChat(desktop, AGENT, "last", newChatPlace(device, AGENT, "last"), server);
+    assert.deepEqual(server.made, [undefined]);
+  }
 });
 
 test("asks for no folder while the agent does not hear this computer, and says so", async () => {
   const desktop = bridge();
   const server = agent({ online: false });
-  await assert.rejects(createChat(desktop, AGENT, "last", server), {
+  await assert.rejects(createChat(desktop, AGENT, "last", SHOWN_HERE, server), {
     message: "Flavius's ThinkPad is not connected to the agent right now, so this chat was not made. Send it again once it is.",
   });
   assert.deepEqual([server.made, desktop.calls], [[], [["getDevice"]]]);
@@ -98,7 +119,7 @@ test("asks for no folder while the agent does not hear this computer, and says s
 
 test("lets the confirmation go when the chat cannot be made, and says why in the server's words", async () => {
   const desktop = bridge();
-  await assert.rejects(createChat(desktop, AGENT, "pick", agent({ refuse: "Local access to this computer was revoked." })), {
+  await assert.rejects(createChat(desktop, AGENT, "pick", SHOWN_HERE, agent({ refuse: "Local access to this computer was revoked." })), {
     message: "Local access to this computer was revoked.",
   });
   assert.deepEqual(desktop.calls.slice(-1), [["cancelPrepared", "t".repeat(43)]]);
@@ -107,23 +128,23 @@ test("lets the confirmation go when the chat cannot be made, and says why in the
 
 test("reads the agent's config again at the first message when it could not be read, and makes no chat while it still cannot be", async () => {
   const read = agent();
-  await createChat(bridge(), UNREAD, "last", read);
+  await createChat(bridge(), UNREAD, "last", SHOWN_CLOUD, read);
   assert.deepEqual([read.reads, read.made], [1, [{ kind: "device", device_id: "d-1", folder: "/home/flavius/notes", nonce: "n".repeat(43) }]]);
   const desktop = bridge();
   const unread = agent({ config: UNREAD });
-  await assert.rejects(createChat(desktop, UNREAD, "last", unread), {
+  await assert.rejects(createChat(desktop, UNREAD, "last", SHOWN_CLOUD, unread), {
     message: "Surogate could not read the agent's settings, so this chat was not made. Send it again.",
   });
   assert.deepEqual([unread.made, desktop.calls], [[], []]);
   // A browser offers no folder: its chat is made in the cloud, the config read or not.
   const browser = agent({ config: UNREAD });
-  await createChat(undefined, UNREAD, "last", browser);
+  await createChat(undefined, UNREAD, "last", SHOWN_CLOUD, browser);
   assert.deepEqual([browser.reads, browser.made], [0, [undefined]]);
 });
 
 test("makes no chat when the user cancels the folder sheet", async () => {
   const server = agent();
-  await assert.rejects(createChat(bridge({ prepared: null }), AGENT, "last", server), { message: NO_FOLDER });
+  await assert.rejects(createChat(bridge({ prepared: null }), AGENT, "last", SHOWN_HERE, server), { message: NO_FOLDER });
   assert.deepEqual(server.made, []);
 });
 
@@ -134,7 +155,7 @@ test("says plainly that the chat was made when its folder could not be set up, a
       throw new Error("Error invoking remote method 'desktop:bindSession': Error: This folder's confirmation expired before its chat was created");
     },
   });
-  await assert.rejects(createChat(desktop, AGENT, "last", agent()), {
+  await assert.rejects(createChat(desktop, AGENT, "last", SHOWN_HERE, agent()), {
     message: "Surogate made this chat but could not set up its folder on this computer: This folder's confirmation expired before its chat was created. Start a new chat.",
   });
   assert.equal(desktop.calls.some(([name]) => name === "cancelPrepared"), false);

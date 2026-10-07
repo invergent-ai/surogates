@@ -60,13 +60,16 @@ export function newChatPlace(
   }
   // Nothing is said until the agent's config has been read.
   if (agent.desktopSessions === null) return { local: false, text: null };
-  if (!agent.desktopSessions) {
-    return { local: false, text: "This server doesn't support local folders yet, so this chat works in the cloud." };
-  }
-  if (device.device !== null) {
-    return { local: false, text: "Local access revoked, so this chat works in the cloud. Restore it from Surogate's sidebar." };
-  }
-  return { local: false, text: "Surogate can't work on folders of this computer for this account, so this chat works in the cloud." };
+  const why = cloudReason(device, agent.desktopSessions);
+  return { local: false, text: `${why}, so this chat works in the cloud.${why === REVOKED ? " Restore it from Surogate's sidebar." : ""}` };
+}
+
+const REVOKED = "Local access revoked";
+
+/** Why a new chat in the desktop works in the cloud, once the agent's config has been read. */
+function cloudReason(device: DesktopDeviceState, desktopSessions: boolean): string {
+  if (!desktopSessions) return "This server doesn't support local folders yet";
+  return device.device !== null ? REVOKED : "Surogate can't work on folders of this computer for this account";
 }
 
 /**
@@ -81,8 +84,9 @@ export interface NewChatApi<T> {
 
 /**
  * A new chat, where the desktop says when its first message goes, not when the line under the
- * composer was drawn: the computer may have been added since, as the first chat after the first
- * sign-in finds, or its access may have ended. On a folder of this computer it is made in
+ * composer was drawn (*shown*): the computer may have been added since, as the first chat after
+ * the first sign-in finds, or its access may have ended, when no chat is made until the line says
+ * the cloud. On a folder of this computer it is made in
  * Section 8's order: the user confirms the folder in the desktop's own sheet, the chat is made
  * with it, and the desktop records the folder for that chat, settling once the agent has heard.
  * Only then may the first message and its attachments go. Anywhere else it is made in the cloud.
@@ -91,6 +95,7 @@ export async function createChat<T extends { id: string }>(
   desktop: Pick<DesktopBridge, "getDevice" | "prepareFolder" | "bindSession" | "cancelPrepared"> | undefined,
   agent: LocalCapabilities,
   choice: "last" | "pick",
+  shown: { local: boolean },
   api: NewChatApi<T>,
 ): Promise<T> {
   if (!desktop) return api.create();
@@ -101,7 +106,10 @@ export async function createChat<T extends { id: string }>(
   }
   const state = await desktop.getDevice();
   const device = state.device;
-  if (!device || !newChatPlace(state, known, choice).local) return api.create();
+  if (!device || !newChatPlace(state, known, choice).local) {
+    if (!shown.local) return api.create();
+    throw new Error(`${cloudReason(state, known.desktopSessions)}, so this chat was not made. Send it again to make it in the cloud.`);
+  }
   // Its binding reaches this computer through the agent: one the agent does not hear would wait in silence.
   if (!(await api.online(device.deviceId))) {
     throw new Error(`${device.name} is not connected to the agent right now, so this chat was not made. Send it again once it is.`);

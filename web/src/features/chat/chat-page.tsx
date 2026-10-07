@@ -164,9 +164,9 @@ export function ChatPage() {
   const place = newChatPlace(device, { desktopSessions, multiSession }, folderChoice);
   // What the composer shows, for the chat adapter to read when a message is sent: the adapter
   // stays the same, since the SDK clears a chat that has no session yet whenever its adapter changes.
-  const composer = useRef({ folderChoice });
+  const composer = useRef({ folderChoice, shown: place });
   useEffect(() => {
-    composer.current = { folderChoice };
+    composer.current = { folderChoice, shown: place };
   });
 
   // Show disclosure banner when transparency is enabled and the user has not
@@ -220,7 +220,8 @@ export function ChatPage() {
           browserProfileId: browserProfileId ?? undefined,
         };
         // On a folder of this computer, it is confirmed and bound before the first message and its attachments go.
-        const rawSession = await createChat(getDesktop(), useAppStore.getState(), composer.current.folderChoice, {
+        const { folderChoice: choice, shown } = composer.current;
+        const rawSession = await createChat(getDesktop(), useAppStore.getState(), choice, shown, {
           create: (execution) => sessionsApi.createSession({ ...fields, execution }),
           online: async (deviceId) => (await listDevices()).some((row) => row.id === deviceId && row.online),
           capabilities: async () => {
@@ -228,8 +229,10 @@ export function ChatPage() {
             return useAppStore.getState();
           },
         }).catch((error: unknown) => {
-          // A chat made whose folder could not be set up is listed all the same.
+          // A chat made whose folder could not be set up is listed all the same, and the line
+          // under the composer says where the next one works.
           void fetchSessions();
+          void getDesktop()?.getDevice().then(setDevice, () => setDevice(null));
           throw error;
         });
         upsertSession(rawSession);
