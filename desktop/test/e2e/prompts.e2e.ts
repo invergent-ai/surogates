@@ -743,4 +743,43 @@ describe("a chat's folder, from the page", () => {
       .toBe("Surogate shows a chat's folder only when its user asks, with a click");
     expect(await askedOf()).toEqual({ shown: [], opened: [] });
   });
+
+  it("shows one folder for each click of its user's, and none for a click its page made or one long past", async () => {
+    const client = await signedIn();
+    await fileManager();
+    await bound(client, folder);
+    const refused = "Surogate shows a chat's folder only when its user asks, with a click";
+    // A button that asks *times* times at each click, and an input that asks at each key: what each was answered.
+    await client.evaluate((id) => {
+      const answers: string[] = [];
+      const ask = () => window.surogateDesktop!.revealFolder!(id).then(() => "shown", (error: Error) => error.message)
+        .then((answer) => answers.push(answer));
+      const twice = Object.assign(document.createElement("button"), { id: "twice", textContent: "Show folder twice" });
+      twice.onclick = () => void Promise.all([ask(), ask()]);
+      const once = Object.assign(document.createElement("button"), { id: "once", textContent: "Show folder" });
+      once.onclick = () => void ask();
+      const keys = Object.assign(document.createElement("input"), { id: "keys" });
+      keys.onkeydown = () => void ask();
+      const elsewhere = Object.assign(document.createElement("p"), { id: "elsewhere", textContent: "Elsewhere" });
+      document.body.append(twice, once, keys, elsewhere);
+      Object.assign(window, { answers });
+    }, CHAT);
+    const answers = async (count: number) => {
+      await client.waitForFunction((length) => (window as unknown as { answers: string[] }).answers.length >= length, count);
+      return client.evaluate(() => (window as unknown as { answers: string[] }).answers);
+    };
+    // One click shows one folder. The second call's refusal needs no answer from the main process, so it comes first.
+    await client.click("#twice");
+    expect(await answers(2)).toEqual([refused, "shown"]);
+    // A click the page's own code made: its activation is Playwright's, the click is no user's.
+    await client.evaluate(() => document.getElementById("once")!.click());
+    expect((await answers(3))[2]).toBe(refused);
+    // A click long past, then a key pressed, which activates the page too.
+    await client.click("#elsewhere");
+    await new Promise((resolve) => setTimeout(resolve, 5_500));
+    await client.focus("#keys");
+    await client.keyboard.press("a");
+    expect((await answers(4))[3]).toBe(refused);
+    expect(await askedOf()).toEqual({ shown: [folder], opened: [] });
+  });
 });

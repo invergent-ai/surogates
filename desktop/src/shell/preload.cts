@@ -13,6 +13,14 @@ const origin = process.argv.find((arg) => arg.startsWith(PREFIX))?.slice(PREFIX.
 
 if (origin !== undefined && window.top === window && location.origin === origin) {
   const call = (name: string) => (...args: unknown[]) => ipcRenderer.invoke(`desktop:${name}`, ...args);
+  // Show folder only at its user's click: one heard here, in the preload's own world, where the
+  // page's scripts cannot make a trusted one. A click by key or by assistive technology counts. It
+  // allows one Show folder, for as long as Chromium's activation lasts.
+  const CLICK_MS = 5_000;
+  let clickedAt = -Infinity;
+  window.addEventListener("click", (event) => {
+    if (event.isTrusted) clickedAt = performance.now();
+  }, true);
   // The projects source the page serves (Section 12) stays here, and is called for the main
   // process, which checks each answer.
   let projects: ProjectsSource | null = null;
@@ -69,9 +77,13 @@ if (origin !== undefined && window.top === window && location.origin === origin)
     cancelPrepared: call("cancelPrepared"),
     getBinding: call("getBinding"),
     // Only at its user's click: the agent's page cannot open file manager windows by itself.
-    revealFolder: (sessionId: unknown) => navigator.userActivation.isActive
-      ? ipcRenderer.invoke("desktop:revealFolder", sessionId)
-      : Promise.reject(new Error("Surogate shows a chat's folder only when its user asks, with a click")),
+    revealFolder: (sessionId: unknown) => {
+      const clicked = navigator.userActivation.isActive && performance.now() - clickedAt < CLICK_MS;
+      clickedAt = -Infinity;
+      return clicked
+        ? ipcRenderer.invoke("desktop:revealFolder", sessionId)
+        : Promise.reject(new Error("Surogate shows a chat's folder only when its user asks, with a click"));
+    },
     onBindingChanged: (listener: (sessionId: string) => void) => {
       const relay = (_event: unknown, sessionId: unknown) => {
         if (typeof sessionId === "string") listener(sessionId);
