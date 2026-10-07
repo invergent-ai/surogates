@@ -63,7 +63,10 @@ class ThreadPods:
         return response.text
 
     async def destroy(self, sandbox_id: str) -> None:
-        await self.pods.pop(sandbox_id).aclose()
+        # A pod already gone is destroyed, as a delete answered 404 is.
+        client = self.pods.pop(sandbox_id, None)
+        if client is not None:
+            await client.aclose()
 
     async def status(self, sandbox_id: str) -> SandboxStatus:
         return SandboxStatus.RUNNING if sandbox_id in self.pods else SandboxStatus.TERMINATED

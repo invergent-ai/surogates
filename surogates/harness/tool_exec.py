@@ -180,6 +180,14 @@ async def _build_session_sandbox_spec(
     return sandbox_spec
 
 
+#: The first tool result after a thread's pod was remade mid-turn.
+COPY_REMADE = (
+    "[This thread's copy of the project's files was made again from the project's "
+    "files: its pod stopped.  The changes this turn made before now are gone; make "
+    "again any that are still needed.]"
+)
+
+
 async def _snapshot_copy(
     session: Any, tenant: Any, sandbox_pool: Any, credential_vault: Any, *, reason: str,
 ) -> str | None:
@@ -1713,6 +1721,8 @@ async def _run_single_tool(
             result_content = await sandbox_pool.execute(
                 sandbox_owner, tool_name, args_str,
             )
+            if sandbox_pool.copy_remade(sandbox_owner):
+                result_content = f"{COPY_REMADE}\n\n{result_content}"
         else:
             result_content = await tools.dispatch(
                 tool_name,

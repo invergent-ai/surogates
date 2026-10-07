@@ -574,3 +574,23 @@ async def test_a_threads_helper_on_another_worker_makes_the_threads_own_copy(api
     other_worker = SandboxPool(pods)
     await other_worker.ensure(owner, spec)
     assert (owner, other_worker.holds_copy(owner), spec.env["HISTORY_THREAD"]) == (str(thread.id), True, str(thread.id))
+
+
+async def test_a_thread_whose_pod_was_remade_mid_turn_is_told_its_edits_are_gone(api, monkeypatch, pods):
+    thread = await a_thread(api)
+
+    async def the_pod_goes(harness):  # past its deadline
+        await pods.destroy(next(iter(pods.pods)))
+
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "a.md", "content": "a"})),
+        calling(("memory", {"action": "add", "content": "Name: Ana"})),
+        calling(("write_file", {"path": "b.md", "content": "b"})),
+        _final_response("Done."),
+    ], pool=SandboxPool(pods), during=the_pod_goes)
+    events = await api.app.state.session_store.get_events(thread.id, types=[EventType.TOOL_RESULT])
+    first, second = [e.data["content"] for e in events if e.data["name"] == "write_file"]
+    assert "was made again" not in first
+    assert second.startswith("[This thread's copy of the project's files was made again")
+    # What it wrote before is gone with the old copy; what it wrote after lands.
+    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "b.md", "notes.txt"]
