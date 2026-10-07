@@ -57,6 +57,7 @@ describe("the sign-in, as this computer keeps it", () => {
 
   it("keeps it as it is where the secret store protects nothing, says so, and seals it once there is one", () => {
     store(new Secrets("basic_text")).save(SIGNED_IN);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(store(new Secrets("basic_text")).unencrypted()).toBe(true);
     expect(store().get()).toEqual(SIGNED_IN);
     expect(readFileSync(path, "utf8")).not.toContain("surg_rt_secret");
@@ -143,6 +144,44 @@ describe("the session", () => {
     const at = (ms: number) => new DesktopSession(SIGNED_IN, { store: store(), fetch: agent().fetch, onEnded: () => {}, now: () => ms });
     expect(at(SIGNED_IN.authTime * 1000 + RECENT_MS - 1).recent()).toBe(true);
     expect(at(SIGNED_IN.authTime * 1000 + RECENT_MS).recent()).toBe(false);
+  });
+
+  it.each([["fast", 15], ["slow", -15]])("measures the sign-in on the agent's clock, with this computer's %s by 15 minutes", (_name, minutes) => {
+    // The agent issued the access token a minute after the sign-in, by its own clock.
+    const issued = SIGNED_IN.authTime + 60;
+    const accessToken = `h.${Buffer.from(JSON.stringify({ iat: issued })).toString("base64url")}.s`;
+    let now = issued * 1000 + minutes * 60_000;
+    const session = new DesktopSession(SIGNED_IN, { store: store(), fetch: agent().fetch, onEnded: () => {}, now: () => now }, {
+      accessToken, refreshToken: SIGNED_IN.refreshToken, expiresAt: now + 1_800_000, authTime: SIGNED_IN.authTime,
+    });
+    expect(session.recent()).toBe(true);
+    now += RECENT_MS - 60_000 - 1;
+    expect(session.recent()).toBe(true);
+    now += 1;
+    expect(session.recent()).toBe(false);
+  });
+
+  it("sends its access token to the agent only", async () => {
+    const server = agent();
+    const session = new DesktopSession(SIGNED_IN, { store: store(), fetch: server.fetch, onEnded: () => {}, now: () => 0 }, {
+      accessToken: "at-0", refreshToken: SIGNED_IN.refreshToken, expiresAt: 1_800_000, authTime: SIGNED_IN.authTime,
+    });
+    await expect(session.api("https://elsewhere.example/x")).rejects.toThrow("is not on the agent");
+    await expect(session.api("//elsewhere.example/x")).rejects.toThrow("is not on the agent");
+    expect(server.calls).toEqual([]);
+  });
+
+  it("gives a caller still waiting on a refresh no access token once signed out", async () => {
+    const server = agent();
+    const kept = store();
+    kept.save(SIGNED_IN);
+    const session = new DesktopSession(SIGNED_IN, { store: kept, fetch: server.fetch, onEnded: () => {} });
+    const waiting = session.accessToken();
+    const ending = session.end();
+    server.release();
+    await expect(waiting).rejects.toMatchObject({ code: "invalid_grant" });
+    await ending;
+    expect(existsSync(path)).toBe(false);
   });
 });
 

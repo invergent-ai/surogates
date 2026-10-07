@@ -19,7 +19,7 @@ export interface SignedIn {
   refreshToken: string;
 }
 
-// The agent asks for a sign-in from its last 10 minutes to add or restore a computer; a minute less here, for the clocks.
+// The agent asks for a sign-in from its last 10 minutes to add or restore a computer; a minute less here, for the time a call takes.
 export const RECENT_MS = 9 * 60_000;
 // How long a sign-in lasts at the agent, from the browser sign-in (FAMILY_LIFETIME there).
 export const SIGN_IN_LIFETIME_MS = 30 * 86_400_000;
@@ -91,14 +91,27 @@ export interface SessionOptions {
   now?: () => number;
 }
 
+// When the agent issued *accessToken*, by its own clock, in seconds; null when it does not say.
+function issuedAt(accessToken: string): number | null {
+  try {
+    const { iat } = JSON.parse(Buffer.from(accessToken.split(".")[1] ?? "", "base64url").toString()) as { iat?: unknown };
+    return typeof iat === "number" ? iat : null;
+  } catch {
+    return null;
+  }
+}
+
 export class DesktopSession {
-  private access: { token: string; expiresAt: number } | null;
+  private access: { token: string; expiresAt: number } | null = null;
   private refreshing: Promise<string> | null = null;
   private ended = false;
+  // How far the agent's clock is ahead of this computer's, from its last access token: a sign-in's
+  // age is the agent's to measure. Until a token says, this computer's clock stands in.
+  private skewMs = 0;
 
   /** *first* holds the tokens of a sign-in that just happened; a session read back at launch has none. */
   constructor(private signedIn: SignedIn, private readonly options: SessionOptions, first?: Tokens) {
-    this.access = first ? { token: first.accessToken, expiresAt: first.expiresAt } : null;
+    if (first) this.took(first);
   }
 
   get account(): DesktopAccount {
@@ -111,7 +124,7 @@ export class DesktopSession {
 
   /** Whether the agent would still take this sign-in as recent enough to add or restore a computer. */
   recent(): boolean {
-    return (this.options.now ?? Date.now)() - this.signedIn.authTime * 1000 < RECENT_MS;
+    return this.agentNow() - this.signedIn.authTime * 1000 < RECENT_MS;
   }
 
   /** An access token for the agent: the one in hand, or one refreshed once for every caller waiting. */
@@ -128,9 +141,11 @@ export class DesktopSession {
 
   /** *path* on the agent, as the signed-in user. */
   async api(path: string, init: RequestInit = {}): Promise<Response> {
+    const url = new URL(path, this.signedIn.origin);
+    if (url.origin !== this.signedIn.origin) throw new Error(`${path} is not on the agent`);
     const headers = new Headers(init.headers);
     headers.set("authorization", `Bearer ${await this.accessToken()}`);
-    return this.options.fetch(new URL(path, this.signedIn.origin).href, {
+    return this.options.fetch(url.href, {
       ...init, headers, signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   }
@@ -151,18 +166,30 @@ export class DesktopSession {
       if (error instanceof OAuthError && error.code === "invalid_grant" && !this.ended) {
         this.ended = true;
         this.options.store.clear();
-        const aged = (this.options.now ?? Date.now)() - this.signedIn.authTime * 1000 >= SIGN_IN_LIFETIME_MS;
+        const aged = this.agentNow() - this.signedIn.authTime * 1000 >= SIGN_IN_LIFETIME_MS;
         this.options.onEnded(aged
           ? "Your sign-in is 30 days old: sign in again in your browser"
           : "The agent ended this sign-in: sign in again in your browser");
       }
       throw error;
     }
+    // Signed out meanwhile: the sign-in is over, for whoever was waiting too.
+    if (this.ended) throw new OAuthError("invalid_grant", "Signed out of the agent");
     // Kept before it is used: the spent token never works again, so a crash must not lose its successor.
     this.signedIn = { ...this.signedIn, refreshToken: tokens.refreshToken };
-    if (!this.ended) this.options.store.save(this.signedIn);
-    this.access = { token: tokens.accessToken, expiresAt: tokens.expiresAt };
+    this.options.store.save(this.signedIn);
+    this.took(tokens);
     return tokens.accessToken;
+  }
+
+  private took(tokens: Tokens): void {
+    this.access = { token: tokens.accessToken, expiresAt: tokens.expiresAt };
+    const iat = issuedAt(tokens.accessToken);
+    if (iat !== null) this.skewMs = iat * 1000 - (this.options.now ?? Date.now)();
+  }
+
+  private agentNow(): number {
+    return (this.options.now ?? Date.now)() + this.skewMs;
   }
 }
 

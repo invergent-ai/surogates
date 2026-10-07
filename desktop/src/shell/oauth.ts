@@ -5,7 +5,7 @@
 // to http://127.0.0.1:<port>/callback with a one-time code, which is exchanged, with its
 // verifier, for an access token and a refresh token that rotates on every use.
 
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -63,6 +63,12 @@ interface Callback {
 // the wait goes on: whatever can reach this port ends nothing. What comes after the callback
 // is told the sign-in is over.
 function waitForCallback(server: Server, host: string, state: string, timeoutMs: number, signal?: AbortSignal): Promise<Callback> {
+  const expected = Buffer.from(state);
+  // Compared in constant time: guesses are unlimited while the sign-in waits.
+  const ours = (given: string | null): boolean => {
+    const bytes = Buffer.from(given ?? "");
+    return bytes.length === expected.length && timingSafeEqual(bytes, expected);
+  };
   return new Promise((resolve, reject) => {
     let taken = false;
     const finish = (): void => {
@@ -89,7 +95,7 @@ function waitForCallback(server: Server, host: string, state: string, timeoutMs:
         response.writeHead(410, { ...HEADERS, "content-type": "text/html; charset=utf-8" }).end(page("This sign-in is over."));
         return;
       }
-      if (url.searchParams.get("state") !== state) {
+      if (!ours(url.searchParams.get("state"))) {
         response.writeHead(400, { ...HEADERS, "content-type": "text/html; charset=utf-8" })
           .end(page("This sign-in is not one Surogate started, so it was refused."));
         return;
@@ -104,12 +110,13 @@ function waitForCallback(server: Server, host: string, state: string, timeoutMs:
   });
 }
 
-async function postToken(origin: string, form: Record<string, string>, fetch: Fetch, now: () => number): Promise<Tokens> {
+async function postToken(origin: string, form: Record<string, string>, fetch: Fetch, now: () => number, signal?: AbortSignal): Promise<Tokens> {
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   const response = await fetch(new URL("/api/v1/auth/oauth/token", origin).href, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(form).toString(),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
   const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
   if (!response.ok) {
@@ -145,7 +152,8 @@ export async function signInWithBrowser(options: BrowserSignIn): Promise<Tokens>
       response_type: "code", client_id: CLIENT_ID, redirect_uri: redirectUri, state,
       code_challenge: challenge, code_challenge_method: "S256", computer: options.computer,
     }).toString();
-    await options.open(authorize.href);
+    // A sign-in already cancelled opens nothing, and one that ends while the browser opens ends then.
+    if (!signal.aborted) await Promise.race([options.open(authorize.href), callback]);
     const { query, answer } = await callback;
     try {
       const error = query.get("error");
@@ -154,14 +162,16 @@ export async function signInWithBrowser(options: BrowserSignIn): Promise<Tokens>
       }
       const code = query.get("code");
       if (!code) throw new OAuthError("invalid_request", "The browser came back without a sign-in code");
+      // A sign-in started again meanwhile gets no tokens: nobody would ever end them.
       const tokens = await postToken(options.origin, {
         grant_type: "authorization_code", client_id: CLIENT_ID, code, redirect_uri: redirectUri, code_verifier: verifier,
-      }, options.fetch, now);
+      }, options.fetch, now, signal);
       answer(200, "Signed in. You can close this tab and return to Surogate.");
       return tokens;
     } catch (error) {
-      answer(400, `Surogate is not signed in: ${error instanceof Error ? error.message : String(error)}`);
-      throw error;
+      const failed = options.signal?.aborted ? new OAuthError("cancelled", "Sign-in was cancelled") : error;
+      answer(400, `Surogate is not signed in: ${failed instanceof Error ? failed.message : String(failed)}`);
+      throw failed;
     }
   } finally {
     ended.abort();

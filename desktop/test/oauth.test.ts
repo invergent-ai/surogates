@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CLIENT_ID, OAuthError, refreshTokens, revokeTokens, signInWithBrowser, type Tokens } from "../src/shell/oauth.js";
 
@@ -111,6 +111,7 @@ describe("signing in through the system browser", () => {
     });
     expect(asked!.searchParams.get("state")).toMatch(/^[A-Za-z0-9_-]{32}$/);
     expect(await tab()).toEqual({ status: 200, text: expect.stringContaining("Signed in. You can close this tab and return to Surogate.") });
+    await expect(browse(redirectUri!)).rejects.toThrow(/ECONNREFUSED/);
   });
 
   it("ignores a callback with another sign-in's state, and still takes its own", async () => {
@@ -142,7 +143,7 @@ describe("signing in through the system browser", () => {
       seen.push(await browse(new URL("/favicon.ico", back).href));
       seen.push(await browse(back.href, "attacker.example:80"));
       const first = browse(back.href);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await vi.waitFor(() => expect(agent.forms).toHaveLength(1));
       // The exchange is under way: the loopback still listens, for nothing.
       seen.push(await browse(back.href));
       release();
@@ -165,9 +166,55 @@ describe("signing in through the system browser", () => {
     await expect(browse(`http://127.0.0.1:${port}/callback`)).rejects.toThrow(/ECONNREFUSED/);
   });
 
-  it("gives up when the browser never comes back", async () => {
-    const { signedIn } = signIn(async () => {}, { timeoutMs: 50 });
+  it("gives up when the browser never comes back, and leaves no port open", async () => {
+    let port = "";
+    const { signedIn } = signIn(async (url) => {
+      port = new URL(url.searchParams.get("redirect_uri")!).port;
+    }, { timeoutMs: 50 });
     await expect(signedIn).rejects.toMatchObject({ code: "timeout" });
+    await expect(browse(`http://127.0.0.1:${port}/callback`)).rejects.toThrow(/ECONNREFUSED/);
+  });
+
+  it("gives up in time even when opening the browser never finishes", async () => {
+    const signedIn = signInWithBrowser({
+      origin, computer: "c", fetch: (url, init) => fetch(url, init), open: () => new Promise(() => {}), timeoutMs: 50,
+    });
+    await expect(signedIn).rejects.toMatchObject({ code: "timeout" });
+  });
+
+  it("opens no browser for a sign-in already cancelled", async () => {
+    const opened: string[] = [];
+    const signedIn = signInWithBrowser({
+      origin, computer: "c", fetch: (url, init) => fetch(url, init), signal: AbortSignal.abort(),
+      open: async (url) => {
+        opened.push(url);
+      },
+    });
+    await expect(signedIn).rejects.toMatchObject({ code: "cancelled" });
+    expect(opened).toEqual([]);
+  });
+
+  it("is cancelled, with no tokens, when started again during the exchange", async () => {
+    let release = () => {};
+    agent.hold = new Promise((resolve) => {
+      release = resolve;
+    });
+    const controller = new AbortController();
+    const { signedIn, tab } = signIn(async (url) => {
+      const back = browse(approved(url));
+      await vi.waitFor(() => expect(agent.forms).toHaveLength(1));
+      controller.abort();
+      release();
+      return back;
+    }, { signal: controller.signal });
+    await expect(signedIn).rejects.toMatchObject({ code: "cancelled" });
+    expect(await tab()).toMatchObject({ status: 400 });
+  });
+
+  it("ends a callback with this sign-in's state but no code", async () => {
+    const { signedIn, tab } = signIn((url) => browse(callback(url, { state: url.searchParams.get("state")! })));
+    await expect(signedIn).rejects.toMatchObject({ code: "invalid_request" });
+    expect(await tab()).toMatchObject({ status: 400 });
   });
 
   it("ends at once when the browser cannot be opened", async () => {
