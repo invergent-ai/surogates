@@ -412,3 +412,65 @@ describe("an approval prompt", () => {
     expect(existsSync(join(folder, "a.txt"))).toBe(false);
   });
 });
+
+describe("a chat's mode, from the page", () => {
+  it("works freely only once its user confirms it in the desktop's own window", async () => {
+    const client = await signedIn();
+    await bound(client, folder);
+    const free = (chat: string) => client.evaluate((id) => window.surogateDesktop!.requestFreeMode(id), chat);
+    const kept = free(CHAT);
+    const asked = await prompt(app!);
+    expect(await text(asked, "#prompt-title")).toBe(`Let 127.0.0.1:${new URL(origin).port} work freely in ${folder.split("/").at(-1)}?`);
+    expect(await asked.evaluate(() => (document.activeElement as HTMLElement).dataset.id)).toBe("keep");
+    await press(asked, "keep");
+    expect(await kept).toBe(false);
+    // Kept asking: this page is refused without a prompt, until it loads again.
+    await expect(free(CHAT)).rejects.toThrow("The user chose to keep this chat asking");
+    expect(await promptsShown(app!)).toBe(0);
+    await client.reload();
+    await client.waitForFunction(() => window.surogateDesktop !== undefined);
+    const freed = free(CHAT);
+    await press(await prompt(app!), "free");
+    expect(await freed).toBe(true);
+    // Now nothing is asked.
+    expect(await outcome(write("a.txt", "a"))).toEqual({ ok: null });
+    expect(await promptsShown(app!)).toBe(0);
+  });
+
+  it("asks one folder question and one Work-freely question at a time for a page", async () => {
+    const client = await signedIn();
+    await bound(client, folder);
+    const first = prepare(client);
+    const sheet = await prompt(app!);
+    await expect(prepare(client)).rejects.toThrow("Surogate is already asking");
+    const free = client.evaluate((id) => window.surogateDesktop!.requestFreeMode(id), CHAT);
+    await expect(client.evaluate((id) => window.surogateDesktop!.requestFreeMode(id), CHAT)).rejects.toThrow("Surogate is already asking");
+    await key(sheet, "Escape");
+    expect(await first).toBeNull();
+    await press(await prompt(app!), "keep");
+    expect(await free).toBe(false);
+    expect(await promptsShown(app!)).toBe(0);
+  });
+
+  it("can be made to ask every time by the page, and never to work freely", async () => {
+    const client = await signedIn();
+    await bound(client, folder, CHAT, "free");
+    await expect(client.evaluate((id) => window.surogateDesktop!.setMode(id, "free" as "ask"), CHAT))
+      .rejects.toThrow("Only the desktop can let a chat work freely");
+    await client.evaluate((id) => window.surogateDesktop!.setMode(id, "ask"), CHAT);
+    const id = write("a.txt", "a");
+    await press(await prompt(app!), "deny");
+    expect(await outcome(id)).toMatchObject({ error: { type: "os", code: "EACCES" } });
+  });
+
+  it("drops a confirmed folder whose chat was never created", async () => {
+    const client = await signedIn();
+    const prepared = prepare(client);
+    await press(await prompt(app!), "accept");
+    const ready = (await prepared)!;
+    await client.evaluate((token) => window.surogateDesktop!.cancelPrepared(token), ready.token);
+    expect(await outcome(send("bind", { folder: ready.folder, nonce: ready.nonce }))).toEqual({
+      error: { type: "binding", message: "This folder was not confirmed on this computer" },
+    });
+  });
+});

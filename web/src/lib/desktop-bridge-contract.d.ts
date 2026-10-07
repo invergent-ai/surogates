@@ -48,6 +48,13 @@ export interface DesktopBridge {
   signOut(): Promise<void>;
   prepareFolder(choice: "last" | "pick"): Promise<DesktopPreparedFolder | null>;
   bindSession(sessionId: string, token: string): Promise<void>;
+  // From now on the chat asks before each command, file change and input. The page can
+  // make a chat only safer: "Work freely" is the desktop's own to grant.
+  setMode(sessionId: string, mode: "ask"): Promise<void>;
+  // Opens the desktop's own confirmation; true once the chat works freely.
+  requestFreeMode(sessionId: string): Promise<boolean>;
+  // Drops a folder confirmed with prepareFolder whose chat was never created.
+  cancelPrepared(token: string): Promise<void>;
   getAppearance(): Promise<DesktopAppearance>;
   onAppearanceChanged(listener: (appearance: DesktopAppearance) => void): () => void;
   // Who is signed in; null once nobody is.

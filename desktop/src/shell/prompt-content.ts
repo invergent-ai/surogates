@@ -173,3 +173,19 @@ export function approval(request: ApprovalRequest): PromptContent {
     height: request.privateNetwork ? 340 : 290,
   };
 }
+
+/** The desktop's own confirmation before a chat works freely (spec, Section 4). */
+export function freeMode(chat: ChatLabel): PromptContent {
+  return {
+    title: `Let ${chat.agent} work freely in ${named(chat.folder)}?`,
+    lead: "It will run commands, change files and type into its commands in this folder without asking you first. It still asks before it connects to an address off the package hosts.",
+    details: [code("Folder", chat.folder)],
+    notes: [],
+    choice: null,
+    buttons: [button("keep", "Keep asking"), button("free", "Work freely", true)],
+    focus: "keep",
+    cancel: "keep",
+    enter: null,
+    height: 300,
+  };
+}

@@ -1,14 +1,13 @@
 // The desktop's own prompts (spec, Sections 4 and 8). The folder dialog is the system's,
 // as Claude Desktop picks a folder (dialog.showOpenDialog with openDirectory and
-// createDirectory); the folder sheet and the approval prompts are prompt windows of the
-// app's own. Each takes its turn over the app's window, one at a time. No chat works
-// freely yet.
+// createDirectory); the folder sheet, the approval prompts and the Work-freely confirmation
+// are prompt windows of the app's own. Each takes its turn over the app's window, one at a time.
 
 import { type BrowserWindow, dialog } from "electron";
 
 import type { ApprovalAnswer, ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
-import { approval, folderSheet, type PromptContent } from "./prompt-content.js";
+import { approval, folderSheet, freeMode, type PromptContent } from "./prompt-content.js";
 import { PromptQueue, TIMEOUT } from "./prompt-queue.js";
 import { openPrompt, type PromptAnswer } from "./prompt-window.js";
 
@@ -58,6 +57,9 @@ export function desktopPrompts(options: DesktopPromptsOptions): FolderPrompts & 
       if (answer === TIMEOUT) return "timeout";
       return answer === null ? "deny" : (answer.button as ApprovalAnswer);
     },
-    confirmFreeMode: () => Promise.resolve(false),
+    async confirmFreeMode(chat, signal) {
+      const answer = await ask(freeMode(chat), signal);
+      return answer !== null && answer !== TIMEOUT && answer.button === "free";
+    },
   };
 }

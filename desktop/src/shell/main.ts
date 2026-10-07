@@ -836,7 +836,7 @@ async function signIn(agent: Agent): Promise<void> {
   }
 }
 
-// A folder is prepared for the window that asked: its prompts go once that window goes or its page is replaced.
+// What a window asked for, a folder or Work freely: its prompts go once that window goes or its page is replaced.
 async function preparing<T>(window: string, prepare: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const contents = webContents.fromId(Number(window));
   const controller = new AbortController();
@@ -854,6 +854,8 @@ async function preparing<T>(window: string, prepare: (signal: AbortSignal) => Pr
 
 // The bridge, on a view of the agent's web client: its calls answer for this agent only.
 function bridge(contents: WebContents, agent: Agent): void {
+  // Each load of the page is a page of its own: what its user refused there holds until it is replaced.
+  let load = 0;
   // The device is the account's it was registered for: a page signed in as anyone else sees none.
   // Until the page says who it is, it is whoever is signed in to the app, whose sign-in gave it its session.
   const anotherAccount = () => {
@@ -891,6 +893,10 @@ function bridge(contents: WebContents, agent: Agent): void {
     bindSession: async (sessionId, token, window) => {
       await (await registered()).binder.bindSession(sessionId, token, window);
     },
+    setMode: async (sessionId, mode) => (await registered()).binder.approvals.setMode(sessionId, mode),
+    requestFreeMode: (sessionId, window) =>
+      preparing(window, async (signal) => (await registered()).binder.approvals.requestFreeMode(sessionId, signal, `${window}:${load}`)),
+    cancelPrepared: async (token, window) => (await registered()).binder.cancelPrepared(token, window),
     getAppearance: appearanceNow,
     setAccount: (reported) => {
       // Another account, or none, or the first: nothing listed before is theirs. A page that
@@ -924,6 +930,7 @@ function bridge(contents: WebContents, agent: Agent): void {
   // A page that loads again starts with no source, until it registers one. Until its load commits,
   // the page there still serves: a load the shell cancels, as to an address outside the agent's, changes nothing.
   onReplaced(contents, () => {
+    load += 1;
     if (served) withdrawProjects(false);
   });
 }

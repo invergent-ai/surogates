@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ApprovalRequest, ChatLabel } from "../src/binding/approvals.js";
 import type { FolderSheet } from "../src/binding/binder.js";
-import { approval, folderSheet, sizeOf } from "../src/shell/prompt-content.js";
+import { approval, folderSheet, freeMode, sizeOf } from "../src/shell/prompt-content.js";
 
 const SHEET: FolderSheet = { agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null };
 const CHAT: ChatLabel = { agent: "acme.surogate.ai", root: "r", calling: "r", folder: "/home/me/notes" };
@@ -102,5 +102,13 @@ describe("an approval prompt", () => {
 describe("a size", () => {
   it.each([[1, "1 byte"], [900, "900 bytes"], [2048, "2 KB"], [1536, "1.5 KB"], [3 * 1024 * 1024, "3 MB"]])("of %d is %s", (bytes, text) => {
     expect(sizeOf(bytes)).toBe(text);
+  });
+});
+
+describe("the Work-freely confirmation", () => {
+  it("names the agent and the folder, Keep asking first and focused", () => {
+    const content = freeMode(CHAT);
+    expect(content.title).toBe("Let acme.surogate.ai work freely in notes?");
+    expect([ids(content), allowing(content), content.focus, content.cancel]).toEqual([["keep", "free"], ["free"], "keep", "keep"]);
   });
 });
