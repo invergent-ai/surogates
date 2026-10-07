@@ -40,7 +40,8 @@ export function qemuArgs(disks: Disks, run: string, console: string, cpus = gues
     // vhost-user-fs needs the guest's memory shared with virtiofsd.
     "-object", `memory-backend-memfd,id=mem,size=${MEMORY},share=on`,
     "-kernel", disks.kernel,
-    "-append", "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet",
+    // lsm=: the kernel's own list, and bpf, which it lacks, for the rule vm/init loads.
+    "-append", "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf",
     "-drive", `if=none,id=root,file=${option(disks.rootfs)},format=raw,readonly=on`, "-device", "virtio-blk-pci,drive=root",
     "-drive", `if=none,id=agent,file=${option(disks.agentDisk)},format=raw,readonly=on`, "-device", "virtio-blk-pci,drive=agent",
     "-drive", `if=none,id=sessions,file=${option(disks.sessions)},format=raw,discard=unmap`, "-device", "virtio-blk-pci,drive=sessions",

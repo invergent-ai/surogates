@@ -153,6 +153,12 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     }
   });
 
+  it("activates the bpf LSM and attaches all eleven rule hooks before sessions run", () => {
+    // No command runs as the guest's root: its init says what it found on the console, before it starts the agent.
+    const said = /surogate: the protected-names rule attached (\d+) of \d+ hooks, under the LSMs (\S+)/.exec(readFileSync(options.console, "utf8"));
+    expect(said?.slice(1)).toEqual(["11", expect.stringMatching(/\bbpf\b/)]);
+  });
+
   it("runs a root's background process in its runner, where the next command reaches it, and answers for it", async () => {
     writeFileSync(join(folder, "served.txt"), "served\n");
     const started = await guest.op(ROOT, "start", background("python3 -m http.server 8765 --bind 127.0.0.1"), signal()) as { ok: { session_id: string } };
