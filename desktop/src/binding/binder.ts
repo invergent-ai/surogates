@@ -259,8 +259,11 @@ export class Binder implements Executor {
     if (binding) preparation.resolve(binding);
   }
 
-  run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
-    return this.options.hosts.run(operation, signal);
+  async run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
+    const outcome = await this.options.hosts.run(operation, signal);
+    // A prompt before input to a background process names the command it runs.
+    this.approvals.started(operation, outcome);
+    return outcome;
   }
 
   async end(): Promise<void> {

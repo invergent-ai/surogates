@@ -36,16 +36,25 @@ export interface ChatLabel {
   folder: string;
 }
 
+// The head of a write's new data, as text: cut when the data goes on past it.
+export interface Preview {
+  text: string;
+  cut: boolean;
+}
+
 export type ApprovalRequest =
   | { kind: "command"; chat: ChatLabel; command: string; workdir: string | null; background: boolean }
-  | { kind: "change"; chat: ChatLabel; action: "write" | "delete"; path: string; bytes: number | null }
-  | { kind: "input"; chat: ChatLabel; process: string; data: string }
+  // preview: null for a delete, and for data that is not text.
+  | { kind: "change"; chat: ChatLabel; action: "write" | "delete"; path: string; bytes: number | null; preview: Preview | null }
+  // command: what the process runs, as its start named it; null for a process this run of the app did not start.
+  | { kind: "input"; chat: ChatLabel; process: string; command: string | null; data: string }
   | { kind: "network"; chat: ChatLabel; host: string; port: number; privateNetwork: boolean };
 
 // Allow it this once; deny it; allow it and stop asking in this chat, which then works
 // freely (not offered for a network prompt); or, for a network prompt only, allow its
-// host, on every port, for the rest of the chat. Any answer a prompt does not offer denies.
-export type ApprovalAnswer = "allow" | "deny" | "stop_asking" | "allow_session";
+// host, on every port, for the rest of the chat. "timeout": nobody answered in time.
+// Any answer a prompt does not offer denies.
+export type ApprovalAnswer = "allow" | "deny" | "stop_asking" | "allow_session" | "timeout";
 
 // The desktop shell's own windows; fakes in tests. Each settles once its signal aborts.
 export interface ApprovalPrompts {
@@ -70,6 +79,17 @@ const DENIED = {
   input: "The user denied this input on this computer",
 } as const;
 
+// Not denied: nobody was there to answer.
+const UNANSWERED = {
+  command: "Nobody answered on this computer in time, so the command did not run",
+  change: "Nobody answered on this computer in time, so the change was not made",
+  input: "Nobody answered on this computer in time, so the input was not sent",
+} as const;
+
+// How much of a write's new data its prompt shows, read from the head of its base64.
+export const PREVIEW_BYTES = 8 * 1024;
+const PREVIEW_BASE64 = Math.ceil(PREVIEW_BYTES / 3) * 4;
+
 const couldNotAsk = (error: unknown) =>
   `This computer could not ask its user about this: ${error instanceof Error ? error.message : String(error)}`;
 
@@ -87,19 +107,34 @@ function denied(kind: string, why: string = DENIED[shapeOf(kind)]): Outcome {
   return { error: { type: "sandbox", message: why } };
 }
 
+// The head of a write's data as text, or null for data that is not: a NUL, or not UTF-8.
+function previewOf(data: string, bytes: number): Preview | null {
+  const head = Buffer.from(data.slice(0, PREVIEW_BASE64), "base64").subarray(0, PREVIEW_BYTES);
+  if (head.includes(0)) return null;
+  try {
+    // A character the head cuts in two is left out, not refused.
+    return { text: new TextDecoder("utf-8", { fatal: true }).decode(head, { stream: true }), cut: bytes > head.length };
+  } catch {
+    return null;
+  }
+}
+
 // What the prompt shows. The hosts take only text in these fields and refuse
-// anything else before it runs; here it is shown as String() writes it.
-function requestFor(operation: Operation, binding: Binding, agent: string): ApprovalRequest {
+// anything else before it runs; here it is shown as String() writes it. A write
+// whose data came in a transfer carries it by now: the runner asks once it is whole.
+function requestFor(operation: Operation, binding: Binding, agent: string, command: (process: string) => string | null): ApprovalRequest {
   const { kind, args } = operation;
   const chat = { agent, root: binding.root, calling: operation.callingSessionId, folder: binding.folder };
   const text = (name: string) => String(args[name] ?? "");
-  if (kind === "write" || kind === "delete") {
-    // A write whose data comes in a transfer names its size: the runner asks only once that data is whole.
-    const named = (args.transfer as { size?: unknown } | undefined)?.size;
-    const bytes = kind === "delete" ? null : typeof named === "number" ? named : Buffer.byteLength(text("data"), "base64");
-    return { kind: "change", chat, action: kind, path: text("key"), bytes };
+  if (kind === "delete") return { kind: "change", chat, action: kind, path: text("key"), bytes: null, preview: null };
+  if (kind === "write") {
+    const bytes = Buffer.byteLength(text("data"), "base64");
+    return { kind: "change", chat, action: kind, path: text("key"), bytes, preview: previewOf(text("data"), bytes) };
   }
-  if (kind === "write_stdin") return { kind: "input", chat, process: text("session_id"), data: text("data") };
+  if (kind === "write_stdin") {
+    const process = text("session_id");
+    return { kind: "input", chat, process, command: command(process), data: text("data") };
+  }
   const workdir = args.workdir == null ? null : String(args.workdir);
   return { kind: "command", chat, command: text("command"), workdir, background: kind === "start" };
 }
@@ -117,6 +152,14 @@ function settled<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undef
 export class Approvals {
   // Each chat's last prompt in line: one prompt per chat at a time, in the order asked.
   private readonly lines = new Map<string, Promise<void>>();
+  // ponytail: each background command's text by its chat and handle, kept for the app's life, one per
+  // background command started: background processes end with the app.
+  private readonly commands = new Map<string, string>();
+  // Each chat's open Work-freely confirmation: a second request hears its answer.
+  private readonly freeing = new Map<string, Promise<boolean>>();
+  // ponytail: the pages whose user kept a chat asking, by page and chat, for the app's life, one per
+  // refusal: a page is asked no more for that chat, and a page once replaced never asks again.
+  private readonly kept = new Set<string>();
 
   constructor(private readonly options: ApprovalsOptions) {}
 
@@ -135,7 +178,7 @@ export class Approvals {
       // A "Stop asking" while it waited its turn lets it through unasked.
       const again = this.asking(operation);
       if ("answer" in again) return again.answer;
-      const request = requestFor(operation, again.binding, this.options.agent);
+      const request = requestFor(operation, again.binding, this.options.agent, (process) => this.commands.get(`${root}\0${process}`) ?? null);
       let answer: ApprovalAnswer | undefined;
       try {
         // Raced against its signal: a prompt that ignores it cannot hold a cancel or a suspend.
@@ -145,6 +188,7 @@ export class Approvals {
       }
       // A dismissed prompt's answer is not its user's.
       if (signal.aborted) return denied(operation.kind);
+      if (answer === "timeout") return denied(operation.kind, UNANSWERED[shapeOf(operation.kind)]);
       if (answer === "stop_asking") {
         // The user let this one run either way.
         try {
@@ -155,6 +199,13 @@ export class Approvals {
       }
       return answer === "allow" || answer === "stop_asking" ? null : denied(operation.kind);
     });
+  }
+
+  /** A background command has started: a prompt before input to its process names the command. */
+  started(operation: Operation, outcome: Outcome): void {
+    const handle = "ok" in outcome ? (outcome.ok as { session_id?: unknown } | null)?.session_id : undefined;
+    if (operation.kind !== "start" || typeof handle !== "string") return;
+    this.commands.set(`${operation.sessionId}\0${handle}`, String(operation.args.command ?? ""));
   }
 
   /** The hosts the chat's user allowed for the chat past the package hosts: each new tool host for it starts with these. */
@@ -239,15 +290,35 @@ export class Approvals {
     this.options.bindings.setMode(sessionId, "ask");
   }
 
-  /** Work freely, once the user confirms it in the desktop's own window. True when the chat now works freely. */
-  async requestFreeMode(sessionId: string, signal: AbortSignal): Promise<boolean> {
+  /**
+   * Work freely, once the user confirms it in the desktop's own window. True when the
+   * chat now works freely. One confirmation per chat at a time: a request while one is
+   * open hears its answer. Settles false once *signal* aborts, even when the
+   * confirmation does not; the confirmation opened under the first request's signal.
+   * Once its user keeps the chat asking (or lets the confirmation go unanswered), *page*,
+   * one load of the page that asked, is refused for that chat without asking again: a
+   * page cannot wear its user down.
+   */
+  async requestFreeMode(sessionId: string, signal: AbortSignal, page: string): Promise<boolean> {
     const binding = this.bound(sessionId);
     if (binding.mode === "free") return true;
-    const chat = { agent: this.options.agent, root: sessionId, calling: sessionId, folder: binding.folder };
-    const confirmed = await this.options.prompts.confirmFreeMode(chat, signal);
-    if (confirmed !== true || signal.aborted) return false;
-    this.options.bindings.setMode(sessionId, "free");
-    return true;
+    const key = `${page}\0${sessionId}`;
+    if (this.kept.has(key)) throw new Error("The user chose to keep this chat asking");
+    if (signal.aborted) return false;
+    let open = this.freeing.get(sessionId);
+    if (!open) {
+      const chat = { agent: this.options.agent, root: sessionId, calling: sessionId, folder: binding.folder };
+      open = settled(this.options.prompts.confirmFreeMode(chat, signal), signal).then((confirmed) => {
+        if (confirmed !== true || signal.aborted) return false;
+        this.options.bindings.setMode(sessionId, "free");
+        return true;
+      }).finally(() => this.freeing.delete(sessionId));
+      this.freeing.set(sessionId, open);
+    }
+    const freed = (await settled(open, signal)) ?? false;
+    // Kept asking: a page that went is replaced anyway.
+    if (!freed && !signal.aborted) this.kept.add(key);
+    return freed;
   }
 
   // The chat's binding, when this operation must be asked about now; otherwise its

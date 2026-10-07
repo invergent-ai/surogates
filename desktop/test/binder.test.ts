@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ApprovalPrompts } from "../src/binding/approvals.js";
+import type { ApprovalPrompts, ApprovalRequest } from "../src/binding/approvals.js";
 import {
   ALREADY_BOUND, Binder, type BinderOptions, type FolderPrompts, type FolderSheet, NOT_RECORDED, type Prepared,
 } from "../src/binding/binder.js";
@@ -396,6 +396,28 @@ describe("a chat's bind operation", () => {
       error: { type: "sandbox", message: "The user denied this command on this computer" },
     });
     expect(asked).toEqual(["command"]);
+  });
+
+  it("tells the approvals the command each background process runs, as it starts", async () => {
+    const asked: ApprovalRequest[] = [];
+    hosts.run = (operation) => Promise.resolve(operation.kind === "start" ? { ok: { session_id: "proc_1", pid: 7 } } : { ok: null });
+    const chooser = binder(new User(), {
+      approvalPrompts: {
+        approve: (request) => {
+          asked.push(request);
+          return Promise.resolve("deny");
+        },
+        confirmFreeMode: () => Promise.resolve(false),
+      },
+    });
+    journal.bindings.add({ root: ROOT, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
+    const start: Operation = {
+      id: "s", sessionId: ROOT, callingSessionId: ROOT, invocationId: "1:c", ordinal: 1, kind: "start", args: { command: "npm run dev" }, digest: "d",
+    };
+    expect(await chooser.run(start, never())).toEqual({ ok: { session_id: "proc_1", pid: 7 } });
+    journal.bindings.setMode(ROOT, "ask");
+    await chooser.admit({ ...start, id: "i", ordinal: 2, kind: "write_stdin", args: { session_id: "proc_1", data: "q" } }, never());
+    expect(asked).toMatchObject([{ kind: "input", process: "proc_1", command: "npm run dev" }]);
   });
 
   it("is the binder's own: every other operation goes to the tool hosts, and so does the end of access", async () => {

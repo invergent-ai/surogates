@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  type ApprovalAnswer, type ApprovalPrompts, type ApprovalRequest, Approvals, type ChatLabel,
+  type ApprovalAnswer, type ApprovalPrompts, type ApprovalRequest, Approvals, type ChatLabel, PREVIEW_BYTES,
 } from "../src/binding/approvals.js";
 import { Binder, type FolderPrompts } from "../src/binding/binder.js";
 import { BOOT_ID } from "../src/binding/folder.js";
@@ -117,14 +117,31 @@ describe("a chat that asks every time", () => {
       op("start", { command: "npm run dev", workdir: null, task_id: "t", pty: false, notify_on_complete: false, watcher_interval: null }),
       { kind: "command", command: "npm run dev", workdir: null, background: true },
     ],
-    ["a write", op("write", { key: `${FOLDER}/a.txt`, data: "aGVsbG8=" }), { kind: "change", action: "write", path: `${FOLDER}/a.txt`, bytes: 5 }],
     [
-      "a write whose data comes in a transfer",
-      op("write", { key: `${FOLDER}/big.bin`, transfer: { size: 5_242_880, sha256: "a".repeat(64) } }),
-      { kind: "change", action: "write", path: `${FOLDER}/big.bin`, bytes: 5_242_880 },
+      "a write",
+      op("write", { key: `${FOLDER}/a.txt`, data: "aGVsbG8=" }),
+      { kind: "change", action: "write", path: `${FOLDER}/a.txt`, bytes: 5, preview: { text: "hello", cut: false } },
     ],
-    ["a delete", op("delete", { key: `${FOLDER}/a.txt` }), { kind: "change", action: "delete", path: `${FOLDER}/a.txt`, bytes: null }],
-    ["input to a process", op("write_stdin", { session_id: "proc_1", data: "y\n" }), { kind: "input", process: "proc_1", data: "y\n" }],
+    [
+      "a write longer than its preview",
+      op("write", { key: `${FOLDER}/long.txt`, data: Buffer.from("a".repeat(PREVIEW_BYTES + 10)).toString("base64") }),
+      { kind: "change", action: "write", path: `${FOLDER}/long.txt`, bytes: PREVIEW_BYTES + 10, preview: { text: "a".repeat(PREVIEW_BYTES), cut: true } },
+    ],
+    [
+      "a write of data that is not text",
+      op("write", { key: `${FOLDER}/a.bin`, data: Buffer.from([0x89, 0x50, 0x00, 0x01]).toString("base64") }),
+      { kind: "change", action: "write", path: `${FOLDER}/a.bin`, bytes: 4, preview: null },
+    ],
+    [
+      "a delete",
+      op("delete", { key: `${FOLDER}/a.txt` }),
+      { kind: "change", action: "delete", path: `${FOLDER}/a.txt`, bytes: null, preview: null },
+    ],
+    [
+      "input to a process",
+      op("write_stdin", { session_id: "proc_1", data: "y\n" }),
+      { kind: "input", process: "proc_1", command: null, data: "y\n" },
+    ],
   ])("asks before %s, naming the chat and exactly what it does, and lets it run once allowed", async (_name, operation, shown) => {
     bind(ROOT, "ask");
     const admitted = approvals.admit(operation, never());
@@ -333,6 +350,45 @@ describe("a chat that asks every time", () => {
     expect(user.asked).toHaveLength(1);
   });
 
+  it("leaves out of a write's preview a character its head cuts in two", async () => {
+    bind(ROOT, "ask");
+    user.auto = "deny";
+    const data = `a${"é".repeat(PREVIEW_BYTES)}`;
+    await approvals.admit(op("write", { key: `${FOLDER}/a.txt`, data: Buffer.from(data).toString("base64") }), never());
+    expect(user.asked[0]).toMatchObject({ preview: { text: data.slice(0, PREVIEW_BYTES / 2), cut: true } });
+  });
+
+  it("names the command a background process of the chat runs in a prompt before input to it", async () => {
+    bind(ROOT, "ask");
+    bind(OTHER, "ask");
+    user.auto = "deny";
+    approvals.started(op("start", { command: "python3 manage.py shell", workdir: null }), { ok: { session_id: "proc_1", pid: 41 } });
+    // Not a background command's start, or not started: nothing to name.
+    approvals.started(op("run", { command: "ls" }), { ok: { session_id: "proc_2" } });
+    approvals.started(op("start", { command: "npm run dev" }), { error: { type: "sandbox", message: "blocked" } });
+    for (const [process, root] of [["proc_1", ROOT], ["proc_1", OTHER], ["proc_2", ROOT]] as const) {
+      await approvals.admit(op("write_stdin", { session_id: process, data: "y\n" }, root), never());
+    }
+    expect(user.asked.map((request) => request.kind === "input" && request.command)).toEqual(["python3 manage.py shell", null, null]);
+  });
+
+  it.each([
+    ["a command", op("run", RUN), { error: { type: "sandbox", message: "Nobody answered on this computer in time, so the command did not run" } }],
+    [
+      "a change", op("delete", { key: `${FOLDER}/a.txt` }),
+      { error: { type: "os", code: "EACCES", message: "Nobody answered on this computer in time, so the change was not made" } },
+    ],
+    [
+      "input to a process", op("write_stdin", { session_id: "p", data: "y" }),
+      { ok: { status: "error", error: "Nobody answered on this computer in time, so the input was not sent" } },
+    ],
+  ])("answers %s nobody answered in time as not done, saying so", async (_name, operation, outcome) => {
+    bind(ROOT, "ask");
+    user.auto = "timeout";
+    expect(await approvals.admit(operation, never())).toEqual(outcome);
+    expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
+  });
+
   it("answers what would ask, for a chat this computer did not bind, as its host would, and asks nothing", async () => {
     user.auto = "deny";
     expect(await approvals.admit(op("run", RUN, OTHER), never())).toEqual(FOLDER_UNAVAILABLE);
@@ -396,9 +452,9 @@ describe("a command's connection to a destination off the package hosts", () => 
     expect(await command).toBeNull();
   });
 
-  it("denies on Deny, on an answer a network prompt does not offer, and when the prompt fails, saying why", async () => {
+  it("denies on Deny, when nobody answers in time, on an answer a network prompt does not offer, and when the prompt fails, saying why", async () => {
     bind(ROOT, "ask");
-    for (const answer of ["deny", "stop_asking", "maybe"] as ApprovalAnswer[]) {
+    for (const answer of ["deny", "timeout", "stop_asking", "maybe"] as ApprovalAnswer[]) {
       user.auto = answer;
       expect(await approvals.askNetwork(ROOT, SITE, never())).toBe("deny");
     }
@@ -515,23 +571,113 @@ describe("a chat's mode", () => {
     // Only true confirms: not a window that answers something else.
     const confirming = new User(null, [false, "yes" as unknown as boolean, true]);
     const asking = new Approvals({ bindings: journal.bindings, prompts: confirming, agent: "Research assistant" });
-    expect(await asking.requestFreeMode(ROOT, never())).toBe(false);
-    expect(await asking.requestFreeMode(ROOT, never())).toBe(false);
+    // Each from a page of its own: a page whose user kept the chat asking is not asked again.
+    expect(await asking.requestFreeMode(ROOT, never(), "page-1")).toBe(false);
+    expect(await asking.requestFreeMode(ROOT, never(), "page-2")).toBe(false);
     expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
-    expect(await asking.requestFreeMode(ROOT, never())).toBe(true);
+    expect(await asking.requestFreeMode(ROOT, never(), "page-3")).toBe(true);
     expect(journal.bindings.get(ROOT)?.mode).toBe("free");
     // Already working freely: nothing to confirm.
-    expect(await asking.requestFreeMode(ROOT, never())).toBe(true);
+    expect(await asking.requestFreeMode(ROOT, never(), "page-3")).toBe(true);
     expect(confirming.confirmations).toEqual([chat(), chat(), chat()]);
-    await expect(asking.requestFreeMode(OTHER, never())).rejects.toThrow("This chat has no folder on this computer");
+    await expect(asking.requestFreeMode(OTHER, never(), "page-1")).rejects.toThrow("This chat has no folder on this computer");
   });
 
-  it("keeps asking when the page went away while the confirmation was open", async () => {
+  it("keeps asking, and asks nothing, for a page already gone", async () => {
     bind(ROOT, "ask");
     const gone = new AbortController();
     gone.abort();
-    expect(await approvals.requestFreeMode(ROOT, gone.signal)).toBe(false);
+    expect(await approvals.requestFreeMode(ROOT, gone.signal, "page-1")).toBe(false);
     expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
+    expect(user.confirmations).toEqual([]);
+  });
+
+  it("opens one confirmation for requests that come while it is open, and each hears its answer", async () => {
+    bind(ROOT, "ask");
+    let confirm = (_yes: boolean): void => {};
+    const asked: ChatLabel[] = [];
+    const confirming = new Approvals({
+      bindings: journal.bindings,
+      prompts: {
+        approve: () => Promise.resolve("deny"),
+        confirmFreeMode: (chat) => {
+          asked.push(chat);
+          return new Promise((resolve) => {
+            confirm = resolve;
+          });
+        },
+      },
+      agent: "Research assistant",
+    });
+    const both = [confirming.requestFreeMode(ROOT, never(), "page-1"), confirming.requestFreeMode(ROOT, never(), "page-2")];
+    await vi.waitFor(() => expect(asked).toHaveLength(1));
+    confirm(true);
+    expect(await Promise.all(both)).toEqual([true, true]);
+    expect(journal.bindings.get(ROOT)?.mode).toBe("free");
+    expect(asked).toHaveLength(1);
+  });
+
+  it("settles once its page goes, even when the confirmation never does, and asks again for the next request", async () => {
+    bind(ROOT, "ask");
+    const asked: ChatLabel[] = [];
+    const ignoring = new Approvals({
+      bindings: journal.bindings,
+      prompts: {
+        approve: () => Promise.resolve("deny"),
+        confirmFreeMode: (chat) => {
+          asked.push(chat);
+          return asked.length === 1 ? new Promise(() => {}) : Promise.resolve(false);
+        },
+      },
+      agent: "Research assistant",
+    });
+    const gone = new AbortController();
+    const first = ignoring.requestFreeMode(ROOT, gone.signal, "page-1");
+    await vi.waitFor(() => expect(asked).toHaveLength(1));
+    gone.abort();
+    expect(await first).toBe(false);
+    expect(await ignoring.requestFreeMode(ROOT, never(), "page-2")).toBe(false);
+    expect(asked).toHaveLength(2);
+    expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
+  });
+});
+
+describe("a page that asks for Work freely again", () => {
+  it("is refused without a prompt, for that chat, once its user kept the chat asking, until another page asks", async () => {
+    bind(ROOT, "ask");
+    bind(OTHER, "ask");
+    const keeping = new User(null, [false, false, true]);
+    const asking = new Approvals({ bindings: journal.bindings, prompts: keeping, agent: "Research assistant" });
+    expect(await asking.requestFreeMode(ROOT, never(), "page-1")).toBe(false);
+    await expect(asking.requestFreeMode(ROOT, never(), "page-1")).rejects.toThrow("The user chose to keep this chat asking");
+    expect(keeping.confirmations).toHaveLength(1);
+    // Another chat on that page is its own; so is the next page.
+    expect(await asking.requestFreeMode(OTHER, never(), "page-1")).toBe(false);
+    expect(await asking.requestFreeMode(ROOT, never(), "page-2")).toBe(true);
+    expect(keeping.confirmations.map(({ root }) => root)).toEqual([ROOT, OTHER, ROOT]);
+  });
+
+  it("is asked again from the same page when the page went away while the confirmation was open", async () => {
+    bind(ROOT, "ask");
+    const gone = new AbortController();
+    const asked: ChatLabel[] = [];
+    const leaving = new Approvals({
+      bindings: journal.bindings,
+      prompts: {
+        approve: () => Promise.resolve("deny"),
+        confirmFreeMode: (chat) => {
+          asked.push(chat);
+          return asked.length === 1 ? new Promise(() => {}) : Promise.resolve(false);
+        },
+      },
+      agent: "Research assistant",
+    });
+    const first = leaving.requestFreeMode(ROOT, gone.signal, "page-1");
+    await vi.waitFor(() => expect(asked).toHaveLength(1));
+    gone.abort();
+    expect(await first).toBe(false);
+    expect(await leaving.requestFreeMode(ROOT, never(), "page-1")).toBe(false);
+    expect(asked).toHaveLength(2);
   });
 });
 
