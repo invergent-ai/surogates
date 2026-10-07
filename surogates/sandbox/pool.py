@@ -156,6 +156,10 @@ class SandboxPool:
             )
         return await self._backend.execute(sandbox_id, name, input)
 
+    def mark_copy_remade(self, session_id: str) -> None:
+        """Note that *session_id*'s next copy is made afresh: its last one was let go mid-turn."""
+        self._remade.add(session_id)
+
     def copy_remade(self, session_id: str) -> bool:
         """Whether *session_id*'s copy was made again since its pod died; asked once."""
         if session_id not in self._remade:

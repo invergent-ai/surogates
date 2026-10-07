@@ -668,3 +668,28 @@ async def test_any_step_after_a_copy_remade_tells_the_thread(api, monkeypatch, p
     events = await api.app.state.session_store.get_events(thread.id, types=[EventType.TOOL_RESULT])
     first, second = [e.data["content"] for e in events if e.data["name"] == "memory"]
     assert not first.startswith("[This thread's copy") and second.startswith("[This thread's copy")
+
+
+async def test_a_crashed_turns_retry_is_told_its_copy_was_made_fresh(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Edit the report."})
+    monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
+    harness = a_waking_harness(store, SlashCommandConfig())
+    harness._compressor.prune_stale_browser_states.side_effect = lambda messages: messages
+    harness._redis, harness._session_factory, harness._sandbox_pool = api.app.state.redis, api.app.state.session_factory, pool
+
+    async def crashes_after_its_first_step(session, *_, **__):
+        await open_pod(pool, session)
+        raise RuntimeError("the worker crashed mid-step")
+
+    harness._run_loop = crashes_after_its_first_step
+    with pytest.raises(RuntimeError):
+        await harness.wake(thread.id)
+    # The retry starts from a copy made afresh, and its first result says so.
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "a.md", "content": "a"})),
+        _final_response("Done."),
+    ], pool=pool)
+    [first] = [e.data["content"] for e in await store.get_events(thread.id, types=[EventType.TOOL_RESULT])]
+    assert first.startswith("[This thread's copy of the project's files was made again"), first

@@ -1600,8 +1600,13 @@ class AgentHarness(
                 sys.exc_info()[0] is not None and session is not None
                 and is_project_thread(session.config) and self._sandbox_pool is not None
             ):
+                owner = sandbox_session_key(session)
                 try:
-                    await asyncio.shield(self._sandbox_pool.destroy_for_session(sandbox_session_key(session)))
+                    held = self._sandbox_pool.holds_copy(owner)
+                    await asyncio.shield(self._sandbox_pool.destroy_for_session(owner))
+                    # The turn's retry, if it comes here, is told its copy was made afresh.
+                    if held:
+                        self._sandbox_pool.mark_copy_remade(owner)
                 except BaseException:
                     logger.warning("Could not let the copy of %s go", session_id, exc_info=True)
 
