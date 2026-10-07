@@ -47,10 +47,11 @@ export async function register(options: Registration): Promise<Credential | "sig
   if (await wantsRecentSignIn(response)) return "sign-in-again";
   if (!response.ok) throw new Error(`The agent did not add this computer (HTTP ${response.status})`);
   const issued = (await response.json().catch(() => null)) as { id?: unknown; token?: unknown } | null;
-  if (typeof issued?.id !== "string" || typeof issued.token !== "string" || !DEVICE_TOKEN.test(issued.token)) {
-    throw new Error("The agent added this computer without a device token Surogate can use");
-  }
+  if (typeof issued?.id !== "string") throw new Error("The agent added this computer without a device token Surogate can use");
   try {
+    if (typeof issued.token !== "string" || !DEVICE_TOKEN.test(issued.token)) {
+      throw new Error("The agent added this computer without a device token Surogate can use");
+    }
     const welcome = await options.verify(issued.token);
     const { userId, orgId } = session.account;
     if (welcome.deviceId !== issued.id || welcome.agentId !== agent.agentId || welcome.orgId !== orgId || welcome.userId !== userId) {
@@ -74,4 +75,57 @@ export async function register(options: Registration): Promise<Credential | "sig
     await session.api(`/api/v1/devices/${encodeURIComponent(issued.id)}`, { method: "DELETE" }).catch(() => {});
     throw error;
   }
+}
+
+export interface Restoring extends Omit<Registration, "computer"> {
+  credential: Credential; // the computer as this computer keeps it
+}
+
+/**
+ * Issue this computer a new device token for the session's sign-in, which the agent then binds to
+ * it; a revoked computer is restored. Its credential once its device runs on the new token, "gone"
+ * when the agent has no such device any more, or "sign-in-again" when it wants a more recent sign-in.
+ */
+export async function reauthorize(options: Restoring): Promise<Credential | "sign-in-again" | "gone"> {
+  const { agent, session, credential } = options;
+  const response = await session.api(`/api/v1/devices/${encodeURIComponent(credential.deviceId)}/reauthorize`, { method: "POST" });
+  if (response.status === 404) return "gone";
+  if (await wantsRecentSignIn(response)) return "sign-in-again";
+  if (!response.ok) throw new Error(`The agent did not reauthorize this computer (HTTP ${response.status})`);
+  const issued = (await response.json().catch(() => null)) as { token?: unknown } | null;
+  if (typeof issued?.token !== "string" || !DEVICE_TOKEN.test(issued.token)) {
+    throw new Error("The agent reauthorized this computer without a device token Surogate can use");
+  }
+  const welcome = await options.verify(issued.token);
+  const { userId, orgId } = session.account;
+  if (welcome.deviceId !== credential.deviceId || welcome.agentId !== agent.agentId || welcome.orgId !== orgId || welcome.userId !== userId) {
+    throw new Error("The agent's device token connects as another device, agent or user");
+  }
+  const restored: Credential = { ...credential, token: issued.token };
+  const stack = await options.start(restored);
+  try {
+    options.save(restored);
+  } catch (error) {
+    await stack.stop();
+    throw error;
+  }
+  return restored;
+}
+
+/**
+ * Bind a new sign-in to the computer kept for its account: revoking the computer then ends that
+ * sign-in too, and the window's session made from it. Its credential on the new device token; null
+ * when the agent revoked the computer or no longer has it, which is left as it is: restoring it is
+ * the user's to confirm. Throws when it cannot be bound.
+ */
+export async function rebind(options: Restoring): Promise<Credential | null> {
+  const response = await options.session.api("/api/v1/devices");
+  const listed = response.ok ? ((await response.json().catch(() => null)) as unknown) : null;
+  if (!Array.isArray(listed)) throw new Error(`The agent did not list this computer (HTTP ${response.status})`);
+  const found = (listed as Array<{ id?: unknown; revoked_at?: unknown }>).find((one) => one.id === options.credential.deviceId);
+  if (found === undefined || found.revoked_at !== null) return null;
+  const restored = await reauthorize(options);
+  if (restored === "gone") return null;
+  if (restored === "sign-in-again") throw new Error("The agent wants a more recent sign-in to keep this computer");
+  return restored;
 }

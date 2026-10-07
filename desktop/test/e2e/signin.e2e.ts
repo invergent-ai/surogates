@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { ACCOUNT, connect, FakeAgent, opened, signIn, signedInAndAdded, webClient as clientOn } from "./fake-agent.js";
+import { ACCOUNT, connect, FakeAgent, opened, ROTATED, signIn, signedInAndAdded, webClient as clientOn } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
 let home: string;
@@ -151,6 +151,43 @@ describe("signing in", () => {
     await agent.approve((await opened(shell))[before]!);
     await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
     expect(await page.isVisible("#device-action")).toBe(false);
+  });
+
+  // Signed in and added, then that sign-in ended (as one does after 30 days) while the computer
+  // stays, on a token of its own: the app, launched again, with nobody signed in.
+  async function signInEnded(): Promise<{ shell: ElectronApplication; page: Page }> {
+    const first = await connected();
+    await signedInAndAdded(first.shell, first.page, agent);
+    await quit(first.shell);
+    rmSync(state("session.json"));
+    app = await launch(home);
+    await stubNative(app);
+    const page = await shellPage(app);
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    return { shell: app, page };
+  }
+
+  it("binds a later sign-in to the computer it keeps, which runs on the new token the agent issues for it", async () => {
+    const { shell, page } = await signInEnded();
+    await signIn(shell, page, agent);
+    // Revoking the computer at the agent now ends this sign-in too.
+    await expect.poll(() => agent.reauthorized).toEqual(["Bearer at-2"]);
+    await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    expect(readFileSync(state("credentials.json"), "utf8")).toContain(ROTATED);
+    expect(agent.registered).toHaveLength(1);
+  });
+
+  it("signs out rather than keep a sign-in it cannot bind to the computer", async () => {
+    const { shell, page } = await signInEnded();
+    agent.reauthorizeStatus = 500;
+    await page.click("#sign-in-button");
+    await expect.poll(async () => (await opened(shell)).length).toBe(1);
+    await agent.approve((await opened(shell))[0]!);
+    await expect.poll(() => page.textContent("#sign-in-error"))
+      .toBe("Surogate could not tie this sign-in to this computer, so it signed out: The agent did not reauthorize this computer (HTTP 500)");
+    expect(existsSync(state("session.json"))).toBe(false);
+    expect(agent.oauth.at(-1)).toMatchObject({ token: "rt-2" });
+    expect(await webShown(shell)).toBe(false);
   });
 
   it("removes the device the agent made when its token connects as another agent, and keeps nothing", async () => {

@@ -17,6 +17,8 @@ import { FakeLinkServer } from "../fake-server.js";
 
 // As surogates/devices/store.py issues one: surg_dev_ and token_urlsafe(33).
 export const TOKEN = `surg_dev_${"t".repeat(44)}`;
+// The token a reauthorization issues instead.
+export const ROTATED = `surg_dev_${"r".repeat(44)}`;
 
 // The signed-in user, as /auth/me and the fake link's welcome name them.
 export const ACCOUNT = { name: "Flavius Burca", email: "flavius@example.com", userId: "u", orgId: "o" };
@@ -48,6 +50,10 @@ export class FakeAgent {
   readonly link = new FakeLinkServer({ token: TOKEN });
   readonly registered: unknown[] = [];
   readonly deleted: string[] = [];
+  // The bearer of each reauthorization of this computer: the sign-in the agent bound to it.
+  readonly reauthorized: string[] = [];
+  // What a reauthorization answers, when not the new token.
+  reauthorizeStatus = 200;
   // What the app's OAuth calls sent, form by form.
   readonly oauth: Array<Record<string, string>> = [];
   private readonly codes = new Map<string, { challenge: string; redirectUri: string }>();
@@ -93,6 +99,15 @@ export class FakeAgent {
       this.registered.push(JSON.parse((await body(request)) || "{}"));
       if (!this.recent) return json(response, 403, { detail: { code: "recent_sign_in_required", message: "Sign in again" } });
       return json(response, 201, { id: this.link.identity.device_id, name: "Laptop", token: this.link.token });
+    }
+    if (request.method === "GET" && path === "/api/v1/devices" && bearer) {
+      return json(response, 200, [{ id: this.link.identity.device_id, name: "Laptop", revoked_at: null }]);
+    }
+    if (request.method === "POST" && path === `/api/v1/devices/${this.link.identity.device_id}/reauthorize` && bearer) {
+      this.reauthorized.push(request.headers.authorization ?? "");
+      if (this.reauthorizeStatus !== 200) return json(response, this.reauthorizeStatus, {});
+      this.link.token = ROTATED;
+      return json(response, 200, { id: this.link.identity.device_id, name: "Laptop", token: ROTATED });
     }
     if (request.method === "DELETE" && path.startsWith("/api/v1/devices/") && bearer) {
       this.deleted.push(path.slice("/api/v1/devices/".length));

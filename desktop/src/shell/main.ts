@@ -23,7 +23,7 @@ import { VmExecutor } from "../vm/executor.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, linksFor, linkUrl, partitionFor } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
-import { register } from "./computer.js";
+import { rebind, register } from "./computer.js";
 import { type Credential, CredentialStore } from "./credentials.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { letWindowClose, MainWindow, onSettingsKey } from "./main-window.js";
@@ -408,6 +408,36 @@ async function registerComputer(agent: Agent): Promise<void> {
   }
 }
 
+/**
+ * Bind the sign-in that just happened to the computer kept for its account, before anything uses it:
+ * revoking the computer then ends it too, and the window's session made from it. The device starts
+ * again on the new token the agent issues for it. A sign-in that cannot be bound is ended rather than
+ * run unbound.
+ */
+async function bindToComputer(agent: Agent): Promise<void> {
+  const session = signedIn;
+  const credential = kept;
+  if (!session || !credential || credential.orgId !== session.account.orgId || credential.userId !== session.account.userId) return;
+  try {
+    const restored = await rebind({
+      agent, session, credential,
+      verify: (token) => verifyDevice(linkUrl(agent.origin), token),
+      // The device on the old token goes first: the new one keeps the same journal.
+      start: async (renewed) => {
+        await stopDevice(device?.started, null);
+        device = null;
+        return startStack(agent, renewed);
+      },
+      save: (renewed) => credentials.save(renewed),
+    });
+    if (restored) kept = restored;
+  } catch (error) {
+    if (signedIn === session) signedIn = null;
+    await session.end().catch(report);
+    throw new Error(`Surogate could not tie this sign-in to this computer, so it signed out: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 /** Sign in to the agent in the system browser. A sign-in started again cancels the one under way. */
 async function signIn(agent: Agent): Promise<void> {
   signingIn?.abort();
@@ -425,6 +455,7 @@ async function signIn(agent: Agent): Promise<void> {
     const signedInNow: SignedIn = { origin: agent.origin, agentId: agent.agentId, account: who, authTime: tokens.authTime, refreshToken: tokens.refreshToken };
     sessionStore.save(signedInNow);
     startSession(signedInNow, tokens);
+    await bindToComputer(agent);
     // The web client's session comes from this sign-in: whatever the window held before goes, and
     // the sign-in shows until the web client has loaded again.
     reloading = true;

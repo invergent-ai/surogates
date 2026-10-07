@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Welcome } from "../src/link/protocol.js";
 import type { Agent } from "../src/shell/agents.js";
-import { register, type Registration } from "../src/shell/computer.js";
+import { rebind, register, type Registration } from "../src/shell/computer.js";
 import type { Credential } from "../src/shell/credentials.js";
 import type { DeviceStack } from "../src/shell/device-stack.js";
 
@@ -87,8 +87,63 @@ describe("adding this computer to the agent", () => {
     expect(full.asked.at(-1)).toMatchObject({ method: "DELETE" });
   });
 
-  it("refuses an answer with no usable device token", async () => {
-    const { options } = rig({ status: 201, body: { id: "d", token: "not a token" } });
+  it("refuses an answer with no usable device token, and removes the row it names", async () => {
+    const { asked, options } = rig({ status: 201, body: { id: "d", token: "not a token" } });
     await expect(register(options)).rejects.toThrow("without a device token Surogate can use");
+    expect(asked.at(-1)).toMatchObject({ method: "DELETE", path: "/api/v1/devices/d" });
+  });
+});
+
+const ROTATED = `surg_dev_${"r".repeat(44)}`;
+const KEPT: Credential = {
+  origin: AGENT.origin, orgId: "o", agentId: "a", userId: "u", deviceId: "d", name: "ThinkPad",
+  addedAt: "2026-10-07T09:00:00.000Z", token: TOKEN,
+};
+
+// The agent as a new sign-in meets it, with this computer kept: what it lists, and how it reauthorizes.
+function rebinding(listed: unknown, reauthorized: { status: number; body: unknown } = { status: 200, body: { id: "d", name: "ThinkPad", token: ROTATED } }) {
+  const { asked, order, saved, options } = rig();
+  options.session.api = async (path, init = {}) => {
+    asked.push({ path, method: init.method ?? "GET", body: undefined });
+    if (path === "/api/v1/devices") return new Response(JSON.stringify(listed));
+    return new Response(JSON.stringify(reauthorized.body), { status: reauthorized.status });
+  };
+  options.verify = async (token) => {
+    order.push(`verify ${token === ROTATED}`);
+    return WELCOME;
+  };
+  return { asked, order, saved, restoring: { ...options, credential: KEPT } };
+}
+
+describe("binding a new sign-in to the computer kept for its account", () => {
+  it("restores the device on a new token for that sign-in, checks whom it connects as, starts it, and keeps it last", async () => {
+    const { asked, order, saved, restoring } = rebinding([{ id: "d", revoked_at: null }]);
+    expect(await rebind(restoring)).toEqual({ ...KEPT, token: ROTATED });
+    expect(asked.map(({ path, method }) => `${method} ${path}`)).toEqual(["GET /api/v1/devices", "POST /api/v1/devices/d/reauthorize"]);
+    expect(order).toEqual(["verify true", "start", "save"]);
+    expect(saved).toEqual([{ ...KEPT, token: ROTATED }]);
+  });
+
+  it.each([
+    ["revoked", [{ id: "d", revoked_at: "2026-10-07T09:30:00Z" }]],
+    ["gone", [{ id: "another", revoked_at: null }]],
+  ])("leaves a computer the agent has %s as it is: restoring it is the user's to confirm", async (_name, listed) => {
+    const { asked, order, restoring } = rebinding(listed);
+    expect(await rebind(restoring)).toBeNull();
+    expect(asked.map(({ method }) => method)).toEqual(["GET"]);
+    expect(order).toEqual([]);
+  });
+
+  it("fails when the agent will not reauthorize it, so the app does not run on an unbound sign-in", async () => {
+    const { order, restoring } = rebinding([{ id: "d", revoked_at: null }], { status: 500, body: {} });
+    await expect(rebind(restoring)).rejects.toThrow("HTTP 500");
+    expect(order).toEqual([]);
+  });
+
+  it("fails when the new token connects as another device", async () => {
+    const { order, restoring } = rebinding([{ id: "d", revoked_at: null }]);
+    restoring.verify = async () => ({ ...WELCOME, deviceId: "d2" });
+    await expect(rebind(restoring)).rejects.toThrow("connects as another device, agent or user");
+    expect(order).toEqual([]);
   });
 });

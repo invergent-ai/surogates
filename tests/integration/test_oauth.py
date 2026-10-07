@@ -384,3 +384,20 @@ async def test_the_desktops_window_cannot_allow_another_sign_in_either(api):
     web = await window_session(api, tokens["access_token"])
     response = await authorize(api, pkce()[1], token=web["access_token"])
     assert response.status_code == 403
+
+
+async def test_a_later_sign_in_the_app_binds_to_its_computer_ends_with_it_and_so_does_its_windows_session(api):
+    first = await signed_in(api)
+    device_id = await add_computer(api, first["access_token"])
+    # That sign-in ends, by signing out or after its 30 days; the computer stays, on a token of its own.
+    await api.client.post("/v1/auth/oauth/revoke", data={"token": first["refresh_token"], "client_id": CLIENT})
+    second = await signed_in(api)
+    # As the app does with every later sign-in: it binds it to the computer it keeps.
+    listed = (await api.client.get("/v1/devices", headers=api.auth(second["access_token"]))).json()
+    assert [device["revoked_at"] for device in listed if device["id"] == device_id] == [None]
+    bound = await api.client.post(f"/v1/devices/{device_id}/reauthorize", headers=api.auth(second["access_token"]))
+    assert bound.status_code == 200, bound.text
+    web = await window_session(api, second["access_token"])
+    assert (await api.client.delete(f"/v1/devices/{device_id}", headers=api.auth())).status_code == 204
+    assert (await refresh(api, second["refresh_token"])).json() == {"error": "invalid_grant"}
+    assert (await api.client.post("/v1/auth/refresh", json={"refresh_token": web["refresh_token"]})).status_code == 401
