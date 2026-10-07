@@ -392,7 +392,7 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
 
     it("is the chat's approvals' to decide while something of the chat runs, and denied unasked once nothing does", async () => {
       const asked: Array<[string, NetworkAsk]> = [];
-      vmExecutor(undefined, { granted: () => [], askNetwork: async (root, request) => (asked.push([root, request]), "allow_session") });
+      vmExecutor(undefined, { askNetwork: async (root, request) => (asked.push([root, request]), "allow_session") });
       let release = () => {};
       guest = (operation) => (operation.kind === "run" ? new Promise((resolve) => {
         release = () => resolve(ran("ran\n"));
@@ -411,7 +411,6 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
     it("dismisses the chat's open prompt once nothing of the chat runs, and denies with it", async () => {
       let dismissed = false;
       vmExecutor(undefined, {
-        granted: () => [],
         askNetwork: (_root, _request, signal) => new Promise<NetworkAnswer>((resolve) => signal.addEventListener("abort", () => {
           dismissed = true;
           resolve("deny");

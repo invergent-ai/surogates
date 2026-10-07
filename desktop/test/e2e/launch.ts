@@ -35,7 +35,7 @@ export async function quit(shell: ElectronApplication | undefined): Promise<void
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
 }
 
-/** Launch the shell with its state under *home*; *env* adds to its environment, as a slow login shell would. */
+/** Launch the shell with its state under *home*; *env* adds to its environment. */
 export function launch(home: string, env: Record<string, string> = {}): Promise<ElectronApplication> {
   return _electron.launch({
     executablePath: ELECTRON,

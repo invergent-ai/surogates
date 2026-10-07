@@ -1,34 +1,21 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { hideSrtTmp, isReserved, sandboxPolicy } from "../src/hosts/policy.js";
-import { PACKAGE_HOSTS } from "../src/vm/egress.js";
 
-let base = "";
-afterEach(() => rmSync(base, { recursive: true, force: true }));
-
-describe("the sandbox policy", () => {
-  it("makes srt's own /tmp/claude read-only, because every srt sandbox shares it", () => {
-    const { filesystem } = sandboxPolicy({ folder: "/f", tmp: "/t", home: "/h", appDirs: [] });
-    expect(filesystem.denyWrite).toEqual(["/tmp/claude", "/private/tmp/claude"]);
-    expect(filesystem.allowWrite).toEqual(["/f", "/t"]);
-  });
-
-  it("re-admits the toolchains that exist, and none whose path srt would read as a glob", () => {
-    base = realpathSync(mkdtempSync(join(tmpdir(), "policy-")));
-    const plain = join(base, "plain");
-    const odd = join(base, "odd[1]");
-    for (const home of [plain, odd]) mkdirSync(join(home, ".nvm"), { recursive: true });
-    const read = (home: string) => sandboxPolicy({ folder: "/f", tmp: "/t", home, appDirs: [] }).filesystem.allowRead;
-    expect(read(plain)).toContain(join(plain, ".nvm"));
-    expect(read(odd)).not.toContain(join(odd, ".nvm"));
-  });
-
-  it("scans for nested protected names as deep as srt allows", () => {
-    expect(sandboxPolicy({ folder: "/f", tmp: "/t", home: "/h", appDirs: [] }).mandatoryDenySearchDepth).toBe(10);
+describe("the file helper's sandbox policy", () => {
+  it("reads the system, the app, the folder and its working folder, writes the last two, and reaches no host", () => {
+    expect(sandboxPolicy({ folder: "/f", tmp: "/t", appDirs: ["/app"], bwrapPath: "/b/bwrap", socatPath: "/s/socat" })).toEqual({
+      bwrapPath: "/b/bwrap",
+      socatPath: "/s/socat",
+      network: { allowedDomains: [], deniedDomains: [] },
+      filesystem: {
+        denyRead: ["/"],
+        allowRead: ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/proc", "/sys", "/dev", "/run/systemd/resolve", "/app", "/f", "/t"],
+        allowWrite: ["/f", "/t"],
+        // srt's own /tmp/claude, read-only, because every srt sandbox shares it.
+        denyWrite: ["/tmp/claude", "/private/tmp/claude"],
+      },
+    });
   });
 });
 
@@ -47,18 +34,6 @@ describe("the folders no sandbox may be given", () => {
     "refuses %s, which srt makes read-only",
     (path) => expect(isReserved(path)).toBe(true),
   );
-});
-
-describe("the package hosts", () => {
-  it("are what the sandbox lets commands reach, with srt's tools by their absolute paths", () => {
-    const policy = sandboxPolicy({
-      folder: "/f", tmp: "/t", home: "/h", appDirs: [], bwrapPath: "/b/bwrap", socatPath: "/s/socat", rgPath: "/r/rg",
-    });
-    expect(policy.network).toEqual({ allowedDomains: PACKAGE_HOSTS, deniedDomains: [] });
-    expect(policy).toMatchObject({ bwrapPath: "/b/bwrap", socatPath: "/s/socat" });
-    // srt's scan for nested protected names must not read the folder's ignore files.
-    expect(policy.ripgrep).toEqual({ command: "/r/rg", args: ["--no-ignore"] });
-  });
 });
 
 describe("hideSrtTmp", () => {

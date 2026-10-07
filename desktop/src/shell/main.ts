@@ -5,7 +5,7 @@
 // awaits app.whenReady() deadlocks.
 
 import { rmSync } from "node:fs";
-import { hostname, userInfo } from "node:os";
+import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -17,7 +17,6 @@ import {
 import type { DesktopAccount } from "../../../web/src/lib/desktop-bridge-contract.js";
 import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow } from "../../../web/src/lib/projects-contract.js";
 import { revokeDevice, verifyDevice } from "../device.js";
-import { appEnvironment } from "../hosts/environment.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../vm/client.js";
@@ -117,11 +116,11 @@ let rotating: Credential | null = null;
 
 // A credential whose token the agent still takes: one a device can start on.
 const live = (credential: Credential | null): credential is LiveCredential => credential?.token != null;
-// The commands' environment, read from the login shell once.
-let environment: Promise<Record<string, string>>;
+// What the file hosts are told of this computer's user: the home, which no chat's folder may be, and the language.
+const env = { HOME: homedir(), LANG: process.env.LANG || "C.UTF-8" };
 // This computer's credential for the agent, as stored: what the page is told, and what keeps a second registration out.
 let kept: Credential | null = null;
-// Its device, from the moment it starts, before the commands' environment is read.
+// Its device, from the moment it starts.
 let device: { credential: Credential; status: LinkStatus; stack: DeviceStack | null; started: Promise<DeviceStack> } | null = null;
 let registering = false;
 let connecting = false;
@@ -194,11 +193,11 @@ function utilityManager(): ManagerProcess {
   };
 }
 
-// The app's one VM, shared by every device, for the user the commands' environment names.
+// The app's one VM, shared by every device, for this computer's user.
 let vm: VmClient | null = null;
-const vmFor = (env: Record<string, string>): VmClient => {
-  const { uid, gid, username, homedir } = userInfo();
-  vm ??= new VmClient({ vm: vmOptions(root, { uid, gid, name: username, home: env.HOME ?? homedir }), spawn: utilityManager });
+const vmFor = (): VmClient => {
+  const { uid, gid, username } = userInfo();
+  vm ??= new VmClient({ vm: vmOptions(root, { uid, gid, name: username, home: env.HOME }), spawn: utilityManager });
   return vm;
 };
 
@@ -388,19 +387,18 @@ function navigated(url: string): void {
 }
 
 /**
- * Start the device for *credential*. It counts as this computer's device at once: the commands'
- * environment comes from a login shell, which can take seconds, and the shell shows it as
- * connecting meanwhile. A start that fails leaves no device.
+ * Start the device for *credential*. It counts as this computer's device at once, so a page
+ * asking meanwhile does not register a second device. A start that fails leaves no device.
  */
 function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceStack> {
-  const started = environment.then((env) => startDevice({
+  const started = Promise.resolve().then(() => startDevice({
     journalPath: join(root, "devices", credential.deviceId, "journal.sqlite"),
     url: linkUrl(agent.origin),
     token: credential.token,
     agent: agent.name,
     identity: { deviceId: credential.deviceId, orgId: credential.orgId, agentId: credential.agentId, userId: credential.userId },
     // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the VM.
-    tools: (bindings, network) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(env) }),
+    tools: (bindings, network) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor() }),
     prompts: folderPrompts(() => main?.window),
     approvalPrompts: refusingApprovals,
     onStatus: (status) => {
@@ -1256,7 +1254,6 @@ if (!app.requestSingleInstanceLock()) {
   void app.whenReady().then(() => {
     credentials = new CredentialStore(join(root, "credentials.json"), safeStorage, report);
     sessionStore = new SessionStore(join(root, "session.json"), safeStorage, report);
-    environment = appEnvironment();
     // Before the window: its first frame is in the chosen theme.
     theme = new Theme(nativeTheme, appearance, (dark) => {
       main?.paint(dark);

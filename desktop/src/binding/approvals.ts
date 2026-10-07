@@ -28,7 +28,7 @@ export const UNASKED: ReadonlySet<string> = new Set([
 const RESULTS = ".surogates-results";
 
 // The chat a prompt is for, and the session asking: a sub-agent of the chat when it is not the root.
-// A network prompt names the root: srt does not say which session's command asked.
+// A network prompt names the root: a connection is known by its root's socket, not by which session's command made it.
 export interface ChatLabel {
   agent: string;
   root: string;
@@ -185,7 +185,7 @@ export class Approvals {
     if (granted) return "allow";
     const chat = { agent: this.options.agent, root, calling: root, folder: binding.folder };
     return this.inLine(root, signal, "deny", async () => {
-      // Allowed for the session while this one waited its turn: srt lets it through already.
+      // Allowed for the session while this one waited its turn: a new connection would go through unasked, so this one does.
       try {
         if (this.granted(root).includes(asked.host)) return "allow";
       } catch (error) {

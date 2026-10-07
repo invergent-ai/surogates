@@ -41,6 +41,12 @@ chat lets it go, served uncached, with its protected files read-only there.
 The guest has no network device: a command's connections go through its chat's
 proxies in the guest to the app's host proxy, which lets the package hosts through,
 refuses this computer's own addresses, and asks the chat's user about the rest.
+
+Nothing runs a command on this computer. srt (`@anthropic-ai/sandbox-runtime`) wraps
+only the file helper (`src/hosts/host.ts`, `src/hosts/policy.ts`), which does the file
+tools and ripgrep in a sandbox that shows it the system, the app and the chat's folder,
+and connects to no host.
+
 Until the image is delivered, the app boots the image built here (or
 `SUROGATE_VM_IMAGE`'s) with the agent disk `npm run agent-disk` makes from `dist/`.
 The shell's tests that run a command boot it too:

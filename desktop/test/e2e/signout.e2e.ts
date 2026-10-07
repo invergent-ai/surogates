@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
@@ -171,17 +171,15 @@ describe("a quit during a log out the agent cannot hear", () => {
     async (_name, killed) => {
       const first = await signedIn();
       await quit(first.shell);
-      // A login shell this slow keeps the device starting, and the log out waiting for it.
-      const slow = join(home, "slow-shell");
-      writeFileSync(slow, "#!/bin/sh\nsleep 4\n", { mode: 0o755 });
-      const shell = await launch(home, { SHELL: slow });
+      const shell = await launch(home);
       app = shell;
       await stubNative(shell);
       const page = await shellPage(shell);
-      await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connecting…");
+      await expect.poll(() => page.getAttribute("#device", "title")).toBe("Connected as Laptop");
       // Gone once the app has launched: Playwright's launch can hang on a window whose agent cannot be reached.
       const port = Number(new URL(origin).port);
       await agent.stop();
+      await expect.poll(() => page.getAttribute("#device", "title")).not.toBe("Connected as Laptop");
       await logOut(page);
       await expect.poll(() => asked(shell)).toContain(`Log out of ${host}?`);
       app = undefined;

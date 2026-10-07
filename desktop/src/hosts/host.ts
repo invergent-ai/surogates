@@ -7,8 +7,8 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { isIP, type Server } from "node:net";
-import { isAbsolute, join, resolve } from "node:path";
+import type { Server } from "node:net";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -17,10 +17,8 @@ import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { BOOT_ID, checkFolder } from "../binding/folder.js";
 import { findOnPath } from "../files/operations.js";
 import type { Outcome } from "../link/protocol.js";
-import { inside, realpath } from "../files/paths.js";
+import { realpath } from "../files/paths.js";
 import { APP_QUIT, FINISHED_TTL_SECONDS, lostWith } from "../guest/processes.js";
-import { reach } from "../vm/egress.js";
-import { absolutePath, commandEnvironment, makeCaches } from "./environment.js";
 import { type FolderRecord, lockFolder, readRecord, writeRecord } from "./folder-record.js";
 import { HookGuard } from "./hooks.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
@@ -203,31 +201,30 @@ async function start(message: HostStart): Promise<void> {
   // A command writes the folder alone: a hook linked into it is a command's.
   guard = new HookGuard(path, { inherited, known: running, writable: [path], writing, running: () => runs.size > 0 });
   mkdirSync(tmp, { recursive: true });
-  makeCaches(tmp);
-  const env = commandEnvironment(message.env, tmp);
-  // srt sets the sandbox's TMPDIR from this; its default is shared by every sandbox.
-  process.env.CLAUDE_CODE_TMPDIR = tmp;
-  // srt and the shell it wraps the helper in run outside the sandbox, and srt itself
-  // looks up which, rg and the shell through this process's PATH. Only absolute entries
-  // outside the folder and the temp folder are kept, and srt's own tools go by absolute
-  // path: no program a command wrote can run out here.
-  const hostPath = absolutePath(process.env.PATH ?? "").split(":")
-    .filter((entry) => entry && ![path, tmp].some((dir) => inside(realpath(entry).path, dir)))
+  // srt and the shell it wraps the helper in run outside the sandbox, and look up which,
+  // rg and the shell through this process's PATH; the helper finds its rg through it in
+  // the sandbox. Each absolute entry is kept as the path it leads to now, so a link a command
+  // swaps in later moves none, and is dropped when it is the folder or the working folder, or
+  // lies in either, by what each is (dev:ino), however it is spelled: a link, a bind mount, a
+  // .. through a folder in it. srt's own tools go by absolute path. So no program a command
+  // wrote runs, out here or in the helper.
+  const held = [`${dev}:${ino}`, ((stats) => `${stats.dev}:${stats.ino}`)(statSync(tmp))];
+  const within = (dir: string): boolean => {
+    for (let at = dir; ; at = dirname(at)) {
+      const stats = statSync(at, { throwIfNoEntry: false });
+      if (stats && held.includes(`${stats.dev}:${stats.ino}`)) return true;
+      if (at === dirname(at)) return false;
+    }
+  };
+  const hostPath = (process.env.PATH ?? "").split(":")
+    .filter((entry) => entry.startsWith("/"))
+    .map((entry) => realpath(entry).path)
+    .filter((entry) => !within(entry))
     .join(":") || "/usr/bin:/bin";
   process.env.PATH = hostPath;
-  // A user's rg config could hide nested paths from srt's scan, as it could from the helper's searches.
-  delete process.env.RIPGREP_CONFIG_PATH;
   const bwrapPath = message.bwrapPath ?? findOnPath("bwrap", hostPath, "/") ?? undefined;
   const socatPath = findOnPath("socat", hostPath, "/") ?? undefined;
-  const rgPath = findOnPath("rg", hostPath, "/") ?? undefined;
-  // An address granted on one network can be this computer's own on another, and srt
-  // never judges a listed literal again: such a grant is left out while it is.
-  const domains: string[] = [];
-  for (const domain of message.domains) {
-    if (isIP(domain.replace(/^\[(.*)\]$/, "$1")) && ((await reach(domain).catch(() => null))?.reach ?? "own") === "own") continue;
-    domains.push(domain);
-  }
-  const policy = sandboxPolicy({ folder: path, tmp, home, appDirs, bwrapPath, socatPath, rgPath, domains });
+  const policy = sandboxPolicy({ folder: path, tmp, appDirs, bwrapPath, socatPath });
   // The helper makes no connection: one that came would be refused.
   await SandboxManager.initialize(policy, () => Promise.resolve(false));
   // A warning names a protection that is missing, such as seccomp's unix-socket filter: fail closed.
@@ -246,11 +243,11 @@ async function start(message: HostStart): Promise<void> {
   const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} ${quote(HELPER)}`);
   const [file, flag, line] = argv;
   if (!file || flag === undefined || line === undefined) throw new Error("srt returned no command");
-  // The app-built environment only: srt's returned env is this process's own.
+  // Named here only: srt's returned env is this process's own, and the app's may hold its credentials.
   // --norc --noprofile: with a socket for stdin, as this pipe is, bash reads ~/.bashrc out here.
   const child = spawn(file, ["--norc", "--noprofile", flag, hideSrtTmp(line)], {
     cwd: path,
-    env: { ...env, SUROGATE_FOLDER: path, ELECTRON_RUN_AS_NODE: "1" },
+    env: { HOME: home, LANG: message.env.LANG || "C.UTF-8", PATH: hostPath, SUROGATE_FOLDER: path, ELECTRON_RUN_AS_NODE: "1" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   helper = child;

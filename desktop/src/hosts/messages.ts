@@ -25,12 +25,10 @@ export interface HostStart {
   folder: string; // the bound folder; the host resolves it
   // The folder's identity when the chat was bound, and that boot's id: a folder replaced since is not the chat's.
   expect: { dev: number; ino: number; boot: string };
-  tmp: string; // the root session's temp folder
+  tmp: string; // the file helper's working folder, which srt wraps it from
   dataDir: string; // the app's own data, never inside the folder
-  env: Record<string, string>; // the app-built environment: HOME, LANG, PATH
+  env: Record<string, string>; // the app's: HOME, and LANG for the helper
   appDirs: string[]; // read-only folders the sandbox needs: the runtime and the app's files
-  // The hosts the chat's user allowed for the chat past the package hosts, on every port: srt's allowedDomains entries.
-  domains: string[];
   bwrapPath?: string;
 }
 

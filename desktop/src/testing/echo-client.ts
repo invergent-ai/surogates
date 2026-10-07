@@ -18,14 +18,13 @@
 // the file only after it quits.
 
 import { statSync } from "node:fs";
-import { userInfo } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
 import { Binder } from "../binding/binder.js";
 import { BOOT_ID } from "../binding/folder.js";
 import { connectDevice } from "../device.js";
-import { appEnvironment } from "../hosts/environment.js";
 import type { NetworkApprovals } from "../hosts/tool-hosts.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { Operation, Outcome } from "../link/protocol.js";
@@ -64,7 +63,7 @@ class SpokenJournal extends OperationJournal {
 
 const journal = new SpokenJournal(values.journal);
 const dataDir = join(dirname(values.journal), "data");
-const env: Record<string, string> = values.folder || values.confirm ? await appEnvironment() : {};
+const env: Record<string, string> = { HOME: homedir(), LANG: process.env.LANG || "C.UTF-8" };
 // With --folder, every session works on that folder, as if each had been bound to it there.
 let everyRoot: { folder: string; dev: number; ino: number; boot: string } | undefined;
 if (values.folder) {
@@ -75,7 +74,6 @@ if (values.folder) {
 // them only once the binder exists. With --folder there is no binder, and every
 // destination off the package list is refused.
 const network: NetworkApprovals = {
-  granted: (root) => binder?.approvals.granted(root) ?? [],
   askNetwork: (root, asked, signal) => binder?.approvals.askNetwork(root, asked, signal) ?? Promise.resolve("deny"),
 };
 const bindingOf = (root: string) => everyRoot ?? journal.bindings.get(root);

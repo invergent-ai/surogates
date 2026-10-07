@@ -22,9 +22,9 @@ let start: HostStart;
 let harnesses: Harness[];
 
 // Bound to its folder as that folder is now, unless the test says otherwise.
-// *env* is the host's own environment; omitted, it is this process's.
-function host(overrides: Partial<HostStart> = {}, cwd?: string, env?: NodeJS.ProcessEnv): Harness {
-  const harness = new Harness(cwd, env);
+// *env* is the host's own environment; omitted, it is this process's. *execPath* runs it.
+function host(overrides: Partial<HostStart> = {}, cwd?: string, env?: NodeJS.ProcessEnv, execPath?: string): Harness {
+  const harness = new Harness(cwd, env, execPath);
   harnesses.push(harness);
   harness.send({ ...start, expect: bound(overrides.folder ?? start.folder), ...overrides });
   return harness;
@@ -80,7 +80,6 @@ beforeEach(() => {
     type: "start",
     folder,
     expect: bound(folder),
-    domains: [],
     tmp: join(base, "data", "tmp", "root"),
     dataDir: join(base, "data"),
     env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
@@ -408,6 +407,50 @@ describe("a tool host's own sandbox", { timeout: 30_000 }, () => {
     await ready(harness);
     expect(await harness.op("1", "ripgrep", { key: folder, mode: "files", pattern: "*.txt", glob: null, context: 0 })).toEqual({ ok: `${folder}/a.txt\n` });
     expect(existsSync(proof)).toBe(false);
+  });
+
+  it("never runs a program from the folder in its sandbox either: its helper's rg comes from the host's own PATH", async () => {
+    const proof = join(folder, "ran-inside");
+    mkdirSync(join(folder, "bin"));
+    writeFileSync(join(folder, "bin", "rg"), `#!/bin/sh\ntouch '${proof}'\nexec /usr/bin/rg "$@"\n`, { mode: 0o755 });
+    // The app's PATH and the host's own both name the folder's first, as a user's can.
+    const harness = host({ env: { ...start.env, PATH: `${folder}/bin:/usr/bin:/bin` } }, undefined, { ...process.env, PATH: `${folder}/bin:${process.env.PATH ?? ""}` });
+    await ready(harness);
+    expect(await harness.op("1", "ripgrep", { key: folder, mode: "files", pattern: "*.txt", glob: null, context: 0 })).toEqual({ ok: `${folder}/a.txt\n` });
+    expect(existsSync(proof)).toBe(false);
+  });
+
+  // Whether this computer lets a test mount in a user namespace of its own.
+  const mounts = spawnSync("unshare", ["-Urm", "true"]).status === 0;
+
+  it.skipIf(!mounts)("never runs a program from the folder by another of its paths: a bind mount of it", async () => {
+    const proof = join(base, "ran-aliased");
+    mkdirSync(join(folder, "bin"));
+    for (const name of ["which", "rg"]) {
+      writeFileSync(join(folder, "bin", name), `#!/bin/sh\necho "$0" >> '${proof}'\nexec /usr/bin/${name} "$@"\n`, { mode: 0o755 });
+    }
+    const alias = join(base, "alias");
+    mkdirSync(alias);
+    // The host's node, in a mount namespace of its own where alias is the folder mounted again.
+    const node = join(base, "aliased-node");
+    writeFileSync(node, `#!/bin/sh\nexec unshare -Urm sh -c 'mount --bind "$0" "$1" && shift && exec "$@"' '${folder}' '${alias}' '${process.execPath}' "$@"\n`, { mode: 0o755 });
+    const harness = host({}, undefined, { ...process.env, PATH: `${alias}/bin:${process.env.PATH ?? ""}` }, node);
+    await ready(harness);
+    expect(await harness.op("1", "ripgrep", { key: folder, mode: "files", pattern: "*.txt", glob: null, context: 0 })).toEqual({ ok: `${folder}/a.txt\n` });
+    expect(existsSync(proof)).toBe(false);
+  });
+
+  it("gives srt and its helper each entry of the host's PATH as where it leads at the start, so no link swapped in later moves it", async () => {
+    // An rg in a folder of the app's, out of the bound folder through a .. that passes a folder in it,
+    // which says what PATH it was given: the helper's own lookups fold a .. by its spelling, srt's which and the kernel by the folders.
+    const tools = join(base, "tools");
+    mkdirSync(tools);
+    mkdirSync(join(folder, "sub"));
+    writeFileSync(join(tools, "rg"), `#!/bin/sh\necho "$PATH" > '${folder}/given-path'\nexec /usr/bin/rg "$@"\n`, { mode: 0o755 });
+    const harness = host({ appDirs: [...start.appDirs, tools] }, undefined, { ...process.env, PATH: `${folder}/sub/../../tools:${process.env.PATH ?? ""}` });
+    await ready(harness);
+    expect(await harness.op("1", "ripgrep", { key: folder, mode: "files", pattern: "*.txt", glob: null, context: 0 })).toEqual({ ok: `${folder}/a.txt\n` });
+    expect(readFileSync(join(folder, "given-path"), "utf8").split(":")[0]).toBe(tools);
   });
 
   it("never reads the user's shell startup files outside its sandbox", async () => {

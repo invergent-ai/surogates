@@ -1667,7 +1667,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
     const approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "the VM tests" });
     executor = new VmExecutor({
       bindingOf: (root) => journal.bindings.get(root), dataDir: join(dir, "data"), env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
-      network: { granted: (root) => approvals.granted(root), askNetwork: (root, asked, cancel) => approvals.askNetwork(root, asked, cancel) }, vm,
+      network: { askNetwork: (root, asked, cancel) => approvals.askNetwork(root, asked, cancel) }, vm,
     });
   });
 

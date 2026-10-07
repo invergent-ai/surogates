@@ -1,7 +1,8 @@
 // Runs each operation on its root session's folder: one tool host per root,
 // started on that root's first operation (spec, Section 1). The folder comes from
-// the app's own record of the binding, never from the request. A host's commands
-// reach only the package hosts and what the chat's user allows: the approvals decide.
+// the app's own record of the binding, never from the request. What the root runs in
+// the VM asks the chat's approvals about the hosts its connections reach past the
+// package hosts.
 
 import { fork } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -114,8 +115,6 @@ export function forkHost(options: ForkOptions = {}): HostProcess {
 
 // Who decides what a root's commands may reach past the package hosts: the approvals.
 export interface NetworkApprovals {
-  // The hosts the chat's user allowed for the chat: each new tool host for the root starts with these.
-  granted(root: string): readonly string[];
   // A destination one of the root's commands asked for. Settles once *signal* aborts (its host went).
   askNetwork(root: string, asked: NetworkAsk, signal: AbortSignal): Promise<NetworkAnswer>;
 }
@@ -224,7 +223,6 @@ export class ToolHosts implements Executor {
       dataDir,
       env,
       appDirs: this.options.appDirs ?? APP_DIRS,
-      domains: [...(network?.granted(root) ?? [])],
       ...(bwrapPath ? { bwrapPath } : {}),
     };
     const ask = (asked: NetworkAsk, signal: AbortSignal): Promise<NetworkAnswer> =>
