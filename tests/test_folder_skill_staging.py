@@ -156,3 +156,27 @@ async def test_a_skills_files_are_fetched_for_this_chat_and_a_failure_names_only
         await api.skill_file_bytes("deck", "scripts/gone.py")
     # What the model reads: never the api's address or the agent's id.
     assert str(failed.value) == "the skill's file scripts/gone.py could not be fetched (HTTP 404)"
+
+
+async def test_the_staging_marker_is_read_no_further_than_the_chat_it_should_name(files, folder):
+    asked: list = []
+    run = files._runner.run
+
+    async def recording(kind, args, payload=None):
+        if kind == "read":
+            asked.append(args["max_bytes"])
+        return await run(kind, args, payload)
+
+    files._runner.run = recording
+    api, chat = Api({"scripts/build.py": b"print('x')"}), str(uuid4())
+    staged = folder / ".surogates-results" / "skills" / "deck"
+    staged.mkdir(parents=True)
+    # Planted, and long: never read whole, and no chat's.
+    (staged / ".staged").write_text(chat + " " * 1_000_000)
+    await stage_in_folder(
+        files, skill_name="deck", linked_files=sorted(api.files), owner=chat,
+        fetch=lambda path: api.skill_file_bytes("deck", path),
+    )
+    assert asked == [len(chat) + 1]
+    assert (staged / "scripts" / "build.py").read_bytes() == b"print('x')"
+    assert (staged / ".staged").read_text() == chat

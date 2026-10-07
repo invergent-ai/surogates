@@ -410,3 +410,41 @@ async def test_a_local_folders_image_its_computer_will_not_read_is_said_in_its_w
     ))
     assert payload == {"error": "Could not read image a.png: Local access to this computer was revoked"}
     create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_local_folders_image_is_read_no_further_than_the_cap_whatever_its_stat_said(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from surogates.devices.workspace import DeviceWorkspaceIO
+    from surogates.tools.builtin import vision
+    from surogates.tools.workspace_io import LocalWorkspaceIO
+    from tests.fake_laptop import InProcessRunner
+
+    class Grown(InProcessRunner):
+        """The file grew after its stat: the stat says one byte."""
+
+        asked: list = []
+
+        async def run(self, kind, args, payload=None):
+            outcome = await super().run(kind, args, payload)
+            if kind == "stat" and outcome.get("ok"):
+                outcome["ok"]["size"] = 1
+            if kind == "read":
+                self.asked.append(args["max_bytes"])
+            return outcome
+
+    folder = tmp_path.resolve()
+    _png(folder / "big.png")
+    monkeypatch.setattr(vision, "_MAX_IMAGE_BYTES", 10)
+    runner = Grown(LocalWorkspaceIO(workspace_path=str(folder)))
+    create = AsyncMock(return_value=_fake_response())
+    payload = json.loads(await vision._vision_analyze_handler(
+        {"image": "big.png"},
+        workspace_io=DeviceWorkspaceIO(runner, root=str(folder)),
+        llm_client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
+        model="surogate",
+    ))
+    assert payload["error"].startswith("Image file is too large:"), payload
+    assert runner.asked == [11]
+    create.assert_not_called()

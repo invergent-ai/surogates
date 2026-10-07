@@ -436,7 +436,8 @@ async def stage_in_folder(
     base = f"{FOLDER_STAGING_DIR}/{skill_name}"
     marker = await files.resolve(f"{base}/{STAGING_MARKER}")
     try:
-        if await files.read(marker) == owner.encode():
+        # No further than the chat it should name: anything may be planted there.
+        if await files.read(marker, max_bytes=len(owner.encode()) + 1) == owner.encode():
             return base
     except FileNotFoundError:
         pass

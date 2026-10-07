@@ -240,9 +240,12 @@ async def _image_ref_to_data_url(
                 raise ValueError(
                     f"Image file is too large: {found.size} bytes exceeds {_MAX_IMAGE_BYTES}"
                 )
-            data = await workspace_io.read(key)
+            # No further than the cap: the file may have grown since its stat.
+            data = await workspace_io.read(key, max_bytes=_MAX_IMAGE_BYTES + 1)
         except (OSError, DeviceOperationError) as exc:
             raise ValueError(f"Could not read image {image_ref}: {said(exc)}") from None
+        if len(data) > _MAX_IMAGE_BYTES:
+            raise ValueError(f"Image file is too large: over {_MAX_IMAGE_BYTES} bytes")
         mime_type = _detect_mime_type(data, fallback=mimetypes.guess_type(key)[0] or "")
         if mime_type not in _SUPPORTED_MIME_TYPES:
             raise ValueError(f"Unsupported image MIME type: {mime_type or 'unknown'}")
