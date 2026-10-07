@@ -222,6 +222,17 @@ describe("signing in", () => {
     expect(await webShown(shell)).toBe(false);
   });
 
+  it("ends at the agent a sign-in that fails once its tokens are in hand: none is left valid with no copy here", async () => {
+    agent.meStatus = 500;
+    const { shell, page } = await connected();
+    await page.click("#sign-in-button");
+    await expect.poll(async () => (await opened(shell)).length).toBe(1);
+    await agent.approve((await opened(shell))[0]!);
+    await expect.poll(() => page.textContent("#sign-in-error")).toBe("The agent did not say who signed in (HTTP 500)");
+    await expect.poll(() => agent.oauth.filter((form) => "token" in form)).toEqual([expect.objectContaining({ token: "rt-1" })]);
+    expect(existsSync(state("session.json"))).toBe(false);
+  });
+
   it("removes the device the agent made when its token connects as another agent, and keeps nothing", async () => {
     agent.config = { ...agent.config, agent_id: "another" };
     const { shell, page } = await connected();

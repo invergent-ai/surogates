@@ -735,8 +735,8 @@ async function restore(agent: Agent): Promise<void> {
       // The agent has no such device any more: its folders here go too, and this computer is added afresh.
       kept = null;
       device = null;
-      credentials.remove(credential.deviceId);
-      rmSync(join(root, "devices", credential.deviceId), { recursive: true, force: true });
+      trying(() => credentials.remove(credential.deviceId));
+      trying(() => rmSync(join(root, "devices", credential.deviceId), { recursive: true, force: true }));
       await registerComputer(agent);
     } else if (restored === "sign-in-again") {
       restoreFailure = "The agent wants a newer sign-in: sign in again, then restore";
@@ -766,10 +766,13 @@ async function signIn(agent: Agent): Promise<void> {
   signedInOrStopped = stopped;
   signInFailure = null;
   changed();
+  // The refresh token of a sign-in no session keeps yet: one that fails is ended at the agent, as nothing here would.
+  let unkept: string | null = null;
   try {
     const tokens = await signInWithBrowser({
       origin: agent.origin, computer: hostname(), fetch: apiFetch, signal: attempt.signal, open: (url) => shell.openExternal(url),
     });
+    unkept = tokens.refreshToken;
     let started: DesktopSession | null = null;
     // Cancelled once the browser came back: it goes no further. Tokens never kept are ended at the
     // agent, as nothing here would end them. A sign-in already kept ends only with a log out: a quit
@@ -809,6 +812,7 @@ async function signIn(agent: Agent): Promise<void> {
     sessionStore.save(signedInNow);
     startSession(signedInNow, tokens);
     started = signedIn;
+    unkept = null;
     await bindToComputer(agent, attempt.signal);
     if (cancelled()) return;
     // The web client's session comes from this sign-in: whatever the window held before goes, and
@@ -825,6 +829,7 @@ async function signIn(agent: Agent): Promise<void> {
     void registerComputer(agent);
     void refreshAgent(agent);
   } catch (error) {
+    if (unkept !== null) void revokeTokens(agent.origin, unkept, apiFetch).catch(report);
     if (!(error instanceof OAuthError && error.code === "cancelled")) {
       signInFailure = error instanceof Error ? error.message : String(error);
     }

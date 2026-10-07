@@ -69,6 +69,8 @@ export class FakeAgent {
   readonly reauthorized: string[] = [];
   // What a reauthorization answers, when not the new token.
   reauthorizeStatus = 200;
+  // What /auth/me answers, when not who signed in.
+  meStatus = 200;
   // While set, the web client's page loads only once it settles.
   pagesHeld: Promise<void> | null = null;
   // What the app's OAuth calls sent, form by form.
@@ -116,6 +118,7 @@ export class FakeAgent {
     }
     if (path === "/api/v1/auth/me" && bearer) {
       await this.answered("me");
+      if (this.meStatus !== 200) return json(response, this.meStatus, {});
       const { name, email, userId, orgId } = this.account;
       return json(response, 200, { id: userId, org_id: orgId, email, display_name: name });
     }
