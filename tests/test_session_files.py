@@ -57,7 +57,8 @@ async def test_the_agents_key_prefix_comes_first(tmp_path):
 
 async def test_a_change_comes_only_with_its_callers_access_to_that_session(tmp_path):
     session = cloud()
-    for access in (None, DeviceAccess(uuid4())):
+    # None; another session's; and one that did not check the chat's folder is bound.
+    for access in (None, DeviceAccess(uuid4(), bound=True), DeviceAccess(session.id, bound=False)):
         with pytest.raises(RuntimeError, match="require_device_access"):
             async with session_files(
                 session, storage=LocalBackend(str(tmp_path)), session_factory=None, redis=None,
@@ -66,6 +67,6 @@ async def test_a_change_comes_only_with_its_callers_access_to_that_session(tmp_p
                 pass
     async with session_files(
         session, storage=LocalBackend(str(tmp_path)), session_factory=None, redis=None,
-        change="upload a.txt", access=DeviceAccess(session.id),
+        change="upload a.txt", access=DeviceAccess(session.id, bound=True),
     ):
         pass

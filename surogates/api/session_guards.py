@@ -153,9 +153,8 @@ async def require_device_access(
     Returns the access ``session_files`` takes a change with, so no change is
     claimed before this check.
     """
-    access = DeviceAccess(session.id)
     if device_of(session.config) is None:
-        return access
+        return DeviceAccess(session.id, bound=True)
     own = (
         (tenant.user_id is not None and tenant.user_id == session.user_id)
         or (tenant.service_account_id is not None and tenant.service_account_id == session.service_account_id)
@@ -163,7 +162,7 @@ async def require_device_access(
     if not own:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Session {session.id} not found.")
     if not bound:
-        return access
+        return DeviceAccess(session.id, bound=False)
     async with request.app.state.session_factory() as db:
         binding = await binding_of(db, UUID(sandbox_session_key(session)))
     if binding.state == "pending":
@@ -176,4 +175,4 @@ async def require_device_access(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"This chat's folder could not be set up: {binding.message}. Start a new chat.",
         )
-    return access
+    return DeviceAccess(session.id, bound=True)

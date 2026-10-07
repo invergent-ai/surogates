@@ -50,12 +50,15 @@ class ComputerAway(Exception):
 class DeviceAccess:
     """What ``surogates.api.session_guards.require_device_access`` returns once it let a caller in.
 
-    It names the session the caller may reach.  :func:`session_files` takes a
-    change only with it: a change's claim checks no session, binding or
-    caller, so the check must come first.
+    It names the session the caller may reach, and whether the check found
+    its folder accepted on its computer (a cloud chat has none to wait for).
+    :func:`session_files` takes a change only with it, and only bound: a
+    change's claim checks no session, binding or caller, so the check must
+    come first, and a chat whose folder is not set up has nowhere to change.
     """
 
     session_id: UUID
+    bound: bool
 
 
 @asynccontextmanager
@@ -85,8 +88,8 @@ async def session_files(
     access ended: a kept request it left open is then cancelled, since its
     caller is told it failed.
     """
-    if change is not None and (access is None or access.session_id != session.id):
-        # A route that forgot the check would claim a change for anyone in the org.
+    if change is not None and (access is None or access.session_id != session.id or not access.bound):
+        # A route that forgot the check would claim a change for anyone in the org, or on a folder not set up.
         raise RuntimeError("A change reaches a session's files only once require_device_access let its caller in")
     device_id = device_of(session.config)
     if device_id is None:

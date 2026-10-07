@@ -331,7 +331,7 @@ async def test_a_sub_agents_chat_is_its_roots_users(api, session_factory):
     def caller(user_id: UUID) -> SimpleNamespace:
         return SimpleNamespace(user_id=user_id, service_account_id=None)
 
-    assert await require_device_access(request, child, caller(api.user_id), bound=False) == DeviceAccess(child.id)
+    assert await require_device_access(request, child, caller(api.user_id), bound=False) == DeviceAccess(child.id, bound=False)
     with pytest.raises(HTTPException) as refused:
         await require_device_access(request, child, caller(member_id), bound=False)
     assert refused.value.status_code == 404
