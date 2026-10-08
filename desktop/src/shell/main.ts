@@ -1250,10 +1250,12 @@ function bridge(contents: WebContents, agent: Agent): void {
     // it only at its user's click, before they kept the browser and after: a page cannot wear its user down.
     handBack: async (sessionId) => {
       const stack = await browsing(sessionId);
-      // Nobody holds it: the agent drives it already. Held from another chat: handed back there, never from this one.
-      const holder = stack.tools.holder?.() ?? null;
-      if (holder === null) return true;
-      if (holder !== sessionId) throw new Error(HELD_FROM_ANOTHER_CHAT);
+      // Held from this chat, or from one that is gone, which can hand nothing back: this chat's to hand back.
+      // Nobody holds it: the agent drives it already. Held from another chat that is here: handed back there.
+      if ((stack.tools.takenOver?.(sessionId) ?? false) === false) {
+        if ((stack.tools.holder?.() ?? null) === null) return true;
+        throw new Error(HELD_FROM_ANOTHER_CHAT);
+      }
       // The chat by its title, as text: the page names only an id, and its user may hold more than one chat's browser.
       const title = await titleSoon(sessionId);
       // The window first, where it was hidden since the click: the box opens over it.

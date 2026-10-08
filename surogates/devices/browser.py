@@ -46,8 +46,9 @@ of a computer with no supported browser (browser.unavailable), each with
   {"type": "no_browser", "message"}  no supported browser on this computer
   {"type": "unsupported", ...}       an app that has no browser yet
   {"type": "revoked", "message"}     the computer's access ended
-  {"type": "paused_by_user", ...}    its user took the browser over, for the chat, until
-                                     they hand it back in the desktop's own confirmation
+  {"type": "paused_by_user", ...}    its user took the browser over, from one chat and for
+                                     every chat of the agent's there, until they hand it
+                                     back in the desktop's own confirmation
   any other type                     DeviceOperationError(message), which the handlers
                                      report as their own failure too
 

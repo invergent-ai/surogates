@@ -35,6 +35,8 @@ export class Browsing implements ToolLayer {
   // every chat of the agent's here, every tab a tab of one window on one profile: so while it is held,
   // every chat's browser operations are answered paused, not only that chat's.
   private held: string | null = null;
+  // Whether the chat it is held from was deleted since.
+  private deleted = false;
 
   constructor(private readonly options: BrowsingOptions) {}
 
@@ -58,30 +60,44 @@ export class Browsing implements ToolLayer {
     return this.options.browser.address(session);
   }
 
+  // Whether the browser is held from a chat that is gone: deleted, or its folder forgotten on this computer.
+  // That chat can hand nothing back, so the browser is nobody's to hand back but any chat's.
+  private orphaned(): boolean {
+    return this.held !== null && (this.deleted || !this.options.bindingOf(this.held));
+  }
+
   /**
    * The chat's user takes the agent's browser over: every chat's browser operations are answered
-   * paused_by_user until this chat hands it back. Whether the chat holds it now: another chat's
-   * take-over does not take it from the chat that holds it. A holder that is no longer a chat of this
-   * computer's can hand nothing back, so the next chat to take the browser over holds it.
+   * paused_by_user until it is handed back. Whether the chat holds it now: another chat's take-over
+   * does not take it from a chat that holds it, only from one that is gone.
    */
   takeOver(root: string): boolean {
-    if (this.held === null || (this.held !== root && !this.options.bindingOf(this.held))) {
+    if (this.held === null || (this.held !== root && this.orphaned())) {
       this.held = root;
+      this.deleted = false;
       this.options.browser.pause(root, true);
     }
     return this.held === root;
   }
 
-  /** The chat that holds the browser handed it back, through the desktop's own confirmation. Another chat hands nothing back. */
+  /**
+   * The browser handed back, through the desktop's own confirmation: by the chat that holds it, or by
+   * any chat once the one it was held from is gone. Another chat hands nothing back while its holder is here.
+   */
   handBack(root: string): void {
-    if (this.held !== root) return;
+    const holder = this.held;
+    if (holder === null || (holder !== root && !this.orphaned())) return;
     this.held = null;
-    this.options.browser.pause(root, false);
+    this.options.browser.pause(holder, false);
   }
 
-  /** Whether the chat's user holds the browser from this chat. */
-  takenOver(root: string): boolean {
-    return this.held === root;
+  /**
+   * Whether the chat's user holds the browser from this chat; "orphaned" where it is held from a chat
+   * that is gone, which any chat may hand back; false where nobody holds it, or another chat here does.
+   */
+  takenOver(root: string): boolean | "orphaned" {
+    if (this.held === root) return true;
+    return this.orphaned() ? "orphaned" : false;
   }
 
   /** The chat the browser is held from, or null: the agent drives it. */
@@ -97,6 +113,7 @@ export class Browsing implements ToolLayer {
   // A deleted chat: its tabs close, with every popup its sessions opened. A browser held from it stays
   // held: a page can have a chat deleted, and only the desktop's own confirmation hands the browser back.
   retired(root: string): void {
+    if (this.held === root) this.deleted = true;
     this.options.browser.forget(root);
     this.options.tools.retired?.(root);
   }

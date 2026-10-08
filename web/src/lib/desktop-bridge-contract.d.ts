@@ -30,10 +30,12 @@ export interface DesktopPreparedFolder {
 export interface DesktopBinding {
   folder: string; // as the folder sheet showed it, and the agent was told
   mode: "free" | "ask";
-  // Its user holds the agent's browser, taken over from this chat: the agent's browser calls wait, in every
-  // chat on this computer, until this chat hands it back. False in a chat the browser is not held from,
-  // though its agent's browser calls wait too while another chat holds it.
-  takenOver: boolean;
+  // True: its user holds the agent's browser, taken over from this chat. The agent's browser calls wait,
+  // in every chat on this computer, until this chat hands it back. False in a chat the browser is not
+  // held from, though its agent's browser calls wait too while another chat holds it. "orphaned": the
+  // browser is held from a chat that is gone (deleted, or its folder forgotten here), which can hand
+  // nothing back: every chat reads this then, and any of them hands the browser back, as handBack says.
+  takenOver: boolean | "orphaned";
 }
 
 // The agent's browser on this computer, for a chat bound here (Section 5): each call takes the chat's
@@ -58,9 +60,10 @@ export interface DesktopBrowser {
   // hands the agent's browser back only when its user asks, with a click" but at a click of its
   // user's, once for each, within 5 s of it, as show does, whatever its user chose before; and with
   // "Surogate is already asking" while this window's last one is still open. Only the chat the browser
-  // is held from hands it back: from another chat it rejects with "The agent's browser on this computer
-  // is taken over from another chat, and is handed back there", and no box opens. True, with no box,
-  // where nobody holds the browser.
+  // is held from hands it back, while that chat is here: from another chat it rejects with "The agent's
+  // browser on this computer is taken over from another chat, and is handed back there", and no box
+  // opens. Once the chat it was held from is gone (takenOver reads "orphaned"), any chat hands it back,
+  // at its user's click and the desktop's box as any. True, with no box, where nobody holds the browser.
   handBack(sessionId: string): Promise<boolean>;
 }
 

@@ -118,23 +118,53 @@ describe("the browser's kinds beside the tools", () => {
     expect(paused).toEqual([[ROOT, true]]);
   });
 
-  it("keeps the browser held when the chat that took it over is deleted, until another chat takes it over and hands it back", async () => {
+  it("keeps the browser held when the chat that took it over is deleted, and lets any chat hand it back then", async () => {
     const { browsing, browsed, chats, paused } = rig();
     browsing.takeOver(ROOT);
-    chats.delete(ROOT);
+    // Deleted, as a page can have a chat deleted: nothing is handed back by that.
     browsing.retired(ROOT);
-    // Deleting a chat is no hand back: the agent's other chats are answered paused still.
+    chats.delete(ROOT);
     expect(browsing.holder()).toBe(ROOT);
     expect(browsing.refusal(op("browser.navigate", OTHER))).toEqual(PAUSED);
     expect(await browsing.run(op("browser.navigate", OTHER), signal)).toEqual(PAUSED);
     expect(browsed).toEqual([]);
-    // The chat that held it can hand nothing back now: the next chat to take the browser over holds it, and hands it back.
+    // No chat holds it now, and every chat is told so: neither "held from this chat" nor "not held".
+    expect(browsing.takenOver(OTHER)).toBe("orphaned");
+    // The chat that held it can hand nothing back, so any chat's hand back ends it: the desktop confirms that one as any.
+    browsing.handBack(OTHER);
+    expect(browsing.holder()).toBeNull();
+    expect(browsing.takenOver(OTHER)).toBe(false);
+    expect(browsing.refusal(op("browser.navigate", OTHER))).toBeNull();
+    expect(paused).toEqual([[ROOT, true], [ROOT, false]]);
+  });
+
+  it("takes a deleted chat for gone though its folder could not be forgotten here, and lets the next chat take the browser over as well", () => {
+    const { browsing, paused } = rig();
+    browsing.takeOver(ROOT);
+    // Deleted, its binding left behind.
+    browsing.retired(ROOT);
+    expect(browsing.takenOver(OTHER)).toBe("orphaned");
+    // Taken over from another chat: that one holds it now, as any holder.
     expect(browsing.takeOver(OTHER)).toBe(true);
     expect(browsing.takenOver(OTHER)).toBe(true);
-    expect(browsing.refusal(op("browser.navigate", OTHER))).toEqual(PAUSED);
+    expect(browsing.takenOver(ROOT)).toBe(false);
+    browsing.handBack(ROOT);
+    expect(browsing.holder()).toBe(OTHER);
     browsing.handBack(OTHER);
-    expect(browsing.refusal(op("browser.navigate", OTHER))).toBeNull();
+    expect(browsing.holder()).toBeNull();
     expect(paused).toEqual([[ROOT, true], [OTHER, true], [OTHER, false]]);
+    // Held anew from a chat that is here, it is that chat's alone again.
+    browsing.takeOver(OTHER);
+    expect(browsing.takenOver(ROOT)).toBe(false);
+  });
+
+  it("takes a chat whose folder was forgotten on this computer for gone too", () => {
+    const { browsing, chats } = rig();
+    browsing.takeOver(ROOT);
+    chats.delete(ROOT);
+    expect(browsing.takenOver(OTHER)).toBe("orphaned");
+    browsing.handBack(OTHER);
+    expect(browsing.holder()).toBeNull();
   });
 
   it("asks the browser to show a chat's page", async () => {

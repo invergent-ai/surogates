@@ -95,7 +95,16 @@ async function bound(folder: string, requires: string[] = []): Promise<Page> {
   return page;
 }
 
-// A browser operation of a chat its user took the browser over.
+// Another chat of the agent's bound on this computer too, to *folder*, in the desktop's own sheet.
+async function alsoBound(client: Page, folder: string, chat = OTHER): Promise<void> {
+  mkdirSync(folder);
+  await app!.evaluate((_electron, picked) => Object.assign(globalThis, { folder: picked }), folder);
+  const preparing = client.evaluate(() => window.surogateDesktop!.prepareFolder("pick")) as Promise<{ folder: string; nonce: string }>;
+  await press(await prompt(app!), "accept");
+  expect(await operation("bind", { folder, nonce: (await preparing).nonce }, "bind", 0, chat)).toEqual({ ok: null });
+}
+
+// A browser operation while its user holds the agent's browser.
 const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
 
 // One of the bridge's calls about a chat's browser, made as the page's own button makes it, at its
@@ -359,13 +368,8 @@ describe("a chat's browser taken over, and handed back", () => {
     mkdirSync(folder);
     await bound(folder);
     const client = await webClient(app!, origin);
-    // Another chat of the agent's, bound on this computer too.
     const second = join(home, "second");
-    mkdirSync(second);
-    await app!.evaluate((_electron, picked) => Object.assign(globalThis, { folder: picked }), second);
-    const preparing = client.evaluate(() => window.surogateDesktop!.prepareFolder("pick")) as Promise<{ folder: string; nonce: string }>;
-    await press(await prompt(app!), "accept");
-    expect(await operation("bind", { folder: second, nonce: (await preparing).nonce }, "bind", 0, OTHER)).toEqual({ ok: null });
+    await alsoBound(client, second);
     const binding = (chat: string) => client.evaluate((id) => window.surogateDesktop!.getBinding!(id), chat);
     await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
     expect(await binding(CHAT)).toMatchObject({ takenOver: true });
@@ -393,6 +397,42 @@ describe("a chat's browser taken over, and handed back", () => {
     // Nothing is held now: a hand back has nothing to ask.
     expect(await atClick(client, "handBack", OTHER)).toBe(true);
     expect(await boxes()).toHaveLength(before + 1);
+  });
+
+  it("keeps the agent's browser held when the chat it is held from is deleted, and hands it back from any chat then, only at its user's click and the desktop's own confirmation", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    await alsoBound(client, join(home, "second"));
+    const binding = (chat: string) => client.evaluate((id) => window.surogateDesktop!.getBinding!(id), chat);
+    const navigated = () => operation("browser.navigate", { url: "https://example.com/", wait_until: "load" }, undefined, 1, OTHER);
+    await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
+    // The chat it is held from is deleted, as a page can have one deleted: that hands nothing back.
+    expect(await operation("retire", {}, "retire", 0, CHAT)).toEqual({ ok: null });
+    expect(await binding(CHAT)).toBeNull();
+    expect(await navigated()).toEqual(PAUSED);
+    // No chat holds it now, and a chat's page can tell: neither held from it, nor free.
+    expect(await binding(OTHER)).toMatchObject({ takenOver: "orphaned" });
+    // The page's own code hands nothing back for the other chat either. A box that opened would be answered Hand back.
+    await app!.evaluate(() => Object.assign(globalThis, { answer: 0 }));
+    const before = (await boxes()).length;
+    await expect(client.evaluate((chat) => window.surogateDesktop!.browser!.handBack(chat), OTHER)).rejects.toThrow(HAND_BACK_AT_A_CLICK);
+    expect(await boxes()).toHaveLength(before);
+    expect(await navigated()).toEqual(PAUSED);
+    // At its user's click the desktop asks, in its own box, and they keep it: held still.
+    await app!.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    expect(await atClick(client, "handBack", OTHER)).toBe(false);
+    expect(await boxes()).toHaveLength(before + 1);
+    expect(await binding(OTHER)).toMatchObject({ takenOver: "orphaned" });
+    expect(await navigated()).toEqual(PAUSED);
+    // At the next they hand it back: the agent's browser is every chat's again, asking its first use as any.
+    await app!.evaluate(() => Object.assign(globalThis, { answer: 0 }));
+    expect(await atClick(client, "handBack", OTHER)).toBe(true);
+    expect(await binding(OTHER)).toMatchObject({ takenOver: false });
+    const navigating = navigated();
+    await press(await prompt(app!), "deny");
+    expect((await navigating).error.type).toBe("denied");
   });
 
   it("opens no box for a page that loads itself again and asks to hand the browser back, before its user kept it or after", async () => {
