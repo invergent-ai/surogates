@@ -266,6 +266,17 @@ async function asksFor(session: string, click: () => Promise<unknown>): Promise<
   await click();
   await expect.poll(() => kept(session) !== undefined && kept(session) !== before, { timeout: 10_000 }).toBe(true);
 }
+// How many times an upload's files were made ready in the page for the input the host keeps for *session*, from now on.
+function madeFor(session: string): () => number {
+  const input = kept(session)!.element();
+  const make = input.evaluateHandle.bind(input) as (...args: unknown[]) => Promise<JSHandle>;
+  let made = 0;
+  Object.assign(input, { evaluateHandle: (...args: unknown[]) => {
+    made += 1;
+    return make(...args);
+  } });
+  return () => made;
+}
 // The names of the files each file input of a page or a frame holds.
 const filed = () => [...document.querySelectorAll("input")].map((input) => [...(input.files ?? [])].map((file) => file.name));
 // What *work* answers within *ms*, or "late".
@@ -1744,6 +1755,44 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     expect(await holds()).toEqual(["c.pdf", "b.pdf"]);
   }, 30_000);
 
+  it("sends a page nothing of an upload it can tell beforehand the page will not take: too many files, a folder asked for, or an input that is gone or elsewhere", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    const page = tabs().get(a)![0]!;
+    const asks = async () => {
+      await asksFor(a, () => page.click("#file"));
+      return madeFor(a);
+    };
+    const upload = (...names: string[]) => op(a, "browser.set_input_files", { files: names.map((name) => ({ ...REPORT, name })) });
+    // Two files for an input that takes one.
+    let made = await asks();
+    expect((await upload("a.pdf", "b.pdf")).error?.message).toBe(ONE_FILE);
+    expect(made()).toBe(0);
+    // An input that asks for a folder.
+    await page.evaluate(() => {
+      (document.getElementById("file") as HTMLInputElement).webkitdirectory = true;
+    });
+    expect((await upload("a.pdf")).error?.message).toBe(A_FOLDER);
+    expect(made()).toBe(0);
+    // One its prompt named, whose page is at another address by now; and one taken out of its page.
+    await page.goto("http://fixture.test/");
+    made = await asks();
+    expect(await host.address(a, true)).toBe("http://fixture.test/");
+    await page.evaluate(() => history.pushState({}, "", "/elsewhere"));
+    expect((await upload("a.pdf")).error?.message).toBe(NOT_AS_ASKED);
+    expect(made()).toBe(0);
+    await page.goto("http://fixture.test/");
+    made = await asks();
+    await page.evaluate(() => document.getElementById("file")!.remove());
+    expect((await upload("a.pdf")).error?.message).toBe(NOT_ASKED);
+    expect(made()).toBe(0);
+    // One the page takes is made ready there once, and given.
+    await page.goto("http://fixture.test/");
+    made = await asks();
+    expect(await upload("a.pdf")).toMatchObject({ ok: { files: 1 } });
+    expect(made()).toBe(1);
+  }, 30_000);
+
   it("gives a chat's upload to no file input of another chat's tab, nor to one in a tab no chat owns, whichever asked last", async () => {
     const [a, b] = [session(), session()];
     await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
@@ -2856,14 +2905,15 @@ await navigator.serviceWorker.ready;`);
     // The page is busy a moment, by now: the upload sent meanwhile is still on its way to it when its user takes the browser over.
     await page.evaluate("void setTimeout(() => { const until = Date.now() + 1500; while (Date.now() < until) {} }, 0)");
     await new Promise((done) => setTimeout(done, 100));
+    const made = madeFor(a);
     const uploading = op(a, "browser.set_input_files", { files: [REPORT] }, "chat-1");
     await new Promise((done) => setTimeout(done, 300));
     host.pause("chat-1", true);
     expect(await within(1_000, uploading)).toEqual(PAUSED);
-    // The page answers again, and what was on its way has had its time: it was given nothing.
+    // The page answers again, and what was on its way has had its time: it was given nothing, and its files were not even sent to it.
     await expect.poll(holds, { timeout: 10_000 }).toEqual([]);
     await new Promise((done) => setTimeout(done, 1_500));
-    expect(await holds()).toEqual([]);
+    expect([await holds(), made()]).toEqual([[], 0]);
     // Nor at the hand back.
     host.pause("chat-1", false);
     expect((await op(a, "browser.mouse", { action: "move", x: 5, y: 5 }, "chat-1")).ok.notices).toEqual([]);

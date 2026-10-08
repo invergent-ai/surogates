@@ -249,19 +249,35 @@ export function filesOf(value: unknown): UploadFile[] | null {
 }
 
 // Where a file input is: whether it is still a file input of its frame's own document, at what address
-// that frame is, and as what site it runs. Said in the page, in the isolated world the input's handle
-// lives in (Playwright's own, one for each frame), which no script of the page's reaches: so it is the
-// browser's word, not the page's.
+// that frame is, and as what site it runs; and what it takes, several files or a folder. Said in the page,
+// in the isolated world the input's handle lives in (Playwright's own, one for each frame), which no
+// script of the page's reaches: so it is the browser's word, not the page's.
 interface Place {
   here: boolean;
   href: string;
   origin: string;
+  multiple: boolean;
+  folder: boolean;
 }
-const place = (input: Node): Place => ({
-  here: input instanceof HTMLInputElement && input.type === "file" && input.isConnected && input.ownerDocument === document,
-  href: location.href,
-  origin: self.origin,
-});
+const place = (input: Node): Place => {
+  const file = input instanceof HTMLInputElement && input.type === "file";
+  return {
+    here: file && input.isConnected && input.ownerDocument === document,
+    href: location.href,
+    origin: self.origin,
+    multiple: file && input.multiple,
+    folder: file && input.webkitdirectory,
+  };
+};
+// Why an input that is at *now* takes none of *count* files, where *at* is what the upload's prompt said of
+// it (null for an upload nobody was asked about); null where it would take them.
+type Unfit = "gone" | "moved" | "single" | "folder";
+const unfitFor = (now: Place, count: number, at: { href: string; origin: string } | null): Unfit | null => {
+  if (!now.here) return "gone";
+  if (at !== null && (now.href !== at.href || now.origin !== at.origin)) return "moved";
+  if (now.folder) return "folder";
+  return count > 1 && !now.multiple ? "single" : null;
+};
 // The address that names the site a file given there goes to: its frame's own, or, for a frame with none
 // (one its page spells out or writes, a blob), the site it runs as. Null for one that runs as no site, as
 // a data address does: there is nothing to ask its user about.
@@ -1069,6 +1085,12 @@ export class BrowserHost {
     session: string, chooser: FileChooser, files: UploadFile[], at: { href: string; origin: string } | null, stop: AbortSignal,
   ): Promise<string | null | typeof HELD> {
     const input = chooser.element();
+    const said = (why: Unfit): string => (why === "single" ? ONE_FILE : why === "folder" ? A_FOLDER : at ? NOT_AS_ASKED : NOT_ASKED);
+    // Looked at first: an input that would take none of them is sent none of them. The step that gives them
+    // looks again, as it gives.
+    const unfit = unfitFor(await input.evaluate(place), files.length, at);
+    if (unfit !== null) return said(unfit);
+    if (stop.aborted) return HELD;
     const made = await input.evaluateHandle(make, files);
     try {
       for (let tries = 0; tries < GIVE_TRIES; tries += 1) {
@@ -1076,9 +1098,7 @@ export class BrowserHost {
         const came = await made.evaluate(put, { input, by: Date.now() + GIVE_MS, at: at && { href: at.href, origin: at.origin } });
         // The page was too busy to take them in time: looked at again, and sent again.
         if (came === "late") continue;
-        if (came === "single") return ONE_FILE;
-        if (came === "folder") return A_FOLDER;
-        if (came !== "given") return at ? NOT_AS_ASKED : NOT_ASKED;
+        if (came !== "given") return said(came);
         if (stop.aborted) this.keep(session, GIVEN_AS_TAKEN);
         return null;
       }
