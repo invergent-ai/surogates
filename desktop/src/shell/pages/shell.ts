@@ -357,10 +357,15 @@ byId("menu").addEventListener("click", () => void shell.menu("app"));
 byId("project-menu").addEventListener("click", () => void shell.menu("project"));
 byId("open-settings").addEventListener("click", () => void shell.settings());
 
-// The user menu: a popover over the user row, closed by Escape, by a click elsewhere, and by its own rows.
+// The user menu: a popover over the user row, as a menu button's menu. Opened, the keyboard is on
+// its first row, and the arrows, Home and End move along the rows it offers now. Escape closes it and
+// gives the keyboard back to the user row; Tab, a click elsewhere and its own rows close it.
+const menuRows = () => [...document.querySelectorAll<HTMLButtonElement>("#user-menu [role=menuitem]")]
+  .filter((row) => !row.disabled && row.checkVisibility());
 const menu = (open: boolean) => {
   byId("user-menu").hidden = !open;
   byId("user").setAttribute("aria-expanded", String(open));
+  if (open) menuRows()[0]?.focus();
 };
 byId("user").addEventListener("click", (event) => {
   event.stopPropagation();
@@ -369,8 +374,23 @@ byId("user").addEventListener("click", (event) => {
 document.addEventListener("click", (event) => {
   if (!byId("user-menu").contains(event.target as Node)) menu(false);
 });
+const MOVES = new Map<string, (at: number, count: number) => number>([
+  ["ArrowDown", (at) => at + 1], ["ArrowUp", (at) => at - 1], ["Home", () => 0], ["End", (_at, count) => count - 1],
+]);
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") menu(false);
+  if (byId("user-menu").hidden) return;
+  if (event.key === "Escape") {
+    menu(false);
+    byId("user").focus();
+    return;
+  }
+  if (event.key === "Tab") return menu(false);
+  const move = MOVES.get(event.key);
+  if (!move) return;
+  event.preventDefault();
+  const rows = menuRows();
+  const to = move(rows.indexOf(document.activeElement as HTMLButtonElement), rows.length);
+  rows[(to + rows.length) % rows.length]?.focus();
 });
 // The conversation and Settings are views of their own: a click there reaches this page as its blur.
 addEventListener("blur", () => menu(false));
@@ -399,7 +419,11 @@ const pane = (open: boolean) => {
   byId("overview").setAttribute("aria-pressed", String(open));
 };
 byId("overview").addEventListener("click", () => pane(document.body.classList.contains("no-panel")));
-byId("close-panel").addEventListener("click", () => pane(false));
+// Closed by its own button, the pane gives the keyboard to the one that opens it again.
+byId("close-panel").addEventListener("click", () => {
+  pane(false);
+  byId("overview").focus();
+});
 
 // The web client is placed over the hole, wherever the layout puts it.
 new ResizeObserver(() => {

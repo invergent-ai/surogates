@@ -287,9 +287,12 @@ describe("the Overview pane", () => {
     expect(await page.getAttribute("#overview", "aria-pressed")).toBe("false");
     await page.click("#overview");
     expect(await page.isVisible("#panel")).toBe(true);
-    await page.click("#close-panel");
+    // Closed from the keyboard, the pane gives it to the button that opens it again.
+    await page.focus("#close-panel");
+    await page.keyboard.press("Enter");
     expect(await page.isVisible("#panel")).toBe(false);
     expect(await page.getAttribute("#overview", "aria-pressed")).toBe("false");
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("overview");
   });
 });
 

@@ -92,6 +92,31 @@ describe("the user menu", () => {
     expect(await page.isVisible("#user-menu")).toBe(false);
   });
 
+  it("takes the keyboard into its rows, moves along them with the arrows, and gives it back to the user row on Escape", async () => {
+    const { page } = await signedIn();
+    const focused = () => page.evaluate(() => (document.activeElement as HTMLElement).id || document.activeElement?.textContent?.trim());
+    await page.focus("#user");
+    await page.keyboard.press("Enter");
+    expect(await page.isVisible("#user-menu")).toBe(true);
+    expect(await focused()).toBe("SettingsCtrl+Shift+,");
+    // Language comes later, and is passed over; Usage is hidden off surogate.ai.
+    await page.keyboard.press("ArrowDown");
+    expect(await focused()).toBe("Get help");
+    await page.keyboard.press("End");
+    expect(await focused()).toBe("Remove this agent…");
+    await page.keyboard.press("ArrowDown");
+    expect(await focused()).toBe("SettingsCtrl+Shift+,");
+    await page.keyboard.press("ArrowUp");
+    expect(await focused()).toBe("Remove this agent…");
+    await page.keyboard.press("Escape");
+    expect(await page.isVisible("#user-menu")).toBe(false);
+    expect(await focused()).toBe("user");
+    // Tab leaves it, closed.
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Tab");
+    expect(await page.isVisible("#user-menu")).toBe(false);
+  });
+
   it("closes once the conversation takes the focus", async () => {
     const { shell, page } = await signedIn();
     // Playwright keeps a page it drives focused: this one hears focus come and go, as in the app.
