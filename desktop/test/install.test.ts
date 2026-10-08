@@ -1473,6 +1473,13 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(refused.stdout).toContain("Surogate Desktop: removed from this computer");
     expect(refused.stdout).toContain("Surogate Desktop: could not delete all of tester's app data: what tester may not change stays, in /home/tester/dat/surogate and /home/tester/cch/surogate");
     expect(root("test ! -e /home/tester/dat/surogate && test -e /home/tester/cch/surogate/root-only && test ! -e /opt/surogate").status).toBe(0);
+
+    // A folder the session names by no whole path is no folder of XDG's: the entry goes from where
+    // XDG's default puts it, and nothing under that name where the script was started.
+    expect(install().status).toBe(0);
+    expect(as("tester", "mkdir -p .config/autostart cfg-relative/autostart && touch .config/autostart/surogate.desktop cfg-relative/autostart/surogate.desktop").status).toBe(0);
+    expect(uninstall("XDG_CONFIG_HOME=cfg-relative")).toMatchObject({ status: 0, stderr: "" });
+    expect(root("test ! -e /home/tester/.config/autostart/surogate.desktop && test -e /home/tester/cfg-relative/autostart/surogate.desktop && test ! -e /opt/surogate").status).toBe(0);
   });
 
   it("uninstalls under sudo too, finding the user's own XDG_CONFIG_HOME in their login", () => {
