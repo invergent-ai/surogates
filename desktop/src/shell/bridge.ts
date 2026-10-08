@@ -82,8 +82,8 @@ export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<strin
     signOut: checked(() => calls.signOut()),
     prepareFolder: checked((window, choice, thread) => {
       if (choice !== "last" && choice !== "pick") throw new Error("Not a folder choice");
-      const named = threadOf(thread);
-      return alone("folder", window, () => calls.prepareFolder(choice, window, named));
+      const label = threadOf(thread);
+      return alone("folder", window, () => calls.prepareFolder(choice, window, label));
     }),
     bindSession: checked((window, sessionId, token) => {
       if (typeof sessionId !== "string" || !UUID.test(sessionId)) throw new Error("Not a chat");
