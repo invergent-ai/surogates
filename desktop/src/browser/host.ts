@@ -225,7 +225,7 @@ export function filesOf(value: unknown): UploadFile[] | null {
     const { name, mimeType, buffer } = file;
     const plain = typeof name === "string" && name !== "" && name !== "." && name !== ".." && !/[/\\\0]/.test(name)
       && Buffer.byteLength(name) <= MAX_NAME_BYTES;
-    if (!plain || typeof mimeType !== "string" || mimeType.length > MAX_NAME_BYTES) return null;
+    if (!plain || typeof mimeType !== "string" || Buffer.byteLength(mimeType) > MAX_NAME_BYTES) return null;
     if (typeof buffer !== "string" || buffer.length % 4 !== 0 || !BASE64.test(buffer)) return null;
     bytes += Buffer.byteLength(buffer, "base64");
     return { name, mimeType, buffer };
@@ -663,7 +663,8 @@ export class BrowserHost {
   ): Promise<Outcome> {
     if (signal.aborted) return CANCELLED;
     if (kind === "browser.set_input_files") return this.upload(session, args, stop, id);
-    // Its agent acted since an upload's prompt named an input: that prompt's upload is not coming.
+    // Its agent acted since an upload's prompt named an input: that prompt's upload is not coming, or, allowed
+    // and still having its files read, comes to nothing (upload).
     if (!looks(kind, args)) this.named.delete(session);
     const operation = OPERATIONS[kind];
     if (!operation) return { error: { type: "unsupported", message: `This computer's browser does not handle ${kind}` } };

@@ -1077,6 +1077,30 @@ describe("the browser on this computer", () => {
     expect(user.asked).toEqual([]);
   });
 
+  it("gives an upload no leave once the browser is taken over while its prompt is open, or while the browser was still saying where its input is: answered as the tools answer then, whatever the prompt settles with", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+    const paths = [`${FOLDER}/report.pdf`];
+    for (const [address, prompts] of [[() => Promise.resolve("https://uploads.example/form"), 1], [() => new Promise<string>(() => {}), 0]] as const) {
+      let taken = false;
+      // Its prompt, dismissed, settles with "Allow and stop asking": the answer that would do most.
+      user = new User();
+      approvals = new Approvals({
+        bindings: journal.bindings, prompts: user, agent: "Research assistant", address,
+        refusal: (operation) => (taken && operation.kind.startsWith("browser.") ? PAUSED : null),
+      });
+      const upload = approvals.admit(op("browser.set_input_files", { paths }), never());
+      // The first is asked about by now; the second still waits for the browser to say where its input is.
+      await new Promise((done) => setTimeout(done, 50));
+      taken = true;
+      approvals.dismissBrowser();
+      expect(await upload).toEqual(PAUSED);
+      expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
+      expect([user.asked.length, user.dismissed]).toEqual([prompts, prompts]);
+    }
+  });
+
   it("names a mouse press and a mouse release for what they are, not a click", async () => {
     bind(ROOT, "ask");
     journal.bindings.allowBrowser(ROOT);
