@@ -1255,11 +1255,17 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       'ID=ubuntu\nVERSION_ID="22.04"\nVERSION="22.04.5 LTS (Jammy Jellyfish)"',
       'ID=debian\nVERSION_ID="12"\nVERSION="12 (bookworm)"',
     ];
-    const unsupported = "Surogate Desktop: Surogate Desktop supports Ubuntu 24.04 LTS or a later LTS release (x64)\n";
+    // The sentence as it is: not as a line of the script's own, which would say the app's name twice.
+    const unsupported = "Surogate Desktop supports Ubuntu 24.04 LTS or a later LTS release (x64)\n";
     for (const osRelease of others) {
       expect(root(`printf '%s\\n' '${osRelease}' >/etc/os-release`).status).toBe(0);
       expect(install()).toMatchObject({ status: 1, stdout: "", stderr: unsupported });
     }
+    // A computer with no such file at all, as one that is no Linux: the same sentence, and nothing of bash's own.
+    expect(root("mv /etc/os-release /etc/os-release.away").status).toBe(0);
+    const without = install();
+    expect(root("mv /etc/os-release.away /etc/os-release").status).toBe(0);
+    expect(without).toMatchObject({ status: 1, stdout: "", stderr: unsupported });
     // What is a base is read byte for byte, the same in every locale of its caller's: white space
     // is ASCII's six characters and no other, and bytes that are no letters are bytes. On this
     // computer, which it does not support, a base it takes gets as far as that refusal.

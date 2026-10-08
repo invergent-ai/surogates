@@ -100,14 +100,17 @@ scratch() {
   stoppable
 }
 
-# Ubuntu 24.04 LTS or a later LTS release, on x64. Nothing is changed before this passes.
+# Ubuntu 24.04 LTS or a later LTS release, on x64. Nothing is changed before this passes. A
+# computer with no /etc/os-release, as one that is no Linux, is no Ubuntu: it is told the same, and
+# nothing of bash's own. The sentence is said as it is, and not as a line of this script's, which
+# would say the app's name twice.
 supported() {
   local id version version_id
-  id="$(. /etc/os-release && echo "${ID:-}")"
-  version="$(. /etc/os-release && echo "${VERSION:-}")"
-  version_id="$(. /etc/os-release && echo "${VERSION_ID:-}")"
+  id="$(. /etc/os-release 2>/dev/null && echo "${ID:-}")" || true
+  version="$(. /etc/os-release 2>/dev/null && echo "${VERSION:-}")" || true
+  version_id="$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-}")" || true
   [ "$id" = ubuntu ] && [[ "$version" == *LTS* ]] && dpkg --compare-versions "$version_id" ge 24.04 && [ "$(uname -m)" = x86_64 ] \
-    || fail "Surogate Desktop supports Ubuntu 24.04 LTS or a later LTS release (x64)"
+    || { echo "Surogate Desktop supports Ubuntu 24.04 LTS or a later LTS release (x64)" >&2; exit 1; }
 }
 
 # Whether manifest $1 is signed, in signature $2, by the private half of one of the release keys.
