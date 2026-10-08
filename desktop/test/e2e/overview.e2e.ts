@@ -275,6 +275,20 @@ describe("the Overview pane", () => {
     await expect.poll(focused).toBe(`act:${RESOLVED}`);
   });
 
+  it("gives the keyboard to the first group that shows once the group whose heading had it empties and goes", async () => {
+    const { page, client } = await opened();
+    const focused = () => page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.focus ?? null);
+    await page.focus('[data-focus="summary:idle"]');
+    // Its one thread starts working, as the agent tells it: the Idle group goes from the pane, its heading with it.
+    await client.evaluate(([project, thread]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      fake.data.threads[project!]!.find((found) => found.id === thread)!.group = "working";
+      fake.changed(project!, thread!);
+    }, [REPORT, IDLE]);
+    await expect.poll(() => texts(page, ".section summary")).toEqual(["Waiting on you 3", "Working 3", "Idle 0", "Resolved 1"]);
+    await expect.poll(focused).toBe("summary:waiting");
+  });
+
   it("shows a row's Resolve or Reopen in its age's place, over nothing else of the row", async () => {
     // Long chips, which fill their line to the row's end.
     const idle = agent.projects!.threads[REPORT]!.find((thread) => thread.id === IDLE)!;

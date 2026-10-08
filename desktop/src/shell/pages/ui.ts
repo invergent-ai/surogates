@@ -153,7 +153,8 @@ const shownIn = (list: Element | null): HTMLElement[] =>
  * again is named by its data-focus, and a list it can leave by its data-focus-list. The keyboard goes
  * back to the element of the same name while it shows in the same list. One that went to another
  * list, out of sight, or away gives it to what took its place in its list, or else to the first of
- * the list it went to, as a folded group's summary.
+ * the list it went to, as a folded group's summary. Where neither list shows anything, as a group
+ * that went whole with its heading, it goes to the first that shows of what holds its list.
  */
 export function keepFocus(redraw: () => void): void {
   const had = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>("[data-focus]");
@@ -165,8 +166,14 @@ export function keepFocus(redraw: () => void): void {
   if (now && now !== document.body && now.checkVisibility()) return;
   const same = document.querySelector<HTMLElement>(`[data-focus="${CSS.escape(had.dataset.focus!)}"]`);
   if (same?.checkVisibility() && same.closest<HTMLElement>("[data-focus-list]")?.dataset.focusList === list) return same.focus();
-  const left = list === undefined ? [] : shownIn(document.querySelector(`[data-focus-list="${CSS.escape(list)}"]`));
-  (left[Math.min(at, left.length - 1)] ?? shownIn(same?.closest("[data-focus-list]") ?? null)[0])?.focus();
+  const listed = list === undefined ? null : document.querySelector<HTMLElement>(`[data-focus-list="${CSS.escape(list)}"]`);
+  const left = shownIn(listed);
+  const next = left[Math.min(at, left.length - 1)] ?? shownIn(same?.closest("[data-focus-list]") ?? null)[0];
+  if (next) return next.focus();
+  for (let around = listed?.parentElement ?? null; around; around = around.parentElement) {
+    const first = shownIn(around)[0];
+    if (first) return first.focus();
+  }
 }
 
 const RELATIVE = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
