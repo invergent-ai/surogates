@@ -216,7 +216,8 @@ describe("Settings", () => {
       expect(await settings.getAttribute(`[data-setting="theme"] [data-value="${theme}"]`, "aria-pressed")).toBe("true");
     }
     const overlays = await shell.evaluate(() => (globalThis as unknown as { overlays: Array<{ color: string }> }).overlays);
-    expect(overlays.slice(-2).map((overlay) => overlay.color)).toEqual(["#1a1a19", "#f5f4ed"]);
+    // Under Settings, dimmed with the window.
+    expect(overlays.slice(-2).map((overlay) => overlay.color)).toEqual(["#0c0c0b", "#6e6e6b"]);
     expect(await client.evaluate(() => (window as unknown as { themes: string[] }).themes.slice(-2))).toEqual(["dark", "light"]);
     await settings.click('[data-setting="textSize"] [data-value="large"]');
     const saved = () => JSON.parse(readFileSync(join(home, "surogate", "settings.json"), "utf8")) as Record<string, string>;
@@ -240,6 +241,32 @@ describe("Settings", () => {
       "General", "Account", "This computer", "Browser", "Folders and permissions", "SkillsLater", "ConnectorsLater",
     ]);
     expect(await texts(settings, ".settings-nav h3")).toEqual(["Settings", "Customize"]);
+  });
+
+  it("dims the system's controls with the window while it is open, and fills the window as Claude's does", async () => {
+    const { shell, page } = await signedIn();
+    await shell.evaluate(({ BrowserWindow, nativeTheme }) => {
+      const window = BrowserWindow.getAllWindows()[0]!;
+      window.setBounds({ x: 0, y: 0, width: 1600, height: 1000 });
+      const set = window.setTitleBarOverlay.bind(window);
+      const overlays: unknown[] = [];
+      Object.assign(globalThis, { overlays });
+      window.setTitleBarOverlay = (overlay) => {
+        overlays.push(overlay);
+        set(overlay);
+      };
+      nativeTheme.themeSource = "dark";
+    });
+    const colours = () => shell.evaluate(() => (globalThis as unknown as { overlays: Array<{ color: string }> }).overlays.map((overlay) => overlay.color));
+    await expect.poll(colours).toEqual(["#1a1a19"]);
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    await expect.poll(colours).toEqual(["#1a1a19", "#0c0c0b"]);
+    const { width, height } = await settings.$eval(".dialog", (found) => found.getBoundingClientRect().toJSON() as DOMRect);
+    const content = await shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.getContentBounds());
+    expect([width, height]).toEqual([content.width - 96, content.height - 96]);
+    await settings.click("#close");
+    await expect.poll(colours).toEqual(["#1a1a19", "#0c0c0b", "#1a1a19"]);
   });
 
   it("names each segmented control as a group, by its row, for a screen reader", async () => {

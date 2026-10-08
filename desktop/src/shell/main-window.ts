@@ -165,7 +165,8 @@ export class MainWindow {
 
   paint(dark: boolean): void {
     this.dark = dark;
-    const { background, overlay } = chrome(dark);
+    // Settings, or the project dialog, dims the controls with the window under it.
+    const { background, overlay } = chrome(dark, this.settingsView !== null);
     this.window.setBackgroundColor(background);
     this.window.setTitleBarOverlay(overlay);
     this.web?.view.setBackgroundColor(background);
@@ -264,6 +265,7 @@ export class MainWindow {
     lockPage(view.webContents);
     wire(view.webContents);
     this.settingsView = view;
+    this.paint(this.dark);
     // Closed while its page still loads, the load ends with it, and nothing is left to say.
     void view.webContents.loadFile(page).then(() => {
       if (this.settingsView === view) view.webContents.focus();
@@ -277,6 +279,7 @@ export class MainWindow {
     const view = this.settingsView;
     if (!view) return;
     this.settingsView = null;
+    this.paint(this.dark);
     this.window.contentView.removeChildView(view);
     view.webContents.close();
     const back = this.opener && !this.opener.isDestroyed() ? this.opener : this.window.webContents;

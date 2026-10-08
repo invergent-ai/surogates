@@ -78,7 +78,9 @@ describe("the shell", () => {
     expect(Math.min(layout.sidebar.width, layout.centre.width, layout.panel.width)).toBeGreaterThan(200);
     // The controls take the top right corner, right of the title bar's area: nothing of the panel's sits under them.
     const controls = { left: layout.titleBar.x + layout.titleBar.width, bottom: layout.titleBar.y + layout.titleBar.height };
-    expect(controls.bottom).toBe(40);
+    expect(controls.bottom).toBe(36);
+    // The strips the window is dragged by are the controls' height, as Claude Desktop's are.
+    expect(await page.$eval("#sidebar .top", (found) => found.getBoundingClientRect().height)).toBe(36);
     expect(layout.close.right <= controls.left || layout.close.top >= controls.bottom).toBe(true);
   });
 

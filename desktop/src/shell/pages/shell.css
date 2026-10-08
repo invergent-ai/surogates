@@ -19,7 +19,7 @@
   --danger: light-dark(#b53333, #dd5353);
   --accent: #f59e0b;
   --accent-fg: #0b0e14;
-  --top: 40px;
+  --top: 36px;
   --sidebar-width: clamp(240px, 19vw, 370px);
   --panel-width: clamp(300px, 32vw, 640px);
 }
@@ -1038,8 +1038,8 @@ body.settings-page {
   position: relative;
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
-  width: min(1200px, calc(100vw - 96px));
-  height: min(860px, calc(100vh - 96px));
+  width: calc(100vw - 96px);
+  height: calc(100vh - 96px);
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 14px;
