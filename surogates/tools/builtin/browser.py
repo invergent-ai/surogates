@@ -72,7 +72,7 @@ def build_browser_screenshot_key(
         session_id,
         relative_path,
     )
-from surogates.devices.workspace import DeviceOperationError
+from surogates.devices.workspace import DeviceOperationError, said
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
@@ -1229,7 +1229,7 @@ async def _browser_upload_file_handler(
     try:
         keys = [await workspace_io.resolve(path) for path in arguments["paths"]]
     except _UNRESOLVED as exc:
-        return json.dumps({"error": "upload_failed", "detail": str(exc)})
+        return json.dumps({"error": "upload_failed", "detail": said(exc)})
     client = DeviceBrowserClient(workspace_io.runner, snapshot_cache=device_snapshot_cache(str(session_id)))
     try:
         given = await client.set_input_files(keys)

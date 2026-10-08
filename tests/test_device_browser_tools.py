@@ -336,6 +336,20 @@ async def test_a_path_out_of_the_folder_never_reaches_the_computers_browser(comp
     assert rig.laptop.asked == []
 
 
+async def test_a_path_the_computer_cannot_resolve_is_said_in_its_own_words_without_pythons_errno(computer) -> None:
+    rig = computer()
+
+    async def looping(kind: str, args: dict[str, Any], payload: bytes | None = None) -> dict[str, Any]:
+        return {"error": {"type": "os", "code": "ELOOP", "message": "Too many levels of symbolic links: 'loop.txt'"}}
+
+    rig.laptop.files = SimpleNamespace(run=looping)
+
+    body = json.loads(await browser._browser_upload_file_handler({"paths": ["loop.txt"]}, **rig.kwargs))
+
+    assert body == {"error": "upload_failed", "detail": "Too many levels of symbolic links: 'loop.txt'"}
+    assert rig.laptop.asked == []
+
+
 async def test_a_page_that_asked_for_no_file_is_said_so(computer) -> None:
     said = "The page has not asked for a file: click its upload button or its file input first"
     rig = computer({"error": {"type": "browser", "message": said}})
