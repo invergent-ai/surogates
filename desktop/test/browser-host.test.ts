@@ -403,8 +403,11 @@ describe("a page's download, as the host stages it", () => {
     const gone = join(profile, "gone");
     await state().stage(SESSION, downloadOf("gone.txt", gone, Promise.resolve(gone)));
     await state().stage(SESSION, downloadOf("broken.txt", gone, Promise.reject(new Error("canceled"))));
+    // What else the browser says of one that did not finish is not passed on: an error's own text is not the agent's to read.
+    await state().stage(SESSION, downloadOf("closed.txt", gone, Promise.reject(new Error(`Target page, context or browser has been closed: ${profile}`))));
     expect(state().unseen.get(SESSION)).toEqual([
       'The page downloaded "gone.txt", but its size could not be measured, so it was not saved.', notFinished("broken.txt", "canceled"),
+      'The page\'s download of "closed.txt" did not finish (the browser stopped it), so it was not saved.',
     ]);
     // A session with no tab left is no chat's: what its page finished after is removed, and nobody is told.
     const late = fileOf(6);

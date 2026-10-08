@@ -8,6 +8,7 @@ import { readFile, rm } from "node:fs/promises";
 import { extname, posix } from "node:path";
 
 import type { DownloadBy } from "../binding/approvals.js";
+import { strerror } from "../files/answers.js";
 import type { Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 
@@ -76,6 +77,9 @@ export function savedName(suggested: string): string {
   return cut(named.slice(0, named.length - extname(named).length), NAME_BYTES - Buffer.byteLength(extension)) + extension;
 }
 
+// Why nothing was saved, where the reason is this computer's own and not the agent's to read.
+const COULD_NOT = "this computer could not save it";
+
 // The *n*th name tried for *name*.
 function numbered(name: string, n: number): string {
   if (n === 1) return name;
@@ -100,7 +104,15 @@ export async function saveDownload(download: StagedDownload, bindings: Pick<Bind
   try {
     const binding = bindings.get(download.root);
     if (!binding) return `${said}, but this chat has no folder on this computer, so it was not saved.`;
-    const data = (await readFile(download.path)).toString("base64");
+    let data: string;
+    try {
+      data = (await readFile(download.path)).toString("base64");
+    } catch (error) {
+      // Gone with the browser's close, say. Told by the error's code alone, in the file tools' words for it:
+      // what the error says itself names where the browser host keeps its files on this computer.
+      const why = strerror((error as NodeJS.ErrnoException | null)?.code);
+      return notSaved(why === null ? COULD_NOT : `the file the browser kept could not be read (${why})`);
+    }
     // Where the chat's downloads go, as its file host resolves it: a link there that leads out of the folder is refused.
     const into = await saver.run(op("resolve", { path: posix.join(binding.folder, DOWNLOADS) }), signal);
     if ("error" in into) return notSaved(into.error.message);
@@ -131,8 +143,9 @@ export async function saveDownload(download: StagedDownload, bindings: Pick<Bind
       return `${said}. It is saved in the chat's folder as ${key.slice(binding.folder.length + 1)}.`;
     }
     return notSaved(refused ?? `the chat's folder has ${NAMES} files of that name already`);
-  } catch (error) {
-    return notSaved(error instanceof Error ? error.message : String(error));
+  } catch {
+    // Not in the error's own words, which can name a path of this computer.
+    return notSaved(COULD_NOT);
   } finally {
     await rm(download.path, { force: true }).catch(() => {});
   }

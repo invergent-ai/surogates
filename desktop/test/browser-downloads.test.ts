@@ -172,6 +172,33 @@ describe("a download the agent's page started", () => {
     expect(existsSync(download.path)).toBe(false);
   });
 
+  it("says why by the error's code, in the file tools' words, when its staged file cannot be read, as after the browser closed: no path of this computer, and no text of the error's own", async () => {
+    bind("free");
+    const staging = join(base, "staged");
+    // Gone, as Playwright removes what it staged when the browser closes; and something else there than a file.
+    const gone = { ...stage("report.txt"), path: join(staging, "gone") };
+    const folder = { ...stage("notes.txt"), path: staging };
+    const said = [await saveDownload(gone, journal.bindings, saver), await saveDownload(folder, journal.bindings, saver)];
+    expect(said).toEqual([
+      'The page downloaded "report.txt", but it was not saved: the file the browser kept could not be read (No such file or directory).',
+      'The page downloaded "notes.txt", but it was not saved: the file the browser kept could not be read (Is a directory).',
+    ]);
+    // Whatever else goes wrong on this computer is not told in the error's words, which can name its paths.
+    const broken = stage("plan.txt");
+    const unread = { get: () => { throw new Error(`unable to open database file: ${join(base, "journal.sqlite")}`); } };
+    const refusing: Saver = { admit: saver.admit, run: () => Promise.reject(Object.assign(new Error(`EACCES: permission denied, open '${broken.path}'`), { code: "EACCES" })) };
+    said.push(await saveDownload(broken, unread, saver), await saveDownload(stage("plan.txt"), journal.bindings, refusing));
+    // Nor is a code the file tools have no words for: a path that is no path, here.
+    said.push(await saveDownload({ ...stage("plan.txt"), path: `${staging}/no\0path` }, journal.bindings, saver));
+    expect(said.slice(2)).toEqual([
+      'The page downloaded "plan.txt", but it was not saved: this computer could not save it.',
+      'The page downloaded "plan.txt", but it was not saved: this computer could not save it.',
+      'The page downloaded "plan.txt", but it was not saved: this computer could not save it.',
+    ]);
+    for (const notice of said) expect(notice).not.toContain(base);
+    expect([existsSync(broken.path), existsSync(staging)]).toEqual([false, true]);
+  });
+
   it("saves nothing for a chat this computer did not bind", async () => {
     const download = stage("report.txt");
     expect(await saveDownload(download, journal.bindings, saver)).toBe(

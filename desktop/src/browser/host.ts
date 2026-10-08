@@ -76,6 +76,9 @@ export const FILE_ASKED =
 export const tooLarge = (name: string, bytes: number): string =>
   `The page downloaded ${quoted(name)} (${bytes} bytes), too large to save in the chat's folder at once (at most ${MAX_WRITE_BYTES} bytes), so it was not saved.`;
 export const notFinished = (name: string, why: string): string => `The page's download of ${quoted(name)} did not finish (${why}), so it was not saved.`;
+// Why one did not finish: the browser's own word for one that was cancelled, or whose connection broke; of
+// any other, this host's words. What an error says itself is not the agent's to read.
+const unfinished = (failure: string | null): string => (failure === "canceled" ? failure : "the browser stopped it");
 const unmeasured = (name: string): string => `The page downloaded ${quoted(name)}, but its size could not be measured, so it was not saved.`;
 export const interrupted = (name: string): string =>
   `The page's download of ${quoted(name)} was interrupted when the user took over the agent's browser on this computer, so it was not saved.`;
@@ -575,8 +578,8 @@ export class BrowserHost {
       let path: string;
       try {
         path = await download.path();
-      } catch (error) {
-        tell(stop?.aborted ? interrupted(name) : notFinished(name, (await download.failure().catch(() => null)) ?? said(error)));
+      } catch {
+        tell(stop?.aborted ? interrupted(name) : notFinished(name, unfinished(await download.failure().catch(() => null))));
         return;
       }
       const size = await stat(path).then((found) => found.size, () => null);
