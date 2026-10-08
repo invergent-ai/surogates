@@ -278,3 +278,282 @@ export function folderCalls(
     typeof desktop.onBindingChanged === "function";
   return present ? (desktop as FolderCalls) : null;
 }
+
+// As the desktop's browser tools say it (surogates/devices/browser.py).
+const NO_BROWSER_HERE =
+  "No supported browser on this computer. Install Google Chrome, Microsoft Edge, Brave or Vivaldi, or pick one in Settings → Browser. The Snap build of Chromium is not supported.";
+
+export type BrowserAction = "show" | "takeOver" | "handBack" | "settings";
+
+type BrowserCalls = Pick<DesktopBridge, "browser" | "openSettings">;
+
+/**
+ * Who holds the browser on this computer, as the chat's binding reads it, and what this chat may do
+ * about it: take it over from nobody, hand it back where it is held from this chat or from one that
+ * is gone, and neither where it is held from another chat, for which the desktop refuses both. While
+ * the desktop asks its user about a hand back (*asking*), no second one is offered.
+ */
+function heldBrowser(
+  takenOver: DesktopBinding["takenOver"] | undefined,
+  asking: boolean,
+): { text: string; drive: BrowserAction | null } {
+  const open = "The browser is open on this computer";
+  if (takenOver === "elsewhere") {
+    return {
+      text: `${open}, and you have it, taken over from another chat: the agent waits until you hand it back there.`,
+      drive: null,
+    };
+  }
+  // A desktop from before the take-over says nothing of it: nobody holds its browser.
+  if (!(takenOver === true || takenOver === "orphaned")) {
+    return { text: `${open}.`, drive: "takeOver" };
+  }
+  if (asking) {
+    return {
+      text: `${open}, and you have it. Surogate is asking you, in a window of its own, whether to hand it back.`,
+      drive: null,
+    };
+  }
+  return {
+    text:
+      takenOver === true
+        ? `${open}, and you have it: the agent waits until you hand it back.`
+        : `${open}, and you have it, though the chat it was taken over from is gone: the agent waits until you hand it back here.`,
+    drive: "handBack",
+  };
+}
+
+/**
+ * What a local-folder chat's browser pane says, and the buttons it offers (Section 5): Show browser
+ * and Take over or Hand back where the browser is open, or Settings → Browser where there is none,
+ * each only in the desktop on the computer the chat is bound to, and only where that desktop has
+ * the call. Elsewhere the pane says where the browser is, and nothing more. *available* is false
+ * where the computer has no supported browser; a chat the page only reads (*readOnly*) is neither
+ * taken over nor handed back from here. *asking* is true while the desktop asks its user whether to
+ * hand the browser back.
+ */
+export function computerBrowser(
+  chat: LocalChat,
+  browser: { available: boolean; readOnly: boolean },
+  desktop: BrowserCalls | null,
+  asking = false,
+): { text: string; actions: BrowserAction[] } {
+  const here = desktop !== null ? chat.here : null;
+  if (!browser.available) {
+    if (!here) {
+      return {
+        text: `No supported browser on ${chat.computer}. Install Google Chrome, Microsoft Edge, Brave or Vivaldi there, or pick one in Surogate's Settings → Browser on it.`,
+        actions: [],
+      };
+    }
+    return {
+      text: NO_BROWSER_HERE,
+      actions: desktop?.openSettings ? ["settings"] : [],
+    };
+  }
+  if (!here) {
+    return { text: `The browser is open on ${chat.computer}.`, actions: [] };
+  }
+  const { text, drive } = heldBrowser(here.takenOver, asking);
+  const driven = browser.readOnly || drive === null ? [] : [drive];
+  return {
+    text,
+    actions: desktop?.browser ? ["show", ...driven] : [],
+  };
+}
+
+/** What the pane's presses tell the chat's server: that its user took the browser over, and that they handed it back. */
+export interface BrowserTelling {
+  taken(): Promise<unknown>;
+  handedBack(): Promise<unknown>;
+}
+
+/**
+ * What a button of the pane does, when pressed. The desktop's call is made in the same turn as the
+ * press, before anything is awaited: the desktop lets one call through for a click of its user's.
+ * The pause is the desktop's; the server is told of a take-over, and of a hand back only once the
+ * desktop answered true, its user having confirmed it in the desktop's own window, so the chat says
+ * each and, handed back, its agent goes on (POST …/browser/control). Rejects in the desktop's
+ * words, or with what the server could not be told.
+ */
+export async function actOnBrowser(
+  action: BrowserAction,
+  root: string,
+  desktop: BrowserCalls,
+  server: BrowserTelling,
+): Promise<void> {
+  if (action === "settings") {
+    return desktop.openSettings?.("browser");
+  }
+  const calls = desktop.browser;
+  if (!calls) {
+    return;
+  }
+  if (action === "show") {
+    return calls.show(root);
+  }
+  if (action === "takeOver") {
+    await calls.takeOver(root);
+    await server.taken().catch(() => {
+      throw new Error("You have the browser, but the chat could not be told.");
+    });
+  } else if (await calls.handBack(root)) {
+    await server.handedBack().catch(() => {
+      throw new Error(
+        "The browser is the agent's again, but the agent could not be told: write to it to go on.",
+      );
+    });
+  }
+}
+
+/** The chat's control route, as the pane posts to it (POST …/browser/control). */
+export interface BrowserPosts {
+  acquire(): Promise<unknown>;
+  release(): Promise<unknown>;
+}
+
+/** What a chat's pane shows beside where its browser is. */
+export interface BrowserPaneState {
+  asking: boolean; // the desktop is asking its user whether to hand the browser back
+  failure: string | null; // what the desktop refused, in its words, or what the server could not be told
+  answers: number; // the take-overs and hand backs the desktop has answered: the binding is read again at each
+}
+
+/**
+ * A chat's browser pane, for as long as its page lives: what it shows beside where the browser is,
+ * and what the chat's server has been told. The pane itself is drawn anew each time it is opened,
+ * and a hand back, which waits for its user in the desktop, can outlast a drawing of it.
+ */
+export interface BrowserPane {
+  state(): BrowserPaneState;
+  /** Hears each change of the state; the function returned stops it. */
+  subscribe(listener: () => void): () => void;
+  /**
+   * A button pressed: called first thing in its click's own handler, and the desktop is asked before
+   * it returns. Settles once all the press does is over, the server told too, and never rejects.
+   */
+  press(
+    action: BrowserAction,
+    root: string,
+    desktop: BrowserCalls,
+  ): Promise<void>;
+  /** What the computer says of who holds the browser, when the chat is opened. Never rejects. */
+  loaded(takenOver: DesktopBinding["takenOver"] | undefined): Promise<void>;
+}
+
+/**
+ * The pane of one chat, which posts to that chat's control route (*posts*).
+ *
+ * The server tells the chat of a take-over once, and of a hand back only after one, when it also
+ * wakes the agent. So each is posted in its turn, the next once the last was answered:
+ * - a take-over the desktop made (acquire);
+ * - a hand back the desktop answered true (release), with the take-over posted again before it
+ *   unless this page saw the server answer it: one that never arrived, one made before this page
+ *   loaded, or one made from another chat. The server tells a chat no second time of a take-over
+ *   it knows, so the chat is told both, in order, and its agent is woken;
+ * - at the chat's load, where the computer says nobody holds the browser, a release, once: the app
+ *   may have ended while its user held it, and the chat would still say they do. The server passes
+ *   over a release with no take-over standing.
+ */
+export function browserPane(posts: BrowserPosts): BrowserPane {
+  let state: BrowserPaneState = { asking: false, failure: null, answers: 0 };
+  const listeners = new Set<() => void>();
+  const set = (change: Partial<BrowserPaneState>) => {
+    state = { ...state, ...change };
+    for (const listener of [...listeners]) {
+      listener();
+    }
+  };
+
+  // What the server was last told, as far as this page knows: a post that failed may have arrived.
+  let told: "unknown" | "taken" | "free" = "unknown";
+  let line: Promise<unknown> = Promise.resolve();
+  const inTurn = (post: () => Promise<void>): Promise<void> => {
+    const posted = line.then(post);
+    line = posted.catch(() => {
+      // Said by whoever posted it: the next is posted all the same.
+    });
+    return posted;
+  };
+  const post = async (action: "acquire" | "release") => {
+    told = "unknown";
+    await posts[action]();
+    told = action === "acquire" ? "taken" : "free";
+  };
+  const telling: BrowserTelling = {
+    taken: () => inTurn(() => post("acquire")),
+    handedBack: () =>
+      inTurn(async () => {
+        if (told !== "taken") {
+          await post("acquire");
+        }
+        await post("release");
+      }),
+  };
+
+  return {
+    state: () => state,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    press: (action, root, desktop) => {
+      const handingBack = action === "handBack";
+      if (handingBack && state.asking) {
+        return Promise.resolve();
+      }
+      // The desktop has answered a take-over or a hand back, whatever the server has yet to hear.
+      let waiting = handingBack || action === "takeOver";
+      const answered = () => {
+        if (waiting) {
+          waiting = false;
+          set({
+            asking: handingBack ? false : state.asking,
+            answers: state.answers + 1,
+          });
+        }
+      };
+      const acted = actOnBrowser(action, root, desktop, {
+        taken: () => {
+          answered();
+          return telling.taken();
+        },
+        handedBack: () => {
+          answered();
+          return telling.handedBack();
+        },
+      });
+      set({ asking: handingBack || state.asking, failure: null });
+      return acted.then(answered, (error: unknown) => {
+        answered();
+        set({ failure: saidBy(error) });
+      });
+    },
+    loaded: (takenOver) => {
+      if (takenOver !== false) {
+        return Promise.resolve();
+      }
+      return inTurn(async () => {
+        if (told !== "free") {
+          await post("release");
+        }
+      }).catch(() => {
+        // Nothing its user did is untold: it is posted again when the chat is next opened.
+      });
+    },
+  };
+}
+
+/** Each chat's pane, one for a chat while the page lives: *postsOf* gives the chat's own control route. */
+export function browserPanes(
+  postsOf: (sessionId: string) => BrowserPosts,
+): (sessionId: string) => BrowserPane {
+  const panes = new Map<string, BrowserPane>();
+  return (sessionId) => {
+    const pane = panes.get(sessionId) ?? browserPane(postsOf(sessionId));
+    panes.set(sessionId, pane);
+    return pane;
+  };
+}

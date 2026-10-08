@@ -17,9 +17,10 @@ export interface SessionListResponse {
 }
 
 export interface BrowserStateResponse {
-  status: "live" | "user-control";
+  status: "live" | "user-control" | "unavailable";
   control_owner: string | null;
   live_view_path: string;
+  computer?: boolean; // on the user's computer, in a local-folder chat
 }
 
 export interface BrowserControlResponse {
