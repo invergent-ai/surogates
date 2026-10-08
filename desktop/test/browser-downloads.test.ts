@@ -271,6 +271,30 @@ describe("a download the agent's page started", () => {
     expect(statSync(join(downloads, "most.bin")).size).toBe(MAX_WRITE_BYTES);
   });
 
+  it("stops asking about a download once it is told to stop, as when its chat is deleted: its prompt goes, nothing is saved, and what was staged goes", async () => {
+    bind("ask");
+    // A prompt nobody answers.
+    meanwhile = () => new Promise(() => {});
+    const stop = new AbortController();
+    const download = stage("report.txt");
+    const save = downloadSaver(journal.bindings, saver);
+    const saving = save(download, stop.signal);
+    // Another of the chat's, behind it in the chat's line, told to stop by the same.
+    const behind = stage("notes.txt");
+    const waiting = save(behind, stop.signal);
+    await expect.poll(() => asked.length).toBe(1);
+    stop.abort();
+    expect(await saving).toBe('The page downloaded "report.txt", but it was not saved: its chat was deleted.');
+    expect(await waiting).toContain("but it was not saved");
+    expect([asked.length, existsSync(downloads), existsSync(download.path), existsSync(behind.path)]).toEqual([1, false, false, false]);
+    // In a chat that works freely nobody is asked, and nothing is written either once it is told to stop.
+    journal.bindings.setMode(ROOT, "free");
+    expect(await saveDownload(stage("free.txt"), journal.bindings, saver, stop.signal)).toBe(
+      'The page downloaded "free.txt", but it was not saved: its chat was deleted.',
+    );
+    expect(existsSync(downloads)).toBe(false);
+  });
+
   it("saves nothing for a chat this computer did not bind", async () => {
     const download = stage("report.txt");
     expect(await saveDownload(download, journal.bindings, saver)).toBe(

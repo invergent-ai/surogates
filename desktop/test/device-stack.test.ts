@@ -40,7 +40,7 @@ class Tools implements ToolLayer {
   taken: string | null = null;
   // What an operation answers, where a test says; and what the stack gave it to save its downloads with.
   answer: ((operation: Operation) => Outcome) | null = null;
-  save: ((download: StagedDownload) => Promise<string>) | null = null;
+  save: ((download: StagedDownload, stop: AbortSignal) => Promise<string>) | null = null;
 
   constructor(private readonly base: string, private readonly order: string[]) {}
 
@@ -67,7 +67,7 @@ class Tools implements ToolLayer {
     return true;
   }
 
-  saveDownloadsWith(save: (download: StagedDownload) => Promise<string>): void {
+  saveDownloadsWith(save: (download: StagedDownload, stop: AbortSignal) => Promise<string>): void {
     this.save = save;
   }
 
@@ -364,7 +364,8 @@ describe("one agent's device", () => {
     tools.answer = (operation) => ({ ok: operation.kind === "resolve" ? operation.args.path : null });
     const staged = join(base, "staged");
     writeFileSync(staged, "report");
-    expect(await tools.save?.({ root: ROOT, session: CHILD, name: "report.txt", path: staged, user: false })).toBe(
+    const stop = new AbortController();
+    expect(await tools.save?.({ root: ROOT, session: CHILD, name: "report.txt", path: staged, user: false }, stop.signal)).toBe(
       'The page downloaded "report.txt". It is saved in the chat\'s folder as Downloads/report.txt.',
     );
     const key = join(folder, "Downloads", "report.txt");
@@ -378,8 +379,14 @@ describe("one agent's device", () => {
     expect([device.working(), existsSync(staged)]).toEqual([0, false]);
     // Its user's own, made while they held the browser: asked as theirs.
     writeFileSync(staged, "theirs");
-    await tools.save?.({ root: ROOT, session: CHILD, name: "statement.pdf", path: staged, user: true });
+    await tools.save?.({ root: ROOT, session: CHILD, name: "statement.pdf", path: staged, user: true }, stop.signal);
     expect(asked.at(-1)).toMatchObject({ kind: "change", path: join(folder, "Downloads", "statement.pdf"), download: "user" });
+    // Told to stop, as when its chat is deleted: what it asks of its tools is stopped by the same, and nobody is asked.
+    stop.abort();
+    writeFileSync(staged, "late");
+    tools.ran.length = 0;
+    expect(await tools.save?.({ root: ROOT, session: CHILD, name: "late.txt", path: staged, user: false }, stop.signal)).toContain("but it was not saved");
+    expect([asked.length, tools.ran.some((ran) => ran.kind === "write"), existsSync(staged)]).toEqual([2, false, false]);
   });
 
   it("counts a chat whose background process lives beneath the browser's layer, as the app's own stack wires it", async () => {

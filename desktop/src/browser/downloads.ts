@@ -81,6 +81,10 @@ export function savedName(suggested: string): string {
 
 // Why nothing was saved, where the reason is this computer's own and not the agent's to read.
 const COULD_NOT = "this computer could not save it";
+// And where its chat was deleted meanwhile.
+const STOPPED = "its chat was deleted";
+// What stops no save: a save not told what would stop it.
+const NEVER = new AbortController().signal;
 /** What the agent is told of a download that came as no download this computer saves: not even its name is taken from it. */
 export const UNSAVED = `The page downloaded a file, but it was not saved: ${COULD_NOT}.`;
 
@@ -124,11 +128,15 @@ async function stagedAt(path: string): Promise<Buffer | number> {
  * hear at its next answer. Asked once, as a write of the chat's; made create-only, so what is at a
  * name by then is never replaced: the next name is taken. The staged file goes either way, and
  * this never rejects: of one it cannot even name, as a browser host gone wrong would stage, it says
- * that a file was not saved.
+ * that a file was not saved. *stop* aborts when its chat is deleted: its open prompt goes, and
+ * nothing more is asked or written. Otherwise an unanswered prompt expires by itself, and a quit
+ * denies what still asks.
  */
-export async function saveDownload(download: StagedDownload, bindings: Pick<Bindings, "get">, saver: Saver): Promise<string> {
+export async function saveDownload(
+  download: StagedDownload, bindings: Pick<Bindings, "get">, saver: Saver, stop: AbortSignal = NEVER,
+): Promise<string> {
   try {
-    return await save(download, bindings, saver);
+    return await save(download, bindings, saver, stop);
   } catch {
     return UNSAVED;
   } finally {
@@ -136,15 +144,13 @@ export async function saveDownload(download: StagedDownload, bindings: Pick<Bind
   }
 }
 
-async function save(download: StagedDownload, bindings: Pick<Bindings, "get">, saver: Saver): Promise<string> {
+async function save(download: StagedDownload, bindings: Pick<Bindings, "get">, saver: Saver, signal: AbortSignal): Promise<string> {
   const said = `The page downloaded ${quoted(download.name)}`;
   const notSaved = (why: string) => `${said}, but it was not saved: ${why}.`;
   const op = (kind: string, args: Record<string, unknown>): Operation => ({
     id: `download-${randomUUID()}`, sessionId: download.root, callingSessionId: download.session, invocationId: "download", ordinal: 0,
     kind, args, digest: "",
   });
-  // ponytail: never cancelled; an unanswered prompt expires by itself, and a quit denies what still asks.
-  const signal = new AbortController().signal;
   try {
     const binding = bindings.get(download.root);
     if (!binding) return `${said}, but this chat has no folder on this computer, so it was not saved.`;
@@ -182,7 +188,10 @@ async function save(download: StagedDownload, bindings: Pick<Bindings, "get">, s
       if (found.ok !== null) continue;
       // Made only where nothing is. Asked once, at the first name found free: its user allows the download, not one name.
       const write = op("write", { key, data, create: true });
-      const outcome = (asked ? null : await saver.admit(write, signal, download.user ? "user" : "page")) ?? (await saver.run(write, signal));
+      const denied = asked ? null : await saver.admit(write, signal, download.user ? "user" : "page");
+      // Told to stop while it asked, or before: nobody answered, and nothing is written, in a chat that works freely either.
+      if (signal.aborted) return notSaved(STOPPED);
+      const outcome = denied ?? (await saver.run(write, signal));
       asked = true;
       if ("error" in outcome && outcome.error.code === "EEXIST") {
         // Made there since the look, by another writer: left as it is, and the next name is tried. Where nothing
@@ -206,12 +215,14 @@ async function save(download: StagedDownload, bindings: Pick<Bindings, "get">, s
  * What saves a device's downloads: one at a time for a chat, in the order they finished, so each
  * looks for its name once the one before it is saved, and its prompt names the file it becomes.
  */
-export function downloadSaver(bindings: Pick<Bindings, "get">, saver: Saver): (download: StagedDownload) => Promise<string> {
+export function downloadSaver(
+  bindings: Pick<Bindings, "get">, saver: Saver,
+): (download: StagedDownload, stop?: AbortSignal) => Promise<string> {
   // Each chat's last save in line.
   const lines = new Map<string, Promise<string>>();
-  return (download) => {
+  return (download, stop) => {
     // A save never rejects: it says why it saved nothing, so the chat's line goes on to the next whatever came of it.
-    const mine = (lines.get(download.root) ?? Promise.resolve("")).then(() => saveDownload(download, bindings, saver));
+    const mine = (lines.get(download.root) ?? Promise.resolve("")).then(() => saveDownload(download, bindings, saver, stop));
     lines.set(download.root, mine);
     void mine.then(() => {
       if (lines.get(download.root) === mine) lines.delete(download.root);

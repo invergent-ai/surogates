@@ -49,8 +49,10 @@ export class Browsing implements ToolLayer {
   private deleted = false;
   // What saves each download its browser stages, once the stack has said; and what each calling
   // session's downloads came to, with the chat it is of, until its next answer that says what its page did.
-  private save: ((download: StagedDownload) => Promise<string>) | null = null;
+  private save: ((download: StagedDownload, stop: AbortSignal) => Promise<string>) | null = null;
   private readonly told = new Map<string, { root: string; notices: string[] }>();
+  // ponytail: what stops each chat's saves, one for a chat that had a download, until the chat is deleted.
+  private readonly saving = new Map<string, AbortController>();
   // The look at where each staged file is, one after another: downloads are saved in the order they were staged.
   private looking: Promise<unknown> = Promise.resolve();
 
@@ -81,8 +83,11 @@ export class Browsing implements ToolLayer {
     return this.options.browser.perform(launch, operation, signal).then((outcome) => this.tell(operation.callingSessionId, outcome));
   }
 
-  /** What saves each download its browser stages: the stack's, which asks the chat's approvals and writes through its file host. */
-  saveDownloadsWith(save: (download: StagedDownload) => Promise<string>): void {
+  /**
+   * What saves each download its browser stages: the stack's, which asks the chat's approvals and writes
+   * through its file host. It is told to stop a chat's saves, by their signal, when the chat is deleted.
+   */
+  saveDownloadsWith(save: (download: StagedDownload, stop: AbortSignal) => Promise<string>): void {
     this.save = save;
   }
 
@@ -101,9 +106,11 @@ export class Browsing implements ToolLayer {
       await rm(path, { force: true }).catch(() => {});
       return;
     }
+    const stop = this.saving.get(download.root) ?? new AbortController();
+    this.saving.set(download.root, stop);
     let notice: string;
     try {
-      notice = await this.save({ ...download, path });
+      notice = await this.save({ ...download, path }, stop.signal);
     } catch {
       // What saves them says itself what came of each, and removes what was staged: of one it failed on
       // outright there is nothing to tell, and its file goes here.
@@ -201,10 +208,13 @@ export class Browsing implements ToolLayer {
   // held: a page can have a chat deleted, and only the desktop's own confirmation hands the browser back.
   retired(root: string): void {
     if (this.held === root) this.deleted = true;
-    // What its sessions' downloads came to is told to nobody now.
+    // What its sessions' downloads came to is told to nobody now, and what is still being saved for it,
+    // or asked about, stops.
     for (const [session, kept] of this.told) {
       if (kept.root === root) this.told.delete(session);
     }
+    this.saving.get(root)?.abort();
+    this.saving.delete(root);
     this.options.browser.forget(root);
     this.options.tools.retired?.(root);
   }

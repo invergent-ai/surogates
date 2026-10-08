@@ -359,6 +359,23 @@ describe("the browser's kinds beside the tools", () => {
     expect(readFileSync(elsewhere, "utf8")).toBe("a file of the user's");
   });
 
+  it("tells what saves a deleted chat's downloads to stop, its sub-agents' too, and no other chat's", async () => {
+    const { browsing, stage } = rig();
+    const stops = new Map<string, AbortSignal>();
+    browsing.saveDownloadsWith((download, stop) => (stops.set(download.name, stop), new Promise(() => {})));
+    stage({ root: ROOT, session: ROOT, name: "report.txt", path: kept("a"), user: false });
+    stage({ root: ROOT, session: "child", name: "statement.pdf", path: kept("b"), user: true });
+    stage({ root: OTHER, session: OTHER, name: "other.txt", path: kept("c"), user: false });
+    await vi.waitFor(() => expect(stops.size).toBe(3));
+    expect([...stops.values()].map((stop) => stop.aborted)).toEqual([false, false, false]);
+    browsing.retired(ROOT);
+    expect([...stops].map(([name, stop]) => [name, stop.aborted])).toEqual([["report.txt", true], ["statement.pdf", true], ["other.txt", false]]);
+    // Nothing is kept of a chat that is gone; one of its downloads that comes after is told to stop by nothing old.
+    expect((browsing as unknown as { saving: Map<string, unknown> }).saving.has(ROOT)).toBe(false);
+    stage({ root: ROOT, session: ROOT, name: "late.txt", path: kept("d"), user: false });
+    await vi.waitFor(() => expect(stops.get("late.txt")?.aborted).toBe(false));
+  });
+
   it("drops what a deleted chat's downloads came to, untold: its own and its sub-agents', and of a save that ends after it", async () => {
     const { browsing, chats, stage } = rig();
     let ended = (): void => {};

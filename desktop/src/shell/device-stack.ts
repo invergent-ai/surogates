@@ -48,8 +48,9 @@ export interface ToolLayer extends Executor {
   handBack?(root: string): boolean;
   takenOver?(root: string): boolean | "orphaned" | "elsewhere";
   show?(root: string): Promise<boolean>;
-  // What saves each download the agent's pages start: the stack's, through the binder.
-  saveDownloadsWith?(save: (download: StagedDownload) => Promise<string>): void;
+  // What saves each download the agent's pages start: the stack's, through the binder. *stop* aborts when the
+  // download's chat is deleted.
+  saveDownloadsWith?(save: (download: StagedDownload, stop: AbortSignal) => Promise<string>): void;
 }
 
 export interface DeviceStackOptions {
