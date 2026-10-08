@@ -31,7 +31,7 @@ The VM tests boot it under QEMU and KVM (`/dev/kvm`, `qemu-system-x86`,
 `SUROGATE_VM_IMAGE` names another image folder.
 
     npm run build
-    SUROGATE_VM_TESTS=1 npx vitest run test/vm/guest.test.ts
+    SUROGATE_VM_TESTS=1 npx vitest run test/vm/
 
 The app runs a chat's commands and background processes in that VM, each command
 in a cgroup of its own, its manager in a utility process of its own, with the VM's

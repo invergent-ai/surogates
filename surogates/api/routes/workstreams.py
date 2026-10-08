@@ -20,22 +20,26 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints, model_validator
 from sse_starlette.sse import EventSourceResponse
 
-from surogates.api.routes.sessions import archive_session_tree
+from surogates.api.routes.sessions import DeviceExecution, _require_local_device, archive_session_tree
 from surogates.api.routes.workspace import _should_skip_dir
+from surogates.api.session_guards import require_device_access
 from surogates.db.models import Workstream
+from surogates.devices.operations import DeviceOperations
+from surogates.devices.presence import DevicePresence
 from surogates.harness.loop_artifacts import _coerce_modified_to_datetime
 from surogates.harness.turn_summarizer import is_platform_path
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep, rate_limit_dep
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
+from surogates.session.store import SessionNotFoundError
 from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.workstreams import master_config
 from surogates.workstreams import stream as project_stream
-from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread, units, utc
+from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread, place_of, units, utc
 from surogates.workstreams.store import WorkstreamStore
-from surogates.workstreams.threads import start_thread, stop_thread
+from surogates.workstreams.threads import begin_thread, make_thread, start_thread, stop_thread
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +114,8 @@ class ProposedThreadStart(BaseModel):
 
     proposal_id: UUID
     key: Annotated[str, StringConstraints(pattern=r"^[1-9][0-9]{0,3}$")]
+    #: A folder its user confirmed on their computer: the thread works there.
+    execution: DeviceExecution | None = None
 
 
 class ProjectSummaryOut(BaseModel):
@@ -256,6 +262,23 @@ async def archive_project(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+async def _say_online(request: Request, places: list[dict[str, Any]]) -> None:
+    """Say of each computer *places* name whether it is connected to the agent now."""
+    devices = {UUID(place["device_id"]) for place in places if place["kind"] == "device"}
+    redis = getattr(request.app.state, "redis", None)
+    if not devices or redis is None:
+        return
+    try:
+        online = await DevicePresence(redis).online(list(devices))
+    except Exception:
+        # A nicety: Redis down leaves every computer offline, and the rows still answer.
+        logger.warning("Could not tell which computers are online", exc_info=True)
+        return
+    for place in places:
+        if place["kind"] == "device":
+            place["online"] = UUID(place["device_id"]) in online
+
+
 @router.get("/{workstream_id}/threads")
 async def list_threads(
     workstream_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant, thread_id: UUID | None = None,
@@ -266,7 +289,9 @@ async def list_threads(
     project = await _project(request, workstream_id, tenant, ctx)
     now = datetime.now(timezone.utc)
     found = await _store(request).thread_facts(project.id, thread_id=thread_id)
-    return [derive_thread(facts, now=now) for facts in found[: SHELL_LIMITS["rows"]]]
+    rows = [derive_thread(facts, now=now) for facts in found[: SHELL_LIMITS["rows"]]]
+    await _say_online(request, [row["place"] for row in rows])
+    return rows
 
 
 @router.get("/{workstream_id}/library")
@@ -274,18 +299,22 @@ async def project_library(
     workstream_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant,
 ) -> list[dict[str, Any]]:
     """The project's files, newest first and as many as the shell takes:
-    the one workspace its master and threads share.  A file a thread's turn
-    summary named is that thread's, the last one to name it; every other
-    file the user added.  The platform's own files are left out, and so is
-    every folder the file panel skips (dependencies, builds, checkouts):
-    an install's thousands of files would push the user's out."""
+    the one workspace its master and threads share.  A file a cloud
+    thread's turn summary named is that thread's, the last one to name it;
+    every other file the user added.  The platform's own files are left
+    out, and so is every folder the file panel skips (dependencies, builds,
+    checkouts): an install's thousands of files would push the user's out.
+    A thread on the user's computer made its files there: they are listed
+    from its summaries, with that computer as their place."""
     project = await _project(request, workstream_id, tenant, ctx)
     master = await request.app.state.session_store.get_session(project.master_session_id)
     prefix = boundary_workspace_prefix(master.config, master, master.id)
-    produced, listed = await asyncio.gather(
+    named, listed = await asyncio.gather(
         _store(request).produced(project.id),
         request.app.state.storage.list_entries(master.config["storage_bucket"], prefix=prefix),
     )
+    produced = {path: thread_id for thread_id, path, execution, _ in named if execution is None}
+    on_computers = {(thread_id, path): (execution, at) for thread_id, path, execution, at in named if execution is not None}
     entries: list[tuple[datetime, dict[str, Any]]] = []
     for found in listed:
         path = found["key"][len(prefix):]
@@ -305,12 +334,20 @@ async def project_library(
             "thread_id": None if thread_id is None else str(thread_id),
             "size": found.get("size"),
             "updated_at": utc(modified),
-            # Every thread works in the cloud until local-folder threads.
             "place": {"kind": "cloud"},
+        }))
+    for (thread_id, path), (execution, at) in on_computers.items():
+        if is_platform_path(path, on_folder=True) or units(path) > SHELL_LIMITS["ref"]:
+            continue
+        entries.append((aware(at), {
+            "path": path, "origin": "produced", "thread_id": str(thread_id),
+            "size": None, "updated_at": utc(at), "place": place_of(execution),
         }))
     # By the moment, not its text: "…:56Z" would sort after "…:56.5Z".
     entries.sort(key=lambda entry: entry[0], reverse=True)
-    return [entry for _, entry in entries[: SHELL_LIMITS["library"]]]
+    shown = [entry for _, entry in entries[: SHELL_LIMITS["library"]]]
+    await _say_online(request, [entry["place"] for entry in shown])
+    return shown
 
 
 @router.get("/{workstream_id}/stream")
@@ -373,7 +410,9 @@ async def _row(request: Request, project: Workstream, thread_id: UUID) -> dict[s
     found = await _store(request).thread_facts(project.id, thread_id=thread_id)
     if not found:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such thread.")
-    return derive_thread(found[0], now=datetime.now(timezone.utc))
+    row = derive_thread(found[0], now=datetime.now(timezone.utc))
+    await _say_online(request, [row["place"]])
+    return row
 
 
 @router.post("/{workstream_id}/threads/{thread_id}/resolve")
@@ -408,6 +447,42 @@ async def reopen_thread(
     return await _row(request, project, thread.id)
 
 
+@contextlib.asynccontextmanager
+async def _card_held(request: Request, project: Workstream, proposal_id: UUID, key: str):
+    """The card *key* of *proposal_id*, held for one start; Redis, for the start.
+
+    A card started twice at once, by a double click or from two devices:
+    the second does not wait for the first, it is refused.  The claim is in
+    Redis, so no start holds a database connection while it waits for more
+    of the pool, as Start all's every card at once would; the thread's
+    ``worker.spawned`` refuses a later start.
+    """
+    redis = getattr(request.app.state, "redis", None)
+    if redis is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Redis is required to start a thread.")
+    claim, token = f"surogates:workstream:card:{project.id}:{proposal_id}:{key}", uuid4().hex
+    if not await redis.set(claim, token, nx=True, ex=_CARD_CLAIM_SECONDS):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This thread was already started.")
+    try:
+        if await _store(request).started_from(project.master_session_id, proposal_id, key):
+            raise HTTPException(status.HTTP_409_CONFLICT, "This thread was already started.")
+        yield redis
+    finally:
+        # Released however the start ends, so one that failed can be tried
+        # again; but only its own, so a start that ran past its claim's
+        # expiry leaves the claim of the start that took it over.
+        await redis.eval(_RELEASE_CLAIM, 1, claim, token)
+
+
+async def _card(request: Request, project: Workstream, proposal_id: UUID, key: str) -> dict[str, Any]:
+    """The card *key* of the master's proposal *proposal_id*; 404 when there is none."""
+    proposed = await _store(request).proposal(project.master_session_id, proposal_id)
+    card = next((t for t in (proposed or {}).get("threads", []) if t.get("key") == key), None)
+    if card is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such proposed thread.")
+    return card
+
+
 @router.post("/{workstream_id}/threads", status_code=status.HTTP_201_CREATED)
 async def start_proposed_thread(
     workstream_id: UUID, body: ProposedThreadStart, request: Request, ctx: AgentRuntime, tenant: Tenant,
@@ -415,43 +490,74 @@ async def start_proposed_thread(
 ) -> dict[str, Any]:
     """Start a thread the master proposed, from its card.  Its title and goal
     are the proposal's, read from the master's log, never the request's; it
-    is news to the master, and wakes nobody but itself."""
+    is news to the master, and wakes nobody but itself.
+
+    With *execution*, a folder its user confirmed on their computer, the
+    thread is made there and its computer asked to bind it.  It begins once
+    bound, from ``…/threads/{thread_id}/start``, and this answers its id.
+    """
     project = await _project(request, workstream_id, tenant, ctx)
-    store = _store(request)
-    proposed = await store.proposal(project.master_session_id, body.proposal_id)
-    card = next((t for t in (proposed or {}).get("threads", []) if t.get("key") == body.key), None)
-    if card is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such proposed thread.")
-    if card["where"] != "cloud":
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "This thread works in a folder on your computer: start it from Surogate Desktop.",
-        )
+    # A card proposed for the user's computer runs in the cloud without one:
+    # the user chose it there, as a browser's card offers.
+    card = await _card(request, project, body.proposal_id, body.key)
+    # Checked before anything is made, as a new local-folder chat's is.
+    device = None if body.execution is None else await _require_local_device(
+        request, tenant, ctx.agent_id, body.execution, channel="web", user_id=tenant.user_id,
+    )
     state = request.app.state
-    redis = getattr(state, "redis", None)
-    if redis is None:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Redis is required to start a thread.")
-    # A card started twice at once, by a double click or from two devices:
-    # the second does not wait for the first, it is refused.  The claim is
-    # in Redis, so no start holds a database connection while it waits for
-    # more of the pool, as Start all's every card at once would; the
-    # thread's ``worker.spawned`` refuses a later start.
-    claim, token = f"surogates:workstream:card:{project.id}:{body.proposal_id}:{body.key}", uuid4().hex
-    if not await redis.set(claim, token, nx=True, ex=_CARD_CLAIM_SECONDS):
-        raise HTTPException(status.HTTP_409_CONFLICT, "This thread was already started.")
-    try:
-        if await store.started_from(project.master_session_id, body.proposal_id, body.key):
-            raise HTTPException(status.HTTP_409_CONFLICT, "This thread was already started.")
-        thread = await start_thread(
-            session_store=state.session_store, session_factory=state.session_factory, redis=redis,
-            master=await state.session_store.get_session(project.master_session_id), live_config=None,
-            title=card["title"], goal=card["goal"], context="",
-            proposal={"proposal_id": str(body.proposal_id), "key": body.key},
-        )
-    finally:
-        # Released however the start ends, so one that failed can be tried
-        # again; but only its own, so a start that ran past its claim's
-        # expiry leaves the claim of the start that took it over.
-        await redis.eval(_RELEASE_CLAIM, 1, claim, token)
+    proposal = {"proposal_id": str(body.proposal_id), "key": body.key}
+    async with _card_held(request, project, body.proposal_id, body.key) as redis:
+        master = await state.session_store.get_session(project.master_session_id)
+        if body.execution is None:
+            thread = await start_thread(
+                session_store=state.session_store, session_factory=state.session_factory, redis=redis,
+                master=master, live_config=None, title=card["title"], goal=card["goal"], context="",
+                proposal=proposal,
+            )
+        else:
+            thread = await make_thread(
+                session_store=state.session_store, session_factory=state.session_factory, master=master,
+                live_config=None, title=card["title"], device=device, folder=body.execution.folder, card=proposal,
+            )
+            if thread is not None:
+                await DeviceOperations(state.session_factory, redis).bind(
+                    session_id=thread.id, device_id=device.id,
+                    folder=body.execution.folder, nonce=body.execution.nonce,
+                )
     if thread is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
+    if body.execution is not None:
+        return {"thread_id": str(thread.id)}
+    return await _row(request, project, thread.id)
+
+
+@router.post("/{workstream_id}/threads/{thread_id}/start", status_code=status.HTTP_201_CREATED)
+async def begin_local_thread(
+    workstream_id: UUID, thread_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant,
+    _rate: None = Depends(rate_limit_dep),
+) -> dict[str, Any]:
+    """Begin a thread made from a card on the user's computer, once that
+    computer has bound it: its row, its goal, the master's news, its queue.
+    409 until bound, and for a card started meanwhile."""
+    project = await _project(request, workstream_id, tenant, ctx)
+    state = request.app.state
+    try:
+        thread = await state.session_store.get_session(thread_id)
+    except SessionNotFoundError:
+        thread = None
+    made_for = (thread.config or {}).get("workstream_card") if thread is not None else None
+    if made_for is None or thread.parent_id != project.master_session_id or thread.status == "archived":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such thread.")
+    # 409 until its computer has bound the folder: it has nowhere to work yet.
+    await require_device_access(request, thread, tenant)
+    proposal_id = UUID(made_for["proposal_id"])
+    card = await _card(request, project, proposal_id, made_for["key"])
+    async with _card_held(request, project, proposal_id, made_for["key"]) as redis:
+        begun = await begin_thread(
+            session_store=state.session_store, session_factory=state.session_factory, redis=redis,
+            master=await state.session_store.get_session(project.master_session_id), thread=thread,
+            title=card["title"], goal=card["goal"], context="", proposal=made_for,
+        )
+    if begun is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
     return await _row(request, project, thread.id)

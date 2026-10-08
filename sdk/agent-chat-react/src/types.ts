@@ -1013,6 +1013,16 @@ export interface AgentChatAdapter {
     proposalId: string;
     key: string;
   }): Promise<AgentChatThreadRow>;
+  /**
+   * Start a thread the master proposed for the user's computer, in Surogate Desktop only: in a
+   * folder its user confirms in the desktop's own sheet, which names the project and *title*.
+   */
+  startLocalThread?(input: {
+    projectId: string;
+    proposalId: string;
+    key: string;
+    title: string;
+  }): Promise<AgentChatThreadRow>;
   getArtifact(input: {
     sessionId: string;
     artifactId: string;

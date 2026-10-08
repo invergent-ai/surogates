@@ -17,7 +17,7 @@ from surogates.db.models import Event, InboxItem, Workstream, WorkstreamThread
 from surogates.db.models import Session as SessionRow
 from surogates.session.events import EventType
 from surogates.workstreams import master_instructions
-from surogates.workstreams.derive import LATEST_TYPES, WAITING_KINDS, ThreadFacts
+from surogates.workstreams.derive import LATEST_TYPES, WAITING_KINDS, ThreadFacts, place_of
 
 
 def _any(ids: Any) -> Any:
@@ -155,7 +155,7 @@ class WorkstreamStore:
         every summary is most of the cost of a project's rows.
         """
         query = (
-            select(WorkstreamThread, SessionRow.status, SessionRow.updated_at)
+            select(WorkstreamThread, SessionRow.status, SessionRow.updated_at, SessionRow.config["execution"])
             .join(SessionRow, SessionRow.id == WorkstreamThread.session_id)
             .where(WorkstreamThread.workstream_id == workstream_id, SessionRow.status != "archived")
         )
@@ -163,7 +163,7 @@ class WorkstreamStore:
             query = query.where(WorkstreamThread.session_id == thread_id)
         async with self._sf() as db:
             threads = (await db.execute(query)).all()
-            ids = [thread.session_id for thread, _, _ in threads]
+            ids = [thread.session_id for thread, _, _, _ in threads]
             if not ids:
                 return []
             # A thread's delegated children wait on the user for it, so every
@@ -205,11 +205,10 @@ class WorkstreamStore:
             ThreadFacts(
                 id=thread.session_id, title=thread.title, status=status,
                 created_at=thread.created_at, updated_at=updated_at, resolved_at=thread.resolved_at,
-                # Every thread works in the cloud until local-folder threads.
-                place={"kind": "cloud"},
+                place=place_of(execution),
                 items=tuple(items_of[thread.session_id]), events=tuple(events_of[thread.session_id]),
             )
-            for thread, status, updated_at in sorted(threads, key=lambda found: found[2], reverse=True)
+            for thread, status, updated_at, execution in sorted(threads, key=lambda found: found[2], reverse=True)
         ]
 
     async def thread_counts(self, workstream_ids: list[UUID]) -> dict[UUID, tuple[datetime, int, int]]:
@@ -276,23 +275,33 @@ class WorkstreamStore:
             found = await db.execute(query)
             return {project: (latest, waiting, working) for project, latest, waiting, working in found}
 
-    async def produced(self, workstream_id: UUID) -> dict[str, UUID]:
-        """Each workspace file the project's threads produced, and the thread
-        whose turn summary named it last."""
+    async def produced(self, workstream_id: UUID) -> list[tuple[UUID, str, Any, datetime]]:
+        """Each file the project's threads' turn summaries named, the oldest
+        naming first: the thread, the file's path from the top of where the
+        thread works, where it works (its ``config.execution``: None in the
+        cloud) and when the summary was written.  A ref outside where the
+        thread works names none of its files."""
         async with self._sf() as db:
             summaries = await db.execute(
-                select(Event.session_id, Event.data["artifacts"])
+                select(
+                    Event.session_id, Event.data["artifacts"], Event.created_at,
+                    SessionRow.config["execution"], SessionRow.config["workspace_path"],
+                )
                 .join(WorkstreamThread, WorkstreamThread.session_id == Event.session_id)
+                .join(SessionRow, SessionRow.id == Event.session_id)
                 .where(WorkstreamThread.workstream_id == workstream_id, Event.type == EventType.TURN_SUMMARY.value)
                 .order_by(Event.id)
             )
-            produced: dict[str, UUID] = {}
-            for thread_id, artifacts in summaries:
+            produced: list[tuple[UUID, str, Any, datetime]] = []
+            for thread_id, artifacts, at, execution, folder in summaries:
+                # The model's argument as given: ``./a.docx`` and the whole
+                # path, ``/workspace/a.docx`` or the computer's folder's, are ``a.docx``.
+                top = f"{str(folder).rstrip('/')}/" if execution else "/workspace/"
                 for artifact in artifacts if isinstance(artifacts, list) else []:
                     if isinstance(artifact, dict) and artifact.get("kind") == "file" and isinstance(artifact.get("ref"), str):
-                        # The model's argument as given: ``./a.docx`` and
-                        # ``/workspace/a.docx`` are ``a.docx``.
-                        produced[posixpath.normpath(artifact["ref"]).removeprefix("/workspace/")] = thread_id
+                        path = posixpath.normpath(artifact["ref"]).removeprefix(top)
+                        if not path.startswith("/") and path.split("/")[0] != "..":
+                            produced.append((thread_id, path, execution, at))
         return produced
 
     async def masters(self, master_ids: list[UUID]) -> dict[UUID, tuple[datetime, bool]]:

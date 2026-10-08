@@ -3,6 +3,7 @@ import * as codingAgentsApi from "@/api/coding-agents";
 import * as composioApi from "@/api/composio";
 import { authFetch } from "@/api/auth";
 import { submitAskUserQuestionResponse as submitAskUserQuestionResponseApi } from "@/api/ask_user_question";
+import { listDevices } from "@/api/devices";
 import { submitTurnFeedback } from "@/api/feedback";
 import * as inboxApi from "@/api/inbox";
 import * as missionsApi from "@/api/missions";
@@ -11,6 +12,8 @@ import { type SkillSummary, listSkills } from "@/api/skills";
 import * as workspaceApi from "@/api/workspace";
 import { workstreams } from "@/api/workstreams";
 import { getAuthToken } from "@/features/auth";
+import { getDesktop } from "@/lib/desktop-bridge";
+import { localThreads } from "@/lib/local-thread";
 import { INBOX_REOPENING, reopeningStream } from "@/lib/reopening-stream";
 import { useAppStore } from "@/stores/app-store";
 import type { ScheduledWorkItem, Session } from "@/types/session";
@@ -205,6 +208,12 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
   async startProposedThread(input) {
     return workstreams.start(input.projectId, input.proposalId, input.key);
   },
+
+  // Only Surogate Desktop has folders of this computer for a thread to work in.
+  ...localThreads(getDesktop(), {
+    ...workstreams,
+    online: async (deviceId) => (await listDevices()).some((row) => row.id === deviceId && row.online),
+  }),
 
   async stopSession(input) {
     await sessionsApi.stopSession(input.sessionId);

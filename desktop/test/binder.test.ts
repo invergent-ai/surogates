@@ -153,7 +153,7 @@ describe("preparing a new chat's folder", () => {
     const made = user.sheets[0]?.folder ?? "";
     expect(made).toMatch(new RegExp(`^${join(base, "home", "Surogate", "Research-assistant")}/\\d{4}-\\d{2}-\\d{2}$`));
     expect(user.dialogs).toEqual([]);
-    expect(user.sheets).toEqual([{ agent: "Research assistant", folder: made, mode: "free", links: null, refusal: null }]);
+    expect(user.sheets).toEqual([{ agent: "Research assistant", folder: made, mode: "free", links: null, refusal: null, thread: null }]);
     expect(ready).toEqual({
       folder: made, mode: "ask", nonce: expect.stringMatching(/^[A-Za-z0-9_-]{16,128}$/), token: expect.any(String),
     });
@@ -246,6 +246,13 @@ describe("preparing a new chat's folder", () => {
     expect(user.dialogs).toEqual([join(base, "home")]);
     expect(user.sheets.map((sheet) => sheet.folder)).toEqual([notes]);
     expect(readdirSync(join(base, "data", "Research-assistant"))).toEqual([]);
+  });
+
+  it("names on the sheet the project's thread the folder is for", async () => {
+    const user = new User([notes], [{ mode: "ask" }]);
+    const thread = { project: "Q3 report", thread: "Check the totals" };
+    expect(await binder(user).prepareFolder("pick", WINDOW, never(), thread)).toMatchObject({ folder: notes, mode: "ask" });
+    expect(user.sheets.map((sheet) => sheet.thread)).toEqual([thread]);
   });
 
   it("shows the files in the folder that are linked from elsewhere", async () => {

@@ -904,7 +904,8 @@ body.main.first {
   visibility: hidden;
 }
 
-.thread .place {
+.thread .place,
+.file .place {
   display: inline-flex;
   margin-left: 6px;
   vertical-align: -2px;

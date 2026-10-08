@@ -45,7 +45,7 @@ describe("the bridge", () => {
     const handlers = bridgeHandlers(ORIGIN, made);
     expect(await handlers.webSignIn!(TOP, "7")).toEqual({ code: "web-code" });
     await handlers.prepareFolder!(TOP, "7", "pick");
-    expect(made.prepareFolder).toHaveBeenCalledWith("pick", "7");
+    expect(made.prepareFolder).toHaveBeenCalledWith("pick", "7", null);
     await handlers.bindSession!(TOP, "7", SESSION, "b".repeat(43));
     expect(made.bindSession).toHaveBeenCalledWith(SESSION, "b".repeat(43), "7");
     expect(await handlers.getAppearance!(TOP, "7")).toMatchObject({ theme: "dark" });
@@ -99,6 +99,10 @@ describe("the bridge", () => {
 
   it.each([
     ["prepareFolder", ["new"], "Not a folder choice"],
+    ["prepareFolder", ["last", "Check the totals"], "Not a project's thread"],
+    ["prepareFolder", ["last", { project: "Q3 report", thread: 42 }], "Not a project's thread"],
+    ["prepareFolder", ["last", { project: "", thread: "Check the totals" }], "Not a project's thread"],
+    ["prepareFolder", ["last", { project: "Q3 report", thread: "x".repeat(257) }], "Not a project's thread"],
     ["bindSession", ["not-a-session", "b".repeat(43)], "Not a chat"],
     ["bindSession", [SESSION, "short"], "Not a folder confirmation"],
     ["setAccount", [{ ...ACCOUNT, name: "x".repeat(201) }], "Not an account"],
@@ -115,6 +119,15 @@ describe("the bridge", () => {
     const made = calls();
     await expect(bridgeHandlers(ORIGIN, made)[name]!(TOP, "7", ...args)).rejects.toThrow(message);
     expect(made[name]).not.toHaveBeenCalled();
+  });
+
+  it("passes on the project's thread a folder is asked for, and only its two names", async () => {
+    const made = calls();
+    const handlers = bridgeHandlers(ORIGIN, made);
+    await handlers.prepareFolder!(TOP, "7", "last", { project: "Q3 report", thread: "Check the totals", folder: "/etc" });
+    expect(made.prepareFolder).toHaveBeenCalledWith("last", "7", { project: "Q3 report", thread: "Check the totals" });
+    await handlers.prepareFolder!(TOP, "7", "pick", null);
+    expect(made.prepareFolder).toHaveBeenLastCalledWith("pick", "7", null);
   });
 
   it("keeps only what it knows of an account, takes none, and hears a registration", async () => {
