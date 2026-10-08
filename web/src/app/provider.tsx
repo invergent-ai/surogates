@@ -22,7 +22,8 @@ function hearSystemTheme(changed: () => void): () => void {
 const systemTheme = () => (window.matchMedia(DARK).matches ? "dark" : "light");
 
 /**
- * The theme Surogate Desktop gives the page, or none in a browser. The desktop's Light, Dark or
+ * The theme Surogate Desktop gives the page, or none in a browser but on the pane's transcript,
+ * which follows the system's there. The desktop's Light, Dark or
  * Match system drives prefers-color-scheme in every page it shows (Electron's
  * nativeTheme.themeSource), its pane's transcript too, so the page follows that, live, and no
  * toggle of its own applies.

@@ -9,7 +9,9 @@
          setting"). The desktop's Light, Dark or Match system drives prefers-color-scheme in every
          page it shows, its Overview pane's transcript too, which has no bridge (lib/appearance.ts's
          takesDesktopLook), so the root takes it here, before the stylesheets paint the body from
-         it; the app keeps it so (app/provider.tsx). In a browser the theme is next-themes' own. -->
+         it; the app keeps it so (app/provider.tsx). In a browser the theme is next-themes' own, but
+         on /transcript/<id>, the pane's page, which a browser reaches only by its address typed:
+         there it is the system's. -->
     <script>
       if (window.surogateDesktop || location.pathname.startsWith("/transcript/")) {
         document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches);
