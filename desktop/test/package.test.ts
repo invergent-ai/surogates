@@ -2,14 +2,14 @@
 // started as the installed app is: renamed, with the app's fuses. Behind SUROGATE_PACKAGE_TESTS=1:
 // it needs npm run build first, the npm cache npm ci left, xvfb-run, and about 1 GB of /tmp.
 
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { FuseState, FuseV1Options, getCurrentFuseWire } from "@electron/fuses";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 const DESKTOP = fileURLToPath(new URL("..", import.meta.url));
 const VERSION = "1.2.3";
@@ -61,31 +61,38 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarba
   // this package's, its paths as that folder names them; *more* is what a test adds to the job's
   // three arguments. Built as in a checkout under a folder that hands its group on: every folder
   // made there has the set-gid bit, here the build's own dist, and so has the folder for temporary files.
-  const pack = (out: string, ...more: string[]) => {
+  // Off the test's event loop: a packaging takes half a minute, and vitest's worker answers its
+  // runner on that loop within a minute, or fails the run with every test passed.
+  const pack = async (out: string, ...more: string[]) => {
     const dist = join(DESKTOP, "dist");
     const mode = statSync(dist).mode & 0o7777;
     chmodSync(dist, mode | 0o2000);
     try {
-      return spawnSync(join(DESKTOP, "scripts", "package.sh"), [VERSION, "vm-manifest.json", out, ...more], {
-        cwd: dir, encoding: "utf8", env: { ...process.env, SOURCE_DATE_EPOCH: "1790000000", TMPDIR: join(dir, "tmp") }, maxBuffer: 16 * 1024 * 1024,
+      return await new Promise<{ status: number | string | null; stdout: string; stderr: string }>((resolve) => {
+        execFile(join(DESKTOP, "scripts", "package.sh"), [VERSION, "vm-manifest.json", out, ...more], {
+          cwd: dir, encoding: "utf8", env: { ...process.env, SOURCE_DATE_EPOCH: "1790000000", TMPDIR: join(dir, "tmp") }, maxBuffer: 16 * 1024 * 1024,
+        }, (error, stdout, stderr) => resolve({ status: error ? error.code ?? null : 0, stdout, stderr }));
       });
     } finally {
       chmodSync(dist, mode);
     }
   };
 
-  beforeAll(() => {
+  beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), "package-test-"));
     writeFileSync(join(dir, "vm-manifest.json"), vmManifest);
     mkdirSync(join(dir, "tmp"));
     chmodSync(join(dir, "tmp"), 0o2775);
-    const packed = pack("out");
+    const packed = await pack("out");
     expect(packed.status, packed.stderr).toBe(0);
     expect(packed.stdout.trim().split("\n").at(-1)).toBe(join(dir, "out", `${NAME}.tar.gz`));
     mkdirSync(join(dir, "x"));
     expect(spawnSync("tar", ["-xzf", join(dir, "out", `${NAME}.tar.gz`), "-C", join(dir, "x")]).status).toBe(0);
     top = join(dir, "x", NAME);
   }, 180_000);
+
+  // A turn of the event loop between tests, for the calls that do hold it.
+  afterEach(() => new Promise((resolve) => setTimeout(resolve, 0)));
 
   afterAll(() => {
     rmSync(dir, { recursive: true, force: true });
@@ -121,18 +128,18 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarba
     expect(listing.split("\n").filter((line) => line && !/^(-rw-r--r--|-rwxr-xr-x|drwxr-xr-x|lrwxrwxrwx) /.test(line))).toEqual([]);
   });
 
-  it("packs the install script it is told as the root helper, a program whatever its file's mode: a test's release trusts a key of the test's own", () => {
+  it("packs the install script it is told as the root helper, a program whatever its file's mode: a test's release trusts a key of the test's own", async () => {
     // The repository's script with a line of the test's, kept as a file that is no program.
     const script = `${readFileSync(join(DESKTOP, "release", "install.sh"), "utf8")}# a test's\n`;
     writeFileSync(join(dir, "install.sh"), script, { mode: 0o644 });
-    const packed = pack("told", "install.sh");
+    const packed = await pack("told", "install.sh");
     expect(packed.status, packed.stderr).toBe(0);
     const tarball = join(dir, "told", `${NAME}.tar.gz`);
     expect(spawnSync("tar", ["-xzOf", tarball, `${NAME}/bin/surogate-apply-update`], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }).stdout).toBe(script);
     expect(spawnSync("tar", ["-tvzf", tarball, `${NAME}/bin/surogate-apply-update`], { encoding: "utf8" }).stdout).toMatch(/^-rwxr-xr-x 0\/0 /);
     // What is no file, or anything after it, is its usage.
     for (const more of [["nowhere.sh"], ["install.sh", "more"]]) {
-      expect(pack("told", ...more), more.join(" ")).toMatchObject({ status: 2, stdout: "", stderr: "usage: scripts/package.sh <x.y.z> <vm manifest.json> <out> [<install script>]\n" });
+      expect(await pack("told", ...more), more.join(" ")).toMatchObject({ status: 2, stdout: "", stderr: "usage: scripts/package.sh <x.y.z> <vm manifest.json> <out> [<install script>]\n" });
     }
   });
 
