@@ -65,9 +65,17 @@ async def harness_folder_refusal(workspace_io: DeviceWorkspaceIO, name: str, arg
 
     Each target is judged as the computer resolves it, as Ask every time
     judges a write.  One the computer will not resolve is the handler's to
-    refuse, in the computer's words.
+    refuse, in the computer's words.  A JSON string is judged as the
+    arguments it encodes, which ``ToolRegistry.dispatch`` parses and runs.
     """
-    if not isinstance(args, dict) or name not in ("write_file", "patch"):
+    if name not in ("write_file", "patch"):
+        return None
+    if isinstance(args, str):
+        try:
+            args = json.loads(args) if args.strip() else {}
+        except json.JSONDecodeError:
+            return None  # the registry refuses it
+    if not isinstance(args, dict):
         return None
     for path in [args.get("path")] if name == "write_file" else patch_targets(args):
         if not isinstance(path, str) or not path:
@@ -129,7 +137,7 @@ class DeviceCall:
         except Exception:
             logger.warning("could not mark what a tool call read as consumed", exc_info=True)
 
-    async def dispatch(self, name: str, args: dict[str, Any], *, read_tracker_id: str | None = None) -> str:
+    async def dispatch(self, name: str, args: dict[str, Any] | str, *, read_tracker_id: str | None = None) -> str:
         """Run a model's sandbox tool call on the computer, reading as the session unless *read_tracker_id* says.
 
         The model is the session's own, or an expert's through :meth:`execute`:
@@ -145,7 +153,7 @@ class DeviceCall:
         """The harness's own write_file of a result too long to keep in context, into its own folder."""
         return await self._run("write_file", {"path": path, "content": content}, self._harness_tool_tracker_id)
 
-    async def _run(self, name: str, args: dict[str, Any], read_tracker_id: str) -> str:
+    async def _run(self, name: str, args: dict[str, Any] | str, read_tracker_id: str) -> str:
         return await self._tools.dispatch(
             name,
             args,

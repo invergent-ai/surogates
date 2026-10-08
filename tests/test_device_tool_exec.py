@@ -382,3 +382,18 @@ async def test_an_experts_write_to_the_harnesss_own_folder_is_refused_too_and_th
     # The harness's own spill there, through the same call, still lands.
     assert await make_sandbox_writer(call, "root")(".surogates-results/call_1.txt", "x" * 10)
     assert (folder / ".surogates-results" / "call_1.txt").read_text() == "x" * 10
+
+
+async def test_a_double_encoded_write_to_the_harnesss_own_folder_is_refused_as_any(tmp_path):
+    folder = tmp_path.resolve()
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    call = DeviceCall(
+        tools=registry, workspace_io=DeviceWorkspaceIO(InProcessRunner(LocalWorkspaceIO(workspace_path=str(folder))), root=str(folder)),
+        task_id=str(uuid4()), read_tracker_id=str(uuid4()),
+    )
+    staged = ".surogates-results/skills/xlsx/scripts/recalc.py"
+    # A JSON string of the arguments, which the registry parses and runs as their object.
+    refused = await call.dispatch("write_file", json.dumps({"path": staged, "content": "print('rewritten')\n"}))
+    assert json.loads(refused) == {"error": "That folder is Surogate's own; write somewhere else in the chat's folder."}
+    assert not (folder / staged).exists()
