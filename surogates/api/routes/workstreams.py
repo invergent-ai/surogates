@@ -22,6 +22,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from surogates.api.routes.sessions import DeviceExecution, _require_local_device, archive_session_tree
 from surogates.api.routes.workspace import _should_skip_dir
+from surogates.api.session_guards import require_device_access
 from surogates.db.models import Workstream
 from surogates.devices.operations import DeviceOperations
 from surogates.harness.loop_artifacts import _coerce_modified_to_datetime
@@ -29,6 +30,7 @@ from surogates.harness.turn_summarizer import is_platform_path
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep, rate_limit_dep
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
+from surogates.session.store import SessionNotFoundError
 from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -36,7 +38,7 @@ from surogates.workstreams import master_config
 from surogates.workstreams import stream as project_stream
 from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread, units, utc
 from surogates.workstreams.store import WorkstreamStore
-from surogates.workstreams.threads import make_thread, start_thread, stop_thread
+from surogates.workstreams.threads import begin_thread, make_thread, start_thread, stop_thread
 
 logger = logging.getLogger(__name__)
 
@@ -461,11 +463,9 @@ async def start_proposed_thread(
     bound, from ``…/threads/{thread_id}/start``, and this answers its id.
     """
     project = await _project(request, workstream_id, tenant, ctx)
+    # A card proposed for the user's computer runs in the cloud without one:
+    # the user chose it there, as a browser's card offers.
     card = await _card(request, project, body.proposal_id, body.key)
-    if card["where"] != "cloud" and body.execution is None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "This thread works in a folder on your computer: start it from Surogate Desktop.",
-        )
     # Checked before anything is made, as a new local-folder chat's is.
     device = None if body.execution is None else await _require_local_device(
         request, tenant, ctx.agent_id, body.execution, channel="web", user_id=tenant.user_id,
@@ -494,4 +494,36 @@ async def start_proposed_thread(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
     if body.execution is not None:
         return {"thread_id": str(thread.id)}
+    return await _row(request, project, thread.id)
+
+
+@router.post("/{workstream_id}/threads/{thread_id}/start", status_code=status.HTTP_201_CREATED)
+async def begin_local_thread(
+    workstream_id: UUID, thread_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant,
+    _rate: None = Depends(rate_limit_dep),
+) -> dict[str, Any]:
+    """Begin a thread made from a card on the user's computer, once that
+    computer has bound it: its row, its goal, the master's news, its queue.
+    409 until bound, and for a card started meanwhile."""
+    project = await _project(request, workstream_id, tenant, ctx)
+    state = request.app.state
+    try:
+        thread = await state.session_store.get_session(thread_id)
+    except SessionNotFoundError:
+        thread = None
+    made_for = (thread.config or {}).get("workstream_card") if thread is not None else None
+    if made_for is None or thread.parent_id != project.master_session_id or thread.status == "archived":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such thread.")
+    # 409 until its computer has bound the folder: it has nowhere to work yet.
+    await require_device_access(request, thread, tenant)
+    proposal_id = UUID(made_for["proposal_id"])
+    card = await _card(request, project, proposal_id, made_for["key"])
+    async with _card_held(request, project, proposal_id, made_for["key"]) as redis:
+        begun = await begin_thread(
+            session_store=state.session_store, session_factory=state.session_factory, redis=redis,
+            master=await state.session_store.get_session(project.master_session_id), thread=thread,
+            title=card["title"], goal=card["goal"], context="", proposal=made_for,
+        )
+    if begun is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
     return await _row(request, project, thread.id)

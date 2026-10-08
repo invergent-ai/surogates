@@ -3,23 +3,30 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+import pytest_asyncio
 
 from surogates.devices.binding import Binding
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.store import DeviceStore
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
+from surogates.tools.workspace_io import LocalWorkspaceIO
+from tests.fake_laptop import FakeLaptop
 
-from .test_devices import (  # noqa: F401  (api is a fixture)
+from .test_device_sessions import has_failed, is_bound
+from .test_devices import (  # noqa: F401  (api and link_url are fixtures)
     AGENT_ID,
     FOLDER,
     NONCE,
     add_user,
     api,
     binding,
+    eventually,
+    link_url,
     register,
 )
 from .test_workstream_threads import PROPOSED, call_tool, children_of, events_of, queued, start
@@ -168,3 +175,119 @@ async def test_the_coordinator_cannot_make_a_thread_on_the_users_computer(api):
     thread = await start(api, master, execution=confirmed(device["id"]))
     assert "execution" not in thread.config
     assert await journal(api).pending(UUID(device["id"]), 1) == []
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def laptop(api, link_url, tmp_path):
+    """A registered computer's fake app, where the user confirmed ``FOLDER`` under ``NONCE``, not connected yet."""
+    device = await register(api)
+    folder = (tmp_path / "laptop").resolve()
+    folder.mkdir()
+    app = FakeLaptop(link_url, device["token"], LocalWorkspaceIO(str(folder)))
+    app.prepare(NONCE, FOLDER)
+    yield SimpleNamespace(app=app, device_id=device["id"], folder=folder)
+    await app.disconnect()
+
+
+async def begin(api, project: dict, thread_id: str, token: str | None = None):
+    return await api.client.post(
+        f"/v1/workstreams/{project['id']}/threads/{thread_id}/start", headers=api.auth(token),
+    )
+
+
+async def made_local(api, laptop) -> tuple[dict, object, str, str]:
+    """A project, its master, the proposal and the thread made from its card "2" on *laptop*'s computer."""
+    project, master, proposal_id = await device_card(api)
+    made = await make_local(api, project, proposal_id, confirmed(laptop.device_id))
+    assert made.status_code == 201, made.text
+    return project, master, proposal_id, made.json()["thread_id"]
+
+
+async def begun_local(api, laptop):
+    """A project, its master and a thread begun on *laptop*'s computer, which is connected."""
+    project, master, _, thread_id = await made_local(api, laptop)
+    await laptop.app.connect()
+    await eventually(lambda: is_bound(api, thread_id))
+    assert (await begin(api, project, thread_id)).status_code == 201
+    return project, master, await api.app.state.session_store.get_session(UUID(thread_id))
+
+
+async def test_a_thread_on_the_users_computer_begins_once_its_computer_has_bound_it(api, laptop):
+    project, master, proposal_id, thread_id = await made_local(api, laptop)
+    early = await begin(api, project, thread_id)
+    assert (early.status_code, early.json()["detail"]) == (409, "This chat's folder is still being set up on your computer.")
+    assert await events_of(api, UUID(thread_id)) == []
+
+    await laptop.app.connect()
+    await eventually(lambda: is_bound(api, thread_id))
+    assert laptop.app.bindings == {thread_id: FOLDER}
+    response = await begin(api, project, thread_id)
+    assert response.status_code == 201, response.text
+    assert (response.json()["id"], response.json()["title"], response.json()["group"]) == (thread_id, "Check the totals", "working")
+    thread = await api.app.state.session_store.get_session(UUID(thread_id))
+    [goal] = await events_of(api, thread.id, EventType.USER_MESSAGE)
+    assert goal.data == {"content": "Check the totals in Budget.xlsx."}
+    [spawned] = await events_of(api, master.id, EventType.WORKER_SPAWNED)
+    assert spawned.data == {
+        "worker_id": thread_id, "title": "Check the totals", "goal": "Check the totals in Budget.xlsx.",
+        "started_by": "user", "proposal_id": proposal_id, "key": "2",
+    }
+    assert await queued(api, thread)
+
+
+async def test_a_thread_begins_once(api, laptop):
+    project, master, _, thread_id = await made_local(api, laptop)
+    await laptop.app.connect()
+    await eventually(lambda: is_bound(api, thread_id))
+    both = await asyncio.gather(*(begin(api, project, thread_id) for _ in range(2)))
+    assert sorted(response.status_code for response in both) == [201, 409]
+    again = await begin(api, project, thread_id)
+    assert (again.status_code, again.json()["detail"]) == (409, "This thread was already started.")
+    assert len(await events_of(api, master.id, EventType.WORKER_SPAWNED)) == 1
+    assert len(await events_of(api, UUID(thread_id), EventType.USER_MESSAGE)) == 1
+
+
+async def test_a_folder_the_user_did_not_confirm_keeps_its_thread_from_beginning(api, laptop):
+    laptop.app.prepared.clear()
+    project, master, _, thread_id = await made_local(api, laptop)
+    await laptop.app.connect()
+    await eventually(lambda: has_failed(api, thread_id))
+    refused = await begin(api, project, thread_id)
+    assert (refused.status_code, refused.json()["detail"]) == (409, (
+        "This chat's folder could not be set up: This folder was not confirmed on this computer. Start a new chat."
+    ))
+    assert await events_of(api, master.id, EventType.WORKER_SPAWNED) == []
+
+
+async def test_only_the_projects_own_threads_made_on_a_computer_begin(api, laptop, session_factory):
+    project, master, _, thread_id = await made_local(api, laptop)
+    await laptop.app.connect()
+    await eventually(lambda: is_bound(api, thread_id))
+    other = await create(api, name="Budget")
+    cloud = await start(api, master)
+    _, their_token = await add_user(session_factory, api.org_id)
+    for case, (asked, thread, token, detail) in {
+        "another project": (other, thread_id, None, "No such thread."),
+        "an unknown thread": (project, str(uuid4()), None, "No such thread."),
+        "the master": (project, str(master.id), None, "No such thread."),
+        "a thread in the cloud": (project, str(cloud.id), None, "No such thread."),
+        "another user": (project, thread_id, their_token, "No such project."),
+    }.items():
+        refused = await begin(api, asked, thread, token)
+        assert (refused.status_code, refused.json()["detail"]) == (404, detail), case
+    assert await events_of(api, UUID(thread_id)) == []
+
+
+async def test_a_thread_proposed_for_the_users_computer_runs_in_the_cloud_when_the_user_says_so(api, laptop):
+    project, master, proposal_id = await device_card(api)
+    response = await api.client.post(
+        f"/v1/workstreams/{project['id']}/threads", json={"proposal_id": proposal_id, "key": "2"}, headers=api.auth(),
+    )
+    assert response.status_code == 201, response.text
+    thread = await api.app.state.session_store.get_session(UUID(response.json()["id"]))
+    assert "execution" not in thread.config
+    assert await queued(api, thread)
+    # Started in the cloud, it is not made again on the computer.
+    again = await make_local(api, project, proposal_id, confirmed(laptop.device_id))
+    assert (again.status_code, again.json()["detail"]) == (409, "This thread was already started.")
+    assert await journal(api).pending(UUID(laptop.device_id), 1) == []
