@@ -1000,12 +1000,21 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const second = releaseOf("1.1.0", (top) => writeFileSync(join(top, "resources", "app", "large"), randomBytes(48 * 1024 * 1024)));
     manifestOf("1.1.0", second);
     stage(second);
-    for (const [signal, ms] of [["HUP", 150], ["HUP", 300], ["HUP", 450], ["HUP", 600], ["HUP", 750], ["INT", 300], ["INT", 600], ["TERM", 300], ["TERM", 600]] as const) {
+    // Each signal at five points along the time an apply takes here: fixed times would all come
+    // after its end on a faster computer, and nothing would be stopped.
+    const took = Number(root(`start=$(date +%s%N); /opt/surogate-test/install.sh --apply ${files()} >/dev/null && echo $(( ($(date +%s%N) - start) / 1000000 ))`).stdout);
+    expect(took).toBeGreaterThan(0);
+    const stops = new Set<string>();
+    for (const signal of ["HUP", "INT", "TERM"]) for (const part of [0.15, 0.3, 0.45, 0.6, 0.75]) {
+      const ms = Math.max(1, Math.round(took * part));
       root("rm -rf /opt/surogate/versions/1.1.0 && ln -sfn /opt/surogate/versions/1.0.0 /opt/surogate/current");
       // Stopped (124), or done before the signal came (0): staging is empty as the helper ends.
       const stopped = root(`timeout -s ${signal} ${ms / 1000} /opt/surogate-test/install.sh --apply ${files()} >/dev/null 2>&1; echo "$? $(ls -A /opt/surogate/staging | wc -l)"`);
       expect(stopped.stdout.trim(), `${signal} at ${ms} ms`).toMatch(/^(124|0) 0$/);
+      if (stopped.stdout.startsWith("124 ")) stops.add(signal);
     }
+    // Each of the three did come while an apply ran.
+    expect([...stops].sort()).toEqual(["HUP", "INT", "TERM"]);
     expect(apply(second)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.1.0 is installed\n" });
   });
 
