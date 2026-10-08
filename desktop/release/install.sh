@@ -741,7 +741,7 @@ notes() {
 # this computer trusts now did not sign it, and when it cannot read what the installed version
 # keeps in its users' homes, as its state schema says.
 roll_back() {
-  local version="$1" base installed download release named size tarball=""
+  local version="$1" base installed download release its size tarball=""
   # The record is root's own word for the server this computer installs from: a file of root's
   # own at the mode an install writes it, one JSON document of 4096 bytes at most, and its base
   # an http or https URL as --base takes one. curl is handed no other word of it: one that begins
@@ -766,7 +766,7 @@ roll_back() {
     || fail "could not download $base/desktop/releases/$version/manifest.json.sig"
   signed "$download/manifest.json" "$download/manifest.json.sig" \
     || fail "$base/desktop/releases/$version/manifest.json is not signed by Surogate's release key"
-  release="$(release_of "$download/manifest.json")" && read -r named _ size <<<"$release" && [ "$named" = "$version" ] \
+  release="$(release_of "$download/manifest.json")" && read -r its _ size <<<"$release" && [ "$its" = "$version" ] \
     || fail "$base/desktop/releases/$version/manifest.json is not release $version of Surogate Desktop for this computer"
   # Before its tarball is asked for; apply compares them again, with the lock held.
   reads_state "$download/manifest.json" "$version"
