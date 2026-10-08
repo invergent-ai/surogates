@@ -116,6 +116,24 @@ describe("a tool host", { timeout: 30_000 }, () => {
     expect(readFileSync(join(folder, "most.bin")).equals(data)).toBe(true);
   });
 
+  it("makes a file only where nothing is for a write told to create, through its file helper in the folder's sandbox, and writes through no link made at a name", async () => {
+    const harness = host();
+    await ready(harness);
+    const b64 = (text: string) => Buffer.from(text).toString("base64");
+    const key = `${folder}/Downloads/report.txt`;
+    // The first makes the folder too.
+    expect(await harness.op("1", "write", { key, data: b64("first"), create: true })).toEqual({ ok: null });
+    expect(await harness.op("2", "write", { key, data: b64("second"), create: true })).toEqual({
+      error: { type: "os", code: "EEXIST", message: `File exists: '${key}'` },
+    });
+    // A link made at a name meanwhile, to a file outside the folder that is not there yet.
+    symlinkSync(join(base, "outside.txt"), join(folder, "Downloads", "notes.txt"));
+    expect(await harness.op("3", "write", { key: `${folder}/Downloads/notes.txt`, data: b64("third"), create: true })).toMatchObject({ error: { type: "sandbox" } });
+    expect([readdirSync(join(folder, "Downloads")).sort(), readFileSync(key, "utf8"), existsSync(join(base, "outside.txt"))]).toEqual([
+      ["notes.txt", "report.txt"], "first", false,
+    ]);
+  });
+
   it("leaves the user's folder as it was", async () => {
     const before = readdirSync(folder).sort();
     // Started in the folder: without its own chdir, srt would mount its
