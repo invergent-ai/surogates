@@ -227,10 +227,22 @@ for (const link of document.querySelectorAll<HTMLElement>("[data-link]")) {
 }
 for (const control of document.querySelectorAll<HTMLElement>("[data-setting]")) {
   // A group named by its row, so a screen reader says what its buttons choose.
+  const row = control.closest<HTMLElement>(".row");
+  const label = row?.dataset.label ?? "";
   control.setAttribute("role", "group");
-  control.setAttribute("aria-label", control.closest<HTMLElement>(".row")?.dataset.label ?? "");
+  control.setAttribute("aria-label", label);
+  // Why its last choice failed, under its row's label: gone once one goes through.
+  const refused = document.createElement("span");
+  refused.className = "error";
+  refused.setAttribute("role", "alert");
+  row?.querySelector(".label")?.append(refused);
   for (const option of control.querySelectorAll<HTMLElement>("[data-value]")) {
-    option.addEventListener("click", () => void settings.set(control.dataset.setting ?? "", option.dataset.value ?? "").then(render));
+    // Drawn again either way: the control shows the setting as it is, whatever of the choice was kept before it failed.
+    option.addEventListener("click", () => void settings.set(control.dataset.setting ?? "", option.dataset.value ?? "").then(() => {
+      refused.textContent = "";
+    }, (error: unknown) => {
+      showText(refused, `Surogate did not change ${label}: ${said(error)}.`);
+    }).finally(render));
   }
 }
 // The main process acts only on a button its line shows.
