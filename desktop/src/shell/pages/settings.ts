@@ -26,13 +26,16 @@ interface State {
 // A folder this computer's chats work on, and each chat on it (folders.ts).
 interface Folder {
   folder: string;
-  chats: Array<{ root: string; title: string; mode: "free" | "ask"; hosts: string[]; processes: Array<{ id: string; command: string }> }>;
+  chats: Array<{
+    root: string; title: string; mode: "free" | "ask"; hosts: string[]; browser: boolean; processes: Array<{ id: string; command: string }>;
+  }>;
 }
 
 interface Settings {
   state(): Promise<State>;
   folders(): Promise<Folder[]>;
   takeBack(root: string, host: string): Promise<void>;
+  takeBrowserBack(root: string): Promise<void>;
   stop(root: string, id: string): Promise<void>;
   set(key: string, value: string): Promise<void>;
   link(which: "usage"): Promise<void>;
@@ -110,7 +113,8 @@ function line(text: string, action: string, name: string, act: () => Promise<voi
   return held;
 }
 
-// A chat's row: its title, as text, its mode, each host its user let it reach, and each background process it runs.
+// A chat's row: its title, as text, its mode, each host its user let it reach, the browser if it may use it, and
+// each background process it runs.
 // Its title is what a search finds it by.
 function chatRow(chat: Folder["chats"][number]): HTMLElement {
   const row = document.createElement("div");
@@ -127,6 +131,9 @@ function chatRow(chat: Folder["chats"][number]): HTMLElement {
     title,
     mode,
     ...chat.hosts.map((host) => line(`Reaches ${host}, on every port`, "Take back", host, () => settings.takeBack(chat.root, host))),
+    ...(chat.browser
+      ? [line("Uses the browser on this computer", "Take back", "the browser on this computer", () => settings.takeBrowserBack(chat.root))]
+      : []),
     ...chat.processes.map(({ id, command }) => line(`Runs ${command}`, "Stop", command, () => settings.stop(chat.root, id))),
   );
   row.append(label);

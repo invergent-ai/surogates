@@ -2,7 +2,8 @@
 // work on, its chats, and what each chat's user allowed it. The chats are bound over the fake
 // agent's link, as the agent binds them once its user has accepted the folder sheet.
 
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -148,6 +149,31 @@ describe("Settings → Folders and permissions", () => {
     // Switched from the chat's own bar, while Settings is open.
     await client.evaluate((id) => window.surogateDesktop!.setMode(id, "ask"), CHAT);
     await expect.poll(() => texts(settings, "#folders .row .label > .desc")).toEqual(["Asks every time"]);
+  });
+
+  it("lists a chat its user let use the browser here, and takes it back: its next browser call asks its first use again", async () => {
+    // A program that is no browser: the chat's first use is asked and allowed, and nothing is launched but it.
+    mkdirSync(join(home, "surogate"), { recursive: true });
+    writeFileSync(join(home, "surogate", "browser.json"), JSON.stringify({ choice: "custom", executable: "/usr/bin/true", version: "" }));
+    const { shell, page, client } = await signedIn();
+    await bound(client, folders[0]!, CHAT, "free");
+    const navigating = outcome(send("browser.navigate", { url: "https://example.com/", wait_until: "load" }, CHAT));
+    await press(await prompt(shell), "allow_session");
+    expect(await navigating).toMatchObject({ error: { type: "browser" } });
+    const settings = await foldersSettings(shell, page);
+    await expect.poll(() => texts(settings, "#folders .row .line"), { timeout: 10_000 }).toEqual(["Uses the browser on this computerTake back"]);
+    expect(await settings.getAttribute("#folders .row .line button", "aria-label")).toBe("Take back the browser on this computer");
+    await settings.click("#folders .row .line button");
+    await expect.poll(() => texts(settings, "#folders .row .line"), { timeout: 10_000 }).toEqual([]);
+    // Taken back: the chat's next browser call asks its first use again.
+    const again = outcome(send("browser.observe", { script: "snapshot@1", params: { selector: null } }, CHAT));
+    await press(await prompt(shell), "deny");
+    expect(await again).toMatchObject({ error: { type: "denied" } });
+    // One Settings does not show is refused.
+    const refused = await settings.evaluate((root) =>
+      (window as unknown as { surogateSettings: { takeBrowserBack(root: string): Promise<void> } }).surogateSettings.takeBrowserBack(root)
+        .then(() => "done", (error: Error) => error.message), CHAT);
+    expect(refused).toBe("Error invoking remote method 'settings:take-back-browser': Error: This chat does not use the browser on this computer");
   });
 
   it("says this computer's access was revoked once the agent revokes it, and refuses a Take back or a Stop", async () => {

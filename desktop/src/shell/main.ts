@@ -1983,6 +1983,12 @@ function showSettings(section?: "browser"): void {
       }
       bindings.disallowDomain(root, host);
     });
+    // A chat's browser taken back by its user: its agent's next browser call asks its first use again. Its tabs stay.
+    handle("settings:take-back-browser", (root) => {
+      const bindings = openStack()?.bindings;
+      if (!bindings || typeof root !== "string" || !bindings.browsing(root)) throw new Error("This chat does not use the browser on this computer");
+      bindings.disallowBrowser(root);
+    });
     // A chat's background process, stopped by its user, as the agent's own kill stops one. Only one
     // Settings shows: the VM runs other devices' chats too, and a chat deleted here keeps its processes there.
     handle("settings:stop", async (processRoot, id) => {
