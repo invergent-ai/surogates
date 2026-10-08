@@ -65,4 +65,73 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal "release-notes.md", release_step.fetch("with").fetch("body_path")
     refute release_step.fetch("with").key?("generate_release_notes")
   end
+
+  def test_desktop_vm_image_is_published_once_per_key_after_the_kernel_check
+    job = @workflow.fetch("jobs").fetch("desktop-vm-image")
+    steps = job.fetch("steps")
+    runs = steps.map { |step| step["run"].to_s }
+
+    assert_equal({ "group" => "desktop-vm-image", "cancel-in-progress" => false }, job.fetch("concurrency"))
+    assert_equal({ "contents" => "read" }, job.fetch("permissions"))
+    assert_equal({ "state" => "${{ steps.published.outputs.state }}" }, job.fetch("outputs"))
+    kernel = runs.index { |run| run.include?("images/guest/kernel-current.sh") }
+    fetch = runs.index { |run| run.include?("images/guest/publish.sh fetch images/guest/out") }
+    build = runs.index { |run| run.include?("images/guest/build.sh --packed images/guest/out") }
+    send = runs.index { |run| run.include?("images/guest/publish.sh send images/guest/out") }
+    refute_nil kernel
+    assert_operator kernel, :<, fetch
+    assert_operator fetch, :<, build
+    assert_operator build, :<, send
+    assert_equal "published", steps[fetch].fetch("id")
+    [build, send].each do |index|
+      assert_equal "steps.published.outputs.state == 'missing'", steps[index].fetch("if")
+    end
+    keep = steps.find { |step| step["uses"] == "actions/upload-artifact@v4" }
+    assert_equal "images/guest/out/manifest.json", keep.fetch("with").fetch("path")
+    %w[images/guest/inputs.sh images/guest/build.sh images/guest/publish.sh images/guest/kernel-current.sh].each do |script|
+      assert File.executable?(script), "#{script} is not executable"
+    end
+  end
+
+  def test_desktop_vm_image_gives_the_r2_secrets_to_its_two_publish_steps_alone
+    job = @workflow.fetch("jobs").fetch("desktop-vm-image")
+    r2 = {
+      "S3_ENDPOINT" => "${{ secrets.R2_ENDPOINT }}",
+      "S3_BUCKET" => "${{ secrets.R2_BUCKET }}",
+      "AWS_ACCESS_KEY_ID" => "${{ secrets.R2_ACCESS_KEY_ID }}",
+      "AWS_SECRET_ACCESS_KEY" => "${{ secrets.R2_SECRET_ACCESS_KEY }}",
+    }
+
+    refute job.key?("env"), "the job's env reaches every step"
+    job.fetch("steps").each do |step|
+      run = step["run"].to_s
+      if run.include?("images/guest/publish.sh fetch")
+        assert_equal r2.merge("GH_TOKEN" => "${{ github.token }}"), step.fetch("env")
+      elsif run.include?("images/guest/publish.sh send")
+        assert_equal r2, step.fetch("env")
+      else
+        refute step.fetch("env", {}).values.any? { |value| value.to_s.include?("secrets.") }, "#{step["name"] || step["uses"]} reads a secret"
+      end
+    end
+  end
+
+  def test_desktop_vm_manifest_is_attached_to_the_release_that_published_its_key
+    job = @workflow.fetch("jobs").fetch("desktop-vm-manifest")
+    run = job.fetch("steps").map { |step| step["run"].to_s }.join("\n")
+
+    assert_equal %w[release desktop-vm-image], Array(job.fetch("needs"))
+    assert_equal "needs.desktop-vm-image.outputs.state == 'missing'", job.fetch("if")
+    assert_equal({ "contents" => "write" }, job.fetch("permissions"))
+    download = job.fetch("steps").find { |step| step["uses"] == "actions/download-artifact@v4" }
+    assert_equal "desktop-vm-manifest", download.fetch("with").fetch("name")
+    assert_includes run, 'desktop-vm-${key}.json'
+    assert_includes run, 'gh release upload "$GITHUB_REF_NAME"'
+  end
+
+  def test_the_cloud_release_does_not_wait_for_the_desktop_image
+    release_needs = Array(@workflow.fetch("jobs").fetch("release").fetch("needs", []))
+
+    refute_includes release_needs, "desktop-vm-image"
+    refute_includes release_needs, "desktop-vm-manifest"
+  end
 end
