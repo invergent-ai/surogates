@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   BROWSER_HOST, BROWSER_STOPPED, BrowserClient, type BrowserProcess, CANCELLED, DUPLICATE, type FromBrowser, PAUSED, type ToBrowser,
@@ -118,6 +118,37 @@ describe("the browser host's client", () => {
     const again = client.show("root");
     hosts[0]!.exit();
     expect(await again).toBe(false);
+  });
+
+  it("says no page is shown when the host does not say in time, or is stopping, and keeps nothing of a show once it is answered", async () => {
+    vi.useFakeTimers();
+    try {
+      const host = new FakeHost();
+      const client = new BrowserClient(() => host);
+      const showing = (client as unknown as { showing: Map<string, unknown> }).showing;
+      void client.perform(LAUNCH, operation("op-1"), new AbortController().signal);
+      // A host that never answers leaves nobody waiting.
+      const unanswered = client.show("root");
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(showing.size).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await unanswered).toBe(false);
+      expect(showing.size).toBe(0);
+      // One it answers is kept no longer either, and its late bound answers nothing.
+      const answered = client.show("root");
+      host.say({ type: "shown", id: (host.sent.at(-1) as Extract<ToBrowser, { type: "show" }>).id, shown: true });
+      expect(await answered).toBe(true);
+      expect(showing.size).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+      // A host being stopped is asked nothing more.
+      void client.stop();
+      const sent = host.sent.length;
+      expect(await client.show("root")).toBe(false);
+      expect(host.sent).toHaveLength(sent);
+      host.say({ type: "stopped" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("asks a running host for the address of a session's page, and says a new tab's where none runs", async () => {

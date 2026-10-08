@@ -14,6 +14,8 @@ const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
 export const BROWSER_HOST = join(PACKAGE, "dist", "browser", "main.js");
 // Above the host's own bound on its browser's close (RELEASE_MS).
 const STOP_MS = 10_000;
+// How long a host may take to say whether it showed a page: above its own bound on bringing one to the front (SHOW_MS).
+const SHOWN_MS = 5_000;
 
 export const CANCELLED: Outcome = {
   error: { type: "cancelled", message: "The session stopped this before the computer finished it" },
@@ -140,16 +142,23 @@ export class BrowserClient {
     this.host?.send({ type: "pause", root, paused });
   }
 
-  /** Bring the chat's newest page to the front: whether there was one. None where no host runs. Never rejects. */
+  /**
+   * Bring the chat's newest page to the front: whether there was one. None where no host runs, or
+   * where the host does not say within SHOWN_MS. Never rejects.
+   */
   show(root: string): Promise<boolean> {
     const host = this.host;
     if (!host || this.stopping) return Promise.resolve(false);
     const id = `show-${(this.shows += 1)}`;
     return new Promise((resolve) => {
-      this.showing.set(id, (shown) => {
+      const answer = (shown: boolean) => {
+        clearTimeout(late);
         this.showing.delete(id);
         resolve(shown);
-      });
+      };
+      // A host that never says leaves nobody waiting.
+      const late = setTimeout(() => answer(false), SHOWN_MS);
+      this.showing.set(id, answer);
       host.send({ type: "show", id, root });
     });
   }
