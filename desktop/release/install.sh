@@ -142,10 +142,11 @@ in_use() {
 }
 
 # Whether version folder $2 is whole, for manifest $1: its mark is that manifest, and the app and
-# its helper are there to run.
+# its helper are there to run, each a file of the folder's own and no link. Nothing else in the
+# folder is looked at, where only root writes: a version damaged elsewhere is taken as it is.
 whole() {
-  cmp -s "$1" "$2/release.json" && [ -f "$2/surogate" ] && [ -x "$2/surogate" ] \
-    && [ -f "$2/bin/surogate-apply-update" ] && [ -x "$2/bin/surogate-apply-update" ]
+  cmp -s "$1" "$2/release.json" && [ -f "$2/surogate" ] && [ ! -L "$2/surogate" ] && [ -x "$2/surogate" ] \
+    && [ -f "$2/bin/surogate-apply-update" ] && [ ! -L "$2/bin/surogate-apply-update" ] && [ -x "$2/bin/surogate-apply-update" ]
 }
 
 # One install, update or removal at a time, by a lock on a file in a folder only root can open: any
@@ -307,10 +308,10 @@ apply() {
       [[ "$target" != /* ]] && [[ "$(realpath -ms "${link%/*}/$target")" == "$top"/* ]] && [[ "$(realpath -m "$link" 2>/dev/null)" == "$top"/* ]] \
         || fail "the release's archive links outside itself: $(named "${link#"$top"/}")"
     done < <(find "$top" -type l -print0)
-    # The app and its helper are programs, no folders, and bin a folder of the tree's own, where
-    # this version's bwrap goes.
-    [ -f "$top/surogate" ] && [ -x "$top/surogate" ] && [ -d "$top/bin" ] && [ ! -L "$top/bin" ] \
-      && [ -f "$top/bin/surogate-apply-update" ] && [ -x "$top/bin/surogate-apply-update" ] \
+    # The app and its helper are programs, no folders and no links, and bin a folder of the tree's
+    # own, where this version's bwrap goes.
+    [ -f "$top/surogate" ] && [ ! -L "$top/surogate" ] && [ -x "$top/surogate" ] && [ -d "$top/bin" ] && [ ! -L "$top/bin" ] \
+      && [ -f "$top/bin/surogate-apply-update" ] && [ ! -L "$top/bin/surogate-apply-update" ] && [ -x "$top/bin/surogate-apply-update" ] \
       || fail "the release's archive is not Surogate Desktop"
     chmod -R go-w "$top"
     chmod 0755 "$top"

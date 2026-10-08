@@ -666,6 +666,9 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       (top) => { rmSync(join(top, "surogate")); mkdirSync(join(top, "surogate")); },
       (top) => { rmSync(join(top, "bin", "surogate-apply-update")); mkdirSync(join(top, "bin", "surogate-apply-update")); },
       (top) => { renameSync(join(top, "bin"), join(top, "tools")); symlinkSync("tools", join(top, "bin")); },
+      // Each a link to a program of the tree's own.
+      (top) => { renameSync(join(top, "surogate"), join(top, "resources", "app", "surogate")); symlinkSync("resources/app/surogate", join(top, "surogate")); },
+      (top) => { renameSync(join(top, "bin", "surogate-apply-update"), join(top, "resources", "helper")); symlinkSync("../resources/helper", join(top, "bin", "surogate-apply-update")); },
     ];
     for (const [index, change] of refusals.entries()) {
       const tarball = releaseOf("1.0.0", change);
@@ -760,6 +763,10 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
         expect(root(`rm /opt/surogate/versions/${version}/${program}`).status).toBe(0);
         expect(apply(tarball), program).toMatchObject({ status: 0, stdout: `Surogate Desktop: ${version} is installed\n`, stderr: "" });
         expect(root(`test -x /opt/surogate/versions/${version}/${program}`).status).toBe(0);
+        // Nor when the program is a link, here to one that runs: it is no file of the folder's own.
+        expect(root(`ln -sf /usr/bin/true /opt/surogate/versions/${version}/${program}`).status).toBe(0);
+        expect(apply(tarball), program).toMatchObject({ status: 0, stdout: `Surogate Desktop: ${version} is installed\n`, stderr: "" });
+        expect(root(`test -x /opt/surogate/versions/${version}/${program} && test ! -L /opt/surogate/versions/${version}/${program}`).status, program).toBe(0);
       }
     }
     // An update removes the version before the last: it leaves versions whole, by a rename into staging.
