@@ -812,6 +812,80 @@ def test_a_helper_starts_where_its_thread_handed_off_never_from_a_pickup_of_its_
     assert [c["path"] for c in turn["changes"]] == ["h.md"]
 
 
+TURN = [["Surogate-Saga", "saga:x"], ["Surogate-Kind", "turn"]]
+
+
+def test_a_helper_started_after_its_threads_landing_starts_from_what_landed_and_its_untaken_files_are_named(tmp_path, project):
+    thread = a_pod(tmp_path, project)
+    (thread.copy / "outline.md").write_text("outline v1")
+    thread.hand_off(author=A, trailers=KEPT)
+    helper = a_helper(tmp_path, project)
+    (helper.copy / "sources.md").write_text("sources")
+    helper.hand_back(author=A, trailers=KEPT)
+    thread.take_up()
+    (thread.copy / "outline.md").write_text("outline v2, the thread's last word")
+    land(thread, "saga:1")
+    # The landing took the hand-off up: it is gone, so no later helper starts from the copy as it was handed on.
+    refs = git(project / "_history", "for-each-ref", "--format=%(refname)").splitlines()
+    assert not [ref for ref in refs if "handoff" in ref]
+    other = a_pod(tmp_path, project, "t2")  # another thread lands after it
+    (other.copy / "notes.txt").write_text("v2 notes, landed by another thread\n")
+    land(other, "saga:2", author={"name": "Draft B", "email": "thread:t2@surogate"})
+    run = a_helper(tmp_path, project, "h-routine")  # the thread's routine runs, long after
+    assert (run.copy / "outline.md").read_text() == "outline v2, the thread's last word"
+    assert (run.copy / "sources.md").read_text() == "sources"
+    # It starts at its thread's branch, which is the thread's own landing: not what others landed since.
+    assert (run.copy / "notes.txt").read_text() == "v1 notes\n"
+    (run.copy / "outline.md").write_text("outline v2, with the routine's line")
+    (run.copy / "notes.txt").write_text("v1 notes\nthe routine's line\n")
+    (run.copy / "routine.md").write_text("the routine's own file")
+    assert run.hand_back(author=A, trailers=KEPT)["not_kept"] == []
+    pod = a_pod(tmp_path, project)  # the thread's next turn end, with no tool
+    turn = pod.commit_turn(author=A, trailers=TURN)
+    assert [c["path"] for c in turn["changes"]] == ["outline.md", "routine.md"]
+    # Its edit to a file that changed since it started is left out, and the landing can say so.
+    assert turn["not_taken"] == ["notes.txt"]
+
+
+def test_a_helpers_edit_to_a_file_you_saved_since_is_not_taken_and_is_named(tmp_path, project):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first, "saga:1")
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report v2, saved by you")
+    run = a_helper(tmp_path, project)  # no hand-off: it starts at its thread's branch, as the history has it
+    assert (run.copy / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"  # your save is not in the history
+    (run.copy / "Report.docx").write_bytes(b"PK\x03\x04 report v1 + today's numbers")
+    assert run.hand_back(author=A, trailers=KEPT)["not_kept"] == []
+    pod = a_pod(tmp_path, project)  # its open takes the helper's work up: your version stays
+    turn = pod.commit_turn(author=A, trailers=TURN)
+    assert (turn["commit"], turn["changes"], turn["overlapped"]) == (None, [], [])
+    # Nothing lands, and the helper's edit is not silently gone: the commit step names it.
+    assert turn["not_taken"] == ["Report.docx"]
+    assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v2, saved by you"
+    # Taken up and left out once: a later turn of the thread names it no more.
+    assert a_pod(tmp_path, project).commit_turn(author=A, trailers=TURN)["not_taken"] == []
+
+
+def test_a_failed_turns_keep_drops_the_hand_off_its_branch_has_taken_up(tmp_path, project):
+    thread = a_pod(tmp_path, project)
+    (thread.copy / "outline.md").write_text("outline")
+    thread.hand_off(author=A, trailers=KEPT)
+    helper, late = a_helper(tmp_path, project, "h1"), a_helper(tmp_path, project, "h2")
+    (helper.copy / "sources.md").write_text("sources")
+    helper.hand_back(author=A, trailers=KEPT)
+    thread.take_up()
+    thread.keep(author=A, trailers=KEPT, base=True)  # its turn failed: the copy, with what it took up, is on its branch
+    durable = project / "_history"
+    assert not [ref for ref in git(durable, "for-each-ref", "--format=%(refname)").splitlines() if "handoff" in ref]
+    assert (a_helper(tmp_path, project, "h3").copy / "sources.md").read_text() == "sources"  # from the branch
+    # A helper still at work hands back onto no hand-off: what it changed since it started comes with the next turn.
+    (late.copy / "late.md").write_text("late")
+    late.hand_back(author=A, trailers=KEPT)
+    pod = a_pod(tmp_path, project)
+    assert sorted(p.name for p in pod.copy.iterdir()) == ["Report.docx", "late.md", "notes.txt", "outline.md", "sources.md"]
+    assert pod.commit_turn(author=A, trailers=TURN)["not_taken"] == []
+
+
 def test_a_failed_helpers_copy_is_kept_apart_and_never_handed_back(tmp_path, project):
     thread = a_pod(tmp_path, project)
     thread.hand_off(author=A, trailers=KEPT)

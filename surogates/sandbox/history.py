@@ -358,24 +358,29 @@ class History:
         The turn, its base and the branch are pushed before the first apply,
         so whoever puts a file back after a crash can read both its versions.
         Safe to repeat: a turn already committed and pushed is used again.
-        What helpers kept on the hand-off is taken up first, and lands with it.
+        What helpers kept on the hand-off is taken up first, and lands with
+        it; the hand-off, taken up whole, goes with that push.  ``not_taken``
+        are the helpers' files this pod's take-ups left as the copy had them,
+        at its open, in its turn or here: the landing's report names them.
         """
         self.take_up()
         self._add_all(self._copy)
         excluded, repositories, wrote_left_out = self._excluded()
-        left_out = {"excluded": excluded, "repositories": repositories}
+        left_out = {"excluded": excluded, "repositories": repositories, "not_taken": self._not_taken()}
         base = self._main("rev-parse", self.base)
+        refs = self._durable_refs()
         if not self._copy("diff", "--cached", "--name-only", base):
-            if (taken := self._taken_up()) and self._durable_refs().get(self.handoff_from) != taken[self.handoff_from]:
-                # What it took up and threw away stays away: the next take-up merges from here.
+            taken = self._taken_up(refs)
+            if any(refs.get(ref) != to for ref, to in taken.items()):
+                # What it took up and threw away stays away: no later take-up, and no later helper, starts from it.
                 self._push(taken, expect={})
             return {"commit": None, "base": base, "changes": [], "overlapped": [], **left_out}
         saga = f"Surogate-Saga: {dict(map(tuple, trailers))['Surogate-Saga']}"
         if self._copy("diff", "--cached", "--name-only", "HEAD") or saga not in self._copy("log", "-1", "--format=%B").splitlines():
             self._copy(*_as(author), "commit", "-q", "--allow-empty", "-m", "Turn", "-m", _block(trailers))
         turn = self._copy("rev-parse", "HEAD")
-        if self._durable_refs().get(self.branch) != turn:
-            self._push({self.branch: turn, self.base: base, **self._taken_up()}, expect={self.branch: self._ref(self.synced)})
+        if refs.get(self.branch) != turn:
+            self._push({self.branch: turn, self.base: base, **self._taken_up(refs)}, expect={self.branch: self._ref(self.synced)})
             self._main("update-ref", self.synced, turn)
         versions, renames = self._diff(base, turn)
         # A file and a folder of one name land together, as a rename's two sides do.
@@ -533,10 +538,11 @@ class History:
         A failed turn's work, kept for the thread's next landing.
         """
         tip = self._commit_copy(author, "Kept", trailers)
+        refs = self._durable_refs()
         # A branch never reaches the history without its base: the overlap check is against it.
-        moves_base = base or self.base not in self._durable_refs()
+        moves_base = base or self.base not in refs
         self._push(
-            {self.branch: tip, **({self.base: self._ref(self.base)} if moves_base else {}), **self._taken_up()},
+            {self.branch: tip, **({self.base: self._ref(self.base)} if moves_base else {}), **self._taken_up(refs)},
             expect={self.branch: self._ref(self.synced)},
         )
         self._main("update-ref", self.synced, tip)
@@ -600,8 +606,9 @@ class History:
 
         Where both changed a file, the copy keeps its own version, named in
         ``not_taken``; the helper's stays in history.  The branch takes it up
-        at the turn's end, with the commit step.  A hand-off with no
-        ``handoff-from`` is taken up from the copy's base.
+        at the turn's end, with the commit step, which names every file this
+        pod's take-ups left so.  A hand-off with no ``handoff-from`` is taken
+        up from the copy's base.
         """
         refs = self._take()
         durable = refs.get(self.handoff)
@@ -613,6 +620,8 @@ class History:
         tree, not_taken = self._merged(since, winner=tip, loser=durable)
         self._switch(tip, self._commit(tree, tip, durable, _CHECKPOINT, "Taken up", []))
         self._main("update-ref", self.handed, durable)
+        if not_taken:
+            _replace(self.repo / "not-taken", json.dumps(sorted({*self._not_taken(), *not_taken})).encode())
         return {"not_taken": not_taken}
 
     def drop_hand_off(self) -> dict:
@@ -723,10 +732,28 @@ class History:
             self._copy(*_as(author), "commit", "-q", "-m", title, "-m", _block(trailers))
         return self._copy("rev-parse", "HEAD")
 
-    def _taken_up(self) -> dict[str, str]:
-        """The hand-off as this copy took it up, for the branch's push: what the next take-up merges from."""
+    def _taken_up(self, refs: dict[str, str]) -> dict[str, str | None]:
+        """What a push of the branch makes of the hand-off, *refs* the history's as it is now.
+
+        The branch then holds all the copy took up.  A hand-off it took up
+        whole is dropped, with its ``handoff-from``: a helper started later
+        starts at the branch, not at the copy as it was once handed on, and
+        one still at work hands back onto none, as after a stop.  A hand-off
+        a helper kept onto since stays, its ``handoff-from`` where the copy
+        took it up: what the next take-up merges from.
+        """
         handed = self._ref(self.handed)
+        durable = refs.get(self.handoff)
+        if durable is not None and durable == (handed or refs.get(self.handoff_from)):
+            return {self.handoff: None, self.handoff_from: None}
         return {self.handoff_from: handed} if handed else {}
+
+    def _not_taken(self) -> list[str]:
+        """The helpers' files this pod's take-ups left as the copy had them."""
+        try:
+            return json.loads((self.repo / "not-taken").read_text())
+        except FileNotFoundError:
+            return []
 
     def _merged(self, base: str, *, winner: str, loser: str) -> tuple[str, list[str]]:
         """*winner*'s tree with each change *loser* made since *base* that *winner* did not make otherwise.

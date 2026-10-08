@@ -145,11 +145,13 @@ async def land_turn(
     """Land *session*'s turn; its outcome, or None when the turn never used its pod.
 
     The outcome is ``{saga, state, commit, landed, overlapped, excluded,
-    repositories, files, saved}``: *state* is ``completed``, ``compensated``
-    (rolled back whole) or ``escalated`` (a put-back failed); *files* are
-    the report's, every file the turn changed, ``landed`` or
-    ``not_merged``; *repositories* are the folders inside a git repository
-    the turn wrote into, which never land.
+    repositories, not_taken, files, saved}``: *state* is ``completed``,
+    ``compensated`` (rolled back whole) or ``escalated`` (a put-back
+    failed); *files* are the report's, every file the turn changed,
+    ``landed`` or ``not_merged``; *repositories* are the folders inside a
+    git repository the turn wrote into, which never land; *not_taken* are
+    the files a helper changed that the thread's copy kept its own version
+    of, whose helper's version is in the history alone.
 
     A landing that could not start, since another thread's landing left
     running could not be settled or the lock or its row could not be had,
@@ -194,7 +196,7 @@ async def land_turn(
             saved = await _kept(session_factory, sandbox_pool, session, saga_settings)
             outcome = {
                 "saga": None, "commit": None, "landed": [], "overlapped": [], "excluded": [], "repositories": [],
-                "files": [], "saved": saved, "packs": 0,
+                "not_taken": [], "files": [], "saved": saved, "packs": 0,
                 # Before its own first step nothing of it reached the real files.
                 "state": "compensated" if saved and not began else "failed",
             }
@@ -355,7 +357,7 @@ async def _land(
 
     outcome: dict[str, Any] = {
         "saga": saga.saga_id, "state": "completed", "commit": None,
-        "landed": [], "overlapped": [], "excluded": [], "repositories": [], "files": [],
+        "landed": [], "overlapped": [], "excluded": [], "repositories": [], "not_taken": [], "files": [],
         # Whether the turn's work is in the history: its commit step pushed
         # it, and held no file, whose version the next copy would lack.
         "saved": False,
@@ -375,7 +377,7 @@ async def _land(
         changes = turn["changes"]
         outcome.update(
             overlapped=turn["overlapped"], excluded=turn["excluded"], repositories=turn["repositories"],
-            saved=not turn["overlapped"],
+            not_taken=turn["not_taken"], saved=not turn["overlapped"],
         )
         if turn["commit"] is not None:
             applies = [step("apply", **change) for change in changes]

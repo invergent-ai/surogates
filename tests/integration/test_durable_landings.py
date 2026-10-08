@@ -1200,6 +1200,30 @@ async def test_a_second_helper_is_told_which_of_its_files_the_first_changed_firs
     assert pods.real_names() == ["Report.docx", "first.md", "notes.txt", "second.md"]
 
 
+async def test_a_landings_report_names_a_helpers_files_the_threads_copy_did_not_take_up(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    helper = await a_helper(api, thread)
+    await a_turn(api, monkeypatch, helper, [
+        calling(("terminal", {"command": "echo by the helper >> notes.txt && echo h > h.md"})), _final_response("Done."),
+    ], pool=SandboxPool(pods))
+    (pods.project / "notes.txt").write_text("v2 notes, saved by you\n")  # after the helper started
+    await ends(api, SandboxPool(pods), thread)  # the thread's next turn end takes the helper's work up, and lands it
+    # Your version stays, the helper's is left out, and the master is told, not left to find the edit gone.
+    assert (pods.project / "notes.txt").read_text() == "v2 notes, saved by you\n"
+    [report] = await reports(api, master)
+    assert [(f["ref"], f["landing"]) for f in report["files"]] == [("h.md", "landed")]
+    assert report["not_taken"] == ["notes.txt"]
+    assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
+        "Not taken up from a helper, because the file changed after the helper started "
+        "(the helper's version is kept in the project's history): notes.txt"
+    )
+    # The hand-off went with the landing: a helper started now starts from what landed.
+    refs = git(pods.project / "_history", "for-each-ref", "--format=%(refname)").splitlines()
+    assert not [ref for ref in refs if "handoff" in ref]
+
+
 async def test_a_routine_run_of_a_thread_lands_with_the_threads_next_turn(api, monkeypatch, tmp_path):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)

@@ -146,8 +146,9 @@ async def notify_parent_on_completion(
     not written, has None, so its report lists no files rather than
     claiming none.  A thread whose turn landed reports its *landing*'s
     files instead, each landed or not merged, the excluded files it made,
-    the folders inside a git repository it wrote into, and the landing's
-    state when it did not complete.
+    the folders inside a git repository it wrote into, the helpers' files
+    its copy did not take up, and the landing's state when it did not
+    complete.
 
     A thread's helper whose hand-back failed reports *unkept*: ``kept``
     false, and ``left``, the files kept apart, which its thread's copy lacks.
@@ -196,8 +197,8 @@ async def notify_parent_on_completion(
             payload["title"] = title
             if files is not None:
                 payload["files"] = files
-            for key in ("excluded", "repositories") if landing is not None else ():
-                if landing[key]:
+            for key in ("excluded", "repositories", "not_taken") if landing is not None else ():
+                if landing.get(key):
                     # At most this many names, and how many there are in all.
                     payload[key] = landing[key][:_MAX_LEFT_OUT_NAMED]
                     if len(landing[key]) > _MAX_LEFT_OUT_NAMED:

@@ -211,6 +211,11 @@ def _landing_lines(data: dict, kept: list, deleted: list) -> str:
     for key, words in (
         ("excluded", "Not saved, because the project's history leaves them out"),
         ("repositories", "Not landed, because they are inside a git repository"),
+        (
+            "not_taken",
+            "Not taken up from a helper, because the file changed after the helper started "
+            "(the helper's version is kept in the project's history)",
+        ),
     ):
         named = data.get(key)
         if isinstance(named, list) and named:
