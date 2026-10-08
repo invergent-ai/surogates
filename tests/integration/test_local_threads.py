@@ -162,6 +162,10 @@ async def test_a_thread_works_only_on_the_users_own_live_computer(api, session_f
         response = await make_local(api, project, proposal_id, execution)
         assert response.status_code == status, case
     assert (await make_local(api, project, proposal_id, confirmed(mine["id"]), key="3")).status_code == 404
+    # Nor does another user make a card's thread on my project, on my computer or on theirs.
+    for device_id in (mine["id"], theirs["id"]):
+        refused = await make_local(api, project, proposal_id, confirmed(device_id), token=their_token)
+        assert (refused.status_code, refused.json()["detail"]) == (404, "No such project."), device_id
     # Nothing was made under the master, and no computer was asked for a folder.
     assert await children_of(api, master) == []
     for device_id in (theirs["id"], mine["id"]):
