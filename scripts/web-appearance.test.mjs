@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { applyTranscript, followTranscript } from "../web/src/lib/appearance.ts";
+import { applyTranscript, followTranscript, takesDesktopLook, transcriptOf } from "../web/src/lib/appearance.ts";
 
 const LARGE = { theme: "dark", textSize: "large", transcriptWidth: "wide", motion: "reduced" };
 const MEDIUM = { theme: "light", textSize: "medium", transcriptWidth: "medium", motion: "system" };
@@ -84,4 +84,18 @@ test("says so, and keeps the web client's own look, when the desktop cannot say 
   }
   assert.deepEqual(found.dataset, {});
   assert.equal(warned.length, 1);
+});
+
+test("takes the desktop's look in the desktop, and in the transcript its pane reads, which has no bridge", () => {
+  assert.equal(takesDesktopLook({ version: 1 }, "/chat"), true);
+  assert.equal(takesDesktopLook(undefined, "/transcript/4fac7a5c-ce6b-4a9c-9d54-5e6f708192a3"), true);
+  assert.equal(takesDesktopLook(undefined, "/chat/4fac7a5c-ce6b-4a9c-9d54-5e6f708192a3"), false);
+});
+
+test("reads the pane's transcript settings from its address, and only the ones the desktop offers", () => {
+  const found = root();
+  applyTranscript(found, transcriptOf("?textSize=large&transcriptWidth=narrow&motion=reduced&theme=dark"));
+  assert.deepEqual(found.dataset, { textSize: "large", transcriptWidth: "narrow", motion: "reduced" });
+  applyTranscript(found, transcriptOf("?textSize=%3Cb%3E"));
+  assert.deepEqual(found.dataset, {});
 });

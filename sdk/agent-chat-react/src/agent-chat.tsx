@@ -349,6 +349,7 @@ export function AgentChat({
         onOpenSession: onSessionChange,
         projectId,
         threadRows,
+        readOnly: disabled === true,
       }}
     >
       <TooltipProvider>
@@ -435,7 +436,8 @@ export function AgentChat({
                 runtime.send(content, images, attachments)
               }
               onStop={() => runtime.stop()}
-              onRetry={runtime.retry}
+              // A chat the host only reads is not run again from here.
+              onRetry={disabled ? undefined : runtime.retry}
               onFileSelect={handleFileSelect}
               disabled={effectiveDisabled}
               disabledReason={disabledReason}

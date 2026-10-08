@@ -190,6 +190,8 @@ let overview: { project: Project; threads: ThreadRow[]; library: LibraryEntry[];
 let unfollow = (): void => {};
 // The project dialog's view, while it is open over the window.
 let projectDialog: WebContents | null = null;
+// The open project's thread read in the Overview pane, beside its conversation.
+let reading: { id: string; title: string } | null = null;
 
 const report = (error: unknown): void => {
   console.error(error);
@@ -268,8 +270,33 @@ function changed(): void {
 const appearanceNow = () => ({ ...appearance.get(), theme: theme.dark ? ("dark" as const) : ("light" as const) });
 
 // The web client hears every change of how the app looks: the theme in effect, and the transcript's settings.
+// A thread read in the pane is read again in the transcript's settings, which its address carries.
 function tellAppearance(): void {
   main?.webContents()?.send("desktop:appearance", appearanceNow());
+  if (reading) main?.read(transcriptPath(reading.id));
+}
+
+// A thread's transcript, as the pane reads it: the web client's transcript page, in the transcript's settings.
+function transcriptPath(threadId: string): string {
+  const { textSize, transcriptWidth, motion } = appearance.get();
+  return `/transcript/${threadId}?${new URLSearchParams({ textSize, transcriptWidth, motion })}`;
+}
+
+/**
+ * Read *threadId*, a thread of the open project, in the Overview pane, beside the project's
+ * conversation (Section 12); null closes it. One that has left the pane since it was drawn is said
+ * so, and so is one whose id is no chat's.
+ */
+function read(threadId: string | null): void {
+  const thread = view.kind === "project" && overview?.project.id === view.id
+    ? overview.threads.find((found) => found.id === threadId) : undefined;
+  if (threadId !== null && (!thread || !webClientPath(`/chat/${thread.id}`))) {
+    failure = NO_SUCH_THREAD;
+    return changed();
+  }
+  reading = thread ? { id: thread.id, title: thread.title } : null;
+  main?.read(reading ? transcriptPath(reading.id) : null);
+  changed();
 }
 
 const links = () => linksFor(agents.get());
@@ -421,6 +448,11 @@ function remember(project: Project): void {
 }
 
 function show(next: View): void {
+  // The pane's transcript is the open project's: anything else the centre shows closes it.
+  if (reading && !(next.kind === "project" && view.kind === "project" && next.id === view.id)) {
+    reading = null;
+    main?.read(null);
+  }
   view = next;
   follow();
   changed();
@@ -1210,6 +1242,7 @@ function state() {
     account: sidebarAccount(),
     view,
     overview: view.kind === "project" && overview?.project.id === view.id ? overview : null,
+    reading,
     projects: listed,
     failure,
     links: Object.keys(links()),
@@ -1761,8 +1794,14 @@ function wire(window: MainWindow, page: string): void {
       return changed();
     }
     view = { ...view, thread: { id: thread.id, title: thread.title } };
+    // Shown in the centre, its transcript in the pane has nothing more to show.
+    if (reading?.id === thread.id) read(null);
     window.go(path);
     changed();
+  });
+  handle("shell:read", (id) => {
+    if (id !== null && typeof id !== "string") throw new Error("Not a thread");
+    read(id);
   });
   // A thread of the open project resolved, or reopened, from its row: the page's answer is its row.
   // A row's action is no choice of what the centre shows, so a project opening meanwhile still opens:
@@ -1803,6 +1842,7 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:forward", () => move(() => window.forward()));
   handle("shell:reload", () => window.reload());
   handle("shell:place", (hole) => window.place(bounds(hole)));
+  handle("shell:place-pane", (hole) => window.placePane(bounds(hole)));
   handle("shell:menu", popup);
   handle("shell:settings", showSettings);
   handle("shell:new-project", () => showProject(null));

@@ -17,6 +17,20 @@ export type TranscriptSettings = Pick<
   "textSize" | "transcriptWidth" | "motion"
 >;
 
+// The page Surogate Desktop's Overview pane reads a thread in: it has no bridge, so the desktop puts
+// the transcript's settings in its address.
+const PANE = "/transcript/";
+
+/** Whether the page at *pathname* takes Surogate Desktop's look: the agent's web client in the desktop, whose bridge *desktop* is, or a transcript its pane reads. */
+export function takesDesktopLook(desktop: unknown, pathname: string): boolean {
+  return desktop !== undefined || pathname.startsWith(PANE);
+}
+
+/** The transcript's settings a pane's page carries in its address *search*. */
+export function transcriptOf(search: string): Record<string, string> {
+  return Object.fromEntries(new URLSearchParams(search));
+}
+
 // What the desktop's Settings offer; Medium and System are the web client's own look.
 const CHOICES: Record<keyof TranscriptSettings, readonly string[]> = {
   textSize: ["small", "medium", "large"],

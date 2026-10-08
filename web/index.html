@@ -7,10 +7,11 @@
     <meta charset="UTF-8" />
     <!-- Surogate Desktop's theme from the first frame (desktop design, Progress: "Appearance is a
          setting"). The desktop's Light, Dark or Match system drives prefers-color-scheme in every
-         page it shows, so the root takes it here, before the stylesheets paint the body from it;
-         the app keeps it so (app/provider.tsx). In a browser the theme is next-themes' own. -->
+         page it shows, its Overview pane's transcript too, which has no bridge (lib/appearance.ts's
+         takesDesktopLook), so the root takes it here, before the stylesheets paint the body from
+         it; the app keeps it so (app/provider.tsx). In a browser the theme is next-themes' own. -->
     <script>
-      if (window.surogateDesktop) {
+      if (window.surogateDesktop || location.pathname.startsWith("/transcript/")) {
         document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches);
       }
     </script>

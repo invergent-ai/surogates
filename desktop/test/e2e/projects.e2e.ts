@@ -271,7 +271,9 @@ describe("the Projects page", () => {
     const { page, client } = await signedIn();
     await opened(page, client, REPORT);
     const thread = FIXTURE_IDS.question;
+    // Its row reads it in the pane; the pane's Open shows it in the centre.
     await page.click(`[data-thread="${thread}"]`);
+    await page.click("#reading-open");
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${thread}`);
     await page.click("#open-projects");
     await expect.poll(() => page.isVisible("#projects-page")).toBe(true);

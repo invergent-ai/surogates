@@ -4,7 +4,9 @@
 // placed as the user left it; hidden when the user closes it, unless Keep running is off. Its own
 // page draws the sidebar, the centre's header and the Overview pane. The agent's web
 // client fills the centre's hole, in a WebContentsView of the agent's own partition
-// that stays on the agent's origin, as claude.ai fills Claude Desktop's window.
+// that stays on the agent's origin, as claude.ai fills Claude Desktop's window. A thread read in
+// the Overview pane fills the pane's hole, in a second view of the same partition that has no
+// bridge and stays on its transcript.
 
 import { app, BrowserWindow, net, screen, shell, type WebContents, WebContentsView, webContents } from "electron";
 
@@ -79,6 +81,12 @@ function confine(contents: WebContents, origin: string, onRefused: (url: string)
     permitted(origin, permission, requestingOrigin));
 }
 
+// A thread's transcript in the Overview pane: the web client's page at *url*.
+interface PaneView {
+  view: WebContentsView;
+  url: string;
+}
+
 interface WebView {
   agent: Agent;
   view: WebContentsView;
@@ -104,6 +112,8 @@ export class MainWindow {
   private webShown = true; // false while the centre shows a page of the shell's own, the Projects page
   private gated = false; // nobody is signed in to the app: the web client stays hidden under the sign-in
   private hole: Bounds = { x: 0, y: 0, width: 0, height: 0 };
+  private pane: PaneView | null = null;
+  private paneHole: Bounds = { x: 0, y: 0, width: 0, height: 0 };
   // Settings, over everything: a transparent view whose page dims the window beneath it.
   private settingsView: WebContentsView | null = null;
   private opener: WebContents | null = null; // what had the keyboard when Settings opened
@@ -169,6 +179,7 @@ export class MainWindow {
     this.window.setBackgroundColor(background);
     this.window.setTitleBarOverlay(overlay);
     this.web?.view.setBackgroundColor(background);
+    this.pane?.view.setBackgroundColor(overlay.color);
   }
 
   get unreachable(): string | null {
@@ -238,6 +249,7 @@ export class MainWindow {
   detach(): void {
     const web = this.web;
     if (!web) return;
+    this.read(null);
     this.web = null;
     clearTimeout(web.retry);
     this.window.contentView.removeChildView(web.view);
@@ -306,6 +318,58 @@ export class MainWindow {
   place(hole: Bounds): void {
     this.hole = hole;
     this.web?.view.setBounds(hole);
+  }
+
+  /**
+   * The web client's page at *path*, a thread's transcript, in the Overview pane's hole; null takes it
+   * away. It has the agent's partition, so its session, and no preload, so no bridge. It stays on
+   * its page: a page the web client routes to in place is its transcript again, an address off the
+   * agent's, and any popup, opens in the system browser, and nothing else of the agent's loads there.
+   */
+  read(path: string | null): void {
+    const web = this.web;
+    const url = path === null || !web ? null : `${web.agent.origin}${path}`;
+    if (this.pane?.url === url) return;
+    if (this.pane) {
+      this.window.contentView.removeChildView(this.pane.view);
+      this.pane.view.webContents.close();
+      this.pane = null;
+    }
+    if (url === null || !web) return;
+    const view = new WebContentsView({
+      webPreferences: { partition: partitionFor(web.agent.origin, web.agent.agentId), sandbox: true, contextIsolation: true, nodeIntegration: false },
+    });
+    view.setBackgroundColor(chrome(this.dark).overlay.color);
+    view.setBounds(this.paneHole);
+    // Over the web client, under Settings when it is open.
+    const settings = this.settingsView ? this.window.contentView.children.indexOf(this.settingsView) : -1;
+    this.window.contentView.addChildView(view, settings < 0 ? undefined : settings);
+    const contents = view.webContents;
+    const stay = (event: { preventDefault(): void; url: string }) => {
+      event.preventDefault();
+      if (!sameOrigin(web.agent.origin, event.url)) openOutside(event.url);
+    };
+    contents.on("will-navigate", stay);
+    contents.on("will-redirect", (event) => {
+      if (event.isMainFrame && !sameOrigin(web.agent.origin, event.url)) event.preventDefault();
+    });
+    // A footnote or an anchor scrolls the transcript; any other page the web client routes to loads it again.
+    contents.on("did-navigate-in-page", (_event, to, isMainFrame) => {
+      if (isMainFrame && to.split("#", 1)[0] !== url) void contents.loadURL(url).catch(() => {});
+    });
+    contents.on("will-attach-webview", (event) => event.preventDefault());
+    contents.setWindowOpenHandler(({ url: opening }) => {
+      openOutside(opening);
+      return { action: "deny" };
+    });
+    this.pane = { view, url };
+    void contents.loadURL(url).catch(() => {});
+  }
+
+  // The Overview pane's hole, as the page measures it: none while the pane is folded away.
+  placePane(hole: Bounds): void {
+    this.paneHole = hole;
+    this.pane?.view.setBounds(hole);
   }
 
   /** Load *path* of the web client: settled once it has loaded, or failed to. */

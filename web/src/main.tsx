@@ -6,7 +6,12 @@ import { createRoot } from "react-dom/client";
 
 import "./index.css";
 import { App } from "./app/app";
-import { followTranscript } from "./lib/appearance";
+import {
+  applyTranscript,
+  followTranscript,
+  takesDesktopLook,
+  transcriptOf,
+} from "./lib/appearance";
 import { getDesktop } from "./lib/desktop-bridge";
 import { registerServiceWorker } from "./register-sw";
 
@@ -30,11 +35,17 @@ if (globalCrypto && typeof globalCrypto.randomUUID !== "function") {
     )) as Crypto["randomUUID"];
 }
 
-// In Surogate Desktop the transcript is as the desktop's Settings shape it, from now on. Its
-// theme is on the root from the first frame (index.html).
+// In Surogate Desktop the transcript is as the desktop's Settings shape it: from now on, through
+// the bridge, or in the pane, which has none, as its address says. Its theme is on the root from
+// the first frame (index.html).
 const desktop = getDesktop();
 if (desktop) {
   followTranscript(desktop, document.documentElement);
+} else if (takesDesktopLook(desktop, window.location.pathname)) {
+  applyTranscript(
+    document.documentElement,
+    transcriptOf(window.location.search),
+  );
 }
 
 const rootElement = document.getElementById("root");

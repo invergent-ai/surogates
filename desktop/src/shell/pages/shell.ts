@@ -38,6 +38,7 @@ interface State {
     library: Array<{ path: string; origin: "added" | "produced"; threadId: string | null; size: number | null; updatedAt: string | null }>;
     routines: Array<{ name: string; scheduleDisplay: string }>;
   } | null;
+  reading: { id: string; title: string } | null; // the thread read in the pane, beside the project's conversation
   device: { text: string; status: string | null } | null;
   account: { name: string; email: string; userId: string; orgId: string } | null;
   links: string[]; // the user menu's links the app knows for this agent
@@ -59,12 +60,14 @@ interface Shell {
   projects(): Promise<void>;
   project(id: string): Promise<void>;
   thread(id: string): Promise<void>;
+  read(id: string | null): Promise<void>;
   resolve(id: string): Promise<void>;
   reopen(id: string): Promise<void>;
   back(): Promise<void>;
   forward(): Promise<void>;
   reload(): Promise<void>;
   place(hole: { x: number; y: number; width: number; height: number }): Promise<void>;
+  placePane(hole: { x: number; y: number; width: number; height: number }): Promise<void>;
   menu(which: "app" | "project"): Promise<void>;
   settings(): Promise<void>;
   newProject(): Promise<void>;
@@ -158,8 +161,9 @@ const REASONS = { question: "Question", approval: "Approval", failed: "Failed", 
 const GROUPS = { waiting: "Waiting", working: "Working", idle: "Idle", resolved: "Resolved" } as const;
 let tab = "threads";
 
+// A row reads its thread in the pane; the pane's Open shows it in the centre.
 function threadRow(thread: ThreadRow): HTMLElement {
-  const row = button("thread", "", () => void shell.thread(thread.id));
+  const row = button("thread", "", () => void shell.read(thread.id));
   row.dataset.group = thread.group;
   row.dataset.thread = thread.id;
   const title = element("span", "title", thread.title);
@@ -231,11 +235,27 @@ function renderOverview(state: State): void {
   showTab();
 }
 
+// The thread read in the pane when it was last drawn.
+let readingShown: string | null = null;
+
+// The tab chosen; or, while a thread is read in the pane, its transcript in their place. As one
+// opens there the keyboard goes to its Back, and as it closes, back to its row, while the pane
+// has the keyboard: the row that had it is hidden meanwhile.
 function showTab(): void {
+  const reading = last?.reading ?? null;
   for (const each of document.querySelectorAll<HTMLElement>("[data-tab]")) each.setAttribute("aria-selected", String(each.dataset.tab === tab));
-  byId("threads").hidden = tab !== "threads";
-  byId("library").hidden = tab !== "library";
-  byId("routines").hidden = tab !== "routines";
+  document.querySelector<HTMLElement>(".panel .tabs")!.hidden = reading !== null;
+  byId("threads").hidden = reading !== null || tab !== "threads";
+  byId("library").hidden = reading !== null || tab !== "library";
+  byId("routines").hidden = reading !== null || tab !== "routines";
+  byId("reading").hidden = reading === null;
+  byId("reading-title").textContent = reading?.title ?? "";
+  const was = readingShown;
+  readingShown = reading?.id ?? null;
+  const inPane = document.activeElement === document.body || byId("panel").contains(document.activeElement);
+  if (readingShown === was || !inPane) return;
+  if (reading) byId("reading-back").focus();
+  else document.querySelector<HTMLElement>(`[data-thread="${CSS.escape(was ?? "")}"]`)?.focus();
 }
 
 async function render(): Promise<void> {
@@ -331,6 +351,10 @@ byId("new").addEventListener("click", () => void shell.go("/chat"));
 byId("new-project").addEventListener("click", () => void shell.newProject());
 byId("project-settings").addEventListener("click", () => void shell.projectSettings());
 byId("open-projects").addEventListener("click", () => void shell.projects());
+byId("reading-back").addEventListener("click", () => void shell.read(null));
+byId("reading-open").addEventListener("click", () => {
+  if (last?.reading) void shell.thread(last.reading.id);
+});
 byId("to-project").addEventListener("click", () => {
   if (last?.view.kind === "project") void shell.project(last.view.id);
 });
@@ -396,11 +420,20 @@ const pane = (open: boolean) => {
 byId("overview").addEventListener("click", () => pane(document.body.classList.contains("no-panel")));
 byId("close-panel").addEventListener("click", () => pane(false));
 
-// The web client is placed over the hole, wherever the layout puts it.
-new ResizeObserver(() => {
-  const { x, y, width, height } = byId("hole").getBoundingClientRect();
-  void shell.place({ x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) });
-}).observe(byId("hole"));
+// The web client is placed over the hole, wherever the layout puts it, and a thread read in the
+// pane over the pane's: none while the pane is folded away or shows something else. Each is
+// measured again as its size changes, and as the window's does, which moves the pane without
+// resizing it once the pane is at its widest.
+function placed(hole: string, place: (bounds: { x: number; y: number; width: number; height: number }) => Promise<void>): void {
+  const measure = () => {
+    const { x, y, width, height } = byId(hole).getBoundingClientRect();
+    void place({ x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) });
+  };
+  new ResizeObserver(measure).observe(byId(hole));
+  window.addEventListener("resize", measure);
+}
+placed("hole", shell.place);
+placed("pane-hole", shell.placePane);
 
 shell.onChanged(() => void render());
 void render();

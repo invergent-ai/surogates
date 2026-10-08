@@ -1210,6 +1210,43 @@ describe("AgentChat", () => {
     expect(uploadButton!.disabled).toBe(true);
   });
 
+  it("offers nothing that writes to a chat the host only reads: no answer to its questions, no Retry and no Stop", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" disabled />);
+      await Promise.resolve();
+    });
+    const buttons = () => [...container!.querySelectorAll("button")].map((button) => button.textContent?.trim() || button.getAttribute("aria-label"));
+    act(() => {
+      stream.emit("user.message", 1, { content: "Tidy my notes" });
+      stream.emit("llm.request", 2, {});
+      stream.emit("tool.call", 3, {
+        tool_call_id: "ask-1",
+        name: "ask_user_question",
+        arguments: { questions: [{ prompt: "Which folder first?", choices: [{ label: "Notes" }, { label: "Drafts" }] }] },
+      });
+      stream.emit("tool.call", 4, {
+        tool_call_id: "ask-2",
+        name: "ask_user_question",
+        arguments: { questions: [{ prompt: "Keep the drafts?" }, { prompt: "Rename the notes?" }] },
+      });
+    });
+    expect(container.textContent).toContain("Which folder first?");
+    expect(container.textContent).toContain("Waiting for an answer");
+    expect(buttons()).not.toContain("Notes");
+    expect(buttons()).not.toContain("Submit");
+    expect(buttons()).not.toContain("Stop");
+    act(() => {
+      stream.emit("session.fail", 5, { error_category: "provider_error", error_title: "The model failed", retryable: true });
+    });
+    expect(container.textContent).toContain("The model failed");
+    expect(buttons()).not.toContain("Retry");
+  });
+
   it("renders consult_expert as a dedicated expert block instead of raw JSON", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);
