@@ -358,6 +358,49 @@ describe("a thread read in the Overview pane", () => {
     await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.thread)).toBe(QUESTION);
   });
 
+  it("takes the keyboard into its transcript after its head, to scroll it there, and back to its Back with Shift+Tab or Escape", async () => {
+    const { shell, page } = await opened();
+    await page.focus(`[data-thread="${QUESTION}"]`);
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    const reader = shell.windows().find((found) => found.url().includes("/transcript/"))!;
+    await reader.waitForLoadState();
+    await reader.evaluate(() => {
+      document.body.style.height = "5000px";
+    });
+    // Which has the keyboard, as the app's own process sees it: the window's page, and the pane's transcript.
+    const keyboardIn = () => shell.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0]!;
+      const reading = (window.contentView.children as Electron.WebContentsView[]).find((view) => view.webContents.getURL().includes("/transcript/"));
+      return [window.webContents.isFocused(), reading?.webContents.isFocused() ?? false];
+    });
+    await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe("reading-back");
+    await page.keyboard.press("Tab");
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("reading-open");
+    await page.keyboard.press("Tab");
+    await expect.poll(keyboardIn).toEqual([false, true]);
+    await reader.keyboard.press("PageDown");
+    await expect.poll(() => reader.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+    const paged = await reader.evaluate(() => window.scrollY);
+    await reader.keyboard.press("ArrowDown");
+    await expect.poll(() => reader.evaluate(() => window.scrollY)).toBeGreaterThan(paged);
+    // A key the user presses in the transcript, as the window's input reaches it.
+    const pressed = (keyCode: string, modifiers: Array<"shift">) => shell.evaluate(({ BrowserWindow }, [code, held]) => {
+      const reading = (BrowserWindow.getAllWindows()[0]!.contentView.children as Electron.WebContentsView[])
+        .find((view) => view.webContents.getURL().includes("/transcript/"))!;
+      for (const type of ["keyDown", "keyUp"] as const) reading.webContents.sendInputEvent({ type, keyCode: code as string, modifiers: held as Array<"shift"> });
+    }, [keyCode, modifiers] as const);
+    for (const [key, modifiers] of [["Tab", ["shift"]], ["Escape", []]] as const) {
+      const named = [...modifiers, key].join("+");
+      await pressed(key, [...modifiers]);
+      await expect.poll(keyboardIn, { message: named }).toEqual([true, false]);
+      expect(await page.evaluate(() => document.activeElement?.id), named).toBe("reading-back");
+      await page.keyboard.press("Tab");
+      await page.keyboard.press("Tab");
+      await expect.poll(keyboardIn, { message: named }).toEqual([false, true]);
+    }
+  });
+
   it("is read again as Settings shapes the transcript", async () => {
     const { shell, page } = await opened();
     await page.click(`[data-thread="${QUESTION}"]`);

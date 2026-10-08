@@ -23,6 +23,7 @@ if (location.protocol === "file:") {
     project: (id: string) => ipcRenderer.invoke("shell:project", id),
     thread: (id: string) => ipcRenderer.invoke("shell:thread", id),
     read: (id: string | null) => ipcRenderer.invoke("shell:read", id),
+    focusPane: () => ipcRenderer.invoke("shell:focus-pane"),
     resolve: (id: string) => ipcRenderer.invoke("shell:resolve", id),
     reopen: (id: string) => ipcRenderer.invoke("shell:reopen", id),
     back: () => ipcRenderer.invoke("shell:back"),
@@ -37,6 +38,7 @@ if (location.protocol === "file:") {
     quitNow: () => ipcRenderer.invoke("shell:quit-now"),
     link: (which: string) => ipcRenderer.invoke("shell:link", which),
     onChanged: listen("shell:changed"),
+    onPaneLeft: listen("shell:pane-left"),
   });
   contextBridge.exposeInMainWorld("surogateProject", {
     state: () => ipcRenderer.invoke("project:state"),

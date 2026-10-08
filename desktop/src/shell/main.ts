@@ -1916,6 +1916,7 @@ function wire(window: MainWindow, page: string): void {
     if (id !== null && typeof id !== "string") throw new Error("Not a thread");
     read(id);
   });
+  handle("shell:focus-pane", () => window.focusPane());
   // A thread of the open project resolved, or reopened, from its row: the page's answer is its row.
   // A row's action is no choice of what the centre shows, so a project opening meanwhile still opens:
   // it takes a number of its own, and only the latest action's refusal is said.

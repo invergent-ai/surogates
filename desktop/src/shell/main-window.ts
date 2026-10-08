@@ -369,6 +369,13 @@ export class MainWindow {
       if (isMainFrame && !onTranscript(to)) void contents.loadURL(url).catch(() => {});
     });
     contents.on("will-attach-webview", (event) => event.preventDefault());
+    // Shift+Tab or Escape gives the keyboard back to the window's page, which puts it on the pane's Back.
+    contents.on("before-input-event", (event, input) => {
+      if (input.type !== "keyDown" || !(input.key === "Escape" || (input.key === "Tab" && input.shift))) return;
+      event.preventDefault();
+      this.window.webContents.focus();
+      this.window.webContents.send("shell:pane-left");
+    });
     contents.setWindowOpenHandler(({ url: opening }) => {
       openOutside(opening);
       return { action: "deny" };
@@ -391,6 +398,11 @@ export class MainWindow {
     });
     this.pane = pane;
     void contents.loadURL(url).catch(() => {});
+  }
+
+  /** The keyboard into the pane's transcript, where its keys scroll it. */
+  focusPane(): void {
+    this.pane?.view.webContents.focus();
   }
 
   // The Overview pane's hole, as the page measures it: none while the pane is folded away.
