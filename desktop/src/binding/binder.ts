@@ -89,8 +89,9 @@ export interface BinderOptions {
   hosts: Executor; // runs everything but the binding
   refusal?(operation: Operation): Outcome | null; // what the hosts refuse anyway, before anyone is asked
   retired?(root: string): void; // a deleted chat's root: the hosts let go of what they keep for it
-  // The page a session's next browser operation acts in, for its prompt; for an upload, the frame of the file input that asked.
-  address?(session: string, upload?: boolean): Promise<string>;
+  // The page a session's next browser operation acts in, for its prompt; for an upload, the frame of the file input
+  // that asked, *of* being the upload's operation.
+  address?(session: string, upload?: boolean, of?: string): Promise<string>;
   // The user is asked about every other operation first in a chat that asks every time,
   // and about a network destination off the package hosts in either mode.
   approvalPrompts: ApprovalPrompts;

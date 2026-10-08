@@ -80,7 +80,7 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
       forget: (root) => void forgotten.push(`browser ${root}`),
       stop: () => (stopped.push("browser"), Promise.resolve()),
       end: () => (stopped.push("browser ended"), Promise.resolve()),
-      address: (session, upload) => Promise.resolve(`https://example.com/${session}${upload ? "/the-input" : ""}`),
+      address: (session, upload, of) => Promise.resolve(`https://example.com/${session}${upload ? "/the-input" : ""}${of === undefined ? "" : `#${of}`}`),
       pause: (root, held) => void paused.push([root, held]),
       show: (root) => (shown.push(root), Promise.resolve(true)),
       onDownload: (listener) => {
@@ -488,6 +488,8 @@ describe("the browser's kinds beside the tools", () => {
   it("asks the browser for the address of the page a session acts in, and for an upload, of the file input that asked", async () => {
     expect(await rig().browsing.address("child")).toBe("https://example.com/child");
     expect(await rig().browsing.address("child", true)).toBe("https://example.com/child/the-input");
+    // And which upload it is asked for.
+    expect(await rig().browsing.address("child", true, "op-7")).toBe("https://example.com/child/the-input#op-7");
   });
 
   it("closes a deleted chat's tabs, and tells the tools beneath", () => {

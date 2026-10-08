@@ -105,8 +105,9 @@ export interface ApprovalsOptions {
   prompts: ApprovalPrompts;
   agent: string; // the agent's name, for the prompts
   // The address of the page a calling session's next browser operation acts in: a page moves itself, so an act's prompt names it.
-  // For an *upload*: of the frame of the file input its page asked for, which the browser then holds for that upload alone.
-  address?: (session: string, upload?: boolean) => Promise<string>;
+  // For an *upload*: of the frame of the file input its page asked for, which the browser then holds for that upload alone,
+  // *of* being that upload's operation, by its id.
+  address?: (session: string, upload?: boolean, of?: string) => Promise<string>;
   // What the tools refuse anyway, asked again when a browser operation's turn comes: its user may have taken the browser over meanwhile.
   refusal?: (operation: Operation) => Outcome | null;
   onError?: (error: unknown) => void; // a choice that could not be recorded, or a network prompt that failed, and why
@@ -127,6 +128,7 @@ const BROWSER_DENIED = {
   use: "The user did not let the agent use the browser on this computer in this chat",
   act: "The user denied this in the agent's browser on this computer",
   unanswered: "Nobody answered on this computer in time, so the agent's browser did nothing",
+  unnamed: "The agent's browser on this computer did not say in time which site would get the files, so nobody was asked and the page was given nothing",
 } as const;
 
 // Not denied: nobody was there to answer.
@@ -353,9 +355,13 @@ export class Approvals {
         if (!now.act) return null;
         const act = browserAct(operation);
         // An open names where it goes; any other act, the page it acts in now; an upload, the frame of the input that gets the files.
-        const answer = await ask(act.action === "open"
-          ? { kind: "browser", chat, ...act }
-          : { kind: "browser", chat, ...act, page: await this.pageOf(operation.callingSessionId, asking, act.action === "upload") });
+        const page = act.action === "open"
+          ? undefined
+          : await this.pageOf(operation.callingSessionId, asking, act.action === "upload" ? operation.id : null);
+        // An upload is asked about by the site that gets its files. Where the browser did not say it in time, its
+        // prompt would name none: nobody is asked, and it does not run.
+        if (act.action === "upload" && page === null) return browserDenied(BROWSER_DENIED.unnamed);
+        const answer = await ask(page === undefined ? { kind: "browser", chat, ...act } : { kind: "browser", chat, ...act, page });
         if (typeof answer !== "string") return answer;
         if (answer === "stop_asking") {
           try {
@@ -388,13 +394,13 @@ export class Approvals {
   }
 
   // The address of the page *session*'s act would act in, as the browser says it; null when it does not in time.
-  // For an *upload*, of the frame of the file input that asked.
-  private async pageOf(session: string, signal: AbortSignal, upload: boolean): Promise<string | null> {
+  // For an *upload*, its operation's id, of the frame of the file input that asked: the browser holds that input for that upload.
+  private async pageOf(session: string, signal: AbortSignal, upload: string | null): Promise<string | null> {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), ADDRESS_MS);
     });
-    const said = Promise.resolve().then(() => this.options.address?.(session, upload) ?? null).catch(() => null);
+    const said = Promise.resolve().then(() => this.options.address?.(session, upload !== null, upload ?? undefined) ?? null).catch(() => null);
     try {
       return (await settled(Promise.race([said, late]), signal)) ?? null;
     } finally {

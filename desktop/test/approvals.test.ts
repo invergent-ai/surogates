@@ -1040,6 +1040,43 @@ describe("the browser on this computer", () => {
     expect(user.asked).toHaveLength(2);
   });
 
+  it("tells the browser which upload its prompt is for, so that the input it names is that upload's alone", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    const said: unknown[][] = [];
+    approvals = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant",
+      address: (...asked) => (said.push(asked), Promise.resolve("https://uploads.example/form")),
+    });
+    const [first, second] = [op("browser.set_input_files", { paths: [`${FOLDER}/a.pdf`] }, ROOT, CHILD), op("browser.set_input_files", { paths: [`${FOLDER}/b.pdf`] })];
+    expect(first.id).not.toBe(second.id);
+    expect(await approvals.admit(first, never())).toBeNull();
+    expect(await approvals.admit(second, never())).toBeNull();
+    expect(await approvals.admit(op("browser.evaluate", { code: "return 1;" }), never())).toBeNull();
+    // Each upload by its own operation; any other act names no upload.
+    expect(said).toEqual([[CHILD, true, first.id], [ROOT, true, second.id], [ROOT, false, undefined]]);
+  });
+
+  it("asks nobody about an upload whose site the browser does not say in time, and gives it no leave: its prompt would name no site", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant", address: () => new Promise(() => {}) });
+    const started = performance.now();
+    expect(await approvals.admit(op("browser.set_input_files", { paths: [`${FOLDER}/report.pdf`] }), never())).toEqual({
+      error: { type: "denied", message: "The agent's browser on this computer did not say in time which site would get the files, so nobody was asked and the page was given nothing" },
+    });
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(user.asked).toEqual([]);
+    // Nor where this computer has no word of the browser's at all, or the browser fails to say.
+    for (const address of [undefined, () => Promise.reject(new Error("gone"))]) {
+      approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant", ...(address ? { address } : {}) });
+      expect(await approvals.admit(op("browser.set_input_files", { paths: [`${FOLDER}/report.pdf`] }), never())).toMatchObject({ error: { type: "denied" } });
+    }
+    expect(user.asked).toEqual([]);
+  });
+
   it("names a mouse press and a mouse release for what they are, not a click", async () => {
     bind(ROOT, "ask");
     journal.bindings.allowBrowser(ROOT);

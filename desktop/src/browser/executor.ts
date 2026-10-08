@@ -197,8 +197,8 @@ export class Browsing implements ToolLayer {
     return { ok: { ...ok, notices: [...(ok as { notices: unknown[] }).notices, ...told] } };
   }
 
-  address(session: string, upload?: boolean): Promise<string> {
-    return this.options.browser.address(session, upload);
+  address(session: string, upload?: boolean, of?: string): Promise<string> {
+    return this.options.browser.address(session, upload, of);
   }
 
   // Whether the browser is held from a chat that is gone: deleted, or its folder forgotten on this computer.

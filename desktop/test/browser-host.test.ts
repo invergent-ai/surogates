@@ -1126,6 +1126,49 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     expect(await f.evaluate(filed)).toEqual([["report.pdf"]]);
   }, 60_000);
 
+  it("gives an upload its user was asked about to no other input than its own prompt named: not once its agent acted before its files came, nor where another upload was asked about meanwhile", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/twoframes" });
+    const page = tabs().get(a)![0]!;
+    const [f, g] = ["/fileinput", "/fileinput?second"].map((path) => page.frames().find((frame) => frame.url() === `http://fixture.test${path}`)!) as [Frame, Frame];
+    // An upload, by its operation's id, as the host's process runs it.
+    const upload = (id: string) =>
+      host.perform(launch, ROOT, a, "browser.set_input_files", { files: [{ ...REPORT, name: `${id}.pdf` }] }, new AbortController().signal, id) as ReturnType<typeof op>;
+    const holds = async () => [await f.evaluate(filed), await g.evaluate(filed)];
+    // Its user is asked about one, by the first frame's input, and allows it. While its files are read, its agent's
+    // next act, allowed after it, runs first: and the page makes another input ask.
+    await asksFor(a, () => f.click("#file"));
+    expect(await host.address(a, true, "asked")).toBe("http://fixture.test/fileinput");
+    await op(a, "browser.mouse", { action: "click", x: 5, y: 5, button: "left", clicks: 1 });
+    await asksFor(a, () => g.click("#file"));
+    // Its files come: the input its prompt named is the session's no more, and they go to no other.
+    expect((await upload("asked")).error?.message).toBe(NOT_AS_ASKED);
+    expect(await holds()).toEqual([[[]], [[]]]);
+    // One nobody was asked about, as in a chat that works freely, goes to the input that asked last.
+    expect(await upload("unasked")).toMatchObject({ ok: { files: 1 } });
+    expect(await holds()).toEqual([[[]], [["unasked.pdf"]]]);
+    // Two asked about one after the other, the second's prompt made while the first's files were read: the
+    // first is given to nothing, not to what the second's prompt named; the second to its own.
+    await asksFor(a, () => f.click("#file"));
+    expect(await host.address(a, true, "first")).toBe("http://fixture.test/fileinput");
+    await asksFor(a, () => g.click("#file"));
+    expect(await host.address(a, true, "second")).toBe("http://fixture.test/fileinput?second");
+    expect((await upload("first")).error?.message).toBe(NOT_AS_ASKED);
+    expect(await holds()).toEqual([[[]], [["unasked.pdf"]]]);
+    expect(await upload("second")).toMatchObject({ ok: { files: 1 } });
+    expect(await holds()).toEqual([[[]], [["second.pdf"]]]);
+    // One nobody was asked about takes no input named for another: it goes to what asked last, and the one asked about to its own still.
+    await asksFor(a, () => f.click("#file"));
+    expect(await host.address(a, true, "third")).toBe("http://fixture.test/fileinput");
+    await asksFor(a, () => g.click("#file"));
+    expect(await upload("fourth")).toMatchObject({ ok: { files: 1 } });
+    expect(await holds()).toEqual([[[]], [["fourth.pdf"]]]);
+    expect(await upload("third")).toMatchObject({ ok: { files: 1 } });
+    expect(await holds()).toEqual([[["third.pdf"]], [["fourth.pdf"]]]);
+    // Asked about once, an upload sent again under its id is one nobody was asked about.
+    expect((await upload("third")).error?.message).toBe(NOT_ASKED);
+  }, 60_000);
+
   it("gives nothing to an input that asks only after an upload's prompt was made about a page that had asked for none", async () => {
     const a = session();
     await op(a, "browser.navigate", { url: "http://fixture.test/" });

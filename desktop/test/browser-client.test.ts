@@ -9,6 +9,7 @@ import {
   BROWSER_HOST, BROWSER_STOPPED, BrowserClient, type BrowserProcess, CANCELLED, DUPLICATE, type FromBrowser, PAUSED, type ToBrowser,
 } from "../src/browser/client.js";
 import type { StagedDownload } from "../src/browser/downloads.js";
+import { FILE_ASKED, NO_SITE, NOT_AS_ASKED } from "../src/browser/host.js";
 import type { Operation } from "../src/link/protocol.js";
 import { isolated, TEST_BROWSER } from "./isolated.js";
 
@@ -192,6 +193,13 @@ describe("the browser host's client", () => {
     // For an upload: the frame of the file input the session's page asked for.
     void client.address("child", true);
     expect(hosts[0]!.sent.at(-1)).toMatchObject({ type: "address", session: "child", upload: true });
+    expect(hosts[0]!.sent.at(-1)).not.toHaveProperty("of");
+    // And which upload it is asked for, by its operation: the input named is that upload's alone.
+    void client.address("child", true, "op-7");
+    expect(hosts[0]!.sent.at(-1)).toMatchObject({ type: "address", session: "child", upload: true, of: "op-7" });
+    // No other act's address names an upload.
+    void client.address("child", false, "op-8");
+    expect(Object.keys(hosts[0]!.sent.at(-1)!).sort()).toEqual(["id", "session", "type"]);
     // A host that goes with one asked: the next operation opens a new tab.
     const pending = client.address("child");
     hosts[0]!.exit();
@@ -382,6 +390,51 @@ describe.skipIf(!run)("the browser host's process", () => {
       await client.stop();
     }
   }, 30_000);
+
+  it("gives a page what an upload's files hold, and an upload its user was asked about to nothing but what its own prompt named, through the host's own process", async () => {
+    profile = mkdtempSync(join(tmpdir(), "sb-profile-"));
+    const client = new BrowserClient();
+    const launch = { executable: EXECUTABLE!, profile };
+    const signal = new AbortController().signal;
+    let ops = 0;
+    const sent = (kind: string, args: Record<string, unknown>, id = `op-${(ops += 1)}`) =>
+      client.perform(launch, operation(id, kind, args), signal) as Promise<{ ok?: any; error?: { type: string; message: string } }>;
+    const files = [{ name: "report.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7").toString("base64") }];
+    // The page makes itself a new file input and has it ask, as a page's script can: settled once the host has heard it.
+    const asks = async () => {
+      await sent("browser.evaluate", {
+        code: "document.querySelector('input')?.remove(); const input = document.createElement('input'); input.type = 'file'; document.body.append(input); input.click(); return 1;",
+      });
+      await expect.poll(async () => (await sent("browser.mouse", { action: "move", x: 1, y: 1 })).ok?.notices, { timeout: 10_000 }).toEqual([FILE_ASKED]);
+    };
+    const holds = async () => (await sent("browser.evaluate", {
+      code: "const [file] = document.querySelector('input').files; return file ? [file.name, file.type, await file.text()] : null;",
+    })).ok?.value;
+    try {
+      // This computer's own address: refused by the proxy, but the browser is up, with a tab: its error page, which runs as no site.
+      await sent("browser.navigate", { url: "http://127.0.0.1:9/" });
+      // An upload nobody was asked about, as in a chat that works freely: its files reach the input whole.
+      await asks();
+      expect(await sent("browser.set_input_files", { files })).toEqual({ ok: { files: 1, notices: [] } });
+      expect(await holds()).toEqual(["report.pdf", "application/pdf", "%PDF-1.7"]);
+      // One its user is asked about: the host names the input for that operation, and the operation finds what was named for it.
+      // Here that is an input in a page that runs as no site, so it is told so, and given nothing.
+      await asks();
+      expect(await client.address("child", true, "asked-first")).toMatch(/^chrome-error:/);
+      expect((await sent("browser.set_input_files", { files }, "asked-first")).error?.message).toBe(NO_SITE);
+      expect(await holds()).toBeNull();
+      // One asked about, whose agent acted before its files came: given nothing. One nobody was asked about then goes to what asked last.
+      await asks();
+      await client.address("child", true, "asked-second");
+      await sent("browser.evaluate", { code: "return 1;" });
+      expect((await sent("browser.set_input_files", { files }, "asked-second")).error?.message).toBe(NOT_AS_ASKED);
+      expect(await holds()).toBeNull();
+      expect(await sent("browser.set_input_files", { files }, "asked-by-nobody")).toMatchObject({ ok: { files: 1 } });
+      expect(await holds()).toEqual(["report.pdf", "application/pdf", "%PDF-1.7"]);
+    } finally {
+      await client.stop();
+    }
+  }, 60_000);
 
   it("hands a download a page finished to its client's listener through the host's own process, staged in the host's temporary folder until its browser closes", async () => {
     profile = mkdtempSync(join(tmpdir(), "sb-profile-"));

@@ -465,7 +465,12 @@ export class BrowserHost {
   // What an upload's prompt named for each session: the input, with the address its frame was at and the
   // site it ran as then; that upload's files go to it, there, and to no input that asks after. Or no
   // input, and *why* that upload is given to none: nothing had asked, or what had runs as no site.
-  private readonly named = new Map<string, { input: { chooser: FileChooser; href: string; origin: string } | null; why: string }>();
+  // *of*: the upload it was named for, by its operation's id, which alone is given it.
+  private readonly named = new Map<string, { input: { chooser: FileChooser; href: string; origin: string } | null; why: string; of: string | undefined }>();
+  // ponytail: the uploads whose user was asked about them, by their operations' ids, each until it comes:
+  // one that was denied never does, and stays for the host's life. One of these whose name is the
+  // session's no more is given to nothing, where one nobody was asked about goes to what asked last.
+  private readonly prompted = new Set<string>();
   // Where this host stages downloads, once it has launched a browser: its own folder, until it closes.
   private staging: string | null = null;
   // The agent's downloads on their way, until each is handed on or dropped: a take-over stops them all.
@@ -481,8 +486,11 @@ export class BrowserHost {
 
   constructor(private readonly options: BrowserHostOptions = {}) {}
 
-  /** One operation of *session*'s, of the chat *root*, in its tab, launching the browser first if none runs. Never rejects. */
-  perform(launch: Launch, root: string, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
+  /**
+   * One operation of *session*'s, of the chat *root*, in its tab, launching the browser first if none runs.
+   * *id*: the operation's own, by which an upload is known as the one its user was asked about. Never rejects.
+   */
+  perform(launch: Launch, root: string, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, id?: string): Promise<Outcome> {
     // A session's tab is its chat's: an operation that names the session under another chat acts in no page
     // of that chat's, and closes none. Only the server could send one.
     const of = this.roots.get(session);
@@ -495,7 +503,7 @@ export class BrowserHost {
       : this.inLine(session, () => {
         if (this.forgets.get(root) !== forgets) return Promise.resolve(DELETED);
         // Its user took the browser over while it waited: it does nothing there.
-        return this.held !== null ? Promise.resolve(PAUSED) : this.run(launch, session, kind, args, signal, this.interrupt.signal);
+        return this.held !== null ? Promise.resolve(PAUSED) : this.run(launch, session, kind, args, signal, this.interrupt.signal, id);
       });
     return Promise.race([work, new Promise<Outcome>((resolve) => {
       if (signal.aborted) resolve(CANCELLED);
@@ -509,23 +517,26 @@ export class BrowserHost {
    * the frame of the file input its pages asked for last, which is the site that gets the files,
    * whatever page frames it, as the browser says it and not the page (place); that input is then held
    * for the upload, so one that asks after cannot take the files in its place, and the upload gives
-   * nothing if the input is elsewhere by then. Never rejects.
+   * nothing if the input is elsewhere by then. *of*: that upload, by its operation's id; the input is
+   * kept for it alone. Never rejects.
    */
-  address(session: string, upload = false): Promise<string> {
+  address(session: string, upload = false, of?: string): Promise<string> {
     return this.inLine(session, async () => {
       const tab = (this.tabs.get(session) ?? []).filter((page) => !page.isClosed()).at(-1)?.url() ?? NEW_TAB;
       if (!upload) return tab;
+      // Asked about from here on, whatever is named for it.
+      if (of !== undefined) this.prompted.add(of);
       const chooser = this.choosers.get(session);
       const at = chooser ? await this.placed(session, chooser) : null;
       // Its user holds the browser, or took it over meanwhile: no input is named, or kept, for any upload.
       if (this.held !== null) return tab;
       if (!chooser || !at?.here) {
         // Nothing has asked: its user is asked by the tab's page, and the upload is given to nothing, though an input asks after.
-        this.named.set(session, { input: null, why: NOT_ASKED });
+        this.named.set(session, { input: null, why: NOT_ASKED, of });
         return tab;
       }
       const site = siteOf(at);
-      this.named.set(session, site === null ? { input: null, why: NO_SITE } : { input: { chooser, href: at.href, origin: at.origin }, why: NOT_AS_ASKED });
+      this.named.set(session, site === null ? { input: null, why: NO_SITE, of } : { input: { chooser, href: at.href, origin: at.origin }, why: NOT_AS_ASKED, of });
       return site ?? at.href;
     }).catch(() => NEW_TAB);
   }
@@ -624,13 +635,17 @@ export class BrowserHost {
 
   // An operation at its turn. Taken over while it acts, it is answered paused at once, whatever it has
   // done: nothing it reads from the page after that is the agent's, and its session's line goes on.
-  private run(launch: Launch, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, stop: AbortSignal): Promise<Outcome> {
-    return until(this.act(launch, session, kind, args, signal, stop), stop, PAUSED);
+  private run(
+    launch: Launch, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, stop: AbortSignal, id: string | undefined,
+  ): Promise<Outcome> {
+    return until(this.act(launch, session, kind, args, signal, stop, id), stop, PAUSED);
   }
 
-  private async act(launch: Launch, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, stop: AbortSignal): Promise<Outcome> {
+  private async act(
+    launch: Launch, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, stop: AbortSignal, id: string | undefined,
+  ): Promise<Outcome> {
     if (signal.aborted) return CANCELLED;
-    if (kind === "browser.set_input_files") return this.upload(session, args, stop);
+    if (kind === "browser.set_input_files") return this.upload(session, args, stop, id);
     // Its agent acted since an upload's prompt named an input: that prompt's upload is not coming.
     if (!looks(kind, args)) this.named.delete(session);
     const operation = OPERATIONS[kind];
@@ -889,9 +904,15 @@ export class BrowserHost {
   // The files the main side read from the chat's folder, given once to the file input an upload's
   // prompt named, or, unasked, to the one the session's pages asked for last: the page is given names
   // and what they hold, never a path. Taken over while it is on its way, it gives the page nothing (give).
-  private async upload(session: string, args: Record<string, unknown>, stop: AbortSignal): Promise<Outcome> {
-    const named = this.named.get(session);
-    this.named.delete(session);
+  // *id*: its operation's. One its user was asked about is given only to what its own prompt named: where
+  // that is the session's no more, since its agent acted before its files came or another upload was
+  // asked about meanwhile, it is given to nothing, and never to whatever asked last.
+  private async upload(session: string, args: Record<string, unknown>, stop: AbortSignal, id: string | undefined): Promise<Outcome> {
+    const kept = this.named.get(session);
+    const named = kept !== undefined && kept.of === id ? kept : undefined;
+    if (named) this.named.delete(session);
+    const asked = id !== undefined && this.prompted.delete(id);
+    if (asked && !named) return failed(NOT_AS_ASKED);
     if (named && named.input === null) return failed(named.why);
     const chooser = named?.input?.chooser ?? this.choosers.get(session);
     // Its page closed, or is this session's no more.

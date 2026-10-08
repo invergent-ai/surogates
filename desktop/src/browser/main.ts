@@ -42,12 +42,13 @@ function received(message: ToBrowser): void {
     if (running.has(message.id)) return;
     const controller = new AbortController();
     running.set(message.id, controller);
-    answer(message.id, host.perform(message.launch, message.root, message.session, message.kind, message.args, controller.signal)
+    answer(message.id, host.perform(message.launch, message.root, message.session, message.kind, message.args, controller.signal, message.id)
       .finally(() => running.delete(message.id)));
   } else if (message.type === "try") {
     answer(message.id, host.tryBrowser(message.executable), "tried");
   } else if (message.type === "address") {
-    void host.address(message.session, message.upload === true).then((url) => send({ type: "address", id: message.id, url }));
+    void host.address(message.session, message.upload === true, typeof message.of === "string" ? message.of : undefined)
+      .then((url) => send({ type: "address", id: message.id, url }));
   } else if (message.type === "pause") {
     host.pause(message.root, message.paused);
   } else if (message.type === "show") {
