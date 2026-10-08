@@ -72,8 +72,10 @@ const ASKING_MS = 500;
 // Chromium), and each ask heard gives it that leave anew: Playwright reads the input as a user would.
 // So a page lets be has no leave left that the agent, or this host, gave it.
 export const OWN_CHOOSER_MS = 5_000;
-// How long a page may take to say where a file input of its is, for an upload's prompt.
-const LOOK_MS = 2_000;
+// How long a page may take to say where a file input of its is, for an upload's prompt: less than the
+// prompt waits for this host's answer (the approvals' ADDRESS_MS), which then gives the upload up. Its
+// session's line is held no longer for it.
+export const LOOK_MS = 800;
 // How long a closing browser's processes may take to exit (Edge's take about 5 s on xvfb), below the client's STOP_MS.
 const RELEASE_MS = 6_000;
 export const PROXY_BYPASSED =

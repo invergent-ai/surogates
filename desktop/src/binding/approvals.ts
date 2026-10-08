@@ -118,7 +118,7 @@ export interface ApprovalsOptions {
 }
 
 // How long an act's prompt waits for its page's address before it says the page is not known.
-const ADDRESS_MS = 1_000;
+export const ADDRESS_MS = 1_000;
 
 const DENIED = {
   command: "The user denied this command on this computer",

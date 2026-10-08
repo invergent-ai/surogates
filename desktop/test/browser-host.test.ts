@@ -18,11 +18,12 @@ import { fileURLToPath } from "node:url";
 import type { BrowserContext, FileChooser, Frame, JSHandle, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ADDRESS_MS } from "../src/binding/approvals.js";
 import { PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge } from "../src/browser/downloads.js";
 import {
   A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding,
-  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, OWN_CHOOSER_MS, PROXY_BYPASSED, WEAKENING,
+  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PROXY_BYPASSED, WEAKENING,
 } from "../src/browser/host.js";
 import { OPERATIONS } from "../src/browser/operations.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
@@ -455,6 +456,12 @@ describe("what a host that was killed left staged", () => {
     } finally {
       rmSync(temp, { recursive: true, force: true });
     }
+  });
+});
+
+describe("an upload's prompt, as the host is asked for it", () => {
+  it("waits for a page to say where its file input is no longer than the prompt waits for the host: its session's line is held for no prompt that has given up", () => {
+    expect(LOOK_MS).toBeLessThan(ADDRESS_MS);
   });
 });
 
@@ -1728,7 +1735,7 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     await new Promise((done) => setTimeout(done, 100));
     const started = performance.now();
     expect(await host.address(a, true)).toBe("http://fixture.test/");
-    expect(performance.now() - started).toBeLessThan(3_500);
+    expect(performance.now() - started).toBeLessThan(2_000);
     // Nothing was named: the upload that prompt is about is given to nothing, once the page answers again.
     await expect.poll(() => within(500, page.evaluate("1")), { timeout: 10_000 }).toBe(1);
     expect((await op(a, "browser.set_input_files", { files: [REPORT] })).error?.message).toBe(NOT_ASKED);
