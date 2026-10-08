@@ -6,6 +6,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync,
 } from "node:fs";
+import { statfs } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -331,6 +332,19 @@ describe("the guest image's delivery", () => {
     await expect(deliver(options())).rejects.toThrow(/^there is not enough free disk space: it needs \d+\.\d GB, and \d+\.\d GB is free$/);
     expect(heard).toEqual([]);
     expect(readdirSync(work)).toEqual([]);
+  });
+
+  it("lets an older version's image go first when it alone stands between the delivery and the free space it needs", async () => {
+    // 64 MiB on disk of an image this version never boots.
+    const older = join(images(), "b".repeat(64));
+    mkdirSync(older, { recursive: true });
+    writeFileSync(join(older, "rootfs.img"), randomBytes(64 * 1024 * 1024));
+    // Needed: 32 MiB more than is free, which the older image's room covers. Its size is not the disk's, so the unpack then refuses it.
+    const { bavail, bsize } = await statfs(images());
+    const others = manifest.files.reduce((sum, file) => sum + file.downloadSize, 0) + manifest.files[1]!.size;
+    manifest = { ...manifest, files: [{ ...manifest.files[0]!, size: bavail * bsize + 32 * 1024 * 1024 - others }, manifest.files[1]!] };
+    await expect(deliver(options())).rejects.toThrow("rootfs.img was not the file the app expects");
+    expect(existsSync(older)).toBe(false);
   });
 
   it("says what the server answered when it does not serve the file", async () => {

@@ -138,6 +138,18 @@ async function settle(from: string, to: string): Promise<void> {
   await sync(dirname(to));
 }
 
+// What *folder*'s files hold of the disk, an image's or one's .partial: they are its entries alone.
+function allocated(folder: string): number {
+  try {
+    return readdirSync(folder).reduce((sum, name) => {
+      const entry = lstatSync(join(folder, name));
+      return sum + (entry.isFile() ? entry.blocks * 512 : 0);
+    }, 0);
+  } catch {
+    return 0;
+  }
+}
+
 // Whether *folder* is the whole image: its last step there, and each file at its manifest's size.
 function whole(folder: string, manifest: ImageManifest): boolean {
   return existsSync(join(folder, COMPLETE)) && manifest.files.every((file) => sizeOf(join(folder, file.name)) === file.size);
@@ -187,9 +199,18 @@ export async function deliver(options: DeliverOptions): Promise<string> {
   const needed = manifest.files.filter((file) => !existsSync(join(work, file.name)))
     .reduce((sum, file) => sum + file.size + file.downloadSize - here(file), 0);
   const { bavail, bsize } = await statfs(work);
-  if (bavail * bsize < needed) {
-    throw new Error(`there is not enough free disk space: it needs ${gigabytes(needed)}, and ${gigabytes(bavail * bsize)} is free`);
+  let free = bavail * bsize;
+  if (free < needed) {
+    // An older version's image, which this one never boots, goes now when only it stands in the way,
+    // rather than at this one's first boot.
+    const others = readdirSync(images).filter((name) => name !== manifest.key && name !== `${manifest.key}.partial`);
+    const held = others.reduce((sum, name) => sum + allocated(join(images, name)), 0);
+    if (free + held >= needed) {
+      for (const name of others) rmSync(join(images, name), { recursive: true, force: true });
+      free += held;
+    }
   }
+  if (free < needed) throw new Error(`there is not enough free disk space: it needs ${gigabytes(needed)}, and ${gigabytes(free)} is free`);
   for (const file of manifest.files) {
     const unpacked = join(work, file.name);
     const downloaded = join(work, file.download);
