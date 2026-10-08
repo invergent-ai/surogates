@@ -176,40 +176,65 @@ describe("Settings → Folders and permissions", () => {
     expect(await settings.evaluate(() => (window as unknown as { rejections: string[] }).rejections)).toEqual([]);
   });
 
-  it("says why a Take back was refused once, however often the list is drawn again, until one goes through", async () => {
+  it("says why a Take back or a Stop was refused once for each refusal, however often the list is drawn again, until one goes through", async () => {
     const { shell, page } = await signedIn();
     const settings = await foldersSettings(shell, page);
-    // The list as the main process would answer it, the test's own: its Take back is refused once, then goes through.
+    // The list as the main process would answer it, the test's own: its Take back and its Stop are each
+    // refused twice, in the same words, and then go through.
     await shell.evaluate(({ webContents }, folder) => {
       const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
-      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com"], processes: [] };
-      let refuse = true;
-      for (const channel of ["settings:folders", "settings:take-back"]) contents.ipc.removeHandler(channel);
+      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com"], processes: [{ id: "p-1", command: "npm run serve" }] };
+      const refusals = { takeBack: 2, stop: 2 };
+      for (const channel of ["settings:folders", "settings:take-back", "settings:stop"]) contents.ipc.removeHandler(channel);
       contents.ipc.handle("settings:folders", () => [{ folder, chats: [chat] }]);
       contents.ipc.handle("settings:take-back", () => {
-        if (refuse) {
-          refuse = false;
-          throw new Error("This chat cannot reach that host");
-        }
+        if ((refusals.takeBack -= 1) >= 0) throw new Error("This chat cannot reach that host");
         chat.hosts = [];
+      });
+      contents.ipc.handle("settings:stop", () => {
+        if ((refusals.stop -= 1) >= 0) throw new Error("This chat runs no such process");
+        chat.processes = [];
       });
       contents.send("settings:changed");
     }, folders[0]!);
+    const alert = () => settings.textContent("#folders-failed");
+    // The alert's text is the one marked: it was not set again, so a screen reader did not say it again.
+    const mark = () => settings.evaluate(() => void Object.assign(document.getElementById("folders-failed")!.firstChild!, { saidBefore: true }));
+    const unsaid = () => settings.evaluate(() => "saidBefore" in (document.getElementById("folders-failed")!.firstChild ?? {}));
+    // Drawn again, as each change of the app's state draws it: the chat's row is a new one, and the alert's text the one it had.
+    const drawnAgainUnsaid = async () => {
+      await mark();
+      await settings.evaluate(() => void Object.assign(document.querySelector("#folders .row")!, { drawnBefore: true }));
+      await shell.evaluate(({ webContents }) => {
+        webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!.send("settings:changed");
+      });
+      await expect.poll(() => settings.evaluate(() => "drawnBefore" in document.querySelector("#folders .row")!), { timeout: 5_000 }).toBe(false);
+      expect(await unsaid()).toBe(true);
+    };
+    const takeBack = "Surogate did not take back example.com: This chat cannot reach that host.";
     await settings.click('[aria-label="Take back example.com"]');
-    await expect.poll(() => settings.textContent("#folders-failed")).toBe("Surogate did not take back example.com: This chat cannot reach that host.");
-    // Drawn again, as each change of the app's state draws it: the chat's row is a new one, and the
-    // alert's text the one it had, so a screen reader does not say it again.
-    await settings.evaluate(() => {
-      for (const drawn of [document.querySelector("#folders .row")!, document.getElementById("folders-failed")!.firstChild!]) Object.assign(drawn, { drawnBefore: true });
-    });
-    await shell.evaluate(({ webContents }) => {
-      webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!.send("settings:changed");
-    });
-    await expect.poll(() => settings.evaluate(() => "drawnBefore" in document.querySelector("#folders .row")!)).toBe(false);
-    expect(await settings.evaluate(() => "drawnBefore" in document.getElementById("folders-failed")!.firstChild!)).toBe(true);
+    await expect.poll(alert, { timeout: 5_000 }).toBe(takeBack);
+    await drawnAgainUnsaid();
+    // Refused again, in the same words: it answers a new press, so it is said again, once.
+    await settings.click('[aria-label="Take back example.com"]');
+    await expect.poll(unsaid, { timeout: 5_000 }).toBe(false);
+    expect(await alert()).toBe(takeBack);
+    await drawnAgainUnsaid();
     // One that goes through takes it away.
     await settings.click('[aria-label="Take back example.com"]');
-    await expect.poll(() => settings.textContent("#folders-failed")).toBe("");
+    await expect.poll(alert, { timeout: 5_000 }).toBe("");
+    expect(await texts(settings, "#folders .line")).toEqual(["Runs npm run serveStop"]);
+    // A Stop is said as a Take back is: at each refusal, the same words again too, and not after one that goes through.
+    const stop = "Surogate did not stop npm run serve: This chat runs no such process.";
+    await settings.click('[aria-label="Stop npm run serve"]');
+    await expect.poll(alert, { timeout: 5_000 }).toBe(stop);
+    await mark();
+    await settings.click('[aria-label="Stop npm run serve"]');
+    await expect.poll(unsaid, { timeout: 5_000 }).toBe(false);
+    expect(await alert()).toBe(stop);
+    await drawnAgainUnsaid();
+    await settings.click('[aria-label="Stop npm run serve"]');
+    await expect.poll(alert, { timeout: 5_000 }).toBe("");
     expect(await texts(settings, "#folders .line")).toEqual([]);
   });
 

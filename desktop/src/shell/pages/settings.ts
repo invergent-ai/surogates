@@ -88,7 +88,8 @@ const said = (error: unknown): string => (error instanceof Error ? error.message
 
 // Why the user's last Take back or Stop failed: null once one goes through.
 let failure: string | null = null;
-// What the section's alert says now: it is set only when that changes, so a screen reader says it once, not at each redraw.
+// What the section's alert says now: it is set only when that changes, or at a new refusal, so a screen
+// reader says it once for each, not at each redraw.
 let failedShown = "";
 
 // A line under a chat: what it holds, as text, and the button that ends it, named by what it ends, as it is shown.
@@ -110,6 +111,8 @@ function line(text: string, action: string, name: string, act: () => Promise<voi
     failure = null;
   }, (error: unknown) => {
     failure = `Surogate did not ${action.toLowerCase()} ${name}: ${said(error)}.`;
+    // A refusal answers a new press: the alert is set again, though it says the same words.
+    failedShown = "";
   }).finally(render));
   held.append(what, button);
   return held;
