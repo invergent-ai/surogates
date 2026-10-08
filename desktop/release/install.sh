@@ -87,17 +87,19 @@ signed() {
 }
 
 # A signed manifest's fields: a release of this channel for this platform, its tarball where every
-# release's is, and its hash, each whole (jq's $ also matches before a last newline). The manifest
-# is one JSON document: of two, the first would be applied and both kept as the version's mark.
-# Printed as "<version> <sha256>".
+# release's is, its hash, each whole (jq's $ also matches before a last newline), and its tarball's
+# size in bytes, a whole number above 0 and below 10^15, which jq writes in digits alone. The
+# manifest is one JSON document: of two, the first would be applied and both kept as the version's
+# mark. Printed as "<version> <sha256> <size>".
 release_of() {
   jq -ers --arg channel "$CHANNEL" '
     select(length == 1) | .[0]
     | select((.version | type == "string" and test("\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))
       and .channel == $channel and .platform == "linux" and .arch == "x64"
       and .url == "releases/\(.version)/surogate-desktop-\(.version)-linux-x64.tar.gz"
-      and (.sha256 | type == "string" and test("\\A[0-9a-f]{64}\\z")))
-    | "\(.version) \(.sha256)"' "$1" 2>/dev/null
+      and (.sha256 | type == "string" and test("\\A[0-9a-f]{64}\\z"))
+      and (.size | type == "number" and . > 0 and . == floor and . < 1e15))
+    | "\(.version) \(.sha256) \(.size | floor)"' "$1" 2>/dev/null
 }
 
 # The version /opt/surogate/current names, or nothing.
@@ -166,15 +168,16 @@ as_reader() {
 
 # Copies file $1, which an apply was handed, to $2 in root's staging: read once, as the user who
 # asked, never through a link and never waiting on a pipe, whatever it has become since it was
-# named. A pipe gives an empty copy at once. No more than $3 bytes are its own: root's end of the
-# pipe counts them, and a file that has more is refused.
+# named. A pipe gives an empty copy at once. No more than $3 bytes and one are copied, whatever the
+# file holds: root's end of the pipe counts them. Whether the file held no more than $3.
 taken() {
   local file="$1" copy="$2" most="$3" ends
   as_reader dd if="$file" iflag=nofollow,nonblock,count_bytes count="$(( most + 1 ))" bs=64K status=none 2>/dev/null \
     | head -c "$(( most + 1 ))" 2>/dev/null >"$copy" && ends=(0 0) || ends=("${PIPESTATUS[@]}")
   # Root's own end of the pipe failed: the disk's fault, and not the file's.
   [ "${ends[1]}" -eq 0 ] || fail "$ROOT/staging could not be written: is its disk full?"
-  [ "${ends[0]}" -eq 0 ] && [ "$(stat -c %s "$copy")" -le "$most" ] || fail "$(named "$file") is not a downloaded release's file"
+  [ "${ends[0]}" -eq 0 ] || fail "$(named "$file") is not a downloaded release's file"
+  [ "$(stat -c %s "$copy")" -le "$most" ]
 }
 
 # Applies a release as root: its manifest $1, signature $2 and tarball $3, which the user who
@@ -205,13 +208,13 @@ apply() {
   work="$(mktemp -d "$ROOT/staging/apply.XXXXXX")"
   OWN+=("$work")
   # A manifest is a line, and its signature Ed25519's 64 bytes.
-  taken "$manifest" "$work/manifest.json" 4096
-  taken "$signature" "$work/manifest.json.sig" 64
+  taken "$manifest" "$work/manifest.json" 4096 || fail "$(named "$manifest") is not a downloaded release's file"
+  taken "$signature" "$work/manifest.json.sig" 64 || fail "$(named "$signature") is not a downloaded release's file"
 
   signed "$work/manifest.json" "$work/manifest.json.sig" || fail "the release's manifest is not signed by Surogate's release key"
-  local release version sha256
+  local release version sha256 size
   release="$(release_of "$work/manifest.json")" || fail "the release's manifest is not a release of Surogate Desktop for this computer"
-  read -r version sha256 <<<"$release"
+  read -r version sha256 size <<<"$release"
   local previous
   previous="$(installed_version)"
   if [ -n "$previous" ] && dpkg --compare-versions "$version" lt "$previous"; then
@@ -230,13 +233,15 @@ apply() {
     # The install script hands no tarball for a version it found here whole.
     [ -n "$tarball" ] || fail "$version is no longer whole in $ROOT: run Surogate Desktop's install script again"
     # Room for the tarball's copy and the tree it unpacks to, which is about two and a half times
-    # its size. No more of the tarball is copied than the size that room was found for.
-    local size need room
-    size="$(as_reader stat -c %s -- "$tarball" 2>/dev/null)" && [[ "$size" =~ ^[0-9]+$ ]] || fail "$(named "$tarball") is not a downloaded release's file"
+    # its size: the size its signed manifest names, and never what the file it was handed says.
+    local need room
     need=$(( size / 256 ))
     room="$(df --output=avail -k "$ROOT" | tail -n 1)"
     [ "$room" -ge "$need" ] || fail "$ROOT needs $(( (need + 1023) / 1024 )) MB free to apply this release, and has $(( room / 1024 )) MB"
-    taken "$tarball" "$work/release.tar.gz" "$size"
+    # No more of the tarball is copied than that size, and a copy of any other size is refused
+    # before it is read again for its hash.
+    taken "$tarball" "$work/release.tar.gz" "$size" && [ "$(stat -c %s "$work/release.tar.gz")" -eq "$size" ] \
+      || fail "the downloaded release is not the $size bytes its manifest names"
     [ "$(sha256sum <"$work/release.tar.gz" | cut -d' ' -f1)" = "$sha256" ] || fail "the downloaded release is not the one its manifest names"
     # tar unpacks a set-id member without its bit (--no-same-permissions), so that only the
     # archive's own listing shows one: the fourth and seventh letters of a member's mode.

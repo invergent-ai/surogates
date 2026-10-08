@@ -159,7 +159,7 @@ function lab(release: string, setup: string[], run: string[] = []) {
   const manifestOf = (version: string, tarball: string, fields: Record<string, unknown> = {}, key: KeyObject = keys.privateKey) => {
     const manifest = Buffer.from(`${JSON.stringify({
       version, channel: "stable", platform: "linux", arch: "x64",
-      url: `releases/${version}/surogate-desktop-${version}-linux-x64.tar.gz`, sha256: sha256(readFileSync(tarball)), ...fields,
+      url: `releases/${version}/surogate-desktop-${version}-linux-x64.tar.gz`, sha256: sha256(readFileSync(tarball)), size: statSync(tarball).size, ...fields,
     })}\n`);
     writeFileSync(join(it.dir, "manifest.json"), manifest);
     writeFileSync(join(it.dir, "manifest.json.sig"), sign(null, manifest, key));
@@ -281,7 +281,9 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     // A field is whole or refused: jq's $ also matches before a last newline.
     const hash = sha256(readFileSync(tarball));
     for (const fields of [{ arch: "arm64" }, { platform: "darwin" }, { channel: "beta" }, { url: "https://elsewhere.example/r.tar.gz" }, { version: "1.0" },
-      { version: "1.0.0\n", url: "releases/1.0.0\n/surogate-desktop-1.0.0\n-linux-x64.tar.gz" }, { sha256: `${hash}\n` }]) {
+      { version: "1.0.0\n", url: "releases/1.0.0\n/surogate-desktop-1.0.0\n-linux-x64.tar.gz" }, { sha256: `${hash}\n` },
+      // Its tarball's size is a whole number of bytes, above 0 and below 10^15, or it is no release: undefined leaves the field out.
+      { size: undefined }, { size: null }, { size: 0 }, { size: -1 }, { size: 1.5 }, { size: "4096" }, { size: [4096] }, { size: 1e15 }, { size: 1e300 }]) {
       manifestOf("1.0.0", tarball, fields);
       expect(apply(tarball), JSON.stringify(fields)).toMatchObject({ status: 1, stderr: "Surogate Desktop: the release's manifest is not a release of Surogate Desktop for this computer\n" });
     }
@@ -323,6 +325,35 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(apply(tarball), after.toString()).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's manifest is not a release of Surogate Desktop for this computer\n" });
     }
     expect(root("test -e /opt/surogate/current").status).toBe(1);
+  });
+
+  it("refuses a tarball that is not the size its signed manifest names, longer or shorter, before it reads it for its hash", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    const size = statSync(tarball).size;
+    const refusal = { status: 1, stdout: "", stderr: `Surogate Desktop: the downloaded release is not the ${size} bytes its manifest names\n` };
+    for (const change of ["echo >>", "truncate -s +1G", "truncate -s -1", "truncate -s 0"]) {
+      stage(tarball);
+      expect(root(`${change} /home/tester/release.tar.gz && /opt/surogate-test/install.sh --apply ${files()}`), change).toMatchObject(refusal);
+      expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
+    }
+    // A manifest that names its tarball's hash and another size.
+    for (const named of [size + 1, size - 1]) {
+      manifestOf("1.0.0", tarball, { size: named });
+      expect(apply(tarball), `${named}`).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: the downloaded release is not the ${named} bytes its manifest names\n` });
+    }
+    expect(root("test -e /opt/surogate/current").status).toBe(1);
+    // The room it needs is the room for the size its manifest names, whatever the file it is handed holds.
+    manifestOf("1.0.0", tarball, { size: 999_999_999_999_999 });
+    stage(tarball);
+    expect(root(`/opt/surogate-test/install.sh --apply ${files()}`))
+      .toMatchObject({ status: 1, stdout: "", stderr: expect.stringMatching(/^Surogate Desktop: \/opt\/surogate needs 3814697266 MB free to apply this release, and has \d+ MB\n$/) });
+    // A size written another way is the same number.
+    const written = Buffer.from(manifestOf("1.0.0", tarball).toString().replace(`"size":${size}`, `"size":${size}.0`));
+    writeFileSync(join(box.dir, "manifest.json"), written);
+    writeFileSync(join(box.dir, "manifest.json.sig"), sign(null, written, keys.privateKey));
+    expect(written.toString()).toContain(`"size":${size}.0`);
+    expect(apply(tarball)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
   });
 
   it("takes the update's lock where only root can, so that no other user of the computer stalls it, and gives up on a lock held too long", () => {
@@ -405,25 +436,25 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
       expect(free - room()).toBeLessThan(64);
     };
-    // The tarball swapped for one of 10 GiB while the helper waited: the disk has no room for it, and none of it is copied.
+    // No more of a tarball is copied than the size its manifest names, and one byte, which shows it is another's.
+    const other = `the downloaded release is not the ${statSync(tarball).size} bytes its manifest names`;
+    // The tarball swapped for one of 10 GiB while the helper waited: the disk has no room for it.
     stage(tarball);
-    nothing(held("rm /home/tester/release.tar.gz && truncate -s 10G /home/tester/release.tar.gz"), "/home/tester/release.tar.gz",
-      "/opt/surogate needs 40960 MB free to apply this release, and has \\d+ MB");
-    // A file that holds more than its size says, as /proc's do: no more than that size is its copy.
+    nothing(held("rm /home/tester/release.tar.gz && truncate -s 10G /home/tester/release.tar.gz"), "/home/tester/release.tar.gz", other);
+    // A file that holds more than its size says, as /proc's do.
     stage(tarball);
-    nothing(root(`/opt/surogate-test/install.sh --apply ${files(undefined, "/proc/cpuinfo")}`), "/proc/cpuinfo");
+    nothing(root(`/opt/surogate-test/install.sh --apply ${files(undefined, "/proc/cpuinfo")}`), "/proc/cpuinfo", other);
     // Its folder swapped for a link to /dev: the name's last part, zero, is no link, and has no end.
     stage(tarball);
     expect(root("rm -rf /home/tester/dl /home/tester/dl.real && mkdir /home/tester/dl && cp /home/tester/release.tar.gz /home/tester/dl/zero && chown -R tester: /home/tester/dl").status).toBe(0);
-    nothing(held("mv /home/tester/dl /home/tester/dl.real && ln -s /dev /home/tester/dl", undefined, "/home/tester/dl/zero"), "/home/tester/dl/zero");
+    nothing(held("mv /home/tester/dl /home/tester/dl.real && ln -s /dev /home/tester/dl", undefined, "/home/tester/dl/zero"), "/home/tester/dl/zero", other);
     // A manifest and a signature have sizes of their own.
     expect(root("truncate -s 150M /home/tester/big.sig && truncate -s 1M /home/tester/big.json").status).toBe(0);
     nothing(root(`/opt/surogate-test/install.sh --apply /home/tester/manifest.json /home/tester/big.sig /home/tester/release.tar.gz`), "/home/tester/big.sig");
     nothing(root(`/opt/surogate-test/install.sh --apply ${files("/home/tester/big.json")}`), "/home/tester/big.json");
-    // The room a tarball needs is counted without overflow: four times 2^62 bytes is not 0.
-    expect(root(`truncate -s 4611686018427387904 /dev/shm/huge.tar.gz && /opt/surogate-test/install.sh --apply ${files(undefined, "/dev/shm/huge.tar.gz")}; said=$?; rm -f /dev/shm/huge.tar.gz; exit $said`))
-      .toMatchObject({ status: 1, stderr: expect.stringMatching(/^Surogate Desktop: \/opt\/surogate needs 17592186044416 MB free to apply this release, and has \d+ MB\n$/) });
-    expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
+    // A file of 2^62 bytes is copied no further than the others, and counted without overflow.
+    nothing(root(`truncate -s 4611686018427387904 /dev/shm/huge.tar.gz && /opt/surogate-test/install.sh --apply ${files(undefined, "/dev/shm/huge.tar.gz")}; said=$?; rm -f /dev/shm/huge.tar.gz; exit $said`),
+      "/dev/shm/huge.tar.gz", other);
     // The honest release after them is applied.
     expect(apply(tarball)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
     expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
@@ -810,9 +841,13 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const tarball = releaseOf("1.0.0");
     manifestOf("1.0.0", tarball);
     stage(tarball);
-    // Room for its copy and its tree, four times its size: none has that for a sparse 10 TiB.
-    expect(root(`truncate -s 10T /home/tester/huge.tar.gz && /opt/surogate-test/install.sh --apply ${files(undefined, "/home/tester/huge.tar.gz")}`))
+    // Room for its copy and its tree, four times the size its manifest names: none has that for 10 TiB.
+    manifestOf("1.0.0", tarball, { size: 10 * 2 ** 40 });
+    stage(tarball);
+    expect(root(`/opt/surogate-test/install.sh --apply ${files()}`))
       .toMatchObject({ status: 1, stderr: expect.stringMatching(/^Surogate Desktop: \/opt\/surogate needs 41943040 MB free to apply this release, and has \d+ MB\n$/) });
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
     const missing = root(`mv /usr/bin/bwrap /usr/bin/bwrap.away; /opt/surogate-test/install.sh --apply ${files()}; said=$?; mv /usr/bin/bwrap.away /usr/bin/bwrap; exit $said`);
     expect(missing).toMatchObject({ status: 1, stderr: "Surogate Desktop: bubblewrap is missing: run Surogate Desktop's install script again\n" });
     expect(root("test -e /opt/surogate/current").status).toBe(1);
