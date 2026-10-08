@@ -3,14 +3,22 @@
 # bin/surogate-apply-update, the root helper that applies a verified release: the current
 # version's copy at /opt/surogate/bin/surogate-apply-update is the one pkexec runs.
 #
+#   curl -fsSL https://surogate.ai/desktop/install.sh | bash                      install, update or repair
+#   install.sh --base <url>                                   install from another server (an enterprise's)
 #   surogate-apply-update --apply <manifest> <signature> <tarball>      as root: apply a downloaded release
 #
 # Every line is in a function, and main runs from the script's last line: a download cut
-# short runs nothing.
+# short runs nothing. Run as a user, it asks for sudo once and runs itself again as root
+# from its own functions.
 
 settings() {
   ROOT=/opt/surogate
   CHANNEL=stable
+  RECORD=/etc/surogate/install.json
+  LAUNCHER=/usr/local/bin/surogate
+  ENTRY=/usr/share/applications/surogate.desktop
+  PROFILE=/etc/apparmor.d/surogate-desktop
+  POLICY=/usr/share/polkit-1/actions/ai.invergent.surogate.update.policy
   # The release keys' public halves: a release's manifest is signed by the private half of one of
   # them (Ed25519). A rotation lists the old key and the new for one release, which the old signs.
   RELEASE_KEYS=(
@@ -165,6 +173,149 @@ apply() {
   say "$version is installed"
 }
 
+# What the app needs of the system: bubblewrap, socat and ripgrep for the file helper's srt; QEMU,
+# virtiofsd, and uidmap's newuidmap and newgidmap for the VM; zstd for its image; and what this
+# script runs itself.
+packages() {
+  say "installing the packages it needs"
+  export DEBIAN_FRONTEND=noninteractive
+  # A package source of the computer's own that fails stops nothing: what is needed may be known already.
+  apt-get update -qq || say "apt-get update failed for a package source of this computer's: installing from what apt knows already"
+  # Soon after a desktop's first boot, its unattended upgrades hold dpkg's lock for a while.
+  apt-get install -y -qq -o DPkg::Lock::Timeout=300 bubblewrap socat ripgrep virtiofsd uidmap zstd openssl jq curl desktop-file-utils \
+    && apt-get install -y -qq -o DPkg::Lock::Timeout=300 --no-install-recommends qemu-system-x86 \
+    || fail "could not install the packages it needs: ripgrep and virtiofsd are in Ubuntu's universe, which this computer's package sources must include"
+}
+
+# Under Ubuntu's restriction of unprivileged user namespaces, the app's Electron gets them from a
+# profile of its own, at the fixed path only root can write; its bwrap copy takes the same profile.
+apparmor_profile() {
+  [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ] || return 0
+  cat >"$PROFILE" <<'PROFILE'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile surogate-desktop /opt/surogate/versions/*/surogate flags=(unconfined) {
+  userns,
+
+  include if exists <local/surogate-desktop>
+}
+PROFILE
+  apparmor_parser -r "$PROFILE"
+}
+
+# The user who ran the script, in the kvm group: the VM runs on KVM from their next login.
+kvm_group() {
+  local user="${SUDO_USER:-}"
+  [ -n "$user" ] && [ "$user" != root ] && getent group kvm >/dev/null || return 0
+  id -nG "$user" | tr ' ' '\n' | grep -qx kvm && return 0
+  gpasswd -a "$user" kvm >/dev/null
+  RELOGIN=1
+}
+
+# The newest release at $1, checked as the user's update would be, then applied. An installed
+# version newer than it stays (a mirror can lag, or a cache): the rest of the install repairs around it.
+install_latest() {
+  local base="$1" download release version installed
+  download="$(mktemp -d)"
+  trap "rm -rf -- '$download'" EXIT
+  curl -q -fsSL --proto '=https,http' -o "$download/manifest.json" "$base/desktop/latest.json" \
+    || fail "could not download $base/desktop/latest.json"
+  curl -q -fsSL --proto '=https,http' -o "$download/manifest.json.sig" "$base/desktop/latest.json.sig" \
+    || fail "could not download $base/desktop/latest.json.sig"
+  signed "$download/manifest.json" "$download/manifest.json.sig" \
+    || fail "$base/desktop/latest.json is not signed by Surogate's release key"
+  release="$(release_of "$download/manifest.json")" \
+    || fail "$base/desktop/latest.json is not a release of Surogate Desktop for this computer"
+  read -r version _ <<<"$release"
+  installed="$(installed_version)"
+  if [ -n "$installed" ] && dpkg --compare-versions "$version" lt "$installed"; then
+    say "kept the installed $installed, newer than the server's $version"
+    return 0
+  fi
+  say "downloading Surogate Desktop $version"
+  curl -q -fSL --proto '=https,http' -o "$download/release.tar.gz" "$base/desktop/$(jq -r .url "$download/manifest.json")" \
+    || fail "could not download Surogate Desktop $version from $base"
+  apply "$download/manifest.json" "$download/manifest.json.sig" "$download/release.tar.gz"
+}
+
+# The launcher, the desktop entry that registers surogate:// for every user, and the polkit
+# action under which an administrator approves an update the app downloaded.
+integrate() {
+  cat >"$LAUNCHER.new" <<'LAUNCHER'
+#!/bin/sh
+# Surogate Desktop, as its install script installed it. VS Code's terminals export
+# ELECTRON_RUN_AS_NODE: the app's Electron ignores it, but what the app starts would inherit it.
+unset ELECTRON_RUN_AS_NODE
+exec /opt/surogate/current/surogate "$@"
+LAUNCHER
+  chmod 0755 "$LAUNCHER.new"
+  mv -T "$LAUNCHER.new" "$LAUNCHER"
+  cat >"$ENTRY" <<'ENTRY'
+[Desktop Entry]
+Type=Application
+Name=Surogate
+Comment=Lets your agents work on folders of this computer
+Exec=/usr/local/bin/surogate %u
+Icon=/opt/surogate/current/resources/surogate.svg
+Terminal=false
+Categories=Development;
+MimeType=x-scheme-handler/surogate;
+StartupWMClass=Surogate
+ENTRY
+  update-desktop-database -q /usr/share/applications
+  cat >"$POLICY" <<'POLICY'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Surogate</vendor>
+  <action id="ai.invergent.surogate.update">
+    <description>Install an update of Surogate Desktop</description>
+    <message>Authentication is required to install an update of Surogate Desktop for every user of this computer</message>
+    <defaults>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/surogate/bin/surogate-apply-update</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">--apply</annotate>
+  </action>
+</policyconfig>
+POLICY
+}
+
+# Where the app updates from, and downloads its VM's image from: the base this script installed from.
+record() {
+  mkdir -p "$(dirname "$RECORD")"
+  jq -n --arg base "$1" --arg channel "$CHANNEL" '{base: $base, channel: $channel}' >"$RECORD.new"
+  chmod 0644 "$RECORD.new"
+  mv -T "$RECORD.new" "$RECORD"
+}
+
+# What the computer lacks that the app would use, said and never a failure.
+notes() {
+  local browser
+  for browser in /opt/google/chrome/chrome /opt/microsoft/msedge/msedge /opt/brave.com/brave/brave /opt/vivaldi/vivaldi /usr/lib/chromium/chromium; do
+    [ -x "$browser" ] && break
+    browser=
+  done
+  [ -n "$browser" ] || say "no supported browser is installed, so the agent cannot use a browser on this computer. Install Google Chrome, Microsoft Edge, Brave or Vivaldi; the Snap build of Chromium is not supported."
+  [ -e /dev/kvm ] || say "This computer has no hardware virtualization (VT-x or AMD-V), or it is turned off in the firmware settings. Surogate will run the agent's commands emulated, several times slower."
+  [ -z "${RELOGIN:-}" ] || say "$SUDO_USER was added to the kvm group: log out and back in to make the agent's commands fast."
+}
+
+install_all() {
+  packages
+  apparmor_profile
+  kvm_group
+  install_latest "$1"
+  integrate
+  record "$1"
+  notes
+  say "open Surogate from your applications, or run surogate"
+}
+
 main() {
   set -euo pipefail
   umask 022
@@ -176,8 +327,25 @@ main() {
       supported
       apply "$2" "$3" "$4"
       ;;
+    --base | "")
+      local base=https://surogate.ai
+      if [ "${1:-}" = --base ]; then
+        [ "$#" -eq 2 ] && [[ "$2" =~ ^https?://[^[:space:]]+$ ]] || fail "usage: install.sh --base <http or https URL>"
+        base="${2%/}"
+      fi
+      supported
+      if [ "$EUID" -ne 0 ]; then
+        say "installing needs administrator rights: sudo asks for your password once"
+        # Again as root, from this script's own functions: a script piped to bash has no file to name.
+        # sudo resets the environment, so the proxy the user's shell names goes with them.
+        { declare -f; declare -p http_proxy https_proxy HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY 2>/dev/null || true; echo 'main "$@"'; } \
+          | sudo -- bash -s -- "$@"
+        return
+      fi
+      install_all "$base"
+      ;;
     *)
-      fail "usage: surogate-apply-update --apply <manifest> <signature> <tarball>"
+      fail "usage: install.sh [--base <url>]"
       ;;
   esac
 }

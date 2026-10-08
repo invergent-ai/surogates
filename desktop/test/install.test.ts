@@ -1,10 +1,10 @@
 // The install script (release/install.sh) in Ubuntu containers, never on this computer: its
-// --apply, which each version ships as bin/surogate-apply-update and runs as root. Releases are
-// small stand-ins in the tarball's layout, signed by a key of the test's own. Behind
-// SUROGATE_INSTALL_TESTS=1: it needs Docker, the ubuntu:24.04 and ubuntu:26.04 images, and the
-// Ubuntu archive for apt.
+// --apply, which each version ships as bin/surogate-apply-update and runs as root; and the install
+// from a server, as a user with sudo. Releases are small stand-ins in the tarball's layout, signed
+// by a key of the test's own. Behind SUROGATE_INSTALL_TESTS=1: it needs Docker, the ubuntu:24.04
+// and ubuntu:26.04 images, and the Ubuntu archive for apt.
 
-import { execFile, spawnSync } from "node:child_process";
+import { type ChildProcess, execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +17,22 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 const SCRIPT = fileURLToPath(new URL("../release/install.sh", import.meta.url));
 const RELEASES = ["24.04", "26.04"] as const;
 const ENABLED = process.env.SUROGATE_INSTALL_TESTS === "1";
+
+// A static server of the folder it is given, on a port of its own, which it prints. A proxy's
+// request, which names the whole URL, is served by its path alike.
+const SERVE = `
+const { createServer } = require("node:http");
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
+createServer((request, response) => {
+  try {
+    response.end(readFileSync(join(process.argv[1], decodeURIComponent(new URL(request.url, "http://x").pathname))));
+  } catch {
+    response.writeHead(404).end();
+  }
+}).listen(0, "127.0.0.1", function () { console.log(this.address().port); });
+`;
+
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 
 // The program that holds Electron's place in a test's release: this computer's sleep, GNU's. Where
@@ -40,6 +56,7 @@ function lab(release: string, setup: string[], run: string[] = []) {
   const env = () => ({ ...process.env, DOCKER_CONFIG: join(it.dir, "docker") });
   const docker = (args: string[]) => spawnSync("docker", args, { encoding: "utf8", env: env(), maxBuffer: 64 * 1024 * 1024 });
   const root = (command: string) => docker(["exec", it.container, "bash", "-c", command]);
+  const as = (user: string, command: string) => docker(["exec", "-u", user, "-w", `/home/${user}`, "-e", `HOME=/home/${user}`, it.container, "bash", "-c", command]);
 
   // A release in the tarball's layout: Electron's place held by this computer's sleep, so that a
   // version can be seen running; *change* edits its tree before it is tarred.
@@ -96,7 +113,7 @@ function lab(release: string, setup: string[], run: string[] = []) {
     rmSync(it.dir, { recursive: true, force: true });
   });
 
-  return { it, docker, root, releaseOf, manifestOf, current, versions };
+  return { it, docker, root, as, releaseOf, manifestOf, current, versions };
 }
 
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --apply, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
@@ -294,5 +311,160 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("test -e /opt/surogate/current").status).toBe(1);
     // Run again with it there, the apply finishes.
     expect(apply(tarball)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+  });
+});
+
+for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, on Ubuntu ${release}`, { timeout: 600_000 }, () => {
+  // A desktop's baseline: sudo for its administrator, curl, AppArmor's parser, polkit, the system
+  // bus and the kvm group; and another user of the computer. The container cannot load a profile
+  // into the kernel, so its apparmor_parser parses one as the release's own parser reads it, and
+  // stops there.
+  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions } = lab(release, [
+    "RUN apt-get update && apt-get install -y --no-install-recommends sudo curl ca-certificates apparmor polkitd pkexec dbus",
+    "RUN groupadd --system kvm && useradd -m -s /bin/bash -G sudo tester && useradd -m -s /bin/bash other && echo 'tester ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/tester",
+    `RUN echo '#!/bin/sh' >/usr/local/sbin/apparmor_parser && echo 'said=$(/usr/sbin/apparmor_parser --skip-kernel-load "$@" 2>&1) || { echo "$said" >&2; exit 1; }' >>/usr/local/sbin/apparmor_parser && chmod 755 /usr/local/sbin/apparmor_parser`,
+  ], ["--network", "host"]);
+  let server: ChildProcess;
+  let base: string;
+  // What the base serves: desktop/install.sh, latest.json and its signature, and each release.
+  const www = () => join(box.dir, "www");
+  const publish = (version: string, key?: KeyObject) => {
+    const tarball = releaseOf(version);
+    const manifest = manifestOf(version, tarball, {}, key);
+    const folder = join(www(), "desktop", "releases", version);
+    mkdirSync(folder, { recursive: true });
+    copyFileSync(tarball, join(folder, `surogate-desktop-${version}-linux-x64.tar.gz`));
+    writeFileSync(join(www(), "desktop", "latest.json"), manifest);
+    copyFileSync(join(box.dir, "manifest.json.sig"), join(www(), "desktop", "latest.json.sig"));
+  };
+  const install = () => as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- --base ${base}`);
+
+  beforeAll(async () => {
+    mkdirSync(join(www(), "desktop"), { recursive: true });
+    copyFileSync(join(box.dir, "install.sh"), join(www(), "desktop", "install.sh"));
+    // A process of its own: every docker call here blocks this one's event loop.
+    server = spawn(process.execPath, ["-e", SERVE, www()], { stdio: ["ignore", "pipe", "inherit"] });
+    const port = await new Promise<string>((resolve) => server.stdout!.once("data", (chunk: Buffer) => resolve(chunk.toString().trim())));
+    base = `http://127.0.0.1:${port}`;
+  });
+
+  afterAll(() => {
+    server.kill();
+  });
+
+  it("refuses a computer it does not support before it changes anything, or asks for sudo, and a base that is no http or https URL", () => {
+    for (const args of ["--base", "--base ftp://elsewhere.example", `--base ${base} again`]) {
+      expect(as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- ${args}`), args)
+        .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: usage: install.sh --base <http or https URL>\n" });
+    }
+    expect(root("cp /etc/os-release /root/os-release").status).toBe(0);
+    const others = [
+      'ID=ubuntu\nVERSION_ID="25.10"\nVERSION="25.10 (Questing Quokka)"',
+      'ID=ubuntu\nVERSION_ID="22.04"\nVERSION="22.04.5 LTS (Jammy Jellyfish)"',
+      'ID=debian\nVERSION_ID="12"\nVERSION="12 (bookworm)"',
+    ];
+    for (const osRelease of others) {
+      expect(root(`printf '%s\\n' '${osRelease}' >/etc/os-release`).status).toBe(0);
+      expect(install()).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: Surogate Desktop supports Ubuntu 24.04 LTS or a later LTS release (x64)\n" });
+    }
+    expect(root("cp /root/os-release /etc/os-release && test ! -e /opt/surogate && test ! -e /etc/surogate").status).toBe(0);
+  });
+
+  it("installs from its base, as a user who has sudo, all that the app needs, for every user of the computer", () => {
+    publish("1.0.0");
+    // A package source of the computer's own that apt cannot update from: the install goes on.
+    expect(root(`echo 'deb ${base}/nowhere noble main' >/etc/apt/sources.list.d/broken.list`).status).toBe(0);
+    const installed = install();
+    expect(root("rm /etc/apt/sources.list.d/broken.list").status).toBe(0);
+    expect(installed.status, installed.stderr).toBe(0);
+    expect(installed.stdout).toContain("Surogate Desktop: installing needs administrator rights: sudo asks for your password once\n");
+    expect(installed.stdout).toContain("Surogate Desktop: apt-get update failed for a package source of this computer's: installing from what apt knows already\n");
+    expect(installed.stdout).toContain("Surogate Desktop: 1.0.0 is installed\n");
+    expect(installed.stdout).toContain("Surogate Desktop: no supported browser is installed");
+    // A container has no /dev/kvm.
+    expect(installed.stdout).toContain("Surogate Desktop: This computer has no hardware virtualization (VT-x or AMD-V)");
+    expect(installed.stdout).toContain("Surogate Desktop: tester was added to the kvm group: log out and back in to make the agent's commands fast.\n");
+    expect(current()).toBe("/opt/surogate/versions/1.0.0");
+
+    // The packages, QEMU's without its recommends, and its firmware for q35.
+    expect(root("dpkg-query -W -f='${Status}\\n' bubblewrap socat ripgrep virtiofsd uidmap zstd openssl jq qemu-system-x86 | sort -u").stdout).toBe("install ok installed\n");
+    expect(root("dpkg-query -W -f='${Status}\\n' qemu-system-gui 2>/dev/null").stdout).not.toBe("install ok installed\n");
+    expect(root("timeout 3 qemu-system-x86_64 -machine q35,accel=tcg -display none -nodefaults -S").status).toBe(124);
+    expect(root("getent group kvm").stdout).toMatch(/\btester\b/);
+
+    // The profile, as both releases' parsers read it.
+    expect(root("cat /etc/apparmor.d/surogate-desktop").stdout).toBe([
+      "abi <abi/4.0>,", "include <tunables/global>", "",
+      "profile surogate-desktop /opt/surogate/versions/*/surogate flags=(unconfined) {", "  userns,", "",
+      "  include if exists <local/surogate-desktop>", "}", "",
+    ].join("\n"));
+    expect(root("/usr/sbin/apparmor_parser --skip-kernel-load -Q /etc/apparmor.d/surogate-desktop").status).toBe(0);
+
+    // The launcher clears ELECTRON_RUN_AS_NODE, and passes its arguments on.
+    expect(as("tester", "ELECTRON_RUN_AS_NODE=1 setsid /usr/local/bin/surogate 600 & sleep 1").status).toBe(0);
+    const pid = root("pgrep -f '^/opt/surogate/current/surogate 600'").stdout.trim();
+    expect(root(`tr '\\0' '\\n' </proc/${pid}/environ | grep -c ELECTRON_RUN_AS_NODE`).stdout).toBe("0\n");
+    root(`kill ${pid}`);
+    // The desktop entry registers surogate:// for every user.
+    expect(root("desktop-file-validate /usr/share/applications/surogate.desktop").stdout).toBe("");
+    expect(root("grep -x 'x-scheme-handler/surogate=surogate.desktop;' /usr/share/applications/mimeinfo.cache").status).toBe(0);
+    expect(root("grep -x 'Exec=/usr/local/bin/surogate %u' /usr/share/applications/surogate.desktop").status).toBe(0);
+    // The install record, root's, which every user reads.
+    expect(root("stat -c '%a %U' /etc/surogate/install.json /usr/local/bin/surogate /usr/share/polkit-1/actions/ai.invergent.surogate.update.policy").stdout)
+      .toBe("644 root\n755 root\n644 root\n");
+    expect(JSON.parse(root("cat /etc/surogate/install.json").stdout)).toEqual({ base, channel: "stable" });
+  });
+
+  it("installs again as a repair, through the user's proxy, takes a newer release, and refuses one the release key did not sign", () => {
+    // sudo resets the environment: the root half's downloads still go through the proxy the
+    // user's shell names, here the base itself, for a server name that does not resolve.
+    const proxied = as("tester", `curl -fsSL ${base}/desktop/install.sh | http_proxy=${base} bash -s -- --base http://surogate.invalid`);
+    expect(proxied.status, proxied.stderr).toBe(0);
+    expect(JSON.parse(root("cat /etc/surogate/install.json").stdout)).toEqual({ base: "http://surogate.invalid", channel: "stable" });
+    expect(current()).toBe("/opt/surogate/versions/1.0.0");
+    publish("1.1.0");
+    expect(install().status).toBe(0);
+    expect(versions()).toEqual(["1.0.0", "1.1.0"]);
+    publish("1.2.0", other.privateKey);
+    expect(install()).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json is not signed by Surogate's release key\n` });
+    expect(current()).toBe("/opt/surogate/versions/1.1.0");
+    // Its download's folder goes, whether it finished or not.
+    expect(root("find /tmp -mindepth 1 -maxdepth 1 -name 'tmp.*'").stdout).toBe("");
+    publish("1.1.0");
+  });
+
+  it("lets an administrator approve through polkit the update a user downloaded, and nothing else of the helper", () => {
+    // The system bus and polkit, as a desktop runs them, and an administrator who has just approved.
+    expect(root("mkdir -p /run/dbus && dbus-daemon --system --fork && (/usr/lib/polkit-1/polkitd --no-debug >/dev/null 2>&1 &) && sleep 2").status).toBe(0);
+    expect(root(`echo 'polkit.addRule(function (action, subject) { if (action.id == "ai.invergent.surogate.update" && subject.user == "tester") return polkit.Result.YES; });' >/etc/polkit-1/rules.d/10-test.rules && sleep 2`).status).toBe(0);
+    const tarball = releaseOf("1.3.0");
+    manifestOf("1.3.0", tarball);
+    // Where the app downloads it, as the user.
+    const updates = "/home/tester/.cache/surogate/updates";
+    expect(root(`mkdir -p ${updates}`).status).toBe(0);
+    for (const [from, to] of [[join(box.dir, "manifest.json"), "manifest.json"], [join(box.dir, "manifest.json.sig"), "manifest.json.sig"], [tarball, "release.tar.gz"]] as const) {
+      expect(docker(["cp", from, `${box.container}:${updates}/${to}`]).status).toBe(0);
+    }
+    expect(root("chown -R tester /home/tester/.cache").status).toBe(0);
+    // Not exec'd by bash, as the app spawns it: polkit reads its caller's start, and docker exec's has none.
+    const applied = as("tester", `pkexec /opt/surogate/bin/surogate-apply-update --apply ${updates}/manifest.json ${updates}/manifest.json.sig ${updates}/release.tar.gz; exit $?`);
+    expect(applied, applied.stderr).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.3.0 is installed\n" });
+    expect(current()).toBe("/opt/surogate/versions/1.3.0");
+    // Any other use of the helper is not the update's action: polkit asks for an administrator, and nobody is there to answer.
+    const other = as("tester", "pkexec /opt/surogate/bin/surogate-apply-update --uninstall; exit $?");
+    expect(other).toMatchObject({ status: 127, stderr: expect.stringContaining("Error creating textual authentication agent") });
+    expect(root("test -e /opt/surogate/current").status).toBe(0);
+    root("rm /etc/polkit-1/rules.d/10-test.rules");
+  });
+
+  it("repairs an install newer than its server's latest, and keeps that version", () => {
+    // The administrator's update made it 1.3.0, and the server still names 1.1.0, as a mirror that lags may.
+    expect(root("rm /usr/local/bin/surogate").status).toBe(0);
+    const repaired = install();
+    expect(repaired.status, repaired.stderr).toBe(0);
+    expect(repaired.stdout).toContain("Surogate Desktop: kept the installed 1.3.0, newer than the server's 1.1.0\n");
+    expect(repaired.stdout).not.toContain("downloading");
+    expect(current()).toBe("/opt/surogate/versions/1.3.0");
+    expect(root("test -x /usr/local/bin/surogate").status).toBe(0);
   });
 });
