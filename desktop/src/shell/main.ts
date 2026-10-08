@@ -318,6 +318,8 @@ function read(threadId: string | null): void {
     return changed();
   }
   reading = thread ? { id: thread.id, title: thread.title } : null;
+  // Read, it draws away the refusal of an earlier one: no choice of what the centre shows, so a project opening goes on.
+  if (thread) failure = null;
   main?.read(reading ? transcriptPath(reading.id) : null);
   changed();
 }

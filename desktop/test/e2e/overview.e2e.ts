@@ -599,6 +599,16 @@ describe("the Overview pane, at its edges", () => {
     await expect.poll(() => page.textContent("#reading-title")).toBe("Check the third quarter's revenue");
   });
 
+  it("draws away a read's refusal once a thread is read", async () => {
+    const { shell, page } = await opened();
+    await page.evaluate((id) => (window as unknown as { surogateShell: { read(id: string): Promise<void> } }).surogateShell.read(id),
+      "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d");
+    await expect.poll(() => page.textContent("#failure")).toBe("No such thread in the open project");
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    await expect.poll(() => page.isVisible("#failure")).toBe(false);
+  });
+
   it("never loads a master session that is not a chat when a thread leaves", async () => {
     const { page, client } = await opened();
     await viewThread(page, QUESTION);
