@@ -523,6 +523,38 @@ await navigator.serviceWorker.ready;`);
     await expect.poll(() => processes().length, { timeout: 10_000 }).toBe(0);
   });
 
+  it("opens no tab for a deleted chat's operation that waited in its line behind another", async () => {
+    const [a, b] = [session(), session()];
+    await op(b, "browser.navigate", { url: "http://fixture.test/second" }, "chat-2");
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const first = op(a, "browser.evaluate", { code: "await new Promise((done) => setTimeout(done, 1500)); return 1;" }, "chat-1");
+    const queued = op(a, "browser.navigate", { url: "http://fixture.test/second" }, "chat-1");
+    await new Promise((done) => setTimeout(done, 300));
+    await host.forget("chat-1");
+    expect((await first).error?.type).toBe("browser");
+    expect((await queued).error?.type).toBe("browser");
+    // Only the other chat's tab is left, without forgetting the chat again.
+    expect(await pages()).toBe(1);
+    expect(await script(b, "return document.title;")).toBe("Second");
+  });
+
+  it("keeps a chat's tab opened after its browser closed under it the chat's, for the chat's deletion to close", async () => {
+    const [a, b] = [session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const first = op(a, "browser.evaluate", { code: "await new Promise((done) => setTimeout(done, 3000)); return 1;" }, "chat-1");
+    const queued = op(a, "browser.navigate", { url: "http://fixture.test/second" }, "chat-1");
+    await new Promise((done) => setTimeout(done, 300));
+    // Its user closes the browser while the chat's operation runs; the next one opens a tab in another.
+    for (const { pid } of processes().filter(({ args }) => !args.some((arg) => arg.startsWith("--type=")))) process.kill(Number(pid), "SIGTERM");
+    expect((await first).error?.type).toBe("browser");
+    expect((await queued).ok).toMatchObject({ title: "Second", opened: true });
+    await op(b, "browser.navigate", { url: "http://fixture.test/second" }, "chat-2");
+    expect(await pages()).toBe(2);
+    await host.forget("chat-1");
+    expect(await pages()).toBe(1);
+    expect(await script(b, "return document.title;")).toBe("Second");
+  }, 30_000);
+
   it("closes every tab of a deleted chat's sessions, and no other chat's", async () => {
     const [a, child, b] = [session(), session(), session()];
     await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");

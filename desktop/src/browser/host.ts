@@ -67,6 +67,7 @@ export const downloaded = (name: string): string =>
   `The page started a download (${JSON.stringify(name.slice(0, 200))}). This computer does not keep the agent's downloads, so it was not saved.`;
 
 const failed = (message: string): Outcome => ({ error: { type: "browser", message } });
+const DELETED = failed("The chat was deleted, and its tabs closed with it");
 
 // A browser's error, its first line: Playwright's call log follows it.
 export const said = (error: unknown): string => (error instanceof Error ? error.message : String(error)).split("\n")[0] ?? "";
@@ -188,8 +189,12 @@ export class BrowserHost {
   private profile: string | null = null;
   // Each calling session's pages: its tab first, then the popups it opened, in order.
   private readonly tabs = new Map<string, Page[]>();
-  // The chat each calling session is of: its root's.
+  // The chat each calling session is of: its root's. Kept while the browser closes and opens
+  // again, so a tab a session opens in the next one is its chat's too.
   private readonly roots = new Map<string, string>();
+  // ponytail: how many times each chat was forgotten, for the host's life, one entry per chat
+  // deleted while it runs: an operation that waited in its session's line across one opens no tab.
+  private readonly forgets = new Map<string, number>();
   // The page a new browser opens with, until a session takes it.
   private spare: Page | null = null;
   // One operation of a session at a time, in the order they came.
@@ -203,10 +208,11 @@ export class BrowserHost {
   /** One operation of *session*'s, of the chat *root*, in its tab, launching the browser first if none runs. Never rejects. */
   perform(launch: Launch, root: string, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
     this.roots.set(session, root);
+    const forgets = this.forgets.get(root);
     // A close does not wait in the session's line: a page stuck in a script closes with the rest.
     const work = kind === "browser.close"
       ? this.closeTab(session).then((closed): Outcome => ({ ok: { closed } }))
-      : this.inLine(session, () => this.run(launch, session, kind, args, signal));
+      : this.inLine(session, () => (this.forgets.get(root) !== forgets ? Promise.resolve(DELETED) : this.run(launch, session, kind, args, signal)));
     return Promise.race([work, new Promise<Outcome>((resolve) => {
       if (signal.aborted) resolve(CANCELLED);
       signal.addEventListener("abort", () => resolve(CANCELLED), { once: true });
@@ -236,6 +242,7 @@ export class BrowserHost {
 
   /** A deleted chat: every tab of its sessions closes, with the popups they opened. */
   async forget(root: string): Promise<void> {
+    this.forgets.set(root, (this.forgets.get(root) ?? 0) + 1);
     const sessions = [...this.roots].filter(([, of]) => of === root).map(([session]) => session);
     // Together, so that closing the browser's last tabs closes it whole.
     await this.closePages(sessions.flatMap((session) => this.untab(session)));
@@ -433,7 +440,6 @@ export class BrowserHost {
     this.running = null;
     this.spare = null;
     this.tabs.clear();
-    this.roots.clear();
   }
 
   private async launch(launch: Launch): Promise<BrowserContext> {
