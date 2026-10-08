@@ -88,6 +88,12 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<scrip
     if (req.url === "/second") return void res.writeHead(200, { "content-type": "text/html" }).end("<title>Second</title>");
     // A page that answers a moment late: a navigation to it is in flight meanwhile.
     if (req.url === "/slow") return void setTimeout(() => res.writeHead(200, { "content-type": "text/html" }).end("<title>Slow</title>"), 1_500);
+    // A page whose first part comes at once and whose rest, with its script, comes a moment later: it is on its way meanwhile.
+    if (req.url === "/long") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.write(`<!doctype html><title>Long</title><p id="first">first</p>${"<!-- padding -->".repeat(200)}`);
+      return void setTimeout(() => res.end(`<p id="last">last</p><script>window.finished = true;</script>`), 1_500);
+    }
     // The fixture's page under a title of the test's own: the browser's window is named after the tab in front.
     if (req.url?.startsWith("/t/")) return void res.writeHead(200, { "content-type": "text/html" }).end(PAGE.replace("<title>Fixture</title>", `<title>${req.url.slice(3)}</title>`));
     // A page whose outline is larger than the link carries: ten thousand buttons with long names.
@@ -1237,6 +1243,19 @@ await navigator.serviceWorker.ready;`);
     expect(page.url()).toBe("http://fixture.test/t/HELD");
     expect(await page.title()).toBe("HELD");
     expect(await pages()).toBe(1);
+  }, 30_000);
+
+  it("lets a page that had begun to arrive finish arriving when its user takes the browser over: only a navigation not yet answered is stopped", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/t/HELD" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const going = op(a, "browser.navigate", { url: "http://fixture.test/long" }, "chat-1");
+    // The new page has taken the tab: its first part is there, its rest 1.5 s away.
+    await expect.poll(() => page.url(), { timeout: 10_000 }).toBe("http://fixture.test/long");
+    host.pause("chat-1", true);
+    expect(await within(1_000, going)).toEqual(PAUSED);
+    // The page its user holds now is the new one, and it comes whole: its end, and its script.
+    await expect.poll(() => within(500, page.evaluate("[document.getElementById('last') !== null, window.finished === true]")), { timeout: 10_000 }).toEqual([true, true]);
   }, 30_000);
 
   it("brings a chat's own newest page to the front before a sub-agent's, and shows none for a chat with no page", async () => {
