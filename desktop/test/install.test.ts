@@ -999,6 +999,16 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(root("test ! -e /home/tester/login-cfg/autostart/surogate.desktop && test ! -e /opt/surogate && test -e /home/tester/.local/share/surogate").status).toBe(0);
   });
 
+  it("refuses --uninstall with anything after it as a user too, before it asks for sudo", () => {
+    expect(install().status).toBe(0);
+    for (const args of ["--dry-run", "--help", "/home/tester/cfg /home/tester/dat /home/tester/cch"]) {
+      expect(as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- --uninstall ${args}`), args)
+        .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: usage: install.sh --uninstall\n" });
+    }
+    expect(root("test -x /opt/surogate/current/surogate && test -e /usr/local/bin/surogate").status).toBe(0);
+    expect(uninstall().status).toBe(0);
+  });
+
   it("removes again where nothing of it is left, with the system's own tools, and says the user's folders as one word of one line", () => {
     // The root half, as the user's half starts it for tester: handed the user's three folders, or none, as under sudo.
     const none = "/home/tester/none";

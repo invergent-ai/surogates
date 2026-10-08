@@ -549,6 +549,9 @@ main() {
       ;;
     --uninstall)
       if [ "$EUID" -ne 0 ]; then
+        # Nothing may stand after it: an argument this script does not know is refused before
+        # sudo is asked, never dropped and the app removed all the same.
+        [ "$#" -eq 1 ] || fail "usage: install.sh --uninstall"
         say "removing it needs administrator rights: sudo asks for your password once"
         # The user's own folders go with it, as their session names them: sudo resets the environment.
         { declare -f; echo 'main "$@"'; } | sudo -- bash -s -- --uninstall \
