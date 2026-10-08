@@ -78,10 +78,13 @@ const packed = (dir: string, out: string, version: string, change: (top: string)
 describe("the desktop's release manifest", () => {
   let dir: string;
   let out: string;
+  // The temporary folder each signing unpacks its tarball in: the test's own. The computer's is
+  // every signing's that runs on it at that moment, another test's among them.
+  let tmp: string;
   const tarball = () => join(out, "surogate-desktop-1.2.3-linux-x64.tar.gz");
   // publish.sh and an install.sh that trusts the test's key, beside each other as in the repository.
   const publish = (verb: string, version: string, env: Record<string, string> = {}) => spawnSync(join(dir, "release", "publish.sh"), [verb, version, out], {
-    encoding: "utf8", env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}`, ...env },
+    encoding: "utf8", env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}`, TMPDIR: tmp, ...env },
   });
   // Signed as the publish job signs: with the release key, and the hash the build's job gave for its tarball.
   const sign = (env: Record<string, string> = {}) => publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball())), ...env });
@@ -94,6 +97,8 @@ describe("the desktop's release manifest", () => {
     spawnSync("chmod", ["755", join(dir, "release", "publish.sh")]);
     out = join(dir, "out");
     mkdirSync(out);
+    tmp = join(dir, "tmp");
+    mkdirSync(tmp);
     packed(dir, out, "1.2.3");
     recording(dir, "openssl");
   });
@@ -215,6 +220,7 @@ describe("the desktop's release manifest", () => {
       expect(sign(), what).toMatchObject({ status: 1, stdout: "", stderr: said });
       // Nothing is signed, and nothing of the tarball's is left unpacked.
       expect(readdirSync(out), what).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+      expect(readdirSync(tmp), what).toEqual([]);
     }
     // The last case's archive does hold the install script under the helper's own name, and unpacks to the other.
     expect(spawnSync("tar", ["-xzOf", tarball(), helper], { encoding: "utf8" }).stdout).toBe(trusting());
@@ -222,7 +228,7 @@ describe("the desktop's release manifest", () => {
     writeFileSync(tarball(), randomBytes(4096));
     expect(sign()).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: ${tarball()} could not be unpacked\n` });
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
-    expect(readdirSync(tmpdir()).filter((name) => name.startsWith("release-unpacked-"))).toEqual([]);
+    expect(readdirSync(tmp)).toEqual([]);
   });
 
   it("refuses a tarball that is not the one the build's job made, by the hash that job gave: an artifact is its run's, and any job of the run may put another under its name", () => {
