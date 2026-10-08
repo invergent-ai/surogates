@@ -60,6 +60,8 @@ const ASKING_PAGES: Record<string, string> = {
   later: asking("LATER", "setTimeout(ask, 3500)"),
   // Asks every 2 s from its button's first press on, until told to stop.
   often: asking("OFTEN", "window.asking ??= setInterval(ask, 2000)"),
+  // Asks 3.5 s after it finds it has leave to, each time that leave is new: with no press of its button at all.
+  armed: asking("ARMED", "", "let had = false; setInterval(() => { const has = navigator.userActivation.isActive; if (has && !had) setTimeout(ask, 3500); had = has; }, 100);"),
   // Busy for three seconds from each click on its file input on: what it asked for by that click is heard of only then.
   busy: asking("BUSY", "", "document.getElementById('file').addEventListener('click', () => setTimeout(() => { const until = performance.now() + 3000; while (performance.now() < until) {} }, 0));"),
 };
@@ -3161,6 +3163,30 @@ await navigator.serviceWorker.ready;`);
     }, { timeout: 10_000 }).toBe(true);
     expect(await upload()).toMatchObject({ ok: { files: 1 } });
     expect(await framed.evaluate(filed)).toEqual([["report.pdf"]]);
+  }, 60_000);
+
+  it("counts a page's quiet from the end of this host's own reading of it too: handed back and taken over again at once, a busy page that the reading gives leave to ask opens no chooser of the browser's own", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/asks/armed" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const asked = () => within(500, page.evaluate(() => (window as unknown as { asked: number }).asked));
+    // The page has asked on the leave its opening gave it, and that leave has run out.
+    await expect.poll(asked, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+    await new Promise((done) => setTimeout(done, 6_000));
+    const before = (await asked()) as number;
+    // Busy three seconds, by now. Handed back meanwhile, it is asked to answer for what came before: that reading
+    // reaches it only once it is free, and gives it leave anew. Its user has taken the browser over again by then.
+    await page.evaluate("void setTimeout(() => { const until = Date.now() + 3000; while (Date.now() < until) {} }, 0)");
+    await new Promise((done) => setTimeout(done, 100));
+    host.pause("chat-1", true);
+    host.pause("chat-1", false);
+    host.pause("chat-1", true);
+    const taken = performance.now();
+    // It asks 3.5 s after the reading reached it: more than five seconds after the take-over.
+    await expect.poll(async () => typeof (await asked()) === "number" && ((await asked()) as number) > before, { timeout: 20_000 }).toBe(true);
+    expect(performance.now() - taken).toBeGreaterThan(OWN_CHOOSER_MS);
+    await new Promise((done) => setTimeout(done, 1_500));
+    expect(ownChoosers()).toEqual([]);
   }, 60_000);
 
   it("lets a page be only five seconds after what the agent was doing there has reached it: a click still on its way to a busy page at the take-over arms no chooser of the browser's own", async () => {

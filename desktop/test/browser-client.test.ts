@@ -454,6 +454,9 @@ describe.skipIf(!run)("the browser host's process", () => {
       expect(await holds()).toBeNull();
       expect(await sent("browser.set_input_files", { files }, "asked-by-nobody")).toMatchObject({ ok: { files: 1 } });
       expect(await holds()).toEqual(["report.pdf", "application/pdf", "%PDF-1.7"]);
+      // The host says a session's page only to the chat it is of: the chat that asks goes with the question.
+      expect(await client.address("child", false, undefined, "root")).toMatch(/^chrome-error:/);
+      expect(await client.address("child", false, undefined, "another-chat")).toBe("about:blank");
       // One asked about and denied: the host is told it is not coming, and knows it no more as one it was asked about.
       // Sent all the same, as only a mistake of this computer's own could, it is one nobody was asked about.
       await asks();
