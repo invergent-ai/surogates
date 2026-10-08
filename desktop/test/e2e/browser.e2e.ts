@@ -5,7 +5,7 @@
 // with SUROGATE_TEST_BROWSER naming another browser to drive than Settings would choose.
 // Skipped where no supported browser is installed. Settings → Browser launches none, and runs anywhere.
 
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { join } from "node:path";
 
@@ -216,9 +216,11 @@ describe.skipIf(!run)("Custom… in Settings → Browser", () => {
       await app!.evaluate((_electron, picked) => Object.assign(globalThis, { folder: picked }), path);
       await settings.selectOption("#browser", "pick");
     };
-    // A program that does not launch as a browser, within its launch's bound.
+    // A program that does not launch as a browser, within its launch's bound: named where its path leads,
+    // which is /usr/bin/gnutrue where the system's true is a link to GNU's.
     await pick("/bin/true");
-    await expect.poll(() => settings.textContent("#browser-note"), { timeout: 40_000 }).toMatch(/^\/(usr\/)?bin\/true did not start as a browser Surogate can drive: /);
+    const refused = `${realpathSync("/bin/true")} did not start as a browser Surogate can drive: `;
+    await expect.poll(async () => (await settings.textContent("#browser-note"))?.slice(0, refused.length), { timeout: 40_000 }).toBe(refused);
     expect(kept()).not.toContain("custom");
     // A path that leads nowhere.
     await pick(join(home, "gone"));
