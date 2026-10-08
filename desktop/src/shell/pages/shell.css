@@ -1436,6 +1436,16 @@ body.about-page {
   display: inline-flex;
 }
 
+/* What a screen reader hears of the sandbox's line, outside it: each change of its state, not each percent. */
+#sandbox-said {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* Empty, the waiting quit's line takes no room, and stays a live region. */
 #quitting:has(#quitting-text:empty) {
   margin: 0;

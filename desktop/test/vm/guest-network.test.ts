@@ -15,7 +15,9 @@ import { OperationJournal } from "../../src/journal/journal.js";
 import type { Operation, Outcome } from "../../src/link/protocol.js";
 import { VmClient } from "../../src/vm/client.js";
 import { VmExecutor } from "../../src/vm/executor.js";
-import { agentDisk, IMAGE, signal, USER } from "./guest-support.js";
+import { agentDisk, IMAGE, KVM, needsKvm, signal, USER } from "./guest-support.js";
+
+beforeAll(needsKvm);
 
 describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the VmExecutor and the guest", { timeout: 60_000 }, () => {
   const CHAT = "6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d";
@@ -55,7 +57,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
     vm = new VmClient({
       vm: {
         kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
-        run, console: join(dir, "console.log"), user: USER,
+        run, console: join(dir, "console.log"), user: USER, kvm: KVM,
       },
     });
     // The chat as the app binds one, working freely: only the network asks.

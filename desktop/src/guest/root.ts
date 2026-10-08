@@ -26,6 +26,24 @@ export const SESSIONS = `${SESSIONS_DISK}/roots`;
 const SHARES = "/run/surogate/shares";
 // Each root's cgroup, under the one vm/init bounds below the guest's memory.
 export const CGROUPS = "/sys/fs/cgroup/roots";
+/** 6 in a guest whose kernel's command line, *cmdline*, has surogate.emulated=1 (vm/qemu.ts), and 1 otherwise. */
+export const slowerFor = (cmdline: string) => (/(?:^|\s)surogate\.emulated=1(?:\s|$)/.test(cmdline) ? 6 : 1);
+// The agent's own bounds, each below, in a guest *slower* times as slow. An emulated guest is
+// several times slower at everything, and the host waits six times as long for a setup, a
+// teardown and a power-off (vm/manager.ts, WAITS): each bound grows as much, so it still fits
+// inside the host's.
+export const boundsFor = (slower: number) => ({
+  emptyMs: 3_000 * slower, killedMs: 1_000 * slower, flushMs: 3_000 * slower, mountMs: 5_000 * slower,
+  runnerReadyMs: 5_000 * slower, questionMs: 10_000 * slower, backstopMs: 10_000 * slower, ruleMs: 12_000 * slower,
+});
+// This guest's.
+export const BOUNDS = boundsFor(slowerFor((() => {
+  try {
+    return readFileSync("/proc/cmdline", "utf8");
+  } catch {
+    return "";
+  }
+})()));
 // How many processes one root may have of the guest's 32 768.
 const PIDS_MAX = 4096;
 // How many cgroups one root may have below its own: its runner's, its runs' and its
@@ -36,14 +54,14 @@ const PIDS_MAX = 4096;
 const CGROUPS_MAX = 256;
 // How long a root's processes have to end once its cgroup is killed. One stuck in
 // a stat of a stalled share cannot end until the share answers.
-const EMPTY_MS = 3_000;
+const EMPTY_MS = BOUNDS.emptyMs;
 const EMPTY_RETRY_MS = 10;
 // How long a shutdown waits for every root's processes, killed together, to end: inside the
 // host's 5 s from its shutdown to the guest's power-off.
-const KILLED_MS = 1_000;
+const KILLED_MS = BOUNDS.killedMs;
 // How long a flush of a share waits for its server: one that has not answered by then stalled.
 // A teardown's fits the host's 15 s with EMPTY_MS; the stop's, its 5 s with KILLED_MS.
-const FLUSH_MS = 3_000;
+const FLUSH_MS = BOUNDS.flushMs;
 const ENTER_ROOT = "/run/surogate/agent/enter-root";
 // The cloud's layout of the commands' environment, written by the image's build.
 const LAYOUT = "/etc/surogate/environment";
@@ -68,15 +86,15 @@ const FULL = `This computer's sandbox holds ${MAX_SHARES} chats already`;
 const CLOUD_HOME = /(?<=^|:)\/home\/sandbox(?=\/|:|$)/g;
 // A share the host has just added is there once the guest's kernel has found its
 // device, within about 50 ms: until then its mount fails, and is tried again.
-const MOUNT_MS = 5_000;
+const MOUNT_MS = BOUNDS.mountMs;
 const MOUNT_RETRY_MS = 25;
 // A root's runner starts in about 50 ms. The host gives a setup 15 s, past this, MOUNT_MS and EMPTY_MS.
-const RUNNER_READY_MS = 5_000;
+const RUNNER_READY_MS = BOUNDS.runnerReadyMs;
 // A runner that answers no question in this long is stopped, by one of its own
 // commands, or stuck in a stat of the folder that does not return: it is lost.
-const QUESTION_MS = 10_000;
+const QUESTION_MS = BOUNDS.questionMs;
 // How far past a command's timeout its backstop in the guest falls (Backstop).
-const BACKSTOP_MS = 10_000;
+const BACKSTOP_MS = BOUNDS.backstopMs;
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
 // The commands' environment: the cloud's layout under the root's own HOME, and the user's names.
