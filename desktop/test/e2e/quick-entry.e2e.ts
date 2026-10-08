@@ -88,17 +88,19 @@ const loadInView = (shell: ElectronApplication, path: string) => shell.evaluate(
   void webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(at))!.loadURL(`${at}${to}`).catch(() => {});
 }, [origin, path] as const);
 
-// What the main process hands the agent's page from quick entry, from now on.
-const watchHanded = (shell: ElectronApplication) => shell.evaluate(({ webContents }, at) => {
+// What the main process hands the agent's page from quick entry, from now on. With *first*, the page
+// runs that script before each one reaches it, as a page that routes elsewhere just as the text is handed.
+const watchHanded = (shell: ElectronApplication, first: string | null = null) => shell.evaluate(({ webContents }, [at, script]) => {
   const view = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(at))!;
   const send = view.send.bind(view);
   const handed: unknown[] = [];
   Object.assign(globalThis, { handed });
   view.send = (channel: string, ...args: unknown[]) => {
     if (channel === "desktop:quick-entry") handed.push(args[0]);
-    send(channel, ...args);
+    if (channel !== "desktop:quick-entry" || script === null) return send(channel, ...args);
+    void view.executeJavaScript(script).then(() => send(channel, ...args));
   };
-}, origin);
+}, [origin, first] as const);
 const handed = (shell: ElectronApplication) => shell.evaluate(() => (globalThis as unknown as { handed: unknown[] }).handed);
 
 // The X server's own calls, through Python's ctypes: what a shortcut meets on the display. "press"
@@ -317,6 +319,23 @@ describe("quick entry", () => {
     await send("Draft the June invoices");
     await said("Sign in to your agent in Surogate's window first.", "Draft the June invoices");
     expect(await handed(app!)).toHaveLength(3);
+  });
+
+  it("gives a page that left the new chat before the text reached it nothing to hear, then or later, and says why", async () => {
+    const { client } = await signedIn();
+    // The page routes to its inbox between the shell's hand-off and the text's coming.
+    await watchHanded(app!, 'history.pushState(null, "", "/inbox")');
+    await pickInTray(app!, "Quick entry");
+    const quick = await quickPage(app!);
+    await quick.fill("#text", "Draft the March invoices");
+    await quick.press("#text", "Enter");
+    await expect.poll(() => quick.textContent("#refused")).toBe("The agent's page left the new chat before it heard the message, so nothing was sent.");
+    expect(await quick.inputValue("#text")).toBe("Draft the March invoices");
+    expect(await handed(app!)).toHaveLength(1);
+    // On a new chat again, it hears nothing of it: the text was for the chat it left.
+    await client.evaluate(() => history.pushState(null, "", "/chat"));
+    await listen(client);
+    expect(await heard(client)).toEqual([]);
   });
 
   it("hands nothing to a page that says nobody is signed in to it while the new chat loads", async () => {
