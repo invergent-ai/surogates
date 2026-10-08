@@ -2171,6 +2171,35 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(versions()).toEqual(["1.4.0", "1.6.0"]);
   });
 
+  it("rolls back with the system's own tools, whatever PATH root's own shell has, and through the user's proxy from a base whose name has a letter outside ASCII, for each of its three downloads", () => {
+    expect(current()).toBe("/opt/surogate/versions/1.6.0");
+    const installed = standing();
+    // First on root's PATH, an openssl that calls every signature good: it is not the one asked
+    // about a release that no release key signed.
+    expect(root("mkdir -p /tmp/caller && printf '#!/bin/sh\\nexit 0\\n' >/tmp/caller/openssl && chmod 755 /tmp/caller/openssl").status).toBe(0);
+    expect(root("PATH=/tmp/caller:$PATH /opt/surogate-test/install.sh --version 1.6.1"))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${base}/desktop/releases/1.6.1/manifest.json is not signed by Surogate's release key\n` });
+    expect(standing()).toBe(installed);
+    // A release that is not here, from a base that no resolver has: all three of its files are
+    // asked of the proxy the user's shell names, which sudo's own environment does not have, and
+    // the base's letters are read as UTF-8 for each, or curl refuses the name before it asks.
+    publish("1.5.9", undefined, { stateSchema: 2 });
+    expect(root(`cp /etc/surogate/install.json /root/install.json && jq -c '.base = "http://b\u00fccher.invalid"' /root/install.json >/etc/surogate/install.json`).status).toBe(0);
+    const proxied = as("tester", `curl -fsSL ${base}/desktop/install.sh | http_proxy=${base} bash -s -- --version 1.5.9`);
+    expect(root("cp /root/install.json /etc/surogate/install.json").status).toBe(0);
+    expect(proxied.status, proxied.stderr).toBe(0);
+    expect(proxied.stdout).toContain("Surogate Desktop: downloading Surogate Desktop 1.5.9\n");
+    expect(proxied.stdout).toContain("Surogate Desktop: 1.5.9 is installed\n");
+    expect(root(`curl -fsS ${base}/desktop/releases/1.5.9/manifest.json | cmp - /opt/surogate/current/release.json`).status).toBe(0);
+    expect(versions()).toEqual(["1.5.9", "1.6.0"]);
+    // And to the version it replaced, which is here whole and later than the installed one: only the state schema and the keys refuse a version.
+    const forward = rollBack("1.6.0");
+    expect(forward.status, forward.stderr).toBe(0);
+    expect(forward.stdout).not.toContain("downloading");
+    expect(current()).toBe("/opt/surogate/versions/1.6.0");
+    expect(versions()).toEqual(["1.5.9", "1.6.0"]);
+  });
+
   it("rolls back to a version whose folder a later update removed, taking the release from its base again", () => {
     publish("1.7.0", undefined, { stateSchema: 2 });
     expect(install().status).toBe(0);
