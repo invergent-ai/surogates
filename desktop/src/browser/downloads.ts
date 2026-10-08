@@ -31,8 +31,9 @@ export interface Saver {
   run(operation: Operation, signal: AbortSignal): Promise<Outcome>;
 }
 
-// Where a chat's downloads go, under its folder: beside its files, never among them, where the agent's
-// next command would act on a page's conftest.py, Makefile or package.json.
+// Where a chat's downloads go, under its folder: not at its top, where a tool that reads only the top of
+// the folder it runs in would act on a page's Makefile or package.json. A tool that searches the tree, as
+// a test runner does, finds a page's file here too: in a chat that works freely it is saved unasked.
 export const DOWNLOADS = "Downloads";
 // How many names are tried: report.txt, then report (2).txt up to report (100).txt.
 const NAMES = 100;

@@ -80,11 +80,28 @@ describe("a download the agent's page started", () => {
     expect(await saveDownload(stage("report.txt", "second"), journal.bindings, saver)).toContain("as Downloads/report (2).txt.");
     expect([read("report.txt"), read("report (2).txt")]).toEqual(["first", "second"]);
     expect(existsSync(first.path)).toBe(false);
-    // Beside the chat's files, never among them: a page's conftest.py is not at the top of the folder for the agent's next test run.
-    await saveDownload(stage("conftest.py", "raise SystemExit"), journal.bindings, saver);
-    expect(readdirSync(folder)).toEqual(["Downloads"]);
-    // A chat that works freely is asked nothing.
-    expect(asked).toEqual([]);
+    // Under Downloads, not at the folder's top: a tool that reads only the top of the folder it runs in (make, npm)
+    // does not act on a page's Makefile or package.json. That is all it keeps a page's file from: a tool that
+    // searches the tree, as pytest and vitest do for their tests, finds what is in Downloads too.
+    await saveDownload(stage("Makefile", "all:\n\ttrue\n"), journal.bindings, saver);
+    expect([readdirSync(folder), readdirSync(downloads).sort()]).toEqual([["Downloads"], ["Makefile", "report (2).txt", "report.txt"]]);
+  });
+
+  it("saves a page's download with no question in a chat that works freely, as any write of the chat's: whatever the page named it, and whether or not anything clicked", async () => {
+    // The rule as it stands, stated once: a change of it is this test's to make. A page the agent only opened
+    // can download by itself, and its file is then in the user's folder unasked, under the name the page chose.
+    bind("free");
+    for (const name of ["report.pdf", "conftest.py", "zz.test.js", "setup.sh"]) {
+      expect(await saveDownload(stage(name), journal.bindings, saver)).toBe(`The page downloaded "${name}". It is saved in the chat's folder as Downloads/${name}.`);
+    }
+    expect([asked, readdirSync(downloads).sort()]).toEqual([[], ["conftest.py", "report.pdf", "setup.sh", "zz.test.js"]]);
+    // None is made to run by being saved: no file's mode lets it.
+    for (const name of readdirSync(downloads)) expect(statSync(join(downloads, name)).mode & 0o111, name).toBe(0);
+    // In a chat that asks every time, each is asked about, with its name.
+    journal.bindings.setMode(ROOT, "ask");
+    answer = "deny";
+    await saveDownload(stage("conftest.py"), journal.bindings, saver);
+    expect(asked).toMatchObject([{ kind: "change", path: join(downloads, "conftest (2).py"), download: "page" }]);
   });
 
   it("asks a chat that asks every time, saying the page downloaded it, and saves nothing its user denies", async () => {
