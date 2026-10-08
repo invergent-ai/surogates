@@ -650,7 +650,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
 
   it("refuses an archive that holds anything outside its folder, a link out of it, a special file or a hard link", () => {
     const refusals: Array<[(top: string) => void, string]> = [
-      [(top) => symlinkSync("/etc", join(top, "resources", "etc")), "the release's archive links outside itself: resources/etc"],
+      [(top) => symlinkSync("/etc", join(top, "resources", "etc")), "the release's archive holds a link to a whole path: resources/etc"],
       [(top) => symlinkSync("../../../../../../tmp", join(top, "bin", "up")), "the release's archive links outside itself: bin/up"],
       [(top) => spawnSync("mkfifo", [join(top, "fifo")]), "the release's archive holds a special file, a set-id file or a hard link"],
       [(top) => spawnSync("ln", [join(top, "surogate"), join(top, "bin", "again")]), "the release's archive holds a special file, a set-id file or a hard link"],
@@ -681,7 +681,9 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
   });
 
   it("refuses a link that would leave its version once the tree has its place, whatever it names where the tree is unpacked", () => {
-    const refusals: Array<[(top: string) => void, string]> = [
+    const outside = "the release's archive links outside itself";
+    const wholePath = "the release's archive holds a link to a whole path";
+    const refusals: Array<[(top: string) => void, string, string?]> = [
       // Out of the tree and back in by the folder's name in the archive, which is not its name in versions.
       [(top) => symlinkSync("../surogate-desktop-1.0.0-linux-x64/surogate", join(top, "back")), "back"],
       [(top) => symlinkSync("../../surogate-desktop-1.0.0-linux-x64/surogate", join(top, "resources", "back")), "resources/back"],
@@ -690,19 +692,25 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
         symlinkSync("..", join(top, "resources", "app", "short"));
         symlinkSync("resources/app/short/../../surogate-desktop-1.0.0-linux-x64/surogate", join(top, "through"));
       }, "through"],
+      // And the other way: a path that leaves the tree as it is written, and comes back to it as it
+      // resolves, through a link of the tree's own to a folder two below its top.
+      [(top) => {
+        symlinkSync("resources/app", join(top, "deep"));
+        symlinkSync("deep/../../surogate", join(top, "odd"));
+      }, "odd"],
       // By the name it will have, and by its whole path.
       [(top) => symlinkSync("../1.0.0/surogate", join(top, "there")), "there"],
-      [(top) => symlinkSync("/opt/surogate/versions/1.0.0/surogate", join(top, "whole")), "whole"],
-      [(top) => symlinkSync("/opt/surogate/current/surogate", join(top, "whole")), "whole"],
+      [(top) => symlinkSync("/opt/surogate/versions/1.0.0/surogate", join(top, "whole")), "whole", wholePath],
+      [(top) => symlinkSync("/opt/surogate/current/surogate", join(top, "whole")), "whole", wholePath],
     ];
     // The installed version's own files are there to be named.
     const installed = releaseOf("1.0.0");
     manifestOf("1.0.0", installed);
     expect(apply(installed).status).toBe(0);
-    for (const [change, link] of refusals) {
+    for (const [change, link, said = outside] of refusals) {
       const tarball = releaseOf("1.0.0", change);
       manifestOf("1.0.0", tarball);
-      expect(apply(tarball), link).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: the release's archive links outside itself: ${link}\n` });
+      expect(apply(tarball), link).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${said}: ${link}\n` });
     }
     // Links that stay in the tree are links like any other: to a folder above them, and to nothing.
     const tarball = releaseOf("1.0.0", (top) => {
@@ -955,9 +963,11 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(docker(["exec", box.container, "/opt/surogate-test/install.sh", "--apply", ...names]), name)
         .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: $'/home/tester/no ${name}${quoted}' is not a downloaded release's file\n` });
     }
-    const linked = releaseOf("1.0.0", (top) => symlinkSync("/etc", join(top, "resources", `out${line}`)));
-    manifestOf("1.0.0", linked);
-    expect(apply(linked)).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: the release's archive links outside itself: $'resources/out${quoted}'\n` });
+    for (const [target, said] of [["/etc", "holds a link to a whole path"], ["../../../etc", "links outside itself"]] as const) {
+      const linked = releaseOf("1.0.0", (top) => symlinkSync(target, join(top, "resources", `out${line}`)));
+      manifestOf("1.0.0", linked);
+      expect(apply(linked), target).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: the release's archive ${said}: $'resources/out${quoted}'\n` });
+    }
   });
 
   it("reads a name and a user's number in no locale of its caller's, which pkexec and sudo pass on", () => {

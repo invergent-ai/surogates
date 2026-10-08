@@ -319,10 +319,13 @@ apply() {
     # reach the tree is refused here too.
     [ -z "$(find "$top" \( -type b -o -type c -o -type p -o -type s -o -perm /6000 -o \( -type f -links +1 \) \) -print -quit)" ] \
       || fail "the release's archive holds a special file, a set-id file or a hard link"
-    # No link names a whole path, climbs out of the tree as it is written, or leaves it as it resolves.
+    # No link names a whole path, climbs out of the tree as it is written, or leaves it as it
+    # resolves. A whole path is refused in words of its own: it leaves the tree as it resolves too,
+    # wherever it leads, so that those words alone would never be this check's.
     while IFS= read -r -d '' link; do
       target="$(readlink "$link")"
-      [[ "$target" != /* ]] && [[ "$(realpath -ms "${link%/*}/$target")" == "$top"/* ]] && [[ "$(realpath -m "$link" 2>/dev/null)" == "$top"/* ]] \
+      [[ "$target" != /* ]] || fail "the release's archive holds a link to a whole path: $(named "${link#"$top"/}")"
+      [[ "$(realpath -ms "${link%/*}/$target")" == "$top"/* ]] && [[ "$(realpath -m "$link" 2>/dev/null)" == "$top"/* ]] \
         || fail "the release's archive links outside itself: $(named "${link#"$top"/}")"
     done < <(find "$top" -type l -print0)
     # The app and its helper are programs, no folders and no links, and bin a folder of the tree's
