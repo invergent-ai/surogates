@@ -321,10 +321,15 @@ describe("WorkspacePanel", () => {
     expect(notice()).toBe("Local access revoked");
   });
 
-  it("says nothing of a chat's tree wait over the tree of the chat it moves to, on its way", async () => {
+  it("says nothing of a chat's tree wait over the tree of the chat it moves to, on its way, or over its own on the way back", async () => {
+    let told = false;
     const adapter = {
+      // Chat one's first read waits for its computer; its read on the way back is still on its way, and waits for nothing.
       getWorkspaceTree: vi.fn(({ sessionId, onWaiting }: { sessionId: string; onWaiting?: (said: string) => void }) => {
-        if (sessionId === "s-1") onWaiting?.("Waiting for chat one's ThinkPad");
+        if (sessionId === "s-1" && !told) {
+          told = true;
+          onWaiting?.("Waiting for chat one's ThinkPad");
+        }
         return new Promise(() => {});
       }),
       uploadWorkspaceFile: vi.fn(),
@@ -347,10 +352,15 @@ describe("WorkspacePanel", () => {
       root?.render(panel("s-2"));
     });
     expect(waiting()).toBeNull();
+    await act(async () => {
+      root?.render(panel("s-1"));
+    });
+    expect(waiting()).toBeNull();
   });
 
-  it("asks a delete only over its own chat, and its end leaves the chat it moved to alone", async () => {
+  it("asks a delete only over its own chat, and its wait and its end leave the chat it moved to alone", async () => {
     let deleted: () => void = () => {};
+    let deleteWaiting: ((said: string) => void) | undefined;
     const adapter = {
       getWorkspaceTree: vi.fn().mockResolvedValue({
         root: "r",
@@ -358,9 +368,12 @@ describe("WorkspacePanel", () => {
         truncated: false,
       }),
       uploadWorkspaceFile: vi.fn(),
-      deleteWorkspaceFile: vi.fn(() => new Promise<void>((resolve) => {
-        deleted = resolve;
-      })),
+      deleteWorkspaceFile: vi.fn(({ onWaiting }: { onWaiting?: (said: string) => void }) => {
+        deleteWaiting ??= onWaiting;
+        return new Promise<void>((resolve) => {
+          deleted = resolve;
+        });
+      }),
       getWorkspaceDownloadUrl: vi.fn(() => "#"),
     } as unknown as AgentChatAdapter;
     const selected = vi.fn();
@@ -398,11 +411,19 @@ describe("WorkspacePanel", () => {
     await act(async () => {
       button("Cancel")?.click();
     });
+    // Chat one's delete waits for its computer, said over chat one alone.
+    act(() => deleteWaiting?.("Waiting for you to allow this on chat one's ThinkPad"));
+    expect(container.querySelector('[data-testid="workspace-notice"]')).toBeNull();
     await act(async () => {
       deleted();
     });
     expect(selected).not.toHaveBeenCalledWith(null);
     expect(container.querySelector('[data-testid="workspace-notice"]')).toBeNull();
+    // Ended, chat one's dialog is gone with it, and holds nothing on the way back.
+    await act(async () => {
+      root?.render(panel("s-1"));
+    });
+    expect(dialog()).toBeNull();
   });
 
   it("says what a change waits for on the computer while it is sent again", async () => {
