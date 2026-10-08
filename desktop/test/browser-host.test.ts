@@ -992,6 +992,45 @@ await navigator.serviceWorker.ready;`);
     expect(await seen()).toEqual(atPause);
   }, 30_000);
 
+  it("lets go a button its agent pressed and holds down when its user takes the browser over, from whichever chat, and presses none whose pointer was on its way", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    await page.evaluate(() => {
+      const seen = { downs: 0, ups: 0 };
+      Object.assign(window, { seen });
+      addEventListener("mousedown", () => (seen.downs += 1));
+      addEventListener("mouseup", () => (seen.ups += 1));
+    });
+    const seen = () => page.evaluate(() => (window as unknown as { seen: { downs: number; ups: number } }).seen);
+    // Pressed by a `down` of the agent's, whose `up` is its next call, a model's turn away.
+    expect(await op(a, "browser.mouse", { action: "down", x: 300, y: 300, button: "left" }, "chat-1")).toMatchObject({ ok: {} });
+    expect(await seen()).toEqual({ downs: 1, ups: 0 });
+    // Taken over from another chat: the browser is one, and the button comes up where it is, not left held under its user's hand.
+    host.pause("chat-2", true);
+    await expect.poll(seen, { timeout: 5_000 }).toEqual({ downs: 1, ups: 1 });
+    host.pause("chat-2", false);
+    // A `down` whose pointer was on its way when its user took the browser over: the button does not go down.
+    const move = page.mouse.move.bind(page.mouse);
+    page.mouse.move = async (...args: Parameters<typeof move>) => {
+      await move(...args);
+      host.pause("chat-1", true);
+    };
+    expect(await within(2_000, op(a, "browser.mouse", { action: "down", x: 320, y: 300, button: "left" }, "chat-1"))).toEqual(PAUSED);
+    await new Promise((done) => setTimeout(done, 500));
+    expect(await seen()).toEqual({ downs: 1, ups: 1 });
+    host.pause("chat-1", false);
+    page.mouse.move = move;
+    // And one that went down just as they took it over comes up again.
+    const press = page.mouse.down.bind(page.mouse);
+    page.mouse.down = async (...args: Parameters<typeof press>) => {
+      await press(...args);
+      host.pause("chat-1", true);
+    };
+    expect(await within(2_000, op(a, "browser.mouse", { action: "down", x: 340, y: 300, button: "left" }, "chat-1"))).toEqual(PAUSED);
+    await expect.poll(seen, { timeout: 5_000 }).toEqual({ downs: 2, ups: 2 });
+  }, 30_000);
+
   it("answers an operation in flight paused at once, and gives the agent nothing it read after its user took the browser over", async () => {
     const a = session();
     await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");

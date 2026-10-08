@@ -14,7 +14,7 @@ import { type BrowserContext, chromium, type Dialog, type Page } from "playwrigh
 import type { Outcome } from "../link/protocol.js";
 import { destination, reach } from "../vm/egress.js";
 import { CANCELLED, NEW_TAB, PAUSED } from "./client.js";
-import { OPERATIONS } from "./operations.js";
+import { letGo, OPERATIONS } from "./operations.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
 
 // What to launch: the browser the user chose, and the identity's profile for it.
@@ -354,6 +354,8 @@ export class BrowserHost {
     this.held = root;
     this.interrupt.abort();
     this.interrupt = new AbortController();
+    // A button the agent pressed and holds, in any session's page, comes up: not left down under its user's hand.
+    for (const pages of this.tabs.values()) for (const page of pages) void letGo(page);
   }
 
   /**

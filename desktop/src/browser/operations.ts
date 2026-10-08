@@ -86,6 +86,19 @@ return typeof json !== "string" ? false : json.length > ${MAX_FRAME_CHARS} ? jso
   return { value: JSON.parse(sent) as unknown };
 }
 
+// The buttons its agent holds down in each page, by a `down` of its own whose `up` is a later call.
+const down = new WeakMap<Page, Set<Button>>();
+
+/**
+ * Every button the agent holds down in *page* comes up, where the pointer is: its user took the browser
+ * over, and a button left down would drag whatever it holds under their own pointer. Never rejects.
+ */
+export async function letGo(page: Page): Promise<void> {
+  const buttons = down.get(page);
+  down.delete(page);
+  for (const button of buttons ?? []) await page.mouse.up({ button }).catch(() => {});
+}
+
 // As the cloud's click: a moment after it, and the network's quiet if it sent a request.
 async function settled(page: Page, act: () => Promise<void>): Promise<void> {
   let sent = false;
@@ -150,7 +163,15 @@ async function mouse(page: Page, args: Record<string, unknown>, stop: AbortSigna
   }
   if (action === "down" || action === "up") {
     await page.mouse.move(x, y);
+    // Taken over as the pointer got there: its button does not go down under its user's hand.
+    if (action === "down" && stop.aborted) return {};
     await page.mouse[action]({ button });
+    const held = down.get(page) ?? new Set<Button>();
+    if (action === "down") held.add(button);
+    else held.delete(button);
+    down.set(page, held);
+    // Taken over as it went down: it comes up again, as a drag's does.
+    if (action === "down" && stop.aborted) await letGo(page);
     return {};
   }
   throw new Error(`No mouse action ${JSON.stringify(String(action))}`);
