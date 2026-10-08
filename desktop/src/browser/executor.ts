@@ -100,6 +100,8 @@ export class Browsing implements ToolLayer {
   private async browse(launch: Launch, operation: Operation, signal: AbortSignal): Promise<Outcome> {
     const sent = operation.kind === "browser.set_input_files" ? await this.withFiles(operation, signal) : operation;
     if (!("kind" in sent)) return sent;
+    // Its user took the browser over while its files were read: none of them leaves this process, at a hand back either.
+    if (this.held !== null) return PAUSED;
     return this.tell(operation.callingSessionId, await this.options.browser.perform(launch, sent, signal));
   }
 
@@ -113,6 +115,8 @@ export class Browsing implements ToolLayer {
     const files: Array<{ name: string; mimeType: string; buffer: string }> = [];
     let bytes = 0;
     for (const key of paths as string[]) {
+      // Its user took the browser over meanwhile: no more of them is read.
+      if (this.held !== null) return PAUSED;
       const read = await this.options.tools.run({ ...operation, id: `${operation.id}:read-${files.length}`, kind: "read", args: { key, max_bytes: null } }, signal);
       if ("error" in read) return failed(`${key} could not be read for the page: ${read.error.message}`);
       const buffer = String(read.ok);

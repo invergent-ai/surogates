@@ -95,6 +95,14 @@ const MAX_NOTICES = 20;
 export const FILE_ASKED =
   "The page asked for a file to upload. Nothing was chosen: browser_upload_file gives it files of the chat's folder.";
 export const NOT_ASKED = "The page has not asked for a file: click its upload button or its file input first";
+export const ONE_FILE = "The page's file input takes one file at a time";
+export const BUSY = "The page was too busy to take the files, so it was given none of them";
+// How long the one step that puts an upload's files into its input may take to reach the page, and how
+// many times it is sent to a page too busy for that.
+const GIVE_MS = 250;
+const GIVE_TRIES = 10;
+// Told of an upload's own end where its answer could not say it: it was answered paused.
+export const GIVEN_AS_TAKEN = "The files of an upload were given to the page just as the user took over the agent's browser on this computer.";
 export const notFinished = (name: string, why: string): string => `The page's download of ${quoted(name)} did not finish (${why}), so it was not saved.`;
 // Why one did not finish: the browser's own word for one that was cancelled, or whose connection broke; of
 // any other, this host's words. What an error says itself is not the agent's to read.
@@ -180,18 +188,51 @@ async function behind(context: BrowserContext, given: AbortSignal): Promise<Page
 const looks = (kind: string, args: Record<string, unknown>): boolean =>
   kind === "browser.observe" || kind === "browser.screenshot" || (kind === "browser.mouse" && (args.action === "move" || args.action === "wheel"));
 
+// A file for a page: its name, its type, and what it holds, in base64.
+interface UploadFile {
+  name: string;
+  mimeType: string;
+  buffer: string;
+}
+
 // An upload's files as the main side sent them, each a plain name, a type and its data in base64; null for anything else.
-function filesOf(value: unknown): Array<{ name: string; mimeType: string; buffer: Buffer }> | null {
+function filesOf(value: unknown): UploadFile[] | null {
   if (!Array.isArray(value) || value.length === 0) return null;
   const files = value.map((file: unknown) => {
     if (!isRecord(file)) return null;
     const { name, mimeType, buffer } = file;
     const plain = typeof name === "string" && name !== "" && name !== "." && name !== ".." && !/[/\\\0]/.test(name);
     if (!plain || typeof mimeType !== "string" || typeof buffer !== "string") return null;
-    return { name, mimeType, buffer: Buffer.from(buffer, "base64") };
+    return { name, mimeType, buffer };
   });
   return files.every((file) => file !== null) ? files : null;
 }
+
+// The two steps a file input is given its files in. Each runs in the page, in the isolated world its
+// input's handle lives in (Playwright's own, one for each frame), which no script of the page's reaches.
+// First the files are made there: the input has none of them yet, and the page sees nothing.
+const make = (_input: Node, sent: UploadFile[]): DataTransfer => {
+  const made = new DataTransfer();
+  for (const { name, mimeType, buffer } of sent) {
+    const held = atob(buffer);
+    const bytes = new Uint8Array(held.length);
+    for (let at = 0; at < held.length; at += 1) bytes[at] = held.charCodeAt(at);
+    made.items.add(new File([bytes], name, { type: mimeType }));
+  }
+  return made;
+};
+// Then they are put into the input, in one step of the page's, heard there as a person's choice of them is
+// (input, then change): "given", or why not. "late": the step ran after *by*, on this computer's clock,
+// as when the page was busy: it gives nothing then, since its user may hold the browser by now.
+const put = (made: DataTransfer, { input, by }: { input: Node; by: number }): "given" | "gone" | "single" | "late" => {
+  if (Date.now() > by) return "late";
+  if (!(input instanceof HTMLInputElement) || input.type !== "file") return "gone";
+  if (made.files.length > 1 && !input.multiple) return "single";
+  input.files = made.files;
+  input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  return "given";
+};
 
 // A new tab of *context*'s, or why not: a browser that is closing may never answer for one.
 function opened(context: BrowserContext): Promise<Page> {
@@ -453,6 +494,10 @@ export class BrowserHost {
     this.held = root;
     this.interrupt.abort();
     this.interrupt = new AbortController();
+    // What its pages asked for before is not the agent's to answer once its user has held the browser: no
+    // input is kept for an upload, named for a prompt or not, and none is taken up again at the hand back.
+    this.choosers.clear();
+    this.named.clear();
     // The agent's downloads on their way stop where they are: each is dropped once it has ended.
     for (const download of this.arriving) void download.cancel().catch(() => {});
     // A button the agent pressed and holds, in any session's page, comes up: not left down under its user's hand.
@@ -741,24 +786,56 @@ export class BrowserHost {
 
   // The files the main side read from the chat's folder, given once to the file input an upload's
   // prompt named, or, unasked, to the one the session's pages asked for last: the page is given names
-  // and what they hold, never a path.
+  // and what they hold, never a path. Taken over while it is on its way, it gives the page nothing (give).
   private async upload(session: string, args: Record<string, unknown>, stop: AbortSignal): Promise<Outcome> {
     const chooser = this.named.get(session) ?? this.choosers.get(session);
     this.named.delete(session);
     if (!chooser || chooser.page().isClosed()) return failed(NOT_ASKED);
     const files = filesOf(args.files);
     if (!files) return failed("A file for the page is a name, its type and what it holds");
+    let refused: unknown;
     try {
-      await this.bounded(chooser.page(), chooser.setFiles(files), stop);
+      refused = await this.bounded(chooser.page(), this.give(session, chooser, files, stop), stop);
     } catch (error) {
       if (stop.aborted) return PAUSED;
       return failed(said(error));
     }
-    if (stop.aborted) return PAUSED;
+    if (stop.aborted || refused === HELD) return PAUSED;
+    if (typeof refused === "string") return failed(refused);
     if (this.choosers.get(session) === chooser) this.choosers.delete(session);
     const notices = this.unseen.get(session) ?? [];
     this.unseen.delete(session);
     return { ok: { files: files.length, notices } };
+  }
+
+  // *files* given to *chooser*'s input: null once it has them, why not in words, or HELD. They are made
+  // ready in the page where no script of its reaches them, which takes as long as they are large (make),
+  // and then put into the input in one short step (put). Between the two is the last look at whether its
+  // user has taken the browser over (*stop*): taken over before it, the page is given nothing, what was
+  // made ready is dropped, and nothing of it is taken up again. The step sent after that look gives the
+  // files only if the page takes it within GIVE_MS: a page too busy for that is given nothing by it, and
+  // is looked at again first. So a page gets a file at most GIVE_MS after its user took the browser over,
+  // and only from a step sent before they did; its session's next answer then says so, since this
+  // operation's own is paused.
+  private async give(session: string, chooser: FileChooser, files: UploadFile[], stop: AbortSignal): Promise<string | null | typeof HELD> {
+    const input = chooser.element();
+    if (stop.aborted) return HELD;
+    const made = await input.evaluateHandle(make, files);
+    try {
+      for (let tries = 0; tries < GIVE_TRIES; tries += 1) {
+        if (stop.aborted) return HELD;
+        const came = await made.evaluate(put, { input, by: Date.now() + GIVE_MS });
+        // The page was too busy to take them in time: looked at again, and sent again.
+        if (came === "late") continue;
+        if (came === "single") return ONE_FILE;
+        if (came !== "given") return NOT_ASKED;
+        if (stop.aborted) this.keep(session, GIVEN_AS_TAKEN);
+        return null;
+      }
+      return BUSY;
+    } finally {
+      void made.dispose().catch(() => {});
+    }
   }
 
   // A download once it has finished, in this host's staging folder: handed on for the chat's folder,

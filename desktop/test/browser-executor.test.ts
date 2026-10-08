@@ -51,10 +51,13 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
   const chats = new Set(bound ? [ROOT, OTHER] : []);
   // The chat's files, as its file host reads them.
   const files: Record<string, string> = { "/home/u/notes/report.pdf": "%PDF-1.7", "/home/u/notes/scan.png": "PNG" };
+  // What happens while a file is read, as the test says: nothing unless it does.
+  const reading = { then: (): void => {} };
   const tools: ToolLayer = {
     run: (operation) => {
       ran.push(operation.kind);
       if (operation.kind !== "read" || operation.args.key === undefined) return Promise.resolve({ ok: "tools" });
+      reading.then();
       const data = files[String(operation.args.key)];
       return Promise.resolve(data === undefined
         ? { error: { type: "os", code: "ENOENT", message: "No such file or directory", filename: String(operation.args.key) } }
@@ -88,7 +91,7 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
     launch: () => launch,
     staging,
   });
-  return { browsing, ran, browsed, stopped, forgotten, paused, shown, chats, answers, stage: (download: StagedDownload) => staged(download) };
+  return { browsing, ran, browsed, stopped, forgotten, paused, shown, chats, answers, reading, files, stage: (download: StagedDownload) => staged(download) };
 }
 
 describe("the browser's kinds beside the tools", () => {
@@ -459,6 +462,27 @@ describe("the browser's kinds beside the tools", () => {
     });
     expect(browsed).toHaveLength(1);
     expect(await browsing.run({ ...upload, args: { paths: "report.pdf" } }, signal)).toMatchObject({ error: { type: "browser" } });
+  });
+
+  it("gives the browser none of an upload's files once its user took the browser over while they were read, and reads no more of them", async () => {
+    const { browsing, browsed, ran, reading } = rig();
+    const upload = { ...op("browser.set_input_files"), args: { paths: ["/home/u/notes/report.pdf", "/home/u/notes/scan.png"] } };
+    // Taken over from another chat while the first file is read: the browser is the agent's one browser here.
+    reading.then = () => void browsing.takeOver(OTHER);
+    expect(await browsing.run(upload, signal)).toEqual(PAUSED);
+    expect(ran).toEqual(["read"]);
+    expect(browsed).toEqual([]);
+    // Handed back, it is not taken up again: only an upload sent anew gives its files.
+    reading.then = () => {};
+    browsing.handBack(OTHER);
+    expect(browsed).toEqual([]);
+    expect(await browsing.run(upload, signal)).toEqual({ ok: "browser" });
+    expect(browsed).toHaveLength(1);
+    // Taken over as the last file was read: none of them leaves this process.
+    reading.then = () => void (ran.filter((kind) => kind === "read").length === 5 && browsing.takeOver(ROOT));
+    expect(await browsing.run(upload, signal)).toEqual(PAUSED);
+    expect(ran.filter((kind) => kind === "read")).toHaveLength(5);
+    expect(browsed).toHaveLength(1);
   });
 
   it("asks the browser for the address of the page a session acts in, and for an upload, of the file input that asked", async () => {

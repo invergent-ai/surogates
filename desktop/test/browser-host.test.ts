@@ -15,14 +15,14 @@ import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { BrowserContext, Page } from "playwright-core";
+import type { BrowserContext, FileChooser, JSHandle, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge } from "../src/browser/downloads.js";
 import {
-  AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, holding, type Launch, NOT_ASKED, notFinished, PROXY_BYPASSED,
-  WEAKENING,
+  AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, GIVEN_AS_TAKEN, holding, type Launch, NOT_ASKED, notFinished,
+  PROXY_BYPASSED, WEAKENING,
 } from "../src/browser/host.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
@@ -208,6 +208,8 @@ const op = (session: string, kind: string, args: Record<string, unknown> = {}, r
   host.perform(launch, root, session, kind, args, new AbortController().signal) as Promise<{ ok?: any; error?: { type: string; message: string } }>;
 const script = async (session: string, code: string, root = ROOT) => (await op(session, "browser.evaluate", { code }, root)).ok?.value;
 const session = () => `session-${(next += 1)}`;
+// A file of the chat's folder, as the main side sends it to the page: its name, its type and what it holds.
+const REPORT = { name: "report.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7").toString("base64") };
 // What *work* answers within *ms*, or "late".
 const within = <T>(ms: number, work: Promise<T>) => Promise.race([work, new Promise<"late">((done) => setTimeout(() => done("late"), ms))]);
 
@@ -1935,6 +1937,112 @@ await navigator.serviceWorker.ready;`);
     // What the page does once the agent drives again is told as before.
     expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 }, "chat-1")).ok.notices).toEqual([FILE_ASKED]);
   }, 30_000);
+
+  it("gives no input a file while its user holds the browser, from whichever chat, nor after the hand back one that asked before they took it", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const holds = () => page.evaluate(() => [...(document.getElementById("file") as HTMLInputElement).files!].map((file) => file.name));
+    const click = () => op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 }, "chat-1");
+    const upload = () => op(a, "browser.set_input_files", { files: [REPORT] }, "chat-1");
+    for (const holder of ["chat-1", "chat-2"]) {
+      // Its page asks, and an upload's prompt names that input: then its user takes the browser over.
+      expect((await click()).ok.notices).toEqual([FILE_ASKED]);
+      expect(await host.address(a, true)).toBe("http://fixture.test/");
+      host.pause(holder, true);
+      expect(await upload(), holder).toEqual(PAUSED);
+      expect(await holds(), holder).toEqual([]);
+      // Handed back: what the page asked for before is not taken up again, named for a prompt or not.
+      host.pause(holder, false);
+      expect((await upload()).error?.message, holder).toBe(NOT_ASKED);
+      expect((await upload()).error?.message, holder).toBe(NOT_ASKED);
+      expect(await holds(), holder).toEqual([]);
+    }
+    // The page asks again at the agent's own click, and is given the files.
+    expect((await click()).ok.notices).toEqual([FILE_ASKED]);
+    expect(await upload()).toEqual({ ok: { files: 1, notices: [] } });
+    expect(await holds()).toEqual(["report.pdf"]);
+  }, 30_000);
+
+  it("gives the page nothing of an upload in flight when its user takes the browser over: answered paused at once, and not taken up again", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const holds = () => within(500, page.evaluate(() => [...(document.getElementById("file") as HTMLInputElement).files!].map((file) => file.name)));
+    expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 }, "chat-1")).ok.notices).toEqual([FILE_ASKED]);
+    // The page is busy a moment, by now: the upload sent meanwhile is still on its way to it when its user takes the browser over.
+    await page.evaluate("void setTimeout(() => { const until = Date.now() + 1500; while (Date.now() < until) {} }, 0)");
+    await new Promise((done) => setTimeout(done, 100));
+    const uploading = op(a, "browser.set_input_files", { files: [REPORT] }, "chat-1");
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", true);
+    expect(await within(1_000, uploading)).toEqual(PAUSED);
+    // The page answers again, and what was on its way has had its time: it was given nothing.
+    await expect.poll(holds, { timeout: 10_000 }).toEqual([]);
+    await new Promise((done) => setTimeout(done, 1_500));
+    expect(await holds()).toEqual([]);
+    // Nor at the hand back.
+    host.pause("chat-1", false);
+    expect((await op(a, "browser.mouse", { action: "move", x: 5, y: 5 }, "chat-1")).ok.notices).toEqual([]);
+    expect(await holds()).toEqual([]);
+    expect((await op(a, "browser.set_input_files", { files: [REPORT] }, "chat-1")).error?.message).toBe(NOT_ASKED);
+  }, 30_000);
+
+  it("looks last at whether its user holds the browser once an upload's files are ready in the page, gives them by no step that reaches a busy page late, and says so where they were given as it was taken over", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const holds = () => within(500, page.evaluate(() => [...(document.getElementById("file") as HTMLInputElement).files!].map((file) => file.name)));
+    const upload = (name: string) => op(a, "browser.set_input_files", { files: [{ ...REPORT, name }] }, "chat-1");
+    const busy = async () => {
+      await page.evaluate("void setTimeout(() => { const until = Date.now() + 1500; while (Date.now() < until) {} }, 0)");
+      await new Promise((done) => setTimeout(done, 100));
+    };
+    // The page asks for a file; and *then* runs once an upload's files are ready in the page, before the host's last look.
+    const ready = async (then: (made: JSHandle) => unknown) => {
+      expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 }, "chat-1")).ok.notices).toContain(FILE_ASKED);
+      const input = (host as unknown as { choosers: Map<string, FileChooser> }).choosers.get(a)!.element();
+      const make = input.evaluateHandle.bind(input) as (...args: unknown[]) => Promise<JSHandle>;
+      Object.assign(input, { evaluateHandle: async (...args: unknown[]) => {
+        const made = await make(...args);
+        await then(made);
+        return made;
+      } });
+    };
+    // Taken over once they are ready, before the look: the page is given none of them.
+    await ready(() => host.pause("chat-1", true));
+    expect(await within(1_000, upload("first.pdf"))).toEqual(PAUSED);
+    await new Promise((done) => setTimeout(done, 500));
+    expect(await holds()).toEqual([]);
+    host.pause("chat-1", false);
+    // Taken over while the step that gives them waits on a page too busy to take it: it gives nothing once it runs, and is not sent again.
+    await ready(async () => {
+      await busy();
+      setTimeout(() => host.pause("chat-1", true), 300);
+    });
+    expect(await within(2_000, upload("second.pdf"))).toEqual(PAUSED);
+    await expect.poll(holds, { timeout: 10_000 }).toEqual([]);
+    await new Promise((done) => setTimeout(done, 1_000));
+    expect(await holds()).toEqual([]);
+    host.pause("chat-1", false);
+    // A page as busy with nobody taking the browser over is given them once it can take the step in time.
+    await ready(busy);
+    expect(await within(10_000, upload("third.pdf"))).toMatchObject({ ok: { files: 1 } });
+    expect(await holds()).toEqual(["third.pdf"]);
+    // Taken over just as the page took them: answered paused all the same, and its agent told that the page has them.
+    await ready((made) => {
+      const give = made.evaluate.bind(made) as (...args: unknown[]) => Promise<unknown>;
+      Object.assign(made, { evaluate: async (...args: unknown[]) => {
+        const came = await give(...args);
+        host.pause("chat-1", true);
+        return came;
+      } });
+    });
+    expect(await within(2_000, upload("fourth.pdf"))).toEqual(PAUSED);
+    expect(await holds()).toEqual(["fourth.pdf"]);
+    host.pause("chat-1", false);
+    expect((await op(a, "browser.mouse", { action: "move", x: 5, y: 5 }, "chat-1")).ok.notices).toEqual([GIVEN_AS_TAKEN]);
+  }, 60_000);
 
   it("leaves a page's own question open for its user while they hold the browser: nobody answers it for them, and their own answer reaches the page", async () => {
     const a = session();
