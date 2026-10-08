@@ -13,21 +13,24 @@
 #
 # The install script adds bin/bwrap, the system's copy, to each version it installs.
 #
-# Usage, after npm run build (which fetches and checks bin/node), from any folder, with its two
+# Usage, after npm run build (which fetches and checks bin/node), from any folder, with its
 # paths as that folder names them:
-#   scripts/package.sh <version> <vm manifest.json> <out>
-# It writes <out>/surogate-desktop-<version>-linux-x64.tar.gz.
+#   scripts/package.sh <version> <vm manifest.json> <out> [<install script>]
+# It writes <out>/surogate-desktop-<version>-linux-x64.tar.gz. The install script it packs as the
+# root helper is release/install.sh, the only one a release is signed with (release/publish.sh
+# sign refuses a tarball with any other); a test names its own, which trusts a key of the test's.
 set -euo pipefail
 
 VERSION="${1:-}"
 VM_MANIFEST="${2:-}"
 OUT="${3:-}"
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -f "$VM_MANIFEST" ] && [ -n "$OUT" ] \
-  || { echo "usage: scripts/package.sh <x.y.z> <vm manifest.json> <out>" >&2; exit 2; }
-# Its two paths are its caller's, and are read from where it was called, before it works from this
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -f "$VM_MANIFEST" ] && [ -n "$OUT" ] && [ "$#" -le 4 ] && { [ "$#" -lt 4 ] || [ -f "$4" ]; } \
+  || { echo "usage: scripts/package.sh <x.y.z> <vm manifest.json> <out> [<install script>]" >&2; exit 2; }
+# Its paths are its caller's, and are read from where it was called, before it works from this
 # package's folder: the release's job calls it from the repository's root.
 VM_MANIFEST="$(realpath "$VM_MANIFEST")"
 OUT="$(realpath -m "$OUT")"
+HELPER="$(realpath "${4:-$(dirname "$0")/../release/install.sh}")"
 cd "$(dirname "$0")/.."
 DESKTOP="$PWD"
 
@@ -56,7 +59,8 @@ rm "$app/package-lock.json"
 vm/agent-disk.sh "$top/resources/vm/agent.img"
 cp "$VM_MANIFEST" "$top/resources/vm/manifest.json"
 cp ../web/public/favicon.svg "$top/resources/surogate.svg"
-cp release/install.sh "$top/bin/surogate-apply-update"
+# A program, whatever mode its file had where it was kept.
+install -m 0755 "$HELPER" "$top/bin/surogate-apply-update"
 
 # Root installs it: nothing in it is writable but by its owner, whatever umask built it, and
 # nothing has a set-id or sticky bit, whatever folder it was built in: every folder made under one

@@ -57,27 +57,29 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarba
     });
   });
 
+  // The tarball packed into *out*, as the release's job calls package.sh: from a folder that is not
+  // this package's, its paths as that folder names them; *more* is what a test adds to the job's
+  // three arguments. Built as in a checkout under a folder that hands its group on: every folder
+  // made there has the set-gid bit, here the build's own dist, and so has the folder for temporary files.
+  const pack = (out: string, ...more: string[]) => {
+    const dist = join(DESKTOP, "dist");
+    const mode = statSync(dist).mode & 0o7777;
+    chmodSync(dist, mode | 0o2000);
+    try {
+      return spawnSync(join(DESKTOP, "scripts", "package.sh"), [VERSION, "vm-manifest.json", out, ...more], {
+        cwd: dir, encoding: "utf8", env: { ...process.env, SOURCE_DATE_EPOCH: "1790000000", TMPDIR: join(dir, "tmp") }, maxBuffer: 16 * 1024 * 1024,
+      });
+    } finally {
+      chmodSync(dist, mode);
+    }
+  };
+
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), "package-test-"));
     writeFileSync(join(dir, "vm-manifest.json"), vmManifest);
-    // Built as in a checkout under a folder that hands its group on: every folder made there
-    // has the set-gid bit, here the build's own dist, and so has the folder for temporary files.
-    const dist = join(DESKTOP, "dist");
-    const mode = statSync(dist).mode & 0o7777;
     mkdirSync(join(dir, "tmp"));
     chmodSync(join(dir, "tmp"), 0o2775);
-    chmodSync(dist, mode | 0o2000);
-    const packed = (() => {
-      try {
-        // As the release's job calls it: from a folder that is not this package's, its two paths
-        // as that folder names them.
-        return spawnSync(join(DESKTOP, "scripts", "package.sh"), [VERSION, "vm-manifest.json", "out"], {
-          cwd: dir, encoding: "utf8", env: { ...process.env, SOURCE_DATE_EPOCH: "1790000000", TMPDIR: join(dir, "tmp") }, maxBuffer: 16 * 1024 * 1024,
-        });
-      } finally {
-        chmodSync(dist, mode);
-      }
-    })();
+    const packed = pack("out");
     expect(packed.status, packed.stderr).toBe(0);
     expect(packed.stdout.trim().split("\n").at(-1)).toBe(join(dir, "out", `${NAME}.tar.gz`));
     mkdirSync(join(dir, "x"));
@@ -117,6 +119,21 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarba
     // bit, and no member that is not a file, a folder or a link, each with the one mode of its kind.
     expect(listing.split("\n").filter((line) => /^(.{3}|.{6}|.{9})[sStT]/.test(line))).toEqual([]);
     expect(listing.split("\n").filter((line) => line && !/^(-rw-r--r--|-rwxr-xr-x|drwxr-xr-x|lrwxrwxrwx) /.test(line))).toEqual([]);
+  });
+
+  it("packs the install script it is told as the root helper, a program whatever its file's mode: a test's release trusts a key of the test's own", () => {
+    // The repository's script with a line of the test's, kept as a file that is no program.
+    const script = `${readFileSync(join(DESKTOP, "release", "install.sh"), "utf8")}# a test's\n`;
+    writeFileSync(join(dir, "install.sh"), script, { mode: 0o644 });
+    const packed = pack("told", "install.sh");
+    expect(packed.status, packed.stderr).toBe(0);
+    const tarball = join(dir, "told", `${NAME}.tar.gz`);
+    expect(spawnSync("tar", ["-xzOf", tarball, `${NAME}/bin/surogate-apply-update`], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }).stdout).toBe(script);
+    expect(spawnSync("tar", ["-tvzf", tarball, `${NAME}/bin/surogate-apply-update`], { encoding: "utf8" }).stdout).toMatch(/^-rwxr-xr-x 0\/0 /);
+    // What is no file, or anything after it, is its usage.
+    for (const more of [["nowhere.sh"], ["install.sh", "more"]]) {
+      expect(pack("told", ...more), more.join(" ")).toMatchObject({ status: 2, stdout: "", stderr: "usage: scripts/package.sh <x.y.z> <vm manifest.json> <out> [<install script>]\n" });
+    }
   });
 
   it("gives Electron the app's fuses: never Node, no NODE_OPTIONS, no inspector, and its cookies encrypted", async () => {
