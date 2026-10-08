@@ -3095,6 +3095,41 @@ await navigator.serviceWorker.ready;`);
     expect(await page.evaluate(filed)).toEqual([[], ["report.pdf"]]);
   }, 60_000);
 
+  it("gives nothing into a frame of a page whose own question its user left open at the hand back, though that frame's script makes its input ask meanwhile: not until they have answered it", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://other.test/fileframe" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const framed = page.frames().find((frame) => frame.url() === "http://fixture.test/fileinput")!;
+    const upload = () => op(a, "browser.set_input_files", { files: [REPORT] }, "chat-1");
+    const asks = () => framed.evaluate(() => (document.getElementById("file") as HTMLInputElement).click());
+    // The page asks its user a question while they hold the browser, and they hand it back with it open.
+    await script(a, "setTimeout(() => { window.answered = confirm('Pay?'); }, 300); return 1;", "chat-1");
+    host.pause("chat-1", true);
+    expect(await host.show("chat-1")).toBe(true);
+    await new Promise((done) => setTimeout(done, 1_000));
+    host.pause("chat-1", false);
+    expect(await within(500, page.evaluate("window.answered"))).toBe("late");
+    // The framed site is drawn by a process of its own, which the question does not hold: its script makes its input ask.
+    expect(await within(2_000, framed.evaluate("1"))).toBe(1);
+    await asks();
+    await new Promise((done) => setTimeout(done, 1_000));
+    // Nothing is kept of it for an upload, and nothing is given: the page is its user's until they have answered.
+    expect(kept(a)).toBeUndefined();
+    expect((await upload()).error?.message).toBe(NOT_ASKED);
+    expect(await framed.evaluate(filed)).toEqual([[]]);
+    expect(await within(500, page.evaluate("window.answered"))).toBe("late");
+    // They answer it. What the frame asks for then is the agent's to answer again.
+    asUser("focus", xwindow()!.id);
+    asUser("press", "Escape");
+    await expect.poll(() => within(500, page.evaluate("window.answered")), { timeout: 10_000 }).toBe(false);
+    await expect.poll(async () => {
+      await asks();
+      return kept(a) !== undefined;
+    }, { timeout: 10_000 }).toBe(true);
+    expect(await upload()).toMatchObject({ ok: { files: 1 } });
+    expect(await framed.evaluate(filed)).toEqual([["report.pdf"]]);
+  }, 60_000);
+
   it("lets a page be only five seconds after what the agent was doing there has reached it: a click still on its way to a busy page at the take-over arms no chooser of the browser's own", async () => {
     const a = session();
     await op(a, "browser.navigate", { url: "http://fixture.test/asks/later" }, "chat-1");
