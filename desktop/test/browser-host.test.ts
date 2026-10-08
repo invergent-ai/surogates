@@ -1298,7 +1298,7 @@ describe("a page's download, as the host stages it", () => {
           },
           dispose: () => Promise.resolve(),
         });
-        expect(await uploads()).toEqual({ ok: { files: 1, notices: [FILE_ASKED] } });
+        expect(await uploads()).toEqual({ ok: { files: 1, notices: [] } });
         expect(lateFrom).toEqual([1_700_000_000_000 + 250, 1_700_000_000_000 - 3_600_000 + 250]);
         // The five seconds after a take-over are a timer's: neither clock put on an hour ends them, and the timer does.
         host.pause("chat-2", true);
@@ -1690,11 +1690,13 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     // Asked about once, an upload sent again under its id is one nobody was asked about.
     expect((await upload("third")).error?.message).toBe(NOT_ASKED);
     // The input that asked after the one a prompt named is still the session's next once that one has its files.
+    await op(a, "browser.mouse", { action: "move", x: 1, y: 1 });
     await asksFor(a, () => f.click("#file"));
     expect(await host.address(a, true, "fifth")).toBe("http://fixture.test/fileinput");
     await asksFor(a, () => g.click("#file"));
-    expect(await upload("fifth")).toMatchObject({ ok: { files: 1 } });
-    expect(await upload("sixth")).toMatchObject({ ok: { files: 1 } });
+    // Its answer still says that the page asked for a file: of the other input, which no upload has answered yet.
+    expect(await upload("fifth")).toEqual({ ok: { files: 1, notices: [FILE_ASKED] } });
+    expect(await upload("sixth")).toEqual({ ok: { files: 1, notices: [] } });
     expect(await holds()).toEqual([[["fifth.pdf"]], [["sixth.pdf"]]]);
   }, 60_000);
 
@@ -1726,9 +1728,9 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     await asksFor(a, () => page.click("#file"));
     expect((await upload()).error?.message).toBe(NOT_ASKED);
     expect(await page.evaluate(filed)).toEqual([[], []]);
-    // The next upload, about which nobody was asked, is given to the input that asked last, as before: and its
-    // answer says what the page did that its agent has not heard of yet, as any answer that carries notices.
-    expect(await upload()).toEqual({ ok: { files: 1, notices: [FILE_ASKED] } });
+    // The next upload, about which nobody was asked, is given to the input that asked last, as before. Its answer
+    // does not say again that the page asked for a file: that is the ask it has just answered.
+    expect(await upload()).toEqual({ ok: { files: 1, notices: [] } });
     expect(await page.evaluate(filed)).toEqual([[], ["report.pdf"]]);
     expect((await op(a, "browser.mouse", { action: "move", x: 5, y: 5 })).ok.notices).toEqual([]);
   }, 30_000);

@@ -1065,8 +1065,11 @@ export class BrowserHost {
     }
     if (stop.aborted || refused === HELD) return PAUSED;
     if (typeof refused === "string") return failed(refused);
-    if (this.choosers.get(session) === chooser) this.choosers.delete(session);
-    const notices = this.unseen.get(session) ?? [];
+    // The input that asked last has its files: its agent is not told again, with this answer, that the page asked
+    // for one. Where another input has asked since, that is still to tell.
+    const last = this.choosers.get(session) === chooser;
+    if (last) this.choosers.delete(session);
+    const notices = (this.unseen.get(session) ?? []).filter((notice) => !(last && notice === FILE_ASKED));
     this.unseen.delete(session);
     return { ok: { files: files.length, notices } };
   }
