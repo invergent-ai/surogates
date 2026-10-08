@@ -886,6 +886,170 @@ def test_a_failed_turns_keep_drops_the_hand_off_its_branch_has_taken_up(tmp_path
     assert pod.commit_turn(author=A, trailers=TURN)["not_taken"] == []
 
 
+def packed(durable: Path) -> int:
+    """The bytes of the history's packs."""
+    return sum(p.stat().st_size for p in (durable / "objects" / "pack").glob("*.pack"))
+
+
+def parents(repo: Path, commit: str) -> list[str]:
+    return git(repo, "log", "-1", "--format=%P", commit).split()
+
+
+def test_a_turn_reaches_the_history_as_one_commit_on_its_base_whatever_its_steps(tmp_path, project):
+    first = a_pod(tmp_path, project)
+    (first.copy / "Budget.xlsx").write_bytes(os.urandom(300_000))  # an office file: no delta between versions
+    one = land(first, "saga:0")["commit"]
+    durable = project / "_history"
+    before = packed(durable)
+    pod = a_pod(tmp_path, project)
+    steps = []
+    for step in range(10):  # ten steps, each snapshotted first as the harness does, each rewriting the workbook
+        steps.append(pod.snapshot(f"before step {step}"))
+        (pod.copy / "Budget.xlsx").write_bytes(os.urandom(300_000))
+    turn = pod.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "turn"]])
+    # One version of the workbook went up, not ten.
+    assert 300_000 <= packed(durable) - before < 400_000
+    # The turn in the history is one commit, the turn's files on its base, and says whose landing it is.
+    assert git(durable, "rev-parse", "refs/heads/threads/t1") == turn["commit"]
+    assert parents(durable, turn["commit"]) == [turn["base"]] == [one]
+    assert git(durable, "log", "-1", "--format=%s|%an|%(trailers:key=Surogate-Saga,valueonly)", turn["commit"]) == "Turn|Draft A|saga:1"
+    # The steps' snapshots stay in the pod, where a stop restores from them; its own branch keeps them.
+    assert not any(in_history(durable, step) for step in steps[1:])  # the first found nothing to snapshot: it is the base
+    assert git(pod.repo, "rev-list", "--count", "refs/heads/threads/t1", f"^{one}") == "10"  # nine snapshots, and the turn's end
+    assert git(pod.repo, "rev-parse", "refs/synced/t1") == turn["commit"]
+    pod.restore(steps[1])
+    assert (pod.copy / "Budget.xlsx").stat().st_size == 300_000
+    assert git(durable, "fsck", "--no-dangling") == ""
+
+
+def test_a_fresh_pods_open_copies_one_version_of_a_file_for_each_landing_the_history_keeps(tmp_path, project):
+    size, landings = 200_000, 6
+    for n in range(landings):
+        history = a_pod(tmp_path, project)
+        for step in range(3):
+            history.snapshot(f"before step {step}")
+            (history.copy / "Budget.xlsx").write_bytes(os.urandom(size))
+        land(history, f"saga:{n}")
+    pod = a_pod(tmp_path, project, "fresh")
+    copied = packed(pod.repo / "durable.git")
+    # The open copies the whole kept history to the pod: one version a landing, never one a step.
+    # It is not the project's size: a pruning, not the open, is what bounds it.
+    assert landings * size <= copied < (landings + 1) * size
+
+
+def test_a_commit_step_tried_again_pushes_the_commit_it_pushed_before(tmp_path, project, monkeypatch):
+    pod = a_pod(tmp_path, project)
+    pod.snapshot("before a step")
+    (pod.copy / "a.md").write_text("a")
+    trailers = [["Surogate-Saga", "saga:1"], ["Surogate-Kind", "turn"]]
+    durable, put, failed = project / "_history", History._put_durable, []
+
+    def the_refs_fail_once(self, name, source):
+        if name == "packed-refs" and not failed:
+            failed.append(name)
+            raise OSError(5, "Input/output error")  # its pack is up; nothing names it yet
+        return put(self, name, source)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(History, "_put_durable", the_refs_fail_once)
+        with pytest.raises(OSError):
+            pod.commit_turn(author=A, trailers=trailers)
+    assert not (durable / "packed-refs").exists()
+    turn = pod.commit_turn(author=A, trailers=trailers)  # the step's retry, after a push that failed
+    assert git(durable, "rev-parse", "refs/heads/threads/t1") == turn["commit"]
+    # Its answer lost, it is tried again, seconds later: the same commit, which the row then names and the history has.
+    time.sleep(1.1)
+    assert pod.commit_turn(author=A, trailers=trailers)["commit"] == turn["commit"]
+    # Cut off after the push and before the pod noted it: the same commit still, and no refusal.
+    git(pod.repo, "update-ref", "-d", "refs/synced/t1")
+    assert pod.commit_turn(author=A, trailers=trailers)["commit"] == turn["commit"]
+    assert git(durable, "rev-parse", "refs/heads/threads/t1") == turn["commit"]
+    assert git(pod.repo, "rev-parse", "refs/synced/t1") == turn["commit"]
+
+
+def test_the_pods_own_branch_keeps_its_snapshots_until_the_record_moves_it_to_the_landing(tmp_path, project):
+    pod = a_pod(tmp_path, project)
+    (pod.copy / "a.md").write_text("a draft")
+    step = pod.snapshot("before a step")
+    (pod.copy / "a.md").write_text("a")
+    main = pod.fetch()["main"]
+    turn = pod.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "turn"]])
+    # Pushed, the turn is a commit of its own; the pod's branch is still its own line of snapshots.
+    own = git(pod.repo, "rev-parse", "refs/heads/threads/t1")
+    assert own != turn["commit"] and git(pod.repo, "rev-parse", f"{own}~1") == step
+    assert git(pod.repo, "rev-parse", f"{own}^{{tree}}") == git(pod.repo, "rev-parse", f"{turn['commit']}^{{tree}}")
+    applied = [pod.apply(c["path"], c["before"], c["after"]) for c in turn["changes"]]
+    landed = pod.record(turn=turn["commit"], applied=applied, author=A, trailers=[["Surogate-Saga", "saga:1"]], main=main)
+    assert git(pod.repo, "rev-parse", "refs/heads/threads/t1") == landed["commit"]
+    assert parents(project / "_history", landed["commit"])[1] == turn["commit"]
+
+
+def test_a_kept_turn_a_hand_off_and_a_helpers_copy_each_reach_the_history_as_one_commit(tmp_path, project):
+    durable = project / "_history"
+
+    def rewritten(history: History, name: str, times: int = 4) -> None:
+        for step in range(times):
+            history.snapshot(f"before step {step}")
+            (history.copy / name).write_bytes(os.urandom(100_000))
+
+    thread = a_pod(tmp_path, project)
+    base = git(thread.repo, "rev-parse", "refs/bases/t1")
+    rewritten(thread, "Draft.docx")
+    handed = thread.hand_off(author=A, trailers=KEPT)["commit"]
+    assert git(durable, "rev-parse", "refs/handoff/t1") == handed and parents(durable, handed) == [base]
+    helper, failing = a_helper(tmp_path, project, "h1"), a_helper(tmp_path, project, "h2")
+    rewritten(helper, "Sources.docx")
+    kept = helper.hand_back(author=A, trailers=KEPT)["commit"]
+    # A helper's copy is one commit on where it started.
+    assert git(durable, "rev-parse", "refs/handoff/t1") == kept and parents(durable, kept) == [handed]
+    rewritten(failing, "Half.docx")
+    apart = failing.keep_apart(author=A, trailers=KEPT)
+    assert git(durable, "rev-parse", "refs/helpers/t1/h2") == apart["commit"] and parents(durable, apart["commit"]) == [handed]
+    # A failed turn's keep: the copy, with what it took up, on its base; the hand-off it took up its second parent.
+    thread.take_up()
+    rewritten(thread, "Draft.docx")
+    turn = thread.keep(author=A, trailers=KEPT, base=True)["commit"]
+    assert git(durable, "rev-parse", "refs/heads/threads/t1") == turn and parents(durable, turn) == [base, kept]
+    # Four pushes of files rewritten four times each: four versions went up, and the first commit's files.
+    assert packed(durable) < 5 * 100_000
+    assert git(durable, "fsck", "--no-dangling") == ""
+    # Asked again, each answers the commit it pushed.
+    assert thread.keep(author=A, trailers=KEPT, base=True)["commit"] == turn
+    assert helper.hand_back(author=A, trailers=KEPT)["commit"] == kept
+
+
+def test_a_helpers_version_the_thread_did_not_take_stays_in_the_history_with_the_landing(tmp_path, project):
+    durable = project / "_history"
+    thread = a_pod(tmp_path, project)
+    thread.hand_off(author=A, trailers=KEPT)
+    helper = a_helper(tmp_path, project)
+    (helper.copy / "notes.txt").write_text("the helper's notes\n")
+    theirs = git(helper.repo, "hash-object", str(helper.copy / "notes.txt"))
+    handed_back = helper.hand_back(author=A, trailers=KEPT)["commit"]
+    (thread.copy / "notes.txt").write_text("the thread's notes\n")
+    # The landing does not finish: the turn waits on its branch, the hand-off it took up behind it.
+    turn = thread.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "turn"]])
+    assert turn["not_taken"] == ["notes.txt"] and parents(durable, turn["commit"]) == [turn["base"], handed_back]
+    # The thread's next turn, in a new pod, lands it: no hand-off is left to take up, and the helper's version is still named.
+    pod = a_pod(tmp_path, project)
+    (pod.copy / "more.md").write_text("more")
+    landed = land(pod, "saga:2")["commit"]
+    assert not [ref for ref in git(durable, "for-each-ref", "--format=%(refname)").splitlines() if "handoff" in ref]
+    assert parents(durable, f"{landed}^2") == [turn["base"], handed_back]
+    assert theirs in git(durable, "rev-list", "--objects", "refs/heads/main").split()
+    assert git(durable, "show", f"{handed_back}:notes.txt") == "the helper's notes"
+    # What reads the history is as it was: the thread's version is the landing's second parent's,
+    # that commit says whose landing it is, and main's own line is its landings alone.
+    assert git(durable, "show", f"{landed}^2:notes.txt") == "the thread's notes"
+    assert git(durable, "log", "-1", "--format=%(trailers:key=Surogate-Saga,valueonly)", f"{landed}^2") == "saga:2"
+    assert git(durable, "log", "--first-parent", "--format=%s", "refs/heads/main").splitlines() == ["Landing", "The project's files"]
+    assert git(durable, "fsck", "--no-dangling") == ""
+    # And a pruning keeps it with the landing.
+    assert a_pod(tmp_path, project, "t2").prune(keep=[], now=time.time())["pruned"] is True
+    assert git(durable, "show", f"{handed_back}:notes.txt") == "the helper's notes"
+    assert git(durable, "fsck", "--no-dangling") == ""
+
+
 def test_a_failed_helpers_copy_is_kept_apart_and_never_handed_back(tmp_path, project):
     thread = a_pod(tmp_path, project)
     thread.hand_off(author=A, trailers=KEPT)

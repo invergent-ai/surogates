@@ -21,6 +21,11 @@ copy as it was when the helper started, with what helpers kept onto it
 since.  Each helper has a pod and a copy of its own, from the hand-off.
 The thread's copy takes the hand-off up, and its branch only at the turn's
 end, so a turn stopped after it handed work on lands none of it.
+
+What a pod pushes of a copy is one commit: the copy's files on where the
+copy started.  The snapshots its steps took stay in the pod, on the pod's
+own branch, where a stop restores from them.  So the history holds one
+version of a file for each turn that changed it, never one for each step.
 """
 
 from __future__ import annotations
@@ -222,8 +227,13 @@ class History:
     def open(self) -> None:
         """Fetch ``main``, the branch and its base; make ``main`` the real files; then the copy.
 
-        Each is fetched at depth 1: a pod moves the project's current size,
-        not its history.  ``main``'s index of the real files comes with them,
+        The history's packs are copied to the pod's disk first, as data, and
+        each ref is fetched from that copy at depth 1.  So an open moves the
+        whole kept history, not the project's current size: the project's
+        files, and one more version of each file for every landing, kept
+        turn and hand-off the history still holds.  Only a pruning bounds
+        that, to ``main``'s last 20 landings or twice its files, whichever
+        is more.  ``main``'s index of the real files comes with them,
         so only a file whose size or time changed is read.  A difference
         between the real files and ``main`` is a commit on ``main`` by you:
         it is this pod's own, its copy's base, and is never recorded on
@@ -357,7 +367,11 @@ class History:
 
         The turn, its base and the branch are pushed before the first apply,
         so whoever puts a file back after a crash can read both its versions.
-        Safe to repeat: a turn already committed and pushed is used again.
+        ``commit`` is the turn as the history has it: one commit, the turn's
+        files on its base, the hand-off it took up its second parent.  The
+        pod's own branch keeps the steps' snapshots, and moves only with the
+        record, to the landing.  Safe to repeat: every try makes and pushes
+        the same commit.
         What helpers kept on the hand-off is taken up first, and lands with
         it; the hand-off, taken up whole, goes with that push.  ``not_taken``
         are the helpers' files this pod's take-ups left as the copy had them,
@@ -378,10 +392,11 @@ class History:
         saga = f"Surogate-Saga: {dict(map(tuple, trailers))['Surogate-Saga']}"
         if self._copy("diff", "--cached", "--name-only", "HEAD") or saga not in self._copy("log", "-1", "--format=%B").splitlines():
             self._copy(*_as(author), "commit", "-q", "--allow-empty", "-m", "Turn", "-m", _block(trailers))
-        turn = self._copy("rev-parse", "HEAD")
+        turn = self._one(self._copy("rev-parse", "HEAD"), base, *self._behind(base), author=author, title="Turn", trailers=trailers)
         if refs.get(self.branch) != turn:
             self._push({self.branch: turn, self.base: base, **self._taken_up(refs)}, expect={self.branch: self._ref(self.synced)})
-            self._main("update-ref", self.synced, turn)
+        # Also when the history had it already: a try cut off after its push never noted it.
+        self._main("update-ref", self.synced, turn)
         versions, renames = self._diff(base, turn)
         # A file and a folder of one name land together, as a rename's two sides do.
         shapes = [(p, str(f)) for p in versions for f in PurePosixPath(p).parents if str(f) in versions]
@@ -535,27 +550,43 @@ class History:
     def keep(self, *, author: dict[str, str], trailers: list[list[str]], base: bool) -> dict:
         """Commit the copy on the thread's branch and push the branch; its base too when *base*, or when the history has none.
 
-        A failed turn's work, kept for the thread's next landing.
+        A failed turn's work, kept for the thread's next landing: one
+        commit, the copy's files on its base, as a turn is.  A copy the
+        branch holds already, pushed by its commit step or an earlier keep,
+        is left as it is there.
         """
         tip = self._commit_copy(author, "Kept", trailers)
         refs = self._durable_refs()
+        onto = self._main("rev-parse", self.base)
+        behind = self._behind(onto)
+        there = refs.get(self.branch)
+        if there and there != onto and self._has(there) and self._tree(there) == self._tree(tip) and self._parents(there) == [onto, *behind]:
+            self._main("update-ref", self.synced, there)
+            return {"commit": there}
+        kept = self._one(tip, onto, *behind, author=author, title="Kept", trailers=trailers)
         # A branch never reaches the history without its base: the overlap check is against it.
         moves_base = base or self.base not in refs
         self._push(
-            {self.branch: tip, **({self.base: self._ref(self.base)} if moves_base else {}), **self._taken_up(refs)},
+            {self.branch: kept, **({self.base: onto} if moves_base else {}), **self._taken_up(refs)},
             expect={self.branch: self._ref(self.synced)},
         )
-        self._main("update-ref", self.synced, tip)
-        return {"commit": tip}
+        self._main("update-ref", self.synced, kept)
+        return {"commit": kept}
 
     def hand_off(self, *, author: dict[str, str], trailers: list[list[str]]) -> dict:
         """Put the thread's copy on its hand-off, for a helper about to start from it; the branch stays as it was.
 
         What helpers kept there comes into the copy first.  Only the turn's
         end moves the branch: a turn stopped after this lands none of it.
+        The hand-off is one commit, the copy's files on its base, the
+        hand-off it took up behind it.
         """
         not_taken = self.take_up()["not_taken"]
-        tip = self._commit_copy(author, "Handed on", trailers)
+        onto = self._main("rev-parse", self.base)
+        tip = self._one(
+            self._commit_copy(author, "Handed on", trailers), onto, *self._behind(onto),
+            author=author, title="Handed on", trailers=trailers,
+        )
         self._push({self.handoff: tip, self.handoff_from: tip}, expect={self.handoff: self._durable_refs().get(self.handoff)})
         for ref in (self.handed, self.gave):
             self._main("update-ref", ref, tip)
@@ -568,13 +599,15 @@ class History:
         stays: this copy's version is kept in history, as the merge's second
         parent, and named in ``not_kept``.  With no hand-off, as after its
         thread's turn was stopped, the copy is the hand-off, from where it
-        started.
+        started.  The copy goes up as one commit, its files on where it
+        started, or on what it last handed back.
         """
-        tip = self._commit_copy(author, "Kept", trailers)
+        own = self._commit_copy(author, "Kept", trailers)
         since = self._ref(self.synced)
         durable = self._take().get(self.handoff)
-        if tip == since:
-            return {"commit": durable or tip, "not_kept": []}
+        if self._tree(own) == self._tree(since):
+            return {"commit": durable or since, "not_kept": []}
+        tip = self._one(own, since, author=author, title="Kept", trailers=trailers)
         not_kept: list[str] = []
         if durable is None:
             updates = {self.handoff: tip, self.handoff_from: since}
@@ -592,13 +625,16 @@ class History:
     def keep_apart(self, *, author: dict[str, str], trailers: list[list[str]]) -> dict:
         """Keep a failed helper's copy on a ref of its own, merged onto nothing: its files may be half made.
 
-        ``left`` names the files it changed, which its thread is told are there.
+        ``left`` names the files it changed, which its thread is told are
+        there: one commit, its files on where it started.
         """
-        tip = self._commit_copy(author, "Kept apart", trailers)
+        own = self._commit_copy(author, "Kept apart", trailers)
         since = self._ref(self.synced)
-        left = sorted(self._diff(since, tip)[0]) if tip != since else []
-        if left:
-            self._push({self.apart: tip}, expect={})
+        left = sorted(self._diff(since, own)[0])
+        if not left:
+            return {"commit": since, "left": []}
+        tip = self._one(own, since, author=author, title="Kept apart", trailers=trailers)
+        self._push({self.apart: tip}, expect={})
         return {"commit": tip, "left": left}
 
     def take_up(self) -> dict:
@@ -731,6 +767,37 @@ class History:
         if self._copy("diff", "--cached", "--name-only", "HEAD"):
             self._copy(*_as(author), "commit", "-q", "-m", title, "-m", _block(trailers))
         return self._copy("rev-parse", "HEAD")
+
+    def _one(self, tip: str, onto: str, *behind: str, author: dict[str, str], title: str, trailers: list[list[str]]) -> str:
+        """The copy at *tip* as the one commit a push sends: its files on *onto*, with *behind* its further parents.
+
+        The pod's own branch, the snapshots its steps took, is sent by no
+        push.  The commit is the same at every try of a step: nothing of it
+        is the time of the try, and its dates are *tip*'s.  So a push tried
+        again sends the id the first try sent, which a landing's row may
+        already name.
+        """
+        self._fetch(*behind)
+        parents = list(dict.fromkeys((onto, *behind)))
+        written, committed = self._main("log", "-1", "--date=raw", "--format=%ad%n%cd", "--end-of-options", tip).split("\n")
+        return self._git(
+            [*_as(author), "commit-tree", self._tree(tip), *(arg for parent in parents for arg in ("-p", parent)), "-F", "-"],
+            env={"GIT_DIR": str(self.repo), "GIT_AUTHOR_DATE": written, "GIT_COMMITTER_DATE": committed},
+            cwd=self.repo, input=f"{title}\n\n{_block(trailers)}\n",
+        )
+
+    def _behind(self, onto: str) -> list[str]:
+        """A thread's pushed copy's parents after *onto*, its base: the hand-offs its copy has taken up.
+
+        A helper's version of a file the thread did not take is in the
+        history as long as the commit that left it out is: through the
+        hand-off this copy took up, and through those an earlier push of
+        the branch named, when that push did not land and this one takes
+        its place.
+        """
+        handed, synced = self._ref(self.handed), self._ref(self.synced)
+        earlier = self._parents(synced) if synced and synced != onto else []
+        return list(dict.fromkeys([*([handed] if handed else []), *(earlier[1:] if earlier[:1] == [onto] else [])]))
 
     def _taken_up(self, refs: dict[str, str]) -> dict[str, str | None]:
         """What a push of the branch makes of the hand-off, *refs* the history's as it is now.

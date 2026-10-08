@@ -334,6 +334,8 @@ async def test_a_worker_killed_after_two_applies_is_put_back_by_the_next_landing
     [row] = await rows(api, first)
     # Two files were written, and the row shows neither done: at best a.md done and b.md under way.
     assert row.saga_state == "running"
+    # The turn its row names is the one the history has: what the next lock holder fetches to put it back.
+    assert row.steps[0]["result"]["commit"] == git(pods.project / "_history", "rev-parse", f"refs/heads/threads/{first.id}")
     assert [s["state"] for s in row.steps if s["tool_name"] == "history.apply"] == {
         "behind": ["pending", "pending", "pending", "pending"],
         "exact": ["committed", "executing", "pending", "pending"],
@@ -351,6 +353,59 @@ async def test_a_worker_killed_after_two_applies_is_put_back_by_the_next_landing
     assert git(pods.project / "_history", "ls-tree", "--name-only", f"refs/heads/threads/{first.id}").splitlines() == [
         "Report.docx", "a.md", "b.md", "c.md", "d.md", "notes.txt",
     ]
+
+
+async def test_a_worker_killed_right_after_its_commit_step_leaves_the_turn_on_its_branch_to_land_next(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pods = stored(api, first, tmp_path)
+    pool = SandboxPool(pods)
+    await open_pod(pool, first)
+    for step in ("draft", "a"):  # two steps, a snapshot before each as the harness takes them
+        await pool.execute(str(first.id), "_checkpoint", json.dumps({"action": "take", "reason": "before a step"}))
+        await pool.execute(str(first.id), "terminal", json.dumps({"command": f"echo {step} > a.md"}))
+    await a_landing_killed(api, monkeypatch, pool, first, after="commit")
+    # The pod made the turn's commit and pushed it; the worker died before its row named it.
+    [row] = await rows(api, first)
+    assert (row.saga_state, row.steps) == ("running", [])
+    durable = pods.project / "_history"
+    turn = git(durable, "rev-parse", f"refs/heads/threads/{first.id}")
+    assert git(durable, "show", f"{turn}:a.md") == "a" and len(git(durable, "log", "-1", "--format=%P", turn).split()) == 1
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
+    # The next lock holder finds nothing of it in the real files, and reads no commit from its row.
+    await edited(pool, second, "echo by B > B.md")
+    await ends(api, pool, second)
+    assert [r.saga_state for r in await rows(api, first)] == ["compensated"]
+    # The turn waits on its branch, and lands with the thread's next turn, which uses no tool.
+    await ends(api, SandboxPool(pods), first)
+    assert pods.real_names() == ["B.md", "Report.docx", "a.md", "notes.txt"]
+    assert (pods.project / "a.md").read_text() == "a\n"
+
+
+async def test_a_commit_step_whose_answer_was_lost_is_tried_again_and_its_row_names_the_commit_the_history_has(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md")
+    call, pushed = landing_module._call, []
+
+    async def the_first_answer_is_lost(sandbox_pool, owner, action, **arguments):
+        result = await call(sandbox_pool, owner, action, **arguments)
+        if action == "commit":
+            pushed.append((result["commit"], git(pods.project / "_history", "rev-parse", f"refs/heads/threads/{thread.id}")))
+            if len(pushed) == 1:
+                await asyncio.sleep(1.1)  # a later second, so that a commit dated by its try would differ
+                raise landing_module.LandingStepError("the pod's step timed out")
+        return result
+
+    monkeypatch.setattr(landing_module, "_call", the_first_answer_is_lost)
+    await ends(api, pool, thread, settings=SimpleNamespace(default_step_timeout=30, default_max_retries=1, retry_delay=0))
+    # Both tries made and pushed one commit: the row cannot name a turn the history lacks.
+    assert len(pushed) == 2 and len({commit for answer in pushed for commit in answer}) == 1
+    [row] = await rows(api, thread)
+    assert (row.saga_state, row.steps[0]["result"]["commit"]) == ("completed", pushed[0][0])
+    assert git(pods.project / "_history", "rev-parse", f"{row.commit}^2") == pushed[0][0]
+    assert pods.real_names() == ["Report.docx", "a.md", "notes.txt"]
 
 
 @pytest.mark.parametrize("row_is", ROWS)
