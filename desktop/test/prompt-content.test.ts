@@ -103,10 +103,14 @@ describe("an approval prompt", () => {
       { label: "File", value: "Downloads/report.pdf", code: true, keep: "" }, { label: "New content, 2 KB", value: "Not text.", code: false, keep: "" },
     ]);
     expect([ids(page), page.focus]).toEqual([["deny", "stop_asking", "allow"], "deny"]);
-    // Its user's own, made while they held the browser: asked in either mode, so there is no asking to stop.
+    // One that came while its user held the browser: asked in either mode, so there is no asking to stop. It says
+    // when it came, not who clicked: a page can start one by itself under its user's hand.
     const own = approval({ ...save, download: "user" });
     expect(own.title).toBe("Save report.pdf?");
-    expect(own.lead).toBe("You downloaded this file in acme.surogate.ai's browser, 2 KB. Save it in notes? acme.surogate.ai can read what is saved there.");
+    expect(own.lead).toBe(
+      "This file was downloaded while you had control of acme.surogate.ai's browser, 2 KB. Save it in notes? acme.surogate.ai can read what is saved there.",
+    );
+    expect(own.lead).not.toMatch(/you downloaded/i);
     expect([ids(own), allowing(own), own.focus, own.cancel]).toEqual([["deny", "allow"], ["allow"], "deny", "deny"]);
   });
 
