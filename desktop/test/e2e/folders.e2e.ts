@@ -96,9 +96,9 @@ const texts = (page: Page, selector: string) =>
 // A browser operation while its user holds the agent's browser.
 const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
 
-// A hand back of the browser held from *chat*, asked as the page's own button asks it, at its user's click:
-// what the desktop answered, or why it refused.
-async function handBackAtClick(client: Page, chat: string): Promise<unknown> {
+// A hand back of the browser held from *chat*, asked as the page's own button asks it, at its user's click,
+// and the desktop's confirmation answered with *button*: what the page was told.
+async function handBackAtClick(shell: ElectronApplication, client: Page, chat: string, button: "hand_back" | "keep"): Promise<unknown> {
   await client.evaluate((id) => {
     document.getElementById("hand-back")?.remove();
     const button = Object.assign(document.createElement("button"), { id: "hand-back", textContent: "Hand back" });
@@ -111,6 +111,9 @@ async function handBackAtClick(client: Page, chat: string): Promise<unknown> {
     document.body.append(button);
   }, chat);
   await client.click("#hand-back");
+  // The confirmation comes once the chat's title was read, or was not in time.
+  await expect.poll(() => shell.windows().some((window) => window.url().endsWith("/prompt.html")), { timeout: 10_000 }).toBe(true);
+  await press(await prompt(shell), button);
   await client.waitForFunction(() => document.getElementById("hand-back")?.dataset.answer !== undefined, undefined, { timeout: 15_000 });
   return JSON.parse((await client.getAttribute("#hand-back", "data-answer"))!);
 }
@@ -224,17 +227,15 @@ describe("Settings → Folders and permissions", () => {
     expect(await binding(OTHER)).toMatchObject({ takenOver: "elsewhere" });
     expect(await navigate(CHAT)).toEqual(PAUSED);
     expect(await navigate(OTHER)).toEqual(PAUSED);
-    expect(await boxes()).toBe(before);
-    // At its user's click the desktop asks, in its own box, and they keep it: held still.
-    await shell.evaluate(() => Object.assign(globalThis, { answer: 1 }));
-    expect(await handBackAtClick(client, CHAT)).toBe(false);
-    expect(await boxes()).toBe(before + 1);
+    // At its user's click the desktop asks, in its own prompt, and they keep it: held still.
+    expect(await handBackAtClick(shell, client, CHAT, "keep")).toBe(false);
     expect(await binding(CHAT)).toMatchObject({ takenOver: true });
     expect(await navigate(CHAT)).toEqual(PAUSED);
     // Handed back, by its user: the agent drives the browser again, and the chat's next call asks its first use.
-    await shell.evaluate(() => Object.assign(globalThis, { answer: 0 }));
-    expect(await handBackAtClick(client, CHAT)).toBe(true);
+    expect(await handBackAtClick(shell, client, CHAT, "hand_back")).toBe(true);
     expect(await binding(CHAT)).toMatchObject({ takenOver: false });
+    // Not one native box in any of it.
+    expect(await boxes()).toBe(before);
     const again = navigate(CHAT);
     const asked = await prompt(shell);
     await expect.poll(() => asked.textContent("#prompt-title"), { timeout: 10_000 }).toMatch(/^Let .+ use a browser on this computer\?$/);
