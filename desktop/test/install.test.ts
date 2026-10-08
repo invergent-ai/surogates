@@ -251,6 +251,18 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("test -e /opt/surogate/current").status).toBe(1);
   });
 
+  it("refuses a signed manifest that is more than one JSON document", () => {
+    const tarball = releaseOf("1.0.0");
+    const one = manifestOf("1.0.0", tarball);
+    for (const after of [one, Buffer.from('{"version":"9.9.9"}\n'), Buffer.from("1\n")]) {
+      const manifest = Buffer.concat([one, after]);
+      writeFileSync(join(box.dir, "manifest.json"), manifest);
+      writeFileSync(join(box.dir, "manifest.json.sig"), sign(null, manifest, keys.privateKey));
+      expect(apply(tarball), after.toString()).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's manifest is not a release of Surogate Desktop for this computer\n" });
+    }
+    expect(root("test -e /opt/surogate/current").status).toBe(1);
+  });
+
   it("takes the update's lock where only root can, so that no other user of the computer stalls it, and gives up on a lock held too long", () => {
     const tarball = releaseOf("1.0.0");
     manifestOf("1.0.0", tarball);

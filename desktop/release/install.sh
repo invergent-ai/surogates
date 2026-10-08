@@ -77,11 +77,13 @@ signed() {
 }
 
 # A signed manifest's fields: a release of this channel for this platform, its tarball where every
-# release's is, and its hash, each whole (jq's $ also matches before a last newline). Printed as
-# "<version> <sha256>".
+# release's is, and its hash, each whole (jq's $ also matches before a last newline). The manifest
+# is one JSON document: of two, the first would be applied and both kept as the version's mark.
+# Printed as "<version> <sha256>".
 release_of() {
-  jq -er --arg channel "$CHANNEL" '
-    select((.version | type == "string" and test("\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))
+  jq -ers --arg channel "$CHANNEL" '
+    select(length == 1) | .[0]
+    | select((.version | type == "string" and test("\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))
       and .channel == $channel and .platform == "linux" and .arch == "x64"
       and .url == "releases/\(.version)/surogate-desktop-\(.version)-linux-x64.tar.gz"
       and (.sha256 | type == "string" and test("\\A[0-9a-f]{64}\\z")))
