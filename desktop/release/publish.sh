@@ -93,10 +93,11 @@ case "$VERB" in
     # The state schema of what the app keeps in each user's home, as the tarball's own package names
     # it: a rollback takes only a release whose schema is the installed one's or later. Read as the
     # helper is: from the tarball unpacked whole, which is what an install leaves, and from a file
-    # of the tree's own, asked in a command of its own as the helper's path is.
+    # of the tree's own, asked in a command of its own as the helper's path is. The package is one
+    # JSON document: of two, each would name a schema.
     package="surogate-desktop-$VERSION-linux-x64/resources/app/package.json"
     [ -f "$unpacked/$package" ] && [ "$(realpath "$unpacked/$package")" = "$tree/$package" ] || fail "the tarball's resources/app/package.json names no stateSchema"
-    schema="$(jq -e '.stateSchema | select(type == "number" and . >= 1 and . == floor and . < 1e15) | floor' "$unpacked/$package" 2>/dev/null)" \
+    schema="$(jq -es 'select(length == 1) | .[0].stateSchema | select(type == "number" and . >= 1 and . == floor and . < 1e15) | floor' "$unpacked/$package" 2>/dev/null)" \
       || fail "the tarball's resources/app/package.json names no stateSchema"
     # All that is read of the unpacked tarball is read by here. It is removed before anything is
     # signed, and from its removal on no signal ends the signing: one would leave a manifest

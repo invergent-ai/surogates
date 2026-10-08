@@ -192,6 +192,9 @@ describe("the desktop's release manifest", () => {
       ...[{ version: "1.2.3" }, { version: "1.2.3", stateSchema: 0 }, { version: "1.2.3", stateSchema: "1" }, { version: "1.2.3", stateSchema: 1.5 }, { version: "1.2.3", stateSchema: 1e15 }]
         .map((named): [string, (top: string) => void] => [JSON.stringify(named), withApp(named)]),
       ["no package of the app's", (top) => rmSync(app(top))],
+      // Two documents, each with a schema: neither is the app's own word for it.
+      ["a package of two documents", (top) => writeFileSync(app(top), '{"version":"1.2.3","stateSchema":1}\n{"version":"1.2.3","stateSchema":2}\n')],
+      ["a package that is no object", (top) => writeFileSync(app(top), '[{"version":"1.2.3","stateSchema":1}]\n')],
       // A package of this computer's that names one, and a link to it where the app's is: the
       // app that is installed would read whatever its own computer has there.
       ["a link in its place", (top) => {
