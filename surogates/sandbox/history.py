@@ -31,6 +31,7 @@ version of a file for each turn that changed it, never one for each step.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import errno
 import hashlib
 import json
@@ -41,6 +42,7 @@ import stat
 import subprocess
 import time
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
@@ -79,6 +81,12 @@ _GIT_TIMEOUT = 120
 #: Through geesefs, a large project's read of its real files is bound by request latency.
 _OPEN_TIMEOUT = 570
 _TIMEOUT: ContextVar[int | None] = ContextVar("history_git_timeout", default=None)
+#: An open reads the real files it must read this many at once, once there
+#: are more of them than _READ_ALONE: git reads one file at a time, and
+#: through geesefs a file is a few requests, so ten thousand files read alone
+#: outlast the pod's ready bound.
+_READERS = 16
+_READ_ALONE = 64
 _ZERO = "0" * 40
 MAIN = "refs/heads/main"
 _PACKED = "# pack-refs with: peeled fully-peeled sorted \n"
@@ -1120,14 +1128,78 @@ class History:
 
         Git takes such a folder for a submodule: a link to a commit, not
         its files, and an add that fails while it has none.  Each one is
-        written to the excludes, which ``main`` and every copy share.
+        written to the excludes, which ``main`` and every copy share.  Of
+        the real files, many to read are read several at once.
         """
         # Listed file by file, git names a folder only for a repository it will not go into.
-        found = [n for n in git("ls-files", "-z", "--others", "--exclude-standard").split("\0") if n.endswith("/")]
+        new = [n for n in git("ls-files", "-z", "--others", "--exclude-standard").split("\0") if n]
+        found = [n for n in new if n.endswith("/")]
         if found:
             with open(self.repo / "info" / "exclude", "a") as out:
                 out.writelines(f"/{_pattern(n)}\n" for n in found)
-        git("add", "-A")
+        if git != self._main or not self._read_at_once([n for n in new if not n.endswith("/")]):
+            git("add", "-A")
+
+    def _read_at_once(self, new: list[str]) -> bool:
+        """Make ``main``'s index the real files as ``git add -A`` would, reading the files to read several at once; whether it did.
+
+        *new* are the files the index lacks.  The others to read are those
+        the index knows by no size and time, which a landing changed, and
+        those whose size or time changed since: ``git diff-files`` names
+        them from a look at each, with no file read.  Each reader is a git
+        of its own, with an index of its own for the files given to it, so
+        every entry is git's, with the size and time git saw as it read.
+        The entries are then put together, each whole as its git wrote it.
+
+        Few files to read are left to ``git add -A``, and so is anything
+        this cannot do: an index it does not read, a file that changed
+        under a reader.
+        """
+        index = self.repo / "index"
+        entries = _entries(index)
+        if entries is None or len(new) + sum(_unseen(entry) for entry in entries.values()) <= _READ_ALONE:
+            return False
+        work = self.repo / "reading"
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir()
+        before = index.read_bytes() if index.exists() else None
+        try:
+            changed = self._main("diff-files", "--name-status", "--no-renames", "-z").split("\0")
+            gone = [path for status, path in zip(changed[::2], changed[1::2]) if status == "D"]
+            read = [*new, *(path for status, path in zip(changed[::2], changed[1::2]) if status != "D")]
+            shares = [share for share in (read[n::_READERS] for n in range(_READERS)) if share]
+
+            def reader(n: int) -> None:
+                # A file gone since it was listed is no error: --remove leaves it out.
+                self._git(
+                    ["update-index", "--add", "--remove", "-z", "--stdin"],
+                    env={"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project), "GIT_INDEX_FILE": str(work / str(n))},
+                    cwd=self.project, input="".join(f"{path}\0" for path in shares[n]),
+                )
+
+            with ThreadPoolExecutor(len(shares)) as readers:
+                # Each with the open's own bound for its git, which a thread of its own would not have.
+                for done in [readers.submit(contextvars.copy_context().run, reader, n) for n in range(len(shares))]:
+                    done.result()
+            for path in (*gone, *read):
+                entries.pop(path.encode(), None)
+            for n in range(len(shares)):
+                if (theirs := _entries(work / str(n))) is None:
+                    return False
+                entries.update(theirs)
+            _replace(index, _index(entries))
+            # A file and a folder of one name, from a change under the readers, is no index: git says so here.
+            self._main("write-tree")
+        except (HistoryError, OSError):
+            # The index as it was, for git to read the files alone.
+            if before is None:
+                index.unlink(missing_ok=True)
+            else:
+                _replace(index, before)
+            return False
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        return True
 
     def _excluded(self) -> tuple[list[str], list[str]]:
         """The excluded files and folders in the copy, its folders holding a git repository, and whether it wrote any file history leaves out, the platform's folders included.
@@ -1269,6 +1341,46 @@ class History:
             raise HistoryError(f"git {args[0]} failed: {result.stderr.strip()}")
         # Only the line end: a name may start or end with a space.
         return result.stdout.removesuffix("\n")
+
+
+def _entries(index: Path) -> dict[bytes, bytes] | None:
+    """A git index's entries by path, each whole as git wrote it; none for no index, None for one this does not read.
+
+    An index of version 2, which git writes unless told otherwise, and
+    with no entry of a merge.  An entry is read only as far as its length
+    and its path: what git put in it is kept as it is.
+    """
+    try:
+        data = index.read_bytes()
+    except FileNotFoundError:
+        return {}
+    if len(data) < 32 or data[:4] != b"DIRC" or int.from_bytes(data[4:8], "big") != 2:
+        return None
+    entries: dict[bytes, bytes] = {}
+    at = 12
+    for _ in range(int.from_bytes(data[8:12], "big")):
+        flags = int.from_bytes(data[at + 60:at + 62], "big")
+        if flags & 0x7000 or len(data) < at + 62:
+            return None  # an extended entry, or a stage of a merge
+        length = flags & 0xFFF
+        if length == 0xFFF:
+            # A longer path ends at its first NUL.
+            length = data.index(b"\0", at + 62) - (at + 62)
+        size = (62 + length + 8) & ~7
+        entries[data[at + 62:at + 62 + length]] = data[at:at + size]
+        at += size
+    return entries
+
+
+def _index(entries: dict[bytes, bytes]) -> bytes:
+    """A git index of *entries*, in git's order of paths, with its checksum."""
+    body = b"DIRC" + (2).to_bytes(4, "big") + len(entries).to_bytes(4, "big") + b"".join(entries[path] for path in sorted(entries))
+    return body + hashlib.sha1(body).digest()
+
+
+def _unseen(entry: bytes) -> bool:
+    """Whether an index entry holds no size and no time of its file: git reads the file to know it."""
+    return entry[8:12] == entry[36:40] == b"\0\0\0\0"
 
 
 def _environ(env: dict[str, str]) -> dict[str, str]:

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from surogates.harness.turn_summarizer import is_platform_path
+from surogates.sandbox import history as history_module
 from surogates.sandbox.history import THREAD_POD_DEADLINE, History, HistoryConflict, HistoryError
 from surogates.tools.utils.checkpoint_manager import _shadow_repo_path
 
@@ -140,6 +141,117 @@ def test_a_pod_reads_only_the_real_files_whose_size_or_time_changed(tmp_path, pr
         (project / "notes.txt").chmod(0o644)
     assert (pod.copy / "notes.txt").read_text() == "v1 notes\n"
     assert (pod.copy / "Report.docx").read_bytes() == b"PK\x03\x04 report v2"
+
+
+def a_messy_project(project: Path) -> None:
+    """Files of every kind an open meets: names git must not misread, files it leaves out, a link, a repository."""
+    (project / "Annual report 2025.docx").write_bytes(b"PK\x03\x04 annual")
+    (project / "uploads" / "Écran d'accueil.png").write_bytes(b"\x89PNG accueil")
+    (project / "uploads" / "two\nlines.txt").write_text("a name with a line break\n")
+    (project / "uploads" / "deep" / "er").mkdir(parents=True)
+    (project / "uploads" / "deep" / "er" / "notes.md").write_text("deep\n")
+    (project / "empty folder").mkdir()
+    (project / "scratch.tmp").write_text("left out\n")
+    (project / "node_modules" / "x").mkdir(parents=True)
+    (project / "node_modules" / "x" / "index.js").write_text("left out\n")
+    (project / "latest").symlink_to("notes.txt")
+    (project / "vendor").mkdir()
+    subprocess.run(["git", "init", "-q", str(project / "vendor" / "lib")], check=True)
+    (project / "vendor" / "lib" / "lib.c").write_text("a repository of its own\n")
+    for n in range(80):
+        (project / "uploads" / f"scan {n:02}.pdf").write_bytes(b"%PDF " + bytes([n]) * 100)
+
+
+def changed_since(project: Path) -> None:
+    """Every kind of change you can make to the real files between two landings."""
+    (project / "notes.txt").write_text("v2 notes, saved by you\n")  # changed
+    (project / "Report.docx").unlink()  # removed
+    (project / "uploads" / "scan 03.pdf").unlink()
+    (project / "uploads" / "scan 03.pdf").mkdir()  # a folder where a file was
+    (project / "uploads" / "scan 03.pdf" / "page 1.png").write_bytes(b"\x89PNG page")
+    shutil.rmtree(project / "uploads" / "deep")
+    (project / "uploads" / "deep").write_text("a file where a folder was\n")
+    os.utime(project / "Annual report 2025.docx", (time.time() - 30, time.time() - 30))  # touched, not changed
+    for n in range(80):
+        (project / "new" / f"{n % 4}").mkdir(parents=True, exist_ok=True)
+        (project / "new" / f"{n % 4}" / f"upload {n:02}.docx").write_bytes(b"PK\x03\x04 " + bytes([n]) * 200)
+
+
+def mains_tree(history: History) -> str:
+    return git(history.repo, "rev-parse", "refs/bases/t1^{tree}")
+
+
+@pytest.mark.parametrize("since", ["no history yet", "a landing", "a landing of many files"])
+def test_an_open_reads_many_real_files_several_at_once_and_makes_the_commit_git_alone_would(tmp_path, project, monkeypatch, since):
+    a_messy_project(project)
+    if since == "a landing":
+        first = a_pod(tmp_path, project)
+        (first.copy / "a.md").write_text("a")
+        land(first)
+        changed_since(project)
+    elif since == "a landing of many files":
+        # The history's index knows a file a landing wrote by no size or time: the next pod reads each of them.
+        first = a_pod(tmp_path, project)
+        for n in range(80):
+            (first.copy / f"part {n:02}.md").write_text(f"part {n}\n")
+        land(first)
+        (project / "Report.docx").unlink()  # and you removed a file since
+    time.sleep(1.1)  # saved before the second the pods open in: git reads again a file saved in that second
+    with monkeypatch.context() as patch:  # few enough to read, by this bound, for git to read them alone
+        patch.setattr(history_module, "_READ_ALONE", 10**9)
+        alone = a_pod(tmp_path, project)
+    run, readers = subprocess.run, []
+
+    def counted(args, **kwargs):
+        if args[:2] == ["git", "update-index"] and "--stdin" in args:
+            readers.append(sorted(n for n in kwargs["input"].split("\0") if n))
+        return run(args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", counted)
+        pod = a_pod(tmp_path, project)
+    # Read by several gits at once, never more than the bound, each file by one of them.
+    read = [name for names in readers for name in names]
+    assert 1 < len(readers) <= history_module._READERS and len(read) == len(set(read)) > history_module._READ_ALONE
+    assert not [name for name in read if name.startswith(("node_modules/", "vendor/")) or name.endswith(".tmp")]
+    # The pod's base is the commit git alone makes of the same files, and its copy is the same.
+    assert mains_tree(pod) == mains_tree(alone)
+    names = sorted(str(f.relative_to(pod.copy)) for f in pod.copy.rglob("*") if not f.is_dir())
+    assert names == sorted(str(f.relative_to(alone.copy)) for f in alone.copy.rglob("*") if not f.is_dir())
+    assert "uploads/two\nlines.txt" in names and "latest" in names and "scratch.tmp" not in names
+    # Each file it read is known by its size and time from then on: a later look reads none of them again.
+    listed = git(pod.repo, "ls-files", "--stage")
+    for file in project.rglob("*"):
+        if file.is_file() and not file.is_symlink() and "_history" not in file.parts:
+            file.chmod(0)
+    try:
+        subprocess.run(
+            ["git", "add", "-A"], check=True, capture_output=True, cwd=project,
+            env={**os.environ, "GIT_DIR": str(pod.repo), "GIT_WORK_TREE": str(project)},
+        )
+    finally:
+        for file in project.rglob("*"):
+            if file.is_file() and not file.is_symlink():
+                file.chmod(0o644)
+    assert git(pod.repo, "ls-files", "--stage") == listed
+
+
+def test_a_file_that_changes_while_many_are_read_leaves_the_read_to_git_alone(tmp_path, project, monkeypatch):
+    a_messy_project(project)
+    run = subprocess.run
+
+    def a_folder_takes_a_files_place(args, **kwargs):
+        if args[:2] == ["git", "update-index"] and "--stdin" in args and "uploads/scan 07.pdf" in kwargs["input"].split("\0"):
+            (project / "uploads" / "scan 07.pdf").unlink()
+            (project / "uploads" / "scan 07.pdf").mkdir()
+            (project / "uploads" / "scan 07.pdf" / "page.png").write_bytes(b"\x89PNG")
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", a_folder_takes_a_files_place)
+    pod = a_pod(tmp_path, project)
+    # Whatever the several readers could not finish, the copy is the real files as they are.
+    assert (pod.copy / "uploads" / "scan 07.pdf" / "page.png").read_bytes() == b"\x89PNG"
+    assert (pod.copy / "uploads" / "scan 08.pdf").exists()
 
 
 def test_a_pod_looks_again_at_each_folder_main_has_before_it_reads_the_real_files(tmp_path, project, monkeypatch):
