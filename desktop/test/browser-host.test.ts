@@ -1258,6 +1258,18 @@ describe("a page's download, as the host stages it", () => {
       expect([state().named.size, prompted().size]).toEqual([0, 0]);
     });
 
+    it("tells a session once that its page asked for a file, however often the page asks before its next answer: what is kept for its agent of its own acts is not crowded out", async () => {
+      const tab = taken();
+      // A page that keeps asking, as one does that asks by itself.
+      for (let asks = 0; asks < 25; asks += 1) tab.input();
+      expect(state().unseen.get(SESSION)).toEqual([FILE_ASKED]);
+      // An upload whose files reach the input just as its user takes the browser over: its answer is paused, and
+      // its agent is told that the page has them, with its session's next answer that says what its page did.
+      tab.input({ evaluate: () => (host.pause("chat-2", true), Promise.resolve("given")), dispose: () => Promise.resolve() });
+      expect(await uploads()).toEqual(PAUSED);
+      expect(state().unseen.get(SESSION)).toEqual([FILE_ASKED, GIVEN_AS_TAKEN]);
+    });
+
     it("reads each bound on the clock it can be read on: the minute after a hand back on the one that cannot be set, the five seconds after a take-over on a timer, which the computer's clock moves no more, and the quarter second of an upload's step on the computer's own, the one its page reads too", async () => {
       // The clock a host told none reads, and the computer's own, which its user or its network can set.
       let steady = 5_000;

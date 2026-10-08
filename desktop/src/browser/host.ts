@@ -1181,8 +1181,10 @@ export class BrowserHost {
 
   // What a session's page did that its agent could not see happen. While its user holds the browser, what
   // a page asks or starts is their own doing, or the page's under their hand: its agent is told nothing of it.
+  // Told once until its session's next answer carries it, however often the page does it meanwhile: a page that
+  // keeps asking for a file would else fill the answer, and leave no room for what is kept of the agent's own acts.
   private note(session: string, notice: string): void {
-    if (this.held === null) this.keep(session, notice);
+    if (this.held === null && !(this.unseen.get(session) ?? []).includes(notice)) this.keep(session, notice);
   }
 
   // Kept for *session*'s next answer that says what its pages did.
