@@ -6,7 +6,7 @@
 
 import { type ChildProcess, execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -376,6 +376,19 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("test ! -L /opt/surogate/current/release.json && cmp /home/tester/manifest.json /opt/surogate/current/release.json").status).toBe(0);
     expect(root("sha256sum </opt/surogate/current/surogate").stdout).toBe(`${sha256(readFileSync(SLEEP))}  -\n`);
     expect(versions()).toEqual(["1.0.0"]);
+    expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
+  });
+
+  it("refuses an archive that lists a set-id file or folder, which tar unpacks without the bit", () => {
+    for (const [member, mode] of [["surogate", 0o4755], ["bin/surogate-apply-update", 0o2755], ["resources", 0o2755]] as const) {
+      const tarball = releaseOf("1.0.0", (top) => {
+        chmodSync(join(top, member), mode);
+        expect(statSync(join(top, member)).mode & 0o7777).toBe(mode);
+      });
+      manifestOf("1.0.0", tarball);
+      expect(apply(tarball), member).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's archive holds a special file, a set-id file or a hard link\n" });
+    }
+    expect(root("test -e /opt/surogate/current").status).toBe(1);
     expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
   });
 

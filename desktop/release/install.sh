@@ -185,14 +185,18 @@ apply() {
 
   local folder="$ROOT/versions/$version" name="surogate-desktop-$version-linux-x64"
   if ! cmp -s "$work/manifest.json" "$folder/release.json"; then
+    # tar unpacks a set-id member without its bit (--no-same-permissions), so that only the
+    # archive's own listing shows one: the fourth and seventh letters of a member's mode.
+    tar -tvzf "$work/release.tar.gz" >"$work/listing" 2>/dev/null || fail "the release's archive could not be unpacked"
+    ! grep -Eq '^(.{3}|.{6})[sS]' "$work/listing" || fail "the release's archive holds a special file, a set-id file or a hard link"
     mkdir "$work/tree"
     tar -xzf "$work/release.tar.gz" -C "$work/tree" --no-same-owner --no-same-permissions 2>/dev/null \
       || fail "the release's archive could not be unpacked"
     [ "$(ls -A "$work/tree")" = "$name" ] && [ -d "$work/tree/$name" ] && [ ! -L "$work/tree/$name" ] \
       || fail "the release's archive holds more than $name/"
     local top="$work/tree/$name" link
-    # tar keeps no name with .. and nothing outside the tree, and no set-id bit (--no-same-permissions);
-    # a set-id file is refused here too.
+    # tar keeps no name with .. and nothing outside the tree, and no set-id bit; one that did
+    # reach the tree is refused here too.
     [ -z "$(find "$top" \( -type b -o -type c -o -type p -o -type s -o -perm /6000 -o \( -type f -links +1 \) \) -print -quit)" ] \
       || fail "the release's archive holds a special file, a set-id file or a hard link"
     while IFS= read -r -d '' link; do
