@@ -18,6 +18,24 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 const DESKTOP = fileURLToPath(new URL("..", import.meta.url));
 const VERSION = "1.2.3";
 const NAME = `surogate-desktop-${VERSION}-linux-x64`;
+// Every file and folder of the agent's disk $1, one a line, as debugfs lists it: its path, its
+// mode, its owner and group by number, and a file's size.
+const LISTED = String.raw`
+listed() {
+  debugfs -R "ls -p $2" "$1" 2>/dev/null | while IFS=/ read -r _ inode mode uid gid name size _; do
+    case "$name" in "" | . | ..) continue ;; esac
+    case "$mode" in
+      04*) echo "$2$name/ $mode $uid $gid"; listed "$1" "$2$name/" ;;
+      *) echo "$2$name $mode $uid $gid $size" ;;
+    esac
+  done
+}
+`;
+// What *disk* holds, so listed, in the order of its paths' bytes. debugfs is root's tool, and may
+// be on no user's PATH.
+const holds = (disk: string) => spawnSync("bash", ["-c", `${LISTED}\nlisted "$1" / | LC_ALL=C sort`, "_", disk], {
+  encoding: "utf8", env: { ...process.env, PATH: `${process.env.PATH ?? ""}:/usr/sbin:/sbin` },
+}).stdout.trim().split("\n");
 
 describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarball", { timeout: 180_000 }, () => {
   let dir: string;
@@ -120,6 +138,10 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarba
     // The VM's files, and the install script as the version's root helper.
     expect(readFileSync(join(top, "resources", "vm", "manifest.json"), "utf8")).toBe(vmManifest);
     expect(spawnSync("file", ["-b", join(top, "resources", "vm", "agent.img")], { encoding: "utf8" }).stdout).toContain('volume name "surogate-agent"');
+    // Its folders and files are root's, with the one mode of their kind, whatever the build's folders hand on.
+    const disk = holds(join(top, "resources", "vm", "agent.img"));
+    expect(disk.length).toBeGreaterThan(20);
+    expect(disk.filter((line) => !/^(\/lost\+found\/ 040700|\S+\/ 040755) 0 0$|^\S*[^/ ] 100(644|755) 0 0 \d+$/.test(line))).toEqual([]);
     expect(readFileSync(join(top, "bin", "surogate-apply-update"), "utf8")).toBe(readFileSync(join(DESKTOP, "release", "install.sh"), "utf8"));
     expect(statSync(join(top, "bin", "surogate-apply-update")).mode & 0o777).toBe(0o755);
     // Root installs it: nothing in it is writable by anyone but its owner.
@@ -147,6 +169,13 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarba
     }
   });
 
+  it("is the same bytes when the same build is packed again: a release sent again puts no other tarball under a name already served", async () => {
+    const again = await pack("again");
+    expect(again.status, again.stderr).toBe(0);
+    const hash = (out: string) => createHash("sha256").update(readFileSync(join(dir, out, `${NAME}.tar.gz`))).digest("hex");
+    expect(hash("again")).toBe(hash("out"));
+  });
+
   it("gives Electron the app's fuses: never Node, no NODE_OPTIONS, no inspector, and its cookies encrypted", async () => {
     const wire = await getCurrentFuseWire(join(top, "surogate"));
     expect([
@@ -168,20 +197,6 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarba
     expect(output).not.toContain(refusal);
   });
 });
-
-// Every file and folder of the agent's disk $1, one a line, as debugfs lists it: its path, its
-// mode, its owner and group by number, and a file's size.
-const LISTED = String.raw`
-listed() {
-  debugfs -R "ls -p $2" "$1" 2>/dev/null | while IFS=/ read -r _ inode mode uid gid name size _; do
-    case "$name" in "" | . | ..) continue ;; esac
-    case "$mode" in
-      04*) echo "$2$name/ $mode $uid $gid"; listed "$1" "$2$name/" ;;
-      *) echo "$2$name $mode $uid $gid $size" ;;
-    esac
-  done
-}
-`;
 
 describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the agent's disk", { timeout: 120_000 }, () => {
   // A release's runner: Ubuntu 24.04, whose mke2fs is e2fsprogs 1.47.0, with the one package the
@@ -243,7 +258,34 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the agent's disk", 
     // And the same disk here, with this computer's own tools.
     const here = join(dir, "agent.img");
     expect(spawnSync(join(DESKTOP, "vm", "agent-disk.sh"), [here], { encoding: "utf8" })).toMatchObject({ status: 0, stderr: "" });
-    expect(spawnSync("bash", ["-c", `${LISTED}\nlisted "$1" / | LC_ALL=C sort`, "_", here], { encoding: "utf8", env: { ...process.env, PATH: `${process.env.PATH ?? ""}:/usr/sbin:/sbin` } }).stdout.trim().split("\n")).toEqual(expected());
+    expect(holds(here)).toEqual(expected());
+  });
+
+  it("is the same bytes from the same build, whenever it is made, at one SOURCE_DATE_EPOCH, which is every time in it", () => {
+    // Twice, seconds apart, each from a copy of the build made then: on the runner's Ubuntu, and here.
+    const twice = (disk: string) => `for made in 1 2; do SOURCE_DATE_EPOCH=1790000000 ${disk} /tmp/agent-$made.img >/dev/null || exit; sleep 1.5; done
+      sha256sum </tmp/agent-1.img; sha256sum </tmp/agent-2.img
+      debugfs -R "stat /guest/agent.js" /tmp/agent-2.img 2>/dev/null | grep -E "^ *(c|a|m|cr)time:" | cut -d- -f1 | tr -s " \n" " "; echo
+      dumpe2fs -h /tmp/agent-2.img 2>/dev/null | grep -E "^Filesystem (UUID|created):" | tr -s " \n" " "`;
+    const there = runner(image, twice("/desktop/vm/agent-disk.sh"));
+    expect(there.status, there.stderr).toBe(0);
+    const [first, second, times, superblock] = there.stdout.trim().split("\n").map((line) => line.trim());
+    expect(second).toBe(first);
+    // 0x6ab13b80 is 1790000000: when the file was made, changed and read, and when the disk was.
+    expect(times).toBe("ctime: 0x6ab13b80:00000000 atime: 0x6ab13b80:00000000 mtime: 0x6ab13b80:00000000 crtime: 0x6ab13b80:00000000");
+    expect(superblock).toMatch(/^Filesystem UUID: [0-9a-f-]{36} Filesystem created: Mon Sep 21 14:13:20 2026$/);
+    const here = [1, 2].map((made) => {
+      const disk = join(dir, `agent-${made}.img`);
+      expect(spawnSync(join(DESKTOP, "vm", "agent-disk.sh"), [disk], { encoding: "utf8", env: { ...process.env, SOURCE_DATE_EPOCH: "1790000000" } })).toMatchObject({ status: 0, stderr: "" });
+      spawnSync("sleep", ["1.5"]);
+      return createHash("sha256").update(readFileSync(disk)).digest("hex");
+    });
+    expect(here[1]).toBe(here[0]);
+    // With no SOURCE_DATE_EPOCH, its times are the moment it is made.
+    const now = join(dir, "agent-now.img");
+    const { SOURCE_DATE_EPOCH: _, ...env } = process.env;
+    expect(spawnSync(join(DESKTOP, "vm", "agent-disk.sh"), [now], { encoding: "utf8", env }).status).toBe(0);
+    expect(createHash("sha256").update(readFileSync(now)).digest("hex")).not.toBe(here[0]);
   });
 
   it("is not made without fakeroot, and nor is a tarball: each script says so before it does anything", () => {

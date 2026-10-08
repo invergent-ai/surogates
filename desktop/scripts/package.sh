@@ -37,6 +37,10 @@ DESKTOP="$PWD"
 command -v fakeroot >/dev/null \
   || { echo "package.sh: fakeroot is missing, which the agent's disk is made with (vm/agent-disk.sh): install it (apt install fakeroot)" >&2; exit 1; }
 
+# One time for all that is packed, the commit's unless SOURCE_DATE_EPOCH names another: each
+# member of the tarball has it, and it is every time in the agent's disk. The same build, packed
+# again, is then the same tarball.
+EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$DESKTOP" log -1 --format=%ct)}"
 name="surogate-desktop-$VERSION-linux-x64"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
@@ -59,7 +63,7 @@ cp package-lock.json "$app/"
 (cd "$app" && NPM_CONFIG_USERCONFIG=/dev/null npm ci --omit=dev --ignore-scripts --prefer-offline --no-audit --no-fund --loglevel=error)
 rm "$app/package-lock.json"
 
-vm/agent-disk.sh "$top/resources/vm/agent.img"
+SOURCE_DATE_EPOCH="$EPOCH" vm/agent-disk.sh "$top/resources/vm/agent.img"
 cp "$VM_MANIFEST" "$top/resources/vm/manifest.json"
 cp ../web/public/favicon.svg "$top/resources/surogate.svg"
 # A program, whatever mode its file had where it was kept.
@@ -70,6 +74,6 @@ install -m 0755 "$HELPER" "$top/bin/surogate-apply-update"
 # that hands its group on has the bit, and the root helper refuses a release that lists one.
 chmod -R u+w,go-w,a+rX,a-st "$top"
 mkdir -p "$OUT"
-tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@${SOURCE_DATE_EPOCH:-$(git -C "$DESKTOP" log -1 --format=%ct)}" \
+tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$EPOCH" \
   -C "$stage" -czf "$OUT/$name.tar.gz" "$name"
 echo "$OUT/$name.tar.gz"
