@@ -216,7 +216,7 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal "desktop-release", job.fetch("environment")
     assert_equal({ "contents" => "read" }, job.fetch("permissions"))
     assert_equal({ "group" => "desktop-release", "cancel-in-progress" => false }, job.fetch("concurrency"))
-    tarball = steps.index { |step| step["uses"] == "actions/download-artifact@v4" }
+    tarball = steps.index { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }
     assert_equal({ "name" => "desktop-tarball", "path" => "out/desktop" }, steps[tarball].fetch("with"))
     sign = runs.index { |run| run.include?('desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop') }
     send = runs.index { |run| run.include?('desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop') }
@@ -284,9 +284,11 @@ class ReleaseWorkflowTest < Minitest::Test
     # A step need not name npm to run it: package.sh does, and so may an action, a container's
     # image, or a runner that kept what an earlier job's npm left on it. The job that holds the
     # keys is these four steps, each with these keys alone, on a runner of its own.
+    # Its two actions are named by their commits (v4.4.0 and v4.3.0): a tag can be moved to other
+    # code, and the job that holds the release key would run it.
     assert_equal [
-      { "uses" => "actions/checkout@v4" },
-      { "uses" => "actions/download-artifact@v4" },
+      { "uses" => "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" },
+      { "uses" => "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" },
       { "run" => 'desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop' },
       { "run" => 'desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop' },
     ], steps.map { |step| step.slice("uses", "run") }

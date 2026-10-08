@@ -348,10 +348,12 @@ jobs:
       cancel-in-progress: false
     steps:
       # publish.sh, and the install script it trusts and sends, from the tag; the tarball from the build.
-      - uses: actions/checkout@v4
+      # Each action by its commit: a tag can be moved to other code, which this job would run with
+      # the release key.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Take the tarball
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: desktop-tarball
           path: out/desktop
