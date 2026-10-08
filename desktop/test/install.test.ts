@@ -6,7 +6,7 @@
 
 import { execFile, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,11 @@ const SCRIPT = fileURLToPath(new URL("../release/install.sh", import.meta.url));
 const RELEASES = ["24.04", "26.04"] as const;
 const ENABLED = process.env.SUROGATE_INSTALL_TESTS === "1";
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
+
+// The program that holds Electron's place in a test's release: this computer's sleep, GNU's. Where
+// Ubuntu's own sleep is uutils' (26.04), it is one program of many, which runs under no other name
+// and needs a newer libc than 24.04's: GNU's is beside it, as gnusleep.
+const SLEEP = existsSync("/usr/bin/gnusleep") ? "/usr/bin/gnusleep" : "/usr/bin/sleep";
 
 // Keys of the test's own, and the script with their public halves in the release keys' place.
 const keys = generateKeyPairSync("ed25519");
@@ -44,7 +49,7 @@ function lab(release: string, setup: string[], run: string[] = []) {
     const top = join(tree, name);
     mkdirSync(join(top, "bin"), { recursive: true });
     mkdirSync(join(top, "resources", "app"), { recursive: true });
-    copyFileSync("/usr/bin/sleep", join(top, "surogate"));
+    copyFileSync(SLEEP, join(top, "surogate"));
     writeFileSync(join(top, "bin", "surogate-apply-update"), withKeys(readFileSync(SCRIPT, "utf8")), { mode: 0o755 });
     writeFileSync(join(top, "resources", "app", "package.json"), JSON.stringify({ version }));
     change(top);
@@ -208,7 +213,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     manifestOf("1.0.0", tarball);
     expect(apply(tarball).status).toBe(0);
     expect(root("test ! -L /opt/surogate/current/release.json && cmp /home/tester/manifest.json /opt/surogate/current/release.json").status).toBe(0);
-    expect(root("sha256sum </opt/surogate/current/surogate").stdout).toBe(`${sha256(readFileSync("/usr/bin/sleep"))}  -\n`);
+    expect(root("sha256sum </opt/surogate/current/surogate").stdout).toBe(`${sha256(readFileSync(SLEEP))}  -\n`);
     expect(versions()).toEqual(["1.0.0"]);
     expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
   });
