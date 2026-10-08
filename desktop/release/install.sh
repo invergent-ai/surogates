@@ -130,13 +130,19 @@ roots_own() {
 # The release keys this computer trusts, into the array $1 names. One file says which: the helper
 # pkexec runs, whose own list they are, whichever script asks, that helper or an install script
 # of any age. Its list is read as settings writes one, each entry between its two quotes, and the
-# helper is not run. Only a computer with no helper, at its first install, takes this script's
-# own list. A helper that is not as an apply leaves one, or lists nothing, is refused: this
-# script's list never stands in for it, and would be an older one where the script is.
+# helper is not run. Only a computer with no helper and no version, at its first install, takes
+# this script's own list. A helper that is not as an apply leaves one, or lists nothing, is
+# refused, and so is a version that has no helper, which an apply puts in before it switches to
+# one: this script's list never stands in for the helper's, and would be an older one where the
+# script is.
 trusted() {
   local -n list="$1"
   list=("${RELEASE_KEYS[@]}")
-  [ -e "$HELPER" ] || [ -L "$HELPER" ] || return 0
+  if [ ! -e "$HELPER" ] && [ ! -L "$HELPER" ]; then
+    [ -e "$ROOT/current" ] || [ -L "$ROOT/current" ] || return 0
+    list=()
+    fail "$HELPER is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again"
+  fi
   list=()
   roots_own "$HELPER" 81ed || fail "$HELPER is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again"
   listed list "$HELPER"

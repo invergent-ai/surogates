@@ -796,6 +796,11 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       ["echo '{}' >/opt/surogate/bin/release.json", `Surogate Desktop: /opt/surogate/bin/release.json does not say which release ${helper} is of: ${again}`],
       // A link to nothing in the helper's place is no computer without a helper, where this script's own list would count.
       [`rm ${helper} && ln -s /nowhere ${helper}`, `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
+      // Nor is a version that has lost its helper, or the helper's folder with it, at its first
+      // install: an apply puts the helper in before it switches to a version, so only root can
+      // have left one so, and the list of whichever script asks next is trusted for nothing.
+      [`rm ${helper}`, `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
+      ["rm -rf /opt/surogate/bin", `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
       // A mark that is another user's, or that others may write, is not root's own word for which release.
       ["chown tester /opt/surogate/bin/release.json", `Surogate Desktop: /opt/surogate/bin/release.json does not say which release ${helper} is of: ${again}`],
       ["chmod 664 /opt/surogate/bin/release.json", `Surogate Desktop: /opt/surogate/bin/release.json does not say which release ${helper} is of: ${again}`],
