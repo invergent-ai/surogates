@@ -423,6 +423,29 @@ describe("a download the agent's page started", () => {
     expect(savedName("\u3164.env\u00a0")).toBe("_env");
   });
 
+  it("makes a name in one order: spaces plain, what does not show removed, trimmed, then no leading dot or dash, then nothing left, then cut, then trimmed again", () => {
+    // Whatever does not show is gone before the look at what leads: none of these is saved hidden, or with a space before it.
+    for (const hidden of ["\u200b.envrc", "\u2800.envrc", " .envrc", "\u00a0.envrc", "\u200b .envrc", "\u3164\u2028 .envrc"]) {
+      expect(savedName(hidden), JSON.stringify(hidden)).toBe("_envrc");
+    }
+    // A leading dash would be an option to a command run over the folder's names: a `_` goes before it.
+    expect(savedName("-rf")).toBe("_-rf");
+    expect(savedName("--checkpoint-action=exec=sh x.sh")).toBe("_--checkpoint-action=exec=sh x.sh");
+    expect(savedName("\u200b -rf")).toBe("_-rf");
+    expect(savedName("report-final.pdf")).toBe("report-final.pdf");
+    // Nothing left is looked for after that: a name that was only what does not show, or only dots.
+    for (const nothing of ["\u3164", "\u2800", "\u115f\u1160\uffa0", ".", "\u200b.", " \u00a0 "]) expect(savedName(nothing), JSON.stringify(nothing)).toBe("download");
+    expect(savedName("-")).toBe("_-");
+    // The cut comes last, and what it leaves is trimmed: no name ends in a space, before its extension either.
+    expect(savedName(`${"x".repeat(199)} y`)).toBe("x".repeat(199));
+    expect(savedName(`${"x".repeat(195)} ${"y".repeat(10)}.txt`)).toBe(`${"x".repeat(195)}.txt`);
+    // An extension keeps 20 bytes at most, the name the rest.
+    const long = savedName(`${"x".repeat(300)}.${"e".repeat(39)}`);
+    expect([Buffer.byteLength(long), long]).toEqual([200, `${"x".repeat(180)}.${"e".repeat(19)}`]);
+    // A dash that leads only once the name is cut is none that leads: the cut keeps the name's start.
+    expect(savedName(`-${"x".repeat(300)}`)).toBe(`_-${"x".repeat(198)}`);
+  });
+
   it("writes the name it asked about, byte for byte", async () => {
     bind("ask");
     const names = [

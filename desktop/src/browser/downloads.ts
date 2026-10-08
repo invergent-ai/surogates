@@ -70,13 +70,17 @@ export const quoted = (name: string): string => JSON.stringify(cut(name, NAME_BY
 export function savedName(suggested: string): string {
   // The browser makes it one name already ("../a" is "_.._a"): a separator left is cut all the same.
   const last = suggested.split(/[/\\]/).at(-1) ?? "";
-  const shown = last.replace(UNSEEN, "").replace(SPACES, " ").trim();
-  // Never hidden: programs in the folder act on some (.envrc, .npmrc).
-  const named = shown.startsWith(".") ? `_${shown.slice(1)}` : shown;
+  // In this order: every space made plain, what does not show removed, then trimmed, so that what leads
+  // the name is what shows.
+  const shown = last.replace(SPACES, " ").replace(UNSEEN, "").trim();
+  // Never hidden: programs in the folder act on some (.envrc, .npmrc). Nor an option to a command run
+  // over the folder's names (rm *, tar … *): a leading dash gets a `_` before it.
+  const named = shown.startsWith(".") ? `_${shown.slice(1)}` : shown.startsWith("-") ? `_${shown}` : shown;
   if (named.replace(/[._]/g, "") === "") return "download";
   if (Buffer.byteLength(named) <= NAME_BYTES) return named;
+  // Cut last, and what the cut leaves trimmed again: it can end at a space.
   const extension = cut(extname(named), 20);
-  return cut(named.slice(0, named.length - extname(named).length), NAME_BYTES - Buffer.byteLength(extension)) + extension;
+  return `${cut(named.slice(0, named.length - extname(named).length), NAME_BYTES - Buffer.byteLength(extension)).trimEnd()}${extension}`.trimEnd();
 }
 
 // Why nothing was saved, where the reason is this computer's own and not the agent's to read.

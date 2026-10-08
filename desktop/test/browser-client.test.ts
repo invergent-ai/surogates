@@ -161,7 +161,10 @@ describe("the browser host's client", () => {
     const download = { root: "root", session: "child", name: "report.txt", path: "/tmp/nowhere/a", user: false };
     host.say({ type: "download", ...download });
     host.say({ type: "download", ...download, user: true });
-    expect(heard).toEqual([download, { ...download, user: true }]);
+    // Its user's only where the host says exactly so.
+    host.say({ type: "download", ...download, user: "yes" as unknown as boolean });
+    host.say({ type: "download", root: "root", session: "child", name: "report.txt", path: "/tmp/nowhere/a" } as FromBrowser);
+    expect(heard).toEqual([download, { ...download, user: true }, download, download]);
   });
 
   it("asks a running host for the address of a session's page, and says a new tab's where none runs", async () => {
