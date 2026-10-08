@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from asyncpg.exceptions import InternalClientError
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 
@@ -530,8 +531,7 @@ async def lose_the_lock(api, thread) -> None:
     """*thread*'s project's lock lost unseen, as a failover or a pooler restart loses it: its connection ends."""
     async with api.app.state.session_factory() as db:
         await db.execute(text(
-            # Waits until the backend is gone, as a failover's is.
-            "SELECT pg_terminate_backend(pid, 5000) FROM pg_locks WHERE locktype = 'advisory' AND granted "
+            "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND granted "
             "AND objid::text::bigint = (hashtext(:key)::bigint & 4294967295)"
         ), {"key": f"workstream:{thread.config['workstream_id']}"})
         await db.commit()
@@ -625,6 +625,24 @@ async def test_a_failed_turns_work_is_on_its_branch_at_the_next_turn_and_lands_t
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 half made"
     [report] = await reports(api, master)
     assert [(f["ref"], f["landing"]) for f in report["files"]] == [("Report.docx", "landed")]
+
+
+async def test_a_failed_turn_whose_pod_cannot_be_let_go_still_ends_as_failed_with_its_work_kept(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "printf ' half made' >> Report.docx")
+
+    async def the_pool_fails(owner, **_):
+        raise RuntimeError("the pool's lock was cancelled")
+
+    monkeypatch.setattr(pool, "release_for_session", the_pool_fails)
+    await ends(api, pool, thread, failed=True)
+    # The turn's end is written all the same: without it the thread looks alive to its master for ever.
+    [failed] = [e.data for e in await api.app.state.session_store.get_events(thread.id, types=[EventType.SESSION_FAIL])]
+    assert (failed["reason"], failed["saved"]) == ("provider_error", True)
+    assert len(await api.app.state.session_store.get_events(master.id, types=[EventType.WORKER_FAILED])) == 1
 
 
 async def test_a_turn_that_never_used_its_pod_and_has_nothing_waiting_opens_none(api, monkeypatch, tmp_path):
@@ -1416,7 +1434,8 @@ async def test_a_hand_off_outside_its_projects_lock_is_refused(api, monkeypatch,
         return settled
 
     monkeypatch.setattr(landing_module, "settle_running", the_lock_goes)
-    with pytest.raises(DBAPIError):
+    # Its connection's end, as the driver says it: gone already, or going while it is asked.
+    with pytest.raises((DBAPIError, InternalClientError)):
         await handed_off(api, pool, thread)
     # Its check of the hand-off holds only under the lock: outside it, nothing is handed off.
     assert not (pods.project / "_history" / "packed-refs").exists()

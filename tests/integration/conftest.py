@@ -138,6 +138,9 @@ async def engine(pg_url):
     eng = create_async_engine(
         pg_url,
         pool_size=5,
+        # As the worker's engine: a connection a test ended, as a failover
+        # ends one, is found dead when it is next lent, not by the test after.
+        pool_pre_ping=True,
         connect_args={"statement_cache_size": 0},
     )
 
