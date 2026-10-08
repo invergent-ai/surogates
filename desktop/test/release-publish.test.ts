@@ -2,11 +2,11 @@
 // (SeaweedFS in Docker) in R2's place. Behind SUROGATE_S3_TESTS=1: it needs Docker and the
 // chrislusf/seaweedfs image.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, type KeyObject, randomBytes, verify } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -74,6 +74,26 @@ const packed = (dir: string, out: string, version: string, change: (top: string)
   rmSync(tree, { recursive: true, force: true });
   return tarball;
 };
+// Members added to a release's archive after its tree, as tar's own -r adds them, each group with
+// its *mode*, whatever its mode here: a name that ends with / is a folder, added alone, and any
+// other a file of *contents*. So a folder closed to its owner is the archive's, and never one of
+// this computer's.
+const added = (dir: string, ...groups: Array<[mode: string, members: string[], contents?: string]>) => (archive: string, name: string) => {
+  for (const [mode, members, contents = ""] of groups) {
+    const after = mkdtempSync(join(dir, "after-"));
+    for (const member of members) {
+      mkdirSync(join(after, name, member.endsWith("/") ? member : dirname(member)), { recursive: true });
+      if (!member.endsWith("/")) writeFileSync(join(after, name, member), contents);
+    }
+    expect(spawnSync("tar", ["--owner=0", "--group=0", `--mode=${mode}`, "--no-recursion", "-C", after, "-rf", archive, ...members.map((member) => join(name, member))]).status).toBe(0);
+  }
+};
+// A stand-in's lines (see recording) that say it was called, in *dir*/<program>-held, and then wait
+// to be let go, by *dir*/go, for ten seconds at most: a test sends its signal meanwhile.
+const held = (dir: string, program: string) => [
+  `: > '${join(dir, `${program}-held`)}'`,
+  `tries=0; while [ -d '${dir}' ] && [ ! -e '${join(dir, "go")}' ] && [ "$tries" -lt 200 ]; do sleep 0.05; tries=$((tries + 1)); done`,
+];
 
 describe("the desktop's release manifest", () => {
   let dir: string;
@@ -88,6 +108,52 @@ describe("the desktop's release manifest", () => {
   });
   // Signed as the publish job signs: with the release key, and the hash the build's job gave for its tarball.
   const sign = (env: Record<string, string> = {}) => publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball())), ...env });
+  // A signing that goes on while the test sends it a signal: to the script's own shell alone, or,
+  // started in a group of its own, to all it runs too, as a terminal's signal goes. *exited* is
+  // the script's own end; *ended*, how it ended and what was said, once nothing of it still speaks.
+  const signing = (group = false) => {
+    const child = spawn(join(dir, "release", "publish.sh"), ["sign", "1.2.3", out], {
+      detached: group, stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}`, TMPDIR: tmp, DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball())) },
+    });
+    const { pid } = child;
+    if (pid === undefined) throw new Error("the signing did not start");
+    const said = { stdout: "", stderr: "" };
+    child.stdout.on("data", (data: Buffer) => { said.stdout += data.toString(); });
+    child.stderr.on("data", (data: Buffer) => { said.stderr += data.toString(); });
+    return {
+      signal: (signal: NodeJS.Signals) => { process.kill(group ? -pid : pid, signal); },
+      exited: new Promise<void>((resolve) => { child.once("exit", () => resolve()); }),
+      ended: new Promise<{ status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }>((resolve) => {
+        child.once("close", (status, signal) => resolve({ status, signal, ...said }));
+      }),
+    };
+  };
+  // tar as publish.sh calls it, still unpacking when a signal comes: it waits, then writes its last
+  // member where it unpacks, if that folder is still there, and says which in tar-found.
+  const unpacking = (real: string) => [
+    "before=; into=",
+    'for arg; do [ "$before" = -C ] && into="$arg"; before="$arg"; done',
+    `'${real}' "$@" || exit`,
+    ...held(dir, "tar"),
+    `if [ -d "$into" ]; then echo last > "$into/last"; echo there; else echo gone; fi > '${join(dir, "tar-found")}'`,
+  ];
+  // Waits for a stand-in to say it was called (see held).
+  const called = async (program: string) => {
+    for (const end = Date.now() + 10_000; !existsSync(join(dir, `${program}-held`)); await new Promise((resolve) => setTimeout(resolve, 10))) {
+      if (Date.now() > end) throw new Error(`${program} was never called`);
+    }
+  };
+  // Lets the stand-in that waits go on, once a script that the signal ended at once would have
+  // ended: one that waits for what it runs, or lets the signal by, is still there.
+  const letGo = async (run: ReturnType<typeof signing>) => {
+    await Promise.race([run.exited, new Promise((resolve) => setTimeout(resolve, 300))]);
+    writeFileSync(join(dir, "go"), "");
+  };
+  // Before another signing of one test: nothing of the one before it, nor of the stand-ins that held it.
+  const again = (...programs: string[]) => {
+    for (const file of [join(out, "manifest.json"), join(out, "manifest.json.sig"), join(dir, "go"), ...programs.map((program) => join(dir, `${program}-held`))]) rmSync(file, { force: true });
+  };
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "release-sign-"));
@@ -191,6 +257,7 @@ describe("the desktop's release manifest", () => {
     const theirs = trusting([pem(generateKeyPairSync("ed25519").publicKey)]);
     const differs = `publish.sh: the tarball's root helper, ${helper}, is not the install.sh beside this script, byte for byte: every later update is checked by the release keys it lists\n`;
     const missing = `publish.sh: the tarball has no root helper of its own at ${helper}\n`;
+    const broken = `publish.sh: ${tarball()} could not be unpacked\n`;
     const cases: Array<[string, string, Parameters<typeof packed>[3], Parameters<typeof packed>[4]?]> = [
       ["a helper that lists another key", differs, (top) => writeFileSync(join(top, "bin", "surogate-apply-update"), theirs)],
       ["a helper a line longer", differs, (top) => writeFileSync(join(top, "bin", "surogate-apply-update"), `${trusting()}\n`)],
@@ -205,6 +272,13 @@ describe("the desktop's release manifest", () => {
         rmSync(join(top, "bin", "surogate-apply-update"));
         symlinkSync("../install.sh", join(top, "bin", "surogate-apply-update"));
       }],
+      // Refused with folders closed to their owner in it: what was unpacked goes all the same.
+      ["a helper that lists another key, beside a folder its owner may not write", differs, (top) => writeFileSync(join(top, "bin", "surogate-apply-update"), theirs),
+        added(dir, ["0555", ["closed/", "closed/file"]])],
+      ["the install script in a folder its owner may not open", missing, () => {}, added(dir, ["0000", ["bin/"]])],
+      // The helper's folder closed once tar has left it, and then a second helper for it, which only root's tar could put there.
+      ["a second helper for a folder closed to its owner by then", broken, () => {},
+        added(dir, ["0555", ["bin/"]], ["0755", ["surogate"], "#!/bin/sh\n"], ["0755", ["bin/surogate-apply-update"], theirs])],
       // The install script where the helper is, and after it in the archive, under another name for
       // the same folder, a helper of the build's own: unpacked, the second replaces the first.
       ["a helper replaced as the archive is unpacked, through a link to its folder", differs, () => {}, (archive, name) => {
@@ -226,9 +300,120 @@ describe("the desktop's release manifest", () => {
     expect(spawnSync("tar", ["-xzOf", tarball(), helper], { encoding: "utf8" }).stdout).toBe(trusting());
     // What is no archive at all.
     writeFileSync(tarball(), randomBytes(4096));
-    expect(sign()).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: ${tarball()} could not be unpacked\n` });
+    expect(sign()).toMatchObject({ status: 1, stdout: "", stderr: broken });
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
     expect(readdirSync(tmp)).toEqual([]);
+  });
+
+  it("signs a tarball whatever the modes of its folders, which are the build's, and leaves nothing of it unpacked: the helper that installs it unpacks and removes it as root", () => {
+    const cases: Array<[string, ReturnType<typeof added>]> = [
+      ["as package.sh packs it", added(dir)],
+      ["a folder its owner may not write", added(dir, ["0555", ["closed/", "closed/file"]])],
+      ["folders their owner may not open, one in the other", added(dir, ["0000", ["shut/", "shut/inner/", "shut/inner/file"]])],
+      ["its top folder and the helper's, closed once both are unpacked", added(dir, ["0555", ["./", "bin/"]])],
+    ];
+    for (const [what, then] of cases) {
+      again();
+      packed(dir, out, "1.2.3", undefined, then);
+      expect(sign(), what).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
+      expect(verify(null, readFileSync(join(out, "manifest.json")), keys.publicKey, readFileSync(join(out, "manifest.json.sig"))), what).toBe(true);
+      expect(readdirSync(tmp), what).toEqual([]);
+    }
+  });
+
+  it("ends as a signal ends it, with nothing signed and nothing left unpacked, once what unpacks the tarball has ended: removed beside a tar that still writes, the folder keeps what tar writes after", { timeout: 60_000 }, async () => {
+    recording(dir, "tar", unpacking);
+    for (const [signal, status] of [["SIGHUP", 129], ["SIGINT", 130], ["SIGPIPE", 141], ["SIGTERM", 143]] as const) {
+      again("tar");
+      // To the script's own shell alone: tar goes on.
+      const run = signing();
+      await called("tar");
+      run.signal(signal);
+      await letGo(run);
+      const ended = await run.ended;
+      expect(readFileSync(join(dir, "tar-found"), "utf8"), signal).toBe("there\n");
+      expect(ended, signal).toEqual({ status, signal: null, stdout: "", stderr: "" });
+      expect(readdirSync(out), signal).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+      expect(readdirSync(tmp), signal).toEqual([]);
+    }
+    // To all it runs too, tar among them, and with folders in the tarball that their owner may not write or open.
+    again("tar");
+    packed(dir, out, "1.2.3", undefined, added(dir, ["0555", ["closed/", "closed/file"]], ["0000", ["shut/", "shut/file"]]));
+    const run = signing(true);
+    await called("tar");
+    run.signal("SIGTERM");
+    await letGo(run);
+    expect(await run.ended).toMatchObject({ status: 143, signal: null, stdout: "" });
+    expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+    expect(readdirSync(tmp)).toEqual([]);
+  });
+
+  it("lets a signal by while its folder is made, and from the removal of what it unpacked to its end: stopped there, it would leave a folder it has not named yet, or what its removal had not reached, or have said signed and not ended 0", { timeout: 60_000 }, async () => {
+    const stand = {
+      // mktemp as publish.sh calls it: the folder is made, and its name not said yet.
+      mktemp: (real: string) => [`made="$('${real}' "$@")" || exit`, ...held(dir, "mktemp"), 'printf \'%s\\n\' "$made"'],
+      // rm as publish.sh calls it: what was unpacked is about to be removed.
+      rm: (real: string) => ['case "$*" in *release-unpacked-*)', ...held(dir, "rm"), ";; esac", `exec '${real}' "$@"`],
+    };
+    for (const program of ["mktemp", "rm"] as const) {
+      // One stand-in at a time: each waits for the same word to go on.
+      rmSync(join(dir, "bin", "mktemp"), { force: true });
+      recording(dir, program, stand[program]);
+      // To the script alone, and to all it runs too, as Ctrl+C pressed again reaches rm.
+      for (const [group, signal] of [[false, "SIGTERM"], [true, "SIGINT"]] as const) {
+        again(program);
+        const run = signing(group);
+        await called(program);
+        run.signal(signal);
+        await letGo(run);
+        expect(await run.ended, `${program} ${signal}`).toEqual({ status: 0, signal: null, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
+        expect(verify(null, readFileSync(join(out, "manifest.json")), keys.publicKey, readFileSync(join(out, "manifest.json.sig"))), `${program} ${signal}`).toBe(true);
+        expect(readdirSync(tmp), `${program} ${signal}`).toEqual([]);
+      }
+    }
+  });
+
+  it("signs nothing, and says so, when what it unpacked cannot be removed; ends as a signal ends it even then; and says signed of no signing that does not end 0", { timeout: 60_000 }, async () => {
+    // rm as publish.sh calls it, which cannot remove what was unpacked. What it leaves is the stand-in's doing, and is removed here.
+    recording(dir, "rm", (real) => ['case "$*" in *release-unpacked-*) echo "rm: cannot remove what was unpacked" >&2; exit 1 ;; esac', `exec '${real}' "$@"`]);
+    const left = () => {
+      const names = readdirSync(tmp);
+      expect(names).toEqual([expect.stringMatching(/^release-unpacked-/)]);
+      const unpacked = join(tmp, names[0] ?? "");
+      rmSync(unpacked, { recursive: true });
+      return unpacked;
+    };
+    const kept = sign();
+    expect(kept).toMatchObject({ status: 1, stdout: "" });
+    expect(kept.stderr).toContain(`publish.sh: the unpacked tarball could not be removed from ${left()}: nothing is signed\n`);
+    expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+    // Stopped by a signal, its status is the signal's, and not that of the removal that failed as it ended.
+    recording(dir, "tar", unpacking);
+    const run = signing();
+    await called("tar");
+    run.signal("SIGTERM");
+    await letGo(run);
+    expect(await run.ended).toEqual({ status: 143, signal: null, stdout: "", stderr: "rm: cannot remove what was unpacked\n" });
+    expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+    left();
+    for (const program of ["rm", "tar"]) rmSync(join(dir, "bin", program));
+    // openssl as publish.sh calls it, which fails where it signs.
+    recording(dir, "openssl", (real) => ['case " $* " in *" -sign "*) exit 1 ;; esac', `exec '${real}' "$@"`]);
+    expect(sign()).toMatchObject({ status: 1, stdout: "" });
+    expect(existsSync(join(out, "manifest.json.sig"))).toBe(false);
+    expect(readdirSync(tmp)).toEqual([]);
+  });
+
+  it("holds one substitution to a command for as long as a signal ends it: Ubuntu 24.04's bash runs the signal's handler between the two of one command, and ends with an error of its own", () => {
+    const lines = readFileSync(join(RELEASE, "publish.sh"), "utf8").split("\n");
+    // sign's commands from where a signal ends it to where it lets every signal by: its removal, and all that follows.
+    const from = lines.findIndex((line) => line.includes("trap 'exit 143' TERM"));
+    const to = lines.findIndex((line, at) => at > from && /^\s+cleanup \|\| fail /.test(line));
+    expect(from).toBeGreaterThan(0);
+    expect(to).toBeGreaterThan(from);
+    const commands = lines.slice(from + 1, to).filter((line) => !line.trim().startsWith("#"));
+    expect(commands.filter((line) => line.includes("$(")).length).toBeGreaterThan(0);
+    for (const line of commands) expect((line.match(/[$<>]\(/g) ?? []).length, line).toBeLessThanOrEqual(1);
   });
 
   it("refuses a tarball that is not the one the build's job made, by the hash that job gave: an artifact is its run's, and any job of the run may put another under its name", () => {
@@ -261,7 +446,14 @@ describe("the desktop's release manifest", () => {
   });
 
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    try {
+      // However each signing of the test ended, nothing is left where it unpacked.
+      expect(readdirSync(tmp)).toEqual([]);
+    } finally {
+      // What a signing did leave has the modes its archive gave it.
+      spawnSync("chmod", ["-R", "u+rwX", dir]);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
