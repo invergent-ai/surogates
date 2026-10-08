@@ -16,6 +16,7 @@ it("says what stops the agent's commands first: missing tools, then the download
   expect(sandboxLine([], { state: "downloading", done: 307_000_000, total: 614_000_000 }, null)).toEqual({
     text: "Downloading the sandbox for the agent's commands: 50%", actions: [], ready: false,
   });
+  expect(sandboxLine([], { state: "unpacking" }, null)).toEqual({ text: "Unpacking the sandbox for the agent's commands", actions: [], ready: false });
   expect(sandboxLine([], { state: "checking" }, { failed: "QEMU exited" })).toEqual({
     text: "Checking the sandbox for the agent's commands", actions: [], ready: false,
   });

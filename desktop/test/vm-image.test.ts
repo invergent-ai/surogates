@@ -419,6 +419,15 @@ describe("ImageDelivery", () => {
     expect(new ImageDelivery(delivering()).state).toEqual({ state: "ready", folder: join(images(), KEY) });
   });
 
+  it("says it unpacks once a download is here, through the unpack, its hash and its syncs, rather than holding at its last percent", async () => {
+    const states: string[] = [];
+    const delivery: ImageDelivery = new ImageDelivery(delivering(), () => states.push(delivery.state.state));
+    delivery.start();
+    await delivery.wait(new AbortController().signal);
+    // rootfs.img's unpack, vmlinuz's download, then its unpack.
+    expect(states.filter((state, n) => state !== states[n - 1])).toEqual(["downloading", "unpacking", "downloading", "unpacking", "ready"]);
+  });
+
   it("checks the image's files by their hashes again when asked, as after a boot of it did not start, and downloads it again once one differs", async () => {
     const delivery = new ImageDelivery(delivering());
     delivery.start();

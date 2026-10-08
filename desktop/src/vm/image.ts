@@ -89,8 +89,10 @@ export interface DeliverOptions {
   base: string; // where the app was installed from: the files are at <base>/desktop/vm/<key>/
   images: string; // <data>/vm/images: one folder per image, by its key
   fetch?: Fetch;
-  // Told how many of the downloads' bytes are here, of how many.
+  // Told how many of the downloads' bytes are here, of how many; and as each unpack begins, which
+  // its hash and its syncs follow.
   progress?: (done: number, total: number) => void;
+  unpacking?: () => void;
   signal?: AbortSignal;
   stallMs?: number; // how long nothing may come, headers or bytes, before the download stops: STALL_MS
 }
@@ -202,6 +204,7 @@ export async function deliver(options: DeliverOptions): Promise<string> {
       await settle(`${downloaded}.partial`, downloaded);
     }
     signal?.throwIfAborted();
+    options.unpacking?.();
     await unpack(downloaded, unpacked, file, signal);
     rmSync(downloaded);
   }
@@ -338,6 +341,7 @@ async function unpack(from: string, to: string, file: ImageFile, signal?: AbortS
 
 export type Delivery =
   | { state: "downloading"; done: number; total: number }
+  | { state: "unpacking" } // a download, into the image's file, then its hash and its syncs
   | { state: "checking" } // the image's files, by their hashes, after a boot of it did not start
   | { state: "ready"; folder: string }
   | { state: "failed"; why: string };
@@ -354,7 +358,7 @@ export class ImageDelivery {
   private readonly total: number;
 
   // *base* is read at each start: an install record put right is read at the next Retry.
-  constructor(private readonly options: Omit<DeliverOptions, "progress" | "base"> & { base: () => string }, private readonly changed: () => void = () => {}) {
+  constructor(private readonly options: Omit<DeliverOptions, "progress" | "unpacking" | "base"> & { base: () => string }, private readonly changed: () => void = () => {}) {
     this.total = options.manifest.files.reduce((sum, file) => sum + file.downloadSize, 0);
     this.folder = join(options.images, options.manifest.key);
     this.state = whole(this.folder, options.manifest) ? { state: "ready", folder: this.folder } : { state: "downloading", done: 0, total: this.total };
@@ -382,7 +386,9 @@ export class ImageDelivery {
   }
 
   private download(base: string): Promise<string> {
-    return deliver({ ...this.options, base, progress: (done, total) => this.set({ state: "downloading", done, total }) });
+    return deliver({
+      ...this.options, base, progress: (done, total) => this.set({ state: "downloading", done, total }), unpacking: () => this.set({ state: "unpacking" }),
+    });
   }
 
   private async checked(): Promise<string> {
@@ -425,7 +431,7 @@ export class ImageDelivery {
     signal.throwIfAborted();
     const aborted = new Promise<never>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
     aborted.catch(() => {});
-    while (this.state.state === "downloading" || this.state.state === "checking") {
+    while (this.state.state === "downloading" || this.state.state === "unpacking" || this.state.state === "checking") {
       if (!this.running) throw new Error("its download has not started");
       await Promise.race([this.running.catch(() => {}), aborted]);
     }

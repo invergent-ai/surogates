@@ -38,6 +38,7 @@ export function sandboxLine(lacking: string[] | null, delivery: Delivery | null,
     const percent = delivery.total > 0 ? Math.floor((delivery.done * 100) / delivery.total) : 0;
     return { text: `Downloading the sandbox for the agent's commands: ${percent}%`, actions: [], ready: false };
   }
+  if (delivery?.state === "unpacking") return { text: "Unpacking the sandbox for the agent's commands", actions: [], ready: false };
   if (delivery?.state === "checking") return { text: "Checking the sandbox for the agent's commands", actions: [], ready: false };
   // A delivered image may be what did not start: its Retry checks it by its hashes before the next boot.
   if (boot && "failed" in boot) return { text: `This computer's sandbox did not start: ${boot.failed}`, actions: delivery ? ["log", "retry"] : ["log"], ready: false };
