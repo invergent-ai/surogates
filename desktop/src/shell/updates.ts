@@ -6,8 +6,11 @@
 // Electron-free.
 
 import { createPublicKey, type KeyObject, verify } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 import { download, type Fetch, hashOf, sizeOf } from "../download.js";
 import { installBase } from "../vm/image.js";
@@ -130,6 +133,62 @@ function channelOf(record: string, helper: string): string {
   return channel;
 }
 
+// The update's cache is the app's own, and nothing in it is reached through a link: the app is not
+// confined, so a link that a program of the user's put there would have it write, or remove, what
+// the link leads to. Each folder and each file below the cache home is looked at before it is used.
+
+// Whether *path* is a regular file of one name: what the update reads, or takes, as its own. A
+// link in its place is neither, wherever it leads; nor is a file with a second name elsewhere.
+function regular(path: string): boolean {
+  const found = lstatSync(path, { throwIfNoEntry: false });
+  return found !== undefined && found.isFile() && found.nlink === 1;
+}
+
+// Whether *path* is a real folder of this user's own, which is then set to 0700. What has its name
+// and is not one is removed, a link by itself and never what it leads to; with *make*, the folder
+// is then made afresh.
+function ownFolder(path: string, make: boolean): boolean {
+  const found = lstatSync(path, { throwIfNoEntry: false });
+  const own = found !== undefined && found.isDirectory() && found.uid === process.getuid?.();
+  if (found && !own) rmSync(path, { recursive: true, force: true });
+  if (!own && !make) return false;
+  if (!own) mkdirSync(path, { mode: 0o700 });
+  // Its mode is set on the folder that is opened, never through a link put there since: that fails the open.
+  const folder = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    fchmodSync(folder, 0o700);
+  } finally {
+    closeSync(folder);
+  }
+  return true;
+}
+
+// The updates folder that *cache* names, <cache home>/surogate/updates, by its real path; null when
+// it is not there and is not to be made. The cache home may be a link, as one moved to another
+// disk is: its real path is taken once, here. Below it, surogate and updates are each the user's
+// own real folder (ownFolder).
+function updatesFolder(cache: string, make: boolean): string | null {
+  const home = dirname(dirname(cache));
+  if (make) mkdirSync(home, { recursive: true, mode: 0o700 });
+  else if (!existsSync(home)) return null;
+  const surogate = join(realpathSync(home), basename(dirname(cache)));
+  const updates = join(surogate, basename(cache));
+  return ownFolder(surogate, make) && ownFolder(updates, make) ? updates : null;
+}
+
+// *data* as the new file *path*, this user's alone: what has the name goes first, a link by itself,
+// and the name is then made, never opened: not through a link put there since, and not into a
+// file that has another name.
+function keep(path: string, data: Buffer): void {
+  rmSync(path, { recursive: true, force: true });
+  const file = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try {
+    writeFileSync(file, data);
+  } finally {
+    closeSync(file);
+  }
+}
+
 export interface UpdatesOptions {
   version: string; // the running app's
   record: string; // the install script's record: the base, and the channel
@@ -165,7 +224,7 @@ export class Updates {
     // Installed for every user already, as another user's update leaves it: a restart runs it.
     const installed = this.installedVersion();
     if (installed && newer(installed, this.options.version)) return this.set({ state: "installed", version: installed });
-    const { record, rootOwned, helper, cache } = this.options;
+    const { record, rootOwned, helper } = this.options;
     const base = installBase(record, rootOwned);
     const keys = releaseKeys(helper, rootOwned);
     const channel = channelOf(record, helper);
@@ -175,21 +234,45 @@ export class Updates {
     const release = signedRelease(latest, manifest, signature, keys, channel);
     if (!newer(release.version, this.options.version)) {
       // Nothing newer, as once updated to it: what was downloaded for an earlier offer goes.
-      rmSync(cache, { recursive: true, force: true });
+      const earlier = updatesFolder(this.options.cache, false);
+      if (earlier) rmSync(earlier, { recursive: true, force: true });
       return this.set({ state: "none" });
     }
+    const cache = updatesFolder(this.options.cache, true)!;
     const folder = join(cache, release.version);
-    mkdirSync(folder, { recursive: true, mode: 0o700 });
+    ownFolder(folder, true);
+    // In it, what is not a regular file goes before anything is read or written, as in the image's
+    // folder: nothing there is taken by its name alone.
+    for (const name of readdirSync(folder)) if (!regular(join(folder, name))) rmSync(join(folder, name), { recursive: true, force: true });
     const files = { manifest: join(folder, "manifest.json"), signature: join(folder, "manifest.json.sig"), tarball: join(folder, "release.tar.gz") };
-    writeFileSync(files.manifest, manifest);
-    writeFileSync(files.signature, signature);
+    keep(files.manifest, manifest);
+    keep(files.signature, signature);
     // One downloaded already is taken by its size and hash: the user's processes can change it.
-    // What replaces it takes its name by one rename, once it is all here and is the manifest's.
-    if (sizeOf(files.tarball) !== release.size || (await hashOf(files.tarball)).digest("hex") !== release.sha256) {
+    // Only a regular file is: a link in its place is not read, wherever it leads.
+    const here = regular(files.tarball) && sizeOf(files.tarball) === release.size && (await hashOf(files.tarball)).digest("hex") === release.sha256;
+    // Each folder looked at again, wherever time has passed since its look: nothing after it then
+    // follows a link put in a folder's place meanwhile.
+    const own = (): boolean => [dirname(cache), cache, folder].every((path) => ownFolder(path, false));
+    const replaced = new Error(`${folder} was replaced while Surogate ${release.version} was downloaded: nothing in it is taken`);
+    if (!here) {
+      // The base may take as long as its headers' bound to answer: once it has, and before the
+      // partial file is opened, the download stops where a folder is no longer the app's own.
+      const stop = new AbortController();
+      const asked: Fetch = async (url, init) => {
+        const response = await this.options.fetch(url, init);
+        if (own()) return response;
+        void response.body?.cancel().catch(() => {});
+        stop.abort(replaced);
+        throw replaced;
+      };
       await download({ url: `${base}/desktop/${release.url}`, name: `Surogate ${release.version}`, size: release.size, sha256: release.sha256, magic: GZIP_MAGIC },
-        `${files.tarball}.partial`, { fetch: this.options.fetch, signal: this.options.signal });
-      renameSync(`${files.tarball}.partial`, files.tarball);
+        `${files.tarball}.partial`, { fetch: asked, signal: AbortSignal.any([this.options.signal, stop.signal]) });
     }
+    // Its hash, or its download, took a while: again before anything in a folder is renamed or removed.
+    if (!own()) throw replaced;
+    // What replaces it takes its name by one rename, once it is all here and is the manifest's: a
+    // rename replaces a link, and follows none.
+    if (!here) renameSync(`${files.tarball}.partial`, files.tarball);
     // One release's download is kept: an older offer's goes once this one is here.
     for (const name of readdirSync(cache)) if (name !== release.version) rmSync(join(cache, name), { recursive: true, force: true });
     this.set({ state: "available", version: release.version, files });

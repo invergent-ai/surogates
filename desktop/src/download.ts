@@ -3,7 +3,7 @@
 // comes, and checked by its size and hash as it comes: what is not the file is never kept.
 
 import { createHash } from "node:crypto";
-import { closeSync, createReadStream, existsSync, openSync, readSync, rmSync, statSync, truncateSync } from "node:fs";
+import { closeSync, constants, createReadStream, existsSync, openSync, readSync, rmSync, statSync } from "node:fs";
 import { open } from "node:fs/promises";
 
 export type Fetch = (url: string, init: { headers: Record<string, string>; signal?: AbortSignal }) => Promise<Response>;
@@ -60,10 +60,8 @@ export async function download(file: Download, partial: string, options: Downloa
   let have = sizeOf(partial);
   // Whether more came than its size: then it is not the file, whatever its start.
   let past = false;
-  if (have > file.size) {
-    truncateSync(partial, 0);
-    have = 0;
-  }
+  // More than the file: it starts again, and the open below empties what is here.
+  if (have > file.size) have = 0;
   let hash = await hashOf(partial, have);
   got(have);
   if (have < file.size) {
@@ -99,7 +97,6 @@ export async function download(file: Download, partial: string, options: Downloa
           void response.body?.cancel().catch(() => {});
           throw new Error(`${file.name} was not the file the app expects`);
         }
-        truncateSync(partial, 0);
         have = 0;
         hash = createHash("sha256");
         got(have);
@@ -113,7 +110,14 @@ export async function download(file: Download, partial: string, options: Downloa
         void response.body?.cancel().catch(() => {});
         throw new Error(`${new URL(url).host} answered ${response.status} for ${file.name}`);
       }
-      const out = await open(partial, have > 0 ? "a" : "w", 0o600);
+      // Opened by its own name, never through a link: one put in its place since its folder was
+      // looked at fails the open (ELOOP), and nothing is written where it leads. The open is also
+      // what empties a file that starts again, so nothing is emptied through a link either.
+      const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | (have > 0 ? constants.O_APPEND : constants.O_TRUNC);
+      const out = await open(partial, flags, 0o600).catch((error: NodeJS.ErrnoException) => {
+        void response.body?.cancel().catch(() => {});
+        throw error.code === "ELOOP" ? new Error(`the download of ${file.name} stopped: ${partial} is a link`) : error;
+      });
       const reader = response.body?.getReader();
       const next = () => reader && Promise.race([reader.read(), stalled]);
       try {
