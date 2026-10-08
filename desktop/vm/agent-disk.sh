@@ -6,10 +6,13 @@
 #
 # Usage, after npm run build:
 #   desktop/vm/agent-disk.sh <agent.img>
+# It needs mke2fs (e2fsprogs) and fakeroot.
 set -euo pipefail
 
 DESKTOP="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$1"
+command -v fakeroot >/dev/null \
+  || { echo "agent-disk.sh: fakeroot is missing, which makes the disk's files root's with no root and no user namespace: install it (apt install fakeroot)" >&2; exit 1; }
 
 tree="$(mktemp -d)"
 trap 'rm -rf "$tree"' EXIT
@@ -23,7 +26,9 @@ echo '{"type":"module"}' > "$tree/package.json"
 # Readable by every root's user, whatever umask built it.
 chmod -R u=rwX,go=rX "$tree"
 
-# Owned by root in the guest: mke2fs records the owners it sees, and in a user
-# namespace of its own this user is root.
+# Owned by root in the guest: mke2fs records the owners it sees, and under
+# fakeroot it sees every file as root's. No user namespace is made for it: a
+# stock Ubuntu 24.04 refuses one to a program without a profile of its own, and
+# so does a container.
 rm -f "$OUT"
-unshare -r mke2fs -q -t ext4 -O ^has_journal -L surogate-agent -d "$tree" "$OUT" 16M
+fakeroot mke2fs -q -t ext4 -O ^has_journal -L surogate-agent -d "$tree" "$OUT" 16M

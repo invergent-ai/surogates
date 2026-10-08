@@ -196,6 +196,10 @@ class ReleaseWorkflowTest < Minitest::Test
     refute_nil package
     assert_operator vm, :<, package
     assert_operator package, :<, keep
+    # The agent's disk is made under fakeroot, which the job installs before it packages.
+    fakeroot = runs.index { |run| run.match?(/\bapt-get install\b.*\bfakeroot\b/) }
+    refute_nil fakeroot
+    assert_operator fakeroot, :<, package
     assert_equal "desktop-tarball", steps[keep].fetch("with").fetch("name")
     assert_equal "out/desktop/surogate-desktop-*-linux-x64.tar.gz", steps[keep].fetch("with").fetch("path")
     # The tarball's hash is the job's own output, which no other job of the run can set: an
@@ -261,6 +265,16 @@ class ReleaseWorkflowTest < Minitest::Test
       end
     end
     jobs.except("desktop-publish").each { |name, job| refute job.to_s.include?("DESKTOP_RELEASE_KEY"), "#{name} reads the release key" }
+  end
+
+  def test_no_workflow_turns_off_its_runner_s_restriction_of_user_namespaces
+    # A stock Ubuntu 24.04 refuses a user namespace to a program without a profile of its own. No
+    # job needs one, and none changes a kernel setting of its runner's to get one.
+    workflows = Dir[".github/workflows/*.yml"]
+    assert_includes workflows, ".github/workflows/release.yml"
+    workflows.each do |workflow|
+      refute_match(/apparmor_restrict_unprivileged_userns|\bsysctl\b|\bunshare\b/, File.read(workflow), workflow)
+    end
   end
 
   def test_desktop_jobs_are_bounded

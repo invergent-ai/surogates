@@ -1,12 +1,16 @@
 // The release's tarball (scripts/package.sh), built from this package's build, and its Electron
-// started as the installed app is: renamed, with the app's fuses. Behind SUROGATE_PACKAGE_TESTS=1:
-// it needs npm run build first, the npm cache npm ci left, xvfb-run, and about 1 GB of /tmp.
+// started as the installed app is: renamed, with the app's fuses; and the agent's disk in it
+// (vm/agent-disk.sh), made as a release's runner makes it. Behind SUROGATE_PACKAGE_TESTS=1: it needs
+// npm run build first, the npm cache npm ci left, xvfb-run, about 1 GB of /tmp, and for the disk
+// Docker, the ubuntu:24.04 image and the Ubuntu archive for apt.
 
 import { execFile, spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { FuseState, FuseV1Options, getCurrentFuseWire } from "@electron/fuses";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -162,5 +166,98 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarba
     const { code, output } = await started([]);
     expect(code, output).toBeNull();
     expect(output).not.toContain(refusal);
+  });
+});
+
+// Every file and folder of the agent's disk $1, one a line, as debugfs lists it: its path, its
+// mode, its owner and group by number, and a file's size.
+const LISTED = String.raw`
+listed() {
+  debugfs -R "ls -p $2" "$1" 2>/dev/null | while IFS=/ read -r _ inode mode uid gid name size _; do
+    case "$name" in "" | . | ..) continue ;; esac
+    case "$mode" in
+      04*) echo "$2$name/ $mode $uid $gid"; listed "$1" "$2$name/" ;;
+      *) echo "$2$name $mode $uid $gid $size" ;;
+    esac
+  done
+}
+`;
+
+describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the agent's disk", { timeout: 120_000 }, () => {
+  // A release's runner: Ubuntu 24.04, whose mke2fs is e2fsprogs 1.47.0, with the one package the
+  // job installs for the disk, and a user who is not root. A container is given no right to make
+  // a user namespace, as a stock Ubuntu gives none to a program without a profile of its own.
+  const RUNNER = ["RUN apt-get update && apt-get install -y --no-install-recommends fakeroot && rm -rf /var/lib/apt/lists/*"];
+  const image = `surogate-agent-disk-test:24.04-${createHash("sha256").update(RUNNER.join("\n")).digest("hex").slice(0, 12)}`;
+  let dir: string;
+  // No credentials of this user's reach the image's pull or the container.
+  const docker = (...args: string[]) => spawnSync("docker", args, { encoding: "utf8", env: { ...process.env, DOCKER_CONFIG: join(dir, "docker") }, timeout: 100_000 });
+  // *script* in a container of *from*, as a user who is not root, with this package's folder read-only at /desktop.
+  const runner = (from: string, script: string) => docker("run", "--rm", "--user", "1000:1000", "-v", `${DESKTOP}:/desktop:ro`, from, "bash", "-c", script);
+  // What the disk holds, from this package's build: the agent and the modules it imports, the
+  // guest's init and what enters a session's root, each a file all may read, root's.
+  const expected = () => {
+    const files = (folder: string, base = folder): string[] => readdirSync(folder, { withFileTypes: true }).flatMap((entry) => entry.isDirectory()
+      ? [`/${relative(base, join(folder, entry.name))}/ 040755 0 0`, ...files(join(folder, entry.name), base)]
+      : entry.name.endsWith(".map") ? [] : [`/${relative(base, join(folder, entry.name))} 100644 0 0 ${statSync(join(folder, entry.name)).size}`]);
+    const dist = join(DESKTOP, "dist");
+    return [
+      "/lost+found/ 040700 0 0",
+      "/guest/ 040755 0 0", ...files(join(dist, "guest")).map((line) => `/guest${line}`),
+      "/files/ 040755 0 0", ...files(join(dist, "files")).map((line) => `/files${line}`),
+      "/link/ 040755 0 0", `/link/protocol.js 100644 0 0 ${statSync(join(dist, "link", "protocol.js")).size}`,
+      `/init 100755 0 0 ${statSync(join(DESKTOP, "vm", "init")).size}`, `/enter-root 100755 0 0 ${statSync(join(DESKTOP, "vm", "enter-root")).size}`,
+      "/package.json 100644 0 0 18",
+    ].sort();
+  };
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "agent-disk-test-"));
+    mkdirSync(join(dir, "docker"));
+    mkdirSync(join(dir, "image"));
+    writeFileSync(join(dir, "image", "Dockerfile"), ["FROM ubuntu:24.04", ...RUNNER].join("\n"));
+    // Off the event loop: a first build takes a minute, and vitest's RPC answers must still get in.
+    await promisify(execFile)("docker", ["build", "-q", "-t", image, join(dir, "image")], { env: { ...process.env, DOCKER_CONFIG: join(dir, "docker") } });
+  }, 600_000);
+
+  afterEach(() => new Promise((resolve) => setTimeout(resolve, 0)));
+
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("is made where no user namespace can be, by a user who is not root, with every file of it root's", () => {
+    const made = runner(image, `${LISTED}
+      echo "user $(id -u), mke2fs $(mke2fs -V 2>&1 | head -n 1 | cut -d' ' -f2)"
+      echo "a user namespace: $(unshare -r true 2>&1)"
+      /desktop/vm/agent-disk.sh /tmp/agent.img >/dev/null || exit
+      listed /tmp/agent.img / | LC_ALL=C sort
+      e2fsck -fn /tmp/agent.img >/dev/null 2>&1; echo "checked $?"`);
+    expect(made.status, made.stderr).toBe(0);
+    const [who, namespace, ...lines] = made.stdout.trim().split("\n");
+    expect(who).toBe("user 1000, mke2fs 1.47.0");
+    // Refused there, as on a stock Ubuntu 24.04: what the disk was made in before.
+    expect(namespace).toBe("a user namespace: unshare: unshare failed: Operation not permitted");
+    expect(lines.pop()).toBe("checked 0");
+    expect(lines).toEqual(expected());
+    // And the same disk here, with this computer's own tools.
+    const here = join(dir, "agent.img");
+    expect(spawnSync(join(DESKTOP, "vm", "agent-disk.sh"), [here], { encoding: "utf8" })).toMatchObject({ status: 0, stderr: "" });
+    expect(spawnSync("bash", ["-c", `${LISTED}\nlisted "$1" / | LC_ALL=C sort`, "_", here], { encoding: "utf8", env: { ...process.env, PATH: `${process.env.PATH ?? ""}:/usr/sbin:/sbin` } }).stdout.trim().split("\n")).toEqual(expected());
+  });
+
+  it("is not made without fakeroot, and nor is a tarball: each script says so before it does anything", () => {
+    // Ubuntu's own image, which has mke2fs and no fakeroot, and nothing else a packaging needs.
+    const without = runner("ubuntu:24.04", [
+      "/desktop/vm/agent-disk.sh /tmp/agent.img; echo \"agent-disk.sh $?\"",
+      "/desktop/scripts/package.sh 1.2.3 /desktop/package.json /tmp/out; echo \"package.sh $?\"",
+      "ls -A /tmp",
+    ].join("\n"));
+    expect(without.stdout).toBe("agent-disk.sh 1\npackage.sh 1\n");
+    expect(without.stderr).toBe([
+      "agent-disk.sh: fakeroot is missing, which makes the disk's files root's with no root and no user namespace: install it (apt install fakeroot)",
+      "package.sh: fakeroot is missing, which the agent's disk is made with (vm/agent-disk.sh): install it (apt install fakeroot)",
+      "",
+    ].join("\n"));
   });
 });

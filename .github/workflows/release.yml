@@ -321,6 +321,11 @@ jobs:
           name: desktop-vm-manifest
           path: out/vm
 
+      # The agent's disk holds root's files, and is made by a user who is not root, under fakeroot:
+      # in no user namespace, which a stock Ubuntu 24.04 refuses a program without a profile of its own.
+      - name: Install fakeroot, which the agent's disk is made with
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends fakeroot
+
       - name: Package the app
         run: desktop/scripts/package.sh "${GITHUB_REF_NAME#v}" out/vm/manifest.json out/desktop
 

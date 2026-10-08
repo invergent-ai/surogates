@@ -33,6 +33,10 @@ downloaded, which the app's tarball carries.
 
 The VM tests boot it under QEMU and KVM (`/dev/kvm`, `qemu-system-x86`,
 `virtiofsd`), with the agent disk `vm/agent-disk.sh` makes from `dist/`.
+That script needs `mke2fs` (e2fsprogs) and `fakeroot` (`apt install fakeroot`):
+the disk's files are root's, and it is made without root and in no user
+namespace, which a stock Ubuntu 24.04 refuses. `npm start`, `npm run test:e2e`
+and `scripts/package.sh` run it too.
 `SUROGATE_VM_IMAGE` names another image folder, and `SUROGATE_VM_KVM` a device
 that does not exist, to run them emulated.
 
