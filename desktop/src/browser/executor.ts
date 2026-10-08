@@ -1,14 +1,15 @@
 // The tool layer under a device's binder once the agent has a browser here (spec, Section 5):
 // the browser's kinds go to the identity's browser host, every other kind to the tools beneath.
 
-import { rm } from "node:fs/promises";
+import { realpath, rm } from "node:fs/promises";
+import { sep } from "node:path";
 
 import type { FolderGuards } from "../binding/folder.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { ToolLayer } from "../shell/device-stack.js";
 import { type BrowserClient, PAUSED } from "./client.js";
-import type { StagedDownload } from "./downloads.js";
+import { type StagedDownload, UNSAVED } from "./downloads.js";
 import type { Launch } from "./host.js";
 
 export const BROWSER_KINDS = "browser.";
@@ -33,6 +34,9 @@ export interface BrowsingOptions {
   bindingOf(root: string): unknown;
   // The browser Settings chose and the identity's profile for it, read at each operation; null: none here.
   launch(): Launch | null;
+  // Where its browser host stages downloads: the host's own temporary folder, under the identity's profiles.
+  // A staged file is read, and removed, only there.
+  staging: string;
 }
 
 export class Browsing implements ToolLayer {
@@ -47,9 +51,15 @@ export class Browsing implements ToolLayer {
   // session's downloads came to, until its next answer that says what its page did.
   private save: ((download: StagedDownload) => Promise<string>) | null = null;
   private readonly told = new Map<string, string[]>();
+  // The look at where each staged file is, one after another: downloads are saved in the order they were staged.
+  private looking: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: BrowsingOptions) {
-    options.browser.onDownload((download) => void this.saved(download));
+    options.browser.onDownload((download) => {
+      const looked = this.looking.then(() => this.staged(download.path));
+      this.looking = looked;
+      void looked.then((path) => this.saved(download, path));
+    });
   }
 
   // The browser held by its user, or no browser here: refused before any chat's user is asked anything.
@@ -74,18 +84,37 @@ export class Browsing implements ToolLayer {
     this.save = save;
   }
 
-  private async saved(download: StagedDownload): Promise<void> {
+  // *path*: where the staged file really is, under the folder its browser host stages in; null for any other.
+  private async saved(download: StagedDownload, path: string | null): Promise<void> {
+    // No file its browser host staged: nothing is read or removed on the host's word alone.
+    if (path === null) return this.hear(download, UNSAVED);
     if (!this.save) {
-      await rm(download.path, { force: true }).catch(() => {});
+      await rm(path, { force: true }).catch(() => {});
       return;
     }
     let notice: string;
     try {
-      notice = await this.save(download);
+      notice = await this.save({ ...download, path });
     } catch {
       // What saves them says itself what came of each: of one it failed on outright there is nothing to tell.
       return;
     }
+    this.hear(download, notice);
+  }
+
+  // *path* by its real path, where that is under the folder its browser host stages downloads in; null for
+  // any other: a file elsewhere, a link that leads out of the folder, nothing there, or no path at all. Never rejects.
+  private async staged(path: string): Promise<string | null> {
+    try {
+      const [real, within] = await Promise.all([realpath(path), realpath(this.options.staging)]);
+      return real.startsWith(`${within}${sep}`) ? real : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // What came of *download*, for its session's next answer that says what its page did.
+  private hear(download: StagedDownload, notice: string): void {
     // One its user started while they held the browser is theirs: its agent hears nothing of it.
     if (download.user) return;
     const notices = this.told.get(download.session) ?? [];

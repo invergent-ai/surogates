@@ -79,6 +79,8 @@ export function savedName(suggested: string): string {
 
 // Why nothing was saved, where the reason is this computer's own and not the agent's to read.
 const COULD_NOT = "this computer could not save it";
+/** What the agent is told of a download that came as no download this computer saves: not even its name is taken from it. */
+export const UNSAVED = `The page downloaded a file, but it was not saved: ${COULD_NOT}.`;
 
 // The *n*th name tried for *name*.
 function numbered(name: string, n: number): string {
@@ -169,7 +171,7 @@ export function downloadSaver(bindings: Pick<Bindings, "get">, saver: Saver): (d
     // A save never rejects: it says why it saved nothing. One that fails outright all the same, as on what a
     // browser host gone wrong staged, has saved nothing either, and the chat's line goes on to the next.
     const mine = (lines.get(download.root) ?? Promise.resolve("")).then(() => saveDownload(download, bindings, saver))
-      .catch(() => `The page downloaded a file, but it was not saved: ${COULD_NOT}.`);
+      .catch(() => UNSAVED);
     lines.set(download.root, mine);
     void mine.then(() => {
       if (lines.get(download.root) === mine) lines.delete(download.root);

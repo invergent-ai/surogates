@@ -1,11 +1,11 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PAUSED } from "../src/browser/client.js";
-import type { StagedDownload } from "../src/browser/downloads.js";
+import { type StagedDownload, UNSAVED } from "../src/browser/downloads.js";
 import { Browsing, NO_BROWSER } from "../src/browser/executor.js";
 import type { Launch } from "../src/browser/host.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
@@ -20,6 +20,22 @@ const op = (kind: string, root = ROOT): Operation => ({
 });
 const LAUNCH: Launch = { executable: "/opt/google/chrome/chrome", profile: "/data/browser-profiles/x/chrome" };
 const signal = new AbortController().signal;
+
+// Where the browser host stages downloads, its own temporary folder; and a folder of the user's beside it.
+let staging: string;
+let outside: string;
+beforeEach(() => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "browsing-")));
+  [staging, outside] = [join(base, "tmp"), join(base, "outside")];
+  mkdirSync(staging);
+  mkdirSync(outside);
+});
+afterEach(() => rmSync(dirname(staging), { recursive: true, force: true }));
+// A file the host staged there, by its path.
+const kept = (name: string): string => {
+  writeFileSync(join(staging, name), "report");
+  return join(staging, name);
+};
 
 function rig(launch: Launch | null = LAUNCH, bound = true) {
   const ran: string[] = [];
@@ -58,6 +74,7 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
     },
     bindingOf: (root) => (chats.has(root) ? {} : undefined),
     launch: () => launch,
+    staging,
   });
   return { browsing, ran, browsed, stopped, forgotten, paused, shown, chats, answers, stage: (download: StagedDownload) => staged(download) };
 }
@@ -206,9 +223,9 @@ describe("the browser's kinds beside the tools", () => {
     const { browsing, answers, stage } = rig();
     const saved: StagedDownload[] = [];
     browsing.saveDownloadsWith((download) => (saved.push(download), Promise.resolve(`saved ${download.name}`)));
-    const download = { root: ROOT, session: "child", name: "report.txt", path: "/data/browser-profiles/x/tmp/a", user: false };
+    const download = { root: ROOT, session: "child", name: "report.txt", path: kept("a"), user: false };
     // One its user started while they held the browser: saved as theirs, and nothing of it is the agent's to hear.
-    const own = { ...download, name: "statement.pdf", path: "/data/browser-profiles/x/tmp/b", user: true };
+    const own = { ...download, name: "statement.pdf", path: kept("b"), user: true };
     stage(download);
     stage(own);
     await vi.waitFor(() => expect(saved).toEqual([download, own]));
@@ -230,7 +247,7 @@ describe("the browser's kinds beside the tools", () => {
     browsing.saveDownloadsWith((download) => Promise.resolve(`saved ${download.name}`));
     const told = (browsing as unknown as { told: Map<string, string[]> }).told;
     // Staged before its user took the browser over: the agent's, saved as usual while they hold it.
-    stage({ root: ROOT, session: ROOT, name: "report.txt", path: "/data/browser-profiles/x/tmp/a", user: false });
+    stage({ root: ROOT, session: ROOT, name: "report.txt", path: kept("a"), user: false });
     await vi.waitFor(() => expect(told.get(ROOT)).toEqual(["saved report.txt"]));
     browsing.takeOver(OTHER);
     expect(await browsing.run(op("browser.navigate"), signal)).toEqual(PAUSED);
@@ -248,8 +265,8 @@ describe("the browser's kinds beside the tools", () => {
     let saves = 0;
     browsing.saveDownloadsWith((download) => ((saves += 1) === 1 ? Promise.reject(new Error("the journal is closed")) : Promise.resolve(`saved ${download.name}`)));
     const told = (browsing as unknown as { told: Map<string, unknown> }).told;
-    stage({ root: ROOT, session: ROOT, name: "first.txt", path: "/data/browser-profiles/x/tmp/a", user: false });
-    stage({ root: ROOT, session: ROOT, name: "second.txt", path: "/data/browser-profiles/x/tmp/b", user: false });
+    stage({ root: ROOT, session: ROOT, name: "first.txt", path: kept("a"), user: false });
+    stage({ root: ROOT, session: ROOT, name: "second.txt", path: kept("b"), user: false });
     await vi.waitFor(() => expect(told.size).toBe(1));
     answers.push({ ok: { notices: [] } });
     expect(await browsing.run(op("browser.mouse"), signal)).toEqual({ ok: { notices: ["saved second.txt"] } });
@@ -257,24 +274,62 @@ describe("the browser's kinds beside the tools", () => {
 
   it("tells a session of twenty downloads at most with one answer, and removes a staged file nothing was given to save with", async () => {
     const { browsing, answers, stage } = rig();
-    const folder = mkdtempSync(join(tmpdir(), "browsing-"));
-    try {
-      // Before the stack has said what saves them: the staged file goes, and nobody is told.
-      const unsaved = join(folder, "staged");
-      writeFileSync(unsaved, "report");
-      stage({ root: ROOT, session: ROOT, name: "report.txt", path: unsaved, user: false });
-      await vi.waitFor(() => expect(existsSync(unsaved)).toBe(false));
-      let saved = 0;
-      browsing.saveDownloadsWith((download) => (saved += 1, Promise.resolve(`saved ${download.name}`)));
-      for (let n = 1; n <= 21; n += 1) stage({ root: ROOT, session: ROOT, name: `${n}.txt`, path: join(folder, String(n)), user: false });
-      await vi.waitFor(() => expect(saved).toBe(21));
-      answers.push({ ok: { notices: [] } }, { ok: { notices: [] } });
-      const first = await browsing.run(op("browser.mouse"), signal) as { ok: { notices: string[] } };
-      expect([first.ok.notices.length, first.ok.notices[0], first.ok.notices.at(-1)]).toEqual([20, "saved 1.txt", "saved 20.txt"]);
-      expect(await browsing.run(op("browser.mouse"), signal)).toEqual({ ok: { notices: [] } });
-    } finally {
-      rmSync(folder, { recursive: true, force: true });
-    }
+    // Before the stack has said what saves them: the staged file goes, and nobody is told.
+    const unsaved = kept("staged");
+    stage({ root: ROOT, session: ROOT, name: "report.txt", path: unsaved, user: false });
+    await vi.waitFor(() => expect(existsSync(unsaved)).toBe(false));
+    let saved = 0;
+    browsing.saveDownloadsWith((download) => (saved += 1, Promise.resolve(`saved ${download.name}`)));
+    // Staged at once, every other one behind a chain of links, which takes longer to follow: saved in the order they came all the same.
+    const paths = Array.from({ length: 21 }, (_, at) => {
+      let path = kept(String(at + 1));
+      for (let link = 0; at % 2 === 0 && link < 30; link += 1) {
+        symlinkSync(path, join(staging, `${at + 1}-link-${link}`));
+        path = join(staging, `${at + 1}-link-${link}`);
+      }
+      return path;
+    });
+    paths.forEach((path, at) => stage({ root: ROOT, session: ROOT, name: `${at + 1}.txt`, path, user: false }));
+    await vi.waitFor(() => expect(saved).toBe(21));
+    answers.push({ ok: { notices: [] } }, { ok: { notices: [] } });
+    expect(await browsing.run(op("browser.mouse"), signal)).toEqual({ ok: { notices: Array.from({ length: 20 }, (_, at) => `saved ${at + 1}.txt`) } });
+    expect(await browsing.run(op("browser.mouse"), signal)).toEqual({ ok: { notices: [] } });
+  });
+
+  it("reads and removes a staged file only under the folder its browser host stages in: any other is left as it is, given to nothing that saves, and said not to be saved", async () => {
+    const { browsing, answers, stage } = rig();
+    const elsewhere = join(outside, "id_rsa");
+    writeFileSync(elsewhere, "a file of the user's");
+    symlinkSync(elsewhere, join(staging, "link"));
+    symlinkSync(outside, join(staging, "folder"));
+    // A file elsewhere, by its path, by a link in the folder, through a linked folder and by a path that climbs out;
+    // nothing; the folder itself; and no path at all.
+    const others = [
+      elsewhere, join(staging, "link"), join(staging, "folder", "id_rsa"), `${staging}/../outside/id_rsa`, join(staging, "gone"), staging,
+      undefined as unknown as string,
+    ];
+    const staged = (path: string, user = false): StagedDownload => ({ root: ROOT, session: ROOT, name: "report.txt", path, user });
+    const told = (browsing as unknown as { told: Map<string, string[]> }).told;
+    // With nothing to save with yet, a staged file is removed: none of these is one.
+    for (const path of others) stage(staged(path));
+    await vi.waitFor(() => expect(told.get(ROOT)).toHaveLength(others.length));
+    expect([readFileSync(elsewhere, "utf8"), existsSync(join(staging, "link")), existsSync(staging)]).toEqual(["a file of the user's", true, true]);
+    const saved: StagedDownload[] = [];
+    browsing.saveDownloadsWith((download) => (saved.push(download), Promise.resolve(`saved ${download.name}`)));
+    for (const path of others) stage(staged(path));
+    // Of one that was its user's, nothing is told either way.
+    stage(staged(elsewhere, true));
+    // One that is there is handed on by its real path, a link in the folder that leads within it followed.
+    mkdirSync(join(staging, "playwright-artifacts-x"));
+    symlinkSync(join(staging, "playwright-artifacts-x"), join(staging, "artifacts"));
+    stage(staged(join(staging, "artifacts", kept("playwright-artifacts-x/guid").slice(-4))));
+    await vi.waitFor(() => expect(saved).toEqual([staged(join(staging, "playwright-artifacts-x", "guid"))]));
+    await vi.waitFor(() => expect(told.get(ROOT)).toHaveLength(2 * others.length + 1));
+    answers.push({ ok: { notices: [] } });
+    const heard = (await browsing.run(op("browser.mouse"), signal) as { ok: { notices: string[] } }).ok.notices;
+    expect([heard.filter((notice) => notice === UNSAVED).length, heard.filter((notice) => notice !== UNSAVED)]).toEqual([2 * others.length, ["saved report.txt"]]);
+    expect(UNSAVED).toBe("The page downloaded a file, but it was not saved: this computer could not save it.");
+    expect(readFileSync(elsewhere, "utf8")).toBe("a file of the user's");
   });
 
   it("asks the browser for the address of the page a session acts in", async () => {

@@ -260,8 +260,10 @@ function utility<To, From>(script: string, serviceName: string, temp?: string): 
 
 const utilityManager = (): ManagerProcess => utility<ToManager, FromManager>(MANAGER, "Surogate VM");
 // A browser host keeps its own temp files, the browser's and Playwright's, under *profiles*: they go
-// with the profiles, and a host that is killed leaves none in the system's temp folder.
-const utilityBrowser = (profiles: string) => () => utility<ToBrowser, FromBrowser>(BROWSER_HOST, "Surogate browser", join(profiles, "tmp"));
+// with the profiles, and a host that is killed leaves none in the system's temp folder. What it stages
+// of a download is there too, and is read from nowhere else.
+const browserTemp = (profiles: string): string => join(profiles, "tmp");
+const utilityBrowser = (profiles: string) => () => utility<ToBrowser, FromBrowser>(BROWSER_HOST, "Surogate browser", browserTemp(profiles));
 
 // What the VM needs of this computer (spec, Section 11, Requirements): what it lacks, looked for
 // once the app is ready (null until then); its image's download, in a packaged app, or why there
@@ -664,6 +666,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     tools: (bindings, network, changed) => new Browsing({
       tools: new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(), changed }),
       browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
+      staging: browserTemp(profilesOf(root, credential)),
       bindingOf: (bound) => bindings.get(bound),
       launch: () => {
         const browser = chosenBrowser(browserSetting.get(), findBrowsers());

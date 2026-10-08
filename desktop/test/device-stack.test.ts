@@ -394,6 +394,7 @@ describe("one agent's device", () => {
           },
           bindingOf: (root) => bindings.get(root),
           launch: () => null,
+          staging: join(base, "data", "browser-profiles", "tmp"),
         });
       },
     });
