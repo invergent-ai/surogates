@@ -417,6 +417,8 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root(`rm -rf ${LOCKS}`).status).toBe(0);
     const made = root(`strace -f -qq -o /tmp/trace -e trace=mkdir,mkdirat /opt/surogate-test/install.sh --apply ${files()} >/dev/null && grep -F '${LOCKS}"' /tmp/trace`);
     expect(made.stdout).toMatch(/^\d+ +mkdir\("\/run\/surogate-desktop", 0700\) += 0\n$/);
+    // So is staging, where an apply copies and unpacks: made closed, and not closed once it is made.
+    expect(root("grep -E 'staging\", [0-7]+\\) += 0$' /tmp/trace").stdout).toMatch(/^\d+ +mkdir\("(\/opt\/surogate\/)?staging", 0700\) += 0\n$/);
     expect(root(`stat -c '%F %U %a' ${LOCKS} ${LOCKS}/lock`).stdout).toBe("directory root 700\nregular empty file root 644\n");
     expect(as("tester", `ls ${LOCKS}`)).toMatchObject({ status: 2, stderr: expect.stringContaining("Permission denied") });
     for (const [what, how] of NOT_ROOTS_OWN) {

@@ -255,7 +255,7 @@ apply() {
   done
   mkdir -p "$ROOT/versions" "$ROOT/bin"
   # Root's alone from its first moment: what an apply copies and unpacks is in it.
-  ( umask 077 && mkdir -p "$ROOT/staging" )
+  mkdir -p -m 0700 "$ROOT/staging"
   chown 0:0 "$ROOT/versions" "$ROOT/bin" "$ROOT/staging"
   chmod u=rwx,go=rx,a-st "$ROOT/versions" "$ROOT/bin"
   chmod u=rwx,go=,a-st "$ROOT/staging"
