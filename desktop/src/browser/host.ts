@@ -351,6 +351,11 @@ export class BrowserHost {
   // No service worker answers it (bypassWorkers).
   private adopt(session: string, page: Page): void {
     this.tabs.get(session)?.push(page);
+    // Gone from the session's pages once it closes: a long session opens many popups.
+    page.once("close", () => {
+      const pages = this.tabs.get(session);
+      if (pages?.includes(page)) pages.splice(pages.indexOf(page), 1);
+    });
     page.on("popup", (popup) => this.adopt(session, popup));
     // With a listener, the browser opens no file dialog of its own: no path the agent did not get reaches a page.
     page.on("filechooser", () => this.note(session, FILE_ASKED));

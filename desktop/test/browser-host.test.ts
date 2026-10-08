@@ -387,6 +387,19 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     expect(await script(b, "return document.title;")).toBe("Second");
   });
 
+  it("forgets each popup of a session's once it has closed", async () => {
+    const a = session();
+    const kept = () => (host as unknown as { tabs: Map<string, unknown[]> }).tabs.get(a)?.length;
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    for (let round = 0; round < 3; round += 1) {
+      await op(a, "browser.mouse", { action: "click", x: 50, y: 155, button: "left", clicks: 1 });
+      await expect.poll(kept).toBe(2);
+      await script(a, "setTimeout(() => window.close(), 0); return 1;");
+      await expect.poll(kept).toBe(1);
+    }
+    expect(await script(a, "return document.title;")).toBe("Fixture");
+  });
+
   it("launches again after its user closed it, in new tabs", async () => {
     const a = session();
     await op(a, "browser.navigate", { url: "http://fixture.test/" });
