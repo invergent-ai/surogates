@@ -97,6 +97,13 @@ in_use() {
   return 1
 }
 
+# Whether version folder $2 is whole, for manifest $1: its mark is that manifest, and the app and
+# its helper are there to run.
+whole() {
+  cmp -s "$1" "$2/release.json" && [ -f "$2/surogate" ] && [ -x "$2/surogate" ] \
+    && [ -f "$2/bin/surogate-apply-update" ] && [ -x "$2/bin/surogate-apply-update" ]
+}
+
 # The user the helper was run for, who reads the files it is handed: pkexec's caller, or sudo's.
 # Each names that user by number in the helper's environment, and sets it itself, whatever its own
 # caller's environment held. Nothing else is asked who it was. Naming a user only ever lowers the
@@ -188,7 +195,7 @@ apply() {
   [ "$(sha256sum <"$work/release.tar.gz" | cut -d' ' -f1)" = "$sha256" ] || fail "the downloaded release is not the one its manifest names"
 
   local folder="$ROOT/versions/$version" name="surogate-desktop-$version-linux-x64"
-  if ! cmp -s "$work/manifest.json" "$folder/release.json"; then
+  if ! whole "$work/manifest.json" "$folder"; then
     # tar unpacks a set-id member without its bit (--no-same-permissions), so that only the
     # archive's own listing shows one: the fourth and seventh letters of a member's mode.
     tar -tvzf "$work/release.tar.gz" >"$work/listing" 2>/dev/null || fail "the release's archive could not be unpacked"
@@ -234,13 +241,15 @@ apply() {
   install -m 0755 "$folder/bin/surogate-apply-update" "$work/helper"
   mv -T "$work/helper" "$ROOT/bin/surogate-apply-update"
 
-  # Kept: this version and the one before it. Removed: the rest, once nothing runs from them. An
-  # apply of the installed version removes none: it is a repair, or the run after an update that
-  # stopped late, and the version before this one is no longer known to it.
+  # Kept: this version and the one before it. Removed: the rest, once nothing runs from them.
+  # Each leaves versions by one rename, into this apply's folder, so that none is ever left under
+  # its name with its mark and without its files. An apply of the installed version removes none:
+  # it is a repair, or the run after an update that stopped late, and the version before this one
+  # is no longer known to it.
   if [ "$previous" != "$version" ]; then
     local kept
     for kept in "$ROOT"/versions/*; do
-      [ "$kept" = "$folder" ] || [ "$kept" = "$ROOT/versions/$previous" ] || in_use "$kept" || rm -rf -- "$kept"
+      [ "$kept" = "$folder" ] || [ "$kept" = "$ROOT/versions/$previous" ] || in_use "$kept" || mv -T "$kept" "$work/removed.${kept##*/}"
     done
   fi
   rm -rf -- "$work"

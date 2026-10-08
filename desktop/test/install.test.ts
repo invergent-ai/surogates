@@ -144,11 +144,13 @@ function lab(release: string, setup: string[], run: string[] = []) {
 
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --apply, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
   // What --apply needs, on a desktop's baseline: openssl, jq and bubblewrap, which the install
-  // script installs, and nothing of Surogate's. /opt/surogate is a small disk of the container's
-  // own, in memory: a copy with no bound fills that, and never this computer's disk.
+  // script installs, and nothing of Surogate's; and strace, for the tests that read the helper's
+  // system calls. /opt/surogate is a small disk of the container's own, in memory: a copy with no
+  // bound fills that, and never this computer's disk.
   const { it: box, docker, root, as, releaseOf, manifestOf, current, versions } = lab(release, [
     "RUN apt-get update && apt-get install -y --no-install-recommends openssl jq bubblewrap && rm -rf /var/lib/apt/lists/*",
     "RUN useradd -m tester",
+    "RUN apt-get update && apt-get install -y --no-install-recommends strace && rm -rf /var/lib/apt/lists/*",
   ], ["--tmpfs", "/opt/surogate:exec,mode=755,size=512m"]);
   // The files as the app leaves them for the helper: in the user's cache, copied into the container.
   const files = (manifest = "/home/tester/manifest.json", tarball = "/home/tester/release.tar.gz") => `${manifest} /home/tester/manifest.json.sig ${tarball}`;
@@ -182,6 +184,15 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const lines = root(`bash /opt/surogate-test/stops.sh ${these}`).stdout.trim().split("\n");
     expect(lines.pop()).toMatch(/^end \d{2,}$/);
     return lines;
+  };
+
+  // The apply of the staged files, and the system calls it and its commands made to flush a
+  // filesystem and to rename, in order.
+  const traced = () => {
+    const apply = root(`strace -f -qq -o /tmp/trace -e trace=syncfs,rename,renameat,renameat2 /opt/surogate-test/install.sh --apply ${files()} >/dev/null && cat /tmp/trace`);
+    expect(apply.status, apply.stderr).toBe(0);
+    const calls = apply.stdout.split("\n");
+    return (call: RegExp) => calls.findIndex((line) => call.test(line));
   };
 
   beforeEach(() => {
@@ -480,6 +491,28 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     }
     expect(seen).toEqual(new Set(["1.0.0 whole", "1.1.0 whole"]));
   }, 300_000);
+
+  it("unpacks the installed version again when its folder has lost a program, and takes an older version out of versions by one rename", () => {
+    for (const version of ["1.0.0", "1.1.0"]) {
+      const tarball = releaseOf(version);
+      manifestOf(version, tarball);
+      expect(apply(tarball).status).toBe(0);
+      // Its mark is there, and a program is not: the folder is not whole.
+      for (const program of ["surogate", "bin/surogate-apply-update"]) {
+        expect(root(`rm /opt/surogate/versions/${version}/${program}`).status).toBe(0);
+        expect(apply(tarball), program).toMatchObject({ status: 0, stdout: `Surogate Desktop: ${version} is installed\n`, stderr: "" });
+        expect(root(`test -x /opt/surogate/versions/${version}/${program}`).status).toBe(0);
+      }
+    }
+    // An update removes the version before the last: it leaves versions whole, by a rename into staging.
+    const tarball = releaseOf("1.2.0");
+    manifestOf("1.2.0", tarball);
+    stage(tarball);
+    const at = traced();
+    expect(at(/^\d+ +rename\w*\(.*"\/opt\/surogate\/versions\/1\.0\.0", .*"\/opt\/surogate\/staging\/apply\.\w+\/removed\.1\.0\.0".*\) += 0$/)).toBeGreaterThan(-1);
+    expect(versions()).toEqual(["1.1.0", "1.2.0"]);
+    expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
+  });
 
   it("has the installed version whole again by one rename, when a release of it built again replaces its folder", () => {
     for (const version of ["1.0.0", "1.1.0"]) {
