@@ -504,6 +504,31 @@ describe("the browser's kinds beside the tools", () => {
     expect((browsed[0]?.args as { files: unknown[] }).files).toHaveLength(10);
   });
 
+  it("refuses an upload that names a file by a path with a control character, or a line or paragraph separator, before anyone is asked, and says why", async () => {
+    const { browsing, browsed, ran } = rig();
+    const names = (...paths: string[]) => ({ ...op("browser.set_input_files"), args: { paths } });
+    const good = "/home/u/notes/report.pdf";
+    for (const [bad, shown] of [
+      ["/home/u/notes/public.txt\n/home/u/notes/draft.txt", "\\n"], ["/home/u/notes/a\rb.txt", "\\r"], ["/home/u/notes/a\tb.txt", "\\t"], ["/home/u/notes/a\u0000b", "\\u0000"],
+      ["/home/u/notes/a\u007fb", "\u007f"], ["/home/u/notes/a\u0085b", "\u0085"], ["/home/u/notes/a\u2028b", "\u2028"], ["/home/u/notes/a\u2029b", "\u2029"],
+      ["/home/u/no\ntes/report.pdf", "\\n"],
+    ] as const) {
+      const refused = { error: { type: "browser", message: `An upload gives a page no file whose path holds a line break or another control character: ${JSON.stringify(bad)}` } };
+      expect(refused.error.message, bad).toContain(shown);
+      for (const paths of [[bad], [good, bad]]) {
+        // Before the chat's user is asked about it, and where nobody is, as in a chat that works freely.
+        expect(browsing.refusal(names(...paths)), JSON.stringify(paths)).toEqual(refused);
+        expect(await browsing.run(names(...paths), signal), JSON.stringify(paths)).toEqual(refused);
+      }
+    }
+    expect([ran, browsed]).toEqual([[], []]);
+    // A name with a space, a quote, a letter of another script or a mark that shows is a name as any other.
+    expect(browsing.refusal(names("/home/u/notes/a b 'c' \"d\" é 日本 <e>.pdf"))).toBeNull();
+    // While its user holds the browser an upload is answered paused, as every operation in it.
+    browsing.takeOver(ROOT);
+    expect(browsing.refusal(names("/home/u/notes/a\nb"))).toEqual(PAUSED);
+  });
+
   it("gives the browser nothing where the chat's file host answers a read with anything but the file's data", async () => {
     for (const answered of [{ ok: null }, { ok: 7 }, { ok: { transfer: { size: 3, sha256: "x" } } }, { ok: ["UE5H"] }] as Outcome[]) {
       const { browsing, browsed } = rig(LAUNCH, true, () => Promise.resolve(answered));
@@ -568,6 +593,22 @@ describe("an upload's files, read as the chat's file host reads them", () => {
     expect(browsed.at(-1)?.args).toEqual({ files: [
       { name: "a.txt", mimeType: "text/plain", buffer: b64("alpha\n") }, { name: "Scan 1.PNG", mimeType: "image/png", buffer: b64("PNG") },
     ] });
+  });
+
+  it("gives a page each file under its own last name, for every file its user was shown and no other", async () => {
+    const { browsed, upload } = filed();
+    // Names as a folder holds them: spaces, dots, a leading dash, quotes, another script, and as long as a name may be.
+    const names = ["a b.txt", ".env", "..hidden", "-rf", "it's \"quoted\".csv", "日本語 файл.pdf", "a..b", "x.tar.gz", `${"n".repeat(251)}.txt`];
+    mkdirSync(join(folder, "deep", "er"), { recursive: true });
+    const paths = names.map((name, at) => join(folder, at % 2 === 0 ? "" : "deep/er", name));
+    for (const path of paths) writeFileSync(path, `holds ${path}`);
+    for (const some of [paths.slice(0, 5), paths.slice(5)]) {
+      expect(await upload(...some)).toEqual({ ok: "browser" });
+      const given = (browsed.at(-1)!.args as { files: Array<{ name: string; buffer: string }> }).files;
+      // As many as were named, in their order, each by the last part of its own path and holding that file.
+      expect(given.map((file) => file.name)).toEqual(some.map((path) => path.slice(path.lastIndexOf("/") + 1)));
+      expect(given.map((file) => Buffer.from(file.buffer, "base64").toString())).toEqual(some.map((path) => `holds ${path}`));
+    }
   });
 
   it("gives a page nothing its chat's file host does not read: nothing outside the folder, through a link, by a path that is not the file's own, or that is no file; and nothing at all of an upload that names one such", async () => {

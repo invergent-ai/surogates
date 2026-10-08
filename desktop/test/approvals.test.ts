@@ -1029,10 +1029,16 @@ describe("the browser on this computer", () => {
     const paths = [`${FOLDER}/report.pdf`, `${FOLDER}/scan.png`];
     expect(await approvals.admit(op("browser.set_input_files", { paths }, ROOT, CHILD), never())).toBeNull();
     expect(await approvals.admit(op("browser.evaluate", { code: "return 1;" }, ROOT, CHILD), never())).toBeNull();
-    expect(user.asked.map((request) => request.kind === "browser" && [request.action, request.detail, request.page])).toEqual([
-      // The site that gets the files is the input's own, whatever page it is framed in.
-      ["upload", paths.join("\n"), "https://uploads.example/form"], ["script", "return 1;", "https://bank.example/account"],
+    expect(user.asked.map((request) => request.kind === "browser" && [request.action, request.files ?? request.detail, request.page])).toEqual([
+      // The site that gets the files is the input's own, whatever page it is framed in. Each file is an item of its own.
+      ["upload", paths, "https://uploads.example/form"], ["script", "return 1;", "https://bank.example/account"],
     ]);
+    // A name that holds a line break is one item, whatever follows the break: never two files.
+    const broken = [`${FOLDER}/public.txt\n${FOLDER}/draft.txt`];
+    expect(await approvals.admit(op("browser.set_input_files", { paths: broken }, ROOT, CHILD), never())).toBeNull();
+    expect(user.asked.at(-1)).toMatchObject({ action: "upload", detail: "", files: broken });
+    user.asked.pop();
+    said.pop();
     expect(said).toEqual([[CHILD, true], [CHILD, false]]);
     // A chat that works freely gives them once the agent may use the browser.
     journal.bindings.setMode(ROOT, "free");

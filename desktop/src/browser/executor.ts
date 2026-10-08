@@ -41,6 +41,21 @@ const TYPES: Record<string, string> = {
 };
 const failed = (message: string): Outcome => ({ error: { type: "browser", message } });
 
+// A control character, or a separator of lines or of paragraphs: in a path, it would let one file's name read
+// as another's, or as two, wherever the path is shown.
+const UNSHOWN = /[\p{Cc}\p{Zl}\p{Zp}]/u;
+// Why an upload that names *paths* gives a page nothing, whatever its files hold; null where nothing in how
+// it names them says so.
+function unfit(paths: unknown): string | null {
+  if (!Array.isArray(paths)) return null;
+  for (const path of paths) {
+    if (typeof path === "string" && UNSHOWN.test(path)) {
+      return `An upload gives a page no file whose path holds a line break or another control character: ${JSON.stringify(path)}`;
+    }
+  }
+  return null;
+}
+
 export interface BrowsingOptions {
   tools: ToolLayer;
   browser: Pick<BrowserClient, "perform" | "forget" | "stop" | "end" | "address" | "pause" | "show" | "onDownload">;
@@ -84,7 +99,10 @@ export class Browsing implements ToolLayer {
   refusal(operation: Operation): Outcome | null {
     if (!isBrowserKind(operation.kind)) return this.options.tools.refusal?.(operation) ?? null;
     if (this.held !== null) return PAUSED;
-    return this.options.launch() === null ? NO_BROWSER : null;
+    if (this.options.launch() === null) return NO_BROWSER;
+    // An upload that names a file as no prompt could show it truly is refused before anyone is asked about it.
+    const why = operation.kind === "browser.set_input_files" ? unfit(operation.args.paths) : null;
+    return why === null ? null : failed(why);
   }
 
   run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
@@ -113,6 +131,9 @@ export class Browsing implements ToolLayer {
     if (!Array.isArray(paths) || paths.length === 0 || paths.length > MAX_UPLOAD_FILES || !paths.every((path) => typeof path === "string" && path !== "")) {
       return failed(`An upload names 1 to ${MAX_UPLOAD_FILES} files of the chat's folder`);
     }
+    // Refused before anyone was asked (refusal); here for one that came unasked, as in a chat that works freely.
+    const why = unfit(paths);
+    if (why !== null) return failed(why);
     const files: Array<{ name: string; mimeType: string; buffer: string }> = [];
     let bytes = 0;
     for (const key of paths as string[]) {

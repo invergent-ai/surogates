@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ApprovalRequest, ChatLabel } from "../src/binding/approvals.js";
 import type { FolderSheet } from "../src/binding/binder.js";
+import { segments } from "../src/shell/pages/ui.js";
 import { approval, folderSheet, freeMode, handBack, sizeOf } from "../src/shell/prompt-content.js";
 
 const SHEET: FolderSheet = { agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null, thread: null };
@@ -263,13 +264,29 @@ describe("the browser's prompts", () => {
     expect(long.height).toBeGreaterThan(approval({ kind: "browser", chat: CHAT, action: "click", detail: "1, 2", page }).height);
   });
 
-  it("names the site an upload would give the chat's files to, and each file whole", () => {
-    const files = `${CHAT.folder}/report.pdf\n${CHAT.folder}/scan.png`;
-    const content = approval({ kind: "browser", chat: CHAT, action: "upload", detail: files, page: "https://bank.example/upload" });
+  it("names the site an upload would give the chat's files to, and each file whole, in a field of its own, counted: a name that holds a line break reads as one file, never as two", () => {
+    const files = [`${CHAT.folder}/report.pdf`, `${CHAT.folder}/scan.png`];
+    const upload = (paths: string[]) => approval({ kind: "browser", chat: CHAT, action: "upload", detail: "", files: paths, page: "https://bank.example/upload" });
+    const content = upload(files);
     expect(content.title).toBe("Upload to bank.example?");
     expect(content.lead).toContain("wants to give these files to the page open in its browser. The site gets what they hold.");
-    expect(content.details[1]).toMatchObject({ label: "Files, 2 lines", value: files, code: true });
+    expect(content.details).toEqual([
+      { label: "Page", value: "https://bank.example/upload", code: true, keep: "" },
+      { label: "File 1 of 2", value: files[0], code: true, keep: "" }, { label: "File 2 of 2", value: files[1], code: true, keep: "" },
+    ]);
     expect(content.focus).toBe("deny");
+    // One file whose own name holds the second path after a line break: one field, and no special character of it
+    // is shown as itself, as in a download's File field. So it is not the two files' prompt.
+    const one = upload([files.join("\n")]);
+    expect(one.details.slice(1)).toEqual([{ label: "File", value: files.join("\n"), code: true, keep: "" }]);
+    expect(segments(one.details[1]!.value, one.details[1]!.keep).map((run) => run.text).join("")).toBe(`${files[0]}U+000A${files[1]}`);
+    expect(one.details).not.toEqual(content.details);
+    // Each file has its room, and the window stays one a screen holds: the rest scrolls in it.
+    const heights = [1, 2, 10].map((count) => upload(Array.from({ length: count }, (_, n) => `${CHAT.folder}/${"long ".repeat(30)}${n}.pdf`)).height);
+    expect(heights[0]).toBeLessThan(heights[1]!);
+    expect(heights[2]).toBeLessThanOrEqual(720);
+    // With no file named, as nothing the computer lets through is: its fields say so, not nothing.
+    expect(upload([]).details.slice(1)).toEqual([{ label: "Files", value: "None", code: false, keep: "" }]);
   });
 
   it("names the host an open would go to, cut at its start, and opens tall enough for the whole address", () => {

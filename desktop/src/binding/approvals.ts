@@ -75,11 +75,12 @@ export type ApprovalRequest =
   | { kind: "input"; chat: ChatLabel; process: string; command: string | null; data: string }
   | { kind: "network"; chat: ChatLabel; host: string; port: number; privateNetwork: boolean }
   // The chat's first use of the browser here ("use", with no detail), or what an operation would do
-  // in its page: the address it opens, the script it runs, where it clicks, what it types or presses, its drag's path,
-  // the files of the chat's folder it gives the page, one to a line.
+  // in its page: the address it opens, the script it runs, where it clicks, what it types or presses, its drag's path.
   // page: an act's, the address of the page it acts in, as the browser said it just before; null when it did not say in time.
   // An upload's is the address of the frame of the file input that gets the files, which can be another site's than the tab shows.
-  | { kind: "browser"; chat: ChatLabel; action: BrowserAction; detail: string; page?: string | null };
+  // files: an upload's, the files of the chat's folder it gives the page, each path whole and an item of its own, with no
+  // detail: joined in one text, a name that holds a line break would read as two files.
+  | { kind: "browser"; chat: ChatLabel; action: BrowserAction; detail: string; page?: string | null; files?: string[] };
 
 // down and up: a mouse button pressed and held, and released, each where it is.
 export type BrowserAction = "use" | "open" | "script" | "click" | "down" | "up" | "type" | "press" | "drag" | "upload" | "other";
@@ -196,7 +197,7 @@ function requestFor(
 }
 
 // What a browser operation would do in the page, as its prompt shows it.
-function browserAct({ kind, args }: Operation): { action: BrowserAction; detail: string } {
+function browserAct({ kind, args }: Operation): { action: BrowserAction; detail: string; files?: string[] } {
   const text = (value: unknown) => String(value ?? "");
   if (kind === "browser.navigate") return { action: "open", detail: text(args.url) };
   if (kind === "browser.evaluate") return { action: "script", detail: text(args.code) };
@@ -207,7 +208,7 @@ function browserAct({ kind, args }: Operation): { action: BrowserAction; detail:
     return { action: "type", detail: at ? `${JSON.stringify(text(args.text))} at ${text(at.x)}, ${text(at.y)}` : text(args.text) };
   }
   if (kind === "browser.mouse" && args.action === "drag") return { action: "drag", detail: JSON.stringify(args.path ?? []) };
-  if (kind === "browser.set_input_files") return { action: "upload", detail: (Array.isArray(args.paths) ? args.paths : [args.paths]).map(text).join("\n") };
+  if (kind === "browser.set_input_files") return { action: "upload", detail: "", files: (Array.isArray(args.paths) ? args.paths : [args.paths]).map(text) };
   if (kind === "browser.mouse") {
     const button = args.button === undefined || args.button === "left" ? "" : ` (${text(args.button)} button)`;
     const action = args.action === "down" || args.action === "up" ? args.action : "click";
