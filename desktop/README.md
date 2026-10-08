@@ -24,11 +24,17 @@ The VM sandbox's guest (spec, Section 11) is the `guest` stage of
 sandbox, and the guest agent in `src/guest/`. Docker builds the image, without
 root:
 
-    ../images/guest/build.sh      # rootfs.img(.zst) and vmlinuz into images/guest/out
+    ../images/guest/build.sh      # into images/guest/out
+
+It leaves `rootfs.img.zst` and `vmlinuz.zst`, the files a release publishes;
+`rootfs.img` and `vmlinuz` unpacked beside them, for the VM tests; and
+`manifest.json`, the image's key and each file's size and sha256, unpacked and as
+downloaded, which the app's tarball carries.
 
 The VM tests boot it under QEMU and KVM (`/dev/kvm`, `qemu-system-x86`,
 `virtiofsd`), with the agent disk `vm/agent-disk.sh` makes from `dist/`.
-`SUROGATE_VM_IMAGE` names another image folder.
+`SUROGATE_VM_IMAGE` names another image folder, and `SUROGATE_VM_KVM` a device
+that does not exist, to run them emulated.
 
     npm run build
     SUROGATE_VM_TESTS=1 npx vitest run test/vm/guest.test.ts
@@ -53,8 +59,12 @@ linux-x64, pinned by hash and stripped (`scripts/node.sh`, which the build runs)
 Electron never runs as Node: its RunAsNode fuse is off (`scripts/fuses.mjs`; this
 package's own Electron keeps the inspector, which the end-to-end tests drive).
 
-Until the image is delivered, the app boots the image built here (or
-`SUROGATE_VM_IMAGE`'s) with the agent disk `npm run agent-disk` makes from `dist/`.
-The shell's tests that run a command boot it too:
+An installed app downloads the image its `manifest.json` names from where it was
+installed from, and checks it by those hashes. A development build boots the image
+built here (or `SUROGATE_VM_IMAGE`'s) with the agent disk `npm run agent-disk` makes
+from `dist/`, or downloads it as an installed app does when `SUROGATE_INSTALL_JSON`
+names an install record, as the tests do. A packaged app takes neither
+`SUROGATE_VM_IMAGE` nor `SUROGATE_VM_KVM`. The shell's tests that run a command boot
+it too:
 
     SUROGATE_VM_TESTS=1 npm run test:e2e
