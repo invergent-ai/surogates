@@ -37,6 +37,8 @@ function answer(id: string, work: Promise<Outcome>, type: "result" | "tried" = "
 
 function received(message: ToBrowser): void {
   if (message.type === "op") {
+    // A second under the id of one still running is never run: the client refuses it, and its answer would be the first's.
+    if (running.has(message.id)) return;
     const controller = new AbortController();
     running.set(message.id, controller);
     answer(message.id, host.perform(message.launch, message.root, message.session, message.kind, message.args, controller.signal)

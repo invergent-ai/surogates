@@ -5,7 +5,9 @@ import { join } from "node:path";
 
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
-import { BROWSER_HOST, BROWSER_STOPPED, BrowserClient, type BrowserProcess, CANCELLED, type FromBrowser, type ToBrowser } from "../src/browser/client.js";
+import {
+  BROWSER_HOST, BROWSER_STOPPED, BrowserClient, type BrowserProcess, CANCELLED, DUPLICATE, type FromBrowser, type ToBrowser,
+} from "../src/browser/client.js";
 import type { Operation } from "../src/link/protocol.js";
 import { isolated, TEST_BROWSER } from "./isolated.js";
 
@@ -103,6 +105,16 @@ describe("the browser host's client", () => {
     const pending = client.address("child");
     hosts[0]!.exit();
     expect(await pending).toBe("about:blank");
+  });
+
+  it("refuses a second operation under the id of one still running, and sends the host only the first", async () => {
+    const host = new FakeHost();
+    const client = new BrowserClient(() => host);
+    const first = client.perform(LAUNCH, operation("op-1"), new AbortController().signal);
+    expect(await client.perform(LAUNCH, operation("op-1", "browser.evaluate", { code: "return 1;" }), new AbortController().signal)).toEqual(DUPLICATE);
+    expect(host.sent.filter((message) => message.type === "op")).toHaveLength(1);
+    host.say({ type: "result", id: "op-1", outcome: { ok: { url: "https://example.com/", title: "Example" } } });
+    expect(await first).toEqual({ ok: { url: "https://example.com/", title: "Example" } });
   });
 
   it("answers a cancel at once and tells the host", async () => {
@@ -204,6 +216,40 @@ describe.skipIf(!run)("the browser host's process", () => {
     child!.kill("SIGKILL");
     expect(await running).toEqual(BROWSER_STOPPED);
     await expect.poll(() => browserOf(profile).length, { timeout: 5_000 }).toBe(0);
+  });
+
+  it("runs no second operation sent under the id of one it is still running", async () => {
+    profile = mkdtempSync(join(tmpdir(), "sb-profile-"));
+    let child: ChildProcess | undefined;
+    const client = new BrowserClient(() => {
+      child = fork(BROWSER_HOST, [], { stdio: ["ignore", 2, 2, "ipc"] });
+      const exits: Array<() => void> = [];
+      let closed = false;
+      child.once("close", () => {
+        closed = true;
+        for (const listener of exits) listener();
+      });
+      return {
+        send: (message) => void child!.send(message),
+        onMessage: (listener) => void child!.on("message", (message) => listener(message as FromBrowser)),
+        onExit: (listener) => (closed ? listener() : void exits.push(listener)),
+        kill: () => void child!.kill("SIGKILL"),
+      };
+    });
+    const launch = { executable: EXECUTABLE!, profile };
+    const signal = new AbortController().signal;
+    try {
+      await client.perform(launch, operation("op-1", "browser.navigate", { url: "http://127.0.0.1:9/" }), signal);
+      const running = client.perform(launch, operation("op-2", "browser.evaluate", { code: "await new Promise((r) => setTimeout(r, 1500)); return 'first';" }), signal);
+      await new Promise((done) => setTimeout(done, 200));
+      // Past the client's own check, as a client that lost track of its ids would send it.
+      child!.send({ ...operation("op-2"), type: "op", launch, root: "root", session: "child", kind: "browser.evaluate", args: { code: "document.title = 'second ran'; return 'second';" } });
+      expect(await running).toEqual({ ok: { value: "first" } });
+      await new Promise((done) => setTimeout(done, 500));
+      expect(await client.perform(launch, operation("op-3", "browser.evaluate", { code: "return document.title;" }), signal)).not.toEqual({ ok: { value: "second ran" } });
+    } finally {
+      await client.stop();
+    }
   });
 
   it("closes its headed browser when it is stopped, as the app's quit stops it", async () => {

@@ -18,6 +18,10 @@ const STOP_MS = 10_000;
 export const CANCELLED: Outcome = {
   error: { type: "cancelled", message: "The session stopped this before the computer finished it" },
 };
+// A second operation under the id of one still running: its answer would be taken for the first's.
+export const DUPLICATE: Outcome = {
+  error: { type: "browser", message: "The computer's browser is already running an operation under this id" },
+};
 export const BROWSER_STOPPED: Outcome = {
   error: {
     type: "interrupted",
@@ -140,6 +144,7 @@ export class BrowserClient {
 
   private ask(waiting: Map<string, (outcome: Outcome) => void>, id: string, message: ToBrowser, signal?: AbortSignal): Promise<Outcome> {
     if (this.stopping) return Promise.resolve(BROWSER_STOPPED);
+    if (waiting.has(id)) return Promise.resolve(DUPLICATE);
     let host: BrowserProcess;
     try {
       host = this.host ?? this.start();
