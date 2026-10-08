@@ -292,6 +292,10 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    # The tarball's hash, which the publish job signs for and no other: the artifact is the run's,
+    # where any job may put another file under its name, and a job's outputs are its own.
+    outputs:
+      sha256: ${{ steps.tarball.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -319,6 +323,10 @@ jobs:
 
       - name: Package the app
         run: desktop/scripts/package.sh "${GITHUB_REF_NAME#v}" out/vm/manifest.json out/desktop
+
+      - name: Say the tarball's hash to the publish job
+        id: tarball
+        run: echo "sha256=$(sha256sum <"out/desktop/surogate-desktop-${GITHUB_REF_NAME#v}-linux-x64.tar.gz" | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
 
       - name: Keep the tarball for the publish job
         uses: actions/upload-artifact@v4
@@ -348,9 +356,11 @@ jobs:
           name: desktop-tarball
           path: out/desktop
 
+      # What the build says is read from the step's environment, never pasted into its script.
       - name: Sign its manifest
         env:
           DESKTOP_RELEASE_KEY: ${{ secrets.DESKTOP_RELEASE_KEY }}
+          DESKTOP_TARBALL_SHA256: ${{ needs.desktop-build.outputs.sha256 }}
         run: desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop
 
       - name: Publish the release

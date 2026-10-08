@@ -119,7 +119,9 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
     dir = mkdtempSync(join(tmpdir(), "acceptance-"));
     const www = join(dir, "www", "desktop");
     // The install script that trusts the test's own key, and publish.sh beside it, as the two are
-    // in the repository: the release job's own signing, of what its own packaging made.
+    // in the repository: the release job's own signing, of what its own packaging made. Each
+    // release's root helper is that install script, as a release's is its tag's: the signing
+    // refuses any other, and the helper an install puts in place then trusts the test's key too.
     const script = readFileSync(join(DESKTOP, "release", "install.sh"), "utf8").replace(/RELEASE_KEYS=\(\n[^)]*\)/, `RELEASE_KEYS=(\n    '${PUBLIC}'\n  )`);
     mkdirSync(join(dir, "release"));
     writeFileSync(join(dir, "release", "install.sh"), script);
@@ -130,10 +132,13 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
     // its manifest and signature.
     for (const version of [VERSION, NEXT]) {
       const out = join(www, "releases", version);
-      const packed = await run(join(DESKTOP, "scripts", "package.sh"), [version, join(dir, "vm-manifest.json"), out]);
+      const packed = await run(join(DESKTOP, "scripts", "package.sh"), [version, join(dir, "vm-manifest.json"), out, join(dir, "release", "install.sh")]);
       expect(packed.status, packed.stderr).toBe(0);
+      // The tarball's hash, as the build's job says it to the publish job.
+      const hashed = await run("sha256sum", [join(out, tarballOf(version))]);
+      expect(hashed.status, hashed.stderr).toBe(0);
       const signed = await run(join(dir, "release", "publish.sh"), ["sign", version, out], {
-        env: { ...process.env, DESKTOP_RELEASE_KEY: keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString() },
+        env: { ...process.env, DESKTOP_RELEASE_KEY: keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(), DESKTOP_TARBALL_SHA256: hashed.stdout.slice(0, 64) },
       });
       expect(signed.status, signed.stderr).toBe(0);
     }

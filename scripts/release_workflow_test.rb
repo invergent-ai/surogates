@@ -190,6 +190,13 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_operator package, :<, keep
     assert_equal "desktop-tarball", steps[keep].fetch("with").fetch("name")
     assert_equal "out/desktop/surogate-desktop-*-linux-x64.tar.gz", steps[keep].fetch("with").fetch("path")
+    # The tarball's hash is the job's own output, which no other job of the run can set: an
+    # artifact is the run's, and any of its jobs may put another file under the tarball's name.
+    assert_equal({ "sha256" => "${{ steps.tarball.outputs.sha256 }}" }, job.fetch("outputs"))
+    hash = steps.index { |step| step["id"] == "tarball" }
+    refute_nil hash
+    assert_operator package, :<, hash
+    assert_equal 'echo "sha256=$(sha256sum <"out/desktop/surogate-desktop-${GITHUB_REF_NAME#v}-linux-x64.tar.gz" | cut -d\' \' -f1)" >>"$GITHUB_OUTPUT"', steps[hash].fetch("run").strip
   end
 
   def test_desktop_publish_signs_and_sends_the_built_tarball_one_release_at_a_time_in_its_environment
@@ -233,7 +240,12 @@ class ReleaseWorkflowTest < Minitest::Test
       refute_match(/\b(npm|npx|node)\b/, run, "#{step["name"] || step["uses"]} runs npm or node")
       refute_includes step["uses"].to_s, "setup-node"
       if run.include?("publish.sh sign")
-        assert_equal({ "DESKTOP_RELEASE_KEY" => "${{ secrets.DESKTOP_RELEASE_KEY }}" }, step.fetch("env"))
+        # With the key, the hash the build's job gave for its tarball: through the step's
+        # environment, never pasted into its script, where what the build says would be run.
+        assert_equal({
+          "DESKTOP_RELEASE_KEY" => "${{ secrets.DESKTOP_RELEASE_KEY }}",
+          "DESKTOP_TARBALL_SHA256" => "${{ needs.desktop-build.outputs.sha256 }}",
+        }, step.fetch("env"))
       elsif run.include?("publish.sh send")
         assert_equal r2, step.fetch("env")
       else

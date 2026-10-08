@@ -9,7 +9,10 @@
 # Usage, after scripts/package.sh <version> <vm manifest> <out>:
 #   release/publish.sh sign <version> <out>   # <out>/manifest.json and its Ed25519 signature,
 #                                             # with DESKTOP_RELEASE_KEY (its PEM), which must be
-#                                             # one of the keys whose public halves install.sh trusts
+#                                             # one of the keys whose public halves install.sh trusts,
+#                                             # of the tarball whose sha256 is DESKTOP_TARBALL_SHA256
+#                                             # (the build's own word for what it made), and whose
+#                                             # root helper is the install.sh beside this script
 #   release/publish.sh send <version> <out>   # the release, then the install script and latest.json
 #                                             # with its signature, each read back, then the release's
 #                                             # own manifest; never a release again, and latest.json
@@ -35,8 +38,14 @@ fail() {
 
 case "$VERB" in
   sign)
-    : "${DESKTOP_RELEASE_KEY:?}"
+    : "${DESKTOP_RELEASE_KEY:?}" "${DESKTOP_TARBALL_SHA256:?}"
     [ -f "$OUT/$TARBALL" ] || fail "$OUT/$TARBALL is not there: run scripts/package.sh first"
+    # The tarball is the one the build made, by the hash the build's job gave for it: an artifact
+    # is its run's, and any job of the run may put another file under its name. What is no sha256 is
+    # never said back.
+    [[ "$DESKTOP_TARBALL_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "DESKTOP_TARBALL_SHA256 is not a sha256, as the build's job gives its tarball's"
+    sha256="$(sha256sum <"$OUT/$TARBALL" | cut -d' ' -f1)"
+    [ "$sha256" = "$DESKTOP_TARBALL_SHA256" ] || fail "$OUT/$TARBALL is not the tarball the build made: its sha256 is $sha256, and the build's $DESKTOP_TARBALL_SHA256"
     # The release keys the installed apps and the install script trust: install.sh's RELEASE_KEYS,
     # read as install.sh sets them, from its functions alone: its last line, which runs it, is left
     # out. Were its last line any other, as after a blank line at its end, the line that runs it
@@ -46,9 +55,23 @@ case "$VERB" in
     public="$(openssl pkey -pubout -in <(printf '%s\n' "$DESKTOP_RELEASE_KEY"))"
     bash -c '. <(sed "\$d" "$1") && settings && for key in "${RELEASE_KEYS[@]}"; do [ "$key" != "$2" ] || exit 0; done; exit 1' _ "$HERE/install.sh" "$public" \
       || fail "DESKTOP_RELEASE_KEY is not a key whose public half install.sh trusts"
+    # The tarball's root helper is the install script beside this one, byte for byte: installed,
+    # it is what pkexec runs as root at the next update, and its release keys are the ones every
+    # later update is checked against. The build holds no key, and a helper of its own would need
+    # none. The helper is read from the tarball unpacked whole, as the helper that installs it
+    # unpacks it: a member under the helper's own name may be replaced by a later one, or through
+    # a link to its folder. The tarball is the build's, and is unpacked without the key.
+    unpacked="$(mktemp -d --tmpdir release-unpacked-XXXXXXXXXX)"
+    trap 'rm -rf "$unpacked"' EXIT
+    env -u DESKTOP_RELEASE_KEY tar -xzf "$OUT/$TARBALL" -C "$unpacked" --no-same-owner --no-same-permissions 2>/dev/null || fail "$OUT/$TARBALL could not be unpacked"
+    helper="surogate-desktop-$VERSION-linux-x64/bin/surogate-apply-update"
+    # A file of the tree's own: no link, and under no folder that is one.
+    [ -f "$unpacked/$helper" ] && [ "$(realpath "$unpacked/$helper")" = "$(realpath "$unpacked")/$helper" ] || fail "the tarball has no root helper of its own at $helper"
+    cmp -s "$unpacked/$helper" "$HERE/install.sh" \
+      || fail "the tarball's root helper, $helper, is not the install.sh beside this script, byte for byte: every later update is checked by the release keys it lists"
     # The tarball by its hash and its size in bytes, a number: the root helper takes no manifest
     # without either, and copies no more of a tarball than the size its manifest names.
-    jq -cn --arg version "$VERSION" --arg sha256 "$(sha256sum <"$OUT/$TARBALL" | cut -d' ' -f1)" --argjson size "$(stat -c %s "$OUT/$TARBALL")" \
+    jq -cn --arg version "$VERSION" --arg sha256 "$sha256" --argjson size "$(stat -c %s "$OUT/$TARBALL")" \
       '{version: $version, channel: "stable", platform: "linux", arch: "x64",
         url: "releases/\($version)/surogate-desktop-\($version)-linux-x64.tar.gz", sha256: $sha256, size: $size}' >"$OUT/manifest.json"
     openssl pkeyutl -sign -inkey <(printf '%s\n' "$DESKTOP_RELEASE_KEY") -rawin -in "$OUT/manifest.json" -out "$OUT/manifest.json.sig"

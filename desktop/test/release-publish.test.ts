@@ -4,7 +4,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, type KeyObject, randomBytes, verify } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,14 +50,38 @@ const faulty = (curl: string) => [
 // install.sh with *trusted* in the release keys' place.
 const trusting = (trusted = [PUBLIC]) => readFileSync(join(RELEASE, "install.sh"), "utf8")
   .replace(/RELEASE_KEYS=\(\n[^)]*\)/, `RELEASE_KEYS=(\n${trusted.map((key) => `    '${key}'`).join("\n")}\n  )`);
+const NAME_OF = (version: string) => `surogate-desktop-${version}-linux-x64`;
+// A release's tarball in *out*, small, in the layout package.sh gives one: a program in Electron's
+// place, and as its root helper the install script beside publish.sh in *dir*/release, as
+// package.sh packs the repository's. *change* edits its tree before it is tarred; *then* adds to
+// the archive after it, as tar's own -r does, before it is compressed.
+const packed = (dir: string, out: string, version: string, change: (top: string) => void = () => {}, then: (archive: string, name: string) => void = () => {}) => {
+  const tree = mkdtempSync(join(dir, "tree-"));
+  const top = join(tree, NAME_OF(version));
+  mkdirSync(join(top, "bin"), { recursive: true });
+  writeFileSync(join(top, "surogate"), "#!/bin/sh\n", { mode: 0o755 });
+  copyFileSync(join(dir, "release", "install.sh"), join(top, "bin", "surogate-apply-update"));
+  spawnSync("chmod", ["755", join(top, "bin", "surogate-apply-update")]);
+  change(top);
+  const archive = join(tree, "release.tar");
+  expect(spawnSync("tar", ["--owner=0", "--group=0", "-C", tree, "-cf", archive, NAME_OF(version)]).status).toBe(0);
+  then(archive, NAME_OF(version));
+  const tarball = join(out, `${NAME_OF(version)}.tar.gz`);
+  writeFileSync(tarball, spawnSync("gzip", ["-c", archive], { maxBuffer: 64 * 1024 * 1024 }).stdout);
+  rmSync(tree, { recursive: true, force: true });
+  return tarball;
+};
 
 describe("the desktop's release manifest", () => {
   let dir: string;
   let out: string;
+  const tarball = () => join(out, "surogate-desktop-1.2.3-linux-x64.tar.gz");
   // publish.sh and an install.sh that trusts the test's key, beside each other as in the repository.
   const publish = (verb: string, version: string, env: Record<string, string> = {}) => spawnSync(join(dir, "release", "publish.sh"), [verb, version, out], {
     encoding: "utf8", env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}`, ...env },
   });
+  // Signed as the publish job signs: with the release key, and the hash the build's job gave for its tarball.
+  const sign = (env: Record<string, string> = {}) => publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball())), ...env });
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "release-sign-"));
@@ -67,34 +91,33 @@ describe("the desktop's release manifest", () => {
     spawnSync("chmod", ["755", join(dir, "release", "publish.sh")]);
     out = join(dir, "out");
     mkdirSync(out);
-    writeFileSync(join(out, "surogate-desktop-1.2.3-linux-x64.tar.gz"), randomBytes(4096));
+    packed(dir, out, "1.2.3");
     recording(dir, "openssl");
   });
 
   it("signs the exact bytes of a manifest that names the tarball by its hash and its size", () => {
-    expect(publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE })).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n` });
+    expect(sign()).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n` });
     const manifest = readFileSync(join(out, "manifest.json"));
     // The shape install.sh's --apply checks, field for field, on one line.
     expect(manifest.toString()).toBe(`${JSON.stringify({
       version: "1.2.3", channel: "stable", platform: "linux", arch: "x64", url: "releases/1.2.3/surogate-desktop-1.2.3-linux-x64.tar.gz",
-      sha256: sha256(readFileSync(join(out, "surogate-desktop-1.2.3-linux-x64.tar.gz"))),
-      size: statSync(join(out, "surogate-desktop-1.2.3-linux-x64.tar.gz")).size,
+      sha256: sha256(readFileSync(tarball())), size: statSync(tarball()).size,
     })}\n`);
     expect(verify(null, manifest, keys.publicKey, readFileSync(join(out, "manifest.json.sig")))).toBe(true);
   });
 
   it("signs a manifest that the install script's own checks take: its signature, and each of its fields", () => {
-    expect(publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE }).status).toBe(0);
+    expect(sign().status).toBe(0);
     // What every install and every installed helper checks a release by, from the script's
     // functions without its last line, which runs it: the two cannot drift apart.
     const checked = spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && signed "$2" "$2.sig" && release_of "$2"`, "_", join(dir, "release", "install.sh"), join(out, "manifest.json")], {
       encoding: "utf8",
     });
-    expect(checked).toMatchObject({ status: 0, stdout: `1.2.3 ${sha256(readFileSync(join(out, "surogate-desktop-1.2.3-linux-x64.tar.gz")))} 4096\n`, stderr: "" });
+    expect(checked).toMatchObject({ status: 0, stdout: `1.2.3 ${sha256(readFileSync(tarball()))} ${statSync(tarball()).size}\n`, stderr: "" });
   });
 
   it("hands the release key to openssl through a pipe alone: never on a command line, where any process of the runner's could read it, and in no file", () => {
-    expect(publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE }).status).toBe(0);
+    expect(sign().status).toBe(0);
     // The key's own line of its PEM: the rest is every such key's.
     const body = PRIVATE.split("\n")[1] ?? "";
     expect(body).toMatch(/^[A-Za-z0-9+/]{64}$/);
@@ -111,11 +134,13 @@ describe("the desktop's release manifest", () => {
   it("signs with either key a rotating install.sh lists, and refuses a key whose public half it does not list", () => {
     const next = generateKeyPairSync("ed25519");
     writeFileSync(join(dir, "release", "install.sh"), trusting([PUBLIC, pem(next.publicKey)]));
+    // The release of that install script: its root helper lists both.
+    packed(dir, out, "1.2.3");
     for (const { privateKey, publicKey } of [keys, next]) {
-      expect(publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: secret(privateKey) }).status).toBe(0);
+      expect(sign({ DESKTOP_RELEASE_KEY: secret(privateKey) }).status).toBe(0);
       expect(verify(null, readFileSync(join(out, "manifest.json")), publicKey, readFileSync(join(out, "manifest.json.sig")))).toBe(true);
     }
-    expect(publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: secret(generateKeyPairSync("ed25519").privateKey) })).toMatchObject({
+    expect(sign({ DESKTOP_RELEASE_KEY: secret(generateKeyPairSync("ed25519").privateKey) })).toMatchObject({
       status: 1, stderr: "publish.sh: DESKTOP_RELEASE_KEY is not a key whose public half install.sh trusts\n",
     });
   });
@@ -126,7 +151,7 @@ describe("the desktop's release manifest", () => {
     const script = trusting().replace(/\nmain "\$@"\n$/, `\ntouch '${join(dir, "ran")}'\n\n`);
     expect(script.endsWith(`}\n\ntouch '${join(dir, "ran")}'\n\n`)).toBe(true);
     writeFileSync(join(dir, "release", "install.sh"), script);
-    expect(publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE })).toMatchObject({
+    expect(sign()).toMatchObject({
       status: 1, stdout: "", stderr: 'publish.sh: install.sh does not end with the line that runs it (main "$@"): its release keys are not read\n',
     });
     expect(existsSync(join(dir, "ran"))).toBe(false);
@@ -135,12 +160,76 @@ describe("the desktop's release manifest", () => {
 
   it("stops with its usage at a version that is no x.y.z or a verb it does not have, and says so where the tarball is not there", () => {
     for (const [verb, version] of [["sign", "1.2"], ["sign", "1.2.3-rc1"], ["sign", "v1.2.3"], ["sign", "1.2.3/../1.2.3"], ["publish", "1.2.3"]] as const) {
-      expect(publish(verb, version, { DESKTOP_RELEASE_KEY: PRIVATE }), `${verb} ${version}`).toMatchObject({ status: 2, stdout: "", stderr: "usage: publish.sh sign|send <x.y.z> <out>\n" });
+      expect(publish(verb, version, { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball())) }), `${verb} ${version}`)
+        .toMatchObject({ status: 2, stdout: "", stderr: "usage: publish.sh sign|send <x.y.z> <out>\n" });
     }
-    expect(publish("sign", "1.2.4", { DESKTOP_RELEASE_KEY: PRIVATE })).toMatchObject({
+    expect(publish("sign", "1.2.4", { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball())) })).toMatchObject({
       status: 1, stdout: "", stderr: `publish.sh: ${out}/surogate-desktop-1.2.4-linux-x64.tar.gz is not there: run scripts/package.sh first\n`,
     });
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+  });
+
+  it("refuses a tarball whose root helper is not the install script beside it, as a release unpacks it: with it go the release keys every later update is checked against", () => {
+    const helper = `${NAME_OF("1.2.3")}/bin/surogate-apply-update`;
+    // A helper of the build's own, which lists a key of the build's own: the same script but for its keys.
+    const theirs = trusting([pem(generateKeyPairSync("ed25519").publicKey)]);
+    const differs = `publish.sh: the tarball's root helper, ${helper}, is not the install.sh beside this script, byte for byte: every later update is checked by the release keys it lists\n`;
+    const missing = `publish.sh: the tarball has no root helper of its own at ${helper}\n`;
+    const cases: Array<[string, string, Parameters<typeof packed>[3], Parameters<typeof packed>[4]?]> = [
+      ["a helper that lists another key", differs, (top) => writeFileSync(join(top, "bin", "surogate-apply-update"), theirs)],
+      ["a helper a line longer", differs, (top) => writeFileSync(join(top, "bin", "surogate-apply-update"), `${trusting()}\n`)],
+      ["no helper", missing, (top) => rmSync(join(top, "bin", "surogate-apply-update"))],
+      ["a folder in the helper's place", missing, (top) => {
+        rmSync(join(top, "bin", "surogate-apply-update"));
+        mkdirSync(join(top, "bin", "surogate-apply-update"));
+      }],
+      // The install script itself, elsewhere in the tree, and a link to it where the helper is.
+      ["a link in the helper's place", missing, (top) => {
+        copyFileSync(join(top, "bin", "surogate-apply-update"), join(top, "install.sh"));
+        rmSync(join(top, "bin", "surogate-apply-update"));
+        symlinkSync("../install.sh", join(top, "bin", "surogate-apply-update"));
+      }],
+      // The install script where the helper is, and after it in the archive, under another name for
+      // the same folder, a helper of the build's own: unpacked, the second replaces the first.
+      ["a helper replaced as the archive is unpacked, through a link to its folder", differs, () => {}, (archive, name) => {
+        const after = mkdtempSync(join(dir, "after-"));
+        mkdirSync(join(after, name, "bin"), { recursive: true });
+        writeFileSync(join(after, name, "bin", "surogate-apply-update"), theirs, { mode: 0o755 });
+        symlinkSync("bin", join(after, name, "other"));
+        expect(spawnSync("tar", ["--owner=0", "--group=0", "-C", after, "-rf", archive, `${name}/other`, `${name}/other/surogate-apply-update`]).status).toBe(0);
+      }],
+    ];
+    for (const [what, said, change, then] of cases) {
+      packed(dir, out, "1.2.3", change, then);
+      expect(sign(), what).toMatchObject({ status: 1, stdout: "", stderr: said });
+      // Nothing is signed, and nothing of the tarball's is left unpacked.
+      expect(readdirSync(out), what).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+    }
+    // The last case's archive does hold the install script under the helper's own name, and unpacks to the other.
+    expect(spawnSync("tar", ["-xzOf", tarball(), helper], { encoding: "utf8" }).stdout).toBe(trusting());
+    // What is no archive at all.
+    writeFileSync(tarball(), randomBytes(4096));
+    expect(sign()).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: ${tarball()} could not be unpacked\n` });
+    expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+    expect(readdirSync(tmpdir()).filter((name) => name.startsWith("release-unpacked-"))).toEqual([]);
+  });
+
+  it("refuses a tarball that is not the one the build's job made, by the hash that job gave: an artifact is its run's, and any job of the run may put another under its name", () => {
+    const built = sha256(readFileSync(tarball()));
+    // Another tarball under the build's name, whose helper is the install script too.
+    packed(dir, out, "1.2.3", (top) => writeFileSync(join(top, "surogate"), "#!/bin/sh\n# another job's\n"));
+    const found = sha256(readFileSync(tarball()));
+    expect(found).not.toBe(built);
+    expect(sign({ DESKTOP_TARBALL_SHA256: built })).toMatchObject({
+      status: 1, stdout: "", stderr: `publish.sh: ${tarball()} is not the tarball the build made: its sha256 is ${found}, and the build's ${built}\n`,
+    });
+    // What is no sha256 names no tarball: nothing of it is compared, or said back.
+    for (const hash of [found.toUpperCase(), found.slice(1), `${found} `, `${found}\n${found}`, "$(touch ran)"]) {
+      expect(sign({ DESKTOP_TARBALL_SHA256: hash }), hash).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: DESKTOP_TARBALL_SHA256 is not a sha256, as the build's job gives its tarball's\n" });
+    }
+    expect(sign({ DESKTOP_TARBALL_SHA256: "" })).toMatchObject({ status: 1, stdout: "", stderr: expect.stringMatching(/DESKTOP_TARBALL_SHA256: parameter null or not set\n$/) });
+    expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+    expect(sign({ DESKTOP_TARBALL_SHA256: found }).status).toBe(0);
   });
 
   it("lists, in the repository, one release key: the public half in install.sh", () => {
@@ -177,8 +266,11 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
   // A release of *version*, packaged and signed, in an out folder of its own.
   const released = (version: string) => {
     const out = mkdtempSync(join(dir, "out-"));
-    writeFileSync(join(out, `surogate-desktop-${version}-linux-x64.tar.gz`), randomBytes(1024 * 1024));
-    expect(spawnSync(join(dir, "release", "publish.sh"), ["sign", version, out], { env: { ...process.env, DESKTOP_RELEASE_KEY: PRIVATE } }).status).toBe(0);
+    // A megabyte that does not compress: a send takes as long as one of a megabyte.
+    const tarball = packed(dir, out, version, (top) => writeFileSync(join(top, "large"), randomBytes(1024 * 1024)));
+    expect(spawnSync(join(dir, "release", "publish.sh"), ["sign", version, out], {
+      env: { ...process.env, DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball)) },
+    }).status).toBe(0);
     return out;
   };
   const send = (version: string, out: string, env: Record<string, string> = {}) => spawnSync(join(dir, "release", "publish.sh"), ["send", version, out], {
