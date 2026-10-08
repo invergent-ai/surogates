@@ -247,10 +247,15 @@ describe("the guest image's delivery", () => {
     await expect.poll(unpacking, { timeout: 2_000 }).toBe(0);
   });
 
-  it("checks the free space before it fetches anything", async () => {
+  it("checks the free space before it fetches anything, once what a killed unpack left no longer holds any of it", async () => {
+    // zstd's output when the app was killed mid-unpack: up to the image's size, and never taken.
+    const work = join(images(), `${KEY}.partial`);
+    mkdirSync(work, { recursive: true });
+    writeFileSync(join(work, "rootfs.img.partial"), randomBytes(100_000));
     manifest = { ...manifest, files: manifest.files.map((file) => ({ ...file, size: 2 ** 52 })) };
     await expect(deliver(options())).rejects.toThrow(/^there is not enough free disk space: it needs \d+\.\d GB, and \d+\.\d GB is free$/);
     expect(heard).toEqual([]);
+    expect(readdirSync(work)).toEqual([]);
   });
 
   it("says what the server answered when it does not serve the file", async () => {
