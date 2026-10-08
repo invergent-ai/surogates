@@ -21,7 +21,7 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
   const tools: ToolLayer = {
     run: (operation) => (ran.push(operation.kind), Promise.resolve({ ok: "tools" })),
     refusal: () => ({ error: { type: "other", message: "from the tools" } }),
-    guards: () => ({ home: "/home/u", dataDir: "/data", appDirs: [] }),
+    guards: () => ({ home: "/home/u", dataDir: "/data", cacheDir: "/home/u/.cache/surogate", appDirs: [] }),
     live: () => [],
     stop: () => (stopped.push("tools"), Promise.resolve()),
     end: () => (stopped.push("tools ended"), Promise.resolve()),

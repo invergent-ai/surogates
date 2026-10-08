@@ -277,6 +277,22 @@ describe("the folder sheet", () => {
     expect(await prepared).toMatchObject({ folder });
   });
 
+  it("cannot use the user's cache, which holds the app's own, nor the app's cache or a folder in it", async () => {
+    // The test's session puts XDG_CACHE_HOME at <home>/k: the app downloads an update into <home>/k/surogate/updates.
+    const cache = join(home, "k");
+    mkdirSync(join(cache, "surogate", "updates"), { recursive: true });
+    const client = await signedIn(cache);
+    for (const picked of [cache, join(cache, "surogate"), join(cache, "surogate", "updates")]) {
+      await app!.evaluate((_electron, chosen) => Object.assign(globalThis, { folder: chosen }), picked);
+      const prepared = prepare(client);
+      await expect.poll(async () => text(await prompt(app!), "#prompt-lead")).toContain(`the folder ${picked} holds this computer's home folder or the app's own data`);
+      const refused = await prompt(app!);
+      expect(await text(refused, "#prompt-title")).toBe(`${picked.split("/").at(-1)} cannot be used`);
+      await key(refused, "Escape");
+      expect(await prepared).toBeNull();
+    }
+  });
+
   it("says which files in the folder are also linked from elsewhere", async () => {
     const outside = join(home, "outside.txt");
     writeFileSync(outside, "o");

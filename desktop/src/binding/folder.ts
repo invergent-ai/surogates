@@ -32,11 +32,15 @@ export function confirmedFolder(expect: { dev: number; ino: number; boot?: strin
   return found.ino === expect.ino && (rebooted || found.dev === expect.dev);
 }
 
-// What a chat's folder must keep clear of: the home folder, the app's own data
-// and files (which run outside the sandbox), and the credential folders.
+// What a chat's folder must keep clear of: the home folder, the app's own data,
+// cache and files (which run outside the sandbox), and the credential folders.
 export interface FolderGuards {
   home: string;
   dataDir: string;
+  // The app's own cache folder, <cache home>/surogate, where it downloads an update. The app,
+  // which is not confined, moves and removes what is there: nothing a chat's commands can write
+  // may hold it or lie in it, or a link they put there would be the app's to follow.
+  cacheDir: string;
   appDirs: string[];
 }
 
@@ -71,11 +75,11 @@ export function checkFolder(folder: string, guards: FolderGuards): FolderCheck {
   // One that is, holds or lies in a folder of the guest's tools would hide them from its commands.
   const tools = GUEST_SYSTEM.find((dir) => inside(path, dir) || inside(dir, path));
   if (tools) return refused(`the sandbox keeps its own tools in ${tools}, so the folder ${path} cannot be a chat's`);
-  // A sandbox whose writable folder held the home folder, the app's own data or
+  // A sandbox whose writable folder held the home folder, the app's own data, cache or
   // files or a credential folder would hand all of it to the agent. Each is
   // compared as spelled and as resolved: a link would otherwise walk around the check.
   const homes = spellings(guards.home);
-  const guarded = [guards.dataDir, ...guards.appDirs, ...homes.flatMap((dir) => CREDENTIALS.map((name) => join(dir, name)))]
+  const guarded = [guards.dataDir, guards.cacheDir, ...guards.appDirs, ...homes.flatMap((dir) => CREDENTIALS.map((name) => join(dir, name)))]
     .flatMap(spellings);
   const held = [...new Set([resolve(folder), path])].some(
     (candidate) => candidate === "/" || homes.some((dir) => inside(dir, candidate)) ||

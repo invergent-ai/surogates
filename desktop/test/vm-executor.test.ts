@@ -57,6 +57,7 @@ function vmExecutor(idleMs?: number, network?: NetworkApprovals): VmExecutor {
     ...(network ? { network } : {}),
     bindingOf: (root) => (root === ROOT ? { folder, dev, ino, boot: BOOT_ID } : undefined),
     dataDir: join(base, "data"),
+    cacheDir: join(base, "cache", "surogate"),
     env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
     spawnHost: () => {
       const host = forkHost();

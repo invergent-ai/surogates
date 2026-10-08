@@ -799,7 +799,7 @@ describe("approvals over the link", () => {
 
   // The device as the app wires it: the binder, asking the approvals, in front of the tool hosts.
   const binderFor = (prompts: User, tools: Executor = hosts, folders = noFolders) => new Binder({
-    bindings: journal.bindings, prompts: folders, guards: { home: base, dataDir: join(base, "data"), appDirs: [] },
+    bindings: journal.bindings, prompts: folders, guards: { home: base, dataDir: join(base, "data"), cacheDir: join(base, "cache"), appDirs: [] },
     agent: "Research assistant", hosts: tools, approvalPrompts: prompts,
   });
 

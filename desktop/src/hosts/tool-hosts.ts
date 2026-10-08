@@ -140,6 +140,9 @@ export interface ToolHostsOptions {
   bindingOf(rootSessionId: string): BoundFolder | undefined;
   network?: NetworkApprovals; // without it, every destination off the package hosts is refused
   dataDir: string;
+  // The app's own cache folder, <cache home>/surogate, by the cache home the app itself uses: no
+  // chat's folder may hold it or lie in it.
+  cacheDir: string;
   env: Record<string, string>;
   appDirs?: string[];
   bwrapPath?: string;
@@ -207,7 +210,7 @@ export class ToolHosts implements Executor {
   guards(): FolderGuards {
     const home = this.options.env.HOME;
     if (!home) throw new Error("the app's environment has no HOME");
-    return { home, dataDir: this.options.dataDir, appDirs: this.options.appDirs ?? APP_DIRS };
+    return { home, dataDir: this.options.dataDir, cacheDir: this.options.cacheDir, appDirs: this.options.appDirs ?? APP_DIRS };
   }
 
   // The app's quit: each folder's other holders get as long to let it go as its host
@@ -239,13 +242,14 @@ export class ToolHosts implements Executor {
   private hostFor(root: string, binding: BoundFolder): Host {
     const known = this.hosts.get(root);
     if (known) return known;
-    const { dataDir, env, bwrapPath, network } = this.options;
+    const { dataDir, cacheDir, env, bwrapPath, network } = this.options;
     const start: HostStart = {
       type: "start",
       folder: binding.folder,
       expect: { dev: binding.dev, ino: binding.ino, boot: binding.boot },
       tmp: join(dataDir, "tmp", root),
       dataDir,
+      cacheDir,
       env,
       appDirs: this.options.appDirs ?? APP_DIRS,
       ...(bwrapPath ? { bwrapPath } : {}),

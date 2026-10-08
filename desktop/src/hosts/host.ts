@@ -152,7 +152,7 @@ async function start(message: HostStart): Promise<void> {
   if (!isAbsolute(message.tmp)) throw new Error(`the temp folder must be an absolute path: ${message.tmp}`);
   const tmp = resolve(message.tmp);
   const appDirs = message.appDirs.map((dir) => resolve(dir));
-  const checked = checkFolder(message.folder, { home, dataDir: message.dataDir, appDirs });
+  const checked = checkFolder(message.folder, { home, dataDir: message.dataDir, cacheDir: message.cacheDir, appDirs });
   if (!checked.ok) throw checked.missing ? new FolderUnavailable(checked.message) : new Error(checked.message);
   const globbed = [tmp, ...appDirs].find((entry) => GLOB.test(entry));
   if (globbed) throw new Error(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${globbed}`);

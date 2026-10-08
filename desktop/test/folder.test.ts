@@ -12,7 +12,7 @@ let guards: FolderGuards;
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), "folder-")));
   mkdirSync(join(base, "home"));
-  guards = { home: join(base, "home"), dataDir: join(base, "data"), appDirs: [join(base, "app")] };
+  guards = { home: join(base, "home"), dataDir: join(base, "data"), cacheDir: join(base, "home", ".cache", "surogate"), appDirs: [join(base, "app")] };
 });
 
 afterEach(() => {
@@ -41,6 +41,10 @@ describe("a chat's folder", () => {
     ["the home folder", () => join(base, "home"), /home folder or the app's own data/],
     ["a folder that holds the home folder", () => base, /home folder or the app's own data/],
     ["the app's data", () => join(base, "data"), /home folder or the app's own data/],
+    ["the folder in the app's data that its sandbox's image is downloaded into", () => join(base, "data", "vm", "images"), /home folder or the app's own data/],
+    ["the app's cache, where it downloads an update", () => join(base, "home", ".cache", "surogate"), /home folder or the app's own data/],
+    ["a folder inside the app's cache", () => join(base, "home", ".cache", "surogate", "updates"), /home folder or the app's own data/],
+    ["the user's cache, which holds the app's", () => join(base, "home", ".cache"), /home folder or the app's own data/],
     ["a folder inside the app's files", () => join(base, "app", "sub"), /home folder or the app's own data/],
     ["a credential folder", () => join(base, "home", ".config", "gh"), /home folder or the app's own data/],
     ["a path srt would read as a glob", () => join(base, "x[ab]"), /holds \*, \?, \[ or \]/],
@@ -48,7 +52,7 @@ describe("a chat's folder", () => {
     ["a folder of the sandbox's tools", () => "/usr/share", /the sandbox keeps its own tools in \/usr, so the folder \/usr\/share cannot be a chat's$/],
     ["a folder that holds them", () => "/var", /the sandbox keeps its own tools in \/var\/cache, so the folder \/var cannot be a chat's$/],
   ])("may never be %s", (_name, folder, message) => {
-    for (const dir of ["data", "app/sub", "home/.config/gh", "x[ab]"]) mkdirSync(join(base, dir), { recursive: true });
+    for (const dir of ["data/vm/images", "app/sub", "home/.config/gh", "home/.cache/surogate/updates", "x[ab]"]) mkdirSync(join(base, dir), { recursive: true });
     const checked = checkFolder(folder(), guards);
     expect(checked).toMatchObject({ ok: false, missing: false });
     expect(!checked.ok && checked.message).toMatch(message);
@@ -61,6 +65,25 @@ describe("a chat's folder", () => {
     } finally {
       rmSync(beside, { recursive: true, force: true });
     }
+  });
+
+  it("may be another program's folder in the user's cache, beside the app's", () => {
+    mkdirSync(join(base, "home", ".cache", "surogate"), { recursive: true });
+    mkdirSync(join(base, "home", ".cache", "pip"));
+    expect(checkFolder(join(base, "home", ".cache", "pip"), guards)).toMatchObject({ ok: true, path: join(base, "home", ".cache", "pip") });
+  });
+
+  it("may not hold the app's cache, or lie in it, where the user's cache is a link, as one moved to another disk", () => {
+    mkdirSync(join(base, "disk", "cache", "surogate", "updates"), { recursive: true });
+    symlinkSync(join(base, "disk", "cache"), join(base, "home", ".cache"));
+    for (const folder of [join(base, "disk", "cache"), join(base, "disk", "cache", "surogate"), join(base, "disk", "cache", "surogate", "updates"), join(base, "disk")]) {
+      const checked = checkFolder(folder, guards);
+      expect(checked, folder).toMatchObject({ ok: false, missing: false });
+      expect(!checked.ok && checked.message).toMatch(/home folder or the app's own data/);
+    }
+    // A cache folder that is not there yet is still where its home's link leads.
+    rmSync(join(base, "disk", "cache", "surogate"), { recursive: true });
+    expect(checkFolder(join(base, "disk", "cache"), guards)).toMatchObject({ ok: false, missing: false });
   });
 
   it("may not be where a credential folder's link leads", () => {

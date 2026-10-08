@@ -735,7 +735,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the
     // VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
     tools: (bindings, network, changed) => new Browsing({
-      tools: appTools({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(), changed }),
+      tools: appTools({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, cacheDir: join(cacheHome, "surogate"), env, vm: vmFor(), changed }),
       browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
       bindingOf: (bound) => bindings.get(bound),
       launch: () => {

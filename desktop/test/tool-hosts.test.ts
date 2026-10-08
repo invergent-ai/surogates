@@ -53,6 +53,7 @@ function toolHosts(overrides: Partial<ToolHostsOptions> = {}): ToolHosts {
       return folder && made ? { folder, ...made } : undefined;
     },
     dataDir: join(base, "data"),
+    cacheDir: join(base, "cache", "surogate"),
     env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8" },
     // The fake rg's folder: one of the app's, which the helper's sandbox reads.
     appDirs: [...APP_DIRS, join(base, "tools")],
@@ -696,7 +697,8 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     const start = fakes[0]?.sent[0];
     expect(start?.type).toBe("start");
     if (start?.type !== "start") return;
-    expect(executor.guards()).toEqual({ home: start.env.HOME, dataDir: start.dataDir, appDirs: start.appDirs });
+    expect(executor.guards()).toEqual({ home: start.env.HOME, dataDir: start.dataDir, cacheDir: start.cacheDir, appDirs: start.appDirs });
+    expect(start.cacheDir).toBe(join(base, "cache", "surogate"));
     expect(toolHosts({ appDirs: undefined }).guards().appDirs).toEqual(APP_DIRS);
     expect(() => toolHosts({ env: { PATH: "/usr/bin:/bin" } }).guards()).toThrow("the app's environment has no HOME");
   });

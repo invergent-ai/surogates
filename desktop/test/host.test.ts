@@ -83,6 +83,7 @@ beforeEach(() => {
     expect: bound(folder),
     tmp: join(base, "data", "tmp", "root"),
     dataDir: join(base, "data"),
+    cacheDir: join(base, "cache", "surogate"),
     env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
     appDirs: [dirname(process.execPath), PACKAGE],
   };
@@ -189,6 +190,16 @@ describe("a tool host", { timeout: 30_000 }, () => {
 
   it("refuses a folder that holds the app's own data or files, or the whole system", async () => {
     for (const refused of [base, "/", PACKAGE]) {
+      const harness = host({ folder: refused });
+      const failed = await harness.until((messages) => messages.find((message) => message.type === "failed"));
+      expect(failed.type === "failed" && failed.message).toMatch(/home folder or the app's own data/);
+    }
+  });
+
+  it("refuses the app's own cache folder, a folder in it, and a folder that holds it", async () => {
+    const cache = join(base, "cache", "surogate");
+    mkdirSync(join(cache, "updates"), { recursive: true });
+    for (const refused of [cache, join(cache, "updates"), join(base, "cache")]) {
       const harness = host({ folder: refused });
       const failed = await harness.until((messages) => messages.find((message) => message.type === "failed"));
       expect(failed.type === "failed" && failed.message).toMatch(/home folder or the app's own data/);
