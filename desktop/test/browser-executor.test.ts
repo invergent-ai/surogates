@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PAUSED } from "../src/browser/client.js";
-import { interrupted, type StagedDownload, UNSAVED } from "../src/browser/downloads.js";
+import { interrupted, LEFT_TO_USER, type StagedDownload, UNSAVED } from "../src/browser/downloads.js";
 import { Browsing, NO_BROWSER } from "../src/browser/executor.js";
 import type { Launch } from "../src/browser/host.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
@@ -273,6 +273,37 @@ describe("the browser's kinds beside the tools", () => {
     await vi.waitFor(() => expect(existsSync(first)).toBe(false));
     answers.push({ ok: { notices: [] } });
     expect(await browsing.run(op("browser.mouse"), signal)).toEqual({ ok: { notices: ["saved second.txt"] } });
+  });
+
+  it("tells a session what came of a download taken for its user's only because it came just after they handed the browser back, and never of one that is theirs outright, whatever came of it", async () => {
+    const { browsing, answers, stage } = rig();
+    const saved: string[] = [];
+    browsing.saveDownloadsWith((download) => (saved.push(download.name), Promise.resolve(`saved ${download.name}`)));
+    const theirs = { root: ROOT, session: ROOT, user: true };
+    // Theirs outright: saved, or no file this side takes for staged. Not a word of either.
+    stage({ ...theirs, name: "statement.pdf", path: kept("a") });
+    stage({ ...theirs, name: "payslip.pdf", path: join(outside, "nothing") });
+    // Theirs only by the minute, and so perhaps the agent's own: what the saver says came of it; and of one this
+    // side takes for no staged file, that it was not saved, and no more.
+    stage({ ...theirs, name: "report.txt", path: kept("b"), afterHandBack: true });
+    stage({ ...theirs, name: "lost.txt", path: join(outside, "nothing"), afterHandBack: true });
+    const told = (browsing as unknown as { told: Map<string, { notices: string[] }> }).told;
+    await vi.waitFor(() => expect(told.get(ROOT)?.notices).toHaveLength(2));
+    expect(saved).toEqual(["statement.pdf", "report.txt"]);
+    answers.push({ ok: { notices: [] } });
+    expect(await browsing.run(op("browser.mouse"), signal)).toEqual({ ok: { notices: ["saved report.txt", LEFT_TO_USER] } });
+    // What saves it failing outright is "not saved" too; of one that is theirs outright, still not a word.
+    browsing.saveDownloadsWith(() => Promise.reject(new Error("the journal is closed")));
+    stage({ ...theirs, name: "statement.pdf", path: kept("c") });
+    stage({ ...theirs, name: "report.txt", path: kept("d"), afterHandBack: true });
+    await vi.waitFor(() => expect(told.get(ROOT)?.notices).toEqual([LEFT_TO_USER]));
+    await vi.waitFor(() => expect([existsSync(join(staging, "c")), existsSync(join(staging, "d"))]).toEqual([false, false]));
+    answers.push({ ok: { notices: [] } }, { ok: { notices: [] } });
+    expect(await browsing.run(op("browser.mouse"), signal)).toEqual({ ok: { notices: [LEFT_TO_USER] } });
+    expect(await browsing.run(op("browser.mouse"), signal)).toEqual({ ok: { notices: [] } });
+    // The agent's own is told as its own, though it came marked so by mistake.
+    stage({ root: ROOT, session: ROOT, name: "mine.txt", path: join(outside, "nothing"), user: false, afterHandBack: true });
+    await vi.waitFor(() => expect(told.get(ROOT)?.notices).toEqual([UNSAVED]));
   });
 
   it("drops a download the browser hands on as the agent's once its user has taken the browser over, which this side knows before the browser does; one of their own is saved", async () => {

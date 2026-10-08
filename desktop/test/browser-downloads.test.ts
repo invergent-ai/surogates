@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { type ApprovalAnswer, type ApprovalRequest, Approvals } from "../src/binding/approvals.js";
 import { BOOT_ID } from "../src/binding/folder.js";
-import { downloadSaver, quoted, type Saver, saveDownload, savedName, type StagedDownload, tooLarge, UNSAVED } from "../src/browser/downloads.js";
+import {
+  downloadSaver, LEFT_TO_USER, quoted, type Saver, saveDownload, savedName, type StagedDownload, tooLarge, UNSAVED,
+} from "../src/browser/downloads.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { perform } from "../src/files/operations.js";
 import type { Mode } from "../src/journal/bindings.js";
@@ -417,6 +419,56 @@ describe("a download the agent's page started", () => {
     );
     expect([readdirSync(downloads).length, [...new Set(readdirSync(downloads).map(read))]]).toEqual([100, ["kept"]]);
     expect([asked, existsSync(download.path)]).toEqual([[], false]);
+  });
+
+  it("says of one taken for its user's only because it came just after they handed the browser back what it says of the agent's own where it is saved, and one sentence where it is not, whatever the reason", async () => {
+    bind("free");
+    const just = (name: string, data = "report"): StagedDownload => ({ ...stage(name, data, true), afterHandBack: true });
+    // Asked as theirs, in a chat that works freely too. Allowed: its user has put it in the chat's folder, and its agent is told where.
+    expect(await saveDownload(just("report.pdf"), journal.bindings, saver)).toBe(
+      'The page downloaded "report.pdf". It is saved in the chat\'s folder as Downloads/report.pdf.',
+    );
+    expect(asked).toMatchObject([{ kind: "change", action: "write", path: join(downloads, "report.pdf"), download: "user" }]);
+    // Not allowed, in each way a prompt ends without a yes: one sentence, with no name and no reason.
+    const said: string[] = [];
+    for (const refusal of ["deny", "stop_asking", "timeout"] as const) {
+      answer = refusal;
+      said.push(await saveDownload(just("payslip.pdf"), journal.bindings, saver));
+    }
+    answer = "allow";
+    // Not saved for another reason: over what a write carries; its staged file gone; told to stop; and Downloads a link.
+    const over = just("over.bin", "");
+    truncateSync(over.path, MAX_WRITE_BYTES + 1);
+    const stopped = new AbortController();
+    stopped.abort();
+    said.push(
+      await saveDownload(over, journal.bindings, saver),
+      await saveDownload({ ...just("gone.pdf"), path: join(base, "staged", "gone") }, journal.bindings, saver),
+      await saveDownload(just("stopped.pdf"), journal.bindings, saver, stopped.signal),
+    );
+    rmSync(downloads, { recursive: true });
+    symlinkSync(folder, downloads);
+    said.push(await saveDownload(just("linked.pdf"), journal.bindings, saver));
+    // And where what was staged cannot even be named, or its chat has no folder here.
+    said.push(await saveDownload({ ...just("x.pdf"), name: undefined } as unknown as StagedDownload, journal.bindings, saver));
+    said.push(await saveDownload({ ...just("x.pdf"), root: CHILD }, journal.bindings, saver));
+    expect(said).toEqual(said.map(() => LEFT_TO_USER));
+    expect(said).toHaveLength(9);
+    expect(LEFT_TO_USER).toBe(
+      "A download that began just after the user handed the agent's browser back was the user's to save, and was not saved. If it was the agent's own, the agent may start it again.",
+    );
+    expect(readdirSync(folder)).toEqual(["Downloads"]);
+    // One that is theirs outright says what it always said, to nobody: not that sentence, and its name is its own.
+    rmSync(downloads);
+    answer = "deny";
+    expect(await saveDownload(stage("statement.pdf", "x", true), journal.bindings, saver)).toBe(
+      'The page downloaded "statement.pdf", but it was not saved: The user denied this change on this computer.',
+    );
+    // Nor does the agent's own, though one said so of it by mistake.
+    journal.bindings.setMode(ROOT, "ask");
+    expect(await saveDownload({ ...stage("mine.pdf"), afterHandBack: true }, journal.bindings, saver)).toBe(
+      'The page downloaded "mine.pdf", but it was not saved: The user denied this change on this computer.',
+    );
   });
 
   it("names it as one file of the folder: never a path, a hidden file or an invisible character, and within what a name may take", () => {

@@ -16,7 +16,7 @@ import { MAX_WRITE_BYTES } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
 import { destination, reach } from "../vm/egress.js";
 import { CANCELLED, NEW_TAB, PAUSED } from "./client.js";
-import { interrupted, quoted, type StagedDownload, tooLarge } from "./downloads.js";
+import { interrupted, LEFT_TO_USER, quoted, type StagedDownload, tooLarge } from "./downloads.js";
 import { letGo, OPERATIONS } from "./operations.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
 
@@ -661,8 +661,10 @@ export class BrowserHost {
   // now, and it was last handed back more than AFTER_HAND_BACK_MS ago. Every other is its user's: one whose
   // request began while they held it, however late it comes; one with no request known that comes while
   // they hold it, or in the time after in which it may have been asked for under their hand; and, in doubt
-  // between two requests of one address, either.
-  private whose(download: Download): { by: string } | { stop: AbortSignal } {
+  // between two requests of one address, either. *after*: theirs for that last reason alone, the time
+  // after a hand back. Such a one may be the agent's own, and the agent is told what came of it; of one
+  // that is theirs outright, held now or by its request, never, whatever the clock says.
+  private whose(download: Download): { by: string; after?: true } | { stop: AbortSignal } {
     const address = bare(download.url());
     const known = [...this.open].filter(([request]) => bare(request.url()) === address);
     if (known.length > 0) {
@@ -671,7 +673,7 @@ export class BrowserHost {
       return begun.by !== null ? { by: begun.by } : { stop: begun.stop };
     }
     if (this.held !== null) return { by: this.held };
-    if (this.handed !== null && this.now() - this.handed.at <= AFTER_HAND_BACK_MS) return { by: this.handed.by };
+    if (this.handed !== null && this.now() - this.handed.at <= AFTER_HAND_BACK_MS) return { by: this.handed.by, after: true };
     return { stop: this.interrupt.signal };
   }
 
@@ -683,7 +685,12 @@ export class BrowserHost {
   private arrived(page: Page, download: Download): Promise<void> {
     const session = this.sessionOf(page);
     const whose = this.whose(download);
-    if (session !== undefined) return this.stage(download, { root: this.roots.get(session), session }, "stop" in whose ? whose.stop : null);
+    if (session !== undefined) {
+      return "stop" in whose
+        ? this.stage(download, { root: this.roots.get(session), session }, whose.stop)
+        : this.stage(download, { root: this.roots.get(session), session, after: whose.after === true }, null);
+    }
+    // In a tab no chat owns no agent acts: one there is its user's outright, in the time after a hand back too.
     if ("stop" in whose || this.forgets.has(whose.by)) return this.discard(download);
     return this.stage(download, { root: whose.by, session: whose.by }, null);
   }
@@ -697,12 +704,17 @@ export class BrowserHost {
   // A download once it has finished, in this host's staging folder: handed on for the chat's folder,
   // or, when it did not finish, cannot be measured or is too large to save, gone, and its agent told why.
   // *of*: the chat it is saved in, and the session it is told to. *stop*: null for its user's own, which
-  // nothing of the agent's stops and of which the agent is told nothing. The agent's is interrupted as the
-  // operation that started it is, by the signal it began under: taken over before it is handed on, or
-  // before it was announced, it is stopped where it is and dropped, never taken up again at a hand back,
-  // and its agent is told so with its session's next answer. One handed on before the take-over is the
-  // chat's to save, as a write of the chat's that waits or asks goes on.
-  private async stage(download: Download, of: { root: string | undefined; session: string }, stop: AbortSignal | null): Promise<void> {
+  // nothing of the agent's stops. Of one that is theirs outright the agent is told nothing. Of one that
+  // is theirs only by the time after a hand back (*of.after*), which may be the agent's own, the agent is
+  // told that it was not saved where it is not handed on, with no name and no reason; handed on, what
+  // saves it says what came of it. The agent's is interrupted as the operation that started it is, by the
+  // signal it began under: taken over before it is handed on, or before it was announced, it is stopped
+  // where it is and dropped, never taken up again at a hand back, and its agent is told so with its
+  // session's next answer. One handed on before the take-over is the chat's to save, as a write of the
+  // chat's that waits or asks goes on.
+  private async stage(
+    download: Download, of: { root: string | undefined; session: string; after?: boolean }, stop: AbortSignal | null,
+  ): Promise<void> {
     const name = download.suggestedFilename();
     const { root, session } = of;
     const user = stop === null;
@@ -712,6 +724,8 @@ export class BrowserHost {
     // The agent's own is told whatever came of it, held meanwhile or not: it began before any take-over.
     const tell = (notice: string) => {
       if (!user) this.keep(session, notice);
+      // Theirs only by the time after a hand back: not why, and not its name.
+      else if (of.after === true) this.keep(session, LEFT_TO_USER);
     };
     try {
       let path: string;
@@ -728,7 +742,7 @@ export class BrowserHost {
         await download.delete().catch(() => {});
         return;
       }
-      this.options.downloaded({ root, session, name, path, user });
+      this.options.downloaded({ root, session, name, path, user, ...(user && of.after === true ? { afterHandBack: true as const } : {}) });
     } finally {
       this.arriving.delete(download);
     }

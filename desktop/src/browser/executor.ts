@@ -9,7 +9,7 @@ import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { ToolLayer } from "../shell/device-stack.js";
 import { type BrowserClient, PAUSED } from "./client.js";
-import { interrupted, type StagedDownload, UNSAVED } from "./downloads.js";
+import { interrupted, LEFT_TO_USER, type StagedDownload, UNSAVED } from "./downloads.js";
 import type { Launch } from "./host.js";
 
 export const BROWSER_KINDS = "browser.";
@@ -23,6 +23,9 @@ export const NO_BROWSER: Outcome = {
 };
 
 export const isBrowserKind = (kind: string): boolean => kind.startsWith(BROWSER_KINDS);
+
+// Whether *download* is its user's only because it came just after they handed the browser back.
+const justAfter = (download: StagedDownload): boolean => download.user && download.afterHandBack === true;
 
 // What a session's downloads came to, at most this many to an answer, as the host's own notices.
 const MAX_NOTICES = 20;
@@ -95,7 +98,7 @@ export class Browsing implements ToolLayer {
   // *held*: whether its user held the browser when the host handed it on.
   private async saved(download: StagedDownload, path: string | null, held: boolean): Promise<void> {
     // No file its browser host staged: nothing is read or removed on the host's word alone.
-    if (path === null) return this.hear(download, UNSAVED);
+    if (path === null) return this.hear(download, justAfter(download) ? LEFT_TO_USER : UNSAVED);
     // The agent's own, handed on in the instant its user took the browser over, before the host heard of
     // it: dropped as one the host still had, and its agent told the same.
     if (held && !download.user) {
@@ -113,8 +116,9 @@ export class Browsing implements ToolLayer {
       notice = await this.save({ ...download, path }, stop.signal);
     } catch {
       // What saves them says itself what came of each, and removes what was staged: of one it failed on
-      // outright there is nothing to tell, and its file goes here.
+      // outright there is nothing to tell, and its file goes here. One that may be the agent's own was not saved.
       await rm(path, { force: true }).catch(() => {});
+      if (justAfter(download)) this.hear(download, LEFT_TO_USER);
       return;
     }
     this.hear(download, notice);
@@ -133,9 +137,10 @@ export class Browsing implements ToolLayer {
 
   // What came of *download*, for its session's next answer that says what its page did.
   private hear(download: StagedDownload, notice: string): void {
-    // One its user started while they held the browser is theirs: its agent hears nothing of it. Nor does a
-    // chat that is gone: no answer of its sessions is left to carry it.
-    if (download.user || !this.options.bindingOf(download.root)) return;
+    // One that is its user's outright is theirs: its agent hears nothing of it, saved or not. One that is
+    // theirs only because it came just after they handed the browser back may be the agent's own, which
+    // hears what came of it. A chat that is gone hears nothing: no answer of its sessions is left to carry it.
+    if ((download.user && !justAfter(download)) || !this.options.bindingOf(download.root)) return;
     const kept = this.told.get(download.session) ?? { root: download.root, notices: [] };
     if (kept.notices.length < MAX_NOTICES) kept.notices.push(notice);
     this.told.set(download.session, kept);

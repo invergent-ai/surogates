@@ -17,12 +17,16 @@ import type { Operation, Outcome } from "../link/protocol.js";
 // the name the browser gave it, and where the host keeps it until it is saved. user: it is its
 // user's, not the agent's: it began while they held the browser, or cannot be told from one that
 // did (host.ts, whose). It is asked about in either mode, and nothing of it is the agent's to hear.
+// afterHandBack: it is taken for its user's only because it came, with no request known, just after
+// they handed the browser back. It may be the agent's own, so the agent is told what came of it: where
+// it was saved, once its user has allowed that; of any other end, only that it was not saved.
 export interface StagedDownload {
   root: string;
   session: string;
   name: string;
   path: string;
   user: boolean;
+  afterHandBack?: true;
 }
 
 // What saves it: the device's binder, which asks the chat's approvals, then runs it on the chat's file host.
@@ -95,6 +99,13 @@ const NEVER = new AbortController().signal;
 /** What the agent is told of a download that came as no download this computer saves: not even its name is taken from it. */
 export const UNSAVED = `The page downloaded a file, but it was not saved: ${COULD_NOT}.`;
 
+/**
+ * What the agent is told of a download taken for its user's only because it came just after they handed
+ * the browser back, and that was not saved: not allowed, or for any other reason. It names no file and
+ * gives no reason, since the download may have been its user's own.
+ */
+export const LEFT_TO_USER =
+  "A download that began just after the user handed the agent's browser back was the user's to save, and was not saved. If it was the agent's own, the agent may start it again.";
 /** What the agent is told of one too large to save. *most*: the limit in force, a write's most unless told another. */
 export const tooLarge = (name: string, bytes: number, most = MAX_WRITE_BYTES): string =>
   `The page downloaded ${quoted(name)} (${bytes} bytes), too large to save in the chat's folder at once (at most ${most} bytes), so it was not saved.`;
@@ -142,16 +153,22 @@ async function stagedAt(path: string): Promise<Buffer | number> {
 export async function saveDownload(
   download: StagedDownload, bindings: Pick<Bindings, "get">, saver: Saver, stop: AbortSignal = NEVER,
 ): Promise<string> {
+  // Theirs only by the minute after a hand back: of any end but its saving, one sentence, whatever the reason.
+  const unsaved = download.user && download.afterHandBack === true ? LEFT_TO_USER : null;
   try {
-    return await save(download, bindings, saver, stop);
+    const came = await save(download, bindings, saver, stop);
+    return typeof came === "string" ? (unsaved ?? came) : came.saved;
   } catch {
-    return UNSAVED;
+    return unsaved ?? UNSAVED;
   } finally {
     await rm(download.path, { force: true }).catch(() => {});
   }
 }
 
-async function save(download: StagedDownload, bindings: Pick<Bindings, "get">, saver: Saver, signal: AbortSignal): Promise<string> {
+// What came of it: where it was saved; or, as plain text, why it was not.
+async function save(
+  download: StagedDownload, bindings: Pick<Bindings, "get">, saver: Saver, signal: AbortSignal,
+): Promise<string | { saved: string }> {
   const said = `The page downloaded ${quoted(download.name)}`;
   const notSaved = (why: string) => `${said}, but it was not saved: ${why}.`;
   const op = (kind: string, args: Record<string, unknown>): Operation => ({
@@ -210,7 +227,7 @@ async function save(download: StagedDownload, bindings: Pick<Bindings, "get">, s
       if (denied !== null) return notSaved("error" in denied ? denied.error.message : COULD_NOT);
       asked = true;
       const outcome = await saver.run(write, signal);
-      if (!("error" in outcome)) return `${said}. It is saved in the chat's folder as ${key.slice(binding.folder.length + 1)}.`;
+      if (!("error" in outcome)) return { saved: `${said}. It is saved in the chat's folder as ${key.slice(binding.folder.length + 1)}.` };
       // Refused. What is there now says whether another name may do: nothing is written through or over any of it.
       // Downloads itself, made a link or a file since the look, ends the save.
       const since = await unfit();

@@ -19,7 +19,7 @@ import type { BrowserContext, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { PAUSED } from "../src/browser/client.js";
-import { interrupted, type StagedDownload, tooLarge } from "../src/browser/downloads.js";
+import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge } from "../src/browser/downloads.js";
 import {
   AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, holding, type Launch, notFinished, PROXY_BYPASSED, WEAKENING,
 } from "../src/browser/host.js";
@@ -598,36 +598,93 @@ describe("a page's download, as the host stages it", () => {
   });
 
   it("takes one with no request known for the agent's only while nobody holds the browser and more than a minute after it was last handed back: to the millisecond", async () => {
+    // Whose it is handed on as: the agent's; its user's, of which the agent hears nothing; or its user's only
+    // because it came just after they handed the browser back, of which the agent hears what came.
     const whose = async (name: string) => {
       const file = fileOf(6);
       await arrives(downloadOf(name, file, Promise.resolve(file)));
-      return staged.at(-1)?.name === name ? staged.at(-1)!.user : "not staged";
+      const handed = staged.at(-1);
+      if (handed?.name !== name) return "not staged";
+      return handed.user ? (handed.afterHandBack ? "theirs, just after" : "theirs") : (handed.afterHandBack ? "malformed" : "the agent's");
     };
     expect(AFTER_HAND_BACK_MS).toBe(60_000);
     // Never held: the agent's, as a page's own.
-    expect(await whose("first.bin")).toBe(false);
+    expect(await whose("first.bin")).toBe("the agent's");
     // Held: theirs.
     host.pause("chat-2", true);
     clock += 5_000;
-    expect(await whose("held.bin")).toBe(true);
+    expect(await whose("held.bin")).toBe("theirs");
     host.pause("chat-2", false);
     // Handed back: what comes in the minute after may have been asked for while they held it. In doubt, theirs.
-    expect(await whose("at-once.bin")).toBe(true);
+    expect(await whose("at-once.bin")).toBe("theirs, just after");
     clock += AFTER_HAND_BACK_MS - 1;
-    expect(await whose("just-before.bin")).toBe(true);
+    expect(await whose("just-before.bin")).toBe("theirs, just after");
     clock += 1;
-    expect(await whose("at-the-minute.bin")).toBe(true);
+    expect(await whose("at-the-minute.bin")).toBe("theirs, just after");
     clock += 1;
-    expect(await whose("just-after.bin")).toBe(false);
+    expect(await whose("just-after.bin")).toBe("the agent's");
     // The minute runs from the last hand back, by whichever chat.
     host.pause("chat-1", true);
     host.pause("chat-1", false);
     clock += AFTER_HAND_BACK_MS;
-    expect(await whose("again.bin")).toBe(true);
+    expect(await whose("again.bin")).toBe("theirs, just after");
     clock += 1;
-    expect(await whose("after-again.bin")).toBe(false);
-    // The agent is told nothing of those taken for its user's.
+    expect(await whose("after-again.bin")).toBe("the agent's");
+    // Announced while they hold it, it is theirs outright, whatever the clock says: taken over again within the
+    // minute of the last hand back, and at every moment of that minute.
+    host.pause("chat-1", true);
+    host.pause("chat-1", false);
+    host.pause("chat-2", true);
+    for (const passed of [0, 1, AFTER_HAND_BACK_MS - 1, 1, 1, 10 * AFTER_HAND_BACK_MS]) {
+      clock += passed;
+      expect(await whose(`held-${clock}.bin`)).toBe("theirs");
+    }
+    // The host tells the agent nothing of any that it handed on: what came of each is the saver's to say.
     expect(state().unseen.size).toBe(0);
+    // Handed on, the mark is there only where it holds: an own property of none of the others.
+    expect(staged.map((download) => Object.hasOwn(download, "afterHandBack"))).toEqual(staged.map((download) => download.afterHandBack === true));
+  });
+
+  it("tells the agent that one taken for its user's only by the minute was not saved, in one sentence that names no file and gives no reason; and nothing of one that is theirs outright", async () => {
+    expect(LEFT_TO_USER).toBe(
+      "A download that began just after the user handed the agent's browser back was the user's to save, and was not saved. If it was the agent's own, the agent may start it again.",
+    );
+    // Each way a download is not handed on: too large, not finished, not measured.
+    const fails = async () => {
+      const over = fileOf(MAX_WRITE_BYTES + 1);
+      await arrives(downloadOf("statement.pdf", over, Promise.resolve(over)));
+      await arrives(downloadOf("statement.pdf", over, Promise.reject(new Error("canceled"))));
+      await arrives(downloadOf("statement.pdf", join(profile, "gone"), Promise.resolve(join(profile, "gone"))));
+      return existsSync(over);
+    };
+    // Held: theirs outright. Not a word, at any moment.
+    host.pause("chat-2", true);
+    expect([await fails(), state().unseen.size]).toEqual([false, 0]);
+    host.pause("chat-2", false);
+    // Just after the hand back, with no request known: it may be the agent's own, which is told that much.
+    expect([await fails(), state().unseen.get(SESSION)]).toEqual([false, [LEFT_TO_USER, LEFT_TO_USER, LEFT_TO_USER]]);
+    state().unseen.clear();
+    // One whose request began while they held it is theirs outright in that minute too: not a word.
+    host.pause("chat-2", true);
+    asks(SITE_URL);
+    asks(`${SITE_URL}?again`);
+    host.pause("chat-2", false);
+    const over = fileOf(MAX_WRITE_BYTES + 1);
+    await arrives(downloadOf("export.csv", over, Promise.resolve(over), SITE_URL));
+    const file = fileOf(6);
+    await arrives(downloadOf("export.csv", file, Promise.resolve(file), `${SITE_URL}?again`));
+    expect([staged, state().unseen.size]).toEqual([[{ root: "chat-1", session: SESSION, name: "export.csv", path: file, user: true }], 0]);
+    // Nor is one in a tab no chat owns told to anyone: no agent acts there.
+    const large = fileOf(MAX_WRITE_BYTES + 1);
+    await arrives(downloadOf("own.bin", large, Promise.resolve(large)), TAB);
+    const own = fileOf(6);
+    await arrives(downloadOf("own.bin", own, Promise.resolve(own)), TAB);
+    expect([staged[1], existsSync(large), state().unseen.size]).toEqual([{ root: "chat-2", session: "chat-2", name: "own.bin", path: own, user: true }, false, 0]);
+    // Past the minute it is the agent's, told as any of its own.
+    clock += AFTER_HAND_BACK_MS + 1;
+    const mine = fileOf(MAX_WRITE_BYTES + 1);
+    await arrives(downloadOf("report.bin", mine, Promise.resolve(mine)));
+    expect(state().unseen.get(SESSION)).toEqual([tooLarge("report.bin", MAX_WRITE_BYTES + 1)]);
   });
 
   it("takes one whose request began while nobody held the browser for the agent's, in the minute after a hand back too; and one whose request began while it was held for its user's however late it comes", async () => {
@@ -1084,7 +1141,8 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     // Handed back while it is on its way, and nobody takes the browser over again: it ends while the agent drives.
     host.pause("chat-1", false);
     await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(1);
-    expect(staged[0]).toMatchObject({ root: "chat-1", session: a, name: "slow.bin", user: true });
+    // Theirs outright, by its request: handed on with no mark that the agent is to hear of it.
+    expect(staged[0]).toEqual({ root: "chat-1", session: a, name: "slow.bin", path: staged[0]!.path, user: true });
     expect(await readFile(staged[0]!.path, "utf8")).toBe(`${"s".repeat(4_096)}report`);
     expect((await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")).ok.notices).toEqual([]);
     // Another, and taken over again while it is still on its way, from another chat: theirs still, and not stopped as the agent's is.
@@ -1098,7 +1156,7 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     expect((await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")).ok.notices).toEqual([]);
   }, 30_000);
 
-  it("takes a link with `download` that its user clicked while they held the browser for theirs though its site answers after the hand back: the browser says no request of it; and the agent's own in the minute after, in doubt, too", async () => {
+  it("takes a link with `download` that its user clicked while they held the browser for theirs though its site answers after the hand back: the browser says no request of it; and the agent's own in the minute after, in doubt, too, each marked as theirs only by that minute", async () => {
     const staged: StagedDownload[] = [];
     // The host's clock, which the test moves on.
     let ahead = 0;
@@ -1114,18 +1172,63 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     host.pause("chat-1", false);
     // Announced with nobody holding the browser, a second after it was handed back.
     await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(1);
-    expect(staged[0]).toMatchObject({ root: "chat-1", session: a, name: "late.bin", user: true });
+    // Theirs, and only by the minute: what saves it tells the agent what came of it, since it may be the agent's own.
+    expect(staged[0]).toEqual({ root: "chat-1", session: a, name: "late.bin", path: staged[0]!.path, user: true, afterHandBack: true });
+    // The host itself tells the agent nothing of one it handed on.
     expect((await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")).ok.notices).toEqual([]);
-    // The agent's own click on such a link in that minute cannot be told from theirs: asked as theirs, the agent told nothing.
+    // The agent's own click on such a link in that minute cannot be told from theirs: asked as theirs, marked the same.
     expect(await script(a, `${click} return 1;`, "chat-1")).toBe(1);
     await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(2);
-    expect(staged[1]).toMatchObject({ name: "late.bin", user: true });
+    expect(staged[1]).toEqual({ root: "chat-1", session: a, name: "late.bin", path: staged[1]!.path, user: true, afterHandBack: true });
     // More than a minute after the hand back, it is the agent's.
     ahead = AFTER_HAND_BACK_MS + 1;
     expect(await script(a, `${click} return 1;`, "chat-1")).toBe(1);
     await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(3);
-    expect(staged[2]).toMatchObject({ root: "chat-1", session: a, name: "late.bin", user: false });
+    expect(staged[2]).toEqual({ root: "chat-1", session: a, name: "late.bin", path: staged[2]!.path, user: false });
   }, 40_000);
+
+  it("tells the agent that a download was not saved, and no more, only where it is its user's by the minute after a hand back alone: of one announced while they hold the browser, or whose request began then, nothing, whatever the clock says", async () => {
+    const staged: StagedDownload[] = [];
+    let ahead = 0;
+    // A host that hands no download on: each is over what it may carry, so what the agent hears is the host's to say.
+    host = hostWith({ downloaded: (download) => staged.push(download), downloadBytes: 3, now: () => Date.now() + ahead });
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    // What the agent's next answers carry, once the download a test waits for has ended: the page's own hears it too.
+    const hears = async (starts: () => Promise<unknown>) => {
+      const [download] = await Promise.all([page.waitForEvent("download", { timeout: 10_000 }), starts()]);
+      await download.failure();
+      // Removed by the host once it had looked at it: by then it has said what it says.
+      await expect.poll(() => download.path().then((path) => existsSync(path), () => false), { timeout: 5_000 }).toBe(false);
+      return (await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")) as { ok?: { notices: string[] }; error?: unknown };
+    };
+    const link = () => page.click("#dl");
+    // Held: theirs outright. The agent's operations are paused, and once handed back its next answer carries nothing.
+    host.pause("chat-1", true);
+    expect(await hears(link)).toEqual(PAUSED);
+    host.pause("chat-1", false);
+    expect((await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")).ok.notices).toEqual([]);
+    // In the minute after the hand back, with no request known: it may be the agent's own click, which hears that much.
+    expect((await hears(() => script(a, "document.getElementById('dl').click(); return 1;", "chat-1"))).ok?.notices).toEqual([LEFT_TO_USER]);
+    // A request begun while they held it, answered in that minute: theirs outright. Nothing.
+    host.pause("chat-1", true);
+    await page.evaluate("void (location.href = '/late.bin')");
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", false);
+    expect((await hears(() => Promise.resolve())).ok?.notices).toEqual([]);
+    // Taken over again within the minute of that hand back: announced while held, it is theirs outright at every moment of the clock.
+    host.pause("chat-2", true);
+    for (const passed of [0, AFTER_HAND_BACK_MS, 10 * AFTER_HAND_BACK_MS]) {
+      ahead += passed;
+      expect(await hears(link)).toEqual(PAUSED);
+    }
+    host.pause("chat-2", false);
+    ahead += AFTER_HAND_BACK_MS + 1;
+    // Past the minute: nothing was kept of any of those, and the agent's own is told as any of its own.
+    expect((await hears(() => script(a, "document.getElementById('dl').click(); return 1;", "chat-1"))).ok?.notices).toEqual([tooLarge("report.txt", 6, 3)]);
+    expect(staged).toEqual([]);
+  }, 60_000);
 
   it("takes a download for its user's by when its request began, however it was asked for and however late its site answers: a navigation, a redirect, a form, a new window and a frame, each answered after the hand back and past the minute", async () => {
     const staged: StagedDownload[] = [];
@@ -1152,7 +1255,8 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
       ahead += AFTER_HAND_BACK_MS + 1;
       const count = staged.length;
       await expect.poll(() => staged.length, { timeout: 10_000, message: kind }).toBe(count + 1);
-      expect(staged.at(-1), kind).toMatchObject({ root: "chat-1", session: a, name, user: true });
+      // Theirs by its request, outright: not by the minute, so the agent is told nothing of what comes of it.
+      expect(staged.at(-1), kind).toEqual({ root: "chat-1", session: a, name, path: staged.at(-1)!.path, user: true });
     }
     expect((await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")).ok.notices).toEqual([]);
     // Nothing is kept of a request once its download has come.

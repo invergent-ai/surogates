@@ -226,7 +226,10 @@ export class BrowserClient {
       else if (message.type === "address") this.addressing.get(message.id)?.(message.url);
       else if (message.type === "shown") this.showing.get(message.id)?.(message.shown);
       else if (message.type === "download") {
-        this.downloaded({ root: message.root, session: message.session, name: message.name, path: message.path, user: message.user === true });
+        this.downloaded({
+          root: message.root, session: message.session, name: message.name, path: message.path, user: message.user === true,
+          ...(message.afterHandBack === true ? { afterHandBack: true as const } : {}),
+        });
       }
       else if (message.type === "stopped") host.kill();
     });

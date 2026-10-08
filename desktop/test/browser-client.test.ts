@@ -165,6 +165,13 @@ describe("the browser host's client", () => {
     host.say({ type: "download", ...download, user: "yes" as unknown as boolean });
     host.say({ type: "download", root: "root", session: "child", name: "report.txt", path: "/tmp/nowhere/a" } as FromBrowser);
     expect(heard).toEqual([download, { ...download, user: true }, download, download]);
+    // And theirs only by the minute after a hand back, of which the agent is told, only where the host says exactly that.
+    heard.length = 0;
+    host.say({ type: "download", ...download, user: true, afterHandBack: true });
+    host.say({ type: "download", ...download, user: true, afterHandBack: "yes" as unknown as true });
+    host.say({ type: "download", ...download, user: true });
+    expect(heard).toEqual([{ ...download, user: true, afterHandBack: true }, { ...download, user: true }, { ...download, user: true }]);
+    expect(heard.map((staged) => Object.hasOwn(staged as object, "afterHandBack"))).toEqual([true, false, false]);
   });
 
   it("asks a running host for the address of a session's page, and says a new tab's where none runs", async () => {
@@ -391,6 +398,16 @@ describe.skipIf(!run)("the browser host's process", () => {
       expect(readFileSync(heard[0]!.path, "utf8")).toBe("report");
       // Under the host's own temporary folder, apart from the profile.
       expect([heard[0]!.path.startsWith(`${tmpdir()}/`), heard[0]!.path.startsWith(profile)]).toEqual([true, false]);
+      // Taken over and handed back: the same download, just after, comes as its user's by that alone, and says so.
+      client.pause("root", true);
+      client.pause("root", false);
+      expect(await client.perform(launch, operation("op-3", "browser.evaluate", { code }), signal)).toEqual({ ok: { value: 1 } });
+      await expect.poll(() => heard.length, { timeout: 10_000 }).toBe(2);
+      expect(heard[1]).toEqual({ root: "root", session: "child", name: "report.txt", path: heard[1]!.path, user: true, afterHandBack: true });
+      // And one that comes while they hold the browser, as theirs outright.
+      client.pause("root", true);
+      await new Promise((done) => setTimeout(done, 300));
+      expect(await client.perform(launch, operation("op-4", "browser.evaluate", { code }), signal)).toEqual(PAUSED);
     } finally {
       await client.stop();
     }
