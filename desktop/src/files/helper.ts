@@ -7,7 +7,7 @@ import { createInterface } from "node:readline";
 
 import { type Context, perform } from "./operations.js";
 
-const { SUROGATE_FOLDER: folder, HOME: home, ELECTRON_RUN_AS_NODE: _node, ...rest } = process.env;
+const { SUROGATE_FOLDER: folder, HOME: home, ...rest } = process.env;
 if (!folder || !home) {
   process.stderr.write("the file helper needs SUROGATE_FOLDER and HOME\n");
   process.exit(2);

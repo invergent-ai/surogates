@@ -1,15 +1,16 @@
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
-import type { Operation } from "../src/link/protocol.js";
+import { perform } from "../src/files/operations.js";
+import type { Operation, Outcome } from "../src/link/protocol.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type NetworkAnswer, type NetworkAsk, type ToHost } from "../src/hosts/messages.js";
 import {
-  APP_DIRS, CANCELLED, forkHost, HOST_STOPPED, type HostProcess, NOT_BOUND, START_TIMEOUT_MS, ToolHosts,
+  APP_DIRS, CANCELLED, forkHost, HOST_STOPPED, type HostProcess, NODE, NOT_BOUND, START_TIMEOUT_MS, ToolHosts,
   type ToolHostsOptions,
 } from "../src/hosts/tool-hosts.js";
 
@@ -288,6 +289,62 @@ const answering = (host: FakeHost, message: ToHost) => {
   if (message.type === "op") host.say({ type: "result", id: message.id, outcome: { ok: message.id } });
 };
 
+// Spike Q7's race (M8): a program of this computer's, outside every sandbox, flips a folder in the
+// chat's folder between a folder and a link to one beside it, while the file tools work through it.
+describe("the file tools, against a process of this computer's racing them", { timeout: 120_000 }, () => {
+  type Answer = (kind: string, args: Record<string, unknown>) => Promise<Outcome>;
+
+  // 1 250 rounds of a write, a read, a listing and a delete through the flipped folder, and a search
+  // of it every tenth: what of the folder beside it each reached (its file gone counts), how many
+  // writes were answered, what was written beside it, and what its file holds after.
+  async function race(answer: Answer, folder: string, outside: string) {
+    rmSync(outside, { recursive: true, force: true });
+    mkdirSync(outside);
+    writeFileSync(join(outside, "only-outside"), "OUTSIDE\n");
+    // It ends with this process: a run killed partway leaves no attacker spinning.
+    const flipper = spawn("sh", ["-c", `cd '${folder}' && while kill -0 ${process.pid} 2>/dev/null; do rm -rf sub; mkdir sub; echo inside > sub/inside; rm -rf sub; ln -s '${outside}' sub; done`], {
+      stdio: "ignore", detached: true,
+    });
+    let reached = 0;
+    let wrote = 0;
+    try {
+      for (let i = 0; i < 1_250; i += 1) {
+        if ("ok" in (await answer("write", { key: join(folder, "sub", `x-${i}`), data: Buffer.from("m8\n").toString("base64") }))) wrote += 1;
+        const read = await answer("read", { key: join(folder, "sub", "only-outside"), max_bytes: null });
+        if ("ok" in read && typeof read.ok === "string" && Buffer.from(read.ok, "base64").toString() === "OUTSIDE\n") reached += 1;
+        const listed = await answer("list_dir", { key: join(folder, "sub") });
+        if ("ok" in listed && Array.isArray(listed.ok) && listed.ok.includes("only-outside")) reached += 1;
+        await answer("delete", { key: join(folder, "sub", "only-outside") });
+        if (i % 10 === 0) {
+          const found = await answer("ripgrep", { key: join(folder, "sub"), mode: "count", pattern: "OUTSIDE", glob: null, context: 0 });
+          if ("ok" in found && typeof found.ok === "string" && found.ok.includes("only-outside")) reached += 1;
+        }
+      }
+    } finally {
+      process.kill(-flipper.pid!, "SIGKILL");
+    }
+    const left = readdirSync(outside).sort();
+    const kept = left.includes("only-outside") ? readFileSync(join(outside, "only-outside"), "utf8") : null;
+    return { reached: reached + (kept === null ? 1 : 0), wrote, wroteOutside: left.filter((name) => name !== "only-outside").length, kept };
+  }
+
+  it("reach nothing beside the folder through its file host on the app's own node, where the same operations outside any sandbox do", async () => {
+    const folder = folders[ROOT_A]!;
+    const outside = join(base, "outside");
+    // The probe can race: the helper's own checks alone, outside srt, are beaten.
+    const bare = await race((kind, args) => perform(kind, args, { folder, home: base, env: { PATH: "/usr/bin:/bin" } }, signal()), folder, outside);
+    expect(bare.reached + bare.wroteOutside).toBeGreaterThan(0);
+    const executor = toolHosts();
+    const sandboxed = await race((kind, args) => executor.run(op(kind, args), signal()), folder, outside);
+    console.log(`M8: ${JSON.stringify({ bare, sandboxed })}`);
+    // The file host worked in the folder: its writes landed while sub was a folder.
+    expect(sandboxed).toEqual({ reached: 0, wrote: expect.any(Number), wroteOutside: 0, kept: "OUTSIDE\n" });
+    expect(sandboxed.wrote).toBeGreaterThan(0);
+    // The attacker met the file host: some of its writes found sub a link, or gone.
+    expect(sandboxed.wrote).toBeLessThan(1_250);
+  });
+});
+
 describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
   let fakes: FakeHost[];
   const fakeSpawn = (behave: (host: FakeHost, message: ToHost) => void) => () => {
@@ -375,6 +432,49 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(await executor.run(resolve(), signal())).toMatchObject(unavailable);
   });
 
+  it("runs a host on the app's own node, with none of the app's environment but its PATH and HOME", async () => {
+    // What the host's node was given: as a script of the host's, it says so and goes.
+    const script = join(base, "says.cjs");
+    writeFileSync(script, "process.send({ type: 'said', node: process.execPath, title: process.title, env: Object.keys(process.env).sort() }, () => process.exit(0));\n");
+    process.env.NODE_OPTIONS = "--title=leaked";
+    process.env.OPENSSL_CONF = join(base, "openssl.cnf");
+    try {
+      const host = forkHost({ script });
+      const said = await new Promise((resolve) => host.onMessage(resolve));
+      expect(said).toEqual({
+        type: "said", node: NODE, title: expect.not.stringContaining("leaked"),
+        env: ["HOME", "PATH"],
+      });
+    } finally {
+      delete process.env.NODE_OPTIONS;
+      delete process.env.OPENSSL_CONF;
+    }
+  });
+
+  it("runs a host whose node opens no inspector on SIGUSR1, as Electron's fuse keeps its own from opening one", async () => {
+    // A script of the host's: it says its pid, then, asked, whether an inspector listens. On port 0,
+    // so that no other process's 9229 keeps one from opening.
+    const script = join(base, "inspected.cjs");
+    writeFileSync(script, [
+      "process.debugPort = 0;",
+      "process.on('message', () => process.send({ type: 'inspector', url: require('node:inspector').url() ?? null }));",
+      "process.send({ type: 'pid', pid: process.pid });",
+    ].join("\n"));
+    const host = forkHost({ script });
+    const said: Array<{ type: string; pid?: number; url?: string | null }> = [];
+    host.onMessage((message) => said.push(message as unknown as (typeof said)[number]));
+    try {
+      await until(() => said.length > 0, 5_000);
+      process.kill(said[0]!.pid!, "SIGUSR1");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      host.send({ type: "stop" });
+      await until(() => said.length > 1, 5_000);
+      expect(said[1]).toEqual({ type: "inspector", url: null });
+    } finally {
+      host.kill();
+    }
+  });
+
   it("answers unavailable when the host cannot be spawned at all, and stops", async () => {
     const executor = toolHosts({ spawnHost: () => forkHost({ execPath: "/nonexistent/node" }) });
     expect(await executor.run(resolve(), signal())).toMatchObject(unavailable);
@@ -399,6 +499,24 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(calls).toBe(1);
     host.kill();
+  });
+
+  it("says once why a host could not be spawned", async () => {
+    const written = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const host = forkHost({ execPath: "/nonexistent/node" });
+      let gone = false;
+      host.onExit(() => {
+        gone = true;
+      });
+      await until(() => gone, 2_000);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const said = written.mock.calls.map(([text]) => String(text)).filter((text) => text.startsWith("the file host"));
+      expect(said).toEqual(["the file host could not start: spawn /nonexistent/node ENOENT"]);
+      host.kill();
+    } finally {
+      written.mockRestore();
+    }
   });
 
   it("tells a host's listeners once that it has gone, and signals no group after that", async () => {
