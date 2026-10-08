@@ -1,7 +1,7 @@
 import { type ChildProcess, fork } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -397,6 +397,54 @@ describe.skipIf(!run)("the browser host's process", () => {
     // What nobody saved goes with the browser.
     expect(existsSync(heard[0]!.path)).toBe(false);
   }, 30_000);
+
+  it("clears what a host that was killed left staged when the next host starts its browser, and leaves what a running host has staged", async () => {
+    profile = mkdtempSync(join(tmpdir(), "sb-profiles-"));
+    const signal = new AbortController().signal;
+    const code = "const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['report'])); a.download = 'report.txt'; a.click(); return 1;";
+    // A host with a download staged, by its process and what it staged.
+    const withStaged = async (name: string) => {
+      let child: ChildProcess | undefined;
+      const client = new BrowserClient(() => {
+        child = fork(BROWSER_HOST, [], { stdio: ["ignore", 2, 2, "ipc"] });
+        const exits: Array<() => void> = [];
+        child.once("close", () => exits.forEach((listener) => listener()));
+        return {
+          send: (message) => void child!.send(message, () => {}),
+          onMessage: (listener) => void child!.on("message", (message) => listener(message as FromBrowser)),
+          onExit: (listener) => void exits.push(listener),
+          kill: () => void child!.kill("SIGKILL"),
+        };
+      });
+      const heard: StagedDownload[] = [];
+      client.onDownload((download) => heard.push(download));
+      const launch = { executable: EXECUTABLE!, profile: join(profile, name) };
+      await client.perform(launch, operation(`${name}-1`, "browser.navigate", { url: "http://127.0.0.1:9/" }), signal);
+      await client.perform(launch, operation(`${name}-2`, "browser.evaluate", { code }), signal);
+      await expect.poll(() => heard.length, { timeout: 10_000 }).toBe(1);
+      return { client, child: child!, staged: heard[0]!.path };
+    };
+    const killed = await withStaged("first");
+    const running = await withStaged("second");
+    try {
+      // Killed, with no word: its browser goes with it, and what it staged stays.
+      const gone = new Promise((done) => killed.child.once("exit", done));
+      killed.child.kill("SIGKILL");
+      await gone;
+      expect([existsSync(killed.staged), existsSync(running.staged)]).toEqual([true, true]);
+      // The next host to start its browser in that temporary folder clears it, and nothing of the host that still runs.
+      const next = await withStaged("third");
+      try {
+        expect([existsSync(killed.staged), existsSync(dirname(killed.staged)), existsSync(running.staged), existsSync(next.staged)]).toEqual([false, false, true, true]);
+      } finally {
+        await next.client.stop();
+      }
+      // A host that stops takes its own with it.
+      expect(existsSync(dirname(next.staged))).toBe(false);
+    } finally {
+      await running.client.stop();
+    }
+  }, 60_000);
 
   it("closes its headed browser when it is stopped, as the app's quit stops it", async () => {
     profile = mkdtempSync(join(tmpdir(), "sb-profile-"));

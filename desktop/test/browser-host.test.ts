@@ -21,7 +21,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PAUSED } from "../src/browser/client.js";
 import { interrupted, type StagedDownload, tooLarge } from "../src/browser/downloads.js";
 import {
-  AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, FILE_ASKED, holding, type Launch, notFinished, PROXY_BYPASSED, WEAKENING,
+  AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, holding, type Launch, notFinished, PROXY_BYPASSED, WEAKENING,
 } from "../src/browser/host.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
@@ -323,6 +323,36 @@ describe("the processes on a profile", () => {
     } finally {
       on.kill("SIGKILL");
       rmSync(folder, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("what a host that was killed left staged", () => {
+  it("is cleared by the next host to start in its temporary folder, and nothing of a host whose process still runs", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "sb-staged-"));
+    // A process that has ended, as a host that was killed: its number names what it left.
+    const gone = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+    await new Promise((done) => gone.once("exit", done));
+    const kept = (name: string) => {
+      mkdirSync(join(temp, name));
+      writeFileSync(join(temp, name, "8f6c2a51-staged"), "a download nobody saved");
+      return name;
+    };
+    try {
+      const left = kept(`surogate-downloads-${gone.pid}-AbC123`);
+      // A host of this process, one of another that runs (this one's parent), and one of a process that is not
+      // this user's to ask after: none is known to be gone.
+      const running = [kept(`surogate-downloads-${process.pid}-dEf456`), kept(`surogate-downloads-${process.ppid}-gHi789`), kept("surogate-downloads-1-jKl012")];
+      // What is no host's staging folder is left alone, whatever its name begins with.
+      const others = [kept("playwright-artifacts-mNo345"), kept("surogate-downloads-pending"), kept(`surogate-downloads-x${gone.pid}-q`)];
+      await clearStaged(temp);
+      expect(readdirSync(temp).sort()).toEqual([...running, ...others].sort());
+      expect(existsSync(join(temp, left))).toBe(false);
+      for (const name of [...running, ...others]) expect(readdirSync(join(temp, name))).toEqual(["8f6c2a51-staged"]);
+      // A temporary folder that is not there has nothing to clear.
+      await clearStaged(join(temp, "none"));
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
     }
   });
 });

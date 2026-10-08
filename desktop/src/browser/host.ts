@@ -6,7 +6,8 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { type BrowserContext, chromium, type Dialog, type Download, type Page, type Request } from "playwright-core";
@@ -243,6 +244,31 @@ async function released(profile: string): Promise<void> {
   }
 }
 
+// Where a host keeps the downloads it stages: a folder of its own in its temporary folder, named by its
+// process. Playwright removes each file when its browser closes; a host that is killed leaves them.
+const STAGING = "surogate-downloads-";
+
+// Whether a process of that number runs: one this user may not ask after counts as running.
+function runs(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/**
+ * What hosts that are gone left staged in *temp*, removed: each staging folder names its host's process,
+ * and one whose process runs is never touched, so a host cannot clear what a running host has staged.
+ */
+export async function clearStaged(temp: string): Promise<void> {
+  for (const name of await readdir(temp).catch(() => [] as string[])) {
+    const pid = /^surogate-downloads-(\d+)-/.exec(name)?.[1];
+    if (pid !== undefined && !runs(Number(pid))) await rm(join(temp, name), { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 // The browser's own temp folder holds its singleton's socket, whose path a Unix socket keeps
 // under 108 bytes: a profile's folder is too deep for it, so it goes in the user's runtime
 // folder (this host's own temp files, Playwright's, go under the profiles: main.ts). A try's too.
@@ -259,7 +285,7 @@ export function launchOptions(executable: string, port: number, extra: readonly 
     ignoreDefaultArgs: WEAKENING,
     args: [FEATURES, `--proxy-server=http://127.0.0.1:${port}`, "--proxy-bypass-list=<-loopback>", ...extra],
     serviceWorkers: "block" as const,
-    // A download is kept in Playwright's own temporary folder, this host's, until it is saved under the chat's folder.
+    // A download is kept in this host's own staging folder, in its temporary folder, until it is saved under the chat's folder.
     acceptDownloads: true,
     env: browserEnv(),
     // The host decides when the browser ends: with its own end.
@@ -335,6 +361,8 @@ export class BrowserHost {
   // it began under: answered paused at once, it types, drags and loads no further, and is never taken up
   // again, at a hand back either. Those that begin after a hand back get the next.
   private interrupt = new AbortController();
+  // Where this host stages downloads, once it has launched a browser: its own folder, until it closes.
+  private staging: string | null = null;
   // The agent's downloads on their way, until each is handed on or dropped: a take-over stops them all.
   private readonly arriving = new Set<Download>();
   // The chat that last handed the browser back, and when.
@@ -451,6 +479,9 @@ export class BrowserHost {
     await this.ending;
     await this.proxy?.server.close();
     this.proxy = null;
+    // What it staged and nobody saved went with its browser; its folder goes now.
+    if (this.staging !== null) await rm(this.staging, { recursive: true, force: true }).catch(() => {});
+    this.staging = null;
   }
 
   // An operation at its turn. Taken over while it acts, it is answered paused at once, whatever it has
@@ -663,7 +694,7 @@ export class BrowserHost {
     await download.delete().catch(() => {});
   }
 
-  // A download once it has finished, in Playwright's temporary folder: handed on for the chat's folder,
+  // A download once it has finished, in this host's staging folder: handed on for the chat's folder,
   // or, when it did not finish, cannot be measured or is too large to save, gone, and its agent told why.
   // *of*: the chat it is saved in, and the session it is told to. *stop*: null for its user's own, which
   // nothing of the agent's stops and of which the agent is told nothing. The agent's is interrupted as the
@@ -840,7 +871,16 @@ export class BrowserHost {
       return { server, port: await server.listen() };
     })();
     keepWebRtcProxied(launch.profile);
-    const context = await chromium.launchPersistentContext(launch.profile, launchOptions(launch.executable, this.proxy.port, this.options.args));
+    // Its first launch: what a host that was killed left staged here goes, and this host's own folder is made.
+    let staging = this.staging;
+    if (staging === null) {
+      await clearStaged(tmpdir());
+      staging = await mkdtemp(join(tmpdir(), `${STAGING}${process.pid}-`));
+      this.staging = staging;
+    }
+    const context = await chromium.launchPersistentContext(launch.profile, {
+      ...launchOptions(launch.executable, this.proxy.port, this.options.args), downloadsPath: staging,
+    });
     context.on("close", () => this.retire(context));
     context.on("dialog", (dialog) => this.asked(dialog));
     // A download is heard in every page of the browser's, whoever opened it: the page it opens with, a
