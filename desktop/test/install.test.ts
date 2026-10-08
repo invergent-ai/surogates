@@ -1737,4 +1737,22 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(asked.stdout).toContain("Surogate Desktop: deleted tester's app data");
     expect(root("test ! -e /home/tester/closed/dat/surogate && test -d /home/tester/closed/dat").status).toBe(0);
   });
+
+  it("finds what the user has in their cache folder alone, as the user, and asks about it and deletes it as it does the rest", () => {
+    const folders = "/home/tester/closed/cfg /home/tester/closed/dat /home/tester/closed/cch";
+    const squashed = `setpriv --bounding-set=-dac_override,-dac_read_search env SUDO_USER=tester /opt/surogate-test/install.sh --uninstall ${folders}`;
+    // An update the app downloaded, and nothing else of the app's: no data folder is there. Tester's folders, which only tester opens.
+    const fresh = "rm -rf /home/tester/closed && runuser -u tester -- sh -c 'umask 077 && mkdir -p /home/tester/closed/cfg /home/tester/closed/dat /home/tester/closed/cch/surogate/updates"
+      + " && touch /home/tester/closed/cch/surogate/updates/release.tar.gz'";
+    expect(root(`${fresh} && setpriv --bounding-set=-dac_override,-dac_read_search test -e /home/tester/closed/cch/surogate`).status).toBe(1);
+    // Without a terminal it stays, and the script says that the user's data was kept.
+    expect(root(squashed)).toMatchObject({ status: 0, stderr: "", stdout: expect.stringMatching(/\nSurogate Desktop: kept tester's app data, in \/home\/tester\/closed\/dat\/surogate\n$/) });
+    expect(root("test -e /home/tester/closed/cch/surogate/updates/release.tar.gz").status).toBe(0);
+    // With one that answers yes, it goes.
+    const asked = root(`${fresh} && printf 'y\\n' | script -qec '${squashed}' /dev/null`);
+    expect(asked.status, asked.stdout).toBe(0);
+    expect(asked.stdout).toContain("Surogate Desktop: also delete tester's sign-in, device token and browser profiles, in /home/tester/closed/dat/surogate? Chat folders stay. [y/N] ");
+    expect(asked.stdout).toContain("Surogate Desktop: deleted tester's app data");
+    expect(root("test ! -e /home/tester/closed/cch/surogate && test -d /home/tester/closed/cch").status).toBe(0);
+  });
 });
