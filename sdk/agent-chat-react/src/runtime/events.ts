@@ -41,6 +41,7 @@ export const AGENT_CHAT_LISTENED_EVENTS = [
   "artifact.updated",
   "browser.provisioned",
   "browser.destroyed",
+  "browser.unavailable",
   "browser.control_granted",
   "browser.control_returned",
   "ask_user_question.response",

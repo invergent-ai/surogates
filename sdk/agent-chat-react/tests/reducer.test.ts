@@ -369,6 +369,33 @@ describe("applyAgentChatEvent", () => {
     expect(destroyed.messages.at(-1)?.content).toMatch(/browser closed/i);
   });
 
+  it("keeps a local-folder chat's browser as on its computer through a take-over there, and says once when that computer has no browser", () => {
+    const at = (state: ReturnType<typeof createInitialAgentChatState>, type: string, eventId: number, data: Record<string, unknown> = {}) =>
+      applyAgentChatEvent(state, { type, eventId, data: { session_id: "s-1", computer: true, ...data } } as Parameters<typeof applyAgentChatEvent>[1]);
+    const opened = at(createInitialAgentChatState(), "browser.provisioned", 31);
+    expect(opened.browser).toEqual({ status: "live", controlOwner: null, computer: true });
+
+    // Taken over on its computer and handed back, as the desktop's pane tells the server: still the computer's.
+    const taken = at(opened, "browser.control_granted", 32, { owner_user_id: "u-1" });
+    expect(taken.browser).toEqual({ status: "user-control", controlOwner: "u-1", computer: true });
+    expect(taken.messages.at(-1)?.content).toMatch(/took control of the browser/i);
+    const returned = at(taken, "browser.control_returned", 33, { released_by: "u-1" });
+    expect(returned.browser).toEqual({ status: "live", controlOwner: null, computer: true });
+
+    const none = at(returned, "browser.unavailable", 34);
+    expect(none.browser).toEqual({ status: "unavailable", controlOwner: null, computer: true });
+    expect(none.messages.at(-1)).toMatchObject({ id: "browser-marker-34", systemKind: "browser_marker_warning" });
+    expect(none.messages.at(-1)?.content).toMatch(/no supported browser/i);
+
+    // An agent that tries the browser again and again is told each time; the chat says it once.
+    const again = at(at(none, "browser.unavailable", 35), "browser.unavailable", 36);
+    expect(again.browser).toEqual(none.browser);
+    expect(again.messages).toHaveLength(none.messages.length);
+    // Said anew once a browser was there between.
+    const gone = at(at(again, "browser.provisioned", 37), "browser.unavailable", 38);
+    expect(gone.messages.at(-1)).toMatchObject({ id: "browser-marker-38", systemKind: "browser_marker_warning" });
+  });
+
   it("tracks whether the session waits for its computer", () => {
     const initial = createInitialAgentChatState();
     expect(initial.deviceWait).toBeNull();

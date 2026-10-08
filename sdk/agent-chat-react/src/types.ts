@@ -600,6 +600,7 @@ export type AgentChatEventType =
   | "artifact.updated"
   | "browser.provisioned"
   | "browser.destroyed"
+  | "browser.unavailable"
   | "browser.control_granted"
   | "browser.control_returned"
   | "ask_user_question.response"
@@ -620,8 +621,11 @@ export interface AgentChatRuntimeEvent {
 }
 
 export interface AgentChatBrowserState {
-  status: "provisioning" | "live" | "user-control" | "closed";
+  // "unavailable": the chat's computer has no supported browser.
+  status: "provisioning" | "live" | "user-control" | "closed" | "unavailable";
   controlOwner: string | null;
+  /** On the user's computer, in a local-folder chat: no live view, and no lease to take here. */
+  computer?: boolean;
 }
 
 /** A local-folder session's computer is away while its work waits on it. */
@@ -646,9 +650,10 @@ export interface AgentChatBrowserPreviewSnapshot {
 }
 
 export interface AgentChatBrowserStateResponse {
-  status: "live" | "user-control";
+  status: "live" | "user-control" | "unavailable";
   controlOwner: string | null;
   liveViewPath: string;
+  computer?: boolean;
 }
 
 export interface AgentChatBrowserControlResponse {

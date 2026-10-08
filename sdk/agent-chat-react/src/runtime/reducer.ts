@@ -177,18 +177,31 @@ export function applyAgentChatEvent(
       return applyBrowserEvent(nextState, event, {
         status: "live",
         controlOwner: null,
+        ...onComputer(event),
       });
 
+    case "browser.unavailable":
+      // Said once: an agent that tries the browser again and again adds no line for each try.
+      if (nextState.browser?.status === "unavailable") return nextState;
+      return applyBrowserEvent(nextState, event, {
+        status: "unavailable",
+        controlOwner: null,
+        computer: true,
+      });
+
+    // A take-over on the user's computer is told as the cloud's is: the browser stays the computer's.
     case "browser.control_granted":
       return applyBrowserEvent(nextState, event, {
         status: "user-control",
         controlOwner: stringValue(event.data.owner_user_id) || null,
+        ...onComputer(event),
       });
 
     case "browser.control_returned":
       return applyBrowserEvent(nextState, event, {
         status: "live",
         controlOwner: null,
+        ...onComputer(event),
       });
 
     case "browser.destroyed":
@@ -513,6 +526,11 @@ function parseUserMessageAttachments(
   return out.length > 0 ? out : undefined;
 }
 
+// A browser event of a local-folder chat, whose browser is on the user's computer.
+function onComputer(event: AgentChatRuntimeEvent): { computer?: true } {
+  return event.data.computer === true ? { computer: true } : {};
+}
+
 function applyBrowserEvent(
   state: AgentChatState,
   event: AgentChatRuntimeEvent,
@@ -541,6 +559,10 @@ function browserMarker(event: AgentChatRuntimeEvent): AgentChatMessage {
     "browser.destroyed": {
       content: "Browser closed.",
       warning: false,
+    },
+    "browser.unavailable": {
+      content: "No supported browser on the chat's computer.",
+      warning: true,
     },
   };
   const label = labels[event.type] ?? {

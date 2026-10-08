@@ -484,6 +484,69 @@ describe("AgentChat", () => {
     }
   });
 
+  it("draws a local-folder chat's browser pane as its host does, with no live view and no cloud preview", async () => {
+    const stream = new FakeEventStream();
+    const previews: string[] = [];
+    const adapter = {
+      ...createAdapter(stream),
+      async getBrowserState() {
+        return { status: "live" as const, controlOwner: null, liveViewPath: "", computer: true };
+      },
+      async getBrowserPreviewSnapshot(sessionId: string) {
+        previews.push(sessionId);
+        return null;
+      },
+      browserShellUrl() {
+        return "about:blank#shell";
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const draw = ({ available, readOnly }: { available: boolean; readOnly: boolean }) => (
+      <p data-testid="host-pane">{`${available ? "open there" : "none there"}${readOnly ? ", only watched" : ""}`}</p>
+    );
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" computerBrowser={draw} />);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      stream.emit("browser.provisioned", 10, { session_id: "s-1", computer: true });
+      await Promise.resolve();
+    });
+    await openPane(container, "browser");
+
+    const hostPane = () => container?.querySelector('[data-testid="host-pane"]')?.textContent;
+    expect(hostPane()).toBe("open there");
+    // The browser is on the user's computer: nothing of the cloud's live view, and no preview asked of it.
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(previews).toEqual([]);
+
+    // Taken over on its computer, then handed back: the pane stays its host's, never the cloud's shell.
+    for (const [type, id] of [["browser.control_granted", 11], ["browser.control_returned", 12]] as const) {
+      await act(async () => {
+        stream.emit(type, id, { session_id: "s-1", owner_user_id: "u-1", released_by: "u-1", computer: true });
+        await Promise.resolve();
+      });
+      expect(hostPane()).toBe("open there");
+      expect(container.querySelector('[data-testid="browser-shell"]')).toBeNull();
+    }
+
+    await act(async () => {
+      stream.emit("browser.unavailable", 13, { session_id: "s-1", computer: true });
+      await Promise.resolve();
+    });
+    expect(hostPane()).toBe("none there");
+
+    // A chat the host only reads: its pane is told, and offers nothing that takes the browser over.
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" computerBrowser={draw} disabled />);
+      await Promise.resolve();
+    });
+    expect(hostPane()).toBe("none there, only watched");
+  });
+
   it("toggles the browser pane from its card", async () => {
     const stream = new FakeEventStream();
     const adapter = {
