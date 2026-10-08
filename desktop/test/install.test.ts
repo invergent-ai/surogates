@@ -2195,6 +2195,71 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(versions()).toEqual(["1.4.0", "1.6.0"]);
   });
 
+  it("rolls back from no base that its record does not name as an install wrote it, and to no release while the installed version's mark is not root's own: curl is handed no word of a record's but an http or https URL, and nothing is asked of any base", () => {
+    expect(current()).toBe("/opt/surogate/versions/1.6.0");
+    const record = "/etc/surogate/install.json";
+    const mark = "/opt/surogate/versions/1.6.0/release.json";
+    // curl, kept as /opt/hold/curl, which first writes down what it was asked for.
+    const asking = '#!/bin/sh\necho "$*" >>/tmp/curled\nexec /opt/hold/curl "$@"\n';
+    // A rollback by root's own part, after *first* and before *last*: how it ended, how many times
+    // it ran curl, and what it said. Bounded: a record that is a pipe would be waited on for good.
+    const rolled = (version: string, first = ":", last = ":") => swapped("curl", asking, [
+      first, ": >/tmp/curled",
+      `timeout 60 /opt/surogate-test/install.sh --version ${version} >/tmp/said 2>&1; echo "$? $(wc -l </tmp/curled) $(cat /tmp/said)"`,
+      last,
+    ]).stdout;
+    // As an install wrote the record, the base is asked twice for a version that is here: its manifest, and its signature.
+    expect(root(`stat -c '%f %u' ${record} ${mark} && cp -p ${record} /root/record && cp -p ${mark} /root/mark`).stdout).toBe("81a4 0\n81a4 0\n");
+    expect(rolled("1.6.0")).toBe("0 2 Surogate Desktop: 1.6.0 is installed\n");
+    const installed = standing();
+    const restored = `rm -rf ${record} ${mark}; cp -p /root/record ${record}; cp -p /root/mark ${mark}`;
+    const refused = (what: string, made: string, said: string, version = "1.6.0") => {
+      expect(rolled(version, made, restored), what).toBe(`1 0 Surogate Desktop: ${said}\n`);
+      expect(standing(), what).toBe(installed);
+      expect(root("find /tmp -mindepth 1 -maxdepth 1 -name 'tmp.*'; ls -A /opt/surogate/staging").stdout, what).toBe("");
+    };
+    const noServer = `${record} names no server to roll back from: run Surogate Desktop's install script again`;
+    const notRoots = `${record} is not as Surogate Desktop's install leaves it: run its install script again`;
+    const noSchema = "the installed 1.6.0 names no state schema: run Surogate Desktop's install script again";
+    // A base that begins with a dash is options to curl: here a file of a user's own for it to
+    // read its options from, which have it write a file of that user's bytes as root.
+    const options = `url = "${base}/desktop/releases/1.6.0/manifest.json"\\nnext\\nurl = "file:///home/tester/payload"\\noutput = "/etc/written-by-root"\\n`;
+    expect(root(`mkdir -p /home/tester/x/desktop/releases/1.6.0 && printf '${options}' >/home/tester/x/desktop/releases/1.6.0/manifest.json && echo theirs >/home/tester/payload && chown -R tester: /home/tester/x /home/tester/payload`).status).toBe(0);
+    refused("a base that is options to curl", `echo '{"base":"-K/home/tester/x","channel":"stable"}' >${record}`, noServer);
+    expect(root("test ! -e /etc/written-by-root").status).toBe(0);
+    // Nor any other word that is no http or https URL as --base takes one, and no record that is more than one JSON document of a manifest's size.
+    const padded = `printf '{"base":"${base}","more":"%s"}\\n' "$(head -c 4096 /dev/zero | tr '\\0' x)" >${record}`;
+    for (const [what, made] of [
+      ["a base with a new line in it", `printf '{"base":"${base}\\\\n/elsewhere"}\\n' >${record}`],
+      ["a base that is no URL", `echo '{"base":"${base.replace("http://", "ftp://")}"}' >${record}`],
+      ["a base that is a number", `echo '{"base":7}' >${record}`],
+      ["a base that is a list", `echo '{"base":["${base}"]}' >${record}`],
+      ["no base", `echo '{"channel":"stable"}' >${record}`],
+      ["two documents", `printf '{"base":"${base}"}\\n{"base":"${base}"}\\n' >${record}`],
+      ["no JSON", `echo '${base}' >${record}`],
+      ["an empty record", `: >${record}`],
+      ["a record of more than 4096 bytes", padded],
+    ] as const) refused(what, made, noServer);
+    // Nor a record that is not root's own file at the mode an install writes it, whatever it names: here the base itself.
+    for (const [what, made] of [
+      ["a link to a user's file", `cp ${record} /home/tester/record.json && chown tester /home/tester/record.json && rm ${record} && ln -s /home/tester/record.json ${record}`],
+      ["another user's", `chown tester ${record}`],
+      ["one that all may write", `chmod 666 ${record}`],
+      ["a pipe", `rm ${record} && mkfifo ${record}`],
+      ["a folder", `rm ${record} && mkdir ${record}`],
+    ] as const) refused(what, made, notRoots);
+    refused("no record", `rm ${record}`, "Surogate Desktop is not installed: run its install script first");
+    // The installed version's mark says what it keeps for its users, and so which releases read
+    // it: one that is not root's own file says nothing. Here each would have a release of an
+    // earlier state schema taken.
+    for (const [what, made] of [
+      ["a link to a user's file", `echo '{"stateSchema":1}' >/home/tester/mark.json && chown tester /home/tester/mark.json && rm ${mark} && ln -s /home/tester/mark.json ${mark}`],
+      ["another user's", `echo '{"stateSchema":1}' >${mark} && chown tester ${mark}`],
+      ["one that others may write", `echo '{"stateSchema":1}' >${mark} && chmod 664 ${mark}`],
+    ] as const) refused(`the installed mark: ${what}`, made, noSchema, "1.4.0");
+    expect(root(`cmp /root/record ${record} && cmp /root/mark ${mark} && stat -c '%f %u' ${record} ${mark}`).stdout).toBe("81a4 0\n81a4 0\n");
+  });
+
   it("rolls back with the system's own tools, whatever PATH root's own shell has, and through the user's proxy from a base whose name has a letter outside ASCII, for each of its three downloads", () => {
     expect(current()).toBe("/opt/surogate/versions/1.6.0");
     const installed = standing();

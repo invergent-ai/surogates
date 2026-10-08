@@ -164,10 +164,11 @@ signed() {
 # one and as an apply copies one, to a version's mark and to the helper's: one object on one line,
 # whose newline is the file's last byte, of 4096 bytes at most. No more of the file is read than
 # those and one byte. Of two documents, the first would be applied and both kept as a mark; and
-# each would name a version, where dpkg calls a version of two lines older than any other.
+# each would name a version, where dpkg calls a version of two lines older than any other. With
+# "any" as $2 the object may be on any number of lines, as the install record is written.
 one_object() {
   head -c 4097 -- "$1" 2>/dev/null \
-    | jq -ceRs 'select(utf8bytelength <= 4096 and test("\\A[^\\n]*\\n\\z")) | fromjson | select(type == "object")' 2>/dev/null
+    | jq -ceRs --arg lines "${2:-one}" 'select(utf8bytelength <= 4096 and ($lines == "any" or test("\\A[^\\n]*\\n\\z"))) | fromjson | select(type == "object")' 2>/dev/null
 }
 
 # A signed manifest's fields: a release of this channel for this platform, its version x.y.z with
@@ -205,16 +206,23 @@ helper_release() {
     && one_object "$HELPER_MARK" | jq -er '.version | select(type == "string" and test("\\A(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\z"))' 2>/dev/null
 }
 
+# The state schema of what the installed version keeps in each user's home, as its mark names it:
+# that version's manifest as an apply copied it (one_object), in a file of root's own at the mode
+# an apply gives it. Which releases read the installed one's state is this file's word: one that
+# is a link, or another's to write, says nothing. Fails where the mark is not so, or names no
+# schema.
+installed_schema() {
+  roots_own "$ROOT/current/release.json" 81a4 \
+    && one_object "$ROOT/current/release.json" | jq -er '.stateSchema | select(type == "number" and . == floor and (floor | . >= 1 and . < 1e15)) | floor' 2>/dev/null
+}
+
 # Refuses release $2, whose signed manifest is $1, unless it can read what the installed version
-# keeps in each user's home: its state schema is the installed one's or later. The installed
-# version's is read from its mark, which is that version's manifest as an apply copied it
-# (one_object).
+# keeps in each user's home: its state schema is the installed one's or later.
 reads_state() {
   local installed schema now
   installed="$(installed_version)"
   [ -n "$installed" ] || fail "Surogate Desktop is not installed: run its install script first"
-  now="$(one_object "$ROOT/current/release.json" | jq -er '.stateSchema | select(type == "number" and . == floor and (floor | . >= 1 and . < 1e15)) | floor' 2>/dev/null)" \
-    || fail "the installed $installed names no state schema: run Surogate Desktop's install script again"
+  now="$(installed_schema)" || fail "the installed $installed names no state schema: run Surogate Desktop's install script again"
   schema="$(jq -r '.stateSchema | floor' "$1")"
   [ "$schema" -ge "$now" ] \
     || fail "$2 cannot read what the installed $installed keeps for its users: its state schema is $schema, and $installed's $now"
@@ -671,9 +679,20 @@ notes() {
 # this computer trusts now did not sign it, and when it cannot read what the installed version
 # keeps in its users' homes, as its state schema says.
 roll_back() {
-  local version="$1" base download release named size tarball=""
-  base="$(jq -er '.base' "$RECORD" 2>/dev/null)" || fail "Surogate Desktop is not installed: run its install script first"
-  [ -n "$(installed_version)" ] || fail "Surogate Desktop is not installed: run its install script first"
+  local version="$1" base installed download release named size tarball=""
+  # The record is root's own word for the server this computer installs from: a file of root's
+  # own at the mode an install writes it, one JSON document of 4096 bytes at most, and its base
+  # an http or https URL as --base takes one. curl is handed no other word of it: one that begins
+  # with a dash would be options to curl, and name it a file to read and one to write.
+  [ -e "$RECORD" ] || [ -L "$RECORD" ] || fail "Surogate Desktop is not installed: run its install script first"
+  roots_own "$RECORD" 81a4 || fail "$RECORD is not as Surogate Desktop's install leaves it: run its install script again"
+  base="$(one_object "$RECORD" any | jq -er '.base | strings' 2>/dev/null)" && http_url "$base" \
+    || fail "$RECORD names no server to roll back from: run Surogate Desktop's install script again"
+  installed="$(installed_version)"
+  [ -n "$installed" ] || fail "Surogate Desktop is not installed: run its install script first"
+  # Before anything is asked of the base: where what the installed version keeps is not known, no
+  # release is one that reads it.
+  installed_schema >/dev/null || fail "the installed $installed names no state schema: run Surogate Desktop's install script again"
   scratch download --tmpdir tmp.XXXXXXXXXX
   # Each download as the install's own (install_latest): its address's letters read as UTF-8, and
   # no more of it than it is for, a manifest's 4096 bytes and a signature's 64 and one more.
