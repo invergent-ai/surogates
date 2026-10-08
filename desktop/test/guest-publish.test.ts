@@ -173,6 +173,19 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
     expect(readFileSync(join(out, "manifest.json")).equals(sent["manifest.json"]!)).toBe(true);
   });
 
+  it("refuses a release's manifest that names no files, which would leave the bucket's files unchecked", () => {
+    built();
+    expect(publish("send").status).toBe(0);
+    for (const named of [{ key }, { key, files: [] }]) {
+      // The bucket's manifest the same bytes, so only the list can fail it.
+      const bytes = Buffer.from(`${JSON.stringify(named)}\n`);
+      replace(`desktop/vm/${key}/manifest.json`, bytes);
+      released(bytes);
+      out = mkdtempSync(join(dir, "out-"));
+      expect(publish("fetch")).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: desktop/vm/${key}'s manifest does not name rootfs.img.zst and vmlinuz.zst\n` });
+    }
+  });
+
   it("stops at a bucket that refuses it, rather than taking the image for missing", () => {
     const refused = publish("fetch", { AWS_SECRET_ACCESS_KEY: "not-the-secret" });
     expect(refused.status).toBe(1);

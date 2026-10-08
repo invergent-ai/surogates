@@ -59,7 +59,11 @@ keyOf() {
 # The bucket against <out>/manifest.json: its manifest byte for byte, and each file read
 # back, its size and sha256 as downloaded and unpacked.
 check() {
-  local status name size sha256 download downloadSize downloadSha256
+  local status files name size sha256 download downloadSize downloadSha256
+  # The image's two files, or nothing of the bucket's would be checked.
+  jq -e '[.files[]?.download] | sort == ["rootfs.img.zst", "vmlinuz.zst"]' "$OUT/manifest.json" > /dev/null \
+    || fail "desktop/vm/$key's manifest does not name rootfs.img.zst and vmlinuz.zst"
+  files="$(jq -r '.files[] | "\(.name) \(.size) \(.sha256) \(.download) \(.downloadSize) \(.downloadSha256)"' "$OUT/manifest.json")"
   status="$(manifest -o "$OUT/bucket.json")"
   if [ "$status" != 200 ] || ! cmp -s "$OUT/bucket.json" "$OUT/manifest.json"; then
     rm -f "$OUT/bucket.json"
@@ -75,7 +79,7 @@ check() {
       fail "the bucket's desktop/vm/$key/$download is not the release's"
     fi
     rm -f "$OUT/bucket.zst"
-  done < <(jq -r '.files[] | "\(.name) \(.size) \(.sha256) \(.download) \(.downloadSize) \(.downloadSha256)"' "$OUT/manifest.json")
+  done <<< "$files"
 }
 
 case "$VERB" in
