@@ -85,14 +85,19 @@ cleanup() {
   [ "${#OWN[@]}" -eq 0 ] || rm -rf -- "${OWN[@]}"
 }
 
-# A folder of this run's own, for it alone, which goes however the run ends: named as mktemp names
-# one for $2 and what follows, listed as this run's, and only then made, so that a signal between
-# any two of the three leaves nothing. Its name is put in the variable $1 names.
+# A folder of this run's own, for it alone, which goes however the run ends: made and named in one
+# step, as mktemp makes one for $2 and what follows, so that no one else has its name before it is
+# there, and only what this run made is ever listed as its own. Its name is put in the variable $1
+# names. From before the folder is made until it is listed, no signal stops the script, nor
+# mktemp, which a terminal's signal reaches too: stopped between the two, the run would end with a
+# folder that is made and listed nowhere, and leave it. A signal that comes then is let by, as one
+# is from an apply's first rename to its last: the script goes on.
 scratch() {
   local -n made="$1"
-  made="$(mktemp -u "${@:2}")"
+  trap '' HUP INT PIPE TERM
+  made="$(mktemp -d "${@:2}")"
   OWN+=("$made")
-  mkdir -m 0700 "$made"
+  stoppable
 }
 
 # Ubuntu 24.04 LTS or a later LTS release, on x64. Nothing is changed before this passes.

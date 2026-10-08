@@ -111,6 +111,25 @@ done
 exec "/opt/hold/$(basename "$0")" "$@"
 `;
 
+// The system's mktemp, kept as /opt/hold/mktemp. A name it gives out for which nothing is there yet
+// is taken at once by another user of the computer, as a folder with a file of their own in it,
+// and written down in /tmp/taken: what one who watches for the name can do before the script makes
+// its folder there.
+const TAKING = String.raw`#!/bin/sh
+name="$(/opt/hold/mktemp "$@")" || exit
+[ -e "$name" ] || { runuser -u other -- mkdir "$name" 2>/dev/null && runuser -u other -- touch "$name/theirs" && echo "$name" >>/tmp/taken; }
+echo "$name"
+`;
+
+// The system's mktemp, kept as /opt/hold/mktemp, which sends *signal* to all of the script's
+// processes, itself among them, once it has made a folder and before it has said its name, as a
+// terminal's signal may come: each folder it made is written down in /tmp/made.
+const interrupting = (signal: string) => String.raw`#!/bin/sh
+made="$(/opt/hold/mktemp "$@")" || exit
+[ ! -d "$made" ] || { echo "$made" >>/tmp/made; kill -${signal} 0; }
+echo "$made"
+`;
+
 // The lock that one install, update or removal at a time holds, in root's own folder under /run;
 // and a shell of the test's own that holds it, on its descriptor 8.
 const LOCKS = "/run/surogate-desktop";
@@ -193,6 +212,18 @@ function lab(release: string, setup: string[], run: string[] = []) {
   };
   const current = () => root("readlink /opt/surogate/current").stdout.trim();
   const versions = () => root("ls /opt/surogate/versions").stdout.trim().split("\n").filter(Boolean);
+  // The system's *tool* with *standIn* in its place, which finds the tool itself as
+  // /opt/hold/<tool>, for the one docker call that runs *lines*.
+  const swapped = (tool: string, standIn: string, lines: string[]) => {
+    writeFileSync(join(it.dir, "stand-in"), standIn, { mode: 0o755 });
+    expect(docker(["cp", join(it.dir, "stand-in"), `${it.container}:/opt/surogate-test/stand-in`]).status).toBe(0);
+    return root([
+      `mkdir -p /opt/hold && cp -L /usr/bin/${tool} /opt/hold/${tool}`,
+      `mv /usr/bin/${tool} /usr/bin/${tool}.away && cp /opt/surogate-test/stand-in /usr/bin/${tool}`,
+      ...lines,
+      `mv -f /usr/bin/${tool}.away /usr/bin/${tool}`,
+    ].join("\n"));
+  };
 
   beforeAll(async () => {
     it.dir = mkdtempSync(join(tmpdir(), "install-test-"));
@@ -219,7 +250,7 @@ function lab(release: string, setup: string[], run: string[] = []) {
     rmSync(it.dir, { recursive: true, force: true });
   });
 
-  return { it, docker, root, as, releaseOf, manifestOf, current, versions };
+  return { it, docker, root, as, releaseOf, manifestOf, current, versions, swapped };
 }
 
 describe("the install script's release keys", () => {
@@ -248,7 +279,7 @@ describe("the install script's waits", () => {
 });
 
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --apply, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
-  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions } = lab(release, APPLY_LAB, OWN_DISK);
+  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions, swapped } = lab(release, APPLY_LAB, OWN_DISK);
   // The files as the app leaves them for the helper: in the user's cache, copied into the container.
   const files = (manifest = "/home/tester/manifest.json", tarball = "/home/tester/release.tar.gz") => `${manifest} /home/tester/manifest.json.sig ${tarball}`;
   const stage = (tarball: string) => {
@@ -1043,9 +1074,11 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const lines = stops(files(), SIGNALS);
     expect(lines.length).toBeGreaterThan(100);
     for (const line of lines) expect(line).toMatch(/^\d+: (143|0) 1\.1\.0 whole, staging 0$/);
-    // Stopped (143) up to its first rename, let finish (0) from there to its last, where a signal
-    // would leave current naming no folder, and stopped again after it, until it clears up.
-    expect(lines.map((line) => line.split(" ")[1]).join(" ")).toMatch(/^(143 )+(0 )+(143 )+(0 ?)+$/);
+    // Stopped (143) up to the making of its own folder; let finish (0) from there until the folder
+    // is listed as its own, where a signal would leave it made and unlisted; stopped again up to
+    // its first rename; let finish from there to its last, where a signal would leave current
+    // naming no folder; and stopped again after it, until it clears up.
+    expect(lines.map((line) => line.split(" ")[1]).join(" ")).toMatch(/^(143 )+(0 )+(143 )+(0 )+(143 )+(0 ?)+$/);
     expect(root("test -e /opt/surogate/current/resources/app/rebuilt").status).toBe(0);
     // An apply it refuses ends with its own folder still to clear: a signal that comes as it starts to, as wherever else.
     manifestOf("1.1.0", rebuilt, {}, other.privateKey);
@@ -1060,6 +1093,22 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       + `; setsid -w /opt/surogate-test/install.sh --apply ${files()}; said=$?; mv -f /usr/bin/rm.away /usr/bin/rm; echo "$said $(ls -A /opt/surogate/staging | wc -l)"`);
     expect(twice).toMatchObject({ stdout: "1 0\n", stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
   }, 300_000);
+
+  it("leaves no folder of its own when a signal comes as the folder is made, before the script has its name: the signal is let by, and the apply goes on", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    for (const signal of ["HUP", "INT", "PIPE", "TERM"]) {
+      expect(root("find /opt/surogate -mindepth 1 -delete").status).toBe(0);
+      // In a session of its own: the signal goes to all of the helper's processes, as a terminal's does.
+      const signalled = swapped("mktemp", interrupting(signal), [
+        ": >/tmp/made",
+        `setsid -w /opt/surogate-test/install.sh --apply ${files()} >/tmp/said 2>&1; said=$?`,
+        'echo "$said: $(wc -l </tmp/made) made, $(for made in $(cat /tmp/made); do [ ! -e "$made" ] || echo "$made"; done | wc -l) left, staging $(ls -A /opt/surogate/staging | wc -l); $(cat /tmp/said)"',
+      ]);
+      expect(signalled.stdout, signal).toBe("0: 1 made, 0 left, staging 0; Surogate Desktop: 1.0.0 is installed\n");
+    }
+  });
 
   it("says what stops it: its arguments, a user who is not root, too little room, and bubblewrap missing", () => {
     const usage = "Surogate Desktop: usage: surogate-apply-update --apply <manifest> <signature> <tarball>\n";
@@ -1092,7 +1141,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   // stops there. With them, Ubuntu's German language pack, in which the system's tools say what
   // they say in German to whoever's desktop is; and strace, for the test that reads what the
   // script starts.
-  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions } = lab(release, [
+  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions, swapped } = lab(release, [
     "RUN apt-get update && apt-get install -y --no-install-recommends sudo curl ca-certificates apparmor polkitd pkexec dbus",
     "RUN groupadd --system kvm && useradd -m -s /bin/bash -G sudo tester && useradd -m -s /bin/bash other && echo 'tester ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/tester",
     `RUN echo '#!/bin/sh' >/usr/local/sbin/apparmor_parser && echo 'said=$(/usr/sbin/apparmor_parser --skip-kernel-load "$@" 2>&1) || { echo "$said" >&2; exit 1; }' >>/usr/local/sbin/apparmor_parser && chmod 755 /usr/local/sbin/apparmor_parser`,
@@ -1467,6 +1516,32 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     ]);
     expect(both.stdout).toBe("waiting 0, staged 1, applied 0, removed 0\nSurogate Desktop: 1.1.0 is installed\n--\nSurogate Desktop: removed from this computer\n");
     expect(root("test ! -e /opt/surogate && test ! -e /usr/local/bin/surogate").status).toBe(0);
+  });
+
+  it("makes the folder of its download itself, in one step with its name: another user who takes each name the moment it is given out gets none, and loses no folder of their own", () => {
+    publish("1.6.0");
+    const taken = swapped("mktemp", TAKING, [
+      "rm -f /tmp/taken",
+      `runuser -u tester -- bash -c 'cd && curl -fsSL ${base}/desktop/install.sh | bash -s -- --base ${base}' >/tmp/said 2>&1; said=$?`,
+      'echo "$said"; for name in $(cat /tmp/taken 2>/dev/null); do [ -e "$name/theirs" ] && echo "taken, and still theirs: $name" || echo "taken, and removed: $name"; done; tail -n 1 /tmp/said',
+    ]);
+    // No name was theirs to take, and the install went on to its end.
+    expect(taken.stdout).toBe("0\nSurogate Desktop: open Surogate from your applications, or run surogate\n");
+    expect(current()).toBe("/opt/surogate/versions/1.6.0");
+    expect(root("find /tmp -mindepth 1 -maxdepth 1 -name 'tmp.*'").stdout).toBe("");
+  });
+
+  it("leaves no folder of its download when a signal comes as the folder is made, before the script has its name: the signal is let by, and the install goes on", () => {
+    publish("1.7.0");
+    // Root's part by itself, in a session of its own: the signal goes to all of its processes, as Ctrl+C on a terminal does.
+    const signalled = swapped("mktemp", interrupting("INT"), [
+      ": >/tmp/made",
+      `setsid -w /opt/surogate-test/install.sh --base ${base} >/tmp/said 2>&1; said=$?`,
+      'echo "$said: $(grep -c "^/tmp/tmp\\." /tmp/made) made in /tmp, $(for made in $(cat /tmp/made); do [ ! -e "$made" ] || echo "$made"; done | wc -l) left; $(tail -n 1 /tmp/said)"',
+    ]);
+    expect(signalled.stdout).toBe("0: 1 made in /tmp, 0 left; Surogate Desktop: open Surogate from your applications, or run surogate\n");
+    expect(current()).toBe("/opt/surogate/versions/1.7.0");
+    expect(uninstall().status).toBe(0);
   });
 
   // A desktop in German, as Ubuntu's installer sets one up: its locale, and the language of what
