@@ -61,6 +61,11 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<title
       return void res.writeHead(200, { "content-type": "text/html" })
         .end(`<title>Hang</title><script>addEventListener("load", () => setTimeout(() => { while (true) {} }, 0));</script>`);
     }
+    // One whose own code holds its main thread a moment after it loaded.
+    if (req.url === "/late-hang") {
+      return void res.writeHead(200, { "content-type": "text/html" })
+        .end(`<title>LateHang</title><script>addEventListener("load", () => setTimeout(() => { while (true) {} }, 1500));</script>`);
+    }
     if (req.url === "/redirect") return void res.writeHead(302, { location: `http://127.0.0.1:${ports.canary}/redirected` }).end();
     if (req.url === "/reach") {
       // Every way a page reaches out, at this computer's own service: directly, from a worker, and by a redirect.
@@ -398,6 +403,20 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     // The session's next operation runs, in a tab of its own again.
     expect((await op(a, "browser.navigate", { url: "http://fixture.test/second" })).ok).toMatchObject({ title: "Second", opened: true });
   });
+
+  it("closes a page stuck in its own code under a labelled shot, so the shot answers within the bound too", async () => {
+    await host.close();
+    host = hostWith({ boundMs: 2_000 });
+    const a = session();
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/late-hang" })).ok?.title).toBe("LateHang");
+    await new Promise((done) => setTimeout(done, 2_000));
+    const started = performance.now();
+    expect(await within(8_000, op(a, "browser.screenshot", { clip: null, labels: [{ label: 1, x: 10, y: 10 }] }))).toEqual({
+      error: { type: "browser", message: "The page did not answer within 2 s, so it was closed" },
+    });
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/second" })).ok).toMatchObject({ title: "Second", opened: true });
+  }, 20_000);
 
   it("lets no service worker answer the agent's pages, one registered through the prototype's own register too", async () => {
     await host.close();

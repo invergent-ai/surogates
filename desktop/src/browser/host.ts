@@ -41,10 +41,13 @@ export const WEAKENING = [
 const FEATURES = PLAYWRIGHT_FEATURES.replace(",HttpsUpgrades", "").replace(",ThirdPartyStoragePartitioning", "");
 
 const LAUNCH_MS = 30_000;
-// How long a navigation, a script, a read, a click or a key may hold its page, as the cloud bounds
-// each operation: a page whose own code holds its main thread after its load holds a navigation too.
+// How long a navigation, a script, a read, a click, a key or a shot may hold its page, as the cloud
+// bounds each operation: a page whose own code holds its main thread after its load holds a
+// navigation too, and a shot's labels are drawn by code in the page. Above the shot's own 30 s.
 const BOUND_MS = 60_000;
-const BOUNDED: ReadonlySet<string> = new Set(["browser.navigate", "browser.evaluate", "browser.observe", "browser.mouse", "browser.keyboard"]);
+const BOUNDED: ReadonlySet<string> = new Set([
+  "browser.navigate", "browser.evaluate", "browser.observe", "browser.mouse", "browser.keyboard", "browser.screenshot",
+]);
 const LATE = Symbol("late");
 // How long a launch's proof that the proxy carries the browser's requests may take.
 const CHECK_MS = 15_000;
