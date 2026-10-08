@@ -238,7 +238,7 @@ export class BrowserHost {
       : this.inLine(session, () => {
         if (this.forgets.get(root) !== forgets) return Promise.resolve(DELETED);
         // Its user took the browser over while it waited: it does nothing there.
-        return this.paused.has(root) ? Promise.resolve(PAUSED) : this.run(launch, session, kind, args, signal);
+        return this.paused.has(root) ? Promise.resolve(PAUSED) : this.run(launch, root, session, kind, args, signal);
       });
     return Promise.race([work, new Promise<Outcome>((resolve) => {
       if (signal.aborted) resolve(CANCELLED);
@@ -313,13 +313,15 @@ export class BrowserHost {
     this.proxy = null;
   }
 
-  private async run(launch: Launch, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
+  private async run(launch: Launch, root: string, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
     if (signal.aborted) return CANCELLED;
     const operation = OPERATIONS[kind];
     if (!operation) return { error: { type: "unsupported", message: `This computer's browser does not handle ${kind}` } };
     let page: Page | undefined;
     try {
       const found = await this.pageFor(launch, session);
+      // Its user took the browser over while it launched, or while its tab opened: it does nothing in the page.
+      if (this.paused.has(root)) return PAUSED;
       page = found.page;
       const { opened } = found;
       const value = BOUNDED.has(kind) ? await this.bounded(page, operation(page, args)) : await operation(page, args);

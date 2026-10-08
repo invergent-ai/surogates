@@ -693,6 +693,34 @@ await navigator.serviceWorker.ready;`);
     expect((await op(a, "browser.evaluate", { code: "return document.title;" }, "chat-1")).ok?.value).toBe("Fixture");
   }, 30_000);
 
+  it("runs nothing in the page for an operation whose browser was still launching when its user took the browser over", async () => {
+    const a = session();
+    const state = host as unknown as { running: Promise<BrowserContext> | null; live: BrowserContext | null };
+    // The chat's first operation: its turn has come, and the browser launches for it.
+    const first = op(a, "browser.evaluate", { code: "document.title = 'ran after the pause'; return 1;" }, "chat-1");
+    await expect.poll(() => state.running !== null, { timeout: 5_000 }).toBe(true);
+    // Not launched yet: the operation has no page to act in.
+    expect(state.live).toBeNull();
+    host.pause("chat-1", true);
+    expect(await first).toEqual(PAUSED);
+    host.pause("chat-1", false);
+    expect(await script(a, "return document.title;")).toBe("");
+  }, 30_000);
+
+  it("runs nothing in the page for an operation still waiting behind another when its user took the browser over", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    // Its tab is there. One that holds its page a moment, and one whose turn has not come.
+    const held = op(a, "browser.evaluate", { code: "await new Promise((done) => setTimeout(done, 1000)); return 1;" }, "chat-1");
+    const queued = op(a, "browser.evaluate", { code: "document.title = 'ran after the pause'; return 2;" }, "chat-1");
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", true);
+    expect((await held).ok?.value).toBe(1);
+    expect(await queued).toEqual(PAUSED);
+    host.pause("chat-1", false);
+    expect(await script(a, "return document.title;")).toBe("Fixture");
+  }, 30_000);
+
   it("brings a chat's own newest page to the front before a sub-agent's, and shows none for a chat with no page", async () => {
     const child = session();
     expect(await host.show("chat-1")).toBe(false);
