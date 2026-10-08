@@ -172,6 +172,10 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "logs", "console.log"), user: USER, kvm: KVM,
     };
     const first = await Guest.boot(bootLinux, options);
+    // A /dev/kvm that opens but QEMU cannot use boots emulated by itself: the file would then pass slowly, unasked.
+    if (KVM === undefined) {
+      expect(first.emulated, "QEMU could not use this computer's KVM: the VM tests run emulated only with SUROGATE_VM_KVM naming a device that does not exist").toBeNull();
+    }
     console.log(`M1, first boot, formatting the sessions disk: hello after ${first.helloMs.toFixed(0)} ms`);
     expect(statSync(options.sessions).size).toBe(32 * 1024 ** 3);
     await first.stop();
