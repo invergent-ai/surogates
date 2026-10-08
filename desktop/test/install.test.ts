@@ -2,10 +2,11 @@
 // --apply, which each version ships as bin/surogate-apply-update and runs as root; and the install
 // from a server, as a user with sudo. Releases are small stand-ins in the tarball's layout, signed
 // by a key of the test's own. Behind SUROGATE_INSTALL_TESTS=1: it needs Docker, the ubuntu:24.04
-// and ubuntu:26.04 images, and the Ubuntu archive for apt.
+// and ubuntu:26.04 images, and the Ubuntu archive for apt. The script's own list of release keys is
+// read without either.
 
 import { type ChildProcess, execFile, spawn, spawnSync } from "node:child_process";
-import { createHash, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
+import { createHash, createPublicKey, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -141,6 +142,22 @@ function lab(release: string, setup: string[], run: string[] = []) {
 
   return { it, docker, root, as, releaseOf, manifestOf, current, versions };
 }
+
+describe("the install script's release keys", () => {
+  it("are Ed25519 public keys, each written as OpenSSL writes one: an entry that does not load is skipped without a word, and every release refused", () => {
+    const list = /RELEASE_KEYS=\(\n([^)]*)\)/.exec(readFileSync(SCRIPT, "utf8"))?.[1] ?? "";
+    const entries = [...list.matchAll(/'([^']*)'/g)].map(([, entry]) => entry);
+    expect(entries.length).toBeGreaterThan(0);
+    // The list holds its entries and nothing between them.
+    expect(list.replace(/'[^']*'/g, "").trim()).toBe("");
+    for (const entry of entries) {
+      const key = createPublicKey(entry);
+      expect(key.asymmetricKeyType).toBe("ed25519");
+      // No indent, no other line ends, nothing before or after: signed() hands the entry to openssl as it is.
+      expect(entry).toBe(pem(key));
+    }
+  });
+});
 
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --apply, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
   // What --apply needs, on a desktop's baseline: openssl, jq and bubblewrap, which the install
