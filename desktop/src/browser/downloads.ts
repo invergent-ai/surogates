@@ -8,13 +8,14 @@ import { readFile, rm } from "node:fs/promises";
 import { extname, posix } from "node:path";
 
 import type { DownloadBy } from "../binding/approvals.js";
-import { osError, strerror } from "../files/answers.js";
+import { MAX_WRITE_BYTES, osError, strerror } from "../files/answers.js";
 import type { Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 
 // A finished download, as the browser host staged it: the chat, the session whose page started it,
-// the name the browser gave it, and where the host keeps it until it is saved. user: it started
-// while the chat's user held the browser, so it is theirs, and nothing of it is the agent's to hear.
+// the name the browser gave it, and where the host keeps it until it is saved. user: it is its
+// user's, not the agent's: it began while they held the browser, or cannot be told from one that
+// did (host.ts, whose). It is asked about in either mode, and nothing of it is the agent's to hear.
 export interface StagedDownload {
   root: string;
   session: string;
@@ -81,6 +82,13 @@ export function savedName(suggested: string): string {
 const COULD_NOT = "this computer could not save it";
 /** What the agent is told of a download that came as no download this computer saves: not even its name is taken from it. */
 export const UNSAVED = `The page downloaded a file, but it was not saved: ${COULD_NOT}.`;
+
+/** What the agent is told of one too large to save. *most*: the limit in force, a write's most unless told another. */
+export const tooLarge = (name: string, bytes: number, most = MAX_WRITE_BYTES): string =>
+  `The page downloaded ${quoted(name)} (${bytes} bytes), too large to save in the chat's folder at once (at most ${most} bytes), so it was not saved.`;
+/** What the agent is told of one of its own that its user's take-over of the browser stopped. */
+export const interrupted = (name: string): string =>
+  `The page's download of ${quoted(name)} was interrupted when the user took over the agent's browser on this computer, so it was not saved.`;
 
 // The *n*th name tried for *name*.
 function numbered(name: string, n: number): string {

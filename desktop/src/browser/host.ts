@@ -9,13 +9,13 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { type BrowserContext, chromium, type Dialog, type Download, type Page } from "playwright-core";
+import { type BrowserContext, chromium, type Dialog, type Download, type Page, type Request } from "playwright-core";
 
 import { MAX_WRITE_BYTES } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
 import { destination, reach } from "../vm/egress.js";
 import { CANCELLED, NEW_TAB, PAUSED } from "./client.js";
-import { quoted, type StagedDownload } from "./downloads.js";
+import { interrupted, quoted, type StagedDownload, tooLarge } from "./downloads.js";
 import { letGo, OPERATIONS } from "./operations.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
 
@@ -69,20 +69,35 @@ const RELEASE_MS = 6_000;
 export const PROXY_BYPASSED =
   "The agent's browser would not go through Surogate's proxy: its proxy settings are managed elsewhere on this computer, for example by a policy. So it is not used.";
 
+// How long after the browser was handed back a download with no request known is still taken for its
+// user's: the browser says nothing of the request of a link with `download`, of a blob or of a data
+// address until the file comes, so one that comes then may have been asked for while they held it. A
+// site that takes longer than this to answer such a request is taken for the agent's.
+export const AFTER_HAND_BACK_MS = 60_000;
+// How many navigations not yet ended are kept, the oldest going first; and how long one the browser gave
+// up as a page is kept, for the download it announces a moment later.
+const REQUESTS = 256;
+const FAILED_MS = 10_000;
+// An address without its fragment, which a request's does not carry.
+const bare = (url: string): string => url.split("#")[0] ?? url;
+
+// When a navigation's request began: the chat the browser was held from then, or null with nobody holding
+// it; what a take-over since would have stopped it by; and when the browser gave it up as a page.
+interface Begun {
+  by: string | null;
+  stop: AbortSignal;
+  failed?: number;
+}
+
 // What a page did that its agent could not see happen, at most this many to an answer.
 const MAX_NOTICES = 20;
 export const FILE_ASKED =
   "The page asked for a file to upload. The agent's browser on this computer has no files to give it, so nothing was chosen.";
-// *most*: the limit in force, a write's most unless the host was told another.
-export const tooLarge = (name: string, bytes: number, most = MAX_WRITE_BYTES): string =>
-  `The page downloaded ${quoted(name)} (${bytes} bytes), too large to save in the chat's folder at once (at most ${most} bytes), so it was not saved.`;
 export const notFinished = (name: string, why: string): string => `The page's download of ${quoted(name)} did not finish (${why}), so it was not saved.`;
 // Why one did not finish: the browser's own word for one that was cancelled, or whose connection broke; of
 // any other, this host's words. What an error says itself is not the agent's to read.
 const unfinished = (failure: string | null): string => (failure === "canceled" ? failure : "the browser stopped it");
 const unmeasured = (name: string): string => `The page downloaded ${quoted(name)}, but its size could not be measured, so it was not saved.`;
-export const interrupted = (name: string): string =>
-  `The page's download of ${quoted(name)} was interrupted when the user took over the agent's browser on this computer, so it was not saved.`;
 
 const failed = (message: string): Outcome => ({ error: { type: "browser", message } });
 const DELETED = failed("The chat was deleted, and its tabs closed with it");
@@ -279,6 +294,7 @@ export interface BrowserHostOptions {
   boundMs?: number; // BOUND_MS unless told
   downloaded?: (download: StagedDownload) => void; // where each download a page finished goes, to be saved
   downloadBytes?: number; // the most a download may be; a write's most unless told
+  now?: () => number; // the clock; Date.now unless told
 }
 
 export class BrowserHost {
@@ -321,6 +337,13 @@ export class BrowserHost {
   private interrupt = new AbortController();
   // The agent's downloads on their way, until each is handed on or dropped: a take-over stops them all.
   private readonly arriving = new Set<Download>();
+  // The chat that last handed the browser back, and when.
+  private handed: { by: string; at: number } | null = null;
+  // When each navigation's request began, for as long as the browser keeps the request: a redirect's next
+  // request takes its beginning from the one it follows.
+  private readonly begun = new WeakMap<Request, Begun>();
+  // The navigations not known to have ended as a page, oldest first: a download may be the end of one.
+  private readonly open = new Map<Request, Begun>();
   private closing = false;
 
   constructor(private readonly options: BrowserHostOptions = {}) {}
@@ -362,7 +385,9 @@ export class BrowserHost {
    */
   pause(root: string, paused: boolean): void {
     if (!paused) {
-      if (this.held === root) this.held = null;
+      if (this.held !== root) return;
+      this.held = null;
+      this.handed = { by: root, at: this.now() };
       return;
     }
     this.held = root;
@@ -567,16 +592,69 @@ export class BrowserHost {
     return undefined;
   }
 
-  // A download the browser announces in *page*, any page of its: a session's is its chat's. One in a tab
-  // no chat owns is its user's while they hold the browser, and goes to the chat the browser is held
-  // from, asked there as any of theirs. With nobody holding it, or that chat deleted, no chat is there
-  // to ask: it is stopped at once and what it left removed, as before downloads were kept.
+  private now(): number {
+    return this.options.now?.() ?? Date.now();
+  }
+
+  // A request the browser says has begun, in any page of its. A navigation's is kept with who held the
+  // browser at that moment: a download that is a navigation's answer (a link, a form, a new window, a
+  // frame) is whose its request was. No request is said of a link with `download`, of a blob or of a data
+  // address, and what a page loads beside its own document is no download's beginning.
+  private requested(request: Request): void {
+    if (!request.isNavigationRequest()) return;
+    const from = request.redirectedFrom();
+    const begun = (from && this.begun.get(from)) ?? { by: this.held, stop: this.interrupt.signal };
+    this.begun.set(request, begun);
+    if (from) this.open.delete(from);
+    this.open.set(request, begun);
+    const now = this.now();
+    for (const [other, { failed }] of this.open) {
+      if (this.open.size > REQUESTS || (failed !== undefined && now - failed > FAILED_MS)) this.open.delete(other);
+    }
+  }
+
+  // It loaded as a page: no download.
+  private loaded(request: Request): void {
+    this.open.delete(request);
+  }
+
+  // The browser gave it up as a page, as it does a moment before it announces it as a download.
+  private failed(request: Request): void {
+    const begun = this.open.get(request);
+    if (begun) this.open.set(request, { ...begun, failed: this.now() });
+  }
+
+  // Whose a download is: its user's, with the chat the browser was held from; or the agent's, with what a
+  // take-over since its beginning stops it by. It is the agent's only where a request of it is known to
+  // have begun while nobody held the browser, or where no request of it is known, nobody holds the browser
+  // now, and it was last handed back more than AFTER_HAND_BACK_MS ago. Every other is its user's: one whose
+  // request began while they held it, however late it comes; one with no request known that comes while
+  // they hold it, or in the time after in which it may have been asked for under their hand; and, in doubt
+  // between two requests of one address, either.
+  private whose(download: Download): { by: string } | { stop: AbortSignal } {
+    const address = bare(download.url());
+    const known = [...this.open].filter(([request]) => bare(request.url()) === address);
+    if (known.length > 0) {
+      const [request, begun] = known.find(([, { by }]) => by !== null) ?? known[0]!;
+      this.open.delete(request);
+      return begun.by !== null ? { by: begun.by } : { stop: begun.stop };
+    }
+    if (this.held !== null) return { by: this.held };
+    if (this.handed !== null && this.now() - this.handed.at <= AFTER_HAND_BACK_MS) return { by: this.handed.by };
+    return { stop: this.interrupt.signal };
+  }
+
+  // A download the browser announces in *page*, any page of its. Its user's is saved in the chat its tab
+  // is of, asked there in either mode; in a tab no chat owns, in the chat the browser was held from when
+  // it began, unless that chat is deleted. The agent's is its session's chat's. One that is the agent's
+  // in a tab no chat owns is no chat's to ask: it is stopped at once and what it left removed, as before
+  // downloads were kept.
   private arrived(page: Page, download: Download): Promise<void> {
     const session = this.sessionOf(page);
-    const held = this.held;
-    if (session !== undefined) return this.stage(download, { root: this.roots.get(session), session }, held === null ? this.interrupt.signal : null);
-    if (held === null || this.forgets.has(held)) return this.discard(download);
-    return this.stage(download, { root: held, session: held }, null);
+    const whose = this.whose(download);
+    if (session !== undefined) return this.stage(download, { root: this.roots.get(session), session }, "stop" in whose ? whose.stop : null);
+    if ("stop" in whose || this.forgets.has(whose.by)) return this.discard(download);
+    return this.stage(download, { root: whose.by, session: whose.by }, null);
   }
 
   // Stopped where it is, and what it had written removed: one that had ended already too. Never rejects.
@@ -589,15 +667,17 @@ export class BrowserHost {
   // or, when it did not finish, cannot be measured or is too large to save, gone, and its agent told why.
   // *of*: the chat it is saved in, and the session it is told to. *stop*: null for its user's own, which
   // nothing of the agent's stops and of which the agent is told nothing. The agent's is interrupted as the
-  // operation that started it is, by the signal it began under: taken over before it is handed on, it is
-  // stopped where it is and dropped, never taken up again at a hand back, and its agent is told so with its
-  // session's next answer. One handed on before the take-over is the chat's to save, as a write of the
-  // chat's that waits or asks goes on.
+  // operation that started it is, by the signal it began under: taken over before it is handed on, or
+  // before it was announced, it is stopped where it is and dropped, never taken up again at a hand back,
+  // and its agent is told so with its session's next answer. One handed on before the take-over is the
+  // chat's to save, as a write of the chat's that waits or asks goes on.
   private async stage(download: Download, of: { root: string | undefined; session: string }, stop: AbortSignal | null): Promise<void> {
     const name = download.suggestedFilename();
     const { root, session } = of;
     const user = stop === null;
     if (stop) this.arriving.add(download);
+    // Taken over between its request and its announcement: stopped as one on its way is.
+    if (stop?.aborted) void download.cancel().catch(() => {});
     // The agent's own is told whatever came of it, held meanwhile or not: it began before any take-over.
     const tell = (notice: string) => {
       if (!user) this.keep(session, notice);
@@ -768,6 +848,10 @@ export class BrowserHost {
     const watch = (page: Page) => void page.on("download", (download) => void this.arrived(page, download));
     context.on("page", watch);
     context.pages().forEach(watch);
+    // And every request, on the context: a new window's first is said before the window is a page.
+    context.on("request", (request) => this.requested(request));
+    context.on("requestfinished", (request) => this.loaded(request));
+    context.on("requestfailed", (request) => this.failed(request));
     try {
       await this.bypassWorkers(context);
       this.spare = await this.proxied(context, this.proxy.server);

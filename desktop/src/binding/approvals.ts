@@ -45,7 +45,8 @@ const LOOKING: ReadonlySet<unknown> = new Set(["move", "wheel"]);
 const acts = ({ kind, args }: Operation): boolean => !BROWSER_READS.has(kind) && !(kind === "browser.mouse" && LOOKING.has(args.action));
 
 // Whose download a write saves (browser/downloads.ts): one a page of the agent's browser started, or
-// one the chat's user started while they held the browser, which asks in either mode.
+// one that began while its user held the browser, or just after they handed it back, which asks in
+// either mode.
 export type DownloadBy = "page" | "user";
 
 // The chat a prompt is for, and the session asking: a sub-agent of the chat when it is not the root.

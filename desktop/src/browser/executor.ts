@@ -9,7 +9,7 @@ import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { ToolLayer } from "../shell/device-stack.js";
 import { type BrowserClient, PAUSED } from "./client.js";
-import { type StagedDownload, UNSAVED } from "./downloads.js";
+import { interrupted, type StagedDownload, UNSAVED } from "./downloads.js";
 import type { Launch } from "./host.js";
 
 export const BROWSER_KINDS = "browser.";
@@ -56,9 +56,11 @@ export class Browsing implements ToolLayer {
 
   constructor(private readonly options: BrowsingOptions) {
     options.browser.onDownload((download) => {
+      // This side knows that its user took the browser over before its browser host does.
+      const held = this.held !== null;
       const looked = this.looking.then(() => this.staged(download.path));
       this.looking = looked;
-      void looked.then((path) => this.saved(download, path));
+      void looked.then((path) => this.saved(download, path, held)).catch(() => {});
     });
   }
 
@@ -85,9 +87,16 @@ export class Browsing implements ToolLayer {
   }
 
   // *path*: where the staged file really is, under the folder its browser host stages in; null for any other.
-  private async saved(download: StagedDownload, path: string | null): Promise<void> {
+  // *held*: whether its user held the browser when the host handed it on.
+  private async saved(download: StagedDownload, path: string | null, held: boolean): Promise<void> {
     // No file its browser host staged: nothing is read or removed on the host's word alone.
     if (path === null) return this.hear(download, UNSAVED);
+    // The agent's own, handed on in the instant its user took the browser over, before the host heard of
+    // it: dropped as one the host still had, and its agent told the same.
+    if (held && !download.user) {
+      await rm(path, { force: true }).catch(() => {});
+      return this.hear(download, interrupted(download.name));
+    }
     if (!this.save) {
       await rm(path, { force: true }).catch(() => {});
       return;
@@ -96,7 +105,9 @@ export class Browsing implements ToolLayer {
     try {
       notice = await this.save({ ...download, path });
     } catch {
-      // What saves them says itself what came of each: of one it failed on outright there is nothing to tell.
+      // What saves them says itself what came of each, and removes what was staged: of one it failed on
+      // outright there is nothing to tell, and its file goes here.
+      await rm(path, { force: true }).catch(() => {});
       return;
     }
     this.hear(download, notice);

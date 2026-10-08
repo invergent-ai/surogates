@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PAUSED } from "../src/browser/client.js";
-import { type StagedDownload, UNSAVED } from "../src/browser/downloads.js";
+import { interrupted, type StagedDownload, UNSAVED } from "../src/browser/downloads.js";
 import { Browsing, NO_BROWSER } from "../src/browser/executor.js";
 import type { Launch } from "../src/browser/host.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
@@ -265,11 +265,38 @@ describe("the browser's kinds beside the tools", () => {
     let saves = 0;
     browsing.saveDownloadsWith((download) => ((saves += 1) === 1 ? Promise.reject(new Error("the journal is closed")) : Promise.resolve(`saved ${download.name}`)));
     const told = (browsing as unknown as { told: Map<string, unknown> }).told;
-    stage({ root: ROOT, session: ROOT, name: "first.txt", path: kept("a"), user: false });
+    const first = kept("a");
+    stage({ root: ROOT, session: ROOT, name: "first.txt", path: first, user: false });
     stage({ root: ROOT, session: ROOT, name: "second.txt", path: kept("b"), user: false });
     await vi.waitFor(() => expect(told.size).toBe(1));
+    // What it failed on is not left staged.
+    await vi.waitFor(() => expect(existsSync(first)).toBe(false));
     answers.push({ ok: { notices: [] } });
     expect(await browsing.run(op("browser.mouse"), signal)).toEqual({ ok: { notices: ["saved second.txt"] } });
+  });
+
+  it("drops a download the browser hands on as the agent's once its user has taken the browser over, which this side knows before the browser does; one of their own is saved", async () => {
+    const { browsing, answers, stage } = rig();
+    const saved: string[] = [];
+    browsing.saveDownloadsWith((download) => (saved.push(download.name), Promise.resolve(`saved ${download.name}`)));
+    browsing.takeOver(OTHER);
+    // Handed on by a browser host that had not heard of the take-over yet.
+    const agents = kept("a");
+    stage({ root: ROOT, session: ROOT, name: "report.txt", path: agents, user: false });
+    stage({ root: ROOT, session: ROOT, name: "statement.pdf", path: kept("b"), user: true });
+    await vi.waitFor(() => expect([saved, existsSync(agents)]).toEqual([["statement.pdf"], false]));
+    // Handed back, its agent hears what became of its own, as of one the browser had still held; and nothing of its user's.
+    browsing.handBack(OTHER);
+    answers.push({ ok: { notices: [] } });
+    expect(await browsing.run(op("browser.mouse"), signal)).toEqual({ ok: { notices: [interrupted("report.txt")] } });
+    expect(interrupted("report.txt")).toBe(
+      'The page\'s download of "report.txt" was interrupted when the user took over the agent\'s browser on this computer, so it was not saved.',
+    );
+    // One handed on once the browser is the agent's again is saved as its own: also where it is taken over
+    // in the next instant, before this side has looked at where the file is.
+    stage({ root: ROOT, session: ROOT, name: "report.txt", path: kept("c"), user: false });
+    browsing.takeOver(OTHER);
+    await vi.waitFor(() => expect(saved).toEqual(["statement.pdf", "report.txt"]));
   });
 
   it("tells a session of twenty downloads at most with one answer, and removes a staged file nothing was given to save with", async () => {
