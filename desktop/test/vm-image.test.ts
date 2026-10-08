@@ -149,6 +149,20 @@ describe("the guest image's delivery", () => {
     expect(heard.filter(({ url }) => url.endsWith("rootfs.img.zst")).map(({ range }) => range)).toEqual([undefined, undefined, `bytes=${cut}-`]);
   });
 
+  it("keeps what came of a download whose answer ended cleanly but short, as a server that caps its ranges sends, and asks for the rest", async () => {
+    const cut = 100_000;
+    const size = served.get(`/desktop/vm/${KEY}/rootfs.img.zst`)!.length;
+    answer = (request, response, body) => {
+      if (request.headers.range || !request.url?.endsWith("rootfs.img.zst")) return ranged(request, response, body);
+      // Chunked, and its end sent after its first 100 000 bytes.
+      response.writeHead(200).end(body.subarray(0, cut));
+    };
+    await expect(deliver(options())).rejects.toThrow(`the download of rootfs.img.zst stopped: it ended after ${cut} of ${size} bytes`);
+    expect(statSync(join(images(), `${KEY}.partial`, "rootfs.img.zst.partial")).size).toBe(cut);
+    expect(readFileSync(join(await deliver(options()), "rootfs.img")).equals(rootfs)).toBe(true);
+    expect(heard.filter(({ url }) => url.endsWith("rootfs.img.zst")).map(({ range }) => range)).toEqual([undefined, `bytes=${cut}-`]);
+  });
+
   it("starts a download again when a server sends the whole file for a Range", async () => {
     const partial = join(images(), `${KEY}.partial`, "rootfs.img.zst.partial");
     mkdirSync(join(images(), `${KEY}.partial`), { recursive: true });

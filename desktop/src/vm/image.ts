@@ -9,7 +9,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  closeSync, createReadStream, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, truncateSync, writeFileSync,
+  closeSync, createReadStream, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, truncateSync,
+  writeFileSync,
 } from "node:fs";
 import { open, statfs } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -96,6 +97,19 @@ const STALL_MS = 30_000;
 const COMPLETE = "complete";
 const gigabytes = (bytes: number) => `${(bytes / 1e9).toFixed(1)} GB`;
 const sizeOf = (path: string) => (existsSync(path) ? statSync(path).size : 0);
+// How every download begins: a zstd frame's magic number.
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+
+// Whether *path* begins as a download does.
+function zstdAt(path: string): boolean {
+  const head = Buffer.alloc(ZSTD_MAGIC.length);
+  const fd = openSync(path, "r");
+  try {
+    return readSync(fd, head, 0, head.length, 0) === head.length && head.equals(ZSTD_MAGIC);
+  } finally {
+    closeSync(fd);
+  }
+}
 
 // *path*'s data, or a folder's entries, on disk.
 function sync(path: string): void {
@@ -244,11 +258,13 @@ async function download(options: DeliverOptions, file: ImageFile, partial: strin
       const out = await open(partial, have > 0 ? "a" : "w", 0o600);
       const reader = response.body?.getReader();
       const next = () => reader && Promise.race([reader.read(), stalled]);
+      let past = false;
       try {
         for (let read = await next(); read && !read.done; read = await next()) {
           heard();
           // Past the size the manifest names: it is not the file.
-          if (have + read.value.length > file.downloadSize) break;
+          past = have + read.value.length > file.downloadSize;
+          if (past) break;
           hash.update(read.value);
           // A write may take less than it is given: what is hashed is what is on disk.
           for (let at = 0; at < read.value.length;) at += (await out.write(read.value, at)).bytesWritten;
@@ -262,6 +278,11 @@ async function download(options: DeliverOptions, file: ImageFile, partial: strin
         // Not waited for: a body that stalled need not answer its cancel.
         void reader?.cancel().catch(() => {});
         await out.close();
+      }
+      // Ended short, as a server that caps a range sends: what came is kept for the next try's Range.
+      // A page in its place, as a captive portal's, does not begin as a download does.
+      if (!past && have < file.downloadSize && zstdAt(partial)) {
+        throw new Error(`the download of ${file.download} stopped: it ended after ${have} of ${file.downloadSize} bytes`);
       }
     } finally {
       clearTimeout(timer);
