@@ -24,7 +24,10 @@ page's own JavaScript (browser.evaluate), which runs in the page:
   browser.close                                                        {closed}
   browser.set_input_files  paths [key, ...]: files of the chat's       {files: how many, notices}
                        folder, as its own operations name them; given
-                       to the file input the page last asked for
+                       to the file input the computer's user was asked
+                       about (in a chat that asks every time: the one
+                       its prompt named, or none if the page changed
+                       since), else to the one the page last asked for
 
 The scripts browser.observe takes, each a page function shipped with the app:
 
@@ -326,9 +329,12 @@ class DeviceBrowserClient(BrowserClientBase):
         return result
 
     async def set_input_files(self, keys: list[str]) -> int:
-        """Give the files at *keys* of the chat's folder to the file input the page last asked for: how many it took.
+        """Give the files at *keys* of the chat's folder to a file input of the page: how many it took.
 
-        The computer reads each through the chat's file host, as any read of the folder.
+        The computer reads each through the chat's file host, as any read of the folder. Which input:
+        in a chat that asks every time, the one the computer's user was asked about, named in the
+        prompt by its own frame's site, and no other, so a page that changed since is given nothing;
+        in a chat that works freely, the one the page last asked for.
         """
         value = await self._call("browser.set_input_files", paths=list(keys))
         if not isinstance(value, dict) or not _whole(value.get("files")):
