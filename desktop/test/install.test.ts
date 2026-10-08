@@ -591,6 +591,33 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
   });
 
+  it("says in a line of its own what it did not expect: a step of its own that fails, a disk that is full, and room short of a megabyte", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    // A step of its own that fails, here because its bin folder's name is a file's: the step's words, then the helper's line.
+    expect(root("touch /opt/surogate/bin").status).toBe(0);
+    const failed = root(`/opt/surogate-test/install.sh --apply ${files()}`);
+    expect(failed).toMatchObject({ status: 1, stdout: "" });
+    expect(failed.stderr.trimEnd().split("\n").at(-1)).toBe('Surogate Desktop: stopped, as this step failed: mkdir -p "$ROOT/versions" "$ROOT/bin"');
+    expect(root("rm /opt/surogate/bin").status).toBe(0);
+    // A disk with no room at all: the copy's own failure is not the file's.
+    expect(root(`head -c 1G /dev/zero >/opt/surogate/filler 2>/dev/null; /opt/surogate-test/install.sh --apply ${files()}`))
+      .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: /opt/surogate/staging could not be written: is its disk full?\n" });
+    // Room for the manifest and its signature, and not for the release: the megabytes it needs are no 0.
+    expect(root(`truncate -s -32K /opt/surogate/filler && /opt/surogate-test/install.sh --apply ${files()}`))
+      .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: /opt/surogate needs 1 MB free to apply this release, and has 0 MB\n" });
+    expect(root("rm /opt/surogate/filler && ls -A /opt/surogate/staging").stdout).toBe("");
+    // A link that leads round to itself: GNU's realpath lets it be, uutils' refuses it, and the words of neither are said.
+    const looped = releaseOf("1.0.0", (top) => {
+      symlinkSync("round", join(top, "resources", "loop"));
+      symlinkSync("loop", join(top, "resources", "round"));
+    });
+    manifestOf("1.0.0", looped);
+    const loop = apply(looped);
+    expect(`${loop.status} ${loop.stderr}`).toMatch(/^(0 |1 Surogate Desktop: the release's archive links outside itself: resources\/(loop|round)\n)$/);
+  });
+
   it("says what stops it: its arguments, a user who is not root, too little room, and bubblewrap missing", () => {
     const usage = "Surogate Desktop: usage: surogate-apply-update --apply <manifest> <signature> <tarball>\n";
     expect(root("/opt/surogate-test/install.sh --apply /home/tester/manifest.json")).toMatchObject({ status: 1, stderr: usage });

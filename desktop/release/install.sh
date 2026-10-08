@@ -46,6 +46,12 @@ say() {
   echo "Surogate Desktop: $*"
 }
 
+# A step that failed where no failure is expected: said in a line of this script's own, after
+# whatever the step said itself.
+unexpected() {
+  fail "stopped, as this step failed: $1"
+}
+
 # Run as main ends, however it ends.
 cleanup() {
   [ "${#OWN[@]}" -eq 0 ] || rm -rf -- "${OWN[@]}"
@@ -134,10 +140,12 @@ as_reader() {
 # named. A pipe gives an empty copy at once. No more than $3 bytes are its own: root's end of the
 # pipe counts them, and a file that has more is refused.
 taken() {
-  local file="$1" copy="$2" most="$3"
+  local file="$1" copy="$2" most="$3" ends
   as_reader dd if="$file" iflag=nofollow,nonblock,count_bytes count="$(( most + 1 ))" bs=64K status=none 2>/dev/null \
-    | head -c "$(( most + 1 ))" >"$copy" 2>/dev/null \
-    && [ "$(stat -c %s "$copy")" -le "$most" ] || fail "$file is not a downloaded release's file"
+    | head -c "$(( most + 1 ))" 2>/dev/null >"$copy" && ends=(0 0) || ends=("${PIPESTATUS[@]}")
+  # Root's own end of the pipe failed: the disk's fault, and not the file's.
+  [ "${ends[1]}" -eq 0 ] || fail "$ROOT/staging could not be written: is its disk full?"
+  [ "${ends[0]}" -eq 0 ] && [ "$(stat -c %s "$copy")" -le "$most" ] || fail "$file is not a downloaded release's file"
 }
 
 # Applies a release as root: its manifest $1, signature $2 and tarball $3, which the user who
@@ -191,7 +199,7 @@ apply() {
   size="$(as_reader stat -c %s -- "$tarball" 2>/dev/null)" && [[ "$size" =~ ^[0-9]+$ ]] || fail "$tarball is not a downloaded release's file"
   need=$(( size / 256 ))
   room="$(df --output=avail -k "$ROOT" | tail -n 1)"
-  [ "$room" -ge "$need" ] || fail "$ROOT needs $(( need / 1024 )) MB free to apply this release, and has $(( room / 1024 )) MB"
+  [ "$room" -ge "$need" ] || fail "$ROOT needs $(( (need + 1023) / 1024 )) MB free to apply this release, and has $(( room / 1024 )) MB"
   taken "$tarball" "$work/release.tar.gz" "$size"
   [ "$(sha256sum <"$work/release.tar.gz" | cut -d' ' -f1)" = "$sha256" ] || fail "the downloaded release is not the one its manifest names"
 
@@ -216,7 +224,7 @@ apply() {
     [ -z "$(find "$top" \( -type b -o -type c -o -type p -o -type s -o -perm /6000 -o \( -type f -links +1 \) \) -print -quit)" ] \
       || fail "the release's archive holds a special file, a set-id file or a hard link"
     while IFS= read -r -d '' link; do
-      [[ "$(realpath -m "$link")" == "$top"/* ]] || fail "the release's archive links outside itself: ${link#"$top"/}"
+      [[ "$(realpath -m "$link" 2>/dev/null)" == "$top"/* ]] || fail "the release's archive links outside itself: ${link#"$top"/}"
     done < <(find "$top" -type l -print0)
     # The app and its helper are programs, no folders, and bin a folder of the tree's own, where
     # this version's bwrap goes.
@@ -412,10 +420,12 @@ install_all() {
 }
 
 main() {
-  set -euo pipefail
+  set -Eeuo pipefail
   umask 022
   settings
   trap cleanup EXIT
+  # Where a failure ends the script (-e), and not inside a $( ): there, its caller decides.
+  trap '[ "$BASH_SUBSHELL" -gt 0 ] || unexpected "$BASH_COMMAND"' ERR
   case "${1:-}" in
     --apply)
       # The helper runs the system's own tools, wherever its caller's PATH points.
@@ -438,7 +448,7 @@ main() {
         # Again as root, from this script's own functions: a script piped to bash has no file to name.
         # sudo resets the environment, so the proxy the user's shell names goes with them.
         { declare -f; declare -p http_proxy https_proxy HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY 2>/dev/null || true; echo 'main "$@"'; } \
-          | sudo -- bash -s -- "$@"
+          | sudo -- bash -s -- "$@" || exit "$?"
         return
       fi
       install_all "$base"
