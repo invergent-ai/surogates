@@ -160,6 +160,19 @@ const NOT_ROOTS_OWN_SAID = `Surogate Desktop: ${LOCKS} must be a folder of root'
 const linked = (then = "remove the link, and run this again") =>
   `Surogate Desktop: /opt/surogate is a link, where Surogate Desktop keeps a folder of its own or a disk mounted there: ${then}\n`;
 const LINKED_NOTHING_REMOVED = linked("nothing was removed. Remove the link, and run this again: what it names is then yours to remove");
+// What stands installed, all that a refusal leaves as it was: what current names, each version
+// and its mark, and the helper pkexec runs and its mark, with whatever else is beside them: each
+// by its place on the disk, its kind and mode, its owner, its size, its time and its bytes.
+const STANDING = String.raw`
+readlink /opt/surogate/current 2>&1
+ls /opt/surogate/versions 2>&1
+for mark in /opt/surogate/versions/*/release.json; do [ ! -e "$mark" ] || echo "$mark $(sha256sum <"$mark")"; done
+for file in /opt/surogate/bin/*; do
+  [ -e "$file" ] || [ -L "$file" ] || continue
+  stat -c '%n %i %f %u %g %s %y' -- "$file"
+  if [ -L "$file" ]; then readlink "$file"; elif [ -f "$file" ]; then sha256sum <"$file"; fi
+done
+`;
 // What --apply needs, on a desktop's baseline: openssl, jq and bubblewrap, which the install
 // script installs, and nothing of Surogate's; strace, for the tests that read the helper's system
 // calls; and a locale as a desktop's user has one, en_US.UTF-8.
@@ -229,6 +242,7 @@ function lab(release: string, setup: string[], run: string[] = []) {
   };
   const current = () => root("readlink /opt/surogate/current").stdout.trim();
   const versions = () => root("ls /opt/surogate/versions").stdout.trim().split("\n").filter(Boolean);
+  const standing = () => root(STANDING).stdout;
   // The system's *tool* with *standIn* in its place, which finds the tool itself as
   // /opt/hold/<tool>, for the one docker call that runs *lines*.
   const swapped = (tool: string, standIn: string, lines: string[]) => {
@@ -280,7 +294,7 @@ function lab(release: string, setup: string[], run: string[] = []) {
     }
   };
 
-  return { it, docker, root, as, releaseOf, manifestOf, current, versions, swapped, elsewhere };
+  return { it, docker, root, as, releaseOf, manifestOf, current, versions, standing, swapped, elsewhere };
 }
 
 describe("the install script's release keys", () => {
@@ -309,7 +323,7 @@ describe("the install script's waits", () => {
 });
 
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --apply, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
-  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions, swapped, elsewhere } = lab(release, APPLY_LAB, OWN_DISK);
+  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions, standing, swapped, elsewhere } = lab(release, APPLY_LAB, OWN_DISK);
   // The files as the app leaves them for the helper: in the user's cache, copied into the container.
   const files = (manifest = "/home/tester/manifest.json", tarball = "/home/tester/release.tar.gz") => `${manifest} /home/tester/manifest.json.sig ${tarball}`;
   const stage = (tarball: string) => {
@@ -762,6 +776,75 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(root("rm -rf /opt/surogate/bin && cp -a /opt/kept /opt/surogate/bin").status, damage).toBe(0);
     }
     expect(root(`/opt/surogate-test/install.sh --apply ${files()}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+  });
+
+  it("takes a manifest, the helper's mark and the installed version's only as one JSON object on one line, of 4096 bytes at most: of two documents, each would name a version", () => {
+    const tarball = releaseOf("1.0.0");
+    const object = manifestOf("1.0.0", tarball).toString().trimEnd();
+    expect(apply(tarball).status).toBe(0);
+    // The object with more in it, to *size* bytes in all with its newline.
+    const padded = (size: number) => `${object.slice(0, -1)},"more":"${"x".repeat(size - object.length - 11)}"}\n`;
+    expect(Buffer.byteLength(padded(4096))).toBe(4096);
+    const notOne: Array<[string, string]> = [
+      ["two documents on one line", `${object}${object}\n`],
+      ["two documents, a line each", `${object}\n${object}\n`],
+      ["an array", `[${object}]\n`],
+      ["a number", "1\n"],
+      ["an object over two lines", `${object.replace(",", ",\n")}\n`],
+      ["an object without its newline", object],
+      ["an empty file", ""],
+      ["a byte more than the bound", padded(4097)],
+    ];
+    const helper = "/opt/surogate/bin/surogate-apply-update";
+    const mark = "/opt/surogate/bin/release.json";
+    // A manifest the release key signed, handed to the helper with the release's tarball.
+    const handed = (manifest: string) => {
+      writeFileSync(join(box.dir, "manifest.json"), manifest);
+      writeFileSync(join(box.dir, "manifest.json.sig"), sign(null, Buffer.from(manifest), keys.privateKey));
+      return apply(tarball);
+    };
+    // Each is refused as no release. But for two: the longest, as it is copied, in the words of a
+    // file that is no manifest's size; and the empty one, which no key's signature is taken for.
+    const said = (manifest: string) => {
+      if (Buffer.byteLength(manifest) > 4096) return "/home/tester/manifest.json is not a downloaded release's file";
+      return manifest === "" ? "the release's manifest is not signed by Surogate's release key" : "the release's manifest is not a release of Surogate Desktop for this computer";
+    };
+    for (const [what, manifest] of notOne) {
+      const before = standing();
+      expect(handed(manifest), what).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${said(manifest)}\n` });
+      expect(standing(), what).toBe(before);
+    }
+    // One of the bound's own size is a release, and then the helper's mark and the version's.
+    expect(handed(padded(4096))).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+    expect(root(`cmp /home/tester/manifest.json ${mark} && cmp /home/tester/manifest.json /opt/surogate/current/release.json && stat -c %s ${mark}`).stdout).toBe("4096\n");
+
+    // The helper's mark, as only root can leave it: root's own, and no release's manifest. The
+    // release is handed again as it was signed; nothing is compared with what such a mark names.
+    const marked = (path: string, written: string) => {
+      writeFileSync(join(box.dir, "mark"), written);
+      expect(docker(["cp", join(box.dir, "mark"), `${box.container}:/root/mark`]).status).toBe(0);
+      expect(root(`install -m 0644 /root/mark ${path}`).status).toBe(0);
+    };
+    for (const [what, written] of [...notOne, ["an object that names no x.y.z", '{"version":"1.1"}\n']] as const) {
+      marked(mark, written);
+      const before = standing();
+      expect(root(`/opt/surogate-test/install.sh --apply ${files()}`), what).toMatchObject({
+        status: 1, stdout: "", stderr: `Surogate Desktop: ${mark} does not say which release ${helper} is of: remove Surogate Desktop with --uninstall, and install it again\n`,
+      });
+      expect(standing(), what).toBe(before);
+    }
+    // One of the bound's own size that names the release is its mark.
+    marked(mark, padded(4096));
+    expect(root(`/opt/surogate-test/install.sh --apply ${files()}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+
+    // The installed version's own mark, where a rollback asks what the installed version keeps:
+    // that question by itself, from the script's functions without its last line.
+    const keeps = () => root(`bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && reads_state /home/tester/manifest.json 1.0.0'`);
+    expect(keeps()).toMatchObject({ status: 0, stdout: "", stderr: "" });
+    for (const [what, written] of notOne) {
+      marked("/opt/surogate/versions/1.0.0/release.json", written);
+      expect(keeps(), what).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the installed 1.0.0 names no state schema: run Surogate Desktop's install script again\n" });
+    }
   });
 
   it("refuses an archive that holds anything outside its folder, a link out of it, a special file or a hard link", () => {

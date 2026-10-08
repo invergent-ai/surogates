@@ -160,22 +160,30 @@ signed() {
   return 1
 }
 
+# The JSON object that file $1 holds, on one line, where the file is a manifest as a release signs
+# one and as an apply copies one, to a version's mark and to the helper's: one object on one line,
+# whose newline is the file's last byte, of 4096 bytes at most. No more of the file is read than
+# those and one byte. Of two documents, the first would be applied and both kept as a mark; and
+# each would name a version, where dpkg calls a version of two lines older than any other.
+one_object() {
+  head -c 4097 -- "$1" 2>/dev/null \
+    | jq -ceRs 'select(utf8bytelength <= 4096 and test("\\A[^\\n]*\\n\\z")) | fromjson | select(type == "object")' 2>/dev/null
+}
+
 # A signed manifest's fields: a release of this channel for this platform, its tarball where every
 # release's is, its hash, each whole (jq's $ also matches before a last newline), its tarball's
 # size in bytes, a whole number above 0 and below 10^15, which jq writes in digits alone, and the
 # state schema of what the app keeps in each user's home, a whole number from 1 and below 10^15.
-# The manifest is one JSON document: of two, the first would be applied and both kept as the
-# version's mark. Printed as "<version> <sha256> <size>".
+# The manifest is one JSON object on one line (one_object). Printed as "<version> <sha256> <size>".
 release_of() {
-  jq -ers --arg channel "$CHANNEL" '
-    select(length == 1) | .[0]
-    | select((.version | type == "string" and test("\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))
+  one_object "$1" | jq -er --arg channel "$CHANNEL" '
+    select((.version | type == "string" and test("\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))
       and .channel == $channel and .platform == "linux" and .arch == "x64"
       and .url == "releases/\(.version)/surogate-desktop-\(.version)-linux-x64.tar.gz"
       and (.sha256 | type == "string" and test("\\A[0-9a-f]{64}\\z"))
       and (.size | type == "number" and . > 0 and . == floor and . < 1e15)
       and (.stateSchema | type == "number" and . >= 1 and . == floor and . < 1e15))
-    | "\(.version) \(.sha256) \(.size | floor)"' "$1" 2>/dev/null
+    | "\(.version) \(.sha256) \(.size | floor)"' 2>/dev/null
 }
 
 # The version /opt/surogate/current names, or nothing.
@@ -186,19 +194,23 @@ installed_version() {
 }
 
 # The release the helper pkexec runs is of, as its mark beside it names it: nothing on a computer
-# with no helper. Fails where a helper has no mark of root's own that names a release.
+# with no helper. Fails where a helper has no mark of root's own that is a release's manifest as
+# an apply copies one (one_object), and names a release.
 helper_release() {
   [ -e "$HELPER" ] || [ -L "$HELPER" ] || return 0
-  roots_own "$HELPER_MARK" 81a4 && jq -er '.version | select(type == "string" and test("\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))' "$HELPER_MARK" 2>/dev/null
+  roots_own "$HELPER_MARK" 81a4 \
+    && one_object "$HELPER_MARK" | jq -er '.version | select(type == "string" and test("\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))' 2>/dev/null
 }
 
 # Refuses release $2, whose signed manifest is $1, unless it can read what the installed version
-# keeps in each user's home: its state schema is the installed one's or later.
+# keeps in each user's home: its state schema is the installed one's or later. The installed
+# version's is read from its mark, which is that version's manifest as an apply copied it
+# (one_object).
 reads_state() {
   local installed schema now
   installed="$(installed_version)"
   [ -n "$installed" ] || fail "Surogate Desktop is not installed: run its install script first"
-  now="$(jq -er '.stateSchema | select(type == "number" and . >= 1 and . == floor and . < 1e15) | floor' "$ROOT/current/release.json" 2>/dev/null)" \
+  now="$(one_object "$ROOT/current/release.json" | jq -er '.stateSchema | select(type == "number" and . >= 1 and . == floor and . < 1e15) | floor' 2>/dev/null)" \
     || fail "the installed $installed names no state schema: run Surogate Desktop's install script again"
   schema="$(jq -r '.stateSchema | floor' "$1")"
   [ "$schema" -ge "$now" ] \
