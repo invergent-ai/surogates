@@ -176,6 +176,43 @@ describe("Settings → Folders and permissions", () => {
     expect(await settings.evaluate(() => (window as unknown as { rejections: string[] }).rejections)).toEqual([]);
   });
 
+  it("says why a Take back was refused once, however often the list is drawn again, until one goes through", async () => {
+    const { shell, page } = await signedIn();
+    const settings = await foldersSettings(shell, page);
+    // The list as the main process would answer it, the test's own: its Take back is refused once, then goes through.
+    await shell.evaluate(({ webContents }, folder) => {
+      const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
+      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com"], processes: [] };
+      let refuse = true;
+      for (const channel of ["settings:folders", "settings:take-back"]) contents.ipc.removeHandler(channel);
+      contents.ipc.handle("settings:folders", () => [{ folder, chats: [chat] }]);
+      contents.ipc.handle("settings:take-back", () => {
+        if (refuse) {
+          refuse = false;
+          throw new Error("This chat cannot reach that host");
+        }
+        chat.hosts = [];
+      });
+      contents.send("settings:changed");
+    }, folders[0]!);
+    await settings.click('[aria-label="Take back example.com"]');
+    await expect.poll(() => settings.textContent("#folders-failed")).toBe("Surogate did not take back example.com: This chat cannot reach that host.");
+    // Drawn again, as each change of the app's state draws it: the chat's row is a new one, and the
+    // alert's text the one it had, so a screen reader does not say it again.
+    await settings.evaluate(() => {
+      for (const drawn of [document.querySelector("#folders .row")!, document.getElementById("folders-failed")!.firstChild!]) Object.assign(drawn, { drawnBefore: true });
+    });
+    await shell.evaluate(({ webContents }) => {
+      webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!.send("settings:changed");
+    });
+    await expect.poll(() => settings.evaluate(() => "drawnBefore" in document.querySelector("#folders .row")!)).toBe(false);
+    expect(await settings.evaluate(() => "drawnBefore" in document.getElementById("folders-failed")!.firstChild!)).toBe(true);
+    // One that goes through takes it away.
+    await settings.click('[aria-label="Take back example.com"]');
+    await expect.poll(() => settings.textContent("#folders-failed")).toBe("");
+    expect(await texts(settings, "#folders .line")).toEqual([]);
+  });
+
   it("reads each chat's title afresh once its user has logged out, as for another account", async () => {
     const { shell, page, client } = await signedIn();
     agent.titles.set(CHAT, "Quarterly report");

@@ -88,6 +88,8 @@ const said = (error: unknown): string => (error instanceof Error ? error.message
 
 // Why the user's last Take back or Stop failed: null once one goes through.
 let failure: string | null = null;
+// What the section's alert says now: it is set only when that changes, so a screen reader says it once, not at each redraw.
+let failedShown = "";
 
 // A line under a chat: what it holds, as text, and the button that ends it, named by what it ends, as it is shown.
 function line(text: string, action: string, name: string, act: () => Promise<void>): HTMLElement {
@@ -150,7 +152,11 @@ async function renderFolders(): Promise<void> {
   } catch (error) {
     unread = said(error);
   }
-  showText(byId("folders-failed"), unread ?? failure ?? "");
+  const failed = unread ?? failure ?? "";
+  if (failed !== failedShown) {
+    failedShown = failed;
+    showText(byId("folders-failed"), failed);
+  }
   // A Take back or Stop that had the keyboard keeps it, or gives it to the line that took its place.
   keepFocus(() => {
     byId("folders-none").hidden = folders.length > 0 || unread !== null;
