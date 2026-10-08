@@ -174,6 +174,10 @@ async function renderFolders(): Promise<void> {
   });
 }
 
+// The Browser list's rows as its options were last made from them: they are made again only once the
+// rows change, so a redraw leaves a list its user has open as it is.
+let browserRows = "";
+
 async function render(): Promise<void> {
   void renderFolders();
   const state = await settings.state();
@@ -184,13 +188,17 @@ async function render(): Promise<void> {
     }
   }
   const browser = byId<HTMLSelectElement>("browser");
-  browser.replaceChildren(...state.browser.rows.map(({ value, label, disabled }) => {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    option.disabled = disabled;
-    return option;
-  }));
+  const rows = JSON.stringify(state.browser.rows);
+  if (rows !== browserRows) {
+    browserRows = rows;
+    browser.replaceChildren(...state.browser.rows.map(({ value, label, disabled }) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      option.disabled = disabled;
+      return option;
+    }));
+  }
   browser.value = state.browser.choice;
   const note = byId("browser-note");
   note.textContent = state.browser.failure
