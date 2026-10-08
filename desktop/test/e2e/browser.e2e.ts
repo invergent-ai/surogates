@@ -279,8 +279,11 @@ describe.skipIf(!run)("Custom… in Settings → Browser", () => {
 describe("a chat's browser taken over, and handed back", () => {
   const SHOW_AT_A_CLICK = "Surogate shows the agent's browser only when its user asks, with a click";
   const SETTINGS_AT_A_CLICK = "Surogate opens its Settings only when its user asks, with a click";
+  const HAND_BACK_AT_A_CLICK = "Surogate hands the agent's browser back only when its user asks, with a click";
+  // The native boxes the desktop has opened, each as it was asked.
+  const boxes = () => app!.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string; buttons: string[] }> }).asked);
 
-  it("answers the chat's browser operations paused while its user holds the browser, tells the page, and hands it back only at the desktop's own confirmation", async () => {
+  it("answers the chat's browser operations paused while its user holds the browser, tells the page, and hands it back only at its user's click and the desktop's own confirmation", async () => {
     const folder = join(home, "project");
     mkdirSync(folder);
     await bound(folder);
@@ -295,7 +298,6 @@ describe("a chat's browser taken over, and handed back", () => {
     const takeOver = () => client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
     // A hand back the page's own code asks for, with no click of its user's.
     const handBack = () => client.evaluate((chat) => window.surogateDesktop!.browser!.handBack(chat), CHAT);
-    const boxes = () => app!.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string; buttons: string[] }> }).asked);
     expect(await binding()).toMatchObject({ takenOver: false });
     await takeOver();
     expect(await binding()).toMatchObject({ folder, takenOver: true });
@@ -305,23 +307,30 @@ describe("a chat's browser taken over, and handed back", () => {
     expect(await operation("browser.close", {})).toEqual(PAUSED);
     expect(await promptsShown(app!)).toBe(0);
     expect(browsers()).toEqual([]);
-    // Kept at the desktop's own confirmation: still the user's.
-    await app!.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    // The page's own code asks to hand it back, with no click of its user's: refused, however often, and no
+    // box opens for it. One that opened would be answered Hand back.
     const before = (await boxes()).length;
-    expect(await handBack()).toBe(false);
+    for (let n = 0; n < 3; n += 1) await expect(handBack()).rejects.toThrow(HAND_BACK_AT_A_CLICK);
+    expect(await boxes()).toHaveLength(before);
     expect(await binding()).toMatchObject({ takenOver: true });
+    // At its user's click the desktop asks, in its own box, and they keep it: still the user's.
+    await app!.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    expect(await atClick(client, "handBack")).toBe(false);
+    expect(await binding()).toMatchObject({ takenOver: true });
+    expect(await boxes()).toHaveLength(before + 1);
     // Keep control is its default and its cancel: Enter or Escape keeps the browser the user's.
     expect((await boxes()).at(-1)).toMatchObject({
       message: expect.stringMatching(/^Hand the browser back to .+\?$/), buttons: ["Hand back", "Keep control"], defaultId: 1, cancelId: 1,
     });
-    // Kept: the page's own code asks no more, however often, and no box opens for it.
-    for (let n = 0; n < 3; n += 1) await expect(handBack()).rejects.toThrow("The user chose to keep the browser");
-    expect(await boxes()).toHaveLength(before + 1);
-    // Nor after a take-over the page's own code makes again: the chat was its user's already, so it is no new one.
+    // Kept: the page's own code opens no box still, nor after a take-over it makes again.
+    await app!.evaluate(() => Object.assign(globalThis, { answer: 0 }));
+    await expect(handBack()).rejects.toThrow(HAND_BACK_AT_A_CLICK);
     await takeOver();
-    await expect(handBack()).rejects.toThrow("The user chose to keep the browser");
+    await expect(handBack()).rejects.toThrow(HAND_BACK_AT_A_CLICK);
     expect(await boxes()).toHaveLength(before + 1);
-    // Its user's own click still asks, and can still keep it.
+    expect(await binding()).toMatchObject({ takenOver: true });
+    // A new click of its user's asks again, and they can still keep it; at the next they hand it back.
+    await app!.evaluate(() => Object.assign(globalThis, { answer: 1 }));
     expect(await atClick(client, "handBack")).toBe(false);
     expect(await boxes()).toHaveLength(before + 2);
     await app!.evaluate(() => Object.assign(globalThis, { answer: 0 }));
@@ -332,10 +341,37 @@ describe("a chat's browser taken over, and handed back", () => {
     const navigating = operation("browser.navigate", { url: "https://example.com/", wait_until: "load" });
     await press(await prompt(app!), "deny");
     expect((await navigating).error.type).toBe("denied");
-    // Taken over anew, the page may ask once more: what its user chose at the last one is not held against it.
+    // Taken over anew, the page's own code is refused as before: only its user's click asks.
     await takeOver();
-    expect(await handBack()).toBe(true);
+    await expect(handBack()).rejects.toThrow(HAND_BACK_AT_A_CLICK);
+    expect(await boxes()).toHaveLength(before + 3);
+    expect(await atClick(client, "handBack")).toBe(true);
     expect(await boxes()).toHaveLength(before + 4);
+  });
+
+  it("opens no box for a page that loads itself again and asks to hand the browser back, before its user kept it or after", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
+    // The page's own code loads the page again, then asks: what it was answered.
+    const reloadedAndAsked = async () => {
+      await Promise.all([client.waitForEvent("load", { timeout: 15_000 }), client.evaluate(() => location.reload()).catch(() => {})]);
+      await client.waitForFunction(() => window.surogateDesktop !== undefined, undefined, { timeout: 15_000 });
+      return client.evaluate((chat) => window.surogateDesktop!.browser!.handBack(chat).then(String, (error: Error) => error.message), CHAT);
+    };
+    // A box that opened would be answered Hand back.
+    const before = (await boxes()).length;
+    for (let n = 0; n < 3; n += 1) expect(await reloadedAndAsked()).toBe(HAND_BACK_AT_A_CLICK);
+    expect(await boxes()).toHaveLength(before);
+    // Kept at its user's click, and the same after it.
+    await app!.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    expect(await atClick(client, "handBack")).toBe(false);
+    await app!.evaluate(() => Object.assign(globalThis, { answer: 0 }));
+    for (let n = 0; n < 3; n += 1) expect(await reloadedAndAsked()).toBe(HAND_BACK_AT_A_CLICK);
+    expect(await boxes()).toHaveLength(before + 1);
+    expect(await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT)).toMatchObject({ takenOver: true });
   });
 
   it("refuses the browser's calls for a chat this computer did not bind", async () => {

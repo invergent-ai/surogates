@@ -47,10 +47,10 @@ export interface DesktopBrowser {
   // user's, as show's does.
   takeOver(sessionId: string): Promise<void>;
   // The desktop asks its user, in its own window; true once the agent drives the browser again, false
-  // when the user keeps it. A page cannot hand it back on its own. Rejects with "Surogate is already
-  // asking" while this window's last one is still open, and, once its user kept the browser, with
-  // "The user chose to keep the browser" until the chat is taken over anew or the page loads again:
-  // only a call at a click of its user's asks again.
+  // when the user keeps it. A page cannot hand it back on its own, nor ask to: rejects with "Surogate
+  // hands the agent's browser back only when its user asks, with a click" but at a click of its
+  // user's, once for each, within 5 s of it, as show does, whatever its user chose before; and with
+  // "Surogate is already asking" while this window's last one is still open.
   handBack(sessionId: string): Promise<boolean>;
 }
 

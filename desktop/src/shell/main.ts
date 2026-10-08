@@ -1197,8 +1197,6 @@ function bridge(contents: WebContents, agent: Agent): void {
     if (!stack.bindings.get(sessionId)) throw new Error("This chat has no folder on this computer");
     return stack;
   };
-  // The chats whose user kept the browser at this page's hand back: its own code asks no more, until a new take-over.
-  const keptBrowser = new Set<string>();
   const handlers = bridgeHandlers(agent.origin, {
     getDevice: () => {
       // The capabilities as last read and kept: a sign-in's read reaches the file, not the agent this bridge was opened with.
@@ -1242,17 +1240,14 @@ function bridge(contents: WebContents, agent: Agent): void {
     // The user drives the chat's browser from now on, and the page hears the change.
     takeOver: async (sessionId) => {
       const stack = await browsing(sessionId);
-      // A new take-over: what its user chose at the last one's hand back is not held against the page.
-      if (!stack.tools.takenOver?.(sessionId)) keptBrowser.delete(sessionId);
       stack.takeOver(sessionId);
       contents.send("desktop:binding-changed", sessionId);
     },
-    // Only at the desktop's own confirmation: the page asks, the user answers in a native box. Once they
-    // kept the browser, only their own click asks again: a page cannot wear its user down.
-    handBack: async (sessionId, clicked) => {
+    // Only at the desktop's own confirmation: the user answers in a native box. The page's preload asks for
+    // it only at its user's click, before they kept the browser and after: a page cannot wear its user down.
+    handBack: async (sessionId) => {
       const stack = await browsing(sessionId);
       if (!stack.tools.takenOver?.(sessionId)) return true;
-      if (!clicked && keptBrowser.has(sessionId)) throw new Error("The user chose to keep the browser");
       const handed = await ask({
         type: "question",
         message: `Hand the browser back to ${asShown(agent.name)}?`,
@@ -1262,10 +1257,7 @@ function bridge(contents: WebContents, agent: Agent): void {
         cancelId: 1,
         noLink: true,
       });
-      if (!handed) {
-        keptBrowser.add(sessionId);
-        return false;
-      }
+      if (!handed) return false;
       stack.handBack(sessionId);
       contents.send("desktop:binding-changed", sessionId);
       return true;
@@ -1312,7 +1304,6 @@ function bridge(contents: WebContents, agent: Agent): void {
   // the page there still serves: a load the shell cancels, as to an address outside the agent's, changes nothing.
   onReplaced(contents, () => {
     load += 1;
-    keptBrowser.clear();
     if (served) withdrawProjects(false);
   });
 }

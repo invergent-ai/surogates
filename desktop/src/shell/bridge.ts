@@ -32,10 +32,10 @@ export interface BridgeCalls {
   // The chat's folder shown in the file manager, while it is still the one its user confirmed.
   revealFolder(sessionId: string): Promise<void>;
   // The agent's browser for the chat: its page shown, taken over, and handed back at the desktop's own
-  // confirmation. *clicked*: the hand back was asked at its user's click, not by the page's own code.
+  // confirmation.
   showBrowser(sessionId: string): Promise<void>;
   takeOver(sessionId: string): Promise<void>;
-  handBack(sessionId: string, clicked: boolean): Promise<boolean>;
+  handBack(sessionId: string): Promise<boolean>;
   // Settings opened on the one section the page may open.
   openSettings(section: "browser"): Promise<void>;
   getAppearance(): DesktopAppearance;
@@ -132,9 +132,9 @@ export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<strin
       // over by itself makes it safer, and raises nothing. A chat with no page open is taken over all the same.
       if (clicked === true) await calls.showBrowser(id).catch(() => {});
     }),
-    handBack: checked((window, sessionId, clicked) => {
+    handBack: checked((window, sessionId) => {
       const id = chat(sessionId);
-      return alone("hand back", window, () => calls.handBack(id, clicked === true));
+      return alone("hand back", window, () => calls.handBack(id));
     }),
     openSettings: checked((_window, section) => {
       if (section !== "browser") throw new Error("Not a section the agent's page may open");

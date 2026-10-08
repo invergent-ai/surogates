@@ -13,9 +13,10 @@ const origin = process.argv.find((arg) => arg.startsWith(PREFIX))?.slice(PREFIX.
 
 if (origin !== undefined && window.top === window && location.origin === origin) {
   const call = (name: string) => (...args: unknown[]) => ipcRenderer.invoke(`desktop:${name}`, ...args);
-  // What raises a window of this computer happens only at its user's click: one heard here, in the
-  // preload's own world, where the page's scripts cannot make a trusted one. A click by key or by
-  // assistive technology counts. It allows one such call, for as long as Chromium's activation lasts.
+  // What raises a window of this computer, and what asks its user to hand the agent's browser back,
+  // happens only at its user's click: one heard here, in the preload's own world, where the page's
+  // scripts cannot make a trusted one. A click by key or by assistive technology counts. It allows
+  // one such call, for as long as Chromium's activation lasts.
   const CLICK_MS = 5_000;
   let clickedAt = -Infinity;
   window.addEventListener("click", (event) => {
@@ -90,9 +91,10 @@ if (origin !== undefined && window.top === window && location.origin === origin)
     browser: {
       // Only at its user's click: the agent's page cannot bring the agent's browser over what its user is doing.
       show: atClick("showBrowser", "Surogate shows the agent's browser only when its user asks, with a click"),
-      // A take-over needs no click, and raises the chat's page only with one. A hand back says whether its user clicked.
+      // A take-over needs no click, and raises the chat's page only with one.
       takeOver: (sessionId: unknown) => ipcRenderer.invoke("desktop:takeOver", sessionId, clicked()),
-      handBack: (sessionId: unknown) => ipcRenderer.invoke("desktop:handBack", sessionId, clicked()),
+      // Only at its user's click: the agent's page cannot open the desktop's confirmation by itself, whatever its user chose before.
+      handBack: atClick("handBack", "Surogate hands the agent's browser back only when its user asks, with a click"),
     },
     // Only at its user's click: the agent's page cannot put Settings over the window by itself.
     openSettings: atClick("openSettings", "Surogate opens its Settings only when its user asks, with a click"),

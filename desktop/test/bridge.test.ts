@@ -67,13 +67,13 @@ describe("the bridge", () => {
     expect(made.showBrowser).toHaveBeenCalledWith(SESSION);
     await handlers.takeOver!(TOP, "7", SESSION);
     expect(made.takeOver).toHaveBeenCalledWith(SESSION);
-    expect(await handlers.handBack!(TOP, "7", SESSION, true)).toBe(true);
-    expect(made.handBack).toHaveBeenCalledWith(SESSION, true);
+    expect(await handlers.handBack!(TOP, "7", SESSION)).toBe(true);
+    expect(made.handBack).toHaveBeenCalledWith(SESSION);
     await handlers.openSettings!(TOP, "7", "browser");
     expect(made.openSettings).toHaveBeenCalledWith("browser");
   });
 
-  it("brings a chat's page to the front at a take-over only when it came with its user's click, and says of a hand back whether it did", async () => {
+  it("brings a chat's page to the front at a take-over only when it came with its user's click", async () => {
     const made = calls();
     const handlers = bridgeHandlers(ORIGIN, made);
     // The page's own code: the chat is taken over, which only makes it safer, and nothing is raised.
@@ -88,11 +88,6 @@ describe("the bridge", () => {
     (made.showBrowser as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("The agent's browser has no page open for this chat"));
     await handlers.takeOver!(TOP, "7", SESSION, true);
     expect(made.takeOver).toHaveBeenCalledTimes(4);
-    // A hand back says whether its user clicked: the page's own code is held to what they chose before.
-    await handlers.handBack!(TOP, "7", SESSION);
-    await handlers.handBack!(TOP, "7", SESSION, 1);
-    await handlers.handBack!(TOP, "7", SESSION, true);
-    expect((made.handBack as ReturnType<typeof vi.fn>).mock.calls).toEqual([[SESSION, false], [SESSION, false], [SESSION, true]]);
   });
 
   it("asks one hand back at a time for a window: a page cannot pile the desktop's confirmations up", async () => {
