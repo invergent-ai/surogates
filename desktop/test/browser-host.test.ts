@@ -47,6 +47,20 @@ const PAGE = `<!doctype html><title>Fixture</title>
 <div style="height:4000px"></div>
 <script>window.n = 0;</script>`;
 
+// Pages whose own script makes their file input ask, with no hand on the input: a button at 60, 40 and the input below it.
+const asking = (title: string, pressed: string, script = "") => `<!doctype html><title>${title}</title>
+<button id="go" style="position:absolute;left:20px;top:20px;width:120px;height:40px" onclick="${pressed}">Go</button>
+<input id="file" type="file" style="position:absolute;left:20px;top:100px">
+<script>window.asked = 0; const ask = () => { window.asked += 1; document.getElementById('file').click(); }; ${script}</script>`;
+const ASKING_PAGES: Record<string, string> = {
+  // Asks once, 1.8 s after its button is pressed.
+  once: asking("ONCE", "setTimeout(ask, 1800)"),
+  // Asks once, 3.5 s after its button is pressed.
+  later: asking("LATER", "setTimeout(ask, 3500)"),
+  // Asks every 2 s from its button's first press on, until told to stop.
+  often: asking("OFTEN", "window.asking ??= setInterval(ask, 2000)"),
+};
+
 let site: Server;
 let canary: Server;
 let ports: { site: number; canary: number };
@@ -79,6 +93,11 @@ beforeEach(async () => {
     if (req.url === "/twoframes") {
       return void res.writeHead(200, { "content-type": "text/html" })
         .end(`<title>Two</title><iframe id="f" src="/fileinput"></iframe><iframe id="g" src="/fileinput?second"></iframe>`);
+    }
+    // Pages that ask for a file by themselves, each by a script of its own.
+    if (req.url?.startsWith("/asks/")) {
+      const scripted = ASKING_PAGES[req.url.slice("/asks/".length)];
+      if (scripted !== undefined) return void res.writeHead(200, { "content-type": "text/html" }).end(scripted);
     }
     // And framing three file inputs in frames with no address of their own: one the page spells out, one it writes into an
     // empty frame, and one from a data address, which runs as no site at all.
@@ -1105,7 +1124,7 @@ describe("a page's download, as the host stages it", () => {
 
     beforeEach(fresh);
 
-    it("does at the one take-over all that it does for either, with nothing the browser says between: no input stays kept for an upload, the request of the navigation it stopped is forgotten and the download on its way stopped; its pages are heard a second more, for no one, and again from the hand back, when the minute begins", async () => {
+    it("does at the one take-over all that it does for either, with nothing the browser says between: no input stays kept for an upload, the request of the navigation it stopped is forgotten and the download on its way stopped; its pages are heard five seconds more, for no one, and again from the hand back, when the minute begins", async () => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       try {
         const [tab, other] = [taken(), taken(SUB_AGENT)];
@@ -1136,7 +1155,7 @@ describe("a page's download, as the host stages it", () => {
         expect(staged).toEqual([{ root: "chat-1", session: SUB_AGENT, name: "export.csv", path: theirs, user: true }]);
         // The upload that prompt was for comes now: it gives nothing.
         expect(await uploads("upload-1")).toEqual(PAUSED);
-        // A second after the take-over, and not before, a file input is their own to click.
+        // Five seconds after the take-over, and after the file the page asked for since, and not before, a file input is their own to click.
         vi.advanceTimersByTime(OWN_CHOOSER_MS - 1);
         expect([tab.heard(), other.heard()]).toEqual([1, 1]);
         vi.advanceTimersByTime(1);
@@ -1159,7 +1178,7 @@ describe("a page's download, as the host stages it", () => {
       }
     });
 
-    it("reads each bound on the clock it can be read on: the minute after a hand back on the one that cannot be set, the second after a take-over on a timer, which the computer's clock moves no more, and the quarter second of an upload's step on the computer's own, the one its page reads too", async () => {
+    it("reads each bound on the clock it can be read on: the minute after a hand back on the one that cannot be set, the five seconds after a take-over on a timer, which the computer's clock moves no more, and the quarter second of an upload's step on the computer's own, the one its page reads too", async () => {
       // The clock a host told none reads, and the computer's own, which its user or its network can set.
       let steady = 5_000;
       let wall = 1_700_000_000_000;
@@ -1189,7 +1208,7 @@ describe("a page's download, as the host stages it", () => {
         });
         expect(await uploads()).toEqual({ ok: { files: 1, notices: [FILE_ASKED] } });
         expect(lateFrom).toEqual([1_700_000_000_000 + 250, 1_700_000_000_000 - 3_600_000 + 250]);
-        // The second after a take-over is a timer's: neither clock put on an hour ends it, and the timer does.
+        // The five seconds after a take-over are a timer's: neither clock put on an hour ends them, and the timer does.
         host.pause("chat-2", true);
         wall += 3_600_000;
         steady += 3_600_000;
@@ -2833,6 +2852,72 @@ await navigator.serviceWorker.ready;`);
     expect(await popup.evaluate(() => [...(document.getElementById("file") as HTMLInputElement).files!].map((file) => file.name))).toEqual(["report.pdf"]);
     expect(ownChoosers()).toEqual([]);
   }, 30_000);
+
+  it("opens no chooser of the browser's own for a page that asks for a file by itself once its user has taken the browser over, on what the agent's last click gave it: asked a moment after the take-over, or time after time", async () => {
+    const [a, b] = [session(), session()];
+    // The agent's click arms one page to ask 1.8 s on, and its user takes the browser over right after it.
+    await op(a, "browser.navigate", { url: "http://fixture.test/asks/once" }, "chat-1");
+    const once = tabs().get(a)![0]!;
+    await op(a, "browser.mouse", { action: "click", x: 60, y: 40, button: "left", clicks: 1 }, "chat-1");
+    host.pause("chat-1", true);
+    await expect.poll(() => within(500, once.evaluate(() => (window as unknown as { asked: number }).asked)), { timeout: 10_000 }).toBe(1);
+    await new Promise((done) => setTimeout(done, 1_500));
+    expect(ownChoosers()).toEqual([]);
+    host.pause("chat-1", false);
+    // Another page asks every 2 s from the agent's one click on: each ask it is heard at gives it leave for the next.
+    // Taken over from another chat, some seconds on, it opens none however long it keeps asking.
+    await op(b, "browser.navigate", { url: "http://fixture.test/asks/often" }, "chat-1");
+    const often = tabs().get(b)![0]!;
+    const asked = () => within(500, often.evaluate(() => (window as unknown as { asked: number }).asked));
+    await op(b, "browser.mouse", { action: "click", x: 60, y: 40, button: "left", clicks: 1 }, "chat-1");
+    await expect.poll(asked, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+    host.pause("chat-2", true);
+    const taken = (await asked()) as number;
+    await expect.poll(asked, { timeout: 20_000, interval: 500 }).toBeGreaterThanOrEqual(taken + 5);
+    expect(ownChoosers()).toEqual([]);
+    // Heard still, more than five seconds after the take-over: it has not been quiet.
+    expect([hears(often), hears(once)]).toEqual([1, 0]);
+    // Nothing of it is kept for an upload, and its agent is told nothing of what it asked for meanwhile.
+    expect(kept(b)).toBeUndefined();
+    // It stops asking. Five quiet seconds on, its file input is its user's, as in any browser.
+    await often.evaluate("clearInterval(window.asking)");
+    expect(await host.show("chat-1")).toBe(true);
+    await often.bringToFront();
+    await expect.poll(front, { timeout: 5_000 }).toBe("OFTEN");
+    await expect.poll(() => hears(often), { timeout: OWN_CHOOSER_MS + 5_000 }).toBe(0);
+    const [x, y] = await onScreen(often, "file");
+    asUser("focus", xwindow()!.id);
+    asUser("click", String(x), String(y));
+    await expect.poll(() => ownChoosers().length, { timeout: 10_000 }).toBe(1);
+  }, 90_000);
+
+  it("lets a page be only five seconds after what the agent was doing there has reached it: a click still on its way to a busy page at the take-over arms no chooser of the browser's own", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/asks/later" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    // The page is busy six seconds, by now: the agent's click on its button waits on it.
+    await page.evaluate("void setTimeout(() => { const until = Date.now() + 6000; while (Date.now() < until) {} }, 0)");
+    await new Promise((done) => setTimeout(done, 100));
+    const clicking = op(a, "browser.mouse", { action: "click", x: 60, y: 40, button: "left", clicks: 1 }, "chat-1");
+    // Another page's script, of the agent's too, runs a second and a half more, and asks for nothing.
+    const b = session();
+    await op(b, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const scripted = tabs().get(b)![0]!;
+    const running = op(b, "browser.evaluate", { code: "await new Promise((done) => setTimeout(done, 1500)); return 1;" }, "chat-1");
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", true);
+    const taken = performance.now();
+    expect([await within(1_000, clicking), await within(1_000, running)]).toEqual([PAUSED, PAUSED]);
+    // That page is let be five seconds after its script ended, and not sooner.
+    await expect.poll(() => hears(scripted), { timeout: OWN_CHOOSER_MS + 6_000 }).toBe(0);
+    expect(performance.now() - taken).toBeGreaterThan(OWN_CHOOSER_MS + 1_000);
+    // The click reaches the page once it is free, more than five seconds after the take-over, and the page asks
+    // 3.5 s after that: less than five after the click, which is what gave it leave to.
+    await expect.poll(() => within(500, page.evaluate(() => (window as unknown as { asked: number }).asked)), { timeout: 20_000 }).toBe(1);
+    expect(performance.now() - taken).toBeGreaterThan(OWN_CHOOSER_MS + 3_000);
+    await new Promise((done) => setTimeout(done, 1_500));
+    expect(ownChoosers()).toEqual([]);
+  }, 60_000);
 
   it("opens no chooser of the browser's own for what the agent was doing when its user took the browser over: the button of a drag on a file input comes up heard, and kept for no upload", async () => {
     const a = session();

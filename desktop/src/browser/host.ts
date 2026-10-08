@@ -65,9 +65,13 @@ const QUIT_MS = 2_000;
 const SHOW_MS = 2_000;
 // How long a page whose question was left to its user may take to show that it has been answered.
 const ASKING_MS = 500;
-// How long after a take-over the agent's pages still open no file chooser of the browser's own: what the
-// agent was doing in a page then (a click on its way, a button this host lets go) has reached it by then.
-export const OWN_CHOOSER_MS = 1_000;
+// How long a page of the agent's must have been quiet, once its user holds the browser, before a file
+// input in it opens the browser's own chooser: counted from the take-over, from the end of what the
+// agent was doing in it then, and from each file it asks for meanwhile, whichever is last. It is how
+// long a page keeps the leave to ask for a file by itself that a click gives it (five seconds in
+// Chromium), and each ask heard gives it that leave anew: Playwright reads the input as a user would.
+// So a page lets be has no leave left that the agent, or this host, gave it.
+export const OWN_CHOOSER_MS = 5_000;
 // How long a page may take to say where a file input of its is, for an upload's prompt.
 const LOOK_MS = 2_000;
 // How long a closing browser's processes may take to exit (Edge's take about 5 s on xvfb), below the client's STOP_MS.
@@ -484,10 +488,10 @@ export class BrowserHost {
   // again, at a hand back either. Those that begin after a hand back get the next.
   private interrupt = new AbortController();
   // Each session's page this host took, and what hears it ask for a file. While a page is heard the browser
-  // opens no file chooser of its own there. Null while its user holds the browser: a file input is theirs then.
-  private readonly hearing = new Map<Page, { session: string; heard: ((chooser: FileChooser) => void) | null }>();
-  // What takes them off, a moment after a take-over.
-  private ownChooser: NodeJS.Timeout | undefined;
+  // opens no file chooser of its own there. Null once its user holds the browser and the page has been quiet
+  // for OWN_CHOOSER_MS: a file input is theirs then. *acting*: how many operations of the agent's are still
+  // doing something in it. *quiet*: what lets it be, while it is held and heard.
+  private readonly hearing = new Map<Page, { session: string; heard: ((chooser: FileChooser) => void) | null; acting: number; quiet?: NodeJS.Timeout }>();
   // The file input each session's pages asked for a file for last, until it is given one.
   private readonly choosers = new Map<string, FileChooser>();
   // What an upload's prompt named for each session: the input, with the address its frame was at and the
@@ -580,8 +584,10 @@ export class BrowserHost {
       this.handed = { by: root, at: this.now() };
       // The agent drives again: a file its pages ask for is heard, and opens no chooser of the browser's own,
       // also where it was handed back before they were let be.
-      clearTimeout(this.ownChooser);
-      for (const page of this.hearing.keys()) this.hear(page);
+      for (const [page, kept] of this.hearing) {
+        clearTimeout(kept.quiet);
+        this.hear(page);
+      }
       return;
     }
     this.held = root;
@@ -602,13 +608,12 @@ export class BrowserHost {
         if (pageOf(request) === page) this.open.delete(request);
       }
     }
-    // A file input is its user's while they hold the browser, opening the browser's own chooser: but only once
-    // what the agent was doing at this moment has reached its page, so that no act of the agent's opens one.
-    // Until then a page's ask is still heard, and kept for no one (asks).
-    clearTimeout(this.ownChooser);
-    this.ownChooser = setTimeout(() => {
-      for (const page of this.hearing.keys()) this.unhear(page);
-    }, OWN_CHOOSER_MS);
+    // A file input is its user's while they hold the browser, opening the browser's own chooser: but in each
+    // page only once nothing the agent did there can open one (quiet). Until then a page's ask is still
+    // heard, and kept for no one (asks). A page the agent is still doing something in waits for that to end.
+    for (const [page, kept] of this.hearing) {
+      if (kept.acting === 0) this.quiet(page);
+    }
   }
 
   /**
@@ -666,7 +671,7 @@ export class BrowserHost {
     // What it staged and nobody saved went with its browser; its folder goes now.
     if (this.staging !== null) await rm(this.staging, { recursive: true, force: true }).catch(() => {});
     this.staging = null;
-    clearTimeout(this.ownChooser);
+    for (const kept of this.hearing.values()) clearTimeout(kept.quiet);
   }
 
   // An operation at its turn. Taken over while it acts, it is answered paused at once, whatever it has
@@ -700,7 +705,8 @@ export class BrowserHost {
         if (!(await this.answers(page))) return ASKING;
         if (stop.aborted) return PAUSED;
       }
-      const value = BOUNDED.has(kind) ? await this.bounded(page, operation(page, args, stop), stop) : await operation(page, args, stop);
+      const work = this.doing(page, operation(page, args, stop));
+      const value = BOUNDED.has(kind) ? await this.bounded(page, work, stop) : await work;
       // Taken over while it acted: what its pages did meanwhile stays for its session's next answer.
       if (stop.aborted) return PAUSED;
       if (!isRecord(value) || kind === "browser.observe" || kind === "browser.evaluate") return { ok: value ?? null };
@@ -801,10 +807,11 @@ export class BrowserHost {
       const pages = this.tabs.get(session);
       if (pages?.includes(page)) pages.splice(pages.indexOf(page), 1);
       this.asking.delete(page);
+      clearTimeout(this.hearing.get(page)?.quiet);
       this.hearing.delete(page);
     });
     page.on("popup", (popup) => this.adopt(session, popup));
-    this.hearing.set(page, { session, heard: null });
+    this.hearing.set(page, { session, heard: null, acting: 0 });
     // One that opens under its user's hand is heard from the hand back.
     if (this.held === null) this.hear(page);
   }
@@ -815,7 +822,7 @@ export class BrowserHost {
     const kept = this.hearing.get(page);
     if (!kept || kept.heard !== null) return;
     const { session } = kept;
-    kept.heard = (chooser: FileChooser) => this.asks(session, chooser);
+    kept.heard = (chooser: FileChooser) => this.asks(page, session, chooser);
     page.on("filechooser", kept.heard);
   }
 
@@ -825,6 +832,28 @@ export class BrowserHost {
     if (!kept?.heard) return;
     page.off("filechooser", kept.heard);
     kept.heard = null;
+  }
+
+  // *page*, held and heard, is let be OWN_CHOOSER_MS from now, unless it is heard of again before.
+  private quiet(page: Page): void {
+    const kept = this.hearing.get(page);
+    if (!kept?.heard) return;
+    clearTimeout(kept.quiet);
+    kept.quiet = setTimeout(() => this.unhear(page), OWN_CHOOSER_MS);
+  }
+
+  // *work* is what an operation of the agent's does in *page*, until it ends. Taken over meanwhile, the
+  // operation is answered at once, but what it had sent the page can reach it later, as a click does that
+  // waits on a busy page: so the page's quiet is counted only from the end of the last such work.
+  private doing<T>(page: Page, work: Promise<T>): Promise<T> {
+    const kept = this.hearing.get(page);
+    if (!kept) return work;
+    kept.acting += 1;
+    void work.then(() => {}, () => {}).then(() => {
+      kept.acting -= 1;
+      if (this.held !== null && kept.acting === 0) this.quiet(page);
+    });
+    return work;
   }
 
   // Where *chooser*'s input is now, as the browser says it (place). Null where its page is closed, went
@@ -841,11 +870,12 @@ export class BrowserHost {
     }
   }
 
-  // A page of *session*'s asked for a file: the input is kept for an upload, and its agent told. Not while
+  // *page*, of *session*'s, asked for a file: the input is kept for an upload, and its agent told. Not while
   // its user holds the browser: what a page asks for then is their own doing, or the page's under their
-  // hand, and no input of theirs is the agent's to fill, at the hand back either.
-  private asks(session: string, chooser: FileChooser): void {
-    if (this.held !== null) return;
+  // hand, and no input of theirs is the agent's to fill, at the hand back either. Heard then, the page has
+  // leave to ask again, so its quiet begins anew.
+  private asks(page: Page, session: string, chooser: FileChooser): void {
+    if (this.held !== null) return void this.quiet(page);
     this.choosers.set(session, chooser);
     this.note(session, FILE_ASKED);
   }
@@ -1195,6 +1225,7 @@ export class BrowserHost {
     this.spare = null;
     this.tabs.clear();
     this.untold.clear();
+    for (const kept of this.hearing.values()) clearTimeout(kept.quiet);
     this.hearing.clear();
     this.choosers.clear();
     this.named.clear();
