@@ -141,6 +141,19 @@ async function opened() {
 
 const LOCAL = { device: { deviceId: "d-1", name: "Laptop" }, localFolders: true };
 
+// What the web client's own read of the transparency setting answers once the agent refuses it: its
+// module itself, which the page's stand-in for it hands on.
+async function unreadSetting() {
+  const { getTransparencyConfig } = await vite.ssrLoadModule("/src/api/transparency.ts");
+  const fetched = globalThis.fetch;
+  globalThis.fetch = async () => new Response("{}", { status: 500 });
+  try {
+    return await getTransparencyConfig();
+  } finally {
+    globalThis.fetch = fetched;
+  }
+}
+
 test("sends what quick entry handed past the AI disclosure only once it is read and accepted, and tells the desktop it went", async () => {
   const { page, act, change, hand, given, unmount } = await opened();
   await hand();
@@ -190,7 +203,8 @@ test("never sends it once the disclosure is declined, or unreadable, nor after a
 
   const unread = await opened();
   await unread.hand();
-  await unread.act(() => unread.page.transparency.resolve({ enabled: false, read: false }));
+  const setting = await unreadSetting();
+  await unread.act(() => unread.page.transparency.resolve(setting));
   assert.deepEqual(unread.page.answers, [[HANDED.id, "Surogate could not read the agent's AI disclosure setting, so nothing was sent."]]);
   await unread.unmount();
 
