@@ -161,6 +161,8 @@ class DeviceBrowserClient(BrowserClientBase):
     async def navigate(self, url: str, *, wait_until: str = "load") -> dict[str, Any]:
         value = await self._call("browser.navigate", url=url, wait_until=wait_until)
         self._invalidate_snapshot_cache()
+        if not isinstance(value, dict) or not all(isinstance(value.get(key, ""), str) for key in ("url", "title")):
+            raise DeviceOperationError("The computer returned an invalid navigation")
         return {"url": value.get("url", url), "title": value.get("title", "")}
 
     async def evaluate(self, code: str) -> Any:
@@ -217,7 +219,9 @@ class DeviceBrowserClient(BrowserClientBase):
             "browser.mouse", action="wheel", x=int(x), y=int(y), delta_x=int(delta_x), delta_y=int(delta_y),
         )
         keys = ("scroll_x", "scroll_y", "page_height", "viewport_height")
-        return {key: value[key] for key in keys if key in value} if isinstance(value, dict) else {}
+        if not isinstance(value, dict) or not all(_whole(value.get(key)) for key in keys):
+            raise DeviceOperationError("The computer returned an invalid scroll position")
+        return {key: value[key] for key in keys}
 
     async def drag(self, path: list[tuple[int, int]], *, button: str = "left") -> None:
         if len(path) < 2:
@@ -274,7 +278,9 @@ class DeviceBrowserClient(BrowserClientBase):
             "name": str(entry.get("name", "")),
             "nth": int(entry.get("nth", 0)),
         })
-        if not isinstance(value, dict):
+        if not isinstance(value, dict) or not (
+            "missing" in value or "covered" in value or (_whole(value.get("x")) and _whole(value.get("y")))
+        ):
             raise DeviceOperationError("The computer returned an invalid place")
         missing = value.get("missing")
         if missing == "gone":
@@ -313,6 +319,11 @@ class DeviceBrowserClient(BrowserClientBase):
         if isinstance(value, dict) and isinstance(value.get("notices"), list):
             self.notices.extend(str(notice) for notice in value["notices"])
         return value
+
+
+def _whole(value: Any) -> bool:
+    """Whether *value* is a whole number, as the page's coordinates are: not a bool, not text."""
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _png(data: Any) -> bytes:

@@ -183,6 +183,8 @@ class AnyBrowser(Laptop):
         if not kind.startswith("browser."):
             return await self.files.run(kind, args, payload)
         self.asked.append((kind, args))
+        if kind == "browser.mouse" and args.get("action") == "wheel":
+            return {"ok": {"scroll_x": 0, "scroll_y": 100, "page_height": 2000, "viewport_height": 800, "notices": []}}
         return {"ok": {
             "browser.navigate": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []},
             "browser.observe": FRAMES,

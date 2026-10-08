@@ -131,6 +131,24 @@ async def test_a_navigation_forgets_the_refs_and_keeps_what_the_page_did_unseen(
     assert runner.asked[-1] == ("browser.navigate", {"url": "https://example.com/next", "wait_until": "load"})
 
 
+@pytest.mark.parametrize(("act", "answer", "said"), [
+    (lambda client: client.navigate("https://example.com/"), "a page", "The computer returned an invalid navigation"),
+    (lambda client: client.navigate("https://example.com/"), {"url": 1, "title": "T"}, "The computer returned an invalid navigation"),
+    (lambda client: client.click_ref("@e2"), {}, "The computer returned an invalid place"),
+    (lambda client: client.click_ref("@e2"), {"x": "50", "y": 40}, "The computer returned an invalid place"),
+    (lambda client: client.scroll_at(1, 2, delta_y=3), {"scroll_x": 0, "scroll_y": "a", "page_height": 1, "viewport_height": 1},
+     "The computer returned an invalid scroll position"),
+    (lambda client: client.scroll_at(1, 2, delta_y=3), [], "The computer returned an invalid scroll position"),
+])
+async def test_an_answer_of_the_wrong_shape_is_said_as_the_computers_failure(act, answer, said) -> None:
+    runner = ScriptedRunner({"ok": FRAMES}, {"ok": answer})
+    client = DeviceBrowserClient(runner)
+    await client.get_state()
+
+    with pytest.raises(DeviceOperationError, match=said):
+        await act(client)
+
+
 async def test_a_scripts_value_comes_back_whatever_its_shape() -> None:
     # A page's own data, shaped as the link's framing: a value all the same.
     returned = {"transfer": {"size": 5, "sha256": "a" * 64}}
