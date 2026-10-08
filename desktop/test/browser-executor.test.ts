@@ -22,6 +22,7 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
     run: (operation) => (ran.push(operation.kind), Promise.resolve({ ok: "tools" })),
     refusal: () => ({ error: { type: "other", message: "from the tools" } }),
     guards: () => ({ home: "/home/u", dataDir: "/data", appDirs: [] }),
+    live: () => [],
     stop: () => (stopped.push("tools"), Promise.resolve()),
     end: () => (stopped.push("tools ended"), Promise.resolve()),
     retired: (root) => void forgotten.push(`tools ${root}`),

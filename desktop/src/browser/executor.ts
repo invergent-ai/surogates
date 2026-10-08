@@ -55,6 +55,11 @@ export class Browsing implements ToolLayer {
     return this.options.tools.guards();
   }
 
+  // A tab runs nothing of a chat's once its operation answers: what is alive is the tools'.
+  live(): string[] {
+    return this.options.tools.live();
+  }
+
   // The app's quit, a log out: the browser closes, and the tools stop.
   async stop(): Promise<void> {
     await Promise.all([this.options.browser.stop(), this.options.tools.stop()]);

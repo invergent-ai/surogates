@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FolderGuards } from "../src/binding/folder.js";
+import { Browsing } from "../src/browser/executor.js";
 import type { NetworkApprovals } from "../src/hosts/tool-hosts.js";
 import type { Bindings } from "../src/journal/bindings.js";
 import { OperationJournal } from "../src/journal/journal.js";
@@ -266,6 +267,27 @@ describe("one agent's device", () => {
     tools.changed();
     expect(device.working()).toBe(0);
     expect(counts).toEqual([1, 0]);
+  });
+
+  it("counts a chat whose background process lives beneath the browser's layer, as the app's own stack wires it", async () => {
+    const device = await start({
+      tools: (bindings, network, changed) => {
+        tools.changed = changed;
+        return new Browsing({
+          tools,
+          browser: { perform: () => Promise.resolve({ ok: null }), forget: () => {}, stop: () => Promise.resolve(), end: () => Promise.resolve() },
+          bindingOf: (root) => bindings.get(root),
+          launch: () => null,
+        });
+      },
+    });
+    await server.until(() => statuses.includes("connected"));
+    tools.liveRoots = [ROOT];
+    tools.changed();
+    expect(device.working()).toBe(1);
+    tools.liveRoots = [];
+    tools.changed();
+    expect(device.working()).toBe(0);
   });
 
   it("counts a chat's sub-agent apart from the chat, as a session of its own", async () => {
