@@ -437,6 +437,28 @@ describe("a thread read in the Overview pane", () => {
 });
 
 describe("a thread read in the Overview pane, as the agent answers", () => {
+  it("is loaded again once the agent answers after its load failed, and after its page crashed", async () => {
+    const { shell, page } = await opened();
+    // *code* run in the pane's page, while one is there to answer: null while none is, as when it crashes.
+    const inPane = (code: string) => shell.evaluate(({ BrowserWindow }, script) => {
+      const found = (BrowserWindow.getAllWindows()[0]!.contentView.children as Electron.WebContentsView[])
+        .find((view) => view.webContents.getURL().includes("/transcript/"));
+      if (!found || found.webContents.isCrashed()) return null;
+      return Promise.race([found.webContents.executeJavaScript(script), new Promise((resolve) => setTimeout(() => resolve(null), 500))]);
+    }, code);
+    await agent.stop();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await pause(1_000);
+    expect(await inPane("document.title")).not.toBe("Fake agent");
+    await agent.start(Number(new URL(origin).port));
+    await expect.poll(() => inPane("document.title"), { timeout: 10_000 }).toBe("Fake agent");
+    await inPane("window.kept = true");
+    // Its page's process ends, as a crash ends it.
+    await shell.evaluate(({ BrowserWindow }) => process.kill((BrowserWindow.getAllWindows()[0]!.contentView.children as Electron.WebContentsView[])
+      .find((view) => view.webContents.getURL().includes("/transcript/"))!.webContents.getOSProcessId(), "SIGKILL"));
+    await expect.poll(() => inPane("[document.title, window.kept === true]"), { timeout: 10_000 }).toEqual(["Fake agent", false]);
+  });
+
   it("follows a redirect of its load only to its own transcript", async () => {
     const { shell, page } = await opened();
     const shown = () => shell.evaluate(({ BrowserWindow }) =>

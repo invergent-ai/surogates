@@ -85,6 +85,8 @@ function confine(contents: WebContents, origin: string, onRefused: (url: string)
 interface PaneView {
   view: WebContentsView;
   url: string;
+  attempt: number;
+  retry?: NodeJS.Timeout;
 }
 
 interface WebView {
@@ -331,6 +333,7 @@ export class MainWindow {
     const url = path === null || !web ? null : `${web.agent.origin}${path}`;
     if (this.pane?.url === url) return;
     if (this.pane) {
+      clearTimeout(this.pane.retry);
       this.window.contentView.removeChildView(this.pane.view);
       this.pane.view.webContents.close();
       this.pane = null;
@@ -369,7 +372,23 @@ export class MainWindow {
       openOutside(opening);
       return { action: "deny" };
     });
-    this.pane = { view, url };
+    const pane: PaneView = { view, url, attempt: 0 };
+    // A load that failed, or a page that crashed, is loaded again, with the link's backoff, while the pane reads it.
+    const again = () => {
+      clearTimeout(pane.retry);
+      pane.retry = setTimeout(() => {
+        if (this.pane === pane) void contents.loadURL(url).catch(() => {});
+      }, reconnectDelayMs(pane.attempt++));
+    };
+    contents.on("did-fail-load", (_event, code, _description, _url, isMainFrame) => {
+      // -3 is a load another replaced.
+      if (isMainFrame && code !== -3) again();
+    });
+    contents.on("render-process-gone", again);
+    contents.on("did-navigate", () => {
+      pane.attempt = 0;
+    });
+    this.pane = pane;
     void contents.loadURL(url).catch(() => {});
   }
 
