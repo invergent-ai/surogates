@@ -823,6 +823,24 @@ describe("a guest's lifecycle", () => {
     await manager.stop();
   });
 
+  it("boots again at once when asked to retry, the failure it backed off from forgotten", async () => {
+    let boots = 0;
+    const failing: BootVm = async () => {
+      boots += 1;
+      throw new Error("QEMU exited: no hello within 15 s");
+    };
+    const manager = new VmManager(options(), failing);
+    const failed = unavailable("did not start: QEMU exited: no hello within 15 s");
+    expect(await which(manager)).toEqual(failed);
+    expect(await which(manager)).toEqual(failed);
+    expect(boots).toBe(1);
+    // The user's Retry, its image checked: the next operation boots, inside the backoff.
+    manager.retry();
+    expect(await which(manager)).toEqual(failed);
+    expect(boots).toBe(2);
+    await manager.stop();
+  });
+
   it("waits a second before it boots again after a guest that crashed", async () => {
     const events: string[] = [];
     const vms: VmBackend[] = [];

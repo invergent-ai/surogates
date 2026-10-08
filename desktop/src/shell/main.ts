@@ -340,7 +340,9 @@ function sandboxAction(action: unknown): void {
   if (!sandboxLine(lacking, deliveryState(), boot).actions.includes(action as SandboxAction)) return;
   if (action === "log") return void shell.openPath(vmOptions(root, vmUser(), VM_ENV).console);
   if (action === "check") return lookForTools();
+  // The manager forgets that boot too, so the line never says Ready while it still refuses.
   boot = null;
+  vm?.retry();
   startDelivery(true);
   changed();
 }

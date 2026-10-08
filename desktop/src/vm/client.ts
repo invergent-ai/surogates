@@ -81,6 +81,8 @@ export type ToManager =
   | { type: "ping" }
   // The computer woke from sleep (Electron's powerMonitor).
   | { type: "resume" }
+  // The user's Retry: the boot that did not start is forgotten, and the next operation boots at once.
+  | { type: "retry" }
   | { type: "stop" };
 
 export type FromManager =
@@ -237,6 +239,11 @@ export class VmClient {
   resume(): void {
     this.missed = 0;
     if (!this.stopping) this.manager?.send({ type: "resume" });
+  }
+
+  /** The user's Retry: the manager forgets the boot that did not start, so the next operation boots at once. */
+  retry(): void {
+    if (!this.stopping) this.manager?.send({ type: "retry" });
   }
 
   /** Asked about each root's destination off the package hosts, whichever device's it is. Returns what stops it. */

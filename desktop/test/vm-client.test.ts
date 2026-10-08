@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -47,7 +47,7 @@ beforeEach(() => {
   mkdirSync(join(dir, "bin"));
   // A QEMU that never says hello while dir/slow is there, and otherwise cannot start.
   const qemu = join(dir, "bin", "qemu-system-x86_64");
-  writeFileSync(qemu, `#!/bin/sh\nif [ -e '${dir}/slow' ]; then exec sleep ${SLEEP}; fi\necho 'no KVM here' >&2\nexit 1\n`);
+  writeFileSync(qemu, `#!/bin/sh\necho run >> '${dir}/qemu-runs'\nif [ -e '${dir}/slow' ]; then exec sleep ${SLEEP}; fi\necho 'no KVM here' >&2\nexit 1\n`);
   chmodSync(qemu, 0o755);
   path = process.env.PATH;
   process.env.PATH = `${join(dir, "bin")}:${path}`;
@@ -382,6 +382,19 @@ describe("the delivered image, and each boot", () => {
     // The stand-in QEMU cannot start: the manager ran, and said so.
     expect(await answered).toEqual(unavailable("did not start: QEMU exited: no KVM here"));
     expect(spawned).toHaveLength(1);
+  });
+
+  it("has its manager boot again at once at the user's Retry, the boot that did not start forgotten", async () => {
+    const vm = client();
+    const runs = () => readFileSync(join(dir, "qemu-runs"), "utf8").split("\n").filter(Boolean).length;
+    const failed = unavailable("did not start: QEMU exited: no KVM here");
+    expect(await vm.perform(operation(), signal())).toEqual(failed);
+    // Inside the boot's backoff: answered at once, with no boot.
+    expect(await vm.perform(operation(), signal())).toEqual(failed);
+    expect(runs()).toBe(1);
+    vm.retry();
+    expect(await vm.perform(operation(), signal())).toEqual(failed);
+    expect(runs()).toBe(2);
   });
 
   it("answers what waits with why the VM cannot boot, as an image that could not be downloaded, and starts no manager", async () => {

@@ -487,7 +487,7 @@ export class VmManager {
   // Stops a boot under way when the manager stops.
   private readonly halt = new AbortController();
   // Each boot waits out the last failure's backoff; what a boot that failed said, while it lasts.
-  private readonly backoff = new Backoff();
+  private backoff = new Backoff();
   private failed: string | null = null;
   // Operations and teardowns under way: a guest with none, and no root, stops.
   private working = 0;
@@ -545,6 +545,12 @@ export class VmManager {
     } finally {
       this.done();
     }
+  }
+
+  /** The user's Retry, its image checked: the boot that did not start, and its backoff, are forgotten. */
+  retry(): void {
+    this.failed = null;
+    this.backoff = new Backoff();
   }
 
   /** The computer woke: the guest that runs is told so. */

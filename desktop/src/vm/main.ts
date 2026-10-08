@@ -67,6 +67,8 @@ function received(message: ToManager): void {
     void send({ type: "pong" });
   } else if (message.type === "resume") {
     manager?.resume();
+  } else if (message.type === "retry") {
+    manager?.retry();
   } else if (message.type === "cancel") {
     running.get(message.id)?.abort();
   } else if (message.type === "stop") {
