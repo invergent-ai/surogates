@@ -237,6 +237,8 @@ async function download(options: DeliverOptions, file: ImageFile, partial: strin
         if (quiet.signal.aborted) throw new Error(`the download of ${file.download} stopped: ${said(quiet.signal.reason)}`);
         throw new Error(`could not reach ${new URL(url).host}: ${said(error)}`);
       }
+      // Its first bytes get the whole bound, not what the headers left of it.
+      heard();
       if (response.status === 200 && have > 0) {
         // Not the rest of the file: the whole of it, from a server that ignores a Range, starts it
         // again. Anything else, as a captive portal's page, is not the file, and leaves what is here.

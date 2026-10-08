@@ -163,6 +163,18 @@ describe("the guest image's delivery", () => {
     expect(heard.filter(({ url }) => url.endsWith("rootfs.img.zst")).map(({ range }) => range)).toEqual([undefined, `bytes=${cut}-`]);
   });
 
+  it("gives a download's first bytes the whole idle bound once its headers have come", async () => {
+    answer = (request, response, body) => {
+      if (!request.url?.endsWith("rootfs.img.zst")) return ranged(request, response, body);
+      // The headers 0.7 s on, and the body 0.7 s after them: each within the bound, and both past it from the request.
+      setTimeout(() => {
+        response.writeHead(200, { "content-length": body.length }).flushHeaders();
+        setTimeout(() => response.end(body), 700);
+      }, 700);
+    };
+    expect(readFileSync(join(await deliver({ ...options(), stallMs: 1_000 }), "rootfs.img")).equals(rootfs)).toBe(true);
+  });
+
   it("starts a download again when a server sends the whole file for a Range", async () => {
     const partial = join(images(), `${KEY}.partial`, "rootfs.img.zst.partial");
     mkdirSync(join(images(), `${KEY}.partial`), { recursive: true });
