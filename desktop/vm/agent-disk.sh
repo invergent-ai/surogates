@@ -6,10 +6,10 @@
 #
 # Usage, after npm run build:
 #   desktop/vm/agent-disk.sh <agent.img>
-# It needs mke2fs and debugfs (e2fsprogs) and fakeroot. The same build gives the
-# same disk, byte for byte, at the same SOURCE_DATE_EPOCH, which is every time in
-# it: a release packed again is then the same tarball. Without one, its times
-# are the moment it is made.
+# It needs mke2fs and debugfs (e2fsprogs) and fakeroot. With the same e2fsprogs,
+# the same build gives the same disk, byte for byte, at the same
+# SOURCE_DATE_EPOCH, which is every time in it: a release packed again is then
+# the same tarball. Without one, its times are the moment it is made.
 set -euo pipefail
 
 DESKTOP="$(cd "$(dirname "$0")/.." && pwd)"

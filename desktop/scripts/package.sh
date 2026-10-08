@@ -33,7 +33,7 @@ OUT="$(realpath -m "$OUT")"
 HELPER="$(realpath "${4:-$(dirname "$0")/../release/install.sh}")"
 cd "$(dirname "$0")/.."
 DESKTOP="$PWD"
-# Said before any work, and not after the minute the rest of it takes.
+# Said before any work is done, and not at the end of it.
 command -v fakeroot >/dev/null \
   || { echo "package.sh: fakeroot is missing, which the agent's disk is made with (vm/agent-disk.sh): install it (apt install fakeroot)" >&2; exit 1; }
 

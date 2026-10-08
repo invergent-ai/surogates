@@ -37,7 +37,8 @@ That script needs `mke2fs` and `debugfs` (e2fsprogs) and `fakeroot`
 (`apt install fakeroot`): the disk's files are root's, and it is made without
 root and in no user namespace, which a stock Ubuntu 24.04 refuses. `npm start`,
 `npm run test:e2e` and `scripts/package.sh` run it too. At one
-`SOURCE_DATE_EPOCH` the same build gives the same disk, and the same tarball.
+`SOURCE_DATE_EPOCH`, and with the same e2fsprogs, the same build gives the same
+disk, and the same tarball.
 `SUROGATE_VM_IMAGE` names another image folder, and `SUROGATE_VM_KVM` a device
 that does not exist, to run them emulated.
 
