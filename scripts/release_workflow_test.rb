@@ -93,6 +93,14 @@ class ReleaseWorkflowTest < Minitest::Test
     end
   end
 
+  def test_desktop_vm_jobs_are_bounded_past_the_wait_for_a_key_s_manifest
+    jobs = @workflow.fetch("jobs")
+
+    # publish.sh fetch waits up to 15 times 60 s for the release that sent a key to attach its manifest.
+    assert_operator jobs.fetch("desktop-vm-image").fetch("timeout-minutes"), :>, 15
+    assert jobs.fetch("desktop-vm-manifest").key?("timeout-minutes")
+  end
+
   def test_desktop_vm_image_gives_the_r2_secrets_to_its_two_publish_steps_alone
     job = @workflow.fetch("jobs").fetch("desktop-vm-image")
     r2 = {

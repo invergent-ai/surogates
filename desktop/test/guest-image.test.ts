@@ -80,6 +80,14 @@ it("keeps of the kernel's modules only those the guest's init loads", () => {
   expect(kept.length).toBeGreaterThan(0);
 });
 
+it("bounds every transfer of the release's guest jobs: a stall, and its whole time", () => {
+  for (const script of ["images/guest/publish.sh", "images/guest/kernel-current.sh"]) {
+    const curls = readFileSync(join(REPO, script), "utf8").split("\n").filter((line) => line.includes("curl -q "));
+    expect(curls.length, script).toBeGreaterThan(0);
+    for (const curl of curls) for (const bound of ["--connect-timeout", "--speed-limit", "--speed-time", "--max-time"]) expect(curl, script).toContain(bound);
+  }
+});
+
 describe("the release's check of the guest's kernel", () => {
   let server: Server;
   let archive: string;

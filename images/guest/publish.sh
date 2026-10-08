@@ -32,9 +32,11 @@ fail() {
   echo "publish.sh: $*" >&2
   exit 1
 }
-# A request to the bucket, signed; its HTTP status on stdout.
+# A request to the bucket, signed; its HTTP status on stdout. A transfer that stalls for a minute
+# stops, and one that takes an hour: the image's 597 MB at a sixth of a megabyte a second.
 s3() {
-  curl -q -sS --aws-sigv4 "aws:amz:auto:s3" --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" -w '%{http_code}' "$@"
+  curl -q -sS --connect-timeout 30 --speed-limit 1024 --speed-time 60 --max-time 3600 \
+    --aws-sigv4 "aws:amz:auto:s3" --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" -w '%{http_code}' "$@"
 }
 # The key's manifest's HTTP status, 200 or 404, as curl's options ask for it: into a file, or
 # its headers alone (-I). Any other status stops the script, through the assignment it is called in.
@@ -64,14 +66,15 @@ check() {
   jq -e '[.files[]?.download] | sort == ["rootfs.img.zst", "vmlinuz.zst"]' "$OUT/manifest.json" > /dev/null \
     || fail "desktop/vm/$key's manifest does not name rootfs.img.zst and vmlinuz.zst"
   files="$(jq -r '.files[] | "\(.name) \(.size) \(.sha256) \(.download) \(.downloadSize) \(.downloadSha256)"' "$OUT/manifest.json")"
-  status="$(manifest -o "$OUT/bucket.json")"
+  # No more of the bucket's than its manifest, or each file, can be: nothing fills the runner's disk.
+  status="$(manifest --max-filesize 65536 -o "$OUT/bucket.json")"
   if [ "$status" != 200 ] || ! cmp -s "$OUT/bucket.json" "$OUT/manifest.json"; then
     rm -f "$OUT/bucket.json"
     fail "the bucket's desktop/vm/$key/manifest.json is not the release's"
   fi
   rm -f "$OUT/bucket.json"
   while read -r name size sha256 download downloadSize downloadSha256; do
-    status="$(s3 -o "$OUT/bucket.zst" "$prefix/$download")"
+    status="$(s3 --max-filesize "$downloadSize" -o "$OUT/bucket.zst" "$prefix/$download")"
     [ "$status" = 200 ] || fail "fetching desktop/vm/$key/$download got $status"
     if [ "$(stat -c %s "$OUT/bucket.zst") $(sha256sum < "$OUT/bucket.zst" | cut -d' ' -f1)" != "$downloadSize $downloadSha256" ] \
       || [ "$(zstd -q -dc "$OUT/bucket.zst" | wc -c) $(zstd -q -dc "$OUT/bucket.zst" | sha256sum | cut -d' ' -f1)" != "$size $sha256" ]; then

@@ -18,7 +18,7 @@ META=linux-image-generic-hwe-24.04
 pinned="$(sed -n 's|.*/linux-image-[^_]*-generic_\([^_]*\)_amd64\.deb .*|\1|p' "$REPO_ROOT/images/sandbox/Dockerfile")"
 [ -n "$pinned" ] || { echo "kernel-current.sh: no kernel pin in images/sandbox/Dockerfile" >&2; exit 1; }
 # Every version the index lists of it: one a stanza, in no order to rely on.
-listed="$(curl -q -fsS "$ARCHIVE/dists/noble-security/main/binary-amd64/Packages.xz" | xz -dc \
+listed="$(curl -q -fsS --connect-timeout 30 --speed-limit 1024 --speed-time 60 --max-time 600 "$ARCHIVE/dists/noble-security/main/binary-amd64/Packages.xz" | xz -dc \
   | awk -v want="$META" '$1 == "Package:" { name = $2 } $1 == "Version:" && name == want { print $2 }')"
 [ -n "$listed" ] || { echo "kernel-current.sh: noble-security lists no $META" >&2; exit 1; }
 for current in $listed; do
