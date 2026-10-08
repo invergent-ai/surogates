@@ -76,6 +76,9 @@ export class Browsing implements ToolLayer {
   private held: string | null = null;
   // Whether the chat it is held from was deleted since.
   private deleted = false;
+  // How many times the browser was taken over: what was begun before the last of them is not taken up again
+  // at a hand back, though it only finds out after it.
+  private takes = 0;
   // What saves each download its browser stages, once the stack has said; and what each calling
   // session's downloads came to, with the chat it is of, until its next answer that says what its page did.
   private save: ((download: StagedDownload, stop: AbortSignal) => Promise<string>) | null = null;
@@ -116,16 +119,18 @@ export class Browsing implements ToolLayer {
   }
 
   private async browse(launch: Launch, operation: Operation, signal: AbortSignal): Promise<Outcome> {
-    const sent = operation.kind === "browser.set_input_files" ? await this.withFiles(operation, signal) : operation;
+    const begun = this.takes;
+    const sent = operation.kind === "browser.set_input_files" ? await this.withFiles(operation, signal, begun) : operation;
     if (!("kind" in sent)) return sent;
-    // Its user took the browser over while its files were read: none of them leaves this process, at a hand back either.
-    if (this.held !== null) return PAUSED;
+    // Its user took the browser over while its files were read, handed back since or not: none of them leaves this process.
+    if (this.takes !== begun) return PAUSED;
     return this.tell(operation.callingSessionId, await this.options.browser.perform(launch, sent, signal));
   }
 
   // An upload, with what each file it names holds, read through the chat's file host as any read of
   // its folder: the browser is given the files, never a path, and nothing outside the folder.
-  private async withFiles(operation: Operation, signal: AbortSignal): Promise<Operation | Outcome> {
+  // *begun*: how many times the browser had been taken over when the upload began.
+  private async withFiles(operation: Operation, signal: AbortSignal, begun: number): Promise<Operation | Outcome> {
     const { paths } = operation.args;
     // The server refuses these already (surogates/tools/builtin/browser.py): this computer checks what it is sent all the same.
     if (!Array.isArray(paths) || paths.length === 0 || paths.length > MAX_UPLOAD_FILES || !paths.every((path) => typeof path === "string" && path !== "")) {
@@ -137,8 +142,8 @@ export class Browsing implements ToolLayer {
     const files: Array<{ name: string; mimeType: string; buffer: string }> = [];
     let bytes = 0;
     for (const key of paths as string[]) {
-      // Its user took the browser over meanwhile: no more of them is read.
-      if (this.held !== null) return PAUSED;
+      // Its user took the browser over meanwhile, handed back since or not: no more of them is read.
+      if (this.takes !== begun) return PAUSED;
       const read = await this.options.tools.run({ ...operation, id: `${operation.id}:read-${files.length}`, kind: "read", args: { key, max_bytes: null } }, signal);
       if ("error" in read) return failed(`${key} could not be read for the page: ${read.error.message}`);
       // A read answers the file's data, in base64: anything else is no file to give.
@@ -239,6 +244,7 @@ export class Browsing implements ToolLayer {
   takeOver(root: string): boolean {
     if (this.held === null || (this.held !== root && this.orphaned())) {
       this.held = root;
+      this.takes += 1;
       this.deleted = false;
       this.options.browser.pause(root, true);
     }

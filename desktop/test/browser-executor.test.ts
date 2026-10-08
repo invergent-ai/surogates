@@ -488,6 +488,23 @@ describe("the browser's kinds beside the tools", () => {
     expect(await browsing.run(upload, signal)).toEqual(PAUSED);
     expect(ran.filter((kind) => kind === "read")).toHaveLength(5);
     expect(browsed).toHaveLength(1);
+    browsing.handBack(ROOT);
+    // Taken over and handed back while a file was read, the first or the last: its user has held the browser
+    // since the upload began, so it is not taken up again, and no more of it is read.
+    for (const [at, reads] of [[6, 6], [8, 8]] as const) {
+      reading.then = () => {
+        if (ran.filter((kind) => kind === "read").length !== at) return;
+        browsing.takeOver(OTHER);
+        browsing.handBack(OTHER);
+      };
+      expect(await browsing.run(upload, signal), `read ${at}`).toEqual(PAUSED);
+      expect(ran.filter((kind) => kind === "read"), `read ${at}`).toHaveLength(reads);
+      expect(browsed).toHaveLength(1);
+    }
+    // One begun once the browser is the agent's again gives its files.
+    reading.then = () => {};
+    expect(await browsing.run(upload, signal)).toEqual({ ok: "browser" });
+    expect(browsed).toHaveLength(2);
   });
 
   it("gives the browser none of an upload that does not name one to ten files, and reads nothing for it", async () => {

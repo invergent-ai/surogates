@@ -1201,6 +1201,34 @@ describe("a page's download, as the host stages it", () => {
       expect(await uploads()).toEqual({ error: { type: "browser", message: NOT_ASKED } });
     });
 
+    it("gives nothing of an upload that waited its turn while the browser was taken over and handed back: its files were read before its user held the browser, and go to no input that asks after", async () => {
+      const tab = taken();
+      // The session's line is held by a prompt's naming, whose page is slow to say where its input is.
+      const first = tab.input();
+      const slow: { says?: (place: unknown) => void } = {};
+      Object.assign(first.element(), { evaluate: () => new Promise((resolve) => {
+        slow.says = resolve;
+      }) });
+      const naming = host.address(SESSION, true);
+      await vi.waitFor(() => expect(slow.says).toBeDefined());
+      // An upload nobody was asked about waits behind it, its files read already.
+      const waiting = uploads();
+      host.pause("chat-2", true);
+      host.pause("chat-2", false);
+      await new Promise((done) => setTimeout(done, 20));
+      // The page asks anew once the agent drives again: an input that upload was never for.
+      const given: unknown[] = [];
+      tab.input({ evaluate: () => (given.push("given"), Promise.resolve("given")), dispose: () => Promise.resolve() });
+      expect(state().choosers.size).toBe(1);
+      slow.says!({ here: true, href: FORM_URL, origin: new URL(FORM_URL).origin });
+      await naming;
+      expect(await waiting).toEqual(PAUSED);
+      expect(given).toEqual([]);
+      // One sent after the hand back is given to it.
+      expect(await uploads()).toMatchObject({ ok: { files: 1 } });
+      expect(given).toEqual(["given"]);
+    });
+
     it("reads each bound on the clock it can be read on: the minute after a hand back on the one that cannot be set, the five seconds after a take-over on a timer, which the computer's clock moves no more, and the quarter second of an upload's step on the computer's own, the one its page reads too", async () => {
       // The clock a host told none reads, and the computer's own, which its user or its network can set.
       let steady = 5_000;

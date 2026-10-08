@@ -532,13 +532,17 @@ export class BrowserHost {
     if (of !== undefined && of !== root && (this.tabs.get(session) ?? []).some((page) => !page.isClosed())) return Promise.resolve(ANOTHER_CHATS);
     this.roots.set(session, root);
     const forgets = this.forgets.get(root);
+    // What a take-over from here on stops an upload by. It comes with files read before it came, and gives none
+    // of them once its user has held the browser since, though it waited its turn through the hand back.
+    const sent = this.interrupt.signal;
     // A close does not wait in the session's line: a page stuck in a script closes with the rest.
     const work = kind === "browser.close"
       ? (this.held !== null ? Promise.resolve(PAUSED) : this.closeTab(session).then((closed): Outcome => ({ ok: { closed } })))
       : this.inLine(session, () => {
         if (this.forgets.get(root) !== forgets) return Promise.resolve(DELETED);
         // Its user took the browser over while it waited: it does nothing there.
-        return this.held !== null ? Promise.resolve(PAUSED) : this.run(launch, session, kind, args, signal, this.interrupt.signal, id);
+        if (this.held !== null || (kind === "browser.set_input_files" && sent.aborted)) return Promise.resolve(PAUSED);
+        return this.run(launch, session, kind, args, signal, this.interrupt.signal, id);
       });
     return Promise.race([work, new Promise<Outcome>((resolve) => {
       if (signal.aborted) resolve(CANCELLED);
