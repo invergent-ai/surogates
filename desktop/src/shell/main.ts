@@ -1202,7 +1202,7 @@ function state() {
   const agent = agents.get();
   return {
     first: agent === null,
-    agent: agent && { name: agent.name },
+    agent: agent && { name: agent.name, desktopSessions: agent.desktopSessions },
     device: agent && {
       text: deviceLine(agent),
       status: device?.status ?? (kept?.token === null ? "revoked" : null),

@@ -77,7 +77,7 @@ describe("the user menu", () => {
     expect(await page.getAttribute("#user", "aria-expanded")).toBe("true");
     expect(await page.textContent("#user-email")).toBe("flavius@example.com");
     // An agent that names no console: no usage or billing.
-    expect(await texts(page, "#user-menu .menu-item")).toEqual(["SettingsCtrl+Shift+,", "Language", "Get help", "Log out", "Remove this agent…"]);
+    expect(await texts(page, "#user-menu .menu-item")).toEqual(["SettingsCtrl+Shift+,", "Devices", "Language", "Get help", "Log out", "Remove this agent…"]);
     // One divider above Log out: none is doubled where the console's rows are hidden.
     expect(await page.$$eval("#user-menu hr", (found) => found.filter((hr) => (hr as HTMLElement).offsetParent !== null).length)).toBe(1);
     expect(await page.isDisabled('[data-action="logout"]')).toBe(false);

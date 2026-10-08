@@ -7,6 +7,7 @@ import { Route as indexRoute } from "./routes/index";
 import { Route as loginRoute } from "./routes/login";
 import { Route as oauthAuthorizeRoute } from "./routes/oauth-authorize";
 import { chatRoute, chatSessionRoute } from "./routes/chat";
+import { Route as chatsRoute } from "./routes/chats";
 import { Route as linkRoute } from "./routes/link";
 import { Route as settingsRoute } from "./routes/settings";
 import { Route as skillsRoute } from "./routes/skills";
@@ -33,6 +34,7 @@ const routeTree = rootRoute.addChildren([
   codingAgentsRoute,
   missionsRoute.addChildren([missionDetailRoute]),
   chatRoute.addChildren([chatSessionRoute]),
+  chatsRoute,
   whiteboardRoute.addChildren([whiteboardSessionRoute]),
 ]);
 

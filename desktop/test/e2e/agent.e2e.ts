@@ -84,18 +84,23 @@ describe("the agent's web client", () => {
 });
 
 describe("the agent's capabilities", () => {
-  it("are read again at launch: a server that gained local folders gets this computer added", async () => {
+  it("are read again at launch: a server that gained local folders gets this computer added, and the user menu its Devices", async () => {
     agent.config = { ...agent.config, desktop_sessions: false };
     const first = await launched();
     await connect(first.page, origin);
     await signIn(first.shell, first.page, agent);
     await expect.poll(() => first.page.getAttribute("#device", "title")).toBe("This server doesn't support local folders yet");
     expect(agent.registered).toEqual([]);
+    // Its web client's Settings has no Devices tab.
+    await first.page.click("#user");
+    expect(await shown(first.page, "#user-menu .menu-item")).not.toContain("Devices");
     await quit(first.shell);
     agent.config = { ...agent.config, desktop_sessions: true };
     const again = await launched();
     await expect.poll(() => again.page.getAttribute("#device", "title")).toBe("Connected as Laptop");
     expect(JSON.parse(readFileSync(join(home, "surogate", "agent.json"), "utf8")).desktopSessions).toBe(true);
+    await again.page.click("#user");
+    expect(await shown(again.page, "#user-menu .menu-item")).toContain("Devices");
   });
 
   it("are read again at a sign-in, and the web client is told it has local folders", async () => {

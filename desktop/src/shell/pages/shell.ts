@@ -29,7 +29,7 @@ interface ThreadRow {
 
 interface State {
   first: boolean; // no agent yet: the first run fills the window
-  agent: { name: string } | null;
+  agent: { name: string; desktopSessions: boolean } | null; // desktopSessions: its web client lists this computer in Settings → Devices
   view: { kind: "web" } | { kind: "projects" } | { kind: "project"; id: string; name: string; thread: { id: string; title: string } | null };
   projects: ProjectRow[]; // as the page listed them
   failure: string | null; // why what the user last asked for, a project or a thread's resolve, did not happen
@@ -279,6 +279,8 @@ async function render(): Promise<void> {
   for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-link]")) {
     row.hidden = !state.links.includes(row.dataset.link ?? "");
   }
+  // Devices is the web client's Settings tab, which only an agent with local folders has.
+  byId("user-menu").querySelector<HTMLElement>('[data-action="devices"]')!.hidden = state.agent?.desktopSessions !== true;
   // The divider under Plans and billing goes with it: no two dividers meet.
   byId("user-menu").querySelector<HTMLElement>("hr:last-of-type")!.hidden = !state.links.includes("billing");
   const device = byId("device");
@@ -371,6 +373,8 @@ for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-actio
   row.addEventListener("click", () => {
     menu(false);
     if (action === "settings") void shell.settings();
+    // The user's computers and desktop sign-ins are the agent's: its web client's Settings lists them.
+    else if (action === "devices") void shell.go("/settings?tab=devices");
     else if (action === "logout") void shell.signOut();
     else if (action === "remove") void shell.remove();
     else if (row.dataset.link) void shell.link(action);
