@@ -473,8 +473,8 @@ function remember(project: Project): void {
 }
 
 function show(next: View): void {
-  // The pane's transcript is the open project's: anything else the centre shows closes it.
-  if (reading && !(next.kind === "project" && view.kind === "project" && next.id === view.id)) {
+  // The pane's transcript is the open project's: anything else the centre shows closes it, its own thread included.
+  if (reading && !(next.kind === "project" && view.kind === "project" && next.id === view.id && next.thread?.id !== reading.id)) {
     reading = null;
     main?.read(null);
   }
@@ -1442,6 +1442,8 @@ function goWeb(path: string): void {
   const thread = open ? overview?.threads.find((found) => found.id === chatId) : undefined;
   if (open && (thread || chatId === open.masterSessionId)) {
     view = { ...open, thread: thread ? { id: thread.id, title: thread.title } : null };
+    // Shown in the centre, its transcript in the pane has nothing more to show.
+    if (thread && reading?.id === thread.id) read(null);
     changed();
   } else {
     show({ kind: "web" });

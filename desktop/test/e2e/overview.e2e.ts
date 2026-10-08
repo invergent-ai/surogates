@@ -328,6 +328,25 @@ describe("a thread read in the Overview pane", () => {
     await expect.poll(() => pane(shell)).toBeNull();
   });
 
+  it("goes as the centre shows its thread, from a card's View thread or a notification's click", async () => {
+    const { shell, page, client } = await opened();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    // A thread card's View thread: the web client routes to the thread in place.
+    await client.evaluate((id) => history.pushState(null, "", `/chat/${id}`), QUESTION);
+    await expect.poll(() => page.textContent("#title")).toBe("Check the revenue figures");
+    await expect.poll(() => pane(shell)).toBeNull();
+    await page.click("#to-project");
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${REPORT}`);
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    // A notification's click: the centre loads the thread's page.
+    await page.evaluate((path) => (window as unknown as { surogateShell: { go(path: string): Promise<void> } }).surogateShell.go(path),
+      `/chat/${QUESTION}`);
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${QUESTION}`);
+    await expect.poll(() => pane(shell)).toBeNull();
+  });
+
   it("takes the keyboard to its Back as it opens, and back to the thread's row as it closes", async () => {
     const { shell, page } = await opened();
     await page.focus(`[data-thread="${QUESTION}"]`);
