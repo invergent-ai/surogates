@@ -15,6 +15,7 @@ import base64
 import json
 from typing import Any
 
+from surogates.devices.binding import device_of
 from surogates.sandbox.base import MAX_FILE_BYTES, SandboxUnavailableError
 from surogates.sandbox.pool import SandboxPool
 from surogates.workstreams import is_project_thread
@@ -33,10 +34,14 @@ def writes_to_copy(sandbox_pool: Any, owner: Any, session_config: dict[str, Any]
     a project's thread with a storage bucket.  A thread with none has the
     real files for its workspace, as any other session.  So has a thread
     of a project too large for history: it works on the real files, and
-    what a tool makes for it is saved there.
+    what a tool makes for it is saved there.  And so has a thread on the
+    user's computer, in its folder there.
     """
     config = session_config or {}
-    works_on_a_copy = bool(config.get("storage_bucket")) and is_project_thread(config) and not config.get("history_off")
+    works_on_a_copy = (
+        bool(config.get("storage_bucket")) and is_project_thread(config)
+        and not config.get("history_off") and device_of(config) is None
+    )
     return has_copy(sandbox_pool, owner) or works_on_a_copy
 
 

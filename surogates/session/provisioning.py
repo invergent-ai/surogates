@@ -209,10 +209,12 @@ async def create_child_session(
     # A project thread's helper, and a helper's helper, works on a copy of
     # its own, of the thread's work, in a pod of its own on whichever worker
     # takes it: what it keeps there lands with the thread's next landing.
+    # A helper of a thread on the user's computer works in the thread's
+    # folder there, through its binding, as a local chat's helper does.
     merged_config.pop("history_thread", None)
     merged_config.pop("history_project", None)
     thread = str(parent.id) if is_project_thread(parent_config) else parent_config.get("history_thread")
-    if thread:
+    if thread and "execution" not in parent_config:
         session_id = session_id or uuid4()
         merged_config["history_thread"] = thread
         merged_config["history_project"] = parent_config.get("workstream_id") or parent_config["history_project"]

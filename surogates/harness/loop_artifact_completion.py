@@ -1376,8 +1376,14 @@ class ArtifactCompletionMixin:
         return {"kept": False, "left": left} if left else {}
 
     async def _open_copy_to_land(self, session: Session) -> None:
-        """Give a thread's turn that never used its pod one, when its end lands all the same."""
+        """Give a thread's turn that never used its pod one, when its end lands all the same.
+
+        Never for a thread on the user's computer: it works in the folder there,
+        and has no copy in the cloud to land.
+        """
         owner = sandbox_session_key(session)
+        if device_of(session.config) is not None:
+            return
         if self._sandbox_pool.holds_copy(owner) or self._storage is None or session.config.get("history_off"):
             return
         if await waits_to_land(self._session_factory, self._storage, session, fence=_fence(self._saga_settings)):

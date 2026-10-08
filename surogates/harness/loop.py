@@ -1038,9 +1038,10 @@ class AgentHarness(
 
         Its pod then has the plain layout, the real files at ``/workspace``:
         it works on them, as before projects had history, and lands nothing.
+        A thread on the user's computer is never counted: it works in the folder there.
         """
         config = session.config or {}
-        if self._storage is None or not config.get("storage_bucket") or not (
+        if self._storage is None or not config.get("storage_bucket") or device_of(config) is not None or not (
             is_project_thread(config) or config.get("history_thread")
         ):
             return session

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
@@ -12,10 +13,12 @@ import pytest
 import pytest_asyncio
 
 import surogates.devices.operations as operations_module
+from surogates.db.models import WorkstreamHistory
 from surogates.devices.binding import Binding
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.store import DeviceStore
 from surogates.harness.tool_exec import execute_single_tool
+from surogates.sandbox.copy_files import writes_to_copy
 from surogates.sandbox.pool import SandboxPool, sandbox_session_key
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
@@ -387,6 +390,14 @@ async def answered_by_the_journal(api, project: dict, master) -> object:
 
 async def test_a_thread_on_the_users_computer_works_in_its_folder_and_reports_to_its_master(api, laptop, monkeypatch, tmp_path):
     _, master, thread = await begun_local(api, laptop)
+    # A landing a killed worker left running in the project, long quiet: a cloud thread's turn end settles it.
+    async with api.app.state.session_factory() as db:
+        db.add(WorkstreamHistory(
+            workstream_id=UUID(thread.config["workstream_id"]), kind="landing", saga_id=f"left-{uuid4()}",
+            saga_state="running", steps=[], agent_id=thread.agent_id, user_id=thread.user_id,
+            updated_at=datetime.now(UTC) - timedelta(hours=1),
+        ))
+        await db.commit()
     # The harness reads the project's storage, as a worker's does.
     made = test_turn_sagas._make_loop_harness
 
@@ -398,7 +409,7 @@ async def test_a_thread_on_the_users_computer_works_in_its_folder_and_reports_to
     monkeypatch.setattr(test_turn_sagas, "_make_loop_harness", with_storage)
     pods = ThreadPods(tmp_path / "pods")
     pool = SandboxPool(pods)
-    await a_turn(api, monkeypatch, thread, [
+    harness = await a_turn(api, monkeypatch, thread, [
         calling(("write_file", {"path": "Budget.xlsx", "content": "Total,42\n"})),
         _final_response("The totals are in Budget.xlsx."),
     ], pool=pool)
@@ -411,6 +422,9 @@ async def test_a_thread_on_the_users_computer_works_in_its_folder_and_reports_to
     )
     assert "landing" not in report.data, report.data
     assert await queued(api, master)
+    # Nor is the project's history counted for its wake, nor a file of its tools written to a copy.
+    assert "history_off" not in (await harness._with_history_cap(thread)).config
+    assert not writes_to_copy(pool, sandbox_session_key(thread), thread.config)
 
 
 async def test_a_helper_of_a_thread_on_the_users_computer_works_in_the_threads_folder(api, laptop):
@@ -427,5 +441,6 @@ async def test_a_helper_of_a_thread_on_the_users_computer_works_in_the_threads_f
     assert (laptop.folder / "Notes.md").read_text() == "42\n"
     # Through the thread's binding: the helper names the thread as its root, and is never bound itself.
     assert (helper.config["execution"], sandbox_session_key(helper)) == (thread.config["execution"], str(thread.id))
+    assert "history_thread" not in helper.config
     with pytest.raises(ValueError, match="Only a root session is bound to a folder"):
         await journal(api).bind(session_id=helper.id, device_id=UUID(laptop.device_id), folder=FOLDER, nonce=NONCE)
