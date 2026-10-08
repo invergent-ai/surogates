@@ -82,6 +82,17 @@ describe("the user menu", () => {
     expect(await page.$$eval("#user-menu hr", (found) => found.filter((hr) => (hr as HTMLElement).offsetParent !== null).length)).toBe(1);
     expect(await page.isDisabled('[data-action="logout"]')).toBe(false);
     expect(await page.isDisabled('[data-action="language"]')).toBe(true);
+    // A menu holds its rows and the lines between them, and nothing else: the email is over it, in the popover.
+    expect(await page.$eval("#user-menu", (found) => {
+      const rows = found.querySelector('[role="menu"]');
+      return {
+        popover: found.getAttribute("role"),
+        named: rows?.getAttribute("aria-labelledby") ?? null,
+        holds: [...new Set([...(rows?.children ?? [])].map((child) => child.getAttribute("role") ?? child.tagName))],
+        email: rows?.contains(document.getElementById("user-email")) ?? null,
+        outside: [...found.querySelectorAll('[role="menuitem"]')].filter((row) => !rows?.contains(row)).length,
+      };
+    })).toEqual({ popover: null, named: "user", holds: ["menuitem", "HR"], email: false, outside: 0 });
     const menu = await page.$eval("#user-menu", (found) => found.getBoundingClientRect().bottom);
     const row = await page.$eval("#user", (found) => found.getBoundingClientRect().top);
     expect(menu).toBeLessThanOrEqual(row);
@@ -113,10 +124,23 @@ describe("the user menu", () => {
     await page.keyboard.press("Escape");
     expect(await page.isVisible("#user-menu")).toBe(false);
     expect(await focused()).toBe("user");
-    // Tab leaves it, closed.
+    // The arrows are the menu's only while the keyboard is in it: on another control, with the menu open, they move nothing.
+    await page.keyboard.press("Enter");
+    expect(await focused()).toBe("SettingsCtrl+Shift+,");
+    await page.evaluate(() => document.getElementById("open-settings")!.focus());
+    await page.keyboard.press("ArrowDown");
+    expect(await page.isVisible("#user-menu")).toBe(true);
+    expect(await focused()).toBe("open-settings");
+    await page.keyboard.press("Escape");
+    expect(await focused()).toBe("user");
+    // Tab leaves it, closed, for what comes next that shows, outside the menu.
     await page.keyboard.press("Enter");
     await page.keyboard.press("Tab");
     expect(await page.isVisible("#user-menu")).toBe(false);
+    expect(await page.evaluate(() => {
+      const now = document.activeElement as HTMLElement | null;
+      return now !== null && now !== document.body && now.checkVisibility() && !document.getElementById("user-menu")!.contains(now);
+    })).toBe(true);
   });
 
   it("closes once the conversation takes the focus", async () => {

@@ -451,6 +451,8 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Tab") return menu(false);
+  // The arrows are the menu's only while the keyboard is in it.
+  if (!byId("user-menu").contains(document.activeElement)) return;
   const move = MOVES.get(event.key);
   if (!move) return;
   event.preventDefault();
