@@ -278,3 +278,56 @@ export function folderCalls(
     typeof desktop.onBindingChanged === "function";
   return present ? (desktop as FolderCalls) : null;
 }
+
+/** What the chat page keys a new chat's AI disclosure by, before the chat is made. */
+export const PRE_SESSION_KEY = "__pre_session__";
+
+/** A message Surogate Desktop's quick entry handed the page, by the desktop's id, for the new chat it opened. */
+export interface HandedMessage {
+  id: string;
+  text: string;
+}
+
+/**
+ * What the chat page does now with a message quick entry handed it, from the page's own state:
+ * the message, once it may go as the new chat's first; why it never will, which the desktop's box
+ * says; or null while it waits. It waits for the agent's AI disclosure to be read, and accepted
+ * where the agent asks for it: what the user has not agreed to is not sent for them. It waits for
+ * the line under the composer too, so that the chat is made where the line says (Section 8). It
+ * never goes into a chat the page already shows, nor to an agent that keeps one conversation, whose
+ * history would replay under a message sent as it opens.
+ */
+export function handedNow(
+  handed: HandedMessage | null,
+  page: {
+    sessionId: string | null;
+    multiSession: boolean | null;
+    transparency: { enabled: boolean; read?: false } | null; // null until it is read
+    disclosures: Record<string, "accepted" | "declined">;
+    place: { text: string | null }; // the line under the composer
+  },
+): HandedMessage | string | null {
+  if (!handed) {
+    return null;
+  }
+  if (page.multiSession === false) {
+    return "This agent keeps one conversation, and quick entry starts new chats, so nothing was sent. Write to it in Surogate's window.";
+  }
+  if (page.sessionId !== null) {
+    return "Another chat opened before this one was made, so nothing was sent.";
+  }
+  if (page.transparency === null) {
+    return null;
+  }
+  if (page.transparency.read === false) {
+    return "Surogate could not read the agent's AI disclosure setting, so nothing was sent.";
+  }
+  const disclosure = page.disclosures[PRE_SESSION_KEY];
+  if (disclosure === "declined") {
+    return "You declined the agent's AI disclosure, so nothing was sent.";
+  }
+  if (page.transparency.enabled && disclosure !== "accepted") {
+    return null;
+  }
+  return page.place.text === null ? null : handed;
+}

@@ -16,6 +16,7 @@
     "test:device-requests": "node --experimental-strip-types --test ../scripts/web-device-requests.test.mjs",
     "test:devices": "node --experimental-strip-types --test ../scripts/web-devices.test.mjs",
     "test:local-chat": "node --experimental-strip-types --test ../scripts/web-local-chat.test.mjs",
+    "test:chat-page": "node --test ../scripts/web-chat-page.test.mjs",
     "test:oauth-consent": "node --experimental-strip-types --test ../scripts/oauth-consent.test.mjs",
     "test:projects": "node --experimental-strip-types --test ../scripts/web-projects.test.mjs",
     "typecheck": "tsc -b --pretty false",
