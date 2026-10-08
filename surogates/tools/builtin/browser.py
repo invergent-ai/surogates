@@ -89,6 +89,16 @@ def _paused_by_user_result() -> str:
     )
 
 
+# A local-folder chat's browser is on the user's computer, reached only through its tool call's own
+# operations: a call of one that came without them is refused, never given a cloud browser, billed.
+_NO_COMPUTER = "this chat works on a folder of the user's computer, and its browser is there, but this call did not come through the computer"
+
+
+def _on_a_computer(session_config: dict[str, Any] | None) -> bool:
+    """Whether the session is stamped a local-folder chat (surogates.session.provisioning)."""
+    return ((session_config or {}).get("execution") or {}).get("kind") == "device"
+
+
 async def _resolve_session_browser(
     *,
     tenant: Any,
@@ -105,6 +115,8 @@ async def _resolve_session_browser(
         # A session on the user's computer drives the browser there, through its
         # tool call's runner: no browser pool, no browser minutes, no cloud profile.
         return "device", DeviceEndpoint(workspace_io.runner), device_snapshot_cache(str(session_id))
+    if _on_a_computer(session_config):
+        return browser_unavailable_result(_NO_COMPUTER)
 
     if browser_pool is None or session_id is None:
         return browser_unavailable_result("browser pool not configured")
@@ -566,6 +578,7 @@ async def _browser_close_handler(
     session_id: UUID | str | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
+    session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
     **_: Any,
 ) -> str:
@@ -574,6 +587,8 @@ async def _browser_close_handler(
         closed = await DeviceBrowserClient(workspace_io.runner).close_tab()
         forget_snapshot_cache(str(session_id))
         return json.dumps({"closed": closed})
+    if _on_a_computer(session_config):
+        return browser_unavailable_result(_NO_COMPUTER)
 
     if browser_pool is None or session_id is None:
         return json.dumps({"closed": False, "reason": "no_browser_pool"})

@@ -157,6 +157,67 @@ async def test_what_the_computer_refuses_is_the_tools_result(computer, error, re
         assert json.loads(await handler(args, **rig.kwargs)) == result
 
 
+# Every browser tool, with arguments it takes: none may reach the cloud's browser pool for a local-folder chat.
+EVERY_TOOL = [
+    (browser._browser_navigate_handler, {"url": "https://example.com"}),
+    (browser._browser_get_state_handler, {}),
+    (browser._browser_evaluate_handler, {"code": "return 1;"}),
+    (browser._browser_close_handler, {}),
+    (browser._browser_click_handler, {"x": 1, "y": 2}),
+    (browser._browser_type_handler, {"text": "hello"}),
+    (browser._browser_press_key_handler, {"keys": ["Enter"]}),
+    (browser._browser_scroll_handler, {"x": 1, "y": 2, "delta_y": 100}),
+    (browser._browser_drag_handler, {"path": [[1, 2], [3, 4]]}),
+    (browser._browser_wait_handler, {"ms": 0}),
+    (browser._browser_screenshot_handler, {}),
+]
+
+
+class AnyBrowser(Laptop):
+    """A computer whose browser answers each kind as a page would."""
+
+    async def run(self, kind: str, args: dict[str, Any], payload: bytes | None = None) -> dict[str, Any]:
+        if not kind.startswith("browser."):
+            return await self.files.run(kind, args, payload)
+        self.asked.append((kind, args))
+        return {"ok": {
+            "browser.navigate": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []},
+            "browser.observe": FRAMES,
+            "browser.evaluate": {"value": 1},
+            "browser.screenshot": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode("ascii"),
+            "browser.close": {"closed": True},
+        }.get(kind, {"notices": []})}
+
+
+@pytest.mark.parametrize(("handler", "args"), EVERY_TOOL, ids=lambda value: getattr(value, "__name__", ""))
+async def test_no_browser_tool_asks_the_cloud_pool_for_a_session_on_the_computer(computer, handler, args) -> None:
+    rig = computer()
+    laptop = AnyBrowser(str(rig.folder))
+    kwargs = {**rig.kwargs, "workspace_io": DeviceWorkspaceIO(laptop, root=str(rig.folder))}
+
+    result = await handler(args, **kwargs)
+
+    # Answered by the computer's browser: an outline, a value, or a body without an error.
+    assert '"error"' not in result, result
+    assert kwargs["browser_pool"].asked == []
+    assert all(kind.startswith("browser.") for kind, _ in laptop.asked)
+
+
+@pytest.mark.parametrize(("handler", "args"), EVERY_TOOL, ids=lambda value: getattr(value, "__name__", ""))
+async def test_a_local_folder_chats_call_without_its_computer_is_refused_and_never_reaches_the_cloud_pool(
+    computer, handler, args,
+) -> None:
+    rig = computer()
+    # Stamped a local-folder chat, but its call came without the computer's operations.
+    kwargs = {**rig.kwargs, "workspace_io": None}
+
+    body = json.loads(await handler(args, **kwargs))
+
+    assert body["error"] == "browser_unavailable"
+    assert "user's computer" in body["reason"]
+    assert kwargs["browser_pool"].asked == []
+
+
 async def test_a_session_in_the_cloud_still_uses_the_cloud_browser() -> None:
     # No workspace_io: the pool answers, as before.
     pool = NoPool()
