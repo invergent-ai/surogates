@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import {
-  BROWSER_HOST, BROWSER_STOPPED, BrowserClient, type BrowserProcess, CANCELLED, DUPLICATE, type FromBrowser, type ToBrowser,
+  BROWSER_HOST, BROWSER_STOPPED, BrowserClient, type BrowserProcess, CANCELLED, DUPLICATE, type FromBrowser, PAUSED, type ToBrowser,
 } from "../src/browser/client.js";
 import type { Operation } from "../src/link/protocol.js";
 import { isolated, TEST_BROWSER } from "./isolated.js";
@@ -296,6 +296,34 @@ describe.skipIf(!run)("the browser host's process", () => {
       await client.stop();
     }
   });
+
+  it("hears of a chat taken over and handed back, and is asked to show its page, through the host's own process", async () => {
+    profile = mkdtempSync(join(tmpdir(), "sb-profile-"));
+    const client = new BrowserClient();
+    const launch = { executable: EXECUTABLE!, profile };
+    const signal = new AbortController().signal;
+    // What the host answers within 5 s, or "no answer": a message it does not handle is never answered.
+    const answered = (shown: Promise<boolean>) => Promise.race([shown, new Promise<string>((done) => setTimeout(() => done("no answer"), 5_000))]);
+    try {
+      // This computer's own address: refused by the proxy, but the browser is up, with a tab.
+      await client.perform(launch, operation("op-1", "browser.navigate", { url: "http://127.0.0.1:9/" }), signal);
+      // One that holds its page a moment, and one waiting behind it in the session's line.
+      const holding = client.perform(launch, operation("op-2", "browser.evaluate", { code: "await new Promise((r) => setTimeout(r, 1500)); return 'held';" }), signal);
+      const waiting = client.perform(launch, operation("op-3", "browser.evaluate", { code: "document.title = 'ran after the pause'; return 'waited';" }), signal);
+      await new Promise((done) => setTimeout(done, 300));
+      client.pause("root", true);
+      expect(await holding).toEqual({ ok: { value: "held" } });
+      expect(await waiting).toEqual(PAUSED);
+      expect(await client.perform(launch, operation("op-4", "browser.close", {}), signal)).toEqual(PAUSED);
+      expect(await answered(client.show("root"))).toBe(true);
+      expect(await answered(client.show("another-chat"))).toBe(false);
+      client.pause("root", false);
+      // Handed back, the chat's operations run again, in a page the waiting one never acted in.
+      expect(await client.perform(launch, operation("op-5", "browser.evaluate", { code: "return document.title === 'ran after the pause';" }), signal)).toEqual({ ok: { value: false } });
+    } finally {
+      await client.stop();
+    }
+  }, 30_000);
 
   it("closes its headed browser when it is stopped, as the app's quit stops it", async () => {
     profile = mkdtempSync(join(tmpdir(), "sb-profile-"));

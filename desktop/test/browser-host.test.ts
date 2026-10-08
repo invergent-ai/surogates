@@ -263,6 +263,16 @@ describe("the processes on a profile", () => {
   });
 });
 
+describe("the chats taken over, as the host keeps them", () => {
+  // No browser is launched for it: the host is told of each before any operation comes.
+  it("keeps nothing of a deleted chat's take-over, and keeps another chat's", async () => {
+    host.pause("chat-1", true);
+    host.pause("chat-2", true);
+    await host.forget("chat-1");
+    expect([...(host as unknown as { paused: Set<string> }).paused]).toEqual(["chat-2"]);
+  });
+});
+
 describe.skipIf(!run)("the browser host", () => {
   beforeAll(() => isolated());
 

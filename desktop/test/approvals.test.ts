@@ -1134,6 +1134,29 @@ describe("the browser on this computer", () => {
     expect((approvals as unknown as { browsing: Map<string, unknown> }).browsing.size).toBe(0);
   });
 
+  it("asks the tools' refusal again when a browser operation's turn comes, and asks its user nothing about one refused meanwhile", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+    let taken = false;
+    user = new User();
+    approvals = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant",
+      refusal: (operation) => (taken && operation.kind.startsWith("browser.") ? PAUSED : null),
+    });
+    const open = approvals.admit(navigate(), never());
+    const waiting = approvals.admit(op("browser.evaluate", { code: "return 1;" }), never());
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    // Refused by the tools from now on, its prompts not dismissed: the one waiting is caught at its turn all the same.
+    taken = true;
+    // Whatever it would be asked, it would be let through.
+    user.auto = "allow";
+    user.answer("allow");
+    expect(await open).toBeNull();
+    expect(await waiting).toEqual(PAUSED);
+    expect(user.asked).toHaveLength(1);
+  });
+
   it("tells whoever watches of a chat's first use allowed once, and of nothing for a chat this computer did not bind", () => {
     bind(ROOT, "free");
     const heard: string[] = [];
