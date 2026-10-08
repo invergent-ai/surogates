@@ -5,7 +5,7 @@
 //   npm run test:browser -- test/browser-host.test.ts
 // With the flag set anywhere else, they fail before any browser is launched.
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { connect as connectTcp } from "node:net";
 import { tmpdir, userInfo } from "node:os";
@@ -613,6 +613,28 @@ await navigator.serviceWorker.ready;`);
     expect(readdirSync(runtime).filter((name) => !there.includes(name) && /com\./.test(name))).toEqual([]);
     rmSync(home, { recursive: true, force: true });
   }, 60_000);
+
+  it("answers a try of a picked program that launches as a browser but does not close, within its bound", async () => {
+    const folder = mkdtempSync(join(tmpdir(), "sb-picked-"));
+    const picked = join(folder, "lingering-browser");
+    // The browser, and then the program goes on after it, holding the browser's pipe.
+    writeFileSync(picked, `#!/bin/sh\n"${EXECUTABLE}" "$@"\nsleep 600\n`, { mode: 0o755 });
+    try {
+      const started = performance.now();
+      expect(await within(20_000, host.tryBrowser(picked))).toMatchObject({ ok: { version: expect.stringMatching(/^\d+\./) } });
+      expect(performance.now() - started).toBeLessThan(15_000);
+    } finally {
+      // The program, and its sleep with it: the process group it leads.
+      for (const pid of readdirSync("/proc").filter((entry) => /^\d+$/.test(entry))) {
+        try {
+          if (readFileSync(`/proc/${pid}/cmdline`, "utf8").includes(picked)) process.kill(-Number(pid), "SIGKILL");
+        } catch {
+          // Gone, or not its.
+        }
+      }
+      rmSync(folder, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("closes every tab of a deleted chat's sessions, and no other chat's", async () => {
     const [a, child, b] = [session(), session(), session()];

@@ -41,6 +41,8 @@ export const WEAKENING = [
 const FEATURES = PLAYWRIGHT_FEATURES.replace(",HttpsUpgrades", "").replace(",ThirdPartyStoragePartitioning", "");
 
 const LAUNCH_MS = 30_000;
+// How long a try of a picked browser waits for it to close.
+const TRY_CLOSE_MS = 5_000;
 // How long a navigation, a script, a read, a click, a key or a shot may hold its page, as the cloud
 // bounds each operation: a page whose own code holds its main thread after its load holds a
 // navigation too, and a shot's labels are drawn by code in the page. Above the shot's own 30 s.
@@ -235,7 +237,9 @@ export class BrowserHost {
     try {
       const browser = await chromium.launch({ executablePath: executable, headless: true, chromiumSandbox: true, env: browserEnv(), timeout: LAUNCH_MS });
       const version = browser.version();
-      await browser.close();
+      // A program that launched as a browser but does not close is answered all the same: the host's
+      // stop, after the try, ends what is left of it.
+      await Promise.race([browser.close(), new Promise((resolve) => setTimeout(resolve, TRY_CLOSE_MS))]);
       return { ok: { version } };
     } catch (error) {
       return failed(said(error));
