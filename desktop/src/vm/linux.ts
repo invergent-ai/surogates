@@ -1,8 +1,9 @@
-// The VM layer's Linux backend (spec, Section 11): QEMU with KVM, the control and net
-// ports virtio-serial ports on Unix sockets of QEMU's, and each root's folder shared by
-// a virtiofsd of its own, hot-added through QMP. QEMU and virtiofsd run through
-// setpriv --pdeathsig, so they die with the manager however it dies, and each
-// leaves a pidfile in the runtime folder, so a later manager can end one that did not.
+// The VM layer's Linux backend (spec, Section 11): QEMU with KVM, or emulated where this
+// computer gives it no KVM it can use; the control and net ports virtio-serial ports on Unix
+// sockets of QEMU's, and each root's folder shared by a virtiofsd of its own, hot-added
+// through QMP. QEMU and virtiofsd run through setpriv --pdeathsig, so they die with the
+// manager however it dies, and each leaves a pidfile in the runtime folder, so a later
+// manager can end one that did not.
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import {
