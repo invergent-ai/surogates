@@ -253,9 +253,11 @@ for (const control of document.querySelectorAll<HTMLElement>("[data-setting]")) 
       refused.textContent = "";
       return render();
     }, async (error: unknown) => {
-      await render();
+      // The row says what failed whether or not Settings can be drawn again: a state that cannot be read
+      // leaves the control as it was, which says nothing of the choice.
+      const drawn = await render().then(() => true, () => false);
       // Said of the setting as its control now shows it: only a choice that is not in place did not change.
-      const kept = option.getAttribute("aria-pressed") === "true";
+      const kept = drawn && option.getAttribute("aria-pressed") === "true";
       showText(refused, kept ? `${label} is as you chose, but something failed: ${said(error)}.` : `Surogate did not change ${label}: ${said(error)}.`);
     }));
   }

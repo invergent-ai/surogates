@@ -581,6 +581,49 @@ describe("Settings → General", () => {
     expect(await settings.evaluate(() => (window as unknown as { rejections: string[] }).rejections)).toEqual([]);
   });
 
+  it("says in a setting's row what failed, as unchanged, though Settings' state cannot be read after it", async () => {
+    app = await launch(home);
+    await shellPage(app);
+    await app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("settings")!.click());
+    const settings = await settingsPage(app);
+    await expect.poll(() => pressed(settings, "textSize")).toBe("medium");
+    await settings.evaluate(() => {
+      const rejections: string[] = [];
+      Object.assign(window, { rejections });
+      window.addEventListener("unhandledrejection", (event) => rejections.push(String(event.reason)));
+    });
+    const refused = (label: string) =>
+      settings.evaluate((row) => document.querySelector(`.row[data-label="${row}"] .label [role="alert"]`)?.textContent ?? null, label);
+    // The main process's answers as the test's own: each choice is refused with nothing changed, and
+    // the state Settings reads next, to draw itself again, cannot be read.
+    const state = await settings.evaluate(() => (globalThis as unknown as { surogateSettings: { state(): Promise<unknown> } }).surogateSettings.state());
+    await app.evaluate(({ webContents }, asItIs) => {
+      const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
+      let unread = false;
+      for (const channel of ["settings:set", "settings:state"]) contents.ipc.removeHandler(channel);
+      contents.ipc.handle("settings:set", (_event, _key, value) => {
+        unread = true;
+        throw new Error(`The disk is full, so ${String(value)} was not kept`);
+      });
+      contents.ipc.handle("settings:state", () => {
+        if (!unread) return asItIs;
+        unread = false;
+        throw new Error("Settings' state cannot be read");
+      });
+    }, state);
+    // The row says why the choice failed, by the choice's own reason, over the control as it was.
+    await settings.click('[data-setting="textSize"] [data-value="large"]');
+    await expect.poll(() => refused("Transcript text size"), { timeout: 5_000 })
+      .toBe("Surogate did not change Transcript text size: The disk is full, so large was not kept.");
+    expect(await pressed(settings, "textSize")).toBe("medium");
+    // The option already chosen, refused the same way: a control that was not drawn again does not say the choice is in place.
+    await settings.click('[data-setting="textSize"] [data-value="medium"]');
+    await expect.poll(() => refused("Transcript text size"), { timeout: 5_000 })
+      .toBe("Surogate did not change Transcript text size: The disk is full, so medium was not kept.");
+    // Neither the choice's failure nor the read's is left unhandled.
+    expect(await settings.evaluate(() => (window as unknown as { rejections: string[] }).rejections)).toEqual([]);
+  });
+
   it("quits when the window is closed once Keep running is off, and keeps the choice", async () => {
     const { shell, page } = await signedIn();
     await page.click("#open-settings");
