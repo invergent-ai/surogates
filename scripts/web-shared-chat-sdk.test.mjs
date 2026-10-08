@@ -83,6 +83,33 @@ for (const path of [
 }
 
 {
+  // The desktop draws no sidebar, so /missions lists the missions itself, as /chats lists the chats.
+  const missionsRoutes = readFileSync(repoPath("web/src/app/routes/missions.tsx"), "utf8");
+  const router = readFileSync(repoPath("web/src/app/router.tsx"), "utf8");
+  const missionsPage = readFileSync(repoPath("web/src/features/missions/missions-page.tsx"), "utf8");
+  assert.match(
+    missionsRoutes,
+    /export const missionsIndexRoute = createRoute\(\{\s*getParentRoute: \(\) => missionsRoute,\s*path: "\/",\s*component: MissionsPage,/s,
+    "/missions should have an index route that shows the missions page",
+  );
+  assert.match(
+    router,
+    /missionsRoute\.addChildren\(\[missionsIndexRoute, missionDetailRoute\]\)/,
+    "the router should mount the missions page at /missions",
+  );
+  assert.match(
+    missionsPage,
+    /slashCommandEnabled\(slashCommands, "mission"\) \?\s*\(\s*<MissionsPanel[^>]*onMissionSelect=/s,
+    "the missions page should list them with the shared MissionsPanel, gated as the sidebar is",
+  );
+  assert.match(
+    missionsPage,
+    /navigate\(\{ to: "\/missions\/\$missionId", params: \{ missionId \} \}\)/,
+    "a mission picked on the missions page should open its own page",
+  );
+}
+
+{
   const sessionsSliceSource = readFileSync(
     repoPath("web/src/stores/sessions-slice.ts"),
     "utf8",

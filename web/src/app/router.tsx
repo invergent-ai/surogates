@@ -16,7 +16,11 @@ import { Route as agentsRoute } from "./routes/agents";
 import { Route as inboxRoute } from "./routes/inbox";
 import { Route as integrationsRoute } from "./routes/integrations";
 import { Route as codingAgentsRoute } from "./routes/coding-agents";
-import { missionDetailRoute, missionsRoute } from "./routes/missions";
+import {
+  missionDetailRoute,
+  missionsIndexRoute,
+  missionsRoute,
+} from "./routes/missions";
 import {
   whiteboardRoute,
   whiteboardSessionRoute,
@@ -33,7 +37,7 @@ const routeTree = rootRoute.addChildren([
   inboxRoute,
   integrationsRoute,
   codingAgentsRoute,
-  missionsRoute.addChildren([missionDetailRoute]),
+  missionsRoute.addChildren([missionsIndexRoute, missionDetailRoute]),
   chatRoute.addChildren([chatSessionRoute]),
   chatsRoute,
   transcriptRoute,
