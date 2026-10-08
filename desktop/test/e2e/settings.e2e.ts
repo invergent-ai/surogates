@@ -1,7 +1,7 @@
 import { once } from "node:events";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { ElectronApplication, Page } from "playwright-core";
@@ -358,6 +358,25 @@ describe("Settings → General", () => {
       .surogateSettings.set("startAtLogin", "on"));
     await expect(set).rejects.toThrow("GNOME does not start a program whose path holds a %");
     expect(existsSync(join(home, "c", "autostart"))).toBe(false);
+  });
+
+  it("turns off an entry already there from a build that cannot start at login", async () => {
+    // Written by an earlier build, or by the user.
+    const entry = join(home, "c", "autostart", "surogate.desktop");
+    mkdirSync(dirname(entry), { recursive: true });
+    writeFileSync(entry, "[Desktop Entry]\nType=Application\nName=Surogate\nExec=/usr/local/bin/surogate --hidden\n");
+    const percent = join(home, "percent.cjs");
+    writeFileSync(percent, `process.execPath = ${JSON.stringify("/opt/100%/electron")};`);
+    app = await launch(home, {}, [], [percent]);
+    await shellPage(app);
+    await app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("settings")!.click());
+    const settings = await settingsPage(app);
+    await expect.poll(() => pressed(settings, "startAtLogin")).toBe("on");
+    expect(await settings.isDisabled('[data-setting="startAtLogin"] [data-value="on"]')).toBe(true);
+    expect(await settings.isDisabled('[data-setting="startAtLogin"] [data-value="off"]')).toBe(false);
+    await settings.click('[data-setting="startAtLogin"] [data-value="off"]');
+    await expect.poll(() => pressed(settings, "startAtLogin")).toBe("off");
+    expect(existsSync(entry)).toBe(false);
   });
 
   it("does not start at login from a build whose path systemd's autostart reader would misread, and says so", async () => {

@@ -161,11 +161,11 @@ async function render(): Promise<void> {
       option.setAttribute("aria-pressed", String(option.dataset.value === chosen[control.dataset.setting ?? ""]));
     }
   }
-  // A build that cannot start at login says why, and its control does nothing.
+  // A build that cannot start at login says why, and its On does nothing; its Off still removes an entry already there.
   const refused = byId("login-refused");
   refused.textContent = state.startAtLoginRefused ?? "";
   refused.hidden = state.startAtLoginRefused === null;
-  for (const option of document.querySelectorAll<HTMLButtonElement>('[data-setting="startAtLogin"] button')) option.disabled = !refused.hidden;
+  document.querySelector<HTMLButtonElement>('[data-setting="startAtLogin"] [data-value="on"]')!.disabled = !refused.hidden;
   byId("email").textContent = state.account?.email ?? "Not signed in";
   byId("name").textContent = state.account?.name ?? "";
   byId("organisation").textContent = state.computer.organisation ?? "";
