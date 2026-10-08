@@ -81,6 +81,11 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<scrip
     if (req.url === "/inner") return void res.writeHead(200, { "content-type": "text/html" }).end(`<a href="/x">Inner link</a>`);
     if (req.url === "/report.txt") return void res.writeHead(200, { "content-type": "text/plain", "content-disposition": "attachment" }).end("report");
     if (req.url === "/second") return void res.writeHead(200, { "content-type": "text/html" }).end("<title>Second</title>");
+    // A page whose outline is larger than the link carries: ten thousand buttons with long names.
+    if (req.url === "/huge") {
+      const button = `<button>${"a long name ".repeat(20)}</button>`;
+      return void res.writeHead(200, { "content-type": "text/html" }).end(`<title>Huge</title>${button.repeat(10_000)}`);
+    }
     // A page that sends itself on to another site once it has loaded.
     if (req.url === "/moves") {
       return void res.writeHead(200, { "content-type": "text/html" }).end(`<script>addEventListener("load", () => { location.href = "http://other.test/"; });</script>`);
@@ -346,6 +351,15 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     await op(a, "browser.mouse", { action: "click", x: place.x, y: place.y, button: "left", clicks: 1 });
     expect(await script(a, "return document.title;")).toBe("clicked 1");
     expect((await op(a, "browser.observe", { script: "nothing@1", params: {} })).error?.type).toBe("browser");
+  });
+
+  it("measures a page's outline in the page, and sends none too large for the link", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/huge" });
+    const outline = await op(a, "browser.observe", { script: "snapshot@1", params: { selector: null } });
+    expect(outline.error).toEqual({ type: "browser", message: expect.stringMatching(/^The page's outline is too large to send: \d+ characters, at most 2097152\. /) });
+    // A part of it, by a selector, is not.
+    expect((await op(a, "browser.observe", { script: "snapshot@1", params: { selector: "button:first-of-type" } })).ok?.title).toBe("Huge");
   });
 
   it("types, presses keys, scrolls, drags and takes its shot, with the labels drawn for it and gone after", async () => {

@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 
 import type { CDPSession, Page } from "playwright-core";
 
+import { MAX_FRAME_CHARS } from "../link/protocol.js";
+
 // The same from src/browser and from dist/browser.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
 // The snapshot's page half, the one the cloud's browser runs (surogates/browser/observe/snapshot.js),
@@ -42,6 +44,8 @@ async function snapshot(page: Page, params: Params): Promise<unknown> {
   const frames: Array<{ x: number; y: number; nodes: Collected["nodes"] }> = [];
   let viewport: Collected["viewport"] | null = null;
   let base = 0;
+  // Every frame's outline, measured in its page as the JSON the link sends: one too large for a frame never leaves it.
+  let size = 0;
   for (const frame of targets) {
     let x = 0;
     let y = 0;
@@ -52,13 +56,20 @@ async function snapshot(page: Page, params: Params): Promise<unknown> {
       x = Math.round(box.x);
       y = Math.round(box.y);
     }
-    let collected: Collected;
+    let sent: unknown;
     try {
       // The collector with its argument as a JSON literal: data, never code.
-      collected = await frame.evaluate(`(${snapshotCollector()})(${JSON.stringify({ selector: frame === main ? selector : null, base })})`);
+      sent = await frame.evaluate(`(() => {
+const json = JSON.stringify((${snapshotCollector()})(${JSON.stringify({ selector: frame === main ? selector : null, base })}));
+return json.length > ${MAX_FRAME_CHARS - size} ? json.length : json;
+})()`);
     } catch {
       continue;
     }
+    if (typeof sent === "number" || (size += String(sent).length) > MAX_FRAME_CHARS) {
+      throw new Error(`The page's outline is too large to send: ${size + (typeof sent === "number" ? sent : 0)} characters, at most ${MAX_FRAME_CHARS}. Read a part of it with a selector.`);
+    }
+    const collected = JSON.parse(String(sent)) as Collected;
     if (frame === main) viewport = collected.viewport;
     base += collected.nodes.length;
     frames.push({ x, y, nodes: collected.nodes });
@@ -67,16 +78,19 @@ async function snapshot(page: Page, params: Params): Promise<unknown> {
   try {
     const { root } = await cdp.send("DOM.getDocument", { depth: -1, pierce: true });
     const ids = new Map<string, number>();
-    const walk = (node: { attributes?: string[]; backendNodeId: number; children?: unknown[]; contentDocument?: unknown } | undefined): void => {
-      if (!node) return;
+    type Node = { attributes?: string[]; backendNodeId: number; children?: Node[]; contentDocument?: Node };
+    // Walked without recursion: a page can nest its elements as deep as it likes.
+    const left: Array<Node | undefined> = [root as Node];
+    while (left.length > 0) {
+      const node = left.pop();
+      if (!node) continue;
       const attributes = node.attributes ?? [];
       for (let at = 0; at < attributes.length; at += 2) {
         if (attributes[at] === "data-sg-i") ids.set(attributes[at + 1] ?? "", node.backendNodeId);
       }
-      for (const child of node.children ?? []) walk(child as typeof node);
-      walk(node.contentDocument as typeof node);
-    };
-    walk(root);
+      for (const child of node.children ?? []) left.push(child);
+      left.push(node.contentDocument);
+    }
     for (const frame of frames) {
       for (const node of frame.nodes) node.backend_node_id = node.idx === undefined ? null : (ids.get(String(node.idx)) ?? null);
     }
