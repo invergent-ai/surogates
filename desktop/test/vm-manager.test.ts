@@ -834,10 +834,12 @@ describe("a guest's lifecycle", () => {
     expect(await which(manager)).toEqual(failed);
     expect(await which(manager)).toEqual(failed);
     expect(boots).toBe(1);
-    // The user's Retry, its image checked: the next operation boots, inside the backoff.
+    // The user's Retry, its image checked: the next operation boots at once, not after the backoff's second.
     manager.retry();
+    const begun = performance.now();
     expect(await which(manager)).toEqual(failed);
     expect(boots).toBe(2);
+    expect(performance.now() - begun).toBeLessThan(500);
     await manager.stop();
   });
 

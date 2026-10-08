@@ -393,8 +393,11 @@ describe("the delivered image, and each boot", () => {
     expect(await vm.perform(operation(), signal())).toEqual(failed);
     expect(runs()).toBe(1);
     vm.retry();
+    // At once, not after the backoff's second.
+    const begun = performance.now();
     expect(await vm.perform(operation(), signal())).toEqual(failed);
     expect(runs()).toBe(2);
+    expect(performance.now() - begun).toBeLessThan(500);
   });
 
   it("answers what waits with why the VM cannot boot, as an image that could not be downloaded, and starts no manager", async () => {
