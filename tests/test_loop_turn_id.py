@@ -9,7 +9,9 @@ carries the per-turn correlator the Simple chat view consumes.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -21,6 +23,7 @@ import pytest
 from surogates.harness.budget import IterationBudget
 from surogates.harness.loop import AgentHarness
 from surogates.session.events import EventType
+from surogates.session.files import ComputerAway
 from surogates.session.models import Session
 
 
@@ -364,3 +367,105 @@ async def test_advisor_never_delays_the_first_llm_request(
     assert first_request_at[0] - started < 1.0
     # Nothing consulted the advisor on the harness's own initiative.
     assert not advisor_called.is_set()
+
+
+async def _drive_a_turn(monkeypatch: pytest.MonkeyPatch, config: dict, replies: list) -> tuple[Any, list[str]]:
+    """One turn of a session with *config*, its model answering *replies*; what ran, in order."""
+    from tests.test_loop_ordering import _harness
+
+    harness, order = _harness(), []
+    harness._find_invalid_tool_calls = MagicMock(return_value=[])
+    script = iter(replies)
+
+    async def folder_cursor(session: Any) -> str:
+        order.append("cursor")
+        return "1700000000000000000"
+
+    async def fake_call_llm_with_retry(**_kwargs: Any) -> tuple[dict, dict]:
+        order.append("model")
+        return next(script)
+
+    async def fake_execute_tool_calls(tool_calls_raw: list, **_kwargs: Any) -> list[dict]:
+        order.append("tools")
+        return [{"role": "tool", "tool_call_id": call["id"], "content": "ok"} for call in tool_calls_raw]
+
+    harness._folder_cursor = folder_cursor
+    monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
+    monkeypatch.setattr("surogates.harness.loop.execute_tool_calls", fake_execute_tool_calls)
+    session = _make_session()
+    session.config.update(config)
+    await harness._run_loop(
+        session, [{"role": "user", "content": "do the task"}], "system",
+        SimpleNamespace(lease_token=uuid4()), all_events=[],
+    )
+    return harness, order
+
+
+@pytest.mark.parametrize(("config", "asked"), [
+    ({"execution": {"kind": "device", "device_id": str(uuid4())}}, True),
+    # Its recap is ruled out whatever the turn does, so its files are never listed.
+    ({"execution": {"kind": "device", "device_id": str(uuid4())}, "active_mission_id": "m-1"}, False),
+    ({}, False),
+])
+@pytest.mark.asyncio
+async def test_a_local_folders_turn_takes_where_it_begins_before_its_first_tool_call(
+    monkeypatch: pytest.MonkeyPatch, config: dict, asked: bool,
+) -> None:
+    from tests.test_loop_ordering import _resp, _tool_resp
+
+    harness, order = await _drive_a_turn(monkeypatch, config, [_tool_resp("c1"), _tool_resp("c2"), _resp("Done.")])
+
+    # Once, and before the call runs: a mark taken after a tool's first write would miss its file.
+    assert order == (
+        ["model", "cursor", "tools", "model", "tools", "model"] if asked else ["model", "tools", "model", "tools", "model"]
+    )
+    assert harness._turn_cursor == ("1700000000000000000" if asked else None)
+
+
+@pytest.mark.asyncio
+async def test_a_local_folders_turn_that_makes_no_tool_call_takes_no_cursor_and_walks_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_loop_ordering import _resp
+
+    config = {"execution": {"kind": "device", "device_id": str(uuid4())}, "workspace_path": "/home/me/notes"}
+    harness, order = await _drive_a_turn(monkeypatch, config, [_resp("Done.")])
+
+    assert order == ["model"]
+    harness._walk_folder = AsyncMock()
+    session = _make_session()
+    session.config.update(config)
+    # It changed nothing in the folder: seen to be so, without a look.
+    assert await harness._scan_folder_for_new_files(session, set()) == ([], {})
+    harness._walk_folder.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("raised", "level"), [
+    # Offline, or silent past its bound: expected, and said at info.
+    (ComputerAway("the laptop", revoked=False), logging.INFO),
+    (TimeoutError(), logging.INFO),
+    # Anything else is a fault worth a warning.
+    (RuntimeError("no session factory"), logging.WARNING),
+])
+@pytest.mark.asyncio
+async def test_a_folders_harness_request_that_gives_up_logs_by_why(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, raised: Exception, level: int,
+) -> None:
+    from surogates.harness import loop_artifact_completion, loop_context_replay
+    from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
+    from surogates.harness.loop_context_replay import ContextReplayMixin
+
+    @asynccontextmanager
+    async def files_that_fail(*_args: Any, **_kwargs: Any):
+        raise raised
+        yield
+
+    monkeypatch.setattr(loop_context_replay, "session_files", files_that_fail)
+    monkeypatch.setattr(loop_artifact_completion, "session_files", files_that_fail)
+    harness, session = SimpleNamespace(_storage=None, _session_factory=None, _redis=None), SimpleNamespace(id=uuid4())
+    caplog.set_level(logging.INFO, logger="surogates.harness")
+
+    assert await ContextReplayMixin._read_folder_context(harness, session) == (False, None)
+    assert await ArtifactCompletionMixin._folder_cursor(harness, session) is None
+    assert await ArtifactCompletionMixin._walk_folder(harness, session, since="1") is None
+    assert [record.levelno for record in caplog.records] == [level] * 3

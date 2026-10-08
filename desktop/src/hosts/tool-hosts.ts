@@ -4,7 +4,8 @@
 // the VM asks the chat's approvals about the hosts its connections reach past the
 // package hosts.
 
-import { fork } from "node:child_process";
+import { spawn } from "node:child_process";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,7 +22,12 @@ import {
 // The same from src/hosts and from dist/hosts.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
 const HOST = join(PACKAGE, "dist", "hosts", "host.js");
-// Read-only folders a sandbox needs, and no chat's folder may hold: the runtime and the app's files.
+// The app's own plain node, beside its files (scripts/node.sh puts it there). The file hosts run
+// on it, and their helpers in srt, so no process runs Electron as Node (spec, Section 11), and
+// none runs a node of the user's.
+export const NODE = join(PACKAGE, "bin", "node");
+// Read-only folders a sandbox may read, and no chat's folder may hold: the running program's
+// (Electron's, in the app) and the app's files, its node among them.
 export const APP_DIRS = [dirname(process.execPath), PACKAGE];
 const STOP_TIMEOUT_MS = 5_000;
 export const START_TIMEOUT_MS = 30_000;
@@ -60,17 +66,23 @@ export interface HostProcess {
 
 export interface ForkOptions {
   script?: string; // the host's script; its default is dist/hosts/host.js
-  execPath?: string; // the runtime to run it with
+  execPath?: string; // the node it runs on; its default is the app's own
 }
 
 export function forkHost(options: ForkOptions = {}): HostProcess {
+  // Spawned with an IPC channel, never forked: once Electron's RunAsNode fuse is off, its
+  // child_process.fork() throws in every process of the app's, whatever node it is given.
   // Its own process group: srt's socat bridges are the host's children, outside
   // the sandbox, and do not die with it, so a host that goes takes its group
   // along. Its stdout goes to stderr: the app's stdout may carry other things.
-  const child = fork(options.script ?? HOST, [], {
+  // Its environment is named, never the app's: a plain node acts on NODE_OPTIONS, NODE_PATH,
+  // OPENSSL_CONF and the like, and srt on CLAUDE_CODE_TMPDIR, none of which the user's may set for it.
+  // --disable-sigusr1: a plain node opens its inspector on SIGUSR1, which any process of the user's can
+  // send, and has no fuse to refuse it as Electron has.
+  const child = spawn(options.execPath ?? NODE, ["--disable-sigusr1", options.script ?? HOST], {
     detached: true,
     stdio: ["ignore", 2, 2, "ipc"],
-    ...(options.execPath ? { execPath: options.execPath } : {}),
+    env: { PATH: process.env.PATH ?? "", HOME: homedir() },
   });
   const listeners: Array<() => void> = [];
   let exited = false;
@@ -90,9 +102,14 @@ export function forkHost(options: ForkOptions = {}): HostProcess {
     exited = true;
     for (const listener of listeners) listener();
   };
-  // A send to a host that has gone: its exit is what counts.
-  child.on("error", () => {
-    if (child.pid === undefined) gone();
+  // A send to a host that has gone: its exit is what counts. One that never spawned says why, once:
+  // a missing or broken bin/node answers every operation unavailable, and this line tells it.
+  child.on("error", (error) => {
+    if (child.pid !== undefined || exited) return;
+    // console.error, never stderr itself: in Electron's main, a write to a stderr whose reader has gone
+    // is an uncaught error that stalls the app; the console ignores it.
+    console.error(`the file host could not start: ${error.message}`);
+    gone();
   });
   child.on("exit", gone);
   child.on("close", gone);

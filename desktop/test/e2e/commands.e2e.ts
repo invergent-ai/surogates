@@ -5,16 +5,18 @@
 // npm run agent-disk.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { FuseState, FuseV1Options, getCurrentFuseWire } from "@electron/fuses";
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { NODE } from "../../src/hosts/tool-hosts.js";
 import { vmOptions } from "../../src/vm/client.js";
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { dataHome, launch, press, prompt, promptsShown, quit, shellPage, stubNative } from "./launch.js";
+import { dataHome, ELECTRON, launch, press, prompt, promptsShown, quit, shellPage, stubNative } from "./launch.js";
 
 const IMAGE = process.env.SUROGATE_VM_IMAGE ?? fileURLToPath(new URL("../../../images/guest/out", import.meta.url));
 const CHAT = "4e5f6a7b-8c9d-4e0f-a1b2-c3d4e5f6a7b8";
@@ -63,9 +65,9 @@ async function bound(folder: string): Promise<void> {
 }
 
 // The app launched and signed in: the agent's web client in it.
-async function launched(): Promise<Page> {
+async function launched(env: Record<string, string> = {}): Promise<Page> {
   const origin = await agent.start();
-  app = await launch(home, { XDG_RUNTIME_DIR: runtime, SUROGATE_VM_IMAGE: IMAGE });
+  app = await launch(home, { XDG_RUNTIME_DIR: runtime, SUROGATE_VM_IMAGE: IMAGE, ...env });
   await stubNative(app);
   const page = await shellPage(app);
   await connect(page, origin);
@@ -109,6 +111,47 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     await quit(app);
     app = undefined;
     expect(existsSync(vmRun())).toBe(false);
+  });
+
+  it("runs its file host and file helper on the app's own node, never Electron as Node, and a command in the VM reads what they wrote", async () => {
+    // This package's Electron is the app's: RunAsNode is off, as npm run electron:install sets it.
+    expect((await getCurrentFuseWire(ELECTRON))[FuseV1Options.RunAsNode]).toBe(FuseState.DISABLE);
+    const folder = join(home, "node");
+    mkdirSync(folder);
+    // Started as VS Code's terminals start it, ELECTRON_RUN_AS_NODE exported: it is the app all the same.
+    await bind(await launched({ ELECTRON_RUN_AS_NODE: "1" }), folder);
+    const written = Buffer.from("written on the app's node\n").toString("base64");
+    expect(await operation("write", { key: join(folder, "notes.txt"), data: written })).toEqual({ ok: null });
+    expect(await operation("run", { command: "cat notes.txt", workdir: null, timeout: 30 })).toEqual({
+      ok: { output: "written on the app's node\n", returncode: 0, timed_out: false },
+    });
+    // Every process of the app's, by the program it runs: the file host and its helper in srt run
+    // the app's node, and Electron runs only as itself, its own children each with a --type.
+    // Each thread's children: Chromium starts its utility processes from a thread of its own.
+    const main = app!.process().pid!;
+    const tree = (pid: number): number[] => [pid, ...readdirSync(`/proc/${pid}/task`).flatMap((tid) =>
+      readFileSync(`/proc/${pid}/task/${tid}/children`, "utf8").trim().split(" ").filter(Boolean).map(Number)).flatMap(tree)];
+    const processes = tree(main).flatMap((pid) => {
+      try {
+        // Chromium writes its processes' command lines over as one string: read as words.
+        return [{
+          pid, exe: readlinkSync(`/proc/${pid}/exe`), args: readFileSync(`/proc/${pid}/cmdline`, "utf8").split(/[\0 ]/),
+          environ: readFileSync(`/proc/${pid}/environ`, "utf8").split("\0"),
+        }];
+      } catch {
+        return []; // gone meanwhile
+      }
+    });
+    const onNode = processes.filter(({ exe }) => exe === realpathSync(NODE)).map(({ args }) => args.find((arg) => arg.endsWith(".js"))?.replace(/^.*\/dist\//, ""));
+    expect(onNode.sort()).toEqual(["files/helper.js", "hosts/host.js"]);
+    // Neither opens an inspector on SIGUSR1: the app's node has no fuse to refuse it.
+    expect(processes.filter(({ exe }) => exe === realpathSync(NODE)).map(({ args }) => args.includes("--disable-sigusr1"))).toEqual([true, true]);
+    // Nothing the app starts takes ELECTRON_RUN_AS_NODE from it: its main drops it before it starts any.
+    // The main's own /proc environ is the one it was started with, which keeps it.
+    const inheriting = processes.filter(({ pid, environ }) => pid !== main && environ.some((entry) => entry.startsWith("ELECTRON_RUN_AS_NODE=")));
+    expect(inheriting.map(({ exe, args }) => `${exe.split("/").at(-1)} ${args.find((arg) => arg.startsWith("--type=")) ?? ""}`.trim())).toEqual([]);
+    const plainElectron = processes.filter(({ exe, args }) => exe === realpathSync(ELECTRON) && !args.some((arg) => arg.startsWith("--type=")));
+    expect(plainElectron.map(({ pid }) => pid)).toEqual([main]);
   });
 
   it("runs the folder's own configure script, refuses SQLite's WAL there plainly, and keeps a database with a rollback journal that this computer reads", async () => {

@@ -386,10 +386,16 @@ class InProcessRunner:
     def __init__(self, folder: WorkspaceIO) -> None:
         self.folder = folder
         self.kinds: list[str] = []
+        # The browser's kinds, answered by this as FakeLaptop's are: kind, args -> outcome.
+        self.browser: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
 
     async def run(self, kind: str, args: dict[str, Any], payload: bytes | None = None) -> dict[str, Any]:
         self.kinds.append(kind)
         sent = json.loads(json.dumps(args))
+        if kind.startswith("browser."):
+            if self.browser is None:
+                return {"error": {"type": "unsupported", "message": f"This computer does not handle {kind} yet"}}
+            return json.loads(json.dumps(self.browser(kind, sent)))
         if payload is not None:
             # A write's data that crossed as a transfer: whole, as its args name it, then written as one that carried it.
             named = sent.pop("transfer")

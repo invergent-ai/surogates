@@ -1645,6 +1645,23 @@ async def _write_file_handler(
         return _tool_error(str(exc))
 
 
+def patch_targets(arguments: dict[str, Any]) -> list[str]:
+    """The files a patch call names: its path, and in patch mode each file of its V4A patch."""
+    targets: list[str] = []
+    path = arguments.get("path", "")
+    if path:
+        targets.append(path)
+    patch_content = arguments.get("patch")
+    if arguments.get("mode", "replace") == "patch" and patch_content:
+        for m in re.finditer(
+            r'^\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+)$',
+            patch_content,
+            re.MULTILINE,
+        ):
+            targets.append(m.group(1).strip())
+    return targets
+
+
 async def _patch_handler(
     arguments: dict[str, Any],
     **kwargs: Any,
@@ -1666,16 +1683,7 @@ async def _patch_handler(
     wio = workspace_io_from(kwargs)
 
     # Check sensitive paths for both replace (explicit path) and V4A patch (extract paths)
-    paths_to_check: list[str] = []
-    if path:
-        paths_to_check.append(path)
-    if mode == "patch" and patch_content:
-        for m in re.finditer(
-            r'^\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+)$',
-            patch_content,
-            re.MULTILINE,
-        ):
-            paths_to_check.append(m.group(1).strip())
+    paths_to_check = patch_targets(arguments)
 
     for p in paths_to_check:
         # Block writes to sensitive system/credential files

@@ -170,6 +170,24 @@ class HarnessAPIClient:
             data = await self._get(f"/v1/skills/{name}", params=params or None)
         return json.dumps({"success": True, **data}, ensure_ascii=False)
 
+    async def skill_file_bytes(self, name: str, path: str) -> bytes:
+        """A skill's linked file as the skill stores it: what a local folder's ``skill_view`` puts in the folder.
+
+        Under the chat's own entitlement, as :meth:`view_skill`.  A failure
+        names only the file: its words reach the model, and the api's address
+        and the agent's id are no part of them.
+        """
+        params: dict[str, Any] = {"path": path, "raw": "true"}
+        if self._session_id is not None:
+            params["session_id"] = self._session_id
+        resp = await self._client.get(f"/v1/skills/{name}/file", params=self._merge_params(params))
+        if resp.is_error:
+            raise httpx.HTTPStatusError(
+                f"the skill's file {path} could not be fetched (HTTP {resp.status_code})",
+                request=resp.request, response=resp,
+            )
+        return resp.content
+
     async def get_skill(self, name: str) -> dict[str, Any] | None:
         """Fetch a skill's full detail as a structured dict (bundle-aware).
 

@@ -434,7 +434,7 @@ async def test_a_chat_still_in_use_is_never_retired(api, chat):
 
 
 async def test_the_platforms_folders_are_hidden_and_the_panel_changes_none_of_them_but_the_canvas(api, chat):
-    for name in ("_history", "_whiteboard", ".threads", "_artifacts"):
+    for name in ("_history", "_whiteboard", ".threads"):
         (chat.folder / name).mkdir()
         (chat.folder / name / "x.json").write_text("{}")
     (chat.folder / "notes.md").write_text("n")
@@ -442,17 +442,35 @@ async def test_the_platforms_folders_are_hidden_and_the_panel_changes_none_of_th
     assert tree.status_code == 200, tree.text
     assert [entry["name"] for entry in tree.json()["entries"]] == ["notes.md"]
     ran = list(chat.laptop.ran)
-    for path in ("_history/x.json", "./_history/x.json", "_whiteboard/x.json", ".threads/x.json", "_artifacts/x.json"):
+    for path in ("_history/x.json", "./_history/x.json", "_whiteboard/x.json", ".threads/x.json"):
         deleted = await api.client.delete(url(chat, "file"), params={"path": path}, headers=api.auth())
         assert deleted.status_code == 403, (path, deleted.text)
     uploaded = await upload(api, chat, "x.json", b"[]", path="_history", request_id="upload-000000000040")
     assert uploaded.status_code == 403, uploaded.text
     assert chat.laptop.ran == ran
-    for name in ("_history", "_whiteboard", ".threads", "_artifacts"):
+    for name in ("_history", "_whiteboard", ".threads"):
         assert (chat.folder / name / "x.json").read_text() == "{}"
     # The page's own canvas is its to save.
     canvas = await upload(api, chat, "canvas.json", b"{}", path="_whiteboard", request_id="upload-000000000041")
     assert canvas.status_code == 201, canvas.text
+
+
+async def test_a_local_folders_artifacts_folder_is_its_users_own(api, chat):
+    # The harness keeps a local folder's artifacts under .surogates-results/: an _artifacts/ there is the user's.
+    (chat.folder / "_artifacts").mkdir()
+    (chat.folder / "_artifacts" / "notes.md").write_text("mine")
+    tree = await api.client.get(url(chat, "tree"), headers=api.auth())
+    assert tree.status_code == 200, tree.text
+    assert [entry["path"] for entry in tree.json()["entries"][0]["children"]] == ["_artifacts/notes.md"]
+    opened = await api.client.get(url(chat, "file"), params={"path": "_artifacts/notes.md"}, headers=api.auth())
+    assert (opened.status_code, opened.json().get("content")) == (200, "mine"), opened.text
+    downloaded = await api.client.get(url(chat, "download"), params={"path": "_artifacts/notes.md"}, headers=api.auth())
+    assert (downloaded.status_code, downloaded.content) == (200, b"mine"), downloaded.text
+    uploaded = await upload(api, chat, "more.md", b"more", path="_artifacts", request_id="upload-000000000042")
+    assert uploaded.status_code == 201, uploaded.text
+    deleted = await api.client.delete(url(chat, "file"), params={"path": "_artifacts/notes.md"}, headers=api.auth())
+    assert deleted.status_code == 200, deleted.text
+    assert [path.name for path in (chat.folder / "_artifacts").iterdir()] == ["more.md"]
 
 
 DIGEST = "X-Change-Digest"

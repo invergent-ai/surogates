@@ -4,6 +4,7 @@ Exercises local storage and tool responses, including malformed specs and citati
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from surogates.artifacts.store import (
     ArtifactStore,
 )
 from surogates.storage.backend import LocalBackend
+from surogates.tools.workspace_io import StorageWorkspaceIO
 from surogates.tools.builtin.artifact import _create_artifact_handler
 
 
@@ -46,10 +48,8 @@ def store(
     backend: LocalBackend, bucket: str, session_id: UUID,
 ) -> ArtifactStore:
     return ArtifactStore(
-        backend,
+        StorageWorkspaceIO(backend, bucket=bucket, prefix=f"sessions/{session_id}/"),
         session_id=session_id,
-        bucket=bucket,
-        key_prefix=f"sessions/{session_id}/",
     )
 
 
@@ -117,10 +117,8 @@ class TestArtifactStoreCreate:
             bucket, f"sessions/{session_id}/_artifacts/index.json", json.dumps(fake_index),
         )
         store = ArtifactStore(
-            backend,
+            StorageWorkspaceIO(backend, bucket=bucket, prefix=f"sessions/{session_id}/"),
             session_id=session_id,
-            bucket=bucket,
-            key_prefix=f"sessions/{session_id}/",
         )
         with pytest.raises(ArtifactLimitError):
             await store.create(
@@ -826,3 +824,28 @@ class TestCreateArtifactHandlerRevision:
         data = json.loads(out)
         assert data["success"] is True
         assert data["version"] == 2
+
+
+class _Overlapping(LocalBackend):
+    """Local storage that counts the writes it has under way at once."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.under_way = 0
+        self.most = 0
+
+    async def write(self, bucket, key, data) -> None:
+        self.under_way += 1
+        self.most = max(self.most, self.under_way)
+        await asyncio.sleep(0.05)
+        await super().write(bucket, key, data)
+        self.under_way -= 1
+
+
+async def test_a_cloud_artifacts_version_and_metadata_are_written_at_once(tmp_path):
+    backend = _Overlapping(base_path=str(tmp_path))
+    await backend.create_bucket("agent-test")
+    store = ArtifactStore(StorageWorkspaceIO(backend, bucket="agent-test", prefix="s/"), session_id=uuid4())
+    await store.create(name="notes", kind=ArtifactKind.MARKDOWN, spec={"content": "x"})
+    # As before: only a local folder's are written one after another.
+    assert backend.most == 2

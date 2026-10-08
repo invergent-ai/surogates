@@ -30,10 +30,8 @@ from surogates.devices.browser import (
     forget_snapshot_cache,
 )
 from surogates.devices.browser import snapshot_cache as device_snapshot_cache
-from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
+from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.sandbox.copy_files import write_copy, writes_to_copy
-from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR
-from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
 from surogates.storage.tenant import (
     boundary_workspace_key,
@@ -73,7 +71,10 @@ def build_browser_screenshot_key(
         session_id,
         relative_path,
     )
+from surogates.devices.workspace import DeviceOperationError
 from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
 logger = logging.getLogger(__name__)
 
@@ -951,6 +952,10 @@ SCREENSHOT_SCHEMA = {
 }
 
 _SCREENSHOT_DIR = "browser-screenshots"
+# A chat on a local folder keeps its screenshots in the folder, among the
+# harness's own files, so a chat that asks every time is not asked about
+# each one.
+_DEVICE_SCREENSHOT_DIR = WORKSPACE_STORAGE_DIR
 
 
 def _new_screenshot_path() -> str:
@@ -1030,16 +1035,6 @@ async def _save_screenshot_to_storage(
     return relative_path
 
 
-# A session on the user's computer keeps its screenshots in its folder, among the
-# harness's own files, so a chat that asks every time is not asked about each one.
-_DEVICE_SCREENSHOT_DIR = WORKSPACE_STORAGE_DIR
-# Not read_file's to show yet: vision reads the cloud's storage, and this shot is on the computer.
-_DEVICE_SCREENSHOT_HINT = (
-    "This screenshot is not displayed to you. It is saved in the chat's folder on the user's "
-    "computer, where the user can open it; browser_get_state reads the page as text."
-)
-
-
 async def _save_device_screenshot(client: Any, arguments: dict[str, Any], workspace_io: Any) -> str:
     """Take the shot on the computer and write it into the session's folder there."""
     async with client:
@@ -1047,12 +1042,20 @@ async def _save_device_screenshot(client: Any, arguments: dict[str, Any], worksp
             region=arguments.get("region"),
             annotate=bool(arguments.get("annotate", False)),
         )
-    png_bytes = result["png_bytes"]
+    return await _screenshot_in_folder(result["png_bytes"], result, workspace_io)
+
+
+async def _screenshot_in_folder(png_bytes: bytes, result: dict[str, Any], workspace_io: Any) -> str:
+    """Write a local folder's screenshot into the folder, through the tool call's own operations.
+
+    A write the computer refuses is answered as the cloud answers a shot it
+    could not save, in the computer's own words.
+    """
     relative_path = f"{_DEVICE_SCREENSHOT_DIR}/{_new_screenshot_path()}"
     try:
+        await keep_out_of_git(workspace_io)
         await workspace_io.write(await workspace_io.resolve(relative_path), png_bytes)
     except (OSError, WorkspaceSandboxError, DeviceOperationError) as exc:
-        # As the cloud answers a shot it could not save, in the computer's own words.
         return json.dumps({
             "error": "screenshot_save_failed",
             "bytes": len(png_bytes),
@@ -1065,7 +1068,7 @@ async def _save_device_screenshot(client: Any, arguments: dict[str, Any], worksp
         "relative_path": relative_path,
         "mime_type": "image/png",
         "bytes": len(png_bytes),
-        "hint": _DEVICE_SCREENSHOT_HINT,
+        "hint": "This screenshot is not displayed to you. Call vision_analyze with this path to view it.",
     }
     if "annotations" in result:
         body["annotations"] = result["annotations"]
