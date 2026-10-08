@@ -29,6 +29,11 @@ export interface AgentChatProps {
   onSessionChange?: (sessionId: string) => void;
   onFileSelect?: (path: string) => void;
   onMessagesChange?: (messages: AgentChatMessage[]) => void;
+  /**
+   * The host only reads this chat. Nothing in it writes: the composer and the file panel's
+   * changes are off, and so are Stop, Retry, answers to the agent's questions, an expert's
+   * rating, and the browser's card, its control and its close.
+   */
   disabled?: boolean;
   /**
    * Called when the composer rejects a file selection before sending —
