@@ -162,10 +162,11 @@ const linked = (then = "remove the link, and run this again") =>
 const LINKED_NOTHING_REMOVED = linked("nothing was removed. Remove the link, and run this again: what it names is then yours to remove");
 // What stands installed, all that a refusal leaves as it was: what current names, each version
 // and its mark, and the helper pkexec runs and its mark, with whatever else is beside them: each
-// by its place on the disk, its kind and mode, its owner, its size, its time and its bytes.
+// by its place on the disk, its kind and mode, its owner, its size, its time and its bytes. The
+// tree's own folders are not among it: an apply makes them before it refuses anything.
 const STANDING = String.raw`
-readlink /opt/surogate/current 2>&1
-ls /opt/surogate/versions 2>&1
+readlink /opt/surogate/current 2>/dev/null
+ls /opt/surogate/versions 2>/dev/null
 for mark in /opt/surogate/versions/*/release.json; do [ ! -e "$mark" ] || echo "$mark $(sha256sum <"$mark")"; done
 for file in /opt/surogate/bin/*; do
   [ -e "$file" ] || [ -L "$file" ] || continue
@@ -845,6 +846,49 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       marked("/opt/surogate/versions/1.0.0/release.json", written);
       expect(keeps(), what).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the installed 1.0.0 names no state schema: run Surogate Desktop's install script again\n" });
     }
+  });
+
+  it("refuses what is no file where the helper's mark goes, on a computer with no helper and on one that has one, before it switches to any version: a first install is never left with a version and no helper", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    const helper = "/opt/surogate/bin/surogate-apply-update";
+    const mark = "/opt/surogate/bin/release.json";
+    const again = "remove Surogate Desktop with --uninstall, and install it again\n";
+    // A rename replaces a file, and no folder; a link or a pipe there is no mark an apply left.
+    const notFiles: Array<[string, string]> = [
+      ["a folder", `mkdir ${mark}`],
+      ["a link to a file of root's own", `echo kept >/root/elsewhere && ln -s /root/elsewhere ${mark}`],
+      ["a link to nothing", `ln -s /nowhere ${mark}`],
+      ["a pipe", `mkfifo ${mark}`],
+    ];
+    // Bounded: none of them is opened, and a pipe that was would be waited on for good.
+    const applied = () => root(`timeout 30 /opt/surogate-test/install.sh --apply ${files()}`);
+    // With no helper, as at a first install: nothing is installed, and what stands there is left.
+    for (const [what, made] of notFiles) {
+      expect(root(`find /opt/surogate -mindepth 1 -delete; mkdir /opt/surogate/bin && ${made}`).status, what).toBe(0);
+      const before = standing();
+      expect(applied(), what).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${mark} is not as Surogate Desktop's install leaves it: ${again}` });
+      expect(standing(), what).toBe(before);
+      expect(root(`test ! -e /opt/surogate/current && test ! -e ${helper} && find /opt/surogate/versions /opt/surogate/staging -mindepth 1`), what).toMatchObject({ status: 0, stdout: "" });
+    }
+    // With a helper: its mark does not say which release it is of, and neither is replaced.
+    for (const [what, made] of notFiles) {
+      expect(root("find /opt/surogate -mindepth 1 -delete").status, what).toBe(0);
+      expect(applied(), what).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+      expect(root(`rm ${mark} && ${made}`).status, what).toBe(0);
+      const before = standing();
+      expect(applied(), what).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${mark} does not say which release ${helper} is of: ${again}` });
+      expect(standing(), what).toBe(before);
+      expect(root("ls -A /opt/surogate/staging").stdout, what).toBe("");
+    }
+    // Nothing was written through a link.
+    expect(root("cat /root/elsewhere").stdout).toBe("kept\n");
+    // A file there with no helper, as an apply stopped between its last two renames leaves its
+    // own mark, or as anyone left one before the folder was root's: replaced, and never read.
+    expect(root(`find /opt/surogate -mindepth 1 -delete; mkdir /opt/surogate/bin && echo '{"version":"9.9.9"}' >${mark} && chown tester ${mark}`).status).toBe(0);
+    expect(applied()).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    expect(root(`cmp /home/tester/manifest.json ${mark} && stat -c '%a %U' ${mark}`).stdout).toBe("644 root\n");
   });
 
   it("refuses an archive that holds anything outside its folder, a link out of it, a special file or a hard link", () => {

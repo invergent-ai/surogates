@@ -463,6 +463,13 @@ apply() {
   # after either, each leave the helper and its mark as they are.
   local newest keep=""
   newest="$(helper_release)" || fail "$HELPER_MARK does not say which release $HELPER is of: remove Surogate Desktop with --uninstall, and install it again"
+  # On a computer with no helper, its mark is not read: this release's is put in its place, by
+  # a rename. Nothing but a file may stand there then. A folder would stop that rename, once
+  # current is switched, and leave a version with no helper; and a link or a pipe is no mark that
+  # an apply left.
+  if [ -L "$HELPER_MARK" ] || { [ -e "$HELPER_MARK" ] && [ ! -f "$HELPER_MARK" ]; }; then
+    fail "$HELPER_MARK is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again"
+  fi
   if [ -n "$newest" ] && dpkg --compare-versions "$version" lt "$newest"; then keep=1; fi
   if [ -z "$keep" ]; then
     install -m 0755 "${top:-$folder}/bin/surogate-apply-update" "$work/helper"
