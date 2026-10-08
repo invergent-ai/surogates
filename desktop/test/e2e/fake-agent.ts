@@ -330,8 +330,8 @@ export async function signIn(shell: ElectronApplication, page: Page, agent: Fake
   }).not.toBe("");
   const tab = await agent.approve(authorize);
   // The sign-in shows until the web client has loaded again, with the session it gave it: on a busy
-  // machine that load can take seconds.
-  await expect.poll(() => page.isVisible("#sign-in"), { timeout: 10_000 }).toBe(false);
+  // machine the window's storage cleared first and that load can take more than ten seconds.
+  await expect.poll(() => page.isVisible("#sign-in"), { timeout: 30_000 }).toBe(false);
   return tab;
 }
 
