@@ -73,8 +73,9 @@ export const PROXY_BYPASSED =
 const MAX_NOTICES = 20;
 export const FILE_ASKED =
   "The page asked for a file to upload. The agent's browser on this computer has no files to give it, so nothing was chosen.";
-export const tooLarge = (name: string, bytes: number): string =>
-  `The page downloaded ${quoted(name)} (${bytes} bytes), too large to save in the chat's folder at once (at most ${MAX_WRITE_BYTES} bytes), so it was not saved.`;
+// *most*: the limit in force, a write's most unless the host was told another.
+export const tooLarge = (name: string, bytes: number, most = MAX_WRITE_BYTES): string =>
+  `The page downloaded ${quoted(name)} (${bytes} bytes), too large to save in the chat's folder at once (at most ${most} bytes), so it was not saved.`;
 export const notFinished = (name: string, why: string): string => `The page's download of ${quoted(name)} did not finish (${why}), so it was not saved.`;
 // Why one did not finish: the browser's own word for one that was cancelled, or whose connection broke; of
 // any other, this host's words. What an error says itself is not the agent's to read.
@@ -583,8 +584,9 @@ export class BrowserHost {
         return;
       }
       const size = await stat(path).then((found) => found.size, () => null);
-      if (stop?.aborted || root === undefined || !this.options.downloaded || size === null || size > (this.options.downloadBytes ?? MAX_WRITE_BYTES)) {
-        if (root !== undefined && this.options.downloaded) tell(stop?.aborted ? interrupted(name) : size === null ? unmeasured(name) : tooLarge(name, size));
+      const most = this.options.downloadBytes ?? MAX_WRITE_BYTES;
+      if (stop?.aborted || root === undefined || !this.options.downloaded || size === null || size > most) {
+        if (root !== undefined && this.options.downloaded) tell(stop?.aborted ? interrupted(name) : size === null ? unmeasured(name) : tooLarge(name, size, most));
         await download.delete().catch(() => {});
         return;
       }

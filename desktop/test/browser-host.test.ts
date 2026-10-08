@@ -397,6 +397,14 @@ describe("a page's download, as the host stages it", () => {
     expect(tooLarge("over.bin", MAX_WRITE_BYTES + 1)).toBe(
       'The page downloaded "over.bin" (52428801 bytes), too large to save in the chat\'s folder at once (at most 52428800 bytes), so it was not saved.',
     );
+    // A host told another limit names that one.
+    host = new BrowserHost({ downloaded: (download) => staged.push(download), downloadBytes: 3 });
+    state().roots.set(SESSION, "chat-1");
+    const small = fileOf(4);
+    await state().stage(SESSION, downloadOf("small.bin", small, Promise.resolve(small)));
+    expect(state().unseen.get(SESSION)).toEqual([
+      'The page downloaded "small.bin" (4 bytes), too large to save in the chat\'s folder at once (at most 3 bytes), so it was not saved.',
+    ]);
   });
 
   it("hands on none it cannot measure, nor one that did not finish, nor one whose session's tab has closed, and tells the agent of the first two", async () => {
@@ -691,7 +699,7 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     await expect.poll(async () => {
       told.push(...(await op(a, "browser.mouse", { action: "move", x: 1, y: 1 })).ok.notices);
       return told.join(" ");
-    }, { timeout: 8_000 }).toContain('The page downloaded "report.txt" (6 bytes), too large to save in the chat\'s folder at once');
+    }, { timeout: 8_000 }).toBe('The page downloaded "report.txt" (6 bytes), too large to save in the chat\'s folder at once (at most 3 bytes), so it was not saved.');
     expect(staged).toEqual([]);
   });
 
