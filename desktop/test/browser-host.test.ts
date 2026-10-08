@@ -21,9 +21,10 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge } from "../src/browser/downloads.js";
 import {
-  A_FOLDER, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding, type Launch, NO_SITE,
-  NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, OWN_CHOOSER_MS, PROXY_BYPASSED, WEAKENING,
+  A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding,
+  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, OWN_CHOOSER_MS, PROXY_BYPASSED, WEAKENING,
 } from "../src/browser/host.js";
+import { OPERATIONS } from "../src/browser/operations.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
 
@@ -52,6 +53,8 @@ let ports: { site: number; canary: number };
 let hits: string[];
 // What fixture.test's cross-site frame asked the site for.
 let framed: string[];
+// How many times fixture.test's download that answers its first asker late was asked for.
+let firsts: number;
 let profile: string;
 let launch: Launch;
 let host: BrowserHost;
@@ -60,6 +63,7 @@ let next = 0;
 beforeEach(async () => {
   hits = [];
   framed = [];
+  firsts = 0;
   site = createServer((req, res) => {
     // other.test's page with a file input of its own, framing fixture.test's page with another.
     if (req.headers.host === "other.test" && req.url === "/fileframe") {
@@ -126,6 +130,16 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<scrip
     if (req.url === "/late.bin" || req.url === "/post") {
       const name = req.url === "/post" ? "posted.bin" : "late.bin";
       return void setTimeout(() => res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": `attachment; filename=${name}` }).end("late"), 1_500);
+    }
+    // A download whose site answers the first to ask for it only 5 s on, and whoever asks after that at once.
+    if (req.url === "/first-late.bin") {
+      const answer = () => res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment" }).end("late");
+      return void ((firsts += 1) === 1 ? setTimeout(answer, 5_000) : answer());
+    }
+    // One whose site has nothing for the first to ask, and the file for whoever asks after.
+    if (req.url === "/first-empty.bin") {
+      if ((firsts += 1) === 1) return void res.writeHead(204).end();
+      return void res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment" }).end("late");
     }
     // The first redirect comes a moment after it is asked for: the requests after it begin later than the first.
     if (req.url === "/hop1") return void setTimeout(() => res.writeHead(302, { location: "/hop2" }).end(), 700);
@@ -491,16 +505,31 @@ describe("a page's download, as the host stages it", () => {
     requested(request: unknown): void;
     loaded(request: unknown): void;
     failed(request: unknown): void;
+    closed(context: BrowserContext): void;
   };
   // The host's clock, which a test moves.
   let clock: number;
   // A download the browser announces in *page*.
   const arrives = (download: unknown, page = PAGE) => state().arrived(page, download);
-  // A navigation's request, as the browser says it begins: to *url*, and after *from* where a redirect led there.
-  const asks = (url: string, from: unknown = null, navigation = true) => {
-    const request = { url: () => url, isNavigationRequest: () => navigation, redirectedFrom: () => from };
+  // A navigation's request, as the browser says it begins: to *url*, after *from* where a redirect led there, in *page*.
+  const asks = (url: string, from: unknown = null, navigation = true, page: Page = PAGE) => {
+    const request = { url: () => url, isNavigationRequest: () => navigation, redirectedFrom: () => from, frame: () => ({ page: () => page }) };
     state().requested(request);
     return request;
+  };
+  // A page of the session's in which the agent's own navigation acts, not answered yet: as the host runs it, by
+  // what a take-over stops it by. *answer*: its site answers, so the page it leads to has begun to arrive.
+  const navigating = (url: string) => {
+    const hears = new Map<string, (event: unknown) => void>();
+    const frame = {};
+    const page = {
+      on: (event: string, listener: (event: unknown) => void) => void hears.set(event, listener), off: () => {},
+      goto: () => new Promise(() => {}), mainFrame: () => frame, url: () => url, title: () => Promise.resolve(""),
+    } as unknown as Page;
+    state().tabs.get(SESSION)!.push(page);
+    void OPERATIONS["browser.navigate"]!(page, { url }, state().interrupt.signal).catch(() => {});
+    const answer = () => hears.get("response")?.({ request: () => ({ isNavigationRequest: () => true, frame: () => frame }), status: () => 200 });
+    return { page, request: asks(url, null, true, page), answer };
   };
   const SITE_URL = "http://fixture.test/export";
   // A download named *name*, whose file is *file* once *ends* settles: with its path, or with why it did not finish.
@@ -859,17 +888,18 @@ describe("a page's download, as the host stages it", () => {
     expect([staged.length, existsSync(own), existsSync(late), state().unseen.size]).toEqual([2, false, false, 0]);
   });
 
-  it("keeps of the browser's requests only navigations not yet ended as a page, each failed one a moment for the download it may be, and no more than a bound of them", async () => {
+  it("keeps of the browser's requests only navigations not yet ended as a page, a failed one no longer than the second it counts for, none of a browser that closed, and no more than a bound of them", async () => {
     // What a page loads beside its own document is no download's beginning.
     asks("http://fixture.test/image.png", null, false);
     expect(state().open.size).toBe(0);
     // One that loaded as a page is done with.
     state().loaded(asks(SITE_URL));
     expect(state().open.size).toBe(0);
-    // One the browser gave up as a page, as it does a moment before it announces it as a download: kept for that.
+    // One the browser gave up as a page, as it does a moment before it announces it as a download: kept for that
+    // second, and gone at the next thing the browser says once it has passed.
     const failed = asks(`${SITE_URL}?failed`);
     state().failed(failed);
-    clock += 10_000;
+    clock += AFTER_FAILURE_MS;
     asks(`${SITE_URL}?next`);
     expect(state().open.has(failed)).toBe(true);
     clock += 1;
@@ -878,6 +908,75 @@ describe("a page's download, as the host stages it", () => {
     // However many are asked for and never answered, the oldest go.
     const many = Array.from({ length: 300 }, (_, at) => asks(`${SITE_URL}?${at}`));
     expect([state().open.size, state().open.has(many[0]), state().open.has(many.at(-1))]).toEqual([256, false, true]);
+    // A browser that closed answers none of them: its next one starts with none.
+    state().closed({} as BrowserContext);
+    expect(state().open.size).toBe(0);
+  });
+
+  it("counts a request the browser gave up as a page for a download only where the download is announced within a second of that, to the millisecond; one still on its way counts however old", async () => {
+    expect(AFTER_FAILURE_MS).toBe(1_000);
+    const comes = async (name: string, url: string) => {
+      const file = fileOf(6);
+      await arrives(downloadOf(name, file, Promise.resolve(file), url));
+      return staged.at(-1)?.name === name ? `staged, user: ${staged.at(-1)!.user}` : existsSync(file) ? "kept" : "dropped";
+    };
+    // The agent's own navigation that becomes a download: given up as a page, announced a moment after. Its own, still.
+    state().failed(asks(SITE_URL));
+    clock += 15;
+    expect(await comes("export.csv", SITE_URL)).toBe("staged, user: false");
+    // A navigation of the agent's that failed, as to a site that refused it, and then its user takes the browser over.
+    // No operation of the agent's waited on it: the take-over stopped none of it.
+    state().failed(asks(`${SITE_URL}?a`));
+    state().failed(asks(`${SITE_URL}?b`));
+    host.pause("chat-2", true);
+    // Announced exactly a second after: its answer, the agent's, begun before the take-over. Dropped, and its agent told.
+    clock += AFTER_FAILURE_MS;
+    expect(await comes("a.bin", `${SITE_URL}?a`)).toBe("dropped");
+    expect(state().unseen.get(SESSION)).toEqual([interrupted("a.bin")]);
+    // A millisecond later the other is no download's beginning: a download of that address is one with no request
+    // known, as its user's own by the site's link with `download` is. Theirs, and the agent told nothing of it.
+    clock += 1;
+    expect(await comes("b.bin", `${SITE_URL}?b`)).toBe("staged, user: true");
+    expect([did, state().unseen.get(SESSION), state().open.size]).toEqual([["cancel", "delete"], [interrupted("a.bin")], 0]);
+    host.pause("chat-2", false);
+    // One the browser has not given up counts however long it has been on its way.
+    clock += AFTER_HAND_BACK_MS + 1;
+    asks(`${SITE_URL}?slow`);
+    clock += 600 * AFTER_FAILURE_MS;
+    host.pause("chat-2", true);
+    expect(await comes("slow.bin", `${SITE_URL}?slow`)).toBe("dropped");
+  });
+
+  it("forgets at a take-over the navigation of the agent's that the take-over itself stopped: a download of that address its user then makes is theirs, at once, and the agent is told nothing of it", async () => {
+    // The agent's navigation to a download its site has not answered yet, as its own operation runs it.
+    const stopped = navigating(SITE_URL);
+    // Another, which its site has answered: the page it leads to has begun to arrive, and a take-over leaves it to.
+    const arriving = navigating(`${SITE_URL}?arriving`);
+    arriving.answer();
+    // And one no operation of the agent's waits on, as a click's: the take-over stops none of it.
+    const clicked = asks(`${SITE_URL}?clicked`);
+    host.pause("chat-2", true);
+    expect([stopped.request, arriving.request, clicked].map((request) => state().open.has(request))).toEqual([false, true, true]);
+    // The browser says the stopped one failed, a moment after: it stays forgotten.
+    state().failed(stopped.request);
+    expect(state().open.has(stopped.request)).toBe(false);
+    // Their own click on the site's own link with `download` to that address, in that same second: no request of it is said.
+    const theirs = fileOf(6);
+    await arrives(downloadOf("late.bin", theirs, Promise.resolve(theirs), SITE_URL), stopped.page);
+    expect(staged).toEqual([{ root: "chat-1", session: SESSION, name: "late.bin", path: theirs, user: true }]);
+    expect([did, state().unseen.size]).toEqual([[], 0]);
+    // The two the take-over did not stop are the agent's still: answered under its user's hand, dropped, and told.
+    for (const [name, url] of [["arriving.bin", `${SITE_URL}?arriving`], ["clicked.bin", `${SITE_URL}?clicked`]] as const) {
+      const file = fileOf(6);
+      await arrives(downloadOf(name, file, Promise.resolve(file), url));
+      expect([staged.length, existsSync(file)], name).toEqual([1, false]);
+    }
+    expect(state().unseen.get(SESSION)).toEqual([interrupted("arriving.bin"), interrupted("clicked.bin")]);
+    // A take-over stops a page's navigation once: the next one forgets nothing of that page.
+    host.pause("chat-2", false);
+    const later = asks(`${SITE_URL}?later`, null, true, stopped.page);
+    host.pause("chat-2", true);
+    expect(state().open.has(later)).toBe(true);
   });
 });
 
@@ -1640,6 +1739,51 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     expect((await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")).ok.notices).toEqual([]);
     // Nothing is kept of a request once its download has come.
     expect((host as unknown as { open: Map<unknown, unknown> }).open.size).toBe(0);
+  }, 60_000);
+
+  it("takes its user's own download of an address for theirs though the agent's navigation to that address was stopped by their take-over, a moment before or seconds before; and the agent's own navigation that becomes a download for the agent's", async () => {
+    const staged: StagedDownload[] = [];
+    host = hostWith({ downloaded: (download) => staged.push(download) });
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const open = (host as unknown as { open: Map<unknown, unknown> }).open;
+    // The site's own link with `download` to an address, as its user clicks it: the browser says no request of it.
+    const link = (to: string) => page.evaluate(`const link = document.createElement('a'); link.href = '${to}'; link.download = ''; document.body.append(link); link.click(); void 0`);
+    for (const [address, name, wait] of [["/first-late.bin", "first-late.bin", 0], ["/late.bin", "late.bin", 2_500]] as const) {
+      // The agent's own navigation to a download its site has not answered when its user takes the browser over.
+      const going = op(a, "browser.navigate", { url: `http://fixture.test${address}` }, "chat-1");
+      await new Promise((done) => setTimeout(done, 300));
+      host.pause("chat-1", true);
+      expect(await within(1_000, going), address).toEqual(PAUSED);
+      // Stopped by the take-over: nothing of it is kept for a download to be taken for its answer.
+      expect(open.size, address).toBe(0);
+      // Their own click on the site's link to that same address: at once, within the second of the stop, or seconds on.
+      await new Promise((done) => setTimeout(done, wait));
+      const count = staged.length;
+      await link(address);
+      await expect.poll(() => staged.length, { timeout: 10_000, message: address }).toBe(count + 1);
+      expect(staged.at(-1), address).toEqual({ root: "chat-1", session: a, name, path: staged.at(-1)!.path, user: true });
+      host.pause("chat-1", false);
+      // The agent is told nothing of it.
+      expect((await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")).ok.notices, address).toEqual([]);
+    }
+    // A navigation of the agent's that failed by itself, no take-over stopping it: its site had nothing for it. More
+    // than a second on it is no download's beginning either, though the browser has said nothing since.
+    firsts = 0;
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/first-empty.bin" }, "chat-1")).error?.type).toBe("browser");
+    await new Promise((done) => setTimeout(done, 1_200));
+    host.pause("chat-1", true);
+    await link("/first-empty.bin");
+    await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(3);
+    expect(staged[2]).toEqual({ root: "chat-1", session: a, name: "first-empty.bin", path: staged[2]!.path, user: true });
+    host.pause("chat-1", false);
+    expect((await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")).ok.notices).toEqual([]);
+    // The agent's own navigation to a download, with nobody holding the browser: no page comes of it, and the file is its own.
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/report.txt" }, "chat-1")).error?.type).toBe("browser");
+    await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(4);
+    expect(staged[3]).toEqual({ root: "chat-1", session: a, name: "report.txt", path: staged[3]!.path, user: false });
+    expect(open.size).toBe(0);
   }, 60_000);
 
   it("drops a download of the agent's whose request began before its user took the browser over and whose site answers while they hold it, or after they held it meanwhile", async () => {

@@ -17,7 +17,7 @@ import type { Outcome } from "../link/protocol.js";
 import { destination, reach } from "../vm/egress.js";
 import { CANCELLED, NEW_TAB, PAUSED } from "./client.js";
 import { interrupted, LEFT_TO_USER, quoted, type StagedDownload, tooLarge } from "./downloads.js";
-import { letGo, OPERATIONS } from "./operations.js";
+import { letGo, OPERATIONS, stoppedIn } from "./operations.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
 
 // What to launch: the browser the user chose, and the identity's profile for it.
@@ -80,10 +80,21 @@ export const PROXY_BYPASSED =
 // address until the file comes, so one that comes then may have been asked for while they held it. A
 // site that takes longer than this to answer such a request is taken for the agent's.
 export const AFTER_HAND_BACK_MS = 60_000;
-// How many navigations not yet ended are kept, the oldest going first; and how long one the browser gave
-// up as a page is kept, for the download it announces a moment later.
+// How many navigations not yet ended are kept, the oldest going first.
 const REQUESTS = 256;
-const FAILED_MS = 10_000;
+// How long after the browser gave a navigation up as a page a download may still be its answer: the
+// browser gives up a navigation that becomes a download a moment (5 to 15 ms) before it announces the
+// download, and nothing else makes a failed navigation a download's beginning. One that failed longer
+// ago is of no download: a refused site, a page closed, a download of that address asked for anew.
+export const AFTER_FAILURE_MS = 1_000;
+// The page a request is of; none for a new window's first, which is said before the window is a page.
+function pageOf(request: Request): Page | null {
+  try {
+    return request.frame().page();
+  } catch {
+    return null;
+  }
+}
 // An address without its fragment, which a request's does not carry.
 const bare = (url: string): string => url.split("#")[0] ?? url;
 
@@ -584,6 +595,13 @@ export class BrowserHost {
     for (const download of this.arriving) void download.cancel().catch(() => {});
     // A button the agent pressed and holds, in any session's page, comes up: not left down under its user's hand.
     for (const pages of this.tabs.values()) for (const page of pages) void letGo(page);
+    // A navigation of the agent's that this take-over itself stopped answers nothing: its request is forgotten.
+    // A download of that address their user then makes, of which the browser says no request, is not its answer.
+    for (const page of [...this.tabs.values()].flat().filter((page) => stoppedIn(page))) {
+      for (const request of this.open.keys()) {
+        if (pageOf(request) === page) this.open.delete(request);
+      }
+    }
     // A file input is its user's while they hold the browser, opening the browser's own chooser: but only once
     // what the agent was doing at this moment has reached its page, so that no act of the agent's opens one.
     // Until then a page's ask is still heard, and kept for no one (asks).
@@ -856,9 +874,16 @@ export class BrowserHost {
     this.begun.set(request, begun);
     if (from) this.open.delete(from);
     this.open.set(request, begun);
+    this.swept();
+  }
+
+  // What is kept of requests, looked over at each request the browser says and at each download it announces:
+  // one it gave up as a page more than AFTER_FAILURE_MS ago counts for nothing and goes, and of more than
+  // REQUESTS the oldest go.
+  private swept(): void {
     const now = this.now();
-    for (const [other, { failed }] of this.open) {
-      if (this.open.size > REQUESTS || (failed !== undefined && now - failed > FAILED_MS)) this.open.delete(other);
+    for (const [request, { failed }] of this.open) {
+      if (this.open.size > REQUESTS || (failed !== undefined && now - failed > AFTER_FAILURE_MS)) this.open.delete(request);
     }
   }
 
@@ -867,7 +892,8 @@ export class BrowserHost {
     this.open.delete(request);
   }
 
-  // The browser gave it up as a page, as it does a moment before it announces it as a download.
+  // The browser gave it up as a page, as it does a moment before it announces it as a download: from then
+  // it counts for a download for AFTER_FAILURE_MS, and no longer.
   private failed(request: Request): void {
     const begun = this.open.get(request);
     if (begun) this.open.set(request, { ...begun, failed: this.now() });
@@ -883,6 +909,7 @@ export class BrowserHost {
   // after a hand back. Such a one may be the agent's own, and the agent is told what came of it; of one
   // that is theirs outright, held now or by its request, never, whatever the clock says.
   private whose(download: Download): { by: string; after?: true } | { stop: AbortSignal } {
+    this.swept();
     const address = bare(download.url());
     const known = [...this.open].filter(([request]) => bare(request.url()) === address);
     if (known.length > 0) {
@@ -1150,6 +1177,12 @@ export class BrowserHost {
     return this.running;
   }
 
+  // *context*'s browser has closed: none of its requests is answered now, and the next browser starts with none.
+  private closed(context: BrowserContext): void {
+    this.open.clear();
+    this.retire(context);
+  }
+
   // A browser closed by its user, or gone: the next operation launches another, in new tabs. A
   // browser already out of service changes nothing, whatever runs after it.
   private retire(context: BrowserContext): void {
@@ -1184,7 +1217,7 @@ export class BrowserHost {
     const context = await chromium.launchPersistentContext(launch.profile, {
       ...launchOptions(launch.executable, this.proxy.port, this.options.args), downloadsPath: staging,
     });
-    context.on("close", () => this.retire(context));
+    context.on("close", () => this.closed(context));
     context.on("dialog", (dialog) => this.asked(dialog));
     // A download is heard in every page of the browser's, whoever opened it: the page it opens with, a
     // session's tab, a popup, and a tab its user opens themselves.

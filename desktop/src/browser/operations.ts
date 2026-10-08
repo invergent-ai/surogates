@@ -50,6 +50,15 @@ async function stopLoading(page: Page): Promise<void> {
   }
 }
 
+// The pages in which a take-over stopped a navigation of the agent's that its site had not answered yet,
+// until the host has asked: what the browser then says failed there is no download's beginning.
+const halted = new WeakSet<Page>();
+
+/** Whether a take-over stopped a navigation of the agent's in *page* before its site had answered. Asked once. */
+export function stoppedIn(page: Page): boolean {
+  return halted.delete(page);
+}
+
 async function navigate(page: Page, args: Record<string, unknown>, stop: AbortSignal): Promise<unknown> {
   let url: URL;
   try {
@@ -75,7 +84,9 @@ async function navigate(page: Page, args: Record<string, unknown>, stop: AbortSi
     }
   };
   const halt = () => {
-    if (!arrived) void stopLoading(page);
+    if (arrived) return;
+    halted.add(page);
+    void stopLoading(page);
   };
   page.on("response", answered);
   stop.addEventListener("abort", halt, { once: true });
