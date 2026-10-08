@@ -31,7 +31,8 @@ const recording = (dir: string, program: string, instead = (real: string) => [`e
 };
 // curl with one fault of a bucket's, for the object FAULT names as "<fault> <object>": "refused",
 // its PUT answered 503; "unread", any other request for it answered 503; "changed", the copy read
-// back from it a byte longer than what it was sent.
+// back from it a byte longer than what it was sent; "stalled" and "silent", its PUT and any other
+// request for it stopped by curl itself as one that stalls is, with curl's status for it (28).
 const faulty = (curl: string) => [
   "upload=; into=; before=",
   "for arg; do",
@@ -43,6 +44,8 @@ const faulty = (curl: string) => [
   'case "$arg" in */desktop/"${FAULT#* }") fault="${FAULT%% *}" ;; *) fault= ;; esac',
   'if [ "$fault" = refused ] && [ -n "$upload" ]; then printf 503; exit 0; fi',
   'if [ "$fault" = unread ] && [ -z "$upload" ]; then printf 503; exit 0; fi',
+  'if [ "$fault" = stalled ] && [ -n "$upload" ]; then exit 28; fi',
+  'if [ "$fault" = silent ] && [ -z "$upload" ]; then exit 28; fi',
   `'${curl}' "$@" || exit`,
   'if [ "$fault" = changed ] && [ -z "$upload" ] && [ "$into" != /dev/null ]; then printf x >> "$into"; fi',
   "exit 0",
@@ -391,6 +394,37 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     const argv = readFileSync(join(dir, "curl-argv"), "utf8");
     expect(argv).toContain("aws:amz:auto:s3");
     expect(argv).not.toContain(CREDENTIALS.AWS_SECRET_ACCESS_KEY);
+  });
+
+  it("bounds every request to the bucket, and tries again the sending of latest.json and of its signature: stopped between the two, a send would leave a manifest whose signature does not verify", () => {
+    rmSync(join(dir, "curl-argv"), { force: true });
+    expect(send("1.0.0", released("1.0.0")).status).toBe(0);
+    // Each request as curl was given it: its arguments from one -q to the next, its address the last.
+    const requests = readFileSync(join(dir, "curl-argv"), "utf8").split(/^-q\n/m).filter(Boolean).map((args) => args.trimEnd().split("\n"));
+    expect(requests.length).toBeGreaterThan(10);
+    // One that cannot connect, or that stalls for a minute, stops there, and not at the job's time limit.
+    for (const args of requests) expect(args.join(" "), args.at(-1)).toContain("--connect-timeout 30 --speed-limit 1024 --speed-time 60");
+    // Tried again: latest.json and its signature, each sent and each read back.
+    const again = requests.filter((args) => args.includes("--retry"));
+    expect(again.map((args) => args.at(-1)?.replace(/^.*\/desktop\//, ""))).toEqual(["latest.json", "latest.json", "latest.json.sig", "latest.json.sig"]);
+    // Ubuntu 24.04's curl (8.5) ends 23, and does not try again, where the answer it would write
+    // again goes to no file: each of these writes its answer to one.
+    for (const args of again) expect(args[args.indexOf("-o") + 1], args.at(-1)).toMatch(/\/out-[^/]+\/sent$/);
+  });
+
+  it("says which request to the bucket curl stopped, and with what status of curl's, and leaves nothing of the send beside the release", () => {
+    const tarball = "releases/1.0.0/surogate-desktop-1.0.0-linux-x64.tar.gz";
+    for (const [fault, said] of [
+      ["silent releases/1.0.0/manifest.json", "looking for desktop/releases/1.0.0/manifest.json stopped: curl exit 28"],
+      ["silent latest.json", "looking for desktop/latest.json stopped: curl exit 28"],
+      [`stalled ${tarball}`, `sending desktop/${tarball} stopped: curl exit 28`],
+      [`silent ${tarball}`, `reading desktop/${tarball} back stopped: curl exit 28`],
+    ] as const) {
+      const out = released("1.0.0");
+      expect(send("1.0.0", out, { FAULT: fault }), fault).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: ${said}\n` });
+      expect(readdirSync(out).sort(), fault).toEqual(["manifest.json", "manifest.json.sig", "surogate-desktop-1.0.0-linux-x64.tar.gz"]);
+    }
+    expect(object("releases/1.0.0/manifest.json")).toBeNull();
   });
 
   it("stops at a bucket that refuses it, rather than taking the release for unpublished", () => {

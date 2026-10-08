@@ -80,30 +80,38 @@ case "$VERB" in
   send)
     : "${S3_ENDPOINT:?}" "${S3_BUCKET:?}" "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
     bucket="${S3_ENDPOINT%/}/$S3_BUCKET/desktop"
-    # A request to the bucket, signed; its HTTP status on stdout. The secret reaches curl through a
-    # pipe from printf, a builtin, never its command line (R2's are hex, so nothing in it needs
-    # quoting for curl's config).
+    # What a send keeps beside the release while it runs goes however it ends.
+    trap 'rm -f "$OUT/sent" "$OUT/latest.json"' EXIT
+    # A request to the bucket, signed; its HTTP status on stdout. One that cannot connect in half a
+    # minute, or that stalls for a minute, stops, and is said: the job's time limit would otherwise
+    # be what ends it. The secret reaches curl through a pipe from printf, a builtin, never its
+    # command line (R2's are hex, so nothing in it needs quoting for curl's config).
     s3() {
-      curl -q -sS -K <(printf 'user = "%s:%s"\n' "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY") --aws-sigv4 "aws:amz:auto:s3" -w '%{http_code}' "$@"
+      curl -q -sS --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
+        -K <(printf 'user = "%s:%s"\n' "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY") --aws-sigv4 "aws:amz:auto:s3" -w '%{http_code}' "$@"
     }
     # $1 sent as $2, of type $3 and served with cache control $4 when it is given, with its sha256 as
-    # the payload's hash, then read back: an S3 need not check a body against its hash.
+    # the payload's hash, then read back: an S3 need not check a body against its hash. What
+    # follows $4 is curl's own, for both requests. The bucket's answer to each goes to a file:
+    # Ubuntu 24.04's curl (8.5) ends 23, and tries nothing again, where the answer it would write
+    # again goes to /dev/null.
     put() {
       local status
-      status="$(s3 -o /dev/null -T "$1" -H "x-amz-content-sha256: $(sha256sum <"$1" | cut -d' ' -f1)" -H "content-type: $3" ${4:+-H "cache-control: $4"} "$bucket/$2")"
+      status="$(s3 "${@:5}" -o "$OUT/sent" -T "$1" -H "x-amz-content-sha256: $(sha256sum <"$1" | cut -d' ' -f1)" -H "content-type: $3" ${4:+-H "cache-control: $4"} "$bucket/$2")" \
+        || fail "sending desktop/$2 stopped: curl exit $?"
       [ "$status" = 200 ] || fail "sending desktop/$2 got $status"
-      status="$(s3 -o "$OUT/sent" "$bucket/$2")"
+      status="$(s3 "${@:5}" -o "$OUT/sent" "$bucket/$2")" || fail "reading desktop/$2 back stopped: curl exit $?"
       [ "$status" = 200 ] && cmp -s "$1" "$OUT/sent" || fail "the bucket's desktop/$2 is not what was sent"
       rm -f "$OUT/sent"
     }
-    status="$(s3 -o /dev/null -I "$bucket/releases/$VERSION/manifest.json")"
+    status="$(s3 -o /dev/null -I "$bucket/releases/$VERSION/manifest.json")" || fail "looking for desktop/releases/$VERSION/manifest.json stopped: curl exit $?"
     case "$status" in
       404) ;;
       200) fail "desktop/releases/$VERSION is published already, and is not sent again" ;;
       *) fail "looking for desktop/releases/$VERSION/manifest.json got $status" ;;
     esac
     # The newest release the bucket names, which an older one does not replace.
-    status="$(s3 -o "$OUT/latest.json" "$bucket/latest.json")"
+    status="$(s3 -o "$OUT/latest.json" "$bucket/latest.json")" || fail "looking for desktop/latest.json stopped: curl exit $?"
     case "$status" in
       200) newest="$(jq -r .version "$OUT/latest.json")" ;;
       404) newest= ;;
@@ -119,9 +127,11 @@ case "$VERB" in
       # another's signature, or serve an older install script.
       put "$HERE/install.sh" install.sh text/x-shellscript no-cache
       # Its manifest, then its signature: a reader between the two finds a manifest whose signature
-      # does not verify, and tries again later.
-      put "$OUT/manifest.json" latest.json application/json no-cache
-      put "$OUT/manifest.json.sig" latest.json.sig application/octet-stream no-cache
+      # does not verify, and tries again later. A send that stopped between the two would leave
+      # them so until it is run again: each of these two, which are small, is tried again when
+      # the bucket or the way to it fails for a moment.
+      put "$OUT/manifest.json" latest.json application/json no-cache --retry 3
+      put "$OUT/manifest.json.sig" latest.json.sig application/octet-stream no-cache --retry 3
       published="published desktop/releases/$VERSION as desktop/latest.json"
     fi
     # Last, the release's own manifest: the mark that it is published, so a send cut short is sent
