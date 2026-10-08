@@ -225,7 +225,8 @@ describe.skipIf(!run)("the browser host's process", () => {
     await new Promise((done) => setTimeout(done, 500));
     child!.kill("SIGKILL");
     expect(await running).toEqual(BROWSER_STOPPED);
-    await expect.poll(() => browserOf(profile).length, { timeout: 5_000 }).toBe(0);
+    // Its pipe closed, the browser closes itself: Edge takes about 5 s to, as at its own close.
+    await expect.poll(() => browserOf(profile).length, { timeout: 10_000 }).toBe(0);
   });
 
   it("runs no second operation sent under the id of one it is still running", async () => {
