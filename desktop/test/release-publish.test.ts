@@ -206,11 +206,15 @@ describe("the desktop's release manifest", () => {
   });
 
   it("unpacks the tarball, which is the build's, without the release key in what unpacks it", () => {
-    // tar as publish.sh calls it, which first writes down how many of its environment's variables are the key.
-    recording(dir, "tar", (real) => [`env | grep -c '^DESKTOP_RELEASE_KEY=' > '${join(dir, "tar-key")}'`, `exec '${real}' "$@"`]);
+    // tar as publish.sh calls it, which first writes down how many of its environment's variables
+    // are the key: a line for each call, so that none is written over by the one after it.
+    recording(dir, "tar", (real) => [`env | grep -c '^DESKTOP_RELEASE_KEY=' >> '${join(dir, "tar-key")}'`, `exec '${real}' "$@"`]);
     expect(sign().status).toBe(0);
     expect(readFileSync(join(dir, "tar-argv"), "utf8")).toContain(`${tarball()}\n`);
-    expect(readFileSync(join(dir, "tar-key"), "utf8")).toBe("0\n");
+    // Every tar the signing ran, and not its last alone: one that reads the build's tarball with
+    // the key before the unpack is as much a tar with the key.
+    const calls = readFileSync(join(dir, "tar-key"), "utf8").trimEnd().split("\n");
+    expect(calls).toEqual(calls.map(() => "0"));
   });
 
   it("signs with either key a rotating install.sh lists, and refuses a key whose public half it does not list", () => {
