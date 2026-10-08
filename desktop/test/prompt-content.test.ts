@@ -4,7 +4,7 @@ import type { ApprovalRequest, ChatLabel } from "../src/binding/approvals.js";
 import type { FolderSheet } from "../src/binding/binder.js";
 import { approval, folderSheet, freeMode, sizeOf } from "../src/shell/prompt-content.js";
 
-const SHEET: FolderSheet = { agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null };
+const SHEET: FolderSheet = { agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null, thread: null };
 const CHAT: ChatLabel = { agent: "acme.surogate.ai", root: "r", calling: "r", folder: "/home/me/notes" };
 const ids = (content: { buttons: Array<{ id: string }> }) => content.buttons.map((button) => button.id);
 const allowing = (content: { buttons: Array<{ id: string; allows: boolean }> }) => content.buttons.filter((b) => b.allows).map((b) => b.id);
@@ -18,6 +18,21 @@ describe("the folder sheet", () => {
     expect(content.choice?.value).toBe("free");
     expect([ids(content), allowing(content)]).toEqual([["cancel", "change", "accept"], ["accept"]]);
     expect([content.focus, content.cancel, content.enter]).toEqual(["choice", "cancel", "accept"]);
+  });
+
+  it("names the project's thread the folder is for, each name in a field of its own, and makes room for them", () => {
+    const thread = { project: "Q3 report", thread: "Check the totals" };
+    const content = folderSheet({ ...SHEET, thread });
+    expect(content.details).toEqual([
+      { label: "Folder", value: "/home/me/notes", code: true, keep: "" },
+      { label: "Project", value: "Q3 report", code: false, keep: "" },
+      { label: "Thread", value: "Check the totals", code: false, keep: "" },
+    ]);
+    expect(content.height).toBeGreaterThan(folderSheet(SHEET).height);
+    // A long name takes more lines.
+    expect(folderSheet({ ...SHEET, thread: { ...thread, thread: "x".repeat(256) } }).height).toBeGreaterThan(content.height);
+    expect(folderSheet({ ...SHEET, thread, refusal: "the folder holds the app's own data" }).details.map((d) => d.label))
+      .toEqual(["Folder", "Project", "Thread"]);
   });
 
   it("offers only Cancel and Change for a folder that cannot be used, saying why", () => {

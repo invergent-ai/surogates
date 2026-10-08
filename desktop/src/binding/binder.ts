@@ -49,6 +49,12 @@ export const NOT_FORGOTTEN: Outcome = {
 };
 const BOUND: Outcome = { ok: null };
 
+// The project's thread a folder is asked for: its names, as the page sent them.
+export interface ThreadLabel {
+  project: string;
+  thread: string;
+}
+
 // What the sheet shows. Accepting binds *folder* with the mode chosen there.
 export interface FolderSheet {
   agent: string; // the agent the chat is with
@@ -56,6 +62,7 @@ export interface FolderSheet {
   mode: Mode; // as the sheet opens
   links: LinkSummary | null; // null: no file in the folder is linked from elsewhere
   refusal: string | null; // why no chat may work on this folder: the sheet offers Change and Cancel only
+  thread: ThreadLabel | null; // a project's thread the folder is for; null for a new chat
 }
 
 // The desktop shell's own windows; fakes in tests. Each call is dismissed by its signal.
@@ -172,7 +179,9 @@ export class Binder implements Executor {
    * from the folder dialog. Null when the user cancels. Every new chat asks, the last
    * folder too, so a server cannot bind a chat to a folder the user did not see.
    */
-  async prepareFolder(choice: "last" | "pick", window: string, signal: AbortSignal): Promise<Prepared | null> {
+  async prepareFolder(
+    choice: "last" | "pick", window: string, signal: AbortSignal, thread: ThreadLabel | null = null,
+  ): Promise<Prepared | null> {
     const { guards } = this.options;
     const last = this.options.bindings.last()?.folder;
     const usable = choice === "last" && last !== undefined && checkFolder(last, guards).ok ? last : null;
@@ -180,7 +189,7 @@ export class Binder implements Executor {
     const made = usable === null && choice === "last" && !signal.aborted ? newFolder(guards, this.options.agent) : null;
     let prepared: Prepared | null = null;
     try {
-      prepared = await this.confirm(usable ?? made, last ?? guards.home, window, signal);
+      prepared = await this.confirm(usable ?? made, last ?? guards.home, window, signal, thread);
       return prepared;
     } finally {
       // Taken: it goes still if its chat is never bound.
@@ -263,7 +272,9 @@ export class Binder implements Executor {
   }
 
   // The sheet for *offered*, or for the folder the dialog picks from *startIn*, until the user accepts one or cancels.
-  private async confirm(offered: string | null, startIn: string, window: string, signal: AbortSignal): Promise<Prepared | null> {
+  private async confirm(
+    offered: string | null, startIn: string, window: string, signal: AbortSignal, thread: ThreadLabel | null,
+  ): Promise<Prepared | null> {
     const { prompts, guards } = this.options;
     // A page that has gone gets no prompt: the signal is looked at before each one.
     let folder = offered ?? (signal.aborted ? null : await prompts.pickFolder(startIn, signal));
@@ -277,6 +288,7 @@ export class Binder implements Executor {
         mode: "free",
         links,
         refusal: checked.ok ? null : checked.message,
+        thread,
       };
       const answer = await prompts.confirmFolder(sheet, signal);
       if (answer === null || signal.aborted) return null;

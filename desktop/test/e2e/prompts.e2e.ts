@@ -88,6 +88,19 @@ describe("the folder sheet", () => {
     await expect.poll(() => promptsShown(app!)).toBe(0);
   });
 
+  it("names the project's thread a folder is asked for, the page's words shown as text", async () => {
+    const client = await signedIn();
+    const prepared = client.evaluate(() =>
+      window.surogateDesktop!.prepareFolder("pick", { project: "Q3 report", thread: "Check the totals\u202Etxt.exe" }));
+    const sheet = await prompt(app!);
+    expect(await sheet.$$eval("#prompt-details .detail", (blocks) =>
+      blocks.map((block) => [block.querySelector(".label")!.textContent, block.querySelector(".value")!.textContent]))).toEqual([
+      ["Folder", folder], ["Project", "Q3 report"], ["Thread", "Check the totalsU+202Etxt.exe"],
+    ]);
+    await press(sheet, "accept");
+    expect(await prepared).toMatchObject({ folder, mode: "free" });
+  });
+
   it("takes no Enter before its input protection has passed, nor one held down, and Enter accepts after", async () => {
     const client = await signedIn();
     const prepared = prepare(client);
