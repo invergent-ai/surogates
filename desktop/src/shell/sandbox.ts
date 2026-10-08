@@ -7,8 +7,9 @@ import { toolsMissing } from "../vm/linux.js";
 import type { Boot, Emulated } from "../vm/manager.js";
 
 // The line's buttons: Retry the download, or the check of a delivered image whose boot did not
-// start; Show log of a boot that did not start.
-export type SandboxAction = "retry" | "log";
+// start; Show log of a boot that did not start; Check again for the tools, once the install
+// script has run.
+export type SandboxAction = "retry" | "log" | "check";
 
 export interface SandboxLine {
   text: string;
@@ -31,7 +32,7 @@ const EMULATED: Record<Emulated, string> = {
  * and *boot*, the last boot (null before any). The first that stops commands wins.
  */
 export function sandboxLine(lacking: string[] | null, delivery: Delivery | null, boot: Boot | null): SandboxLine {
-  if (lacking && lacking.length > 0) return { text: toolsMissing(lacking), actions: [], ready: false };
+  if (lacking && lacking.length > 0) return { text: toolsMissing(lacking), actions: ["check"], ready: false };
   if (delivery?.state === "failed") return { text: `Surogate could not download its sandbox: ${delivery.why}`, actions: ["retry"], ready: false };
   if (delivery?.state === "downloading") {
     const percent = delivery.total > 0 ? Math.floor((delivery.done * 100) / delivery.total) : 0;

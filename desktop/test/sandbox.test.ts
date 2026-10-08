@@ -6,8 +6,9 @@ const ready = { state: "ready", folder: "/d/vm/images/k" } as const;
 
 it("says what stops the agent's commands first: missing tools, then the download, then a boot that did not start", () => {
   const failed = { state: "failed", why: "there is not enough free disk space: it needs 3.5 GB, and 1.2 GB is free" } as const;
+  // Check again looks for them again once the install script has run, with no restart.
   expect(sandboxLine(["QEMU 8.2 or later", "zstd"], failed, { failed: "QEMU exited" })).toEqual({
-    text: "Surogate's sandbox tools are missing. Run the install script again. It lacks QEMU 8.2 or later, zstd", actions: [], ready: false,
+    text: "Surogate's sandbox tools are missing. Run the install script again. It lacks QEMU 8.2 or later, zstd", actions: ["check"], ready: false,
   });
   expect(sandboxLine([], failed, { failed: "QEMU exited" })).toEqual({
     text: "Surogate could not download its sandbox: there is not enough free disk space: it needs 3.5 GB, and 1.2 GB is free", actions: ["retry"], ready: false,

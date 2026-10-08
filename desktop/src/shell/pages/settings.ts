@@ -19,7 +19,7 @@ interface State {
   account: { name: string; email: string } | null;
   computer: { name: string; connection: string; added: string | null; organisation: string | null; agents: string[] };
   links: { usage: boolean };
-  sandbox: { text: string; actions: Array<"retry" | "log"> };
+  sandbox: { text: string; actions: Array<"retry" | "log" | "check"> };
 }
 
 // A folder this computer's chats work on, and each chat on it (folders.ts).
@@ -35,7 +35,7 @@ interface Settings {
   stop(root: string, id: string): Promise<void>;
   set(key: string, value: string): Promise<void>;
   link(which: "usage"): Promise<void>;
-  sandbox(action: "retry" | "log"): Promise<void>;
+  sandbox(action: "retry" | "log" | "check"): Promise<void>;
   close(): Promise<void>;
   onChanged(listener: () => void): () => void;
 }
@@ -179,6 +179,7 @@ async function render(): Promise<void> {
   showText(byId("sandbox"), state.sandbox.text);
   byId("sandbox-log").hidden = !state.sandbox.actions.includes("log");
   byId("sandbox-retry").hidden = !state.sandbox.actions.includes("retry");
+  byId("sandbox-check").hidden = !state.sandbox.actions.includes("check");
   // A link the agent lacks goes for good: no search brings it back.
   for (const link of document.querySelectorAll<HTMLElement>("[data-link]")) {
     if (!state.links[link.dataset.link as "usage"]) link.remove();
@@ -200,6 +201,7 @@ for (const control of document.querySelectorAll<HTMLElement>("[data-setting]")) 
 // The main process acts only on a button its line shows.
 byId("sandbox-log").addEventListener("click", () => void settings.sandbox("log"));
 byId("sandbox-retry").addEventListener("click", () => void settings.sandbox("retry"));
+byId("sandbox-check").addEventListener("click", () => void settings.sandbox("check"));
 byId("settings-search").addEventListener("input", search);
 byId("close").addEventListener("click", () => void settings.close());
 byId("backdrop").addEventListener("click", () => void settings.close());

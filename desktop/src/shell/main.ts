@@ -283,6 +283,15 @@ function startDelivery(check = false): void {
   }
 }
 
+// What the VM lacks of this computer, looked for: at the app's start, and at the line's Check again.
+function lookForTools(): void {
+  lackingFound = missingTools().then((found) => {
+    lacking = found;
+    changed();
+    return found;
+  });
+}
+
 // Resolves once the VM can boot: it lacks nothing of this computer, and its image is here.
 async function vmReady(signal: AbortSignal): Promise<void> {
   const found = await lackingFound;
@@ -321,11 +330,12 @@ const vmFor = (): VmClient => {
 };
 
 // The status line's buttons, each only while the line shows it: Show log of a boot that did not
-// start; Retry the image's download, or, after a boot of the delivered image did not start, its
-// check by its hashes, and the next boot's line is the next boot's.
+// start; Check again for the tools; Retry the image's download, or, after a boot of the delivered
+// image did not start, its check by its hashes, and the next boot's line is the next boot's.
 function sandboxAction(action: unknown): void {
   if (!sandboxLine(lacking, deliveryState(), boot).actions.includes(action as SandboxAction)) return;
   if (action === "log") return void shell.openPath(vmOptions(root, vmUser()).console);
+  if (action === "check") return lookForTools();
   boot = null;
   startDelivery(true);
   changed();
@@ -2026,12 +2036,8 @@ if (!app.requestSingleInstanceLock()) {
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
     // The VM slept with the computer: at its wake its clock is set, and its keepalive starts afresh.
     powerMonitor.on("resume", () => vm?.resume());
-    // What the VM needs of this computer, looked for once; its image downloaded in the background.
-    lackingFound = missingTools().then((found) => {
-      lacking = found;
-      changed();
-      return found;
-    });
+    // What the VM needs of this computer, looked for; its image downloaded in the background.
+    lookForTools();
     startDelivery();
     const page = join(PAGES, "shell.html");
     main = new MainWindow({

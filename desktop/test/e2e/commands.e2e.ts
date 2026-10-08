@@ -765,7 +765,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
 });
 
 describe("the sandbox's tools, through the app", () => {
-  it("says Surogate's sandbox tools are missing while QEMU is older than it needs, and answers the agent so", async () => {
+  it("says Surogate's sandbox tools are missing while QEMU is older than it needs, answers the agent so, and looks again at Check again", async () => {
     const bin = mkdtempSync(join(home, "bin-"));
     writeFileSync(join(bin, "qemu-system-x86_64"), "#!/bin/sh\necho 'QEMU emulator version 7.2.0 (Debian 1:7.2+dfsg-7)'\n");
     chmodSync(join(bin, "qemu-system-x86_64"), 0o755);
@@ -779,5 +779,10 @@ describe("the sandbox's tools, through the app", () => {
     expect(await operation("run", { command: "true", workdir: null, timeout: 30 })).toEqual({
       error: { type: "unavailable", message: `This computer's sandbox cannot start: ${missing}` },
     });
+    // The install script has put this computer's own QEMU in its place: looked for again, with no restart.
+    rmSync(join(bin, "qemu-system-x86_64"));
+    expect(await page.textContent("#sandbox-check")).toBe("Check again");
+    await page.click("#sandbox-check");
+    await expect.poll(() => page.isHidden("#sandbox")).toBe(true);
   });
 });

@@ -47,7 +47,7 @@ interface State {
   signIn: { needed: boolean; pending: boolean; failure: string | null }; // the app's own sign-in, in the system browser
   deviceAction: { text: string; button: string; action: "sign-in" | "restore" } | null; // what the user can do about this computer
   quitting: number | null; // while a quit waits for the threads working on this computer: how many
-  sandbox: { text: string; actions: Array<"retry" | "log">; ready: boolean }; // what stops the agent's commands, or slows them
+  sandbox: { text: string; actions: Array<"retry" | "log" | "check">; ready: boolean }; // what stops the agent's commands, or slows them
 }
 
 interface Shell {
@@ -73,7 +73,7 @@ interface Shell {
   projectSettings(): Promise<void>;
   quitNow(): Promise<void>;
   link(which: string): Promise<void>;
-  sandbox(action: "retry" | "log"): Promise<void>;
+  sandbox(action: "retry" | "log" | "check"): Promise<void>;
   onChanged(listener: () => void): () => void;
 }
 
@@ -299,6 +299,7 @@ async function render(): Promise<void> {
   showText(byId("sandbox-text"), state.sandbox.ready ? "" : state.sandbox.text);
   byId("sandbox-log").hidden = !state.sandbox.actions.includes("log");
   byId("sandbox-retry").hidden = !state.sandbox.actions.includes("retry");
+  byId("sandbox-check").hidden = !state.sandbox.actions.includes("check");
   // The quit's line is a live region that stays, empty, so that a screen reader hears it when it speaks.
   byId("quit-now").hidden = state.quitting === null;
   byId("quitting-text").textContent = state.quitting === null ? ""
@@ -333,6 +334,7 @@ byId("quit-now").addEventListener("click", () => void shell.quitNow());
 // The main process acts only on a button its line shows.
 byId("sandbox-log").addEventListener("click", () => void shell.sandbox("log"));
 byId("sandbox-retry").addEventListener("click", () => void shell.sandbox("retry"));
+byId("sandbox-check").addEventListener("click", () => void shell.sandbox("check"));
 byId("search").addEventListener("input", filterSidebar);
 byId("project-search").addEventListener("input", renderCards);
 byId("sort").addEventListener("change", renderCards);
