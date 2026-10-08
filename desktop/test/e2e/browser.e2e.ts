@@ -160,23 +160,66 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
   });
 });
 
+// The app launched and signed in, its Settings open at Browser.
+async function browserSettings(): Promise<Page> {
+  const origin = await agent.start();
+  app = await launch(home);
+  await stubNative(app);
+  const page = await shellPage(app);
+  await connect(page, origin);
+  await signedInAndAdded(app, page, agent);
+  await page.click("#user");
+  await page.click('[data-action="settings"]');
+  let settings: Page | undefined;
+  await expect.poll(() => {
+    settings = app!.windows().find((window) => window.url().endsWith("/settings.html"));
+    return settings !== undefined;
+  }).toBe(true);
+  await settings!.waitForSelector('.settings-nav [data-section="browser"]');
+  await settings!.click('.settings-nav [data-section="browser"]');
+  return settings!;
+}
+
+const kept = () => {
+  try {
+    return readFileSync(join(home, "surogate", "browser.json"), "utf8");
+  } catch {
+    return "";
+  }
+};
+
+describe.skipIf(!run)("Custom… in Settings → Browser", () => {
+  beforeAll(() => isolated());
+
+  it("keeps a program the user picked only once it launched as a browser, and says why one that did not, or cannot be read, is not kept", async () => {
+    isolated(shellEnv(home));
+    const settings = await browserSettings();
+    // Nothing kept without a pick: Custom… alone names no program.
+    await settings.evaluate(() => (window as unknown as { surogateSettings: { set(key: string, value: string): Promise<void> } }).surogateSettings.set("browser", "custom"));
+    expect(kept()).not.toContain("custom");
+    const pick = async (path: string) => {
+      await app!.evaluate((_electron, picked) => Object.assign(globalThis, { folder: picked }), path);
+      await settings.selectOption("#browser", "pick");
+    };
+    // A program that does not launch as a browser, within its launch's bound.
+    await pick("/bin/true");
+    await expect.poll(() => settings.textContent("#browser-note"), { timeout: 40_000 }).toMatch(/^\/(usr\/)?bin\/true did not start as a browser Surogate can drive: /);
+    expect(kept()).not.toContain("custom");
+    // A path that leads nowhere.
+    await pick(join(home, "gone"));
+    await expect.poll(() => settings.textContent("#browser-note")).toBe(`Surogate cannot use ${join(home, "gone")}: it cannot be read here.`);
+    expect(kept()).not.toContain("custom");
+    // The user's own browser, launched once to see that it runs: kept, for the next launch.
+    await pick(BROWSER!.executable);
+    await expect.poll(kept, { timeout: 40_000 }).toContain('"choice": "custom"');
+    expect(JSON.parse(kept()).executable).toBe(BROWSER!.executable);
+    expect(await settings.textContent("#browser-note")).not.toMatch(/cannot use|did not start/);
+  }, 120_000);
+});
+
 describe("Settings → Browser", () => {
   it("lists the browsers found here, with Automatic and Custom…, and keeps the one chosen for the next launch", async () => {
-    const origin = await agent.start();
-    app = await launch(home);
-    await stubNative(app);
-    const page = await shellPage(app);
-    await connect(page, origin);
-    await signedInAndAdded(app, page, agent);
-    await page.click("#user");
-    await page.click('[data-action="settings"]');
-    let settings: Page | undefined;
-    await expect.poll(() => {
-      settings = app!.windows().find((window) => window.url().endsWith("/settings.html"));
-      return settings !== undefined;
-    }).toBe(true);
-    await settings!.waitForSelector('.settings-nav [data-section="browser"]');
-    await settings!.click('.settings-nav [data-section="browser"]');
+    const settings = await browserSettings();
     await expect.poll(() => settings!.$$eval("#browser option", (options) => options.length)).toBeGreaterThan(1);
     const values = await settings!.$$eval("#browser option", (options) => options.map((option) => (option as HTMLOptionElement).value));
     expect(values[0]).toBe("auto");

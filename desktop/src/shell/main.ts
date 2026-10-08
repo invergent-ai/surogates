@@ -1439,7 +1439,14 @@ async function chooseBrowser(value: unknown): Promise<void> {
     const picked = main ? await dialog.showOpenDialog(main.window, options) : await dialog.showOpenDialog(options);
     const path = picked.canceled ? undefined : picked.filePaths[0];
     if (!path) return;
-    const real = realpathSync(path);
+    let real: string;
+    try {
+      real = realpathSync(path);
+    } catch {
+      // Gone since it was picked, or a link that leads nowhere.
+      browserFailure = `Surogate cannot use ${path}: it cannot be read here.`;
+      return;
+    }
     const why = unsupportedAt(real);
     if (why) {
       browserFailure = `Surogate cannot use ${real}: ${why}.`;
