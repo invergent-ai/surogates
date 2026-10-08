@@ -447,6 +447,25 @@ describe("a chat's browser taken over, and handed back", () => {
     }
   });
 
+  it("closes the confirmation when the page that asked loads again, and keeps the browser its user's", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
+    void (await clicked(client, "handBack"))().catch(() => {});
+    const asked = await prompted();
+    await expect.poll(() => asked.getAttribute(HAND_BACK, "aria-disabled"), { timeout: 10_000 }).toBe("false");
+    // The page under it loads again, by its own code or its user's reload: nobody is left to answer for.
+    await Promise.all([client.waitForEvent("load", { timeout: 15_000 }), client.evaluate(() => location.reload()).catch(() => {})]);
+    await expect.poll(() => app!.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows().filter((window) => window.webContents.getURL().endsWith("/prompt.html")).length), { timeout: 10_000 }).toBe(0);
+    await client.waitForFunction(() => window.surogateDesktop !== undefined, undefined, { timeout: 15_000 });
+    expect(await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT)).toMatchObject({ takenOver: true });
+    // The new page asks afresh, at its user's click.
+    expect(await handBackWith(client, "hand_back")).toBe(true);
+  });
+
   it("asks one hand back at a time: a second while the confirmation is up is refused, and changes nothing of it", async () => {
     const folder = join(home, "project");
     mkdirSync(folder);
