@@ -201,6 +201,9 @@ for (const link of document.querySelectorAll<HTMLElement>("[data-link]")) {
   link.addEventListener("click", () => void settings.link(link.dataset.link as "usage"));
 }
 for (const control of document.querySelectorAll<HTMLElement>("[data-setting]")) {
+  // A group named by its row, so a screen reader says what its buttons choose.
+  control.setAttribute("role", "group");
+  control.setAttribute("aria-label", control.closest<HTMLElement>(".row")?.dataset.label ?? "");
   for (const option of control.querySelectorAll<HTMLElement>("[data-value]")) {
     option.addEventListener("click", () => void settings.set(control.dataset.setting ?? "", option.dataset.value ?? "").then(render));
   }
@@ -212,8 +215,17 @@ byId<HTMLSelectElement>("browser").addEventListener("change", (event) => {
 byId("settings-search").addEventListener("input", search);
 byId("close").addEventListener("click", () => void settings.close());
 byId("backdrop").addEventListener("click", () => void settings.close());
+// Escape in a search with text clears it, as a search field's does; any other closes Settings.
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") void settings.close();
+  if (event.key !== "Escape") return;
+  const query = byId<HTMLInputElement>("settings-search");
+  if (event.target === query && query.value !== "") {
+    event.preventDefault();
+    query.value = "";
+    search();
+    return;
+  }
+  void settings.close();
 });
 settings.onChanged(() => void render());
 void render().then(() => byId("settings-search").focus());

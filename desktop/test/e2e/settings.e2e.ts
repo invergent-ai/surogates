@@ -242,6 +242,31 @@ describe("Settings", () => {
     expect(await texts(settings, ".settings-nav h3")).toEqual(["Settings", "Customize"]);
   });
 
+  it("names each segmented control as a group, by its row, for a screen reader", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    const groups = await settings.$$eval(".segmented", (found) => found.map((control) =>
+      [control.getAttribute("role"), control.getAttribute("aria-label"), control.closest<HTMLElement>(".row")!.dataset.label]));
+    expect(groups.filter(([role, label, row]) => role !== "group" || label !== row)).toEqual([]);
+    expect(groups.map(([, label]) => label)).toEqual(expect.arrayContaining(["Theme", "Transcript text size", "Transcript width", "Motion"]));
+  });
+
+  it("clears its search on Escape, and closes on the next", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    const nav = await texts(settings, ".settings-nav .item");
+    await settings.fill("#settings-search", "width");
+    await settings.press("#settings-search", "Escape");
+    expect(await settings.inputValue("#settings-search")).toBe("");
+    expect(await texts(settings, ".settings-nav .item")).toEqual(nav);
+    expect(await settingsOpen(shell)).toBe(true);
+    // Settings can close before the key is acknowledged: that it closed is what tells.
+    await settings.press("#settings-search", "Escape").catch(() => {});
+    await expect.poll(() => settingsOpen(shell)).toBe(false);
+  });
+
   it("keeps its own page: a dropped file cannot replace it", async () => {
     const { shell, page } = await signedIn();
     await page.click("#open-settings");
