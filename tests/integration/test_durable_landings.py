@@ -1157,9 +1157,11 @@ async def test_a_project_over_the_cap_has_no_history_and_its_threads_work_on_the
     assert within.config["history_off"] is False
     assert "PROJECT_DIR" in (await _build_session_sandbox_spec(within, tenant, str(thread.id))).env
     (pods.project / "c.md").write_text("one too many")
-    # A wake within the minute takes the last count; the next one counts again.
+    # A wake within the minute takes the last count; one after it counts again.
+    clock = time.monotonic()
+    monkeypatch.setattr(rows_module.time, "monotonic", lambda: clock + rows_module.COUNT_TTL - 1)
     assert (await harness._with_history_cap(thread)).config["history_off"] is False
-    rows_module._COUNTED.clear()
+    monkeypatch.setattr(rows_module.time, "monotonic", lambda: clock + rows_module.COUNT_TTL + 1)
     over = await harness._with_history_cap(thread)
     assert over.config["history_off"] is True
     # The plain layout: the real files at /workspace, no copy, nothing to land.
@@ -1168,6 +1170,36 @@ async def test_a_project_over_the_cap_has_no_history_and_its_threads_work_on_the
     pool = SandboxPool(pods)
     await pool.ensure(str(thread.id), spec)
     assert not pool.holds_copy(str(thread.id))
+
+
+async def test_a_wake_whose_count_of_the_files_fails_takes_the_last_count_and_with_none_keeps_history_on(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    harness = harness_of(api)
+    harness._storage = storage = api.app.state.storage
+    monkeypatch.setattr(rows_module, "HISTORY_CAP", 1)
+    monkeypatch.setattr(rows_module, "_COUNTED", {})
+    listing, down = storage.list_keys, []
+
+    async def the_bucket_does_not_answer(bucket, prefix):
+        if down:
+            raise ConnectionError("the bucket did not answer")
+        return await listing(bucket, prefix)
+
+    monkeypatch.setattr(storage, "list_keys", the_bucket_does_not_answer)
+    down.append(True)
+    # Never counted: the wake goes on, with history, rather than failing on a listing.
+    assert (await harness._with_history_cap(thread)).config["history_off"] is False
+    down.clear()
+    clock = time.monotonic()
+    monkeypatch.setattr(rows_module.time, "monotonic", lambda: clock + 2 * rows_module.COUNT_TTL)
+    assert (await harness._with_history_cap(thread)).config["history_off"] is True  # two files, over a cap of one
+    # Counted over the cap, and the next count fails, a minute on: the last answer stands.
+    down.append(True)
+    monkeypatch.setattr(rows_module.time, "monotonic", lambda: clock + 4 * rows_module.COUNT_TTL)
+    assert (await harness._with_history_cap(thread)).config["history_off"] is True
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
 
 
 async def test_a_landing_prunes_the_history_at_most_once_a_day_keeping_live_threads(api, monkeypatch, pods):

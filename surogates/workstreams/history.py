@@ -12,6 +12,7 @@ try of a step only marks the row alive.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -27,6 +28,8 @@ from surogates.db.models import WorkstreamHistory, WorkstreamThread
 from surogates.governance.saga import Saga
 from surogates.sandbox.history import HISTORY_CAP, PRUNE_DAYS, tracked
 from surogates.storage.tenant import boundary_workspace_prefix
+
+logger = logging.getLogger(__name__)
 
 #: How long a landing waits between tries for its project's lock.
 LOCK_POLL = 0.5
@@ -152,14 +155,20 @@ async def over_history_cap(storage: Any, session: Any) -> bool:
 
     Counted from the bucket's listing, before a pod is made: a pod's layout
     is fixed when it is.  Off the event loop, and stopped one past the cap;
-    a wake within a minute of the last count takes its answer.
+    a wake within a minute of the last count takes its answer.  A listing
+    that fails fails no wake: the last count stands, and with none history
+    stays on, until the next wake counts.
     """
     bucket = session.config["storage_bucket"]
     prefix = boundary_workspace_prefix(session.config, session, session.id)
     counted = _COUNTED.get((bucket, prefix))
     if counted is not None and time.monotonic() - counted[0] < COUNT_TTL:
         return counted[1]
-    keys = await storage.list_keys(bucket, prefix)
+    try:
+        keys = await storage.list_keys(bucket, prefix)
+    except Exception:
+        logger.warning("Could not count the files of %s/%s against the history's cap", bucket, prefix, exc_info=True)
+        return counted[1] if counted is not None else False
 
     def over() -> bool:
         # A key ending in / is a folder's marker, which geesefs writes.
