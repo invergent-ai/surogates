@@ -492,12 +492,22 @@ uninstall() {
   # A version is whole by its mark, so each loses its mark first: stopped while it removes the
   # tree, this leaves no version that a later install would take as whole, with files of it gone.
   rm -rf -- "$ROOT"/versions/*/release.json
-  rm -rf -- "$ROOT" "$(dirname "$RECORD")"
+  # Where /opt/surogate is a disk of its own, the folder cannot go: all that is in it does, and
+  # the rest of the install with it.
+  local left=
+  if mountpoint -q "$ROOT"; then
+    find "$ROOT" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+    left="$ROOT"
+  else
+    rm -rf -- "$ROOT"
+  fi
+  rm -rf -- "$(dirname "$RECORD")"
   rm -f -- "$LAUNCHER" "$ENTRY" "$POLICY"
   if command -v update-desktop-database >/dev/null; then update-desktop-database -q /usr/share/applications; fi
   # The lock is root's alone: nothing that runs as the user below has it open.
   exec 9<&-
   say "removed from this computer"
+  [ -z "$left" ] || say "left $left itself, now empty: it is a disk of its own (a mount point)"
 
   local user="${SUDO_USER:-}" config data cache answer=
   [ -n "$user" ] && [ "$user" != root ] || return 0

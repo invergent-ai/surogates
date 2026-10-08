@@ -1212,4 +1212,21 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     }
     expect(root(`rm -rf ${LOCKS} /root/locks /home/tester/locks`).status).toBe(0);
   });
+
+  it("removes all that is in /opt/surogate where the folder is a disk of its own, and the rest of the install with it, and says that the folder is left", () => {
+    installed("1.0.0");
+    // What an install puts around the tree, and a file of the disk's own beside the tree's.
+    const around = ["/etc/surogate/install.json", "/etc/apparmor.d/surogate-desktop", "/usr/local/bin/surogate", "/usr/share/applications/surogate.desktop",
+      "/usr/share/polkit-1/actions/ai.invergent.surogate.update.policy"];
+    expect(root(`mkdir -p /etc/surogate /etc/apparmor.d /usr/share/applications /usr/share/polkit-1/actions && touch ${around.join(" ")} /opt/surogate/.hidden`).status).toBe(0);
+    expect(root("/opt/surogate-test/install.sh --uninstall")).toMatchObject({
+      status: 0, stderr: "",
+      stdout: "Surogate Desktop: removed from this computer\nSurogate Desktop: left /opt/surogate itself, now empty: it is a disk of its own (a mount point)\n",
+    });
+    expect(root("ls -A /opt/surogate && mountpoint -q /opt/surogate")).toMatchObject({ status: 0, stdout: "" });
+    for (const gone of [...around, "/etc/surogate"]) expect(root(`test ! -e ${gone}`).status, gone).toBe(0);
+    // The install after it finds the disk as a first install does.
+    installed("1.0.0");
+    expect(root("/opt/surogate-test/install.sh --uninstall").status).toBe(0);
+  });
 });
