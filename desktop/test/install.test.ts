@@ -122,7 +122,7 @@ function lab(release: string, setup: string[], run: string[] = []) {
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --apply, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
   // What --apply needs, on a desktop's baseline: openssl, jq and bubblewrap, which the install
   // script installs, and nothing of Surogate's.
-  const { it: box, docker, root, releaseOf, manifestOf, current, versions } = lab(release, [
+  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions } = lab(release, [
     "RUN apt-get update && apt-get install -y --no-install-recommends openssl jq bubblewrap && rm -rf /var/lib/apt/lists/*",
     "RUN useradd -m tester",
   ]);
@@ -176,7 +176,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     // Nor one the user swaps once the helper has started: here while it waits for the update's lock,
     // after any check of the name. A link is refused, and a pipe gives an empty copy at once.
     const swapped = (swap: string) => root([
-      "mkdir -p /opt/surogate && exec 8</opt/surogate && flock 8",
+      "mkdir -p /opt/surogate/staging && exec 8</opt/surogate/staging && flock 8",
       "cp /home/tester/manifest.json /home/tester/swapped.json",
       `/opt/surogate-test/install.sh --apply ${files("/home/tester/swapped.json")} 8<&- &`,
       // A helper that ended before it reached the lock would never be seen waiting for it.
@@ -191,6 +191,26 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(swapped("rm /home/tester/swapped.json && mkfifo /home/tester/swapped.json"))
       .toMatchObject({ status: 1, stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
     expect(root("test -e /opt/surogate/current").status).toBe(1);
+  });
+
+  it("takes the update's lock where only root can, so that no other user of the computer stalls it, and gives up on a lock held too long", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    expect(apply(tarball).status).toBe(0);
+    // Any user may open a folder that all may read, and hold a lock on it: /opt/surogate is one.
+    expect(docker(["exec", "-d", "-u", "tester", box.container, "bash", "-c", "exec 7</opt/surogate && flock 7 && touch /tmp/held && sleep 300"]).status).toBe(0);
+    expect(root("for try in $(seq 100); do [ -e /tmp/held ] && break; sleep 0.05; done; test -e /tmp/held").status).toBe(0);
+    const stalled = root(`timeout 20 /opt/surogate-test/install.sh --apply ${files()}`);
+    root("pkill -u tester -x sleep; rm -f /tmp/held");
+    expect(stalled).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    // The folder the lock is on is root's alone.
+    expect(as("tester", "exec 7</opt/surogate/staging")).toMatchObject({ status: 1, stderr: expect.stringContaining("Permission denied") });
+    // Held by another apply for longer than this one waits, here a second: it says so.
+    const impatient = withKeys(readFileSync(SCRIPT, "utf8")).replace("LOCK_WAIT=300", "LOCK_WAIT=1");
+    writeFileSync(join(box.dir, "impatient.sh"), impatient, { mode: 0o755 });
+    expect(docker(["cp", join(box.dir, "impatient.sh"), `${box.container}:/opt/surogate-test/impatient.sh`]).status).toBe(0);
+    expect(root(`exec 8</opt/surogate/staging && flock 8 && /opt/surogate-test/impatient.sh --apply ${files()} 8<&-`))
+      .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: another install or update of Surogate Desktop is still running: try again once it has finished\n" });
   });
 
   it("applies a release signed by either key it lists, as a rotation needs, and refuses one signed by neither", () => {

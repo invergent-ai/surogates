@@ -19,6 +19,8 @@ settings() {
   ENTRY=/usr/share/applications/surogate.desktop
   PROFILE=/etc/apparmor.d/surogate-desktop
   POLICY=/usr/share/polkit-1/actions/ai.invergent.surogate.update.policy
+  # How long an apply waits for another's lock, in seconds.
+  LOCK_WAIT=300
   # The release keys' public halves: a release's manifest is signed by the private half of one of
   # them (Ed25519). A rotation lists the old key and the new for one release, which the old signs.
   RELEASE_KEYS=(
@@ -97,7 +99,9 @@ apply() {
   for file in "$manifest" "$signature" "$tarball"; do
     [ -f "$file" ] || fail "$file is not a downloaded release's file"
   done
-  mkdir -p "$ROOT/versions" "$ROOT/staging"
+  mkdir -p "$ROOT/versions"
+  # Root's alone from its first moment: the update's lock is on it.
+  ( umask 077 && mkdir -p "$ROOT/staging" )
   chmod 0755 "$ROOT" "$ROOT/versions"
   chmod 0700 "$ROOT/staging"
   # Room for the tarball's copy and the tree it unpacks to, which is about two and a half times its size.
@@ -105,9 +109,11 @@ apply() {
   need=$(( $(stat -c %s -- "$tarball") * 4 / 1024 ))
   room="$(df --output=avail -k "$ROOT" | tail -n 1)"
   [ "$room" -ge "$need" ] || fail "$ROOT needs $(( need / 1024 )) MB free to apply this release, and has $(( room / 1024 )) MB"
-  # One at a time; what an apply that stopped part way left in staging goes.
-  exec 9<"$ROOT"
-  flock 9
+  # One at a time, by a lock on a folder only root can open: any user may open one that all may
+  # read, hold a lock on it, and so stop every update. What an apply that stopped part way left in
+  # staging goes.
+  exec 9<"$ROOT/staging"
+  flock -w "$LOCK_WAIT" 9 || fail "another install or update of Surogate Desktop is still running: try again once it has finished"
   find "$ROOT/staging" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
   local work
   work="$(mktemp -d "$ROOT/staging/apply.XXXXXX")"
