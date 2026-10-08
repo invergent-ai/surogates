@@ -337,6 +337,40 @@ class TestRetryAllExhausted:
         assert step.retry_count == 2
 
 
+class TestAttempt:
+    """A call outside any saga, tried as a step is."""
+
+    @pytest.mark.asyncio
+    async def test_a_look_that_fails_or_runs_out_of_time_is_tried_again_as_a_step_is(self):
+        orch = SagaOrchestrator(default_step_timeout=1, default_max_retries=2, retry_delay=0.01)
+        tries = []
+
+        async def answers_the_third_time():
+            tries.append(len(tries))
+            if len(tries) == 1:
+                raise RuntimeError("the pod did not answer")
+            if len(tries) == 2:
+                await asyncio.sleep(10)  # past a try's bound
+            return "looked"
+
+        assert await orch.attempt(answers_the_third_time) == "looked"
+        assert tries == [0, 1, 2]
+        assert orch.active_sagas == []  # no saga, and no step, is made for it
+
+    @pytest.mark.asyncio
+    async def test_a_look_that_never_answers_raises_its_last_error(self):
+        orch = SagaOrchestrator(default_max_retries=1, retry_delay=0.01)
+        tries = []
+
+        async def never():
+            tries.append(len(tries))
+            raise RuntimeError(f"fail #{len(tries)}")
+
+        with pytest.raises(RuntimeError, match="fail #2"):
+            await orch.attempt(never)
+        assert tries == [0, 1]
+
+
 class TestCompensateStep:
 
     @pytest.mark.asyncio

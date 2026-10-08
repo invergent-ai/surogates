@@ -515,13 +515,17 @@ class History:
         """``main`` in the durable history now, fetched with *commits*: a landing's first look, under the project's lock.
 
         ``has_saga`` says whether ``main`` is the landing of *saga*: the only
-        proof that a landing pushed.
+        proof that a landing pushed.  ``missing`` are those of *commits* the
+        history no longer has, which no fetch can bring: a landing whose turn
+        or base is among them can be put back by no one.
         """
         main = self._take().get(MAIN)
-        self._fetch(main, *(_checked_id(c, "a fetch") for c in commits))
+        wanted = [_checked_id(c, "a fetch") for c in commits]
+        missing = [c for c in wanted if not self._has(c) and not self._in_durable(c)]
+        self._fetch(main, *(c for c in wanted if c not in missing))
         has_saga = main is not None and saga is not None and f"Surogate-Saga: {saga}" in self._message(main)
         packs = sum(p.stat().st_size for p in (self._taken / "objects" / "pack").glob("*.pack"))
-        return {"main": main, "has_saga": has_saga, "packs": packs}
+        return {"main": main, "has_saga": has_saga, "packs": packs, "missing": missing}
 
     def keep(self, *, author: dict[str, str], trailers: list[list[str]], base: bool) -> dict:
         """Commit the copy on the thread's branch and push the branch; its base too when *base*, or when the history has none.

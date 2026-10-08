@@ -249,6 +249,22 @@ def test_the_first_look_says_whether_main_carries_a_landings_saga(tmp_path, proj
     assert history.fetch(saga="saga:another")["has_saga"] is False
 
 
+def test_a_look_fetches_the_commits_it_is_asked_for_and_names_those_the_history_no_longer_has(tmp_path, project):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    turn = first.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "turn"]])
+    wanted = [turn["commit"], turn["base"]]
+    holder = a_pod(tmp_path, project, "t2")  # the next lock holder's pod: it never had the turn or its base
+    assert holder.fetch(commits=wanted)["missing"] == []
+    assert git(holder.repo, "show", f"{turn['commit']}:a.md") == "a"
+    # The history gone, as the master's own tools can delete it: no fetch can bring them.
+    shutil.rmtree(project / "_history")
+    (project / "later.md").write_text("saved since")  # so a new pod's first commit is not the base again, made in the same second
+    assert a_pod(tmp_path, project, "t3").fetch(commits=wanted)["missing"] == wanted
+    # A pod that fetched them before still has them.
+    assert holder.fetch(commits=wanted)["missing"] == []
+
+
 KEPT = [["Surogate-Kind", "kept"]]
 
 

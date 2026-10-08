@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import time
 from functools import partial
 from types import SimpleNamespace
@@ -901,6 +902,179 @@ async def test_a_recovery_that_loses_its_lock_among_committed_put_backs_stops(ap
     [row] = await rows(api, first)
     assert row.saga_state == "compensated"
     assert pods.real_names() == ["C.md", "Report.docx", "notes.txt"]
+
+async def turn_ends(api, thread) -> list[dict]:
+    """What each of *thread*'s turn ends wrote: its ``session.complete`` events."""
+    return [e.data for e in await api.app.state.session_store.get_events(thread.id, types=[EventType.SESSION_COMPLETE])]
+
+
+async def test_a_landing_that_could_not_settle_another_threads_is_kept_and_lands_with_its_next_turn(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo a > a.md && echo b > b.md")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")
+    await edited(pool, second, "echo by B > B.md")
+    call, looks = landing_module._call, []
+
+    async def the_pod_never_answers_the_settle(sandbox_pool, owner, action, **arguments):
+        if action == "fetch" and arguments.get("commits"):
+            looks.append(owner)
+            raise landing_module.LandingStepError("the pod's step timed out")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "_call", the_pod_never_answers_the_settle)
+        await ends(api, pool, second)
+    # B's turn did not land, and is not lost with its pod: it is on B's branch, as a failed turn's is,
+    # kept without waiting on A's landing a second time.
+    assert len(looks) == 1 and "B.md" not in pods.real_names()
+    assert git(pods.project / "_history", "show", f"refs/heads/threads/{second.id}:B.md") == "by B"
+    assert [done["saved"] for done in await turn_ends(api, second)] == [True]
+    [report] = await reports(api, master)
+    assert report["landing"] == "compensated"  # not landed, and the project's files are as they were
+    assert await rows(api, second) == [] and [r.saga_state for r in await rows(api, first)] == ["running"]
+    # B's next turn, with no tool, settles A's landing and lands its own.
+    await ends(api, SandboxPool(pods), second)
+    assert [r.saga_state for r in await rows(api, first)] == ["compensated"]
+    assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
+
+
+async def test_a_failed_turn_is_kept_though_another_threads_landing_cannot_be_settled(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo a > a.md && echo b > b.md")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")
+    await edited(pool, second, "echo half > B.md")
+    call = landing_module._call
+
+    async def the_pod_never_answers_the_settle(sandbox_pool, owner, action, **arguments):
+        if action == "fetch" and arguments.get("commits"):
+            raise landing_module.LandingStepError("the pod's step timed out")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    monkeypatch.setattr(landing_module, "_call", the_pod_never_answers_the_settle)
+    await ends(api, pool, second, failed=True)
+    # A keep moves only its thread's own refs: it waits on no other thread's landing.
+    [failed] = [e.data for e in await api.app.state.session_store.get_events(second.id, types=[EventType.SESSION_FAIL])]
+    assert failed["saved"] is True
+    assert git(pods.project / "_history", "show", f"refs/heads/threads/{second.id}:B.md") == "half"
+
+
+async def test_a_look_of_the_settle_the_pod_did_not_answer_is_tried_again_as_a_step_is(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo a > a.md && echo b > b.md")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")
+    await edited(pool, second, "echo by B > B.md")
+    call, touch, did = landing_module._call, landing_module.touch_landing, []
+    [dead] = await rows(api, first)
+
+    async def the_pod_times_out_once(sandbox_pool, owner, action, **arguments):
+        if action == "fetch" and arguments.get("commits"):
+            did.append("look")
+            if did.count("look") == 1:
+                raise landing_module.LandingStepError("the pod's step timed out")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    async def marked(session_factory, row):
+        if row == dead.id and "put back" not in did:
+            did.append("mark")
+        await touch(session_factory, row)
+
+    async def put_back(*args, **kwargs):
+        did.append("put back")
+        return await compensate(*args, **kwargs)
+
+    compensate = landing_module.compensate_history
+    monkeypatch.setattr(landing_module, "_call", the_pod_times_out_once)
+    monkeypatch.setattr(landing_module, "touch_landing", marked)
+    monkeypatch.setattr(landing_module, "compensate_history", put_back)
+    await ends(api, pool, second, settings=SimpleNamespace(default_step_timeout=1, default_max_retries=1, retry_delay=0))
+    # One timeout of another thread's settle fails no landing: the look is made again, the dead
+    # landing's row marked alive before each try, as a step's is, for the next lock holder's fence.
+    assert did[:4] == ["mark", "look", "mark", "look"]
+    assert [r.saga_state for r in await rows(api, first)] == ["compensated"]
+    assert [r.saga_state for r in await rows(api, second)] == ["completed"]
+    assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
+
+
+async def test_a_landing_settled_whose_row_cannot_be_written_is_left_to_the_next_holder_and_not_settled_again(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second, third = [await a_thread(api, name, master) for name in ("Draft A", "Draft B", "Draft C")]
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo a > a.md && echo b > b.md")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")
+    [dead] = await rows(api, first)
+    save = landing_module.save_landing
+
+    async def its_outcome_cannot_be_written(session_factory, row, saga, **values):
+        if row == dead.id and values.get("state", "running") != "running":
+            raise ConnectionError("the database blinked")
+        await save(session_factory, row, saga, **values)
+
+    await edited(pool, second, "echo by B > B.md")
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "save_landing", its_outcome_cannot_be_written)
+        await asyncio.wait_for(ends(api, pool, second), 30)  # it does not settle the row over and over
+    # Its files went back and B landed; the row, still running, is the next holder's to settle.
+    assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
+    assert [r.saga_state for r in await rows(api, first)] == ["running"]
+    await edited(pool, third, "echo by C > C.md")
+    await ends(api, pool, third)
+    assert [r.saga_state for r in await rows(api, first)] == ["compensated"]
+
+
+#: Why a landing left running is given up: its row's applies say so.
+GONE = "The project's history no longer has this landing's turn or its base: its files cannot be put back"
+
+
+async def test_a_landing_left_running_whose_commits_the_history_lost_is_given_up_and_others_land(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second, third = [await a_thread(api, name, master) for name in ("Draft A", "Draft B", "Draft C")]
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo a > a.md && echo b > b.md")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")
+    # The history is deleted, as the master's own tools can delete it: nobody has the versions from before.
+    shutil.rmtree(pods.project / "_history")
+    for thread, name in ((second, "B"), (third, "C")):
+        await edited(pool, thread, f"echo by {name} > {name}.md")
+        await ends(api, pool, thread)
+    # Given up once, with why, rather than failing every later landing of the project.
+    [row] = await rows(api, first)
+    assert row.saga_state == "escalated"
+    assert {(s["state"], s["error"]) for s in row.steps if s["tool_name"] == "history.apply"} == {("compensation_failed", GONE)}
+    assert [(await rows(api, thread))[-1].saga_state for thread in (second, third)] == ["completed", "completed"]
+    assert all("landing" not in report for report in await reports(api, master))
+    # What it half landed stays, for a person to check; nothing is written over.
+    assert pods.real_names() == ["B.md", "C.md", "Report.docx", "a.md", "notes.txt"]
+
+
+async def test_a_landing_whose_commit_step_failed_keeps_the_turn_on_its_branch(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md")
+    call = landing_module._call
+
+    async def the_commit_fails(sandbox_pool, owner, action, **arguments):
+        if action == "commit":
+            raise landing_module.LandingStepError("git add failed: Input/output error")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "_call", the_commit_fails)
+        await ends(api, pool, thread)
+    # Its commit step never put the turn in the history; the turn's end did, before its pod went.
+    assert git(pods.project / "_history", "show", f"refs/heads/threads/{thread.id}:a.md") == "a"
+    assert [done["saved"] for done in await turn_ends(api, thread)] == [True]
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
+    await ends(api, SandboxPool(pods), thread)  # its next turn, with no tool
+    assert pods.real_names() == ["Report.docx", "a.md", "notes.txt"]
+
 
 async def test_a_project_over_the_cap_has_no_history_and_its_threads_work_on_the_real_files(api, monkeypatch, tmp_path):
     master = await master_of(api, await create(api))

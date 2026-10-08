@@ -67,6 +67,8 @@ _PRUNE_PER_GIB = 180
 #: written at every step cost a landing the square of its files.
 _ROW_EVERY = 5
 _ROW_SHARE = 20
+#: What a landing left running says, on each apply it could not put back, when it is given up.
+_GONE = "The project's history no longer has this landing's turn or its base: its files cannot be put back"
 #: Each thread's put-back still running, kept until done: a cancel never cuts one short.
 _PUTTING_BACK: dict[str, asyncio.Future] = {}
 #: A cancelled landing's pod going, once its slow put-back is done.
@@ -149,6 +151,13 @@ async def land_turn(
     ``not_merged``; *repositories* are the folders inside a git repository
     the turn wrote into, which never land.
 
+    A landing that could not start, since another thread's landing left
+    running could not be settled or the lock or its row could not be had,
+    lands nothing and is no saga.  The turn's copy is then kept on its
+    branch, as a failed turn's is, to land with the thread's next turn: its
+    state is ``compensated``, the project's files being as they were, or
+    ``failed`` when the copy could not be kept either.
+
     The whole saga runs under the project's lock: one landing at a time per
     project, so a landing that starts after another sees its files as
     changed rather than rolling back over them.  The lock frees itself if
@@ -164,9 +173,12 @@ async def land_turn(
     calls = await store.get_events(session.id, after=after_event_id, types=[EventType.TOOL_CALL])
     workstream = session.config["workstream_id"]
     outcome = None
+    settled: list[dict] = []
+    began = False
     try:
         async with project_lock(session_factory, workstream) as held:
             settled = await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
+            began = True
             outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
             if outcome["state"] == "completed":
                 await _prune(session_factory, sandbox_pool, owner, workstream, outcome["packs"])
@@ -175,9 +187,20 @@ async def land_turn(
             # The lock's dead connection failed the block's exit: the cancel goes on.
             raise asyncio.CancelledError from exc
         if outcome is None:
-            raise
-        # The landing is done; only the lock's transaction did not end cleanly.
-        logger.warning("The project's lock for %s ended with an error", session.id, exc_info=True)
+            # No landing of this turn is done.  Its pod goes at the turn's end, so its
+            # copy is kept first: a keep moves only its thread's own refs, and waits
+            # on no other thread's landing.
+            logger.warning("The landing of %s did not run", session.id, exc_info=True)
+            saved = await _kept(session_factory, sandbox_pool, session, saga_settings)
+            outcome = {
+                "saga": None, "commit": None, "landed": [], "overlapped": [], "excluded": [], "repositories": [],
+                "files": [], "saved": saved, "packs": 0,
+                # Before its own first step nothing of it reached the real files.
+                "state": "compensated" if saved and not began else "failed",
+            }
+        else:
+            # The landing is done; only the lock's transaction did not end cleanly.
+            logger.warning("The project's lock for %s ended with an error", session.id, exc_info=True)
     known = {f["ref"] for f in outcome["files"]}
     outcome["files"] += [
         # A landing of this thread a killed worker had pushed: its files landed, and the report says so.
@@ -191,6 +214,7 @@ async def land_turn(
 
 async def keep_copy(
     *, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any, action: str = "keep",
+    settle: bool = True,
 ) -> dict | None:
     """Keep *session*'s copy in the project's history, under its lock; None when it holds none.
 
@@ -199,26 +223,50 @@ async def keep_copy(
     ``hand_off`` a thread's copy, for a helper about to start from it;
     ``hand_back`` a helper's, merged onto its thread's hand-off; and
     ``keep_apart`` a failed helper's, merged onto nothing.  The landings a
-    killed worker left running are settled first, as every lock holder does.
+    killed worker left running are settled first, as every lock holder
+    does, unless *settle* is false.  A keep moves only its thread's own
+    refs and reads no real file, so a settle that fails does not stop it.
     """
     owner = sandbox_session_key(session)
     if not sandbox_pool.holds_copy(owner):
         return None
     workstream = session.config.get("workstream_id") or session.config["history_project"]
-    author = {"name": session.title or "Thread", "email": f"thread:{session.id}@surogate"}
-    trailers = [
-        ["Surogate-Project", str(workstream)], ["Surogate-Thread", session.config.get("history_thread") or str(session.id)],
-        ["Surogate-Agent", str(session.agent_id)], ["Surogate-User", str(session.user_id)],
-        ["Surogate-Kind", "turn"],
-    ]
     async with project_lock(session_factory, workstream) as held:
-        await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
+        if settle:
+            try:
+                await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
+            except Exception:
+                logger.warning("Could not settle the landings left running in project %s", workstream, exc_info=True)
         # The pod checks the refs it moves as it reads them just before: that
         # holds only under the lock, so one lost while it waited stops it.
         await held()
-        return await _call(
-            sandbox_pool, owner, action, author=author, trailers=trailers, **({"base": True} if action == "keep" else {}),
-        )
+        return await _call(sandbox_pool, owner, action, **_kept_as(session), **({"base": True} if action == "keep" else {}))
+
+
+def _kept_as(session: Any) -> dict:
+    """Who a kept copy's commit is by, and what it says of itself."""
+    workstream = session.config.get("workstream_id") or session.config["history_project"]
+    return {
+        "author": {"name": session.title or "Thread", "email": f"thread:{session.id}@surogate"},
+        "trailers": [
+            ["Surogate-Project", str(workstream)],
+            ["Surogate-Thread", session.config.get("history_thread") or str(session.id)],
+            ["Surogate-Agent", str(session.agent_id)], ["Surogate-User", str(session.user_id)],
+            ["Surogate-Kind", "turn"],
+        ],
+    }
+
+
+async def _kept(session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any) -> bool:
+    """Whether a turn whose landing did not run was kept on its thread's branch all the same."""
+    try:
+        return await keep_copy(
+            session_factory=session_factory, sandbox_pool=sandbox_pool, session=session,
+            saga_settings=saga_settings, settle=False,
+        ) is not None
+    except Exception:
+        logger.warning("Could not keep the copy of %s", session.id, exc_info=True)
+        return False
 
 
 async def take_up(sandbox_pool: Any, owner: str) -> list[str]:
@@ -316,8 +364,8 @@ async def _land(
     }
     changes: list[dict] = []
     main: str | None = None
+    commit = step("commit", author=thread, trailers=[*audit, ["Surogate-Kind", "turn"]])
     try:
-        commit = step("commit", author=thread, trailers=[*audit, ["Surogate-Kind", "turn"]])
         # The first look, outside the steps: it changes nothing, and under
         # the lock no one else moves main until this landing is done.
         looked = await asyncio.wait_for(_call(sandbox_pool, owner, "fetch"), commit.timeout_seconds)
@@ -375,6 +423,15 @@ async def _land(
         if pushed is not None:
             # The push happened though its answer was lost: the landing counts.
             outcome.update(commit=pushed, landed=[s.execute_result for s in saga.steps if s.tool_name == "history.apply"])
+        if commit.state is not StepState.COMMITTED:
+            # Its commit step never put the turn in the history, and its pod goes
+            # at the turn's end: the copy is kept on its branch first.
+            try:
+                await held()
+                await _call(sandbox_pool, owner, "keep", **_kept_as(session), base=True)
+                outcome["saved"] = True
+            except Exception:
+                logger.warning("Could not keep the copy of %s", session.id, exc_info=True)
     applied = {c["path"]: c for c in outcome["landed"]}
     reasons = {o["path"]: o["reason"] for o in outcome["overlapped"]}
     paths = sorted({c["path"] for c in changes} | set(reasons))
@@ -425,18 +482,42 @@ async def _settle(
     was in, or had done since, shows ``pending``.  Its put-backs ask *held*
     first, as a landing's applies do.
     """
+    async def look(**arguments: Any) -> dict:
+        """A look at the history through the pod, tried as a step is, each try marking the row alive first."""
+        async def once() -> dict:
+            await _written(row.alive)
+            return await _call(sandbox_pool, owner, "fetch", **arguments)
+
+        return await orchestrator.attempt(once)
+
     if not recovered:
         # Where it stopped, before anything goes back: its own row may be seconds behind.
         await _written(row.write)
+    gone: list[str] = []
+    committed = next(
+        (s.execute_result for s in saga.steps if s.tool_name == "history.commit" and s.state is StepState.COMMITTED), None,
+    )
+    if recovered and committed is not None and committed["commit"] is not None:
+        # The turn and its base, the versions a put-back writes: fetched by id, since this pod never had them.
+        gone = (await look(commits=[c for c in (committed["commit"], committed["base"]) if c]))["missing"]
     record = next((s for s in saga.steps if s.tool_name == "history.record"), None)
     # Whatever its state: a try that pushed shows ``pending`` again in its retry's wait.
     if record is not None:
-        looked = await asyncio.wait_for(_call(sandbox_pool, owner, "fetch", saga=saga.saga_id), record.timeout_seconds)
+        looked = await look(saga=saga.saga_id)
         if looked["has_saga"]:
             if saga.state is SagaState.RUNNING:
                 saga.transition(SagaState.COMPLETED)
             await _written(row.write, tries=2, state="completed", commit=looked["main"], files=_row_files(saga, "completed"))
             return "completed", looked["main"]
+    if gone:
+        # Nobody has the versions from before: given up once, with why, so
+        # that no later landing of the project fails on it.
+        logger.error("Landing %s cannot be put back: the project's history lacks %s", saga.saga_id, ", ".join(gone))
+        for it in saga.steps:
+            if it.tool_name == "history.apply" and it.state is not StepState.COMPENSATED:
+                it.state, it.error = StepState.COMPENSATION_FAILED, _GONE
+        await _written(row.write, tries=2, state="escalated")
+        return "escalated", None
     failed = await _put_back(saga, orchestrator, sandbox_pool, owner, row, recovered=recovered, held=held)
     state = "escalated" if failed else "compensated"
     await _written(row.write, tries=2, state=state)
@@ -463,11 +544,15 @@ async def settle_running(
 
     A row written within the fence is waited for: its worker may still be
     in a step, or putting files back past its bound.  A settle that loses
-    the lock stops, its row left for the next holder.
+    the lock stops, its row left for the next holder.  A landing whose turn
+    or base the history no longer has is given up, ``escalated``: no one
+    can put its files back, and no later landing waits on it.
     """
     fence = _fence(saga_settings)
-    settled = []
-    while running := await running_landings(session_factory, workstream_id):
+    settled: list[dict] = []
+    # A row settled here whose last write failed still reads running: it is the next holder's.
+    done: set[int] = set()
+    while running := [r for r in await running_landings(session_factory, workstream_id) if r[0].id not in done]:
         row, quiet = running[0]
         if quiet < fence:
             await asyncio.sleep(fence - quiet)
@@ -475,14 +560,11 @@ async def settle_running(
         saga = saga_of(row)
         orchestrator = _orchestrator(saga_settings)
         orchestrator.adopt(saga)
-        committed = next((s.execute_result for s in saga.steps if s.tool_name == "history.commit" and s.state is StepState.COMMITTED), None)
-        if committed is not None and committed["commit"] is not None:
-            # The turn and its base: the versions a put-back writes.
-            await _call(sandbox_pool, owner, "fetch", commits=[c for c in (committed["commit"], committed["base"]) if c])
         state, _ = await _settle(
             saga, orchestrator, sandbox_pool, owner, _Row(session_factory, row.id, saga),
             recovered=True, held=held,
         )
+        done.add(row.id)
         logger.warning("Settled landing %s of %s, left running: %s", row.saga_id, row.thread_id, state)
         settled.append({"thread": row.thread_id, "state": state, "files": _row_files(saga, state)})
     return settled
