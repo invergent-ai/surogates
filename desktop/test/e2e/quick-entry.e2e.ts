@@ -282,7 +282,9 @@ describe("quick entry", () => {
       await expect.poll(() => quick.textContent("#refused")).toBe(refused);
       expect(await quick.inputValue("#text")).toBe(text);
     };
-    // Another load takes the new chat's place while it still loads: nothing is handed.
+    // Another load takes the new chat's place while it still loads: nothing is handed, not even to
+    // the page the window keeps meanwhile, which is at /chat too, as after an earlier New chat.
+    await client.evaluate(() => history.pushState(null, "", "/chat"));
     const paused = Promise.withResolvers<void>();
     agent.pagesHeld = paused.promise;
     await send("Draft the March invoices");
@@ -292,6 +294,13 @@ describe("quick entry", () => {
     agent.pagesHeld = null;
     paused.resolve();
     await expect.poll(() => new URL(client.url()).pathname).toBe("/inbox");
+    expect(await handed(app!)).toEqual([]);
+    // The agent sends the new chat's load on to another of its pages: loaded, it is not the new chat, and is handed nothing.
+    agent.pagesRedirect = `${origin}/inbox`;
+    await send("Draft the March invoices again");
+    await said("Surogate's window left the new chat before it was made, so nothing was sent.", "Draft the March invoices again");
+    agent.pagesRedirect = null;
+    expect(new URL(client.url()).pathname).toBe("/inbox");
     expect(await handed(app!)).toEqual([]);
     // Handed, but the page leaves the chat before it listens: it never hears it.
     await send("Draft the April invoices");
