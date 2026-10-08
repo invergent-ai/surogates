@@ -108,7 +108,7 @@ case "$VERB" in
     done
     if [ -z "$assets" ]; then
       [ "$status" = 404 ] \
-        || fail "desktop/vm/$key is in the bucket, but no release of ours carries its manifest (desktop-vm-$key.json): re-run this job once the release run that sent it has attached it, or attach that run's desktop-vm-manifest artifact to its release as desktop-vm-$key.json"
+        || fail "desktop/vm/$key is in the bucket, but no release of ours carries its manifest (desktop-vm-$key.json): re-run this job once the release run that sent it has attached it, or attach that run's desktop-vm-manifest artifact to any release of ours as desktop-vm-$key.json; if that run left no such artifact, or no release, nothing ships the key: remove desktop/vm/$key/ from the bucket by hand, and re-run this job"
       echo missing
       exit 0
     fi

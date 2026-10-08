@@ -146,11 +146,14 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
     const sent = sentFiles();
     expect(publish("send").status).toBe(0);
     out = mkdtempSync(join(dir, "out-"));
-    // No release carries it while the job waits: the job fails, and says how to recover without deleting the key.
+    // No release carries it while the job waits: the job fails, and says how to recover. Only a key whose
+    // sender left nothing to attach it with, which no tarball can name, is removed.
     expect(publish("fetch", { PUBLISH_POLLS: "2", PUBLISH_POLL_S: "0" })).toMatchObject({
       status: 1, stdout: "",
       stderr: `publish.sh: desktop/vm/${key} is in the bucket, but no release of ours carries its manifest (desktop-vm-${key}.json): `
-        + `re-run this job once the release run that sent it has attached it, or attach that run's desktop-vm-manifest artifact to its release as desktop-vm-${key}.json\n`,
+        + `re-run this job once the release run that sent it has attached it, or attach that run's desktop-vm-manifest artifact to any release of ours `
+        + `as desktop-vm-${key}.json; if that run left no such artifact, or no release, nothing ships the key: `
+        + `remove desktop/vm/${key}/ from the bucket by hand, and re-run this job\n`,
     });
     released(sent["manifest.json"]!);
     // The bucket's image swapped for another, compressed as the build compresses: its hashes are not the release's.
