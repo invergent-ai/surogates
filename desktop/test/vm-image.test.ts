@@ -349,6 +349,15 @@ describe("the image's manifest and the install record", () => {
     expect(() => installBase(path)).toThrow(`${path} could not be read: EACCES`);
   });
 
+  it("takes an installed app's record only when root alone may write it, as the install script leaves it", () => {
+    const path = join(dir, "install.json");
+    writeFileSync(path, JSON.stringify({ base: "https://surogate.ai" }));
+    expect(installBase(path)).toBe("https://surogate.ai");
+    expect(() => installBase(path, true)).toThrow(`${path} is not the install script's: only root may write it`);
+    // Root's own, as /etc/passwd is: taken, and read for its base.
+    expect(() => installBase("/etc/passwd", true)).toThrow("/etc/passwd names no web address to download the sandbox from");
+    expect(() => installBase(join(dir, "missing.json"), true)).toThrow("Surogate was not installed by its install script");
+  });
 });
 
 describe("ImageDelivery", () => {

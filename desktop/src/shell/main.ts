@@ -262,7 +262,8 @@ function imageDelivery(): ImageDelivery | null {
   if (process.env.SUROGATE_VM_IMAGE || !record) return null;
   return new ImageDelivery({
     manifest: readManifest(join(VM_RESOURCES ?? REPO_IMAGE, "manifest.json")),
-    base: () => installBase(record),
+    // An installed app's record is root's alone to write, as the install script leaves it.
+    base: () => installBase(record, app.isPackaged),
     images: join(root, "vm", "images"),
     // No cookie of the app's own session goes with it.
     fetch: (url, init) => net.fetch(url, { ...init, credentials: "omit" }),

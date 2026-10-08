@@ -55,15 +55,20 @@ export function readManifest(path: string): ImageManifest {
 
 /**
  * The base URL in the install record at *path*, which the install script writes:
- * {"base": "https://surogate.ai"}. Throws when there is none to read.
+ * {"base": "https://surogate.ai"}. Throws when there is none to read. *rootOwned*, as an
+ * installed app's /etc/surogate/install.json is: a record that another than root may write is
+ * not taken, as it would say where each of this computer's users downloads from.
  */
-export function installBase(path: string): string {
+export function installBase(path: string, rootOwned = false): string {
   let text: string;
   try {
+    const { uid, mode } = statSync(path);
+    if (rootOwned && (uid !== 0 || (mode & 0o022) !== 0)) throw new Error(`${path} is not the install script's: only root may write it`);
     text = readFileSync(path, "utf8");
   } catch (error) {
     const { code } = error as NodeJS.ErrnoException;
-    if (code !== "ENOENT") throw new Error(`${path} could not be read: ${code ?? String(error)}`);
+    if (code === undefined) throw error;
+    if (code !== "ENOENT") throw new Error(`${path} could not be read: ${code}`);
     throw new Error("Surogate was not installed by its install script, so it does not know where to download its sandbox from");
   }
   let base: unknown;
