@@ -237,7 +237,8 @@ export function WorkspacePanel({
 		};
 	}, [stopReading]);
 
-	// Leaving its chat, folded away or moved on: a delete asked there and left unanswered does not come back by itself.
+	// Leaving its chat, folded away or moved on: its tree is not kept, and a delete asked there and left
+	// unanswered does not come back by itself.
 	useEffect(() => () => {
 		if (sessionId) leaveChatFiles(sessionId);
 	}, [sessionId]);
