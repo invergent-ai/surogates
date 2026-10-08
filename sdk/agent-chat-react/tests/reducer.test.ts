@@ -439,6 +439,27 @@ describe("applyAgentChatEvent", () => {
     expect(said(shown)).toEqual(["Browser ready."]);
   });
 
+  it("says that a chat's computer has no supported browser though the server's state said so first, and once", () => {
+    const at = (state: ReturnType<typeof createInitialAgentChatState>, eventId: number) =>
+      applyAgentChatEvent(state, { type: "browser.unavailable", eventId, data: { session_id: "s-1", computer: true } });
+    const said = (state: ReturnType<typeof createInitialAgentChatState>) => state.messages.map((message) => message.content);
+    const none = { status: "unavailable" as const, controlOwner: null, computer: true };
+
+    // At a reload the server's state can answer before the chat's own event is replayed: the chat has said nothing yet.
+    const first = at({ ...createInitialAgentChatState(), browser: none }, 61);
+    expect(first.browser).toEqual(none);
+    expect(said(first)).toEqual(["No supported browser on the chat's computer."]);
+    // The agent's next tries add nothing: it is what the chat said last of its browser.
+    expect(said(at(at(first, 62), 63))).toEqual(said(first));
+    // Nor after the conversation went on: nothing of its browser was said between.
+    const talked = applyAgentChatEvent(first, { type: "user.message", eventId: 64, data: { content: "Try again" } });
+    expect(said(at(talked, 65))).toEqual(["No supported browser on the chat's computer.", "Try again"]);
+    // A state that lost it is told again, with no second line.
+    const told = at({ ...first, browser: null }, 66);
+    expect(told.browser).toEqual(none);
+    expect(said(told)).toEqual(said(first));
+  });
+
   it("tracks whether the session waits for its computer", () => {
     const initial = createInitialAgentChatState();
     expect(initial.deviceWait).toBeNull();

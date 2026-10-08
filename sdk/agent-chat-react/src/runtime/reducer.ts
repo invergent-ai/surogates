@@ -202,14 +202,16 @@ export function applyAgentChatEvent(
 
     case "browser.unavailable": {
       // No supported browser there: no tab either, whoever's call found it so.
-      const none = { ...nextState, browserTabs: [] };
+      const none: AgentChatState = {
+        ...nextState,
+        browserTabs: [],
+        browser: { status: "unavailable", controlOwner: null, computer: true },
+      };
       // Said once: an agent that tries the browser again and again adds no line for each try.
-      if (nextState.browser?.status === "unavailable") return none;
-      return applyBrowserEvent(none, event, {
-        status: "unavailable",
-        controlOwner: null,
-        computer: true,
-      });
+      // By what the chat said last of its browser, not by its state: the server's answer sets
+      // that too, and at a reload it can come before this event is replayed.
+      if (saidLastOfBrowser(nextState.messages) === NO_BROWSER) return none;
+      return withMessages(none, [...none.messages, browserMarker(event)]);
     }
 
     // A take-over on the user's computer is told as the cloud's is: the browser stays the computer's.
@@ -567,6 +569,19 @@ function computerTab(event: AgentChatRuntimeEvent): string | null {
   return event.data.computer === true ? stringValue(event.data.session_id) : null;
 }
 
+const NO_BROWSER = "No supported browser on the chat's computer.";
+
+// The chat's last line about its browser, if it has said one.
+function saidLastOfBrowser(messages: AgentChatMessage[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.systemKind === "browser_marker" || message.systemKind === "browser_marker_warning") {
+      return message.content;
+    }
+  }
+  return undefined;
+}
+
 function applyBrowserEvent(
   state: AgentChatState,
   event: AgentChatRuntimeEvent,
@@ -597,7 +612,7 @@ function browserMarker(event: AgentChatRuntimeEvent): AgentChatMessage {
       warning: false,
     },
     "browser.unavailable": {
-      content: "No supported browser on the chat's computer.",
+      content: NO_BROWSER,
       warning: true,
     },
   };
