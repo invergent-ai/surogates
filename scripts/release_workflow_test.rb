@@ -132,12 +132,14 @@ class ReleaseWorkflowTest < Minitest::Test
     end
   end
 
-  def test_desktop_vm_manifest_is_attached_to_the_release_that_published_its_key
+  def test_desktop_vm_manifest_is_attached_to_every_release_that_ships_its_key
     job = @workflow.fetch("jobs").fetch("desktop-vm-manifest")
     run = job.fetch("steps").map { |step| step["run"].to_s }.join("\n")
 
     assert_equal %w[release desktop-vm-image], Array(job.fetch("needs"))
-    assert_equal "needs.desktop-vm-image.outputs.state == 'missing'", job.fetch("if")
+    # Published by this release or checked against an earlier one's: a release deleted strands no key.
+    refute job.key?("if")
+    assert_includes run, "gh release view"
     assert_equal({ "contents" => "write" }, job.fetch("permissions"))
     download = job.fetch("steps").find { |step| step["uses"] == "actions/download-artifact@v4" }
     assert_equal "desktop-vm-manifest", download.fetch("with").fetch("name")

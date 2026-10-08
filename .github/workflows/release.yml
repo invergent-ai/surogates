@@ -183,7 +183,7 @@ jobs:
 
   # Surogate Desktop's VM guest (images/guest/), published on R2 under desktop/vm/<key>/
   # only when its inputs changed: images/guest/inputs.sh names the key. R2 is never the
-  # truth: the release that publishes a key attaches its manifest to itself
+  # truth: each release that ships a key attaches its manifest to itself
   # (desktop-vm-manifest, below), and later releases take it from there and check R2's
   # files against it. The manifest is kept for the desktop's tarball, published or found.
   # The cloud's release does not wait for it; the desktop's does.
@@ -249,14 +249,14 @@ jobs:
           path: images/guest/out/manifest.json
           if-no-files-found: error
 
-  # The manifest of an image this release published, attached to the release as
-  # desktop-vm-<key>.json once the release exists: the next releases' desktop-vm-image
-  # takes it from there, never from R2.
+  # The manifest of the image this release ships, attached to the release as
+  # desktop-vm-<key>.json once the release exists, whether this release published the key or
+  # checked R2 against an earlier release's copy: the next releases' desktop-vm-image takes it
+  # from any of them, never from R2, so deleting one release strands no key.
   desktop-vm-manifest:
     needs:
       - release
       - desktop-vm-image
-    if: needs.desktop-vm-image.outputs.state == 'missing'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
@@ -273,7 +273,11 @@ jobs:
         run: |
           key="$(jq -r .key out/manifest.json)"
           cp out/manifest.json "desktop-vm-${key}.json"
-          gh release upload "$GITHUB_REF_NAME" "desktop-vm-${key}.json" --repo "$GITHUB_REPOSITORY"
+          # A re-run finds it attached already: desktop-vm-image's fetch then took these bytes from here.
+          attached="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq "any(.assets[]; .name == \"desktop-vm-${key}.json\")")"
+          if [ "$attached" != true ]; then
+            gh release upload "$GITHUB_REF_NAME" "desktop-vm-${key}.json" --repo "$GITHUB_REPOSITORY"
+          fi
 
   release:
     needs:

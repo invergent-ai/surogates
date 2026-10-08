@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The guest image in the release's bucket, under desktop/vm/<key>/ (images/guest/inputs.sh
-# names the key). The bucket is storage, never the truth: the release that publishes a key
+# names the key). The bucket is storage, never the truth: each release that ships a key
 # attaches its manifest to itself on GitHub, as desktop-vm-<key>.json, and every later
 # release takes the manifest from there. Its tarball carries that one, and the bucket's
 # manifest and files are checked against it, each file by both its hashes, before any
