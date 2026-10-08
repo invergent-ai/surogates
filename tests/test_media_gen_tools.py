@@ -899,3 +899,41 @@ async def test_a_video_too_large_for_a_local_folder_stops_downloading_once_past_
         {"prompt": "a long clip"}, media_gen=_video_cfg(), workspace_path=str(tmp_path),
     ))
     assert (tmp_path / saved["path"]).read_bytes() == b"x" * 5_000
+
+
+@pytest.mark.parametrize(("tool", "refused", "paid"), [
+    ("image", "stat", False),  # its check before the model is paid
+    ("video", "stat", False),  # its check before the job is paid
+    ("video", "write", True),  # its save, after the job was paid for
+])
+@pytest.mark.asyncio
+async def test_a_computer_that_refuses_generated_media_says_so_at_every_step(tmp_path, monkeypatch, tool, refused, paid):
+    import httpx as _httpx
+
+    from surogates.tools.builtin.media_gen import _generate_image_handler, _generate_video_handler
+
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    jobs: list[str] = []
+
+    def handler(request):
+        if request.method == "POST":
+            jobs.append("submitted")
+            return _httpx.Response(202, json={
+                "id": "job-7", "status": "completed", "unsigned_urls": ["https://openrouter.ai/api/v1/videos/job-7/content"],
+            })
+        return _httpx.Response(200, content=b"mp4-bytes")
+
+    _patch_video_transport(monkeypatch, handler)
+    folder = tmp_path.resolve()
+    client = _FakeImageClient(images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}])
+    kwargs = _on_a_folder(folder, _revoked(folder, refused))
+    if tool == "image":
+        result = await _generate_image_handler(
+            {"prompt": "a logo", "output_path": "logo.png"}, media_gen=_image_cfg(client), **kwargs,
+        )
+    else:
+        result = await _generate_video_handler({"prompt": "a clip"}, media_gen=_video_cfg(), **kwargs)
+
+    assert json.loads(result) == {"error": "Local access to this computer was revoked"}
+    assert bool(jobs or client.last_create_kwargs) is paid
+    assert not (folder / "media").exists()
