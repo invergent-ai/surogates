@@ -363,6 +363,20 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
   });
 
+  it("refuses a file whose read outlasts its bound, in a line of its own", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    // A helper that waits a millisecond for each read, and a tarball of 100 MB: one read at least is not done by then.
+    writeFileSync(join(box.dir, "hasty.sh"), withKeys(readFileSync(SCRIPT, "utf8")).replace("READ_WAIT=300", "READ_WAIT=0.001"), { mode: 0o755 });
+    expect(docker(["cp", join(box.dir, "hasty.sh"), `${box.container}:/opt/surogate-test/hasty.sh`]).status).toBe(0);
+    expect(root(`truncate -s 100M /home/tester/slow.tar.gz && /opt/surogate-test/hasty.sh --apply ${files(undefined, "/home/tester/slow.tar.gz")}`)).toMatchObject({
+      status: 1, stdout: "",
+      stderr: expect.stringMatching(/^Surogate Desktop: \/home\/tester\/(manifest\.json|manifest\.json\.sig|slow\.tar\.gz) is not a downloaded release's file\n$/),
+    });
+    expect(root("ls -A /opt/surogate/staging 2>/dev/null").stdout).toBe("");
+  });
+
   it("clears what a killed apply left in staging before it measures the room", () => {
     const tarball = releaseOf("1.0.0");
     manifestOf("1.0.0", tarball);

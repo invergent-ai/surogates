@@ -138,9 +138,10 @@ asker() {
 
 # Runs "$@" as the user who reads an apply's files, in that user's own group and no other, with
 # none of the helper's open files, and for READ_WAIT at most: a filesystem of the user's own may
-# never answer.
+# never answer. The command alone is killed then (--foreground): GNU's timeout otherwise kills
+# itself with it, and bash says so in words of its own.
 as_reader() {
-  timeout -s KILL "$READ_WAIT" setpriv --reuid "${READER[0]}" --regid "${READER[1]}" --clear-groups "$@" 9<&- </dev/null
+  timeout --foreground -s KILL "$READ_WAIT" setpriv --reuid "${READER[0]}" --regid "${READER[1]}" --clear-groups "$@" 9<&- </dev/null
 }
 
 # Copies file $1, which an apply was handed, to $2 in root's staging: read once, as the user who
