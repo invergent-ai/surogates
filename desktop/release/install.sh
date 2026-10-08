@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Surogate Desktop's install script (spec, Section 9), and each version's
 # bin/surogate-apply-update, the root helper that applies a verified release: the current
 # version's copy at /opt/surogate/bin/surogate-apply-update is the one pkexec runs.
@@ -9,7 +9,8 @@
 #
 # Every line is in a function, and main runs from the script's last line: a download cut
 # short runs nothing. Run as a user, it asks for sudo once and runs itself again as root
-# from its own functions.
+# from its own functions. Run as the helper, by its own name, bash starts it with -p: it reads
+# no script and takes no function from the environment of whoever asked.
 
 settings() {
   ROOT=/opt/surogate
@@ -417,6 +418,8 @@ main() {
   trap cleanup EXIT
   case "${1:-}" in
     --apply)
+      # The helper runs the system's own tools, wherever its caller's PATH points.
+      export PATH=/usr/sbin:/usr/bin:/sbin:/bin
       [ "$#" -eq 4 ] || fail "usage: surogate-apply-update --apply <manifest> <signature> <tarball>"
       [ "$EUID" -eq 0 ] || fail "applying a release needs administrator rights"
       supported

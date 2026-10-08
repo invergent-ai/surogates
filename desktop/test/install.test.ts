@@ -343,6 +343,18 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
   });
 
+  it("runs the system's own tools, and no script that its caller's environment names", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball, {}, other.privateKey);
+    stage(tarball);
+    // First on the caller's PATH, an openssl that calls every signature good; and a script bash reads as it starts.
+    expect(root("mkdir -p /tmp/caller && printf '#!/bin/sh\\nexit 0\\n' >/tmp/caller/openssl && chmod 755 /tmp/caller/openssl && echo 'touch /tmp/caller/read' >/tmp/caller/env.sh").status).toBe(0);
+    expect(root(`PATH=/tmp/caller:$PATH BASH_ENV=/tmp/caller/env.sh /opt/surogate-test/install.sh --apply ${files()}`))
+      .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
+    expect(root("test -e /tmp/caller/read").status).toBe(1);
+    expect(root("test -e /opt/surogate/current").status).toBe(1);
+  });
+
   it("applies a release signed by either key it lists, as a rotation needs, and refuses one signed by neither", () => {
     // A rotating release's script: the old key and the new.
     writeFileSync(join(box.dir, "rotating.sh"), withKeys(readFileSync(SCRIPT, "utf8"), [PUBLIC, pem(next.publicKey)]), { mode: 0o755 });
