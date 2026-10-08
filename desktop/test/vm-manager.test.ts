@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
 import { createInterface } from "node:readline";
@@ -13,14 +13,18 @@ import { BOOT_ID } from "../src/binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
-import { bootLinux, sweep } from "../src/vm/linux.js";
-import { type BootVm, bootFor, type Folder, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions } from "../src/vm/manager.js";
+import { bootLinux, emulation, missingTools, sweep } from "../src/vm/linux.js";
+import {
+  type Boot, type BootVm, bootFor, EMULATED_NOTICE, type Emulated, type Folder, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions, WAITS,
+} from "../src/vm/manager.js";
 import { VIRTIOFSD } from "../src/vm/qemu.js";
 
 let dir: string;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vm-manager-"));
+  // A KVM device this user opens, so that no stand-in boot reads this computer's own.
+  writeFileSync(join(dir, "kvm"), "");
 });
 
 afterEach(() => {
@@ -35,7 +39,7 @@ async function until(check: () => boolean, ms = 5_000): Promise<void> {
 
 const options = (): VmOptions => ({
   kernel: "/i/vmlinuz", rootfs: "/i/rootfs.img", agentDisk: "/a/agent.img", sessions: join(dir, "data", "sessions.img"),
-  run: join(dir, "run"), console: join(dir, "logs", "console.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" },
+  run: join(dir, "run"), console: join(dir, "logs", "console.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" }, kvm: join(dir, "kvm"),
 });
 
 // *script* as QEMU, first on the PATH, where setpriv looks it up, while *body* runs.
@@ -61,7 +65,8 @@ let agentNet: Duplex | undefined;
 // A VM whose control port reaches the guest's own Control on *roots*, with no QEMU:
 // what the agent is asked, and when. Without roots, an agent that never says hello.
 // *powers*: its agent powers the fake VM off at a shutdown, as the guest's ends QEMU.
-const fakeVm = (roots?: ControlRoots, powers = true): BootVm => async () => {
+// *emulated*: why it runs emulated, or null with KVM.
+const fakeVm = (roots?: ControlRoots, powers = true, emulated: Emulated | null = null): BootVm => async () => {
   const [host, guest] = duplexPair();
   agent = guest;
   const [net, guestNet] = duplexPair();
@@ -81,7 +86,7 @@ const fakeVm = (roots?: ControlRoots, powers = true): BootVm => async () => {
     createInterface({ input: guest }).on("line", (line) => control.receive(line));
     control.hello();
   }
-  return { control: host, net, exited, share: async () => ({ kind: "virtiofs", tag: "r1" }), unshare: async () => {}, kill };
+  return { control: host, net, exited, emulated, share: async () => ({ kind: "virtiofs", tag: "r1" }), unshare: async () => {}, kill };
 };
 
 // *answer*, or "no answer" once *ms* pass.
@@ -298,6 +303,46 @@ describe("the VM manager on the host", () => {
         await vm.kill();
       }
     });
+  });
+
+  it("names each tool the VM lacks, a QEMU or virtiofsd older than it needs among them", async () => {
+    const bin = join(dir, "tools");
+    mkdirSync(bin);
+    const tool = (name: string, script: string) => {
+      writeFileSync(join(bin, name), `#!/bin/sh\n${script}\n`);
+      chmodSync(join(bin, name), 0o755);
+      return join(bin, name);
+    };
+    const path = process.env.PATH;
+    // The stand-ins alone: no newuidmap or newgidmap on the PATH, and no zstd.
+    process.env.PATH = bin;
+    try {
+      tool("qemu-system-x86_64", "echo 'QEMU emulator version 8.1.5 (Debian 1:8.1.5+ds-1ubuntu2)'");
+      const virtiofsd = tool("virtiofsd", "echo 'virtiofsd 1.9.0'");
+      const zstd = join(bin, "zstd");
+      expect(await missingTools({ virtiofsd, zstd })).toEqual(["QEMU 8.2 or later", "virtiofsd 1.10 or later", "newuidmap and newgidmap", "zstd"]);
+      // zstd only unpacks the image's download: not needed once the image is here, or with none to deliver.
+      expect(await missingTools({ virtiofsd, zstd }, false)).toEqual(["QEMU 8.2 or later", "virtiofsd 1.10 or later", "newuidmap and newgidmap"]);
+      tool("qemu-system-x86_64", "echo 'QEMU emulator version 10.1.0 (Debian 1:10.1.0+ds-5ubuntu2)'");
+      tool("virtiofsd", "echo 'virtiofsd 1.13.2'");
+      for (const name of ["newuidmap", "newgidmap", "zstd"]) tool(name, "true");
+      expect(await missingTools({ virtiofsd, zstd })).toEqual([]);
+      // One that says no version, or is not there, is missing too.
+      tool("qemu-system-x86_64", "exit 1");
+      rmSync(virtiofsd);
+      expect(await missingTools({ virtiofsd, zstd })).toEqual(["QEMU 8.2 or later", "virtiofsd 1.10 or later"]);
+    } finally {
+      process.env.PATH = path;
+    }
+  });
+
+  it("gives up on a tool whose --version has not ended in 5 s, though it ignores the timeout's SIGTERM", { timeout: 20_000 }, async () => {
+    const virtiofsd = join(dir, "virtiofsd");
+    writeFileSync(virtiofsd, "#!/bin/sh\ntrap '' TERM\nexec sleep 30\n");
+    chmodSync(virtiofsd, 0o755);
+    const begun = performance.now();
+    expect(await missingTools({ virtiofsd })).toContain("virtiofsd 1.10 or later");
+    expect(performance.now() - begun).toBeLessThan(8_000);
   });
 
   it("ends a QEMU that opens no sockets by the boot's deadline", async () => {
@@ -778,6 +823,26 @@ describe("a guest's lifecycle", () => {
     await manager.stop();
   });
 
+  it("boots again at once when asked to retry, the failure it backed off from forgotten", async () => {
+    let boots = 0;
+    const failing: BootVm = async () => {
+      boots += 1;
+      throw new Error("QEMU exited: no hello within 15 s");
+    };
+    const manager = new VmManager(options(), failing);
+    const failed = unavailable("did not start: QEMU exited: no hello within 15 s");
+    expect(await which(manager)).toEqual(failed);
+    expect(await which(manager)).toEqual(failed);
+    expect(boots).toBe(1);
+    // The user's Retry, its image checked: the next operation boots at once, not after the backoff's second.
+    manager.retry();
+    const begun = performance.now();
+    expect(await which(manager)).toEqual(failed);
+    expect(boots).toBe(2);
+    expect(performance.now() - begun).toBeLessThan(500);
+    await manager.stop();
+  });
+
   it("waits a second before it boots again after a guest that crashed", async () => {
     const events: string[] = [];
     const vms: VmBackend[] = [];
@@ -951,4 +1016,113 @@ describe("a guest frozen while the computer slept", () => {
       await manager.stop();
     });
   }
+});
+
+describe("the emulated VM", () => {
+  it("chooses KVM when this user can open it, and says why the guest runs emulated when it cannot", () => {
+    const kvm = join(dir, "kvm");
+    expect(emulation(join(dir, "missing"))).toBe("no-kvm");
+    expect(emulation(kvm)).toBeNull();
+    // A device this user may not open, as one not in its group finds it.
+    chmodSync(kvm, 0o000);
+    const groups = join(dir, "group");
+    writeFileSync(groups, "kvm:x:4242:someone\n");
+    expect(emulation(kvm, groups)).toBe("no-access");
+    // In its group, though not in this login's groups: the install script added them.
+    writeFileSync(groups, `adm:x:4:\nkvm:x:4242:someone,${userInfo().username}\n`);
+    expect(emulation(kvm, groups)).toBe("relogin");
+    expect(emulation(kvm, join(dir, "no-group-file"))).toBe("no-access");
+  });
+
+  it("boots emulated when QEMU cannot use the KVM it could open, on the same disks", async () => {
+    const fake = join(dir, "qemu.cjs");
+    writeFileSync(fake, [
+      'const net = require("node:net");',
+      "const run = process.argv[2];",
+      'require("node:fs").writeFileSync(run + "/../argv", JSON.stringify(process.argv.slice(3)));',
+      'for (const name of ["control", "net"]) net.createServer(() => {}).listen(run + "/" + name + ".sock");',
+      "net.createServer((socket) => {",
+      '  socket.write(\'{"QMP": {"version": {}, "capabilities": []}}\\n\');',
+      '  socket.once("data", () => socket.write(\'{"return": {}}\\n\'));',
+      '}).listen(run + "/qmp.sock");',
+    ].join("\n"));
+    const script = [
+      'case "$*" in *accel=kvm*) echo "qemu-system-x86_64: failed to initialize kvm: Device or resource busy" >&2; exit 1;; esac',
+      `exec '${process.execPath}' '${fake}' '${join(dir, "run")}' "$@"`,
+    ].join("\n");
+    await withQemu(script, async () => {
+      const vm = await bootLinux(options(), undefined, performance.now() + 5_000);
+      try {
+        expect(vm.emulated).toBe("kvm-failed");
+        const argv = JSON.parse(readFileSync(join(dir, "argv"), "utf8")) as string[];
+        expect(argv).toEqual(expect.arrayContaining(["-accel", "tcg,thread=multi,tb-size=256", "-cpu", "max", "if=none,id=root,file=/i/rootfs.img,format=raw,readonly=on"]));
+        expect(argv[argv.indexOf("-append") + 1]).toMatch(/ surogate\.emulated=1$/);
+      } finally {
+        await vm.kill();
+      }
+    });
+  });
+
+  it("waits as Section 11's table says, with KVM and emulated", () => {
+    expect(WAITS).toEqual({
+      kvm: { helloMs: 15_000, missed: 3, powerOffMs: 5_000, setupMs: 15_000, shareMs: 15_000 },
+      emulated: { helloMs: 120_000, missed: 9, powerOffMs: 30_000, setupMs: 90_000, shareMs: 90_000 },
+    });
+  });
+
+  it("gives an emulated guest nine missed pings, where one with KVM is lost at its third", async () => {
+    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+    const gone: Record<string, number> = {};
+    const begun = performance.now();
+    for (const emulated of [null, "no-kvm"] as const) {
+      const guest = await Guest.boot(fakeVm(roots, true, emulated), { ...options(), pingMs: 100 });
+      // From now on its agent answers nothing: it hangs.
+      (agent as Duplex).write = (() => true) as Duplex["write"];
+      void guest.gone.then(() => {
+        gone[String(emulated)] = performance.now() - begun;
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(Object.keys(gone)).toEqual(["null"]);
+    await until(() => "no-kvm" in gone, 2_000);
+    expect(gone["no-kvm"]).toBeGreaterThan(900);
+  });
+
+  it("tells the agent once a chat, after its first run's output, that the chat's commands run emulated", async () => {
+    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: { output: "hi\n", returncode: 0, timed_out: false } }) };
+    const folder = { path: dir, ...statSync(dir) };
+    const run = (manager: VmManager, root: string) => manager.perform({ id: root, root, folder, kind: "run", args: { command: "echo hi", workdir: null, timeout: 30 } }, new AbortController().signal);
+    const emulated = new VmManager(options(), fakeVm(roots, true, "no-kvm"));
+    const told = { ok: { output: `hi\n\n${EMULATED_NOTICE}`, returncode: 0, timed_out: false } };
+    const plain = { ok: { output: "hi\n", returncode: 0, timed_out: false } };
+    expect(await run(emulated, "root-1")).toEqual(told);
+    expect(await run(emulated, "root-1")).toEqual(plain);
+    expect(await run(emulated, "root-2")).toEqual(told);
+    await emulated.stop();
+    const kvm = new VmManager(options(), fakeVm(roots));
+    expect(await run(kvm, "root-1")).toEqual(plain);
+    await kvm.stop();
+    expect(EMULATED_NOTICE).toBe("This computer runs commands in an emulated sandbox, about 5 to 20 times slower than usual. Give long commands more time.");
+  });
+
+  it("tells each boot: with KVM, emulated and why, or why it did not start", async () => {
+    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+    const folder = { path: dir, ...statSync(dir) };
+    const which = (manager: VmManager) => manager.perform({ id: "1", root: "root-1", folder, kind: "which", args: {} }, new AbortController().signal);
+    for (const emulated of [null, "relogin"] as const) {
+      const told: Boot[] = [];
+      const manager = new VmManager(options(), fakeVm(roots, true, emulated), undefined, undefined, (boot) => told.push(boot));
+      expect(await which(manager)).toEqual({ ok: true });
+      expect(told).toEqual([{ emulated }]);
+      await manager.stop();
+    }
+    const told: Boot[] = [];
+    const failing: BootVm = async () => {
+      throw new Error("QEMU exited: qemu-system-x86_64: -drive if=none,id=root: Could not open '/i/rootfs.img': No such file or directory");
+    };
+    const manager = new VmManager(options(), failing, undefined, undefined, (boot) => told.push(boot));
+    expect(await which(manager)).toEqual(unavailable("did not start: QEMU exited: qemu-system-x86_64: -drive if=none,id=root: Could not open '/i/rootfs.img': No such file or directory"));
+    expect(told).toEqual([{ failed: "QEMU exited: qemu-system-x86_64: -drive if=none,id=root: Could not open '/i/rootfs.img': No such file or directory" }]);
+    await manager.stop();
+  });
 });

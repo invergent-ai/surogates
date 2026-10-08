@@ -38,6 +38,11 @@ async function launched(): Promise<{ shell: ElectronApplication; page: Page }> {
   return { shell, page: await shellPage(shell) };
 }
 
+// The texts of what *selector* finds that is drawn.
+const shown = (page: Page, selector: string) =>
+  page.$$eval(selector, (found) => found.filter((element) => (element as HTMLElement).offsetParent !== null)
+    .map((element) => element.textContent?.trim()));
+
 const asked = (shell: ElectronApplication) =>
   shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string; detail: string }> }).asked);
 
@@ -79,18 +84,23 @@ describe("the agent's web client", () => {
 });
 
 describe("the agent's capabilities", () => {
-  it("are read again at launch: a server that gained local folders gets this computer added", async () => {
+  it("are read again at launch: a server that gained local folders gets this computer added, and the user menu its Devices", async () => {
     agent.config = { ...agent.config, desktop_sessions: false };
     const first = await launched();
     await connect(first.page, origin);
     await signIn(first.shell, first.page, agent);
     await expect.poll(() => first.page.getAttribute("#device", "title")).toBe("This server doesn't support local folders yet");
     expect(agent.registered).toEqual([]);
+    // Its web client's Settings has no Devices tab.
+    await first.page.click("#user");
+    expect(await shown(first.page, "#user-menu .menu-item")).not.toContain("Devices");
     await quit(first.shell);
     agent.config = { ...agent.config, desktop_sessions: true };
     const again = await launched();
     await expect.poll(() => again.page.getAttribute("#device", "title")).toBe("Connected as Laptop");
     expect(JSON.parse(readFileSync(join(home, "surogate", "agent.json"), "utf8")).desktopSessions).toBe(true);
+    await again.page.click("#user");
+    expect(await shown(again.page, "#user-menu .menu-item")).toContain("Devices");
   });
 
   it("are read again at a sign-in, and the web client is told it has local folders", async () => {
@@ -122,6 +132,27 @@ describe("the agent's capabilities", () => {
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(existsSync(join(home, "surogate", "agent.json"))).toBe(false);
     expect(await again.page.isVisible("#first-run")).toBe(true);
+  });
+
+  it("name the console the user menu opens Usage and Plans and billing in, and none once the agent names none", async () => {
+    agent.config = { ...agent.config, console_url: "https://ops.acme.example" };
+    const first = await launched();
+    await connect(first.page, origin);
+    await signIn(first.shell, first.page, agent);
+    await first.page.click("#user");
+    expect(await shown(first.page, "#user-menu .menu-item")).toContain("Usage");
+    expect(await shown(first.page, "#user-menu .menu-item")).toContain("Plans and billing");
+    await first.page.click('[data-action="usage"]');
+    await expect.poll(() => first.shell.evaluate(() => (globalThis as unknown as { opened: string[] }).opened))
+      .toContain("https://ops.acme.example/work/settings/usage");
+    await quit(first.shell);
+    const { console_url: _, ...unnamed } = agent.config;
+    agent.config = unnamed;
+    const again = await launched();
+    await expect.poll(() => JSON.parse(readFileSync(join(home, "surogate", "agent.json"), "utf8")).consoleUrl).toBeNull();
+    await again.page.click("#user");
+    expect(await shown(again.page, "#user-menu .menu-item")).not.toContain("Usage");
+    expect(await shown(again.page, "#user-menu .menu-item")).not.toContain("Plans and billing");
   });
 });
 

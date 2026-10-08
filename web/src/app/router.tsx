@@ -7,14 +7,20 @@ import { Route as indexRoute } from "./routes/index";
 import { Route as loginRoute } from "./routes/login";
 import { Route as oauthAuthorizeRoute } from "./routes/oauth-authorize";
 import { chatRoute, chatSessionRoute } from "./routes/chat";
+import { Route as chatsRoute } from "./routes/chats";
 import { Route as linkRoute } from "./routes/link";
 import { Route as settingsRoute } from "./routes/settings";
 import { Route as skillsRoute } from "./routes/skills";
+import { Route as transcriptRoute } from "./routes/transcript";
 import { Route as agentsRoute } from "./routes/agents";
 import { Route as inboxRoute } from "./routes/inbox";
 import { Route as integrationsRoute } from "./routes/integrations";
 import { Route as codingAgentsRoute } from "./routes/coding-agents";
-import { missionDetailRoute, missionsRoute } from "./routes/missions";
+import {
+  missionDetailRoute,
+  missionsIndexRoute,
+  missionsRoute,
+} from "./routes/missions";
 import {
   whiteboardRoute,
   whiteboardSessionRoute,
@@ -31,8 +37,10 @@ const routeTree = rootRoute.addChildren([
   inboxRoute,
   integrationsRoute,
   codingAgentsRoute,
-  missionsRoute.addChildren([missionDetailRoute]),
+  missionsRoute.addChildren([missionsIndexRoute, missionDetailRoute]),
   chatRoute.addChildren([chatSessionRoute]),
+  chatsRoute,
+  transcriptRoute,
   whiteboardRoute.addChildren([whiteboardSessionRoute]),
 ]);
 

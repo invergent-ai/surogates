@@ -24,6 +24,10 @@
 # exec's first read among them, so no program in a chat's folder could run. Its .debs
 # come from Launchpad, which keeps every published version, and are checked by hash.
 ARG KERNEL=7.0.0-34-generic
+# The guest's revision, in the text images/guest/inputs.sh hashes: raise it to publish a new
+# image with what its unpinned bases (python:3.12-slim, ubuntu:24.04, uv), apt, pip and npm
+# give today, since an image is published once for its key and never rebuilt otherwise.
+ARG GUEST_REVISION=1
 
 # ── Python dependencies: the data libraries ──────────────────────────
 FROM python:3.12-slim AS python-deps
@@ -177,8 +181,11 @@ ADD --checksum=sha256:6228b31dd28232ee2823a0fc68744c5857eb53e96c3d8d12c594112e93
     https://launchpad.net/ubuntu/+archive/primary/+files/linux-tools-7.0.0-34-generic_7.0.0-34.34~24.04.1_amd64.deb /tmp/tools.deb
 ADD --checksum=sha256:951c54d2fcbfa11a6bfe95614c8cd7d3d0135b42efc613c0b5726691c9525ca5 \
     https://launchpad.net/ubuntu/+archive/primary/+files/linux-hwe-7.0-tools-7.0.0-34_7.0.0-34.34~24.04.1_amd64.deb /tmp/hwe-tools.deb
+# Of the modules, only those vm/init loads: the kernel loads no others (modules_disabled),
+# and the rest, compressed already, would add 170 MB to the download.
 RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel \
-    && dpkg-deb -x /tmp/tools.deb /tools && dpkg-deb -x /tmp/hwe-tools.deb /tools
+    && dpkg-deb -x /tmp/tools.deb /tools && dpkg-deb -x /tmp/hwe-tools.deb /tools \
+    && find /kernel/lib/modules/*/kernel -type f ! -name virtiofs.ko.zst ! -name overlay.ko.zst -delete
 
 # ── The guest-kernel rule (BPF-LSM), compiled against the pinned kernel's BTF ──
 # The BTF is the pinned vmlinuz's own: its zstd payload is a vmlinux that keeps .BTF.
@@ -268,7 +275,7 @@ RUN --mount=type=bind,from=guest,target=/tree \
     && mke2fs -q -t ext4 -O ^has_journal -L surogate-guest -N $((inodes * 6 / 5)) \
         -d /tree /out/rootfs.img "$((blocks * 11 / 10 + 64))M" \
     && zstd -q -T0 -19 --rm /out/rootfs.img \
-    && cp "/boot/vmlinuz-$KERNEL" /out/vmlinuz && chmod 0644 /out/vmlinuz
+    && zstd -q -19 -o /out/vmlinuz.zst "/boot/vmlinuz-$KERNEL"
 
 FROM scratch AS guest-disk
 COPY --from=guest-disk-build /out/ /

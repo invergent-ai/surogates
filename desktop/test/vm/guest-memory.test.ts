@@ -10,7 +10,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { bootLinux } from "../../src/vm/linux.js";
 import { Guest, type VmOptions } from "../../src/vm/manager.js";
-import { agentDisk, folderOf, IMAGE, ROOT, signal, until, USER } from "./guest-support.js";
+import { agentDisk, folderOf, IMAGE, KVM, needsKvm, ROOT, signal, until, USER } from "./guest-support.js";
+
+beforeAll(needsKvm);
 
 describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest's memory", { timeout: 60_000 }, () => {
   let dir: string;
@@ -23,7 +25,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest's memory", { t
     mkdirSync(join(dir, "folder"));
     options = {
       kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
-      run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER,
+      run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER, kvm: KVM,
     };
     guest = await Guest.boot(bootLinux, options);
     expect(await guest.ready(ROOT, folderOf(join(dir, "folder")))).toBeNull();

@@ -6,10 +6,21 @@ import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { expect } from "vitest";
+
 import type { HostUser, Share } from "../../src/guest/protocol.js";
+import { emulation } from "../../src/vm/linux.js";
 import type { Folder } from "../../src/vm/manager.js";
 
 export const IMAGE = process.env.SUROGATE_VM_IMAGE ?? fileURLToPath(new URL("../../../images/guest/out", import.meta.url));
+// The device each guest opens for KVM: /dev/kvm, unless the job hides it.
+export const KVM = process.env.SUROGATE_VM_KVM;
+// Each file's beforeAll. Without KVM they fail, as Section 11 has a VM job do: a job runs them
+// emulated only by naming a device that does not exist in SUROGATE_VM_KVM, as the app takes it.
+export function needsKvm(): void {
+  if (process.env.SUROGATE_VM_TESTS !== "1" || KVM !== undefined) return;
+  expect(emulation(), "the VM tests need KVM, or SUROGATE_VM_KVM naming a device that does not exist to run them emulated").toBeNull();
+}
 const AGENT_DISK = fileURLToPath(new URL("../../vm/agent-disk.sh", import.meta.url));
 export const ROOT = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
 export const OTHER = "7d8e9f00-1a2b-4c3d-8e4f-5a6b7c8d9e0f";

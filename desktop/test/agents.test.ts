@@ -5,12 +5,12 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  type Agent, AgentStore, canonicalOrigin, connectAgent, consoleFor, describeAgent, type Get, linkUrl, linksFor, partitionFor, readAgent,
+  type Agent, AgentStore, canonicalOrigin, connectAgent, describeAgent, type Get, linkUrl, linksFor, partitionFor, readAgent,
 } from "../src/shell/agents.js";
 
 const CONFIG = { agent_id: "agent-1", desktop_sessions: true, multi_session: true, self_registration_enabled: false };
 const AGENT: Agent = {
-  origin: "https://agent.example.com", agentId: "agent-1", name: "agent.example.com", desktopSessions: true, multiSession: true,
+  origin: "https://agent.example.com", agentId: "agent-1", name: "agent.example.com", desktopSessions: true, multiSession: true, consoleUrl: null,
 };
 
 // A server as the shell's GET meets it: *hops* are the redirects it sends, each told to the
@@ -92,6 +92,10 @@ describe("connecting to the agent", () => {
     ["a flag that is no boolean", JSON.stringify({ ...AGENT, multiSession: "yes" })],
     ["plain http to another computer", JSON.stringify({ ...AGENT, origin: "http://evil.example" })],
     ["an origin with a path", JSON.stringify({ ...AGENT, origin: "https://agent.example.com/chat" })],
+    ["no console", JSON.stringify({ ...AGENT, consoleUrl: undefined })],
+    ["a null origin", JSON.stringify({ ...AGENT, origin: null })],
+    ["a console that is no origin", JSON.stringify({ ...AGENT, consoleUrl: "javascript:alert(1)" })],
+    ["a console on this computer, for an agent that is not", JSON.stringify({ ...AGENT, consoleUrl: "http://localhost:5173" })],
   ])("starts over when the kept agent has %s, which is said", (_name, held) => {
     writeFileSync(join(dir, "agent.json"), held);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -196,26 +200,42 @@ describe("what the shell says about this computer and the agent", () => {
 });
 describe("the console an agent's user is sent to", () => {
   it.each([
-    ["https://acme.surogate.ai", "https://ops.surogate.ai"],
-    ["https://surogate.ai", null],
-    ["https://agent.example.com", null],
-    ["https://agents.acme.local", null],
-    ["https://evilsurogate.ai", null],
-  ])("for %s is %s", (origin, console) => {
-    expect(consoleFor(origin)).toBe(console);
+    ["https://ops.surogate.ai", "https://ops.surogate.ai"],
+    ["https://Ops.Acme.local/", "https://ops.acme.local"],
+    ["https://ops.acme.local:8443/console", "https://ops.acme.local:8443"],
+    ["http://localhost:5173", null],
+    [undefined, null],
+    [null, null],
+    ["", null],
+    [42, null],
+    ["http://ops.acme.com", null],
+    ["javascript:alert(1)", null],
+    ["file:///etc/passwd", null],
+    ["https://user:secret@ops.acme.com", null],
+    ["/console", null],
+    ["ops.acme.com", null],
+  ])("is %s's origin, %s", async (named, console) => {
+    const { get } = answering({ ...CONFIG, console_url: named });
+    expect((await readAgent("https://agent.example.com", get)).consoleUrl).toBe(console);
+  });
+
+  it("is plain http on this computer only for an agent on this computer too, as its development servers are", async () => {
+    const { get } = answering({ ...CONFIG, console_url: "http://localhost:5173/work" });
+    expect((await readAgent("http://127.0.0.1:8000", get)).consoleUrl).toBe("http://localhost:5173");
   });
 });
 describe("the links the user menu and Settings open", () => {
-  it("lead into the console's settings for an agent surogate.ai hosts", () => {
-    expect(linksFor("https://acme.surogate.ai")).toEqual({
+  it("lead into the console's settings where the agent names its console", () => {
+    expect(linksFor({ ...AGENT, consoleUrl: "https://ops.acme.local" })).toEqual({
       help: "https://docs.surogate.ai/work/",
-      usage: "https://ops.surogate.ai/work/settings/usage",
-      billing: "https://ops.surogate.ai/work/settings/billing",
+      usage: "https://ops.acme.local/work/settings/usage",
+      billing: "https://ops.acme.local/work/settings/billing",
     });
   });
 
-  it("are help alone for an install of its own, and before there is an agent", () => {
-    expect(linksFor("https://agent.example.com")).toEqual({ help: "https://docs.surogate.ai/work/" });
+  it("are help alone where the agent names no console, surogate.ai's own included, and before there is an agent", () => {
+    expect(linksFor(AGENT)).toEqual({ help: "https://docs.surogate.ai/work/" });
+    expect(linksFor({ ...AGENT, origin: "https://acme.surogate.ai" })).toEqual({ help: "https://docs.surogate.ai/work/" });
     expect(linksFor(null)).toEqual({ help: "https://docs.surogate.ai/work/" });
   });
 });

@@ -295,7 +295,7 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
   },
 
   async getWorkspaceTree(input) {
-    return await workspaceApi.getWorkspaceTree(input.sessionId);
+    return await workspaceApi.getWorkspaceTree(input.sessionId, input);
   },
 
   async getWorkspaceFile(input) {
@@ -308,11 +308,17 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
       input.file,
       input.directory,
       input.signal,
+      input.onWaiting,
     );
   },
 
   async deleteWorkspaceFile(input) {
-    await workspaceApi.deleteFile(input.sessionId, input.path, input.signal);
+    await workspaceApi.deleteFile(
+      input.sessionId,
+      input.path,
+      input.signal,
+      input.onWaiting,
+    );
   },
 
   getWorkspaceDownloadUrl(input) {

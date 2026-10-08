@@ -13,7 +13,9 @@ import { BOOT_ID } from "../../src/binding/folder.js";
 import type { Operation, Outcome } from "../../src/link/protocol.js";
 import { VmClient } from "../../src/vm/client.js";
 import { VmExecutor } from "../../src/vm/executor.js";
-import { agentDisk, background, IMAGE, signal, USER } from "./guest-support.js";
+import { agentDisk, background, IMAGE, KVM, needsKvm, signal, USER } from "./guest-support.js";
+
+beforeAll(needsKvm);
 
 describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the guest", { timeout: 60_000 }, () => {
   const CHAT = "5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c";
@@ -35,7 +37,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     vm = new VmClient({
       vm: {
         kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
-        run, console: join(dir, "console.log"), user: USER,
+        run, console: join(dir, "console.log"), user: USER, kvm: KVM,
       },
     });
     const { dev, ino } = statSync(folder);

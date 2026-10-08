@@ -6,12 +6,18 @@ const DRAIN_SECONDS = 0.25;
 const SNAP_LAG = 800;
 const MAX_FRAME_DT = 0.1;
 
+// A host that offers Reduced motion, as Surogate Desktop's Settings do, says so on the document's
+// root: a streaming answer then shows as it comes, with no reveal.
+const reducedMotion = (): boolean =>
+  typeof document !== "undefined" && document.documentElement.dataset.motion === "reduced";
+
 /**
  * Smooths a streaming string into a steady character-by-character reveal,
  * decoupling render cadence from token arrival. The reveal accelerates when
- * the backlog grows and decelerates when it drains.
+ * the backlog grows and decelerates when it drains. Under Reduced motion it is the string itself.
  */
 export function useSmoothStream(target: string, isStreaming: boolean): string {
+  const instant = reducedMotion();
   const [displayedLen, setDisplayedLen] = useState<number>(() =>
     isStreaming ? 0 : target.length,
   );
@@ -23,7 +29,7 @@ export function useSmoothStream(target: string, isStreaming: boolean): string {
     setDisplayedLen((cur) => (cur > target.length ? target.length : cur));
   }, [target]);
 
-  const isActive = isStreaming || displayedLen < target.length;
+  const isActive = !instant && (isStreaming || displayedLen < target.length);
 
   useEffect(() => {
     if (!isActive) return;
@@ -62,7 +68,7 @@ export function useSmoothStream(target: string, isStreaming: boolean): string {
     return () => cancelAnimationFrame(raf);
   }, [isActive]);
 
-  return displayedLen >= target.length
+  return instant || displayedLen >= target.length
     ? target
     : target.slice(0, displayedLen);
 }

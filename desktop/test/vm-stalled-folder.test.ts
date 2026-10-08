@@ -46,7 +46,7 @@ const fakeVm = (roots: ControlRoots): BootVm => async () => {
   const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots, { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill });
   createInterface({ input: guest }).on("line", (line) => control.receive(line));
   control.hello();
-  return { control: host, net, exited, share: async () => ({ kind: "virtiofs", tag: "r1" }), unshare: async () => {}, kill };
+  return { control: host, net, exited, emulated: null, share: async () => ({ kind: "virtiofs", tag: "r1" }), unshare: async () => {}, kill };
 };
 
 // *answer*, or "no answer" once *ms* pass.

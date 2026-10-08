@@ -58,7 +58,8 @@ export class FakeAgent {
   signedInAgoS = 0;
   // True: the agent has no device left to restore.
   gone = false;
-  // Where /auth/config redirects, and where the web client's pages redirect, as a moved agent or a sign-on gateway does.
+  // Where /auth/config redirects, and where the web client's pages redirect, as a moved agent or a sign-on gateway does:
+  // every page but the one it redirects to.
   configRedirect: string | null = null;
   pagesRedirect: string | null = null;
   // When the agent revoked the computer, as its device list says; null while it is active.
@@ -77,6 +78,8 @@ export class FakeAgent {
   meStatus = 200;
   // While set, the web client's page loads only once it settles.
   pagesHeld: Promise<void> | null = null;
+  // The web client's own HTML, served in place of the page standing for it.
+  page: string | null = null;
   // What the app's OAuth calls sent, form by form.
   readonly oauth: Array<Record<string, string>> = [];
   private readonly codes = new Map<string, { challenge: string; redirectUri: string }>();
@@ -210,12 +213,14 @@ export class FakeAgent {
       return;
     }
     await this.pagesHeld;
-    if (this.pagesRedirect && !path.startsWith("/api/")) {
-      response.writeHead(302, { location: this.pagesRedirect }).end();
+    const redirected = this.pagesRedirect === null ? null : new URL(this.pagesRedirect, "http://agent");
+    if (redirected && !path.startsWith("/api/") && redirected.pathname + redirected.search !== path) {
+      response.writeHead(302, { location: redirected.href }).end();
       return;
     }
     const served =this.projects === null ? "" : `<script>(${serveProjects.toString()})(${JSON.stringify(this.projects).replace(/</g, "\\u003c")}, ${this.registerAfterMs})</script>`;
-    response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(`<!doctype html><title>Fake agent</title><p>The web client</p>${served}`);
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
+      .end(this.page ?? `<!doctype html><title>Fake agent</title><p>The web client</p>${served}`);
   }
 
   /** A new item in the user's inbox, as the agent makes one, told on every inbox stream open: its id. */

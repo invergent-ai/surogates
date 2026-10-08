@@ -14,8 +14,10 @@ import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
 import { vmOptions } from "../../src/vm/client.js";
 import { VmManager, type VmOptions } from "../../src/vm/manager.js";
 import {
-  agentDisk, alive, background, FIRST_UID, folderOf, IMAGE, incompat, newestDaemon, OTHER, ROOT, shareDaemons, signal, STUCK, until, USER,
+  agentDisk, alive, background, FIRST_UID, folderOf, IMAGE, incompat, KVM, needsKvm, newestDaemon, OTHER, ROOT, shareDaemons, signal, STUCK, until, USER,
 } from "./guest-support.js";
+
+beforeAll(needsKvm);
 
 describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeout: 60_000 }, () => {
   let dir: string;
@@ -30,7 +32,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     for (const name of ["a", "b"]) mkdirSync(join(dir, name));
     options = {
       kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
-      run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER,
+      run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER, kvm: KVM,
     };
     managers = [];
   });
@@ -66,6 +68,22 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     expect(await op(OTHER, join(dir, "b"), "run", { command: "pwd; id -u", workdir: null, timeout: 10 })).toEqual({
       ok: { output: `${join(dir, "b")}\n${FIRST_UID + 1}\n`, returncode: 0, timed_out: false },
     });
+  });
+
+  it("starts QEMU and each folder's virtiofsd with none of the app's environment but its PATH", async () => {
+    // What a user's shell may export, and either program acts on, or a node it started would.
+    const exported = { OPENSSL_CONF: join(dir, "openssl.cnf"), NODE_OPTIONS: "--title=leaked", SUROGATE_EXPORTED: "1" };
+    Object.assign(process.env, exported);
+    try {
+      managers.push(new VmManager(options));
+      expect(await op(ROOT, join(dir, "a"), "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+    } finally {
+      for (const name of Object.keys(exported)) delete process.env[name];
+    }
+    // Each process's environment as it was started, as /proc keeps it.
+    const environ = (pid: number) => readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").filter(Boolean).map((entry) => entry.slice(0, entry.indexOf("=")));
+    expect(environ(qemuPid())).toEqual(["PATH"]);
+    expect(environ(newestDaemon(options.run))).toEqual(["PATH"]);
   });
 
   it("refuses a folder replaced since its chat was bound", async () => {
@@ -320,7 +338,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
   it("gives two apps' data folders two guests, and one's boot leaves the other's running", async () => {
     // A runtime folder of the test's own, as each app has its own data.
     const runtime = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-rt-"));
-    const env = { SUROGATE_VM_IMAGE: IMAGE, XDG_RUNTIME_DIR: runtime };
+    const env = { SUROGATE_VM_IMAGE: IMAGE, XDG_RUNTIME_DIR: runtime, ...(KVM === undefined ? {} : { SUROGATE_VM_KVM: KVM }) };
     const [one, two] = ["one", "two"].map((app) => new VmManager({ ...vmOptions(join(dir, app), USER, env), agentDisk: options.agentDisk }));
     try {
       const echo = (manager: VmManager | undefined, root: string, path: string, line: string) =>

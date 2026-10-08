@@ -31,7 +31,7 @@ const focused = (shell: ElectronApplication) =>
 function seedAgent(): void {
   mkdirSync(join(home, "surogate"), { recursive: true });
   writeFileSync(join(home, "surogate", "agent.json"), JSON.stringify({
-    origin: "http://127.0.0.1:9", agentId: "a", name: "127.0.0.1:9", desktopSessions: true, multiSession: true,
+    origin: "http://127.0.0.1:9", agentId: "a", name: "127.0.0.1:9", desktopSessions: true, multiSession: true, consoleUrl: null,
   }));
   writeFileSync(join(home, "surogate", "session.json"), JSON.stringify({
     origin: "http://127.0.0.1:9", agentId: "a", authTime: 1_700_000_000, plain: "surg_rt_seeded",
