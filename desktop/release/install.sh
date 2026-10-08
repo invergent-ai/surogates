@@ -24,9 +24,14 @@ settings() {
   # The folder of the lock that one install, update or removal at a time holds: root's alone, and
   # outside /opt/surogate, so that it is there before the tree is made and after it is removed.
   LOCKS=/run/surogate-desktop
-  # How long an apply waits for another's lock, and for each read of a file it is handed, in seconds.
+  # How long an apply waits, in seconds: for another's lock; for its read of a release's tarball;
+  # and for each other thing it has the asking user's own processes do, all of them small. That
+  # user can make each last its whole bound. The reads made with the lock held, a manifest's, a
+  # signature's and a tarball's, are together shorter than the wait for the lock: no one who was
+  # let apply once keeps the next one waiting until it gives up.
   LOCK_WAIT=300
-  READ_WAIT=300
+  READ_WAIT=120
+  SMALL_WAIT=5
   # Who reads the files an apply is handed, by user and group number, and by name: root, unless the
   # helper was run for another user (asker).
   READER=(0 0 root)
@@ -181,17 +186,18 @@ asker() {
     READER=("$uid" "$gid" "${entry%%:*}")
     # The reader is that user, and no other: setpriv takes digits for a user's name where one is so
     # named, and counts a number past the last one from 0 again.
-    [ "$(as_reader id -u 2>/dev/null):$(as_reader id -g 2>/dev/null)" = "$uid:$gid" ] || fail "$name names no user of this computer"
+    [ "$(as_reader "$SMALL_WAIT" id -u 2>/dev/null):$(as_reader "$SMALL_WAIT" id -g 2>/dev/null)" = "$uid:$gid" ] || fail "$name names no user of this computer"
     return 0
   done
 }
 
-# Runs "$@" as the user who reads an apply's files, in that user's own group and no other, with
-# none of the helper's open files, and for READ_WAIT at most: a filesystem of the user's own may
-# never answer. The command alone is killed then (--foreground): GNU's timeout otherwise kills
-# itself with it, and bash says so in words of its own.
+# Runs what follows $1 as the user who reads an apply's files, in that user's own group and no
+# other, with none of the helper's open files, and for $1 seconds at most: a filesystem of the
+# user's own may never answer, and the user can stop what runs as them. The command alone is killed
+# then (--foreground): GNU's timeout otherwise kills itself with it, and bash says so in words of
+# its own.
 as_reader() {
-  timeout --foreground -s KILL "$READ_WAIT" setpriv --reuid "${READER[0]}" --regid "${READER[1]}" --clear-groups "$@" 9<&- </dev/null
+  timeout --foreground -s KILL "$1" setpriv --reuid "${READER[0]}" --regid "${READER[1]}" --clear-groups "${@:2}" 9<&- </dev/null
 }
 
 # Refuses file $1, which the reader could not read as a file. Root never looks at a file it is
@@ -204,13 +210,13 @@ unread() {
 }
 
 # Copies file $1, which an apply was handed, to $2 in root's staging: read once, as the user who
-# asked, never through a link and never waiting on a pipe, whatever it has become since it was
-# named. A pipe gives an empty copy at once. No more than $3 bytes and one are copied, whatever the
+# asked, for $4 seconds at most, never through a link and never waiting on a pipe, whatever it has
+# become since it was named. A pipe gives an empty copy at once. No more than $3 bytes and one are copied, whatever the
 # file holds: root's end of the pipe counts them, and closes it. The reader counts nothing: a
 # count of its own would bound only a reader that kept to it. Whether the file held no more than $3.
 taken() {
-  local file="$1" copy="$2" most="$3" ends
-  as_reader dd if="$file" iflag=nofollow,nonblock bs=64K status=none 2>/dev/null \
+  local file="$1" copy="$2" most="$3" wait="$4" ends
+  as_reader "$wait" dd if="$file" iflag=nofollow,nonblock bs=64K status=none 2>/dev/null \
     | head -c "$(( most + 1 ))" 2>/dev/null >"$copy" && ends=(0 0) || ends=("${PIPESTATUS[@]}")
   # Root's own end of the pipe failed: the disk's fault, and not the file's.
   [ "${ends[1]}" -eq 0 ] || fail "$ROOT/staging could not be written: is its disk full?"
@@ -231,7 +237,7 @@ apply() {
   local manifest="$1" signature="$2" tarball="$3" file
   # A folder or a missing file is refused here; a link, as each is copied, below.
   for file in "$manifest" "$signature" ${tarball:+"$tarball"}; do
-    as_reader test -f "$file" || unread "$file"
+    as_reader "$SMALL_WAIT" test -f "$file" || unread "$file"
   done
   # Before the tree is touched: a removal that runs now takes it away, and this apply makes it again.
   lock
@@ -259,8 +265,8 @@ apply() {
   local work
   scratch work "$ROOT/staging/apply.XXXXXX"
   # A manifest is a line, and its signature Ed25519's 64 bytes.
-  taken "$manifest" "$work/manifest.json" 4096 || fail "$(named "$manifest") is not a downloaded release's file"
-  taken "$signature" "$work/manifest.json.sig" 64 || fail "$(named "$signature") is not a downloaded release's file"
+  taken "$manifest" "$work/manifest.json" 4096 "$SMALL_WAIT" || fail "$(named "$manifest") is not a downloaded release's file"
+  taken "$signature" "$work/manifest.json.sig" 64 "$SMALL_WAIT" || fail "$(named "$signature") is not a downloaded release's file"
 
   signed "$work/manifest.json" "$work/manifest.json.sig" || fail "the release's manifest is not signed by Surogate's release key"
   local release version sha256 size
@@ -291,7 +297,7 @@ apply() {
     [ "$room" -ge "$need" ] || fail "$ROOT needs $(( (need + 1023) / 1024 )) MB free to apply this release, and has $(( room / 1024 )) MB"
     # No more of the tarball is copied than that size, and a copy of any other size is refused
     # before it is read again for its hash.
-    taken "$tarball" "$work/release.tar.gz" "$size" && [ "$(stat -c %s "$work/release.tar.gz")" -eq "$size" ] \
+    taken "$tarball" "$work/release.tar.gz" "$size" "$READ_WAIT" && [ "$(stat -c %s "$work/release.tar.gz")" -eq "$size" ] \
       || fail "the downloaded release is not the $size bytes its manifest names"
     [ "$(sha256sum <"$work/release.tar.gz" | cut -d' ' -f1)" = "$sha256" ] || fail "the downloaded release is not the one its manifest names"
     # tar unpacks a set-id member without its bit (--no-same-permissions), so that only the

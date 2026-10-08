@@ -237,6 +237,15 @@ describe("the install script's release keys", () => {
   });
 });
 
+describe("the install script's waits", () => {
+  it("are shorter for all an apply reads with the lock held than for the lock: one who was let apply once keeps no other waiting until it gives up", () => {
+    const script = readFileSync(SCRIPT, "utf8");
+    const seconds = (name: string) => Number(new RegExp(`^  ${name}=(\\d+)$`, "m").exec(script)?.[1]);
+    // With the lock held, the asking user's processes read a manifest and a signature, each small, and a tarball.
+    expect(seconds("LOCK_WAIT")).toBeGreaterThan(2 * seconds("SMALL_WAIT") + seconds("READ_WAIT"));
+  });
+});
+
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --apply, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
   const { it: box, docker, root, as, releaseOf, manifestOf, current, versions } = lab(release, APPLY_LAB, OWN_DISK);
   // The files as the app leaves them for the helper: in the user's cache, copied into the container.
@@ -554,18 +563,38 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
   });
 
-  it("refuses a file whose read outlasts its bound, in a line of its own", () => {
+  it("refuses a file whose read outlasts its bound, in a line of its own, and bounds each read by its kind: a tarball's, and the small ones", () => {
     const tarball = releaseOf("1.0.0");
     manifestOf("1.0.0", tarball);
     stage(tarball);
-    // A helper that waits a millisecond for each read, and a tarball of 100 MB: one read at least is not done by then.
-    writeFileSync(join(box.dir, "hasty.sh"), withKeys(readFileSync(SCRIPT, "utf8")).replace("READ_WAIT=300", "READ_WAIT=0.001"), { mode: 0o755 });
-    expect(docker(["cp", join(box.dir, "hasty.sh"), `${box.container}:/opt/surogate-test/hasty.sh`]).status).toBe(0);
-    expect(root(`truncate -s 100M /home/tester/slow.tar.gz && /opt/surogate-test/hasty.sh --apply ${files(undefined, "/home/tester/slow.tar.gz")}`)).toMatchObject({
-      status: 1, stdout: "",
-      stderr: expect.stringMatching(/^Surogate Desktop: \/home\/tester\/(manifest\.json|manifest\.json\.sig|slow\.tar\.gz) is not a downloaded release's file\n$/),
-    });
-    expect(root("ls -A /opt/surogate/staging 2>/dev/null").stdout).toBe("");
+    // A helper that waits a moment too short for any read, for its tarball alone, and one that waits so for the others.
+    for (const [wait, cut] of [["READ_WAIT=120", "release.tar.gz"], ["SMALL_WAIT=5", "manifest.json"]] as const) {
+      const hasty = withKeys(readFileSync(SCRIPT, "utf8")).replace(wait, `${wait.split("=")[0]}=0.0001`);
+      expect(hasty).toContain(`${wait.split("=")[0]}=0.0001`);
+      writeFileSync(join(box.dir, "hasty.sh"), hasty, { mode: 0o755 });
+      expect(docker(["cp", join(box.dir, "hasty.sh"), `${box.container}:/opt/surogate-test/hasty.sh`]).status).toBe(0);
+      expect(root(`/opt/surogate-test/hasty.sh --apply ${files()}`), wait)
+        .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /home/tester/${cut} is not a downloaded release's file\n` });
+      expect(root("ls -A /opt/surogate/staging 2>/dev/null").stdout).toBe("");
+    }
+    // All that root has the asking user's processes do, in order, and for how many seconds each at
+    // most: as that user alone, in their own group and no other.
+    const user = Number(root("id -u tester").stdout);
+    const traced = root(`PKEXEC_UID=${user} strace -f -qq -v -s 300 -o /tmp/trace -e trace=execve /opt/surogate-test/install.sh --apply ${files()} >/dev/null && grep -F 'execve("/usr/bin/timeout"' /tmp/trace`);
+    expect(traced.status, traced.stderr).toBe(0);
+    const asked = traced.stdout.trim().split("\n").map((line) => [...(/\[(.*)\], \[/.exec(line)?.[1] ?? "").matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => match[1]).join(" "));
+    const as = `setpriv --reuid ${user} --regid ${user} --clear-groups`;
+    const read = "iflag=nofollow,nonblock bs=64K status=none";
+    expect(asked).toEqual([
+      `timeout --foreground -s KILL 5 ${as} id -u`,
+      `timeout --foreground -s KILL 5 ${as} id -g`,
+      `timeout --foreground -s KILL 5 ${as} test -f /home/tester/manifest.json`,
+      `timeout --foreground -s KILL 5 ${as} test -f /home/tester/manifest.json.sig`,
+      `timeout --foreground -s KILL 5 ${as} test -f /home/tester/release.tar.gz`,
+      `timeout --foreground -s KILL 5 ${as} dd if=/home/tester/manifest.json ${read}`,
+      `timeout --foreground -s KILL 5 ${as} dd if=/home/tester/manifest.json.sig ${read}`,
+      `timeout --foreground -s KILL 120 ${as} dd if=/home/tester/release.tar.gz ${read}`,
+    ]);
   });
 
   it("clears what a killed apply left in staging before it measures the room", () => {
