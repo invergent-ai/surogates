@@ -94,10 +94,12 @@ case "$VERB" in
     # it: a rollback takes only a release whose schema is the installed one's or later. Read as the
     # helper is: from the tarball unpacked whole, which is what an install leaves, and from a file
     # of the tree's own, asked in a command of its own as the helper's path is. The package is one
-    # JSON document: of two, each would name a schema.
+    # JSON document: of two, each would name a schema. And the schema is a whole number from 1 and
+    # below 10^15 as it rounds, which is what is signed: 999999999999999.99, compared as it is
+    # written, is below 10^15, and is written 1000000000000000.
     package="surogate-desktop-$VERSION-linux-x64/resources/app/package.json"
     [ -f "$unpacked/$package" ] && [ "$(realpath "$unpacked/$package")" = "$tree/$package" ] || fail "the tarball's resources/app/package.json names no stateSchema"
-    schema="$(jq -es 'select(length == 1) | .[0].stateSchema | select(type == "number" and . >= 1 and . == floor and . < 1e15) | floor' "$unpacked/$package" 2>/dev/null)" \
+    schema="$(jq -es 'select(length == 1) | .[0].stateSchema | select(type == "number" and . == floor and (floor | . >= 1 and . < 1e15)) | floor' "$unpacked/$package" 2>/dev/null)" \
       || fail "the tarball's resources/app/package.json names no stateSchema"
     # All that is read of the unpacked tarball is read by here. It is removed before anything is
     # signed, and from its removal on no signal ends the signing: one would leave a manifest

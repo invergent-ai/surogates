@@ -234,6 +234,28 @@ describe("the desktop's release manifest", () => {
     expect(Number.isInteger(stateSchema) && (stateSchema as number) >= 1).toBe(true);
   });
 
+  it("signs the state schemas the install script's own check takes, and no other: to the last below 10^15, and none that reads as below it only as it is written", () => {
+    // The install script's check of a manifest's fields, from its functions without its last line.
+    const taken = () => spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && release_of "$2"`, "_", join(dir, "release", "install.sh"), join(out, "manifest.json")], { encoding: "utf8" });
+    // The app's package with the number as it is written: this test's own JSON would round it first.
+    const written = (schema: string) => (top: string) => writeFileSync(join(top, "resources", "app", "package.json"), `{"version":"1.2.3","stateSchema":${schema}}\n`);
+    for (const [schema, signedAs] of [["1", 1], ["1.0", 1], ["999999999999999", 999999999999999]] as const) {
+      again();
+      packed(dir, out, "1.2.3", written(schema));
+      expect(sign().status, schema).toBe(0);
+      expect((JSON.parse(readFileSync(join(out, "manifest.json"), "utf8")) as { stateSchema: number }).stateSchema, schema).toBe(signedAs);
+      expect(taken(), schema).toMatchObject({ status: 0, stdout: `1.2.3 ${sha256(readFileSync(tarball()))} ${statSync(tarball()).size}\n`, stderr: "" });
+    }
+    // A number is what it rounds to: 999999999999999.99 is 10^15. Compared as it is written, it
+    // would pass for less, and be signed as 1000000000000000, which no install takes.
+    for (const schema of ["999999999999999.99", "1000000000000000", "1e15", "0", "0.5", "1.5", "-1"]) {
+      again();
+      packed(dir, out, "1.2.3", written(schema));
+      expect(sign(), schema).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: the tarball's resources/app/package.json names no stateSchema\n" });
+      expect(readdirSync(out), schema).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+    }
+  });
+
   it("signs a manifest that the install script's own checks take: its signature, and each of its fields", () => {
     expect(sign().status).toBe(0);
     // What every install and every installed helper checks a release by, from the script's

@@ -173,7 +173,8 @@ one_object() {
 # A signed manifest's fields: a release of this channel for this platform, its tarball where every
 # release's is, its hash, each whole (jq's $ also matches before a last newline), its tarball's
 # size in bytes, a whole number above 0 and below 10^15, which jq writes in digits alone, and the
-# state schema of what the app keeps in each user's home, a whole number from 1 and below 10^15.
+# state schema of what the app keeps in each user's home, a whole number from 1 and below 10^15
+# as it rounds: jq compares a number as it is written, and 999999999999999.99 is 10^15.
 # The manifest is one JSON object on one line (one_object). Printed as "<version> <sha256> <size>".
 release_of() {
   one_object "$1" | jq -er --arg channel "$CHANNEL" '
@@ -182,7 +183,7 @@ release_of() {
       and .url == "releases/\(.version)/surogate-desktop-\(.version)-linux-x64.tar.gz"
       and (.sha256 | type == "string" and test("\\A[0-9a-f]{64}\\z"))
       and (.size | type == "number" and . > 0 and . == floor and . < 1e15)
-      and (.stateSchema | type == "number" and . >= 1 and . == floor and . < 1e15))
+      and (.stateSchema | type == "number" and . == floor and (floor | . >= 1 and . < 1e15)))
     | "\(.version) \(.sha256) \(.size | floor)"' 2>/dev/null
 }
 
@@ -210,7 +211,7 @@ reads_state() {
   local installed schema now
   installed="$(installed_version)"
   [ -n "$installed" ] || fail "Surogate Desktop is not installed: run its install script first"
-  now="$(one_object "$ROOT/current/release.json" | jq -er '.stateSchema | select(type == "number" and . >= 1 and . == floor and . < 1e15) | floor' 2>/dev/null)" \
+  now="$(one_object "$ROOT/current/release.json" | jq -er '.stateSchema | select(type == "number" and . == floor and (floor | . >= 1 and . < 1e15)) | floor' 2>/dev/null)" \
     || fail "the installed $installed names no state schema: run Surogate Desktop's install script again"
   schema="$(jq -r '.stateSchema | floor' "$1")"
   [ "$schema" -ge "$now" ] \

@@ -893,6 +893,27 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     }
   });
 
+  it("takes a state schema to the last below 10^15, and none that reads as below it only as it is written: a number is what it rounds to, and a signing writes it so", () => {
+    const tarball = releaseOf("1.0.0");
+    const object = manifestOf("1.0.0", tarball).toString().trimEnd();
+    expect(object.endsWith('"stateSchema":1}')).toBe(true);
+    // A manifest with the number as it is written, signed: this test's own JSON would round it first.
+    const withSchema = (schema: string) => {
+      const manifest = `${object.slice(0, -2)}${schema}}\n`;
+      writeFileSync(join(box.dir, "manifest.json"), manifest);
+      writeFileSync(join(box.dir, "manifest.json.sig"), sign(null, Buffer.from(manifest), keys.privateKey));
+      return apply(tarball);
+    };
+    // 999999999999999.99 is 10^15: compared as written, it passed for less.
+    for (const schema of ["999999999999999.99", "1000000000000000", "1e15", "0.5", "1.5", "0"]) {
+      expect(withSchema(schema), schema).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's manifest is not a release of Surogate Desktop for this computer\n" });
+    }
+    expect(root("test -e /opt/surogate/current").status).toBe(1);
+    for (const schema of ["999999999999999", "1.0"]) {
+      expect(withSchema(schema), schema).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    }
+  });
+
   it("refuses what is no file where the helper's mark goes, on a computer with no helper and on one that has one, before it switches to any version: a first install is never left with a version and no helper", () => {
     const tarball = releaseOf("1.0.0");
     manifestOf("1.0.0", tarball);
