@@ -17,6 +17,10 @@
 # Environment for send: S3_ENDPOINT (R2's https://<account>.r2.cloudflarestorage.com), S3_BUCKET,
 # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
 set -euo pipefail
+# All it reads, it reads in no locale and no language of its caller's: in most locales, more than
+# ten characters are digits, and a version's are the ten.
+export LC_ALL=C LANG=C
+unset LANGUAGE
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 VERB="${1:-}"

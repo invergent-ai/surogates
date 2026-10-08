@@ -160,11 +160,13 @@ whole() {
 # would hold a lock on a folder that is gone. Root makes the folder itself, closed to everyone else
 # from its first moment. One that is there already is used only when it is as root makes it: a
 # folder, root's, with nothing for anyone else, and no link. Any other is refused and never taken
-# over: what someone else could have put in it would still be there. The lock is waited for
-# LOCK_WAIT at most, and held until this script ends or closes it.
+# over: what someone else could have put in it would still be there. Its kind, its mode and its
+# owner are read as numbers alone (41c0: a folder, at 0700; and 0, root's): a tool's word for a
+# folder is another word in another language. The lock is waited for LOCK_WAIT at most, and held
+# until this script ends or closes it.
 lock() {
   mkdir -m 0700 "$LOCKS" 2>/dev/null || true
-  [ "$(stat -c '%F %u %a' -- "$LOCKS" 2>/dev/null)" = "directory 0 700" ] \
+  [ "$(stat -c '%f %u' -- "$LOCKS" 2>/dev/null)" = "41c0 0" ] \
     || fail "$LOCKS must be a folder of root's own that no one else opens (mode 700), and no link: remove what is there, and run this again"
   exec 9>>"$LOCKS/lock"
   flock -w "$LOCK_WAIT" 9 || fail "another install or update of Surogate Desktop is still running: try again once it has finished"
@@ -530,6 +532,15 @@ install_all() {
   say "open Surogate from your applications, or run surogate"
 }
 
+# Whether $1 is an http or https URL with no white space in it, read byte for byte in no locale of
+# its caller's: what is a base is then the same for whoever runs the script, and for root's part
+# of it. In most locales, more characters than ASCII's six are white space, and bytes that are no
+# characters match nothing.
+http_url() {
+  local LC_ALL=C
+  [[ "$1" =~ ^https?://[^[:space:]]+$ ]]
+}
+
 # An XDG folder: $1 when it is absolute, as the XDG specification reads it, else the default $2.
 xdg() {
   if [[ "${1:-}" == /* ]]; then echo "$1"; else echo "$2"; fi
@@ -606,6 +617,13 @@ uninstall() {
 main() {
   set -Eeuo pipefail
   umask 022
+  # As root, it reads what the system's tools say, and has them read what they are handed, in no
+  # locale and no language of its caller's, which sudo and pkexec both pass on: in another
+  # language a tool's words are other words; in most locales, more than ten characters are digits;
+  # and a name's other letters are written as they are. LANG too: Ubuntu 26.04's own tools take
+  # their language from it, whatever LC_ALL names. And LANGUAGE goes: some take theirs from it
+  # before any locale.
+  [ "$EUID" -ne 0 ] || { export LC_ALL=C LANG=C; unset LANGUAGE; }
   settings
   trap cleanup EXIT
   stoppable
@@ -613,10 +631,8 @@ main() {
   trap '[ "$BASH_SUBSHELL" -gt 0 ] || unexpected "$BASH_COMMAND"' ERR
   case "${1:-}" in
     --apply)
-      # The helper runs the system's own tools, wherever its caller's PATH points, and reads what
-      # it is handed in no locale of its caller's, which pkexec and sudo both pass on: in most, more
-      # than ten characters are digits, and a name's other letters are written as they are.
-      export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C
+      # The helper runs the system's own tools, wherever its caller's PATH points.
+      export PATH=/usr/sbin:/usr/bin:/sbin:/bin
       [ "$#" -eq 4 ] && [ -n "$4" ] || fail "usage: surogate-apply-update --apply <manifest> <signature> <tarball>"
       [ "$EUID" -eq 0 ] || fail "applying a release needs administrator rights"
       supported
@@ -626,7 +642,7 @@ main() {
     --base | "")
       local base=https://surogate.ai
       if [ "${1:-}" = --base ]; then
-        [ "$#" -eq 2 ] && [[ "$2" =~ ^https?://[^[:space:]]+$ ]] || fail "usage: install.sh --base <http or https URL>"
+        [ "$#" -eq 2 ] && http_url "$2" || fail "usage: install.sh --base <http or https URL>"
         base="${2%/}"
       fi
       supported

@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("../release/install.sh", import.meta.url));
+const PUBLISH = fileURLToPath(new URL("../release/publish.sh", import.meta.url));
 const RELEASES = ["24.04", "26.04"] as const;
 const ENABLED = process.env.SUROGATE_INSTALL_TESTS === "1";
 // The longest one docker call may take: an install with apt's downloads takes under a minute.
@@ -992,6 +993,17 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("test -e /opt/surogate/current").status).toBe(1);
   });
 
+  // The script that publishes a release, beside the install script. Its other tests are
+  // release-publish.test.ts's: this one needs a locale in which more than ten characters are
+  // digits, as this computer's en_US.UTF-8 is.
+  it("takes none but the ten digits for a version's, in whatever locale a release is published", () => {
+    expect(docker(["cp", PUBLISH, `${box.container}:/opt/surogate-test/publish.sh`]).status).toBe(0);
+    for (const version of ["1.0.\u00b2", "1.\u0661.0", "\uff11.0.0"]) for (const verb of ["sign", "send"]) {
+      expect(docker(["exec", "-e", "LC_ALL=en_US.UTF-8", "-e", "DESKTOP_RELEASE_KEY=none", box.container, "bash", "/opt/surogate-test/publish.sh", verb, version, "/tmp"]), `${verb} ${version}`)
+        .toMatchObject({ status: 2, stdout: "", stderr: "usage: publish.sh sign|send <x.y.z> <out>\n" });
+    }
+  });
+
   it("leaves nothing in staging when a signal stops it: a terminal closed, Ctrl+C, a kill", () => {
     const first = releaseOf("1.0.0");
     manifestOf("1.0.0", first);
@@ -1077,11 +1089,14 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   // A desktop's baseline: sudo for its administrator, curl, AppArmor's parser, polkit, the system
   // bus and the kvm group; and another user of the computer. The container cannot load a profile
   // into the kernel, so its apparmor_parser parses one as the release's own parser reads it, and
-  // stops there.
+  // stops there. With them, Ubuntu's German language pack, in which the system's tools say what
+  // they say in German to whoever's desktop is; and strace, for the test that reads what the
+  // script starts.
   const { it: box, docker, root, as, releaseOf, manifestOf, current, versions } = lab(release, [
     "RUN apt-get update && apt-get install -y --no-install-recommends sudo curl ca-certificates apparmor polkitd pkexec dbus",
     "RUN groupadd --system kvm && useradd -m -s /bin/bash -G sudo tester && useradd -m -s /bin/bash other && echo 'tester ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/tester",
     `RUN echo '#!/bin/sh' >/usr/local/sbin/apparmor_parser && echo 'said=$(/usr/sbin/apparmor_parser --skip-kernel-load "$@" 2>&1) || { echo "$said" >&2; exit 1; }' >>/usr/local/sbin/apparmor_parser && chmod 755 /usr/local/sbin/apparmor_parser`,
+    "RUN apt-get update && apt-get install -y --no-install-recommends language-pack-de strace",
   ], ["--network", "host"]);
   let server: ChildProcess;
   let base: string;
@@ -1096,7 +1111,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     writeFileSync(join(www(), "desktop", "latest.json"), manifest);
     copyFileSync(join(box.dir, "manifest.json.sig"), join(www(), "desktop", "latest.json.sig"));
   };
-  const install = () => as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- --base ${base}`);
+  const install = (env = "") => as("tester", `curl -fsSL ${base}/desktop/install.sh | ${env} bash -s -- --base ${base}`);
   const uninstall = (env = "") => as("tester", `curl -fsSL ${base}/desktop/install.sh | ${env} bash -s -- --uninstall`);
 
   beforeAll(async () => {
@@ -1123,9 +1138,22 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       'ID=ubuntu\nVERSION_ID="22.04"\nVERSION="22.04.5 LTS (Jammy Jellyfish)"',
       'ID=debian\nVERSION_ID="12"\nVERSION="12 (bookworm)"',
     ];
+    const unsupported = "Surogate Desktop: Surogate Desktop supports Ubuntu 24.04 LTS or a later LTS release (x64)\n";
     for (const osRelease of others) {
       expect(root(`printf '%s\\n' '${osRelease}' >/etc/os-release`).status).toBe(0);
-      expect(install()).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: Surogate Desktop supports Ubuntu 24.04 LTS or a later LTS release (x64)\n" });
+      expect(install()).toMatchObject({ status: 1, stdout: "", stderr: unsupported });
+    }
+    // What is a base is read byte for byte, the same in every locale of its caller's: white space
+    // is ASCII's six characters and no other, and bytes that are no letters are bytes. On this
+    // computer, which it does not support, a base it takes gets as far as that refusal.
+    for (const locale of ["C", "C.UTF-8", "de_DE.UTF-8"]) {
+      const based = (url: string) => as("tester", `curl -fsSL ${base}/desktop/install.sh | LC_ALL=${locale} bash -s -- --base ${url}`);
+      for (const url of ["$'http://b\\303\\274cher.example'", "$'http://surogate.example/\\343\\200\\200'", "$'http://surogate.example/\\377\\376'"]) {
+        expect(based(url), `${locale} ${url}`).toMatchObject({ status: 1, stdout: "", stderr: unsupported });
+      }
+      for (const url of ["'http://surogate.example/a b'", "$'http://surogate.example/a\\tb'", "$'http://surogate.example\\n'"]) {
+        expect(based(url), `${locale} ${url}`).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: usage: install.sh --base <http or https URL>\n" });
+      }
     }
     expect(root("cp /root/os-release /etc/os-release && test ! -e /opt/surogate && test ! -e /etc/surogate").status).toBe(0);
   });
@@ -1439,6 +1467,65 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     ]);
     expect(both.stdout).toBe("waiting 0, staged 1, applied 0, removed 0\nSurogate Desktop: 1.1.0 is installed\n--\nSurogate Desktop: removed from this computer\n");
     expect(root("test ! -e /opt/surogate && test ! -e /usr/local/bin/surogate").status).toBe(0);
+  });
+
+  // A desktop in German, as Ubuntu's installer sets one up: its locale, and the language of what
+  // every tool says, which sudo and pkexec both pass on to what they run as root.
+  const GERMAN = "LANG=de_DE.UTF-8 LANGUAGE=de";
+  // The system's tools do speak German there, to root too: the head of the one column of df's that the script reads.
+  const german = () => expect(as("tester", `${GERMAN} sudo df --output=avail -k /opt | head -n 1`).stdout.trim()).toBe("Verf.");
+
+  it("installs, installs again, applies an update and uninstalls for a user whose desktop is German, as it does in English", () => {
+    german();
+    publish("2.0.0");
+    const installed = install(GERMAN);
+    expect(installed.status, installed.stderr).toBe(0);
+    expect(installed.stdout).toContain("Surogate Desktop: 2.0.0 is installed\n");
+    expect(installed.stdout).toContain("Surogate Desktop: open Surogate from your applications, or run surogate\n");
+    expect(current()).toBe("/opt/surogate/versions/2.0.0");
+    expect(root("test -x /usr/local/bin/surogate && test -e /etc/surogate/install.json").status).toBe(0);
+    // Again, as a repair: here whole, it is not downloaded.
+    const repaired = install(GERMAN);
+    expect(repaired.status, repaired.stderr).toBe(0);
+    expect(repaired.stdout).not.toContain("downloading");
+    expect(repaired.stdout).toContain("Surogate Desktop: 2.0.0 is installed\n");
+    // An update the user downloaded, through the installed helper.
+    expect(as("tester", `${GERMAN} sudo /opt/surogate/bin/surogate-apply-update --apply ${staged("2.1.0")}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 2.1.0 is installed\n" });
+    expect(versions()).toEqual(["2.0.0", "2.1.0"]);
+    // And its removal. The user's data stays without a terminal to ask on: its folder's letters
+    // outside ASCII are said by their bytes, as root's part of the script says every name.
+    expect(as("tester", "mkdir -p Schl\u00fcssel/surogate").status).toBe(0);
+    const removed = uninstall(`${GERMAN} XDG_DATA_HOME=/home/tester/Schl\u00fcssel`);
+    expect(removed).toMatchObject({
+      status: 0, stderr: "",
+      stdout: "Surogate Desktop: removing it needs administrator rights: sudo asks for your password once\nSurogate Desktop: removed from this computer\n"
+        + "Surogate Desktop: kept tester's app data, in $'/home/tester/Schl\\303\\274ssel/surogate'\n",
+    });
+    expect(root("test ! -e /opt/surogate && test ! -e /usr/local/bin/surogate && test ! -e /etc/surogate && test -d /home/tester/Schl\u00fcssel/surogate").status).toBe(0);
+  });
+
+  it("starts the system's tools in no locale and no language of its caller's, in each part that runs as root: the install, an apply and the removal", () => {
+    german();
+    // What each of *tools* was started with, of all that names a locale or a language, as *part* started it for a caller whose desktop is German.
+    const started = (part: string, tools: string[]) => {
+      const traced = root(`${GERMAN} strace --seccomp-bpf -f -qq -v -s 256 -o /tmp/trace -e trace=execve ${part} >/dev/null 2>&1; echo "$?"; grep -E '^[0-9]+ +execve\\("[^"]*/(${tools.join("|")})", ' /tmp/trace`);
+      const [status, ...calls] = traced.stdout.trim().split("\n");
+      expect(status, part).toBe("0");
+      const named = calls.map((call) => [/^\d+ +execve\("[^"]*\/([^"/]+)", /.exec(call)?.[1], ...[...call.matchAll(/"((?:LANG|LANGUAGE|LC_\w+)=[^"]*)"/g)].map((match) => match[1]).sort()].join(" "));
+      expect([...new Set(named)].sort(), part).toEqual(tools.map((tool) => `${tool} LANG=C LC_ALL=C`).sort());
+    };
+    publish("2.0.0");
+    started(`/opt/surogate-test/install.sh --base ${base}`, ["apt-get", "curl", "jq"]);
+    started(`/opt/surogate-test/install.sh --apply ${staged("2.2.0")}`, ["flock", "df", "tar"]);
+    started("/opt/surogate-test/install.sh --uninstall", ["flock", "mountpoint", "rm"]);
+    expect(root("test ! -e /opt/surogate").status).toBe(0);
+  });
+
+  it("takes the folder of its lock for root's own by its numbers, whatever a folder is called in its caller's language", () => {
+    german();
+    // The lock by itself, from the script's functions without its last line, in German: its folder made, then found there.
+    const alone = root(`rm -rf ${LOCKS}; for found in no yes; do ${GERMAN} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && lock' || exit; done; stat -c '%f %u' ${LOCKS}`);
+    expect(alone).toMatchObject({ status: 0, stdout: "41c0 0\n", stderr: "" });
   });
 });
 
