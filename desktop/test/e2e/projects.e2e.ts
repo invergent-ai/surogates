@@ -343,13 +343,27 @@ describe("the Projects page", () => {
       expect(seen.map((channel, at) => Math.abs(channel - ring[at]!) <= 1)).toEqual([true, true, true]);
       return ring;
     };
-    const plain = await ringIsItsRows();
-    // The pointer over its row, whose colour is another.
-    await page.hover(row(REPORT));
-    await expect.poll(async () => (await ringed()).ring).not.toEqual(plain);
-    const hovered = await ringIsItsRows();
-    await page.mouse.move(0, 0);
-    await expect.poll(async () => (await ringed()).ring).toEqual(plain);
+    // In each theme, plain and then with the pointer over its row, whose colour is another: the other
+    // theme first, so that what follows is drawn in the page's own.
+    const own = await page.evaluate(() => document.documentElement.dataset.theme!);
+    const rings: Record<string, { plain: number[]; hovered: number[] }> = {};
+    for (const theme of [own === "dark" ? "light" : "dark", own]) {
+      await page.evaluate((chosen) => {
+        document.documentElement.dataset.theme = chosen;
+      }, theme);
+      await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).colorScheme), { timeout: 5_000 }).toBe(theme);
+      const plain = await ringIsItsRows();
+      await page.hover(row(REPORT));
+      await expect.poll(async () => (await ringed()).ring, { timeout: 5_000 }).not.toEqual(plain);
+      const hovered = await ringIsItsRows();
+      await page.mouse.move(0, 0);
+      await expect.poll(async () => (await ringed()).ring, { timeout: 5_000 }).toEqual(plain);
+      rings[theme] = { plain, hovered };
+    }
+    // Each theme's own colours were the ones drawn.
+    expect(rings.dark!.plain).not.toEqual(rings.light!.plain);
+    expect(rings.dark!.hovered).not.toEqual(rings.light!.hovered);
+    const { plain, hovered } = rings[own]!;
     await page.click("#open-projects");
     await expect.poll(() => Promise.all([REPORT, BUDGET, HIRING].map((id) => mark(`#cards [data-project="${id}"] .pmark`))), { timeout: 5_000 })
       .toEqual(sidebar);
