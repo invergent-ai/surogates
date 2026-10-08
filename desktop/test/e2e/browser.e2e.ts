@@ -188,6 +188,8 @@ async function browserSettings(): Promise<Page> {
     settings = app!.windows().find((window) => window.url().endsWith("/settings.html"));
     return settings !== undefined;
   }).toBe(true);
+  // Its nav is in its HTML: its script, which hears the click, has run once the page has loaded.
+  await settings!.waitForLoadState();
   await settings!.waitForSelector('.settings-nav [data-section="browser"]');
   await settings!.click('.settings-nav [data-section="browser"]');
   return settings!;
@@ -226,7 +228,7 @@ describe.skipIf(!run)("Custom… in Settings → Browser", () => {
     await pick(BROWSER!.executable);
     await expect.poll(kept, { timeout: 40_000 }).toContain('"choice": "custom"');
     expect(JSON.parse(kept()).executable).toBe(BROWSER!.executable);
-    expect(await settings.textContent("#browser-note")).not.toMatch(/cannot use|did not start/);
+    await expect.poll(() => settings.textContent("#browser-note")).not.toMatch(/cannot use|did not start/);
   }, 120_000);
 });
 
