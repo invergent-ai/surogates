@@ -5,7 +5,8 @@
 // (main.ts); the browser dies with it, as its pipe closes.
 
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { type BrowserContext, chromium, type Page } from "playwright-core";
@@ -97,21 +98,35 @@ function opened(context: BrowserContext): Promise<Page> {
   }).finally(settle);
 }
 
-// The processes on *profile*, by pid: each names it on its command line. None where /proc is not.
-function holding(profile: string): number[] {
+// How long a look at this computer's processes may take.
+const SCAN_MS = 1_000;
+// ponytail: the command lines that did not come within SCAN_MS, for the host's life: a process
+// blocked in the kernel (as on a dead mount) blocks its readers too, and each such read holds one of
+// libuv's four threads until it returns. They are not asked again.
+const unread = new Set<string>();
+
+/**
+ * The processes on *profile*, by pid: each names it on its command line. None where /proc is not.
+ * Read off the event loop, and passed over where one does not come within SCAN_MS.
+ */
+export async function holding(profile: string, read = (path: string) => readFile(path, "utf8")): Promise<number[]> {
   const named = [`${profile}\0`, `${profile}/`, `${profile} `];
-  try {
-    return readdirSync("/proc").filter((pid) => /^\d+$/.test(pid)).flatMap((pid) => {
-      try {
-        const line = readFileSync(`/proc/${pid}/cmdline`, "utf8");
-        return named.some((name) => line.includes(name)) ? [Number(pid)] : [];
-      } catch {
-        return [];
-      }
-    });
-  } catch {
-    return [];
-  }
+  const pids = (await readdir("/proc").catch(() => [] as string[])).filter((pid) => /^\d+$/.test(pid));
+  const found: number[] = [];
+  const waiting = new Set<string>();
+  const reads = pids.map((pid) => `/proc/${pid}/cmdline`).filter((path) => !unread.has(path)).map((path) => {
+    waiting.add(path);
+    return read(path).then((line) => {
+      if (named.some((name) => line.includes(name))) found.push(Number(path.split("/")[2]));
+    }, () => {}).finally(() => waiting.delete(path));
+  });
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([Promise.all(reads), new Promise((resolve) => {
+    timer = setTimeout(resolve, SCAN_MS);
+  })]);
+  clearTimeout(timer);
+  for (const path of waiting) unread.add(path);
+  return found.sort((a, b) => a - b);
 }
 
 /**
@@ -121,8 +136,8 @@ function holding(profile: string): number[] {
  */
 async function released(profile: string): Promise<void> {
   const deadline = Date.now() + RELEASE_MS;
-  while (holding(profile).length > 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
-  for (const pid of holding(profile)) {
+  while ((await holding(profile)).length > 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+  for (const pid of await holding(profile)) {
     try {
       process.kill(pid, "SIGKILL");
     } catch {

@@ -7,6 +7,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { connect as connectTcp } from "node:net";
 import { tmpdir, userInfo } from "node:os";
@@ -15,7 +16,7 @@ import { join } from "node:path";
 import type { BrowserContext } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { BrowserHost, type BrowserHostOptions, FILE_ASKED, type Launch, PROXY_BYPASSED, WEAKENING } from "../src/browser/host.js";
+import { BrowserHost, type BrowserHostOptions, FILE_ASKED, holding, type Launch, PROXY_BYPASSED, WEAKENING } from "../src/browser/host.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
 
 const EXECUTABLE = TEST_BROWSER;
@@ -235,6 +236,28 @@ describe("the browser tests' gate", () => {
       expect(notIsolated({ HOME: join(scratch, "gone") })).toContain("HOME is not a scratch folder");
     } finally {
       rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the processes on a profile", () => {
+  it("finds them without waiting on one whose command line does not come, as on a dead mount, and asks that one no more", async () => {
+    const folder = mkdtempSync(join(tmpdir(), "sb-holding-"));
+    const on = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", join(folder, "profile", "x")], { stdio: "ignore" });
+    try {
+      await new Promise((done) => on.once("spawn", done));
+      // This test's own process stands for one blocked in its read: its command line never comes.
+      const stuck = `/proc/${process.pid}/cmdline`;
+      const asked: string[] = [];
+      const read = (path: string) => (asked.push(path), path === stuck ? new Promise<string>(() => {}) : readFile(path, "utf8"));
+      const started = performance.now();
+      expect(await holding(join(folder, "profile"), read)).toEqual([on.pid]);
+      expect(performance.now() - started).toBeLessThan(3_000);
+      expect(await holding(join(folder, "profile"), read)).toEqual([on.pid]);
+      expect(asked.filter((path) => path === stuck)).toHaveLength(1);
+    } finally {
+      on.kill("SIGKILL");
+      rmSync(folder, { recursive: true, force: true });
     }
   });
 });
