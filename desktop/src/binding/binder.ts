@@ -92,6 +92,7 @@ export interface BinderOptions {
   // The page a session's next browser operation acts in, for its prompt; for an upload, the frame of the file input
   // that asked, *of* being the upload's operation.
   address?(session: string, upload?: boolean, of?: string): Promise<string | { refused: string }>;
+  notComing?(of: string): void; // an upload the browser was asked about, by its operation, that got no leave
   // The user is asked about every other operation first in a chat that asks every time,
   // and about a network destination off the package hosts in either mode.
   approvalPrompts: ApprovalPrompts;
@@ -175,7 +176,7 @@ export class Binder implements Executor {
   constructor(private readonly options: BinderOptions) {
     this.approvals = new Approvals({
       bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, address: options.address,
-      refusal: options.refusal, onError: options.onError,
+      notComing: options.notComing, refusal: options.refusal, onError: options.onError,
     });
   }
 

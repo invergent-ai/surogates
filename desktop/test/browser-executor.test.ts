@@ -47,6 +47,8 @@ function rig(launch: Launch | null = LAUNCH, bound = true, reads?: (operation: O
   const stopped: string[] = [];
   const forgotten: string[] = [];
   const paused: Array<[string, boolean]> = [];
+  // The uploads the browser was told are not coming, by their operations.
+  const unasked: string[] = [];
   const shown: string[] = [];
   // What the browser's next answer is, and how it tells of a download it staged.
   const answers: Outcome[] = [];
@@ -89,6 +91,7 @@ function rig(launch: Launch | null = LAUNCH, bound = true, reads?: (operation: O
         session === "nowhere" ? { refused: "no site" } : `https://example.com/${session}${upload ? "/the-input" : ""}${of === undefined ? "" : `#${of}`}`,
       ),
       pause: (root, held) => void paused.push([root, held]),
+      notComing: (of) => void unasked.push(of),
       show: (root) => (shown.push(root), Promise.resolve(true)),
       onDownload: (listener) => {
         staged = listener;
@@ -98,7 +101,7 @@ function rig(launch: Launch | null = LAUNCH, bound = true, reads?: (operation: O
     launch: () => launch,
     staging,
   });
-  return { browsing, ran, browsed, stopped, forgotten, paused, shown, chats, answers, reading, files, stage: (download: StagedDownload) => staged(download) };
+  return { browsing, ran, browsed, stopped, forgotten, paused, shown, chats, answers, reading, files, unasked, stage: (download: StagedDownload) => staged(download) };
 }
 
 describe("the browser's kinds beside the tools", () => {
@@ -556,6 +559,37 @@ describe("the browser's kinds beside the tools", () => {
       });
       expect(browsed).toEqual([]);
     }
+  });
+
+  it("tells the browser of an upload that ends before it reaches it, whatever it ends on, and of one the approvals say got no leave: the browser keeps nothing for either", async () => {
+    const upload = (id: string, paths: unknown = ["/home/u/notes/report.pdf"], root = ROOT) => ({ ...op("browser.set_input_files", root), id, args: { paths } });
+    // The approvals' word is passed on as it is.
+    const { browsing, unasked, reading, browsed } = rig();
+    browsing.notComing("denied");
+    expect(unasked.splice(0)).toEqual(["denied"]);
+    // One that reaches the browser is the browser's to forget, when it comes.
+    expect(await browsing.run(upload("given"), signal)).toEqual({ ok: "browser" });
+    expect(unasked).toEqual([]);
+    // One whose files are refused, or cannot be read; and one taken over while they were read.
+    expect(await browsing.run(upload("no-files", []), signal)).toMatchObject({ error: { type: "browser" } });
+    expect(await browsing.run(upload("gone", ["/home/u/notes/gone.txt"]), signal)).toMatchObject({ error: { type: "browser" } });
+    reading.then = () => void browsing.takeOver(ROOT);
+    expect(await browsing.run(upload("taken-over"), signal)).toEqual(PAUSED);
+    reading.then = () => {};
+    expect(unasked.splice(0)).toEqual(["no-files", "gone", "taken-over"]);
+    // One that comes while its user holds the browser.
+    expect(await browsing.run(upload("held"), signal)).toEqual(PAUSED);
+    browsing.handBack(ROOT);
+    expect(unasked.splice(0)).toEqual(["held"]);
+    expect(browsed).toHaveLength(1);
+    // One for a chat this computer did not bind, and one where no browser is here.
+    expect(await rig(LAUNCH, false).browsing.run(upload("unbound"), signal)).toEqual(FOLDER_UNAVAILABLE);
+    const none = rig(null);
+    expect(await none.browsing.run(upload("no-browser"), signal)).toEqual(NO_BROWSER);
+    expect(none.unasked).toEqual(["no-browser"]);
+    // No other operation is an upload.
+    expect(await none.browsing.run(op("browser.navigate"), signal)).toEqual(NO_BROWSER);
+    expect(none.unasked).toEqual(["no-browser"]);
   });
 
   it("asks the browser for the address of the page a session acts in, and for an upload, of the file input that asked", async () => {

@@ -49,6 +49,8 @@ function received(message: ToBrowser): void {
   } else if (message.type === "address") {
     void host.address(message.session, message.upload === true, typeof message.of === "string" ? message.of : undefined)
       .then((said) => send(typeof said === "string" ? { type: "address", id: message.id, url: said } : { type: "address", id: message.id, url: NEW_TAB, ...said }));
+  } else if (message.type === "not_coming") {
+    host.notComing(message.of);
   } else if (message.type === "pause") {
     host.pause(message.root, message.paused);
   } else if (message.type === "show") {

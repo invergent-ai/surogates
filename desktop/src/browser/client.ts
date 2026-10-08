@@ -50,6 +50,8 @@ export type ToBrowser =
   // The address of the page the session's next operation acts in; for an upload, of the frame of the file input that asked,
   // *of* being the upload's operation, by its id: the input is kept for that upload alone.
   | { type: "address"; id: string; session: string; upload?: boolean; of?: string }
+  // An upload the host was asked about, by its operation's id, is not coming: it keeps nothing for it.
+  | { type: "not_coming"; of: string }
   // A chat its user took the browser over, or handed back: an operation of it waiting its turn is answered paused.
   | { type: "pause"; root: string; paused: boolean }
   // The chat's newest page brought to the front: answered whether there was one.
@@ -146,6 +148,11 @@ export class BrowserClient {
       });
       host.send({ type: "address", id, session, ...(upload ? { upload, ...(of === undefined ? {} : { of }) } : {}) });
     });
+  }
+
+  /** An upload a running host was asked about, by its operation's id, is not coming: the host keeps nothing for it. */
+  notComing(of: string): void {
+    this.host?.send({ type: "not_coming", of });
   }
 
   /** Hear each download a host stages, for the chat's folder. */

@@ -1123,6 +1123,72 @@ describe("the browser on this computer", () => {
     expect(user.asked).toMatchObject([{ action: "script", page: "https://bank.example/account" }]);
   });
 
+  it("tells the browser when an upload it was asked about got no leave, however its prompt ended: it is not coming, and the browser keeps nothing for it", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+    const unasked: string[] = [];
+    let taken = false;
+    // The browser's word for an upload's input, as the test says: an address, none in time, or that nothing can be given.
+    let said: () => Promise<string | { refused: string }> = () => Promise.resolve("https://uploads.example/form");
+    const asks = (answer: ApprovalAnswer | null) => {
+      user = new User(answer);
+      approvals = new Approvals({
+        bindings: journal.bindings, prompts: user, agent: "Research assistant", address: () => said(),
+        refusal: (operation) => (taken && operation.kind.startsWith("browser.") ? PAUSED : null),
+        notComing: (of) => void unasked.push(of),
+      });
+    };
+    const upload = () => op("browser.set_input_files", { paths: [`${FOLDER}/report.pdf`] });
+    // Allowed, once or for good: the upload is coming, and the browser knows it by its operation until it has.
+    for (const answer of ["allow", "stop_asking"] as const) {
+      journal.bindings.setMode(ROOT, "ask");
+      asks(answer);
+      expect(await approvals.admit(upload(), never())).toBeNull();
+    }
+    // In a chat that works freely nobody is asked, and the browser was told of no upload.
+    expect(await approvals.admit(upload(), never())).toBeNull();
+    expect(unasked).toEqual([]);
+    journal.bindings.setMode(ROOT, "ask");
+    // Denied, or run out.
+    for (const answer of ["deny", "timeout"] as const) {
+      asks(answer);
+      const denied = upload();
+      expect(await approvals.admit(denied, never())).toMatchObject({ error: { type: "denied" } });
+      expect(unasked.splice(0)).toEqual([denied.id]);
+    }
+    // Dismissed by a take-over, and stopped by its session, each with its prompt open.
+    for (const ends of ["taken over", "stopped"] as const) {
+      asks(null);
+      taken = false;
+      const stopped = new AbortController();
+      const open = upload();
+      const asking = approvals.admit(open, stopped.signal);
+      await vi.waitFor(() => expect(user.open).toHaveLength(1));
+      if (ends === "stopped") stopped.abort();
+      else {
+        taken = true;
+        approvals.dismissBrowser();
+      }
+      await asking;
+      expect(unasked.splice(0), ends).toEqual([open.id]);
+    }
+    taken = false;
+    // Never asked about at all: the browser said nothing can be given, or did not say where in time.
+    for (const none of [() => Promise.resolve({ refused: "no site" }), () => new Promise<string>(() => {})]) {
+      said = none;
+      asks("allow");
+      const refused = upload();
+      expect(await approvals.admit(refused, never())).toMatchObject({ error: {} });
+      expect([user.asked, unasked.splice(0)]).toEqual([[], [refused.id]]);
+    }
+    // No other act of the agent's is an upload the browser was asked about.
+    said = () => Promise.resolve("https://bank.example/account");
+    asks("deny");
+    expect(await approvals.admit(op("browser.evaluate", { code: "return 1;" }), never())).toMatchObject({ error: { type: "denied" } });
+    expect(unasked).toEqual([]);
+  });
+
   it("names a mouse press and a mouse release for what they are, not a click", async () => {
     bind(ROOT, "ask");
     journal.bindings.allowBrowser(ROOT);

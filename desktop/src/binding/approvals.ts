@@ -110,6 +110,8 @@ export interface ApprovalsOptions {
   // *of* being that upload's operation, by its id. Or why the upload can be given to nothing, whatever its user would
   // answer: then nobody is asked.
   address?: (session: string, upload?: boolean, of?: string) => Promise<string | { refused: string }>;
+  // An upload the browser was asked about, by its operation's id, got no leave, however its prompt ended: it is not coming.
+  notComing?: (of: string) => void;
   // What the tools refuse anyway, asked again when a browser operation's turn comes: its user may have taken the browser over meanwhile.
   refusal?: (operation: Operation) => Outcome | null;
   onError?: (error: unknown) => void; // a choice that could not be recorded, or a network prompt that failed, and why
@@ -323,6 +325,8 @@ export class Approvals {
     const open = this.browsing.get(root) ?? new Set<AbortController>();
     this.browsing.set(root, open.add(own));
     let answer: Outcome | null;
+    // Whether the browser was asked which input this upload would fill: it keeps that input for this operation.
+    let named = false;
     try {
       answer = await this.inLine(root, asking, browserDenied(BROWSER_DENIED.act), async () => {
         // Allowed, or freed, while it waited its turn: asked no more than it still needs. Refused meanwhile, as for a
@@ -356,6 +360,7 @@ export class Approvals {
         }
         if (!now.act) return null;
         const act = browserAct(operation);
+        named = act.action === "upload";
         // An open names where it goes; any other act, the page it acts in now; an upload, the frame of the input that gets the files.
         const page = act.action === "open"
           ? undefined
@@ -382,7 +387,9 @@ export class Approvals {
       if (open.size === 0 && this.browsing.get(root) === open) this.browsing.delete(root);
     }
     // Dismissed when the browser was taken over: what its prompt settled with is not the user's answer.
-    if (asking.aborted && !signal.aborted) return this.options.refusal?.(operation) ?? browserDenied(BROWSER_DENIED.act);
+    if (asking.aborted && !signal.aborted) answer = this.options.refusal?.(operation) ?? browserDenied(BROWSER_DENIED.act);
+    // An upload the browser was asked about that got no leave, however that came, is not coming: the browser is told.
+    if (named && answer !== null) this.options.notComing?.(operation.id);
     return answer;
   }
 

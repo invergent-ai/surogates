@@ -397,7 +397,7 @@ describe("one agent's device", () => {
           tools,
           browser: {
             perform: () => Promise.resolve({ ok: null }), forget: () => {}, stop: () => Promise.resolve(), end: () => Promise.resolve(), address: () => Promise.resolve("about:blank"),
-            pause: () => {}, show: () => Promise.resolve(false), onDownload: () => {},
+            notComing: () => {}, pause: () => {}, show: () => Promise.resolve(false), onDownload: () => {},
           },
           bindingOf: (root) => bindings.get(root),
           launch: () => null,

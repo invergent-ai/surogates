@@ -1229,6 +1229,24 @@ describe("a page's download, as the host stages it", () => {
       expect(given).toEqual(["given"]);
     });
 
+    it("forgets an upload it was asked about once it is told the upload is not coming: nothing stays named for it, and its operation is known no more", async () => {
+      const tab = taken();
+      const prompted = () => (host as unknown as { prompted: Set<string> }).prompted;
+      tab.input({ evaluate: () => Promise.resolve("given"), dispose: () => Promise.resolve() });
+      expect(await host.address(SESSION, true, "upload-1")).toBe(FORM_URL);
+      expect([state().named.get(SESSION)?.input?.chooser !== undefined, [...prompted()]]).toEqual([true, ["upload-1"]]);
+      // Denied, or run out: told so.
+      host.notComing("upload-1");
+      expect([state().named.size, prompted().size]).toEqual([0, 0]);
+      // Another upload's name is not this one's to drop.
+      expect(await host.address(SESSION, true, "upload-2")).toBe(FORM_URL);
+      host.notComing("upload-1");
+      expect([state().named.size, [...prompted()]]).toEqual([1, ["upload-2"]]);
+      // And one that comes is forgotten as it comes, as before.
+      expect(await uploads("upload-2")).toMatchObject({ ok: { files: 1 } });
+      expect([state().named.size, prompted().size]).toEqual([0, 0]);
+    });
+
     it("reads each bound on the clock it can be read on: the minute after a hand back on the one that cannot be set, the five seconds after a take-over on a timer, which the computer's clock moves no more, and the quarter second of an upload's step on the computer's own, the one its page reads too", async () => {
       // The clock a host told none reads, and the computer's own, which its user or its network can set.
       let steady = 5_000;

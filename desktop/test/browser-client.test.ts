@@ -102,6 +102,19 @@ describe("the browser host's client", () => {
     expect(hosts[0]!.sent.slice(1)).toEqual([{ type: "pause", root: "root", paused: true }, { type: "pause", root: "root", paused: false }]);
   });
 
+  it("tells a running host of an upload its user was asked about that is not coming, and starts none to do it", () => {
+    const hosts: FakeHost[] = [];
+    const client = new BrowserClient(() => {
+      hosts.push(new FakeHost());
+      return hosts.at(-1)!;
+    });
+    client.notComing("op-7");
+    expect(hosts).toHaveLength(0);
+    void client.perform(LAUNCH, operation("op-1"), new AbortController().signal);
+    client.notComing("op-7");
+    expect(hosts[0]!.sent.at(-1)).toEqual({ type: "not_coming", of: "op-7" });
+  });
+
   it("asks a running host to show a chat's page, and says none is shown where no host runs", async () => {
     const hosts: FakeHost[] = [];
     const client = new BrowserClient(() => {
@@ -436,6 +449,13 @@ describe.skipIf(!run)("the browser host's process", () => {
       expect(await holds()).toBeNull();
       expect(await sent("browser.set_input_files", { files }, "asked-by-nobody")).toMatchObject({ ok: { files: 1 } });
       expect(await holds()).toEqual(["report.pdf", "application/pdf", "%PDF-1.7"]);
+      // One asked about and denied: the host is told it is not coming, and knows it no more as one it was asked about.
+      // Sent all the same, as only a mistake of this computer's own could, it is one nobody was asked about.
+      await asks();
+      await client.address("child", true, "asked-third");
+      client.notComing("asked-third");
+      await sent("browser.evaluate", { code: "return 1;" });
+      expect(await sent("browser.set_input_files", { files }, "asked-third")).toMatchObject({ ok: { files: 1 } });
     } finally {
       await client.stop();
     }

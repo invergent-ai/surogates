@@ -58,7 +58,7 @@ function unfit(paths: unknown): string | null {
 
 export interface BrowsingOptions {
   tools: ToolLayer;
-  browser: Pick<BrowserClient, "perform" | "forget" | "stop" | "end" | "address" | "pause" | "show" | "onDownload">;
+  browser: Pick<BrowserClient, "perform" | "forget" | "stop" | "end" | "address" | "notComing" | "pause" | "show" | "onDownload">;
   // A browser operation runs only for a chat this computer bound: its binding, or undefined.
   bindingOf(root: string): unknown;
   // The browser Settings chose and the identity's profile for it, read at each operation; null: none here.
@@ -110,20 +110,27 @@ export class Browsing implements ToolLayer {
 
   run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
     if (!isBrowserKind(operation.kind)) return this.options.tools.run(operation, signal);
-    if (!this.options.bindingOf(operation.sessionId)) return Promise.resolve(FOLDER_UNAVAILABLE);
+    if (!this.options.bindingOf(operation.sessionId)) return Promise.resolve(this.ended(operation, FOLDER_UNAVAILABLE));
     // Let through before its user took the browser over, it never reaches the browser after.
-    if (this.held !== null) return Promise.resolve(PAUSED);
+    if (this.held !== null) return Promise.resolve(this.ended(operation, PAUSED));
     const launch = this.options.launch();
-    if (!launch) return Promise.resolve(NO_BROWSER);
+    if (!launch) return Promise.resolve(this.ended(operation, NO_BROWSER));
     return this.browse(launch, operation, signal);
+  }
+
+  // *outcome*, for an operation that ends here, without reaching the browser. Where it is an upload, the
+  // browser may keep an input for it since its user was asked about it: told that it is not coming.
+  private ended(operation: Operation, outcome: Outcome): Outcome {
+    if (operation.kind === "browser.set_input_files") this.options.browser.notComing(operation.id);
+    return outcome;
   }
 
   private async browse(launch: Launch, operation: Operation, signal: AbortSignal): Promise<Outcome> {
     const begun = this.takes;
     const sent = operation.kind === "browser.set_input_files" ? await this.withFiles(operation, signal, begun) : operation;
-    if (!("kind" in sent)) return sent;
+    if (!("kind" in sent)) return this.ended(operation, sent);
     // Its user took the browser over while its files were read, handed back since or not: none of them leaves this process.
-    if (this.takes !== begun) return PAUSED;
+    if (this.takes !== begun) return this.ended(operation, PAUSED);
     return this.tell(operation.callingSessionId, await this.options.browser.perform(launch, sent, signal));
   }
 
@@ -228,6 +235,11 @@ export class Browsing implements ToolLayer {
 
   address(session: string, upload?: boolean, of?: string): Promise<string | { refused: string }> {
     return this.options.browser.address(session, upload, of);
+  }
+
+  /** An upload the browser was asked about, by its operation's id, got no leave: it is not coming. */
+  notComing(of: string): void {
+    this.options.browser.notComing(of);
   }
 
   // Whether the browser is held from a chat that is gone: deleted, or its folder forgotten on this computer.

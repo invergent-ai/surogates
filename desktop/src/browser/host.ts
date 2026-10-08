@@ -502,9 +502,9 @@ export class BrowserHost {
   // input, and *why* that upload is given to none: nothing had asked, or what had runs as no site.
   // *of*: the upload it was named for, by its operation's id, which alone is given it.
   private readonly named = new Map<string, { input: { chooser: FileChooser; href: string; origin: string } | null; why: string; of: string | undefined }>();
-  // ponytail: the uploads whose user was asked about them, by their operations' ids, each until it comes:
-  // one that was denied never does, and stays for the host's life. One of these whose name is the
-  // session's no more is given to nothing, where one nobody was asked about goes to what asked last.
+  // The uploads whose user was asked about them, by their operations' ids, each until it comes, or until
+  // this host is told it is not coming (notComing). One of these whose name is the session's no more is given
+  // to nothing, where one nobody was asked about goes to what asked last.
   private readonly prompted = new Set<string>();
   // Where this host stages downloads, once it has launched a browser: its own folder, until it closes.
   private staging: string | null = null;
@@ -582,6 +582,17 @@ export class BrowserHost {
       this.named.set(session, site === null ? { input: null, why: NO_SITE, of } : { input: { chooser, href: at.href, origin: at.origin }, why: NOT_AS_ASKED, of });
       return site ?? { refused: NO_SITE };
     }).catch(() => NEW_TAB);
+  }
+
+  /**
+   * The upload this host was asked about under the operation *of* is not coming: its prompt was denied, ran
+   * out or went, or it ended before it came here. It is known no more, and no input is kept for it.
+   */
+  notComing(of: string): void {
+    this.prompted.delete(of);
+    for (const [session, kept] of this.named) {
+      if (kept.of === of) this.named.delete(session);
+    }
   }
 
   /**
