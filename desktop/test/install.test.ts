@@ -440,6 +440,23 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     }
   });
 
+  it("applies a release under a folder that hands its group and its set-id bits on to what is made in it", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    // The tree's own folder so, as it is made under an /opt that is; then each folder in it, staging among them.
+    const states = [
+      "chgrp tester /opt/surogate && chmod 2775 /opt/surogate",
+      "mkdir /opt/surogate/staging /opt/surogate/versions /opt/surogate/bin && chmod 7777 /opt/surogate/staging /opt/surogate/versions /opt/surogate/bin",
+    ];
+    for (const state of states) {
+      expect(root(`find /opt/surogate -mindepth 1 -delete; ${state}`).status, state).toBe(0);
+      expect(apply(tarball), state).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+      expect(root("stat -c '%a %U:%G' /opt/surogate /opt/surogate/versions /opt/surogate/bin /opt/surogate/staging").stdout, state).toBe("755 root:root\n755 root:root\n755 root:root\n700 root:root\n");
+      // Nothing in the tree has a bit or a group of that folder's.
+      expect(root("find /opt/surogate ! -type l \\( ! -user root -o ! -group root -o -perm /7022 \\) -print").stdout, state).toBe("");
+    }
+  });
+
   it("reads each file as the user who asked, so that a folder swapped for a link gets them nothing they could not read themselves", () => {
     const tarball = releaseOf("1.0.0");
     manifestOf("1.0.0", tarball);

@@ -225,10 +225,12 @@ apply() {
   lock
   # Its folders are root's own, whoever made them. The tree's first: from then on no one else puts
   # anything in it. Then the three in it, each a folder of the tree's own and never a link, which
-  # would have root make another folder its own, and work there.
+  # would have root make another folder its own, and work there. Each loses the set-id bits a
+  # folder takes from the one it is made in, as under an /opt that hands its group on: a mode in
+  # digits keeps them, and all that is unpacked below would take them too, and be refused for it.
   mkdir -p "$ROOT"
   chown 0:0 "$ROOT"
-  chmod 0755 "$ROOT"
+  chmod u=rwx,go=rx,a-st "$ROOT"
   local inner
   for inner in versions bin staging; do
     [ ! -L "$ROOT/$inner" ] || fail "$ROOT/$inner is a link, where Surogate Desktop keeps a folder of its own: remove it, and run this again"
@@ -237,8 +239,8 @@ apply() {
   # Root's alone from its first moment: what an apply copies and unpacks is in it.
   ( umask 077 && mkdir -p "$ROOT/staging" )
   chown 0:0 "$ROOT/versions" "$ROOT/bin" "$ROOT/staging"
-  chmod 0755 "$ROOT/versions" "$ROOT/bin"
-  chmod 0700 "$ROOT/staging"
+  chmod u=rwx,go=rx,a-st "$ROOT/versions" "$ROOT/bin"
+  chmod u=rwx,go=,a-st "$ROOT/staging"
   # What an apply that was killed left in staging goes, before any room is measured. This one's
   # own folder goes however it ends.
   find "$ROOT/staging" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
