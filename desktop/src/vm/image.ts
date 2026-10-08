@@ -190,8 +190,12 @@ export async function deliver(options: DeliverOptions): Promise<string> {
   }
   for (const file of manifest.files) {
     const unpacked = join(work, file.name);
-    if (existsSync(unpacked)) continue;
     const downloaded = join(work, file.download);
+    if (existsSync(unpacked)) {
+      // Left by a crash between the unpack's rename and this removal: never carried into the image's folder.
+      rmSync(downloaded, { force: true });
+      continue;
+    }
     if (!existsSync(downloaded)) {
       const others = manifest.files.filter((other) => other !== file).reduce((sum, other) => sum + here(other), 0);
       await download(options, file, `${downloaded}.partial`, (have) => options.progress?.(others + have, total));

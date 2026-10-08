@@ -111,6 +111,17 @@ describe("the guest image's delivery", () => {
     }
   });
 
+  it("removes a download that a crash left beside its unpacked file, and never carries it into the image's folder", async () => {
+    // Killed between the unpack's rename and the download's removal: both files are there.
+    const work = join(images(), `${KEY}.partial`);
+    mkdirSync(work, { recursive: true });
+    writeFileSync(join(work, "rootfs.img"), rootfs);
+    writeFileSync(join(work, "rootfs.img.zst"), served.get(`/desktop/vm/${KEY}/rootfs.img.zst`)!);
+    const folder = await deliver(options());
+    expect(readdirSync(folder).sort()).toEqual(["complete", "rootfs.img", "vmlinuz"]);
+    expect(heard.map(({ url }) => url)).toEqual([`/desktop/vm/${KEY}/vmlinuz.zst`]);
+  });
+
   it("resumes a download that stopped from its .partial, with a Range", async () => {
     const cut = 100_000;
     answer = (request, response, body) => {
