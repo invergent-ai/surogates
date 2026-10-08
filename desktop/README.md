@@ -91,7 +91,7 @@ They launch Chrome where it is installed, else Edge; `SUROGATE_TEST_BROWSER` nam
 A release is a tarball (`scripts/package.sh`), its manifest signed with the release key
 (`release/publish.sh sign`), and both on the release bucket under `desktop/` with the
 install script (`release/publish.sh send`). In `.github/workflows/release.yml`, `desktop-build`
-makes the tarball, and `desktop-publish`, which alone holds the keys and runs no npm, signs and
+makes the tarball, and `desktop-publish`, which alone holds the release key and runs no npm, signs and
 sends it. `release/install.sh` installs it into `/opt/surogate`, and is each version's root
 helper for updates (`--apply`):
 
