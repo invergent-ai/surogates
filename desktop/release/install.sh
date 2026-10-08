@@ -629,7 +629,10 @@ kvm_group() {
 # version newer than it stays (a mirror can lag, or a cache): the rest of the install repairs around it.
 install_latest() {
   local base="$1" download release version size installed tarball=""
-  scratch download --tmpdir tmp.XXXXXXXXXX
+  # In /tmp, whatever TMPDIR root's own shell has: /tmp is root's, and no one there renames what
+  # is another's. Whoever owns a folder that TMPDIR named could put one of their own in this
+  # one's name, and root's downloads would be written through whatever stood in it.
+  scratch download -p /tmp tmp.XXXXXXXXXX
   # curl reads its address's letters as UTF-8 (C.UTF-8, which has no language of its own): a
   # server's name may have letters outside ASCII, as the name the user fetched this script from
   # may, and in a locale without them curl refuses the name before it looks it up.
@@ -748,7 +751,8 @@ roll_back() {
   # Before anything is asked of the base: where what the installed version keeps is not known, no
   # release is one that reads it.
   installed_schema >/dev/null || fail "the installed $installed names no state schema: run Surogate Desktop's install script again"
-  scratch download --tmpdir tmp.XXXXXXXXXX
+  # Its folder in /tmp, as the install's is, whatever TMPDIR root's own shell has.
+  scratch download -p /tmp tmp.XXXXXXXXXX
   # Each download as the install's own (install_latest): its address's letters read as UTF-8, and
   # no more of it than it is for, a manifest's 4096 bytes and a signature's 64 and one more.
   LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 4096 -o "$download/manifest.json" "$base/desktop/releases/$version/manifest.json" \

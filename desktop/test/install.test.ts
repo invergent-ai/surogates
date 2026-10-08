@@ -2310,7 +2310,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(root(`cmp /root/record ${record} && cmp /root/mark ${mark} && stat -c '%f %u' ${record} ${mark}`).stdout).toBe("81a4 0\n81a4 0\n");
   });
 
-  it("rolls back with the system's own tools, whatever PATH root's own shell has, and through the user's proxy from a base whose name has a letter outside ASCII, for each of its three downloads", () => {
+  it("rolls back with the system's own tools and into a folder of root's own, whatever PATH and TMPDIR root's own shell has, and through the user's proxy from a base whose name has a letter outside ASCII, for each of its three downloads", () => {
     expect(current()).toBe("/opt/surogate/versions/1.6.0");
     const installed = standing();
     // First on root's PATH, an openssl that calls every signature good, and a dpkg and a uname
@@ -2324,6 +2324,17 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       expect(root("cat /tmp/caller/ran 2>/dev/null").stdout, started).toBe("");
       expect(standing(), started).toBe(installed);
     }
+    // Nor is what it downloads put where root's own TMPDIR says, in a folder that is another's:
+    // whoever owns that one could put a folder of their own in the download's name. Each folder a
+    // rollback makes, and each the install makes, as mktemp was asked for it: one in /tmp, which
+    // is root's and where no one renames what is another's, and one in root's own staging.
+    const making = '#!/bin/sh\nmade="$(/opt/hold/mktemp "$@")" || exit\necho "$made" >>/tmp/made\necho "$made"\n';
+    expect(root("mkdir -p /home/tester/tmp && chown tester: /home/tester/tmp").status).toBe(0);
+    for (const started of ["--version 1.6.0", `--base ${base}`]) {
+      const made = swapped("mktemp", making, [": >/tmp/made", `TMPDIR=/home/tester/tmp /opt/surogate-test/install.sh ${started} >/dev/null 2>&1; echo "$?"; cat /tmp/made`]).stdout.trim().split("\n");
+      expect(made, started).toEqual(["0", expect.stringMatching(/^\/tmp\/tmp\.\w{10}$/), expect.stringMatching(/^\/opt\/surogate\/staging\/apply\.\w{6}$/)]);
+    }
+    expect(root("ls -A /home/tester/tmp").stdout).toBe("");
     // A release that is not here, from a base that no resolver has: all three of its files are
     // asked of the proxy the user's shell names, which sudo's own environment does not have, and
     // the base's letters are read as UTF-8 for each, or curl refuses the name before it asks.
