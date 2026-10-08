@@ -17,6 +17,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 const SCRIPT = fileURLToPath(new URL("../release/install.sh", import.meta.url));
 const RELEASES = ["24.04", "26.04"] as const;
 const ENABLED = process.env.SUROGATE_INSTALL_TESTS === "1";
+// The longest one docker call may take: an install with apt's downloads takes under a minute.
+const CALL_MS = 300_000;
 
 // A static server of the folder it is given, on a port of its own, which it prints. A proxy's
 // request, which names the whole URL, is served by its path alike.
@@ -54,7 +56,8 @@ function lab(release: string, setup: string[], run: string[] = []) {
   const it = { dir: "", container: "" };
   // No credentials of this user's reach the image's pull or the container.
   const env = () => ({ ...process.env, DOCKER_CONFIG: join(it.dir, "docker") });
-  const docker = (args: string[]) => spawnSync("docker", args, { encoding: "utf8", env: env(), maxBuffer: 64 * 1024 * 1024 });
+  // No call outlives CALL_MS: it is synchronous, so a command that never ended would hold the worker for good.
+  const docker = (args: string[]) => spawnSync("docker", args, { encoding: "utf8", env: env(), maxBuffer: 64 * 1024 * 1024, timeout: CALL_MS });
   const root = (command: string) => docker(["exec", it.container, "bash", "-c", command]);
   const as = (user: string, command: string) => docker(["exec", "-u", user, "-w", `/home/${user}`, "-e", `HOME=/home/${user}`, it.container, "bash", "-c", command]);
 
@@ -176,7 +179,9 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       "mkdir -p /opt/surogate && exec 8</opt/surogate && flock 8",
       "cp /home/tester/manifest.json /home/tester/swapped.json",
       `/opt/surogate-test/install.sh --apply ${files("/home/tester/swapped.json")} 8<&- &`,
-      "until pgrep -x flock >/dev/null; do sleep 0.05; done",
+      // A helper that ended before it reached the lock would never be seen waiting for it.
+      "for try in $(seq 200); do pgrep -x flock >/dev/null && break; sleep 0.05; done",
+      "pgrep -x flock >/dev/null || exit 9",
       swap,
       "flock -u 8",
       "wait $!",
