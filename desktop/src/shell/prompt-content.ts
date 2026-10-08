@@ -244,6 +244,7 @@ const BROWSER_ACTS: Record<Exclude<BrowserAction, "use" | "open">, { title: stri
   type: { title: "Type into", does: "wants to type this into the page open in its browser.", label: "Text" },
   press: { title: "Press keys in", does: "wants to press these keys in the page open in its browser.", label: "Keys" },
   drag: { title: "Drag in", does: "wants to drag along these points in the page open in its browser.", label: "Path" },
+  upload: { title: "Upload to", does: "wants to give these files to the page open in its browser. The site gets what they hold.", label: "Files" },
   other: { title: "Act in", does: "wants to act in the page open in its browser.", label: "Operation" },
 };
 
@@ -252,6 +253,9 @@ const siteOf = (page: string | null | undefined): string => {
   if (!page || !/^https?:/.test(page)) return "the page";
   return ending(hostOf(page));
 };
+
+// The acts whose detail is shown line by line.
+const LINED: ReadonlySet<BrowserAction> = new Set(["script", "upload"]);
 
 /** The browser's prompts (spec, Section 5): its first use in a chat, and each act in a chat that asks every time. */
 function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): PromptContent {
@@ -294,9 +298,9 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
     ...OPERATION,
     title,
     lead: `${asker(chat)} ${act.does}`,
-    // A script's lines are shown as they are, with how many there are: what follows its first can be out of view.
-    details: [...page, request.action === "script" ? code(lined(act.label, request.detail), request.detail, "\n\t") : code(act.label, request.detail)],
-    height: (request.action === "script" ? 420 : 340) + (title.length > 30 ? 50 : 0)
+    // A script's lines, and an upload's files, are shown as they are, with how many there are: what follows the first can be out of view.
+    details: [...page, LINED.has(request.action) ? code(lined(act.label, request.detail), request.detail, "\n\t") : code(act.label, request.detail)],
+    height: (LINED.has(request.action) ? 420 : 340) + (title.length > 30 ? 50 : 0)
       + (request.page ? 25 + Math.min(Math.ceil(request.page.length / 40), MAX_ADDRESS_LINES) * 19 : request.page === null ? 45 : 0),
   };
 }

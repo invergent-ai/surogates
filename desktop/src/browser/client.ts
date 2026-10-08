@@ -47,8 +47,8 @@ export type ToBrowser =
   | { type: "forget"; root: string }
   // A browser the user picked, launched once to see that it runs: answered {version}, or why not.
   | { type: "try"; id: string; executable: string }
-  // The address of the page the session's next operation acts in.
-  | { type: "address"; id: string; session: string }
+  // The address of the page the session's next operation acts in; for an upload, of the frame of the file input that asked.
+  | { type: "address"; id: string; session: string; upload?: boolean }
   // A chat its user took the browser over, or handed back: an operation of it waiting its turn is answered paused.
   | { type: "pause"; root: string; paused: boolean }
   // The chat's newest page brought to the front: answered whether there was one.
@@ -127,8 +127,11 @@ export class BrowserClient {
     return this.ask(this.trying, id, { type: "try", id, executable });
   }
 
-  /** The address of the page *session*'s next operation acts in: a new tab's, about:blank, where no host runs. Never rejects. */
-  address(session: string): Promise<string> {
+  /**
+   * The address of the page *session*'s next operation acts in: a new tab's, about:blank, where no host runs.
+   * For an *upload*, of the frame of the file input its page asked for. Never rejects.
+   */
+  address(session: string, upload = false): Promise<string> {
     const host = this.host;
     if (!host || this.stopping) return Promise.resolve(NEW_TAB);
     const id = `address-${(this.addresses += 1)}`;
@@ -137,7 +140,7 @@ export class BrowserClient {
         this.addressing.delete(id);
         resolve(url);
       });
-      host.send({ type: "address", id, session });
+      host.send({ type: "address", id, session, ...(upload ? { upload } : {}) });
     });
   }
 

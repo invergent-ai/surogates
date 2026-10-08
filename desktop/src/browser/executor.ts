@@ -2,9 +2,10 @@
 // the browser's kinds go to the identity's browser host, every other kind to the tools beneath.
 
 import { realpath, rm } from "node:fs/promises";
-import { sep } from "node:path";
+import { basename, extname, sep } from "node:path";
 
 import type { FolderGuards } from "../binding/folder.js";
+import { MAX_WRITE_BYTES } from "../files/answers.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { ToolLayer } from "../shell/device-stack.js";
@@ -29,6 +30,16 @@ const justAfter = (download: StagedDownload): boolean => download.user && downlo
 
 // What a session's downloads came to, at most this many to an answer, as the host's own notices.
 const MAX_NOTICES = 20;
+// The most files one upload gives a page, as the tool's schema says (surogates/tools/builtin/browser.py).
+const MAX_UPLOAD_FILES = 10;
+// ponytail: the types pages most often check a file input's files for; any other is application/octet-stream.
+const TYPES: Record<string, string> = {
+  ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+  ".webp": "image/webp", ".svg": "image/svg+xml", ".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
+  ".html": "text/html", ".zip": "application/zip", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".mp3": "audio/mpeg", ".mp4": "video/mp4",
+};
+const failed = (message: string): Outcome => ({ error: { type: "browser", message } });
 
 export interface BrowsingOptions {
   tools: ToolLayer;
@@ -83,7 +94,33 @@ export class Browsing implements ToolLayer {
     if (this.held !== null) return Promise.resolve(PAUSED);
     const launch = this.options.launch();
     if (!launch) return Promise.resolve(NO_BROWSER);
-    return this.options.browser.perform(launch, operation, signal).then((outcome) => this.tell(operation.callingSessionId, outcome));
+    return this.browse(launch, operation, signal);
+  }
+
+  private async browse(launch: Launch, operation: Operation, signal: AbortSignal): Promise<Outcome> {
+    const sent = operation.kind === "browser.set_input_files" ? await this.withFiles(operation, signal) : operation;
+    if (!("kind" in sent)) return sent;
+    return this.tell(operation.callingSessionId, await this.options.browser.perform(launch, sent, signal));
+  }
+
+  // An upload, with what each file it names holds, read through the chat's file host as any read of
+  // its folder: the browser is given the files, never a path, and nothing outside the folder.
+  private async withFiles(operation: Operation, signal: AbortSignal): Promise<Operation | Outcome> {
+    const { paths } = operation.args;
+    if (!Array.isArray(paths) || paths.length === 0 || paths.length > MAX_UPLOAD_FILES || !paths.every((path) => typeof path === "string")) {
+      return failed(`An upload names 1 to ${MAX_UPLOAD_FILES} files of the chat's folder`);
+    }
+    const files: Array<{ name: string; mimeType: string; buffer: string }> = [];
+    let bytes = 0;
+    for (const key of paths as string[]) {
+      const read = await this.options.tools.run({ ...operation, id: `${operation.id}:read-${files.length}`, kind: "read", args: { key, max_bytes: null } }, signal);
+      if ("error" in read) return failed(`${key} could not be read for the page: ${read.error.message}`);
+      const buffer = String(read.ok);
+      bytes += Buffer.byteLength(buffer, "base64");
+      if (bytes > MAX_WRITE_BYTES) return failed(`The files are too large to give the page at once: at most ${MAX_WRITE_BYTES} bytes`);
+      files.push({ name: basename(key), mimeType: TYPES[extname(key).toLowerCase()] ?? "application/octet-stream", buffer });
+    }
+    return { ...operation, args: { files } };
   }
 
   /**
@@ -156,8 +193,8 @@ export class Browsing implements ToolLayer {
     return { ok: { ...ok, notices: [...(ok as { notices: unknown[] }).notices, ...told] } };
   }
 
-  address(session: string): Promise<string> {
-    return this.options.browser.address(session);
+  address(session: string, upload?: boolean): Promise<string> {
+    return this.options.browser.address(session, upload);
   }
 
   // Whether the browser is held from a chat that is gone: deleted, or its folder forgotten on this computer.

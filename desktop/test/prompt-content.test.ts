@@ -263,6 +263,15 @@ describe("the browser's prompts", () => {
     expect(long.height).toBeGreaterThan(approval({ kind: "browser", chat: CHAT, action: "click", detail: "1, 2", page }).height);
   });
 
+  it("names the site an upload would give the chat's files to, and each file whole", () => {
+    const files = `${CHAT.folder}/report.pdf\n${CHAT.folder}/scan.png`;
+    const content = approval({ kind: "browser", chat: CHAT, action: "upload", detail: files, page: "https://bank.example/upload" });
+    expect(content.title).toBe("Upload to bank.example?");
+    expect(content.lead).toContain("wants to give these files to the page open in its browser. The site gets what they hold.");
+    expect(content.details[1]).toMatchObject({ label: "Files, 2 lines", value: files, code: true });
+    expect(content.focus).toBe("deny");
+  });
+
   it("names the host an open would go to, cut at its start, and opens tall enough for the whole address", () => {
     expect(approval({ kind: "browser", chat: CHAT, action: "open", detail: "https://example.com:8443/a" }).title).toBe("Open example.com:8443?");
     const padded = `bank.example.${"x".repeat(80)}.attacker.net`;

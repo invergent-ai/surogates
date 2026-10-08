@@ -189,6 +189,9 @@ describe("the browser host's client", () => {
     expect(sent).toMatchObject({ type: "address", session: "child" });
     hosts[0]!.say({ type: "address", id: sent.id, url: "https://bank.example/" });
     expect(await asked).toBe("https://bank.example/");
+    // For an upload: the frame of the file input the session's page asked for.
+    void client.address("child", true);
+    expect(hosts[0]!.sent.at(-1)).toMatchObject({ type: "address", session: "child", upload: true });
     // A host that goes with one asked: the next operation opens a new tab.
     const pending = client.address("child");
     hosts[0]!.exit();

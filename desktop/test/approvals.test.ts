@@ -1016,6 +1016,30 @@ describe("the browser on this computer", () => {
     expect(await approvals.admit(navigate(), never())).toEqual(ACT_DENIED);
   });
 
+  it("asks in Ask every time before files of the chat's folder go to the page, each named whole, and names the file input's own frame", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    // The browser says the page a session acts in, and, for an upload, the frame of the file input that asked.
+    const said: Array<[string, boolean]> = [];
+    approvals = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant",
+      address: (session, upload = false) => (said.push([session, upload]), Promise.resolve(upload ? "https://uploads.example/form" : "https://bank.example/account")),
+    });
+    const paths = [`${FOLDER}/report.pdf`, `${FOLDER}/scan.png`];
+    expect(await approvals.admit(op("browser.set_input_files", { paths }, ROOT, CHILD), never())).toBeNull();
+    expect(await approvals.admit(op("browser.evaluate", { code: "return 1;" }, ROOT, CHILD), never())).toBeNull();
+    expect(user.asked.map((request) => request.kind === "browser" && [request.action, request.detail, request.page])).toEqual([
+      // The site that gets the files is the input's own, whatever page it is framed in.
+      ["upload", paths.join("\n"), "https://uploads.example/form"], ["script", "return 1;", "https://bank.example/account"],
+    ]);
+    expect(said).toEqual([[CHILD, true], [CHILD, false]]);
+    // A chat that works freely gives them once the agent may use the browser.
+    journal.bindings.setMode(ROOT, "free");
+    expect(await approvals.admit(op("browser.set_input_files", { paths }), never())).toBeNull();
+    expect(user.asked).toHaveLength(2);
+  });
+
   it("names a mouse press and a mouse release for what they are, not a click", async () => {
     bind(ROOT, "ask");
     journal.bindings.allowBrowser(ROOT);

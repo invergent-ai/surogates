@@ -10,7 +10,7 @@ import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { type BrowserContext, chromium, type Dialog, type Download, type Page, type Request } from "playwright-core";
+import { type BrowserContext, chromium, type Dialog, type Download, type FileChooser, type Page, type Request } from "playwright-core";
 
 import { MAX_WRITE_BYTES } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
@@ -93,7 +93,8 @@ interface Begun {
 // What a page did that its agent could not see happen, at most this many to an answer.
 const MAX_NOTICES = 20;
 export const FILE_ASKED =
-  "The page asked for a file to upload. The agent's browser on this computer has no files to give it, so nothing was chosen.";
+  "The page asked for a file to upload. Nothing was chosen: browser_upload_file gives it files of the chat's folder.";
+export const NOT_ASKED = "The page has not asked for a file: click its upload button or its file input first";
 export const notFinished = (name: string, why: string): string => `The page's download of ${quoted(name)} did not finish (${why}), so it was not saved.`;
 // Why one did not finish: the browser's own word for one that was cancelled, or whose connection broke; of
 // any other, this host's words. What an error says itself is not the agent's to read.
@@ -172,6 +173,24 @@ async function behind(context: BrowserContext, given: AbortSignal): Promise<Page
     context.off("page", report);
     await cdp.detach().catch(() => {});
   }
+}
+
+// What only looks at a page, as the approvals take it (binding/approvals.ts): it asks no one, so it can run while
+// an upload's prompt is open, and the input that prompt named stays held.
+const looks = (kind: string, args: Record<string, unknown>): boolean =>
+  kind === "browser.observe" || kind === "browser.screenshot" || (kind === "browser.mouse" && (args.action === "move" || args.action === "wheel"));
+
+// An upload's files as the main side sent them, each a plain name, a type and its data in base64; null for anything else.
+function filesOf(value: unknown): Array<{ name: string; mimeType: string; buffer: Buffer }> | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const files = value.map((file: unknown) => {
+    if (!isRecord(file)) return null;
+    const { name, mimeType, buffer } = file;
+    const plain = typeof name === "string" && name !== "" && name !== "." && name !== ".." && !/[/\\\0]/.test(name);
+    if (!plain || typeof mimeType !== "string" || typeof buffer !== "string") return null;
+    return { name, mimeType, buffer: Buffer.from(buffer, "base64") };
+  });
+  return files.every((file) => file !== null) ? files : null;
 }
 
 // A new tab of *context*'s, or why not: a browser that is closing may never answer for one.
@@ -361,6 +380,10 @@ export class BrowserHost {
   // it began under: answered paused at once, it types, drags and loads no further, and is never taken up
   // again, at a hand back either. Those that begin after a hand back get the next.
   private interrupt = new AbortController();
+  // The file input each session's pages asked for a file for last, until it is given one.
+  private readonly choosers = new Map<string, FileChooser>();
+  // The one an upload's prompt named, by the frame of its input: that upload's files go to it, and to no input that asks after.
+  private readonly named = new Map<string, FileChooser>();
   // Where this host stages downloads, once it has launched a browser: its own folder, until it closes.
   private staging: string | null = null;
   // The agent's downloads on their way, until each is handed on or dropped: a take-over stops them all.
@@ -400,11 +423,20 @@ export class BrowserHost {
 
   /**
    * The address of the page *session*'s next operation acts in, once those before it in its line
-   * have run: its newest open page's, a popup's or its tab's, or a new tab's. Never rejects.
+   * have run: its newest open page's, a popup's or its tab's, or a new tab's. For an *upload*: of
+   * the frame of the file input its pages asked for last, which is the site that gets the files,
+   * whatever page frames it; that input is then held for the upload, so one that asks after cannot
+   * take the files in its place. Never rejects.
    */
-  address(session: string): Promise<string> {
-    return this.inLine(session, async () => (this.tabs.get(session) ?? []).filter((page) => !page.isClosed()).at(-1)?.url() ?? NEW_TAB)
-      .catch(() => NEW_TAB);
+  address(session: string, upload = false): Promise<string> {
+    return this.inLine(session, async () => {
+      const chooser = upload ? this.choosers.get(session) : undefined;
+      if (chooser && !chooser.page().isClosed()) {
+        this.named.set(session, chooser);
+        return (await chooser.element().ownerFrame())?.url() ?? chooser.page().url();
+      }
+      return (this.tabs.get(session) ?? []).filter((page) => !page.isClosed()).at(-1)?.url() ?? NEW_TAB;
+    }).catch(() => NEW_TAB);
   }
 
   /**
@@ -492,6 +524,9 @@ export class BrowserHost {
 
   private async act(launch: Launch, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, stop: AbortSignal): Promise<Outcome> {
     if (signal.aborted) return CANCELLED;
+    if (kind === "browser.set_input_files") return this.upload(session, args, stop);
+    // Its agent acted since an upload's prompt named an input: that prompt's upload is not coming.
+    if (!looks(kind, args)) this.named.delete(session);
     const operation = OPERATIONS[kind];
     if (!operation) return { error: { type: "unsupported", message: `This computer's browser does not handle ${kind}` } };
     let page: Page | undefined;
@@ -611,7 +646,10 @@ export class BrowserHost {
     });
     page.on("popup", (popup) => this.adopt(session, popup));
     // With a listener, the browser opens no file dialog of its own: no path the agent did not get reaches a page.
-    page.on("filechooser", () => this.note(session, FILE_ASKED));
+    page.on("filechooser", (chooser) => {
+      this.choosers.set(session, chooser);
+      this.note(session, FILE_ASKED);
+    });
   }
 
   // The session whose page *page* is now, a popup of its too: none for a tab its user opened themselves,
@@ -699,6 +737,28 @@ export class BrowserHost {
   private async discard(download: Download): Promise<void> {
     await download.cancel().catch(() => {});
     await download.delete().catch(() => {});
+  }
+
+  // The files the main side read from the chat's folder, given once to the file input an upload's
+  // prompt named, or, unasked, to the one the session's pages asked for last: the page is given names
+  // and what they hold, never a path.
+  private async upload(session: string, args: Record<string, unknown>, stop: AbortSignal): Promise<Outcome> {
+    const chooser = this.named.get(session) ?? this.choosers.get(session);
+    this.named.delete(session);
+    if (!chooser || chooser.page().isClosed()) return failed(NOT_ASKED);
+    const files = filesOf(args.files);
+    if (!files) return failed("A file for the page is a name, its type and what it holds");
+    try {
+      await this.bounded(chooser.page(), chooser.setFiles(files), stop);
+    } catch (error) {
+      if (stop.aborted) return PAUSED;
+      return failed(said(error));
+    }
+    if (stop.aborted) return PAUSED;
+    if (this.choosers.get(session) === chooser) this.choosers.delete(session);
+    const notices = this.unseen.get(session) ?? [];
+    this.unseen.delete(session);
+    return { ok: { files: files.length, notices } };
   }
 
   // A download once it has finished, in this host's staging folder: handed on for the chat's folder,
@@ -819,6 +879,8 @@ export class BrowserHost {
     this.unseen.delete(session);
     this.untold.delete(session);
     this.roots.delete(session);
+    this.choosers.delete(session);
+    this.named.delete(session);
     return pages.filter((page) => !page.isClosed());
   }
 

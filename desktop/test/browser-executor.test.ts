@@ -39,7 +39,7 @@ const kept = (name: string): string => {
 
 function rig(launch: Launch | null = LAUNCH, bound = true) {
   const ran: string[] = [];
-  const browsed: Array<{ launch: Launch; kind: string }> = [];
+  const browsed: Array<{ launch: Launch; kind: string; args?: Record<string, unknown> }> = [];
   const stopped: string[] = [];
   const forgotten: string[] = [];
   const paused: Array<[string, boolean]> = [];
@@ -49,8 +49,17 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
   let staged: (download: StagedDownload) => void = () => {};
   // The chats this computer bound, until one is deleted.
   const chats = new Set(bound ? [ROOT, OTHER] : []);
+  // The chat's files, as its file host reads them.
+  const files: Record<string, string> = { "/home/u/notes/report.pdf": "%PDF-1.7", "/home/u/notes/scan.png": "PNG" };
   const tools: ToolLayer = {
-    run: (operation) => (ran.push(operation.kind), Promise.resolve({ ok: "tools" })),
+    run: (operation) => {
+      ran.push(operation.kind);
+      if (operation.kind !== "read" || operation.args.key === undefined) return Promise.resolve({ ok: "tools" });
+      const data = files[String(operation.args.key)];
+      return Promise.resolve(data === undefined
+        ? { error: { type: "os", code: "ENOENT", message: "No such file or directory", filename: String(operation.args.key) } }
+        : { ok: Buffer.from(data).toString("base64") });
+    },
     refusal: () => ({ error: { type: "other", message: "from the tools" } }),
     guards: () => ({ home: "/home/u", dataDir: "/data", appDirs: [] }),
     live: () => [],
@@ -61,11 +70,14 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
   const browsing = new Browsing({
     tools,
     browser: {
-      perform: (chosen, operation) => (browsed.push({ launch: chosen, kind: operation.kind }), Promise.resolve<Outcome>(answers.shift() ?? { ok: "browser" })),
+      perform: (chosen, operation) => (
+        browsed.push({ launch: chosen, kind: operation.kind, ...(operation.kind === "browser.set_input_files" ? { args: operation.args } : {}) }),
+        Promise.resolve<Outcome>(answers.shift() ?? { ok: "browser" })
+      ),
       forget: (root) => void forgotten.push(`browser ${root}`),
       stop: () => (stopped.push("browser"), Promise.resolve()),
       end: () => (stopped.push("browser ended"), Promise.resolve()),
-      address: (session) => Promise.resolve(`https://example.com/${session}`),
+      address: (session, upload) => Promise.resolve(`https://example.com/${session}${upload ? "/the-input" : ""}`),
       pause: (root, held) => void paused.push([root, held]),
       show: (root) => (shown.push(root), Promise.resolve(true)),
       onDownload: (listener) => {
@@ -431,8 +443,27 @@ describe("the browser's kinds beside the tools", () => {
     expect([...told.keys()]).toEqual([OTHER]);
   });
 
-  it("asks the browser for the address of the page a session acts in", async () => {
+  it("reads each file of an upload through the chat's file host, and gives the browser what they hold, never their paths", async () => {
+    const { browsing, browsed, ran } = rig();
+    const upload = { ...op("browser.set_input_files"), args: { paths: ["/home/u/notes/report.pdf", "/home/u/notes/scan.png"] } };
+    expect(await browsing.run(upload, signal)).toEqual({ ok: "browser" });
+    expect(ran).toEqual(["read", "read"]);
+    expect(browsed.at(-1)?.args).toEqual({ files: [
+      { name: "report.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7").toString("base64") },
+      { name: "scan.png", mimeType: "image/png", buffer: Buffer.from("PNG").toString("base64") },
+    ] });
+    // One the file host refuses, as one gone or outside the folder: answered so, and the browser is given nothing.
+    const missing = { ...upload, args: { paths: ["/home/u/notes/report.pdf", "/home/u/notes/gone.txt"] } };
+    expect(await browsing.run(missing, signal)).toEqual({
+      error: { type: "browser", message: "/home/u/notes/gone.txt could not be read for the page: No such file or directory" },
+    });
+    expect(browsed).toHaveLength(1);
+    expect(await browsing.run({ ...upload, args: { paths: "report.pdf" } }, signal)).toMatchObject({ error: { type: "browser" } });
+  });
+
+  it("asks the browser for the address of the page a session acts in, and for an upload, of the file input that asked", async () => {
     expect(await rig().browsing.address("child")).toBe("https://example.com/child");
+    expect(await rig().browsing.address("child", true)).toBe("https://example.com/child/the-input");
   });
 
   it("closes a deleted chat's tabs, and tells the tools beneath", () => {

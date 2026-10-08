@@ -37,8 +37,9 @@ export interface ToolLayer extends Executor {
   refusal?(operation: Operation): Outcome | null;
   // A deleted chat's root: what the tools keep for it goes, such as its browser tabs.
   retired?(root: string): void;
-  // The address of the page a calling session's next browser operation acts in, for its prompt.
-  address?(session: string): Promise<string>;
+  // The address of the page a calling session's next browser operation acts in, for its prompt; for an
+  // upload, of the frame of the file input its page asked for.
+  address?(session: string, upload?: boolean): Promise<string>;
   // A chat's user takes the agent's browser over, for every chat, until that chat hands it back: whether the
   // chat holds it now, which it does not while another chat's take-over stands. Where it is held, as a chat
   // is told: true from that chat, false by nobody, "elsewhere" from another chat that is here, "orphaned"

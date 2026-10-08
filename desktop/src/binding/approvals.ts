@@ -75,12 +75,14 @@ export type ApprovalRequest =
   | { kind: "input"; chat: ChatLabel; process: string; command: string | null; data: string }
   | { kind: "network"; chat: ChatLabel; host: string; port: number; privateNetwork: boolean }
   // The chat's first use of the browser here ("use", with no detail), or what an operation would do
-  // in its page: the address it opens, the script it runs, where it clicks, what it types or presses, its drag's path.
+  // in its page: the address it opens, the script it runs, where it clicks, what it types or presses, its drag's path,
+  // the files of the chat's folder it gives the page, one to a line.
   // page: an act's, the address of the page it acts in, as the browser said it just before; null when it did not say in time.
+  // An upload's is the address of the frame of the file input that gets the files, which can be another site's than the tab shows.
   | { kind: "browser"; chat: ChatLabel; action: BrowserAction; detail: string; page?: string | null };
 
 // down and up: a mouse button pressed and held, and released, each where it is.
-export type BrowserAction = "use" | "open" | "script" | "click" | "down" | "up" | "type" | "press" | "drag" | "other";
+export type BrowserAction = "use" | "open" | "script" | "click" | "down" | "up" | "type" | "press" | "drag" | "upload" | "other";
 
 // Allow it this once; deny it; allow it and stop asking in this chat, which then works
 // freely (not offered for a network prompt); or, for a network prompt only, allow its
@@ -103,7 +105,8 @@ export interface ApprovalsOptions {
   prompts: ApprovalPrompts;
   agent: string; // the agent's name, for the prompts
   // The address of the page a calling session's next browser operation acts in: a page moves itself, so an act's prompt names it.
-  address?: (session: string) => Promise<string>;
+  // For an *upload*: of the frame of the file input its page asked for, which the browser then holds for that upload alone.
+  address?: (session: string, upload?: boolean) => Promise<string>;
   // What the tools refuse anyway, asked again when a browser operation's turn comes: its user may have taken the browser over meanwhile.
   refusal?: (operation: Operation) => Outcome | null;
   onError?: (error: unknown) => void; // a choice that could not be recorded, or a network prompt that failed, and why
@@ -202,6 +205,7 @@ function browserAct({ kind, args }: Operation): { action: BrowserAction; detail:
     return { action: "type", detail: at ? `${JSON.stringify(text(args.text))} at ${text(at.x)}, ${text(at.y)}` : text(args.text) };
   }
   if (kind === "browser.mouse" && args.action === "drag") return { action: "drag", detail: JSON.stringify(args.path ?? []) };
+  if (kind === "browser.set_input_files") return { action: "upload", detail: (Array.isArray(args.paths) ? args.paths : [args.paths]).map(text).join("\n") };
   if (kind === "browser.mouse") {
     const button = args.button === undefined || args.button === "left" ? "" : ` (${text(args.button)} button)`;
     const action = args.action === "down" || args.action === "up" ? args.action : "click";
@@ -348,10 +352,10 @@ export class Approvals {
         }
         if (!now.act) return null;
         const act = browserAct(operation);
-        // An open names where it goes; any other act, the page it acts in now.
+        // An open names where it goes; any other act, the page it acts in now; an upload, the frame of the input that gets the files.
         const answer = await ask(act.action === "open"
           ? { kind: "browser", chat, ...act }
-          : { kind: "browser", chat, ...act, page: await this.pageOf(operation.callingSessionId, asking) });
+          : { kind: "browser", chat, ...act, page: await this.pageOf(operation.callingSessionId, asking, act.action === "upload") });
         if (typeof answer !== "string") return answer;
         if (answer === "stop_asking") {
           try {
@@ -384,12 +388,13 @@ export class Approvals {
   }
 
   // The address of the page *session*'s act would act in, as the browser says it; null when it does not in time.
-  private async pageOf(session: string, signal: AbortSignal): Promise<string | null> {
+  // For an *upload*, of the frame of the file input that asked.
+  private async pageOf(session: string, signal: AbortSignal, upload: boolean): Promise<string | null> {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), ADDRESS_MS);
     });
-    const said = Promise.resolve().then(() => this.options.address?.(session) ?? null).catch(() => null);
+    const said = Promise.resolve().then(() => this.options.address?.(session, upload) ?? null).catch(() => null);
     try {
       return (await settled(Promise.race([said, late]), signal)) ?? null;
     } finally {

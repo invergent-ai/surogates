@@ -21,7 +21,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge } from "../src/browser/downloads.js";
 import {
-  AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, holding, type Launch, notFinished, PROXY_BYPASSED, WEAKENING,
+  AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, holding, type Launch, NOT_ASKED, notFinished, PROXY_BYPASSED,
+  WEAKENING,
 } from "../src/browser/host.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
@@ -60,6 +61,16 @@ beforeEach(async () => {
   hits = [];
   framed = [];
   site = createServer((req, res) => {
+    // other.test's page with a file input of its own, framing fixture.test's page with another.
+    if (req.headers.host === "other.test" && req.url === "/fileframe") {
+      return void res.writeHead(200, { "content-type": "text/html" }).end(`<title>Framing</title>
+<iframe src="http://fixture.test/fileinput" style="position:absolute;left:0;top:0;width:400px;height:200px;border:0"></iframe>
+<input id="top" type="file" style="position:absolute;left:20px;top:220px;width:200px;height:40px">`);
+    }
+    if (req.url === "/fileinput") {
+      return void res.writeHead(200, { "content-type": "text/html" })
+        .end(`<input id="file" type="file" style="position:absolute;left:20px;top:20px;width:200px;height:40px">`);
+    }
     // other.test's page, which embeds fixture.test's frame: the frame registers a worker of its own, or loads and navigates itself once.
     if (req.headers.host === "other.test") {
       return void res.writeHead(200, { "content-type": "text/html" }).end(`<title>Embed</title>
@@ -969,11 +980,59 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     expect(await script(a, "return document.getElementById('surogates-overlay');")).toBeNull();
   });
 
-  it("opens no file dialog for a file input, and tells the agent", async () => {
+  it("opens no file dialog for a file input, tells the agent, and gives the input the files it is sent, once", async () => {
     const a = session();
     await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    // Nothing asked for yet: nothing to give.
+    const report = { name: "report.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7").toString("base64") };
+    expect(await op(a, "browser.set_input_files", { files: [report] })).toEqual({
+      error: { type: "browser", message: NOT_ASKED },
+    });
     expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 })).ok.notices).toEqual([FILE_ASKED]);
+    expect(await op(a, "browser.set_input_files", { files: [report] })).toEqual({ ok: { files: 1, notices: [] } });
+    expect(await script(a, `const [file] = document.getElementById("file").files;
+return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "application/pdf", "%PDF-1.7"]);
+    // Answered once: the next upload waits for the page to ask again.
+    expect((await op(a, "browser.set_input_files", { files: [report] })).error?.message).toBe(NOT_ASKED);
+    // A file the page is sent is a name and what it holds, never a path.
+    await op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 });
+    expect((await op(a, "browser.set_input_files", { files: [{ ...report, name: "../etc/passwd" }] })).error?.message).toBe(
+      "A file for the page is a name, its type and what it holds",
+    );
   });
+
+  it("names the frame of the file input that asked, for an upload's prompt, and gives the files to that input though another asks after", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://other.test/fileframe" });
+    const report = { name: "report.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7").toString("base64") };
+    const page = (host as unknown as { tabs: Map<string, Page[]> }).tabs.get(a)![0]!;
+    const framed = page.frames().find((frame) => frame.url() === "http://fixture.test/fileinput")!;
+    // What each input holds: the framed site's, and the framing page's own.
+    const names = (id: string) => [...(document.getElementById(id) as HTMLInputElement).files!].map((file) => file.name);
+    const held = async () => [await framed.evaluate(names, "file"), await page.evaluate(names, "top")];
+    // The framed site is drawn by a process of its own: the mouse reaches it a moment after its page loaded.
+    await framed.evaluate(() => addEventListener("mousemove", () => Object.assign(window, { reached: true })));
+    await expect.poll(async () => {
+      await op(a, "browser.mouse", { action: "move", x: 60, y: 40 });
+      return framed.evaluate(() => (window as unknown as { reached?: boolean }).reached === true);
+    }, { timeout: 10_000 }).toBe(true);
+    // The input of another site, framed in the page: the click lands in its frame.
+    expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 40, button: "left", clicks: 1 })).ok.notices).toEqual([FILE_ASKED]);
+    // The page the tab shows is one site; the site that would get the files is the frame's.
+    expect(await host.address(a)).toBe("http://other.test/fileframe");
+    expect(await host.address(a, true)).toBe("http://fixture.test/fileinput");
+    // Another input asks while the prompt that named the frame is open, and the agent looks at the page: the files still go where the prompt said.
+    await Promise.all([page.waitForEvent("filechooser"), page.click("#top")]);
+    expect((await op(a, "browser.mouse", { action: "move", x: 1, y: 1 })).ok.notices).toEqual([FILE_ASKED]);
+    expect(await op(a, "browser.set_input_files", { files: [report] })).toEqual({ ok: { files: 1, notices: [] } });
+    expect(await held()).toEqual([["report.pdf"], []]);
+    // The one that asked after is the session's next, named by its own frame: the page's.
+    expect(await host.address(a, true)).toBe("http://other.test/fileframe");
+    // Its agent acts before that upload comes, as after a denied one: the name is forgotten, and an upload nobody was asked about goes to the input that asked last.
+    expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 40, button: "left", clicks: 1 })).ok.notices).toEqual([FILE_ASKED]);
+    expect(await op(a, "browser.set_input_files", { files: [{ ...report, name: "scan.pdf" }] })).toMatchObject({ ok: { files: 1 } });
+    expect(await held()).toEqual([["scan.pdf"], []]);
+  }, 30_000);
 
   it("stages a download a session's page finished in its own temporary folder, and hands it on for the chat's folder; one its user started while they hold the browser as theirs, the agent told nothing", async () => {
     const staged: StagedDownload[] = [];
