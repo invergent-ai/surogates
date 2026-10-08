@@ -249,7 +249,8 @@ function showTab(): void {
   byId("library").hidden = reading !== null || tab !== "library";
   byId("routines").hidden = reading !== null || tab !== "routines";
   byId("reading").hidden = reading === null;
-  byId("reading-title").textContent = reading?.title ?? "";
+  // As last listed: a rename shows here too.
+  byId("reading-title").textContent = reading ? (last?.overview?.threads.find((found) => found.id === reading.id)?.title ?? reading.title) : "";
   const was = readingShown;
   readingShown = reading?.id ?? null;
   const inPane = document.activeElement === document.body || byId("panel").contains(document.activeElement);

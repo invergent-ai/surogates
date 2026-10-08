@@ -587,6 +587,18 @@ describe("the Overview pane, at its edges", () => {
     }).toBe("Check the third quarter's revenue");
   });
 
+  it("keeps a transcript's title in the pane in step with a thread that is renamed", async () => {
+    const { page, client } = await opened();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(() => page.textContent("#reading-title")).toBe("Check the revenue figures");
+    await client.evaluate(([project, thread]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      fake.data.threads[project!]!.find((each) => each.id === thread)!.title = "Check the third quarter's revenue";
+      fake.changed(project!, thread!);
+    }, [REPORT, QUESTION]);
+    await expect.poll(() => page.textContent("#reading-title")).toBe("Check the third quarter's revenue");
+  });
+
   it("never loads a master session that is not a chat when a thread leaves", async () => {
     const { page, client } = await opened();
     await viewThread(page, QUESTION);
