@@ -390,9 +390,9 @@ export class BrowserHost {
     return context;
   }
 
-  // No service worker answers any page of the browser's, from its first request, so one a page
-  // installs never answers another chat's tab (Playwright's own block replaces only
-  // navigator.serviceWorker.register). Playwright reports a popup only once its first navigation
+  // No service worker answers any page of the browser's, or any frame of one, from its first
+  // request, so one a page installs never answers another chat's tab (Playwright's own block
+  // replaces only navigator.serviceWorker.register). Playwright reports a popup only once its first navigation
   // has been answered, too late for a bypass set then: so each new page is held at its start until
   // its bypass is on. A page whose bypass fails is closed.
   private async bypassWorkers(context: BrowserContext): Promise<void> {
@@ -429,6 +429,12 @@ export class BrowserHost {
       bypassing.set(targetId, done);
       return done;
     };
+    // A cross-site frame is a target of its own, and its own later navigations are its: each is
+    // bypassed as it appears. Its first load is its page's, under the page's bypass already.
+    root.on("Target.targetCreated", ({ targetInfo: { targetId, type } }) => {
+      if (type === "iframe") void bypassOnce(targetId);
+    });
+    await root.send("Target.setDiscoverTargets", { discover: true });
     // A holder holds each page that opens after it. Its sessions are flat, which Playwright's
     // CDPSession cannot speak to, so it lets its pages go only by detaching whole: it spends itself
     // on the first, the next is armed, then this one lets its pages go, each once it is bypassed.

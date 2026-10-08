@@ -21,9 +21,10 @@ const EXECUTABLE = TEST_BROWSER;
 const run = EXECUTABLE !== undefined && process.env.SUROGATE_BROWSER_TESTS === "1";
 const ROOT = "root-1";
 
-// The fixture, as a site past this computer: fixture.test leads to 203.0.113.10, which the
-// proxy dials at the fixture's own port here. Every other name is unknown.
+// The fixture, as sites past this computer: fixture.test leads to 203.0.113.10 and other.test to
+// 203.0.113.11, each of which the proxy dials at the fixture's own port here. Every other name is unknown.
 const SITE = "203.0.113.10";
+const OTHER = "203.0.113.11";
 
 const PAGE = `<!doctype html><title>Fixture</title>
 <button id="go" style="position:absolute;left:40px;top:40px;width:100px;height:30px" onclick="document.title='clicked '+(++window.n)">Go</button>
@@ -39,6 +40,8 @@ let site: Server;
 let canary: Server;
 let ports: { site: number; canary: number };
 let hits: string[];
+// What fixture.test's cross-site frame asked the site for.
+let framed: string[];
 let profile: string;
 let launch: Launch;
 let host: BrowserHost;
@@ -46,7 +49,35 @@ let next = 0;
 
 beforeEach(async () => {
   hits = [];
+  framed = [];
   site = createServer((req, res) => {
+    // other.test's page, which embeds fixture.test's frame: the frame registers a worker of its own, or loads and navigates itself once.
+    if (req.headers.host === "other.test") {
+      return void res.writeHead(200, { "content-type": "text/html" }).end(`<title>Embed</title>
+<iframe src="http://fixture.test/frame${req.url?.includes("register") ? "?register" : ""}"></iframe>
+<script>addEventListener("message", (event) => { document.title = String(event.data); });</script>`);
+    }
+    if (req.url?.startsWith("/frame")) {
+      framed.push(req.url);
+      return void res.writeHead(200, { "content-type": "text/html" }).end(`<script>
+const at = location.pathname + location.search;
+if (at.includes("register")) {
+  ServiceWorkerContainer.prototype.register.call(navigator.serviceWorker, "/sw-of-frame.js").then(() => navigator.serviceWorker.ready)
+    .then(() => parent.postMessage("registered " + at, "*"), (error) => parent.postMessage("failed " + error, "*"));
+} else if (at.includes("again")) {
+  parent.postMessage("frame again " + at, "*");
+} else {
+  setTimeout(() => { location.href = "/frame?again"; }, 300);
+}
+</script>`);
+    }
+    // The frame's worker, which would answer every request of the frame's (partitioned) origin.
+    if (req.url === "/sw-of-frame.js") {
+      return void res.writeHead(200, { "content-type": "text/javascript" })
+        .end(`self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener("fetch", (event) => event.respondWith(new Response("<script>parent.postMessage('served by the worker ' + location.pathname + location.search, '*')</script>", { headers: { "content-type": "text/html" } })));`);
+    }
     if (req.url === "/inner") return void res.writeHead(200, { "content-type": "text/html" }).end(`<a href="/x">Inner link</a>`);
     if (req.url === "/report.txt") return void res.writeHead(200, { "content-type": "text/plain", "content-disposition": "attachment" }).end("report");
     if (req.url === "/second") return void res.writeHead(200, { "content-type": "text/html" }).end("<title>Second</title>");
@@ -96,9 +127,9 @@ new Worker(URL.createObjectURL(new Blob([\`fetch("${own}/worker").catch(()=>{})\
 // A host whose proxy finds fixture.test at SITE and dials the fixture there; *options* add to it.
 const hostWith = (options: Omit<BrowserHostOptions, "proxy"> = {}) => new BrowserHost({
   proxy: {
-    resolve: (name) => (name === "fixture.test" ? Promise.resolve([SITE]) : Promise.reject(new Error("ENOTFOUND"))),
+    resolve: (name) => (name === "fixture.test" ? Promise.resolve([SITE]) : name === "other.test" ? Promise.resolve([OTHER]) : Promise.reject(new Error("ENOTFOUND"))),
     local: () => ["127.0.0.1", "::1"],
-    connect: (address, port) => connectTcp({ host: "127.0.0.1", port: address === SITE && port === 80 ? ports.site : 9 }),
+    connect: (address, port) => connectTcp({ host: "127.0.0.1", port: (address === SITE || address === OTHER) && port === 80 ? ports.site : 9 }),
   },
   ...options,
 });
@@ -444,6 +475,21 @@ await navigator.serviceWorker.ready;`);
     await expect.poll(() => script(a, "return location.pathname;")).toBe("/second");
     expect(await script(a, "return document.title;")).toBe("Second");
   });
+
+  it("lets no service worker answer a cross-site frame's own navigations, in the chat whose frame registered it or another", async () => {
+    await host.close();
+    host = hostWith({ args: ["--unsafely-treat-insecure-origin-as-secure=http://fixture.test,http://other.test"] });
+    const [a, b] = [session(), session()];
+    await op(a, "browser.navigate", { url: "http://other.test/embed?register" });
+    await expect.poll(() => script(a, "return document.title;"), { timeout: 10_000 }).toBe("registered /frame?register");
+    for (const chat of [b, a]) {
+      framed = [];
+      await op(chat, "browser.navigate", { url: "http://other.test/embed" });
+      await expect.poll(() => script(chat, "return document.title;"), { timeout: 10_000 }).toMatch(/again/);
+      expect(await script(chat, "return document.title;")).toBe("frame again /frame?again");
+      expect(framed).toEqual(["/frame", "/frame?again"]);
+    }
+  }, 40_000);
 
   it("refuses a browser whose requests do not come through its proxy, as a policy can make it, and leaves it closed", async () => {
     await host.close();
