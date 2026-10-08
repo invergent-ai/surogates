@@ -212,6 +212,8 @@ export async function deliver(options: DeliverOptions): Promise<string> {
 // *got* is told how many of its bytes are here.
 async function download(options: DeliverOptions, file: ImageFile, partial: string, got: (have: number) => void): Promise<void> {
   let have = sizeOf(partial);
+  // Whether more came than the manifest's size: then it is not the file, whatever its start.
+  let past = false;
   if (have > file.downloadSize) {
     truncateSync(partial, 0);
     have = 0;
@@ -266,11 +268,9 @@ async function download(options: DeliverOptions, file: ImageFile, partial: strin
       const out = await open(partial, have > 0 ? "a" : "w", 0o600);
       const reader = response.body?.getReader();
       const next = () => reader && Promise.race([reader.read(), stalled]);
-      let past = false;
       try {
         for (let read = await next(); read && !read.done; read = await next()) {
           heard();
-          // Past the size the manifest names: it is not the file.
           past = have + read.value.length > file.downloadSize;
           if (past) break;
           hash.update(read.value);
@@ -296,7 +296,7 @@ async function download(options: DeliverOptions, file: ImageFile, partial: strin
       clearTimeout(timer);
     }
   }
-  if (have !== file.downloadSize || hash.digest("hex") !== file.downloadSha256) {
+  if (past || have !== file.downloadSize || hash.digest("hex") !== file.downloadSha256) {
     rmSync(partial, { force: true });
     throw new Error(`${file.download} was not the file the app expects`);
   }

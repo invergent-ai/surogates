@@ -221,6 +221,29 @@ describe("the guest image's delivery", () => {
     expect(heard.filter(({ url }) => url.endsWith("rootfs.img.zst")).map(({ range }) => range)).toEqual(["bytes=500-", undefined]);
   });
 
+  it("refuses a resume whose answer says it is the rest but is not, and stops a body past the file's size there, keeping neither", async () => {
+    const partial = join(images(), `${KEY}.partial`, "rootfs.img.zst.partial");
+    mkdirSync(join(images(), `${KEY}.partial`), { recursive: true });
+    writeFileSync(partial, served.get(`/desktop/vm/${KEY}/rootfs.img.zst`)!.subarray(0, 500));
+    // A 206 that names the offset asked for, and sends the file from its start.
+    answer = (request, response, body) => {
+      if (!request.headers.range) return ranged(request, response, body);
+      response.writeHead(206, { "content-range": `bytes 500-${body.length - 1}/${body.length}`, "content-length": body.length - 500 }).end(body.subarray(0, body.length - 500));
+    };
+    await expect(deliver(options())).rejects.toThrow("rootfs.img.zst was not the file the app expects");
+    expect(existsSync(partial)).toBe(false);
+    // The file, and then more for as long as the connection lasts.
+    answer = (_request, response, body) => {
+      response.writeHead(200).write(body);
+      const more = setInterval(() => response.write(Buffer.alloc(64 * 1024)), 10);
+      response.once("close", () => clearInterval(more));
+    };
+    await expect(deliver(options())).rejects.toThrow("rootfs.img.zst was not the file the app expects");
+    expect(existsSync(partial)).toBe(false);
+    answer = ranged;
+    expect(readFileSync(join(await deliver(options()), "rootfs.img")).equals(rootfs)).toBe(true);
+  });
+
   it("refuses an unpacked file that is not the one the manifest names, and keeps neither it nor its download", async () => {
     manifest = { ...manifest, files: manifest.files.map((file) => (file.name === "vmlinuz" ? { ...file, sha256: "0".repeat(64) } : file)) };
     await expect(deliver(options())).rejects.toThrow("vmlinuz was not the file the app expects");
