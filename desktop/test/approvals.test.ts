@@ -1076,6 +1076,15 @@ describe("the browser on this computer", () => {
     expect(heard).toEqual([ROOT]);
   });
 
+  it("lets a close through unasked in a chat whose agent may not use the browser: it closes nothing", async () => {
+    for (const [root, mode] of [[ROOT, "free"], [OTHER, "ask"]] as const) {
+      bind(root, mode);
+      expect(await approvals.admit(op("browser.close", {}, root), never())).toBeNull();
+    }
+    expect(user.asked).toEqual([]);
+    expect(journal.bindings.browsing(ROOT)).toBe(false);
+  });
+
   it("forgets a deleted chat's first use with its binding", () => {
     bind(ROOT, "free");
     journal.bindings.allowBrowser(ROOT);
