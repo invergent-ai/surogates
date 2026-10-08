@@ -1069,7 +1069,8 @@ function bridge(contents: WebContents, agent: Agent): void {
       if (typeof code !== "string") throw new Error("The agent gave this window no session");
       return { code };
     },
-    prepareFolder: (choice, window) => preparing(window, async (signal) => (await registered()).binder.prepareFolder(choice, window, signal)),
+    prepareFolder: (choice, window, thread) =>
+      preparing(window, async (signal) => (await registered()).binder.prepareFolder(choice, window, signal, thread)),
     bindSession: async (sessionId, token, window) => {
       await (await registered()).binder.bindSession(sessionId, token, window);
     },

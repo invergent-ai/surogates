@@ -41,6 +41,14 @@ def device_of(config: dict[str, Any] | None) -> UUID | None:
     return UUID(execution["device_id"])
 
 
+def is_binding_root(session_id: UUID, config: dict[str, Any] | None) -> bool:
+    """Whether a session holds a folder binding of its own: a root, or a
+    project's thread, which is its own sandbox root.  A session created
+    under another names that one, and works in its folder."""
+    root = (config or {}).get("sandbox_root_session_id")
+    return not root or root == str(session_id)
+
+
 @dataclass(frozen=True, slots=True)
 class Binding:
     state: Literal["pending", "bound", "failed"]

@@ -100,6 +100,22 @@ describe("the Overview pane", () => {
     expect(await texts(page, "#routine-list .from")).toEqual(["On the 1st of every month at 09:00", "Every Monday at 08:00"]);
   });
 
+  it("marks a file a thread made on the user's computer with its laptop, apart from the cloud's file of that name", async () => {
+    const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+    agent.projects!.library[REPORT] = [
+      { path: "Budget.xlsx", origin: "added", threadId: null, size: 14, updatedAt: minutesAgo(5), place: { kind: "cloud" } },
+      {
+        path: "Budget.xlsx", origin: "produced", threadId: FIXTURE_IDS.computer, size: null, updatedAt: minutesAgo(1),
+        place: { kind: "device", deviceId: "d", deviceName: "thinkpad", online: true },
+      },
+    ];
+    const { page } = await opened();
+    await page.click('[data-tab="library"]');
+    expect(await page.$$eval("#files li", (files) => files.map((file) => [
+      file.querySelector(".from")!.textContent, file.querySelector(".place")?.getAttribute("title") ?? null,
+    ]))).toEqual([["From Tidy the shared folder", "On thinkpad, which is online"], ["Added by you · 1 KB", null]]);
+  });
+
   it("opens a thread in the centre, with its project as the way back, and draws no second web client", async () => {
     const { shell, page, client } = await opened();
     await page.click(`[data-thread="${QUESTION}"]`);

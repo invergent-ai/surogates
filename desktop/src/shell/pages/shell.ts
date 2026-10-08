@@ -35,7 +35,10 @@ interface State {
   failure: string | null; // why what the user last asked for, a project or a thread's resolve, did not happen
   overview: {
     threads: ThreadRow[]; // last active first
-    library: Array<{ path: string; origin: "added" | "produced"; threadId: string | null; size: number | null; updatedAt: string | null }>;
+    library: Array<{
+      path: string; origin: "added" | "produced"; threadId: string | null; size: number | null; updatedAt: string | null;
+      place: ThreadRow["place"];
+    }>;
     routines: Array<{ name: string; scheduleDisplay: string }>;
   } | null;
   device: { text: string; status: string | null } | null;
@@ -158,17 +161,21 @@ const REASONS = { question: "Question", approval: "Approval", failed: "Failed", 
 const GROUPS = { waiting: "Waiting", working: "Working", idle: "Idle", resolved: "Resolved" } as const;
 let tab = "threads";
 
+// A thread's, or a file's, on the user's computer: a laptop, titled with the computer and whether it is online.
+function laptop(place: ThreadRow["place"]): HTMLElement[] {
+  if (place.kind !== "device") return [];
+  const mark = element("span", "place");
+  mark.title = `On ${place.deviceName}, which is ${place.online ? "online" : "offline"}`;
+  mark.append(icon("laptop", 14));
+  return [mark];
+}
+
 function threadRow(thread: ThreadRow): HTMLElement {
   const row = button("thread", "", () => void shell.thread(thread.id));
   row.dataset.group = thread.group;
   row.dataset.thread = thread.id;
   const title = element("span", "title", thread.title);
-  if (thread.place.kind === "device") {
-    const place = element("span", "place");
-    place.title = `On ${thread.place.deviceName}, which is ${thread.place.online ? "online" : "offline"}`;
-    place.append(icon("laptop", 14));
-    title.append(place);
-  }
+  title.append(...laptop(thread.place));
   const words = thread.reason ? REASONS[thread.reason] : GROUPS[thread.group];
   const side = element("span", "side");
   if (thread.progress) side.append(element("span", "progress", `${thread.progress.done}/${thread.progress.total}`));
@@ -190,9 +197,11 @@ function threadRow(thread: ThreadRow): HTMLElement {
   return item;
 }
 
-function listRow(first: string, second: string, third: string): HTMLElement {
+function listRow(first: string, second: string, third: string, place: ThreadRow["place"] = { kind: "cloud" }): HTMLElement {
   const item = element("li", "file");
-  item.append(element("span", "path", first), element("span", "from", second), element("span", "age", third));
+  const from = element("span", "from", second);
+  from.append(...laptop(place));
+  item.append(element("span", "path", first), from, element("span", "age", third));
   return item;
 }
 
@@ -222,6 +231,7 @@ function renderOverview(state: State): void {
     entry.path,
     `${entry.origin === "added" ? "Added by you" : `From ${titles.get(entry.threadId ?? "") ?? "a thread"}`}${kilobytes(entry.size)}`,
     entry.updatedAt ? ago(entry.updatedAt) : "",
+    entry.place,
   )));
   byId("no-files").hidden = library.length > 0;
   const routines = overview?.routines ?? [];
