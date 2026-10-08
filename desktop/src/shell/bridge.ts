@@ -31,6 +31,13 @@ export interface BridgeCalls {
   getBinding(sessionId: string): Promise<DesktopBinding | null>;
   // The chat's folder shown in the file manager, while it is still the one its user confirmed.
   revealFolder(sessionId: string): Promise<void>;
+  // The agent's browser for the chat: its page shown, taken over, and handed back at the desktop's own
+  // confirmation. *clicked*: the hand back was asked at its user's click, not by the page's own code.
+  showBrowser(sessionId: string): Promise<void>;
+  takeOver(sessionId: string): Promise<void>;
+  handBack(sessionId: string, clicked: boolean): Promise<boolean>;
+  // Settings opened on the one section the page may open.
+  openSettings(section: "browser"): Promise<void>;
   getAppearance(): DesktopAppearance;
   setAccount(account: DesktopAccount | null): void;
   // The page registered its projects source (true), or withdrew it; the source stays in the page's preload.
@@ -54,6 +61,12 @@ function threadOf(value: unknown): DesktopThreadLabel | null {
   const { project, thread } = (typeof value === "object" ? value : {}) as Record<string, unknown>;
   if (!titled(project) || !titled(thread)) throw new Error("Not a project's thread");
   return { project, thread };
+}
+
+// A chat's id, as the page names one, or the call is refused.
+function chat(value: unknown): string {
+  if (typeof value !== "string" || !UUID.test(value)) throw new Error("Not a chat");
+  return value;
 }
 
 function accountOf(value: unknown): DesktopAccount | null {
@@ -110,6 +123,22 @@ export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<strin
     revealFolder: checked((window, sessionId) => {
       if (typeof sessionId !== "string" || !UUID.test(sessionId)) throw new Error("Not a chat");
       return alone("show folder", window, () => calls.revealFolder(sessionId), "Surogate is still showing a folder");
+    }),
+    showBrowser: checked((_window, sessionId) => calls.showBrowser(chat(sessionId))),
+    takeOver: checked(async (_window, sessionId, clicked) => {
+      const id = chat(sessionId);
+      await calls.takeOver(id);
+      // Its page comes to the front only at its user's click, as the preload heard it: a page that takes the chat
+      // over by itself makes it safer, and raises nothing. A chat with no page open is taken over all the same.
+      if (clicked === true) await calls.showBrowser(id).catch(() => {});
+    }),
+    handBack: checked((window, sessionId, clicked) => {
+      const id = chat(sessionId);
+      return alone("hand back", window, () => calls.handBack(id, clicked === true));
+    }),
+    openSettings: checked((_window, section) => {
+      if (section !== "browser") throw new Error("Not a section the agent's page may open");
+      return calls.openSettings(section);
     }),
     getAppearance: checked(() => calls.getAppearance()),
     setAccount: checked((_window, account) => calls.setAccount(accountOf(account))),

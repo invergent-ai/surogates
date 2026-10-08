@@ -715,12 +715,12 @@ describe("a chat's folder, from the page", () => {
     });
     expect(await binding(client)).toBeNull();
     await bound(client, folder, CHAT, "ask");
-    expect(await binding(client)).toEqual({ folder, mode: "ask" });
+    expect(await binding(client)).toEqual({ folder, mode: "ask", takenOver: false });
     // Freed in the desktop's own window, then made to ask again by the page: the page hears each.
     const freed = client.evaluate((id) => window.surogateDesktop!.requestFreeMode(id), CHAT);
     await press(await prompt(app!), "free");
     expect(await freed).toBe(true);
-    expect(await binding(client)).toEqual({ folder, mode: "free" });
+    expect(await binding(client)).toEqual({ folder, mode: "free", takenOver: false });
     await client.evaluate((id) => window.surogateDesktop!.setMode(id, "ask"), CHAT);
     await expect.poll(() => client.evaluate(() => (window as unknown as { heard: string[] }).heard)).toEqual([CHAT, CHAT, CHAT]);
     expect(await binding(client, OTHER)).toBeNull();

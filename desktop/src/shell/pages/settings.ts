@@ -39,6 +39,7 @@ interface Settings {
   sandbox(action: "retry" | "log" | "check"): Promise<void>;
   close(): Promise<void>;
   onChanged(listener: () => void): () => void;
+  onShow(listener: (section: string) => void): () => void;
 }
 
 const settings = (globalThis as unknown as { surogateSettings: Settings }).surogateSettings;
@@ -227,4 +228,10 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") void settings.close();
 });
 settings.onChanged(() => void render());
+// Opened on a section, or shown one while open, as the agent's page opens Browser: one the nav has, or none.
+const open = (name: string): void => {
+  if (document.querySelector(`.settings-nav [data-section="${CSS.escape(name)}"]`)) show(name);
+};
+settings.onShow(open);
+open(location.hash.slice(1));
 void render().then(() => byId("settings-search").focus());

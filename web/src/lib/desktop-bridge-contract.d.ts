@@ -30,6 +30,28 @@ export interface DesktopPreparedFolder {
 export interface DesktopBinding {
   folder: string; // as the folder sheet showed it, and the agent was told
   mode: "free" | "ask";
+  takenOver: boolean; // its user took its browser over: its agent's browser calls wait until it is handed back
+}
+
+// The agent's browser on this computer, for a chat bound here (Section 5): each call takes the chat's
+// id as getBinding does (a sub-agent's chat is its root's), and rejects as getBinding does, and for a
+// chat with no folder on this computer. A take-over and a hand back are told by onBindingChanged.
+export interface DesktopBrowser {
+  // The chat's newest page, brought to the front. Rejects with "Surogate shows the agent's browser
+  // only when its user asks, with a click" but at a click of its user's, once for each, within 5 s
+  // of it, as revealFolder does; and when the chat has no page open.
+  show(sessionId: string): Promise<void>;
+  // The user drives the browser from now on: the agent's browser calls in this chat answer that the
+  // user has taken control, and its browser questions waiting on this computer go. It needs no
+  // click, since it only makes the chat safer; its page comes to the front only at a click of its
+  // user's, as show's does.
+  takeOver(sessionId: string): Promise<void>;
+  // The desktop asks its user, in its own window; true once the agent drives the browser again, false
+  // when the user keeps it. A page cannot hand it back on its own. Rejects with "Surogate is already
+  // asking" while this window's last one is still open, and, once its user kept the browser, with
+  // "The user chose to keep the browser" until the chat is taken over anew or the page loads again:
+  // only a call at a click of its user's asks again.
+  handBack(sessionId: string): Promise<boolean>;
 }
 
 // The project's thread a folder is asked for (Section 12): the sheet names both. The page's own
@@ -94,6 +116,13 @@ export interface DesktopBridge {
   // look at this folder, or at two others, has not returned; and once the folder is not there,
   // does not answer within 5 s, or was replaced after it was confirmed for the chat.
   revealFolder?(sessionId: string): Promise<void>;
+  // The browser's calls and Settings came after version 1's first desktops too: the page looks for each.
+  browser?: DesktopBrowser;
+  // Opens the desktop's own Settings on *section*: Browser, as the browser pane's no-browser message
+  // offers. Rejects with "Surogate opens its Settings only when its user asks, with a click" but at
+  // a click of its user's, as revealFolder does, and with "Surogate has a project's dialog open:
+  // close it to open Settings" while one is over the window.
+  openSettings?(section: "browser"): Promise<void>;
   // Hears each chat bound on this computer, each change of a chat's mode, and each chat's folder
   // forgotten here, as for a deleted chat, by the chat's id.
   onBindingChanged?(listener: (sessionId: string) => void): () => void;

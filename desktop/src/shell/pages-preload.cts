@@ -62,6 +62,12 @@ if (location.protocol === "file:") {
     sandbox: (action: string) => ipcRenderer.invoke("settings:sandbox", action),
     close: () => ipcRenderer.invoke("settings:close"),
     onChanged: listen("settings:changed"),
+    // A section to show while it is open, as when the agent's page opens Browser.
+    onShow: (listener: (section: string) => void) => {
+      const relay = (_event: unknown, section: unknown) => listener(String(section));
+      ipcRenderer.on("settings:show", relay);
+      return () => ipcRenderer.off("settings:show", relay);
+    },
   });
   contextBridge.exposeInMainWorld("surogateAbout", {
     state: () => ipcRenderer.invoke("about:state"),

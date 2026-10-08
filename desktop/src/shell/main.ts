@@ -1191,6 +1191,14 @@ function bridge(contents: WebContents, agent: Agent): void {
     if (!device) throw new Error("This computer is not registered with the agent");
     return device.stack ?? device.started;
   };
+  // The device, for a call about a chat's browser: refused for a chat with no folder here.
+  const browsing = async (sessionId: string): Promise<DeviceStack> => {
+    const stack = await registered();
+    if (!stack.bindings.get(sessionId)) throw new Error("This chat has no folder on this computer");
+    return stack;
+  };
+  // The chats whose user kept the browser at this page's hand back: its own code asks no more, until a new take-over.
+  const keptBrowser = new Set<string>();
   const handlers = bridgeHandlers(agent.origin, {
     getDevice: () => {
       // The capabilities as last read and kept: a sign-in's read reaches the file, not the agent this bridge was opened with.
@@ -1220,9 +1228,56 @@ function bridge(contents: WebContents, agent: Agent): void {
     requestFreeMode: (sessionId, window) =>
       preparing(window, async (signal) => (await registered()).binder.approvals.requestFreeMode(sessionId, signal, `${window}:${load}`)),
     cancelPrepared: async (token, window) => (await registered()).binder.cancelPrepared(token, window),
-    getBinding: async (sessionId) => (await registered()).binder.bindingOf(sessionId),
+    getBinding: async (sessionId) => {
+      const stack = await registered();
+      const binding = stack.binder.bindingOf(sessionId);
+      return binding && { ...binding, takenOver: stack.tools.takenOver?.(sessionId) ?? false };
+    },
     // Shown selected in its parent, never opened: a file put at its path after the look is only selected, never run.
     revealFolder: async (sessionId) => shell.showItemInFolder(await (await registered()).binder.folderToShow(sessionId)),
+    showBrowser: async (sessionId) => {
+      const stack = await browsing(sessionId);
+      if (!(await stack.tools.show?.(sessionId))) throw new Error("The agent's browser has no page open for this chat");
+    },
+    // The user drives the chat's browser from now on, and the page hears the change.
+    takeOver: async (sessionId) => {
+      const stack = await browsing(sessionId);
+      // A new take-over: what its user chose at the last one's hand back is not held against the page.
+      if (!stack.tools.takenOver?.(sessionId)) keptBrowser.delete(sessionId);
+      stack.takeOver(sessionId);
+      contents.send("desktop:binding-changed", sessionId);
+    },
+    // Only at the desktop's own confirmation: the page asks, the user answers in a native box. Once they
+    // kept the browser, only their own click asks again: a page cannot wear its user down.
+    handBack: async (sessionId, clicked) => {
+      const stack = await browsing(sessionId);
+      if (!stack.tools.takenOver?.(sessionId)) return true;
+      if (!clicked && keptBrowser.has(sessionId)) throw new Error("The user chose to keep the browser");
+      const handed = await ask({
+        type: "question",
+        message: `Hand the browser back to ${asShown(agent.name)}?`,
+        detail: "It acts in its browser on this computer again, for this chat.",
+        buttons: ["Hand back", "Keep control"],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      });
+      if (!handed) {
+        keptBrowser.add(sessionId);
+        return false;
+      }
+      stack.handBack(sessionId);
+      contents.send("desktop:binding-changed", sessionId);
+      return true;
+    },
+    openSettings: async (section) => {
+      // A project's dialog is over the window: Settings does not open over it.
+      if (projectDialog !== null && main?.settingsContents() === projectDialog) {
+        throw new Error("Surogate has a project's dialog open: close it to open Settings");
+      }
+      main?.show();
+      showSettings(section);
+    },
     getAppearance: appearanceNow,
     setAccount: (reported) => {
       // Another account, or none, or the first: nothing listed before is theirs. A page that
@@ -1257,6 +1312,7 @@ function bridge(contents: WebContents, agent: Agent): void {
   // the page there still serves: a load the shell cancels, as to an address outside the agent's, changes nothing.
   onReplaced(contents, () => {
     load += 1;
+    keptBrowser.clear();
     if (served) withdrawProjects(false);
   });
 }
@@ -1803,7 +1859,7 @@ async function confirmArchive(name: string): Promise<boolean> {
 // calls are answered on its own view only; each answers why it was refused, or null once done.
 function showProject(editing: Opened | null): void {
   const page = join(PAGES, "project.html");
-  main?.openSettings(page, PAGES_PRELOAD, (contents) => {
+  main?.openSettings(page, PAGES_PRELOAD, undefined, (contents) => {
     projectDialog = contents;
     const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
       contents.ipc.handle(channel, (event, ...args: unknown[]) => {
@@ -1883,10 +1939,13 @@ function showProject(editing: Opened | null): void {
   });
 }
 
-// Settings, over the window: its page's calls are answered on its own view only.
-function showSettings(): void {
+// Settings, over the window, on *section* when one is named: its page's calls are answered on its own view only.
+function showSettings(section?: "browser"): void {
   const page = join(PAGES, "settings.html");
-  main?.openSettings(page, PAGES_PRELOAD, (contents) => {
+  // Open already: its page is shown the section. ponytail: one that still loads does not hear it, and opens on its own.
+  const open = main?.settingsContents();
+  if (section && open && open !== projectDialog) open.send("settings:show", section);
+  main?.openSettings(page, PAGES_PRELOAD, section, (contents) => {
     // A chat named not yet is asked about again, once.
     reads.clear();
     const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
@@ -2063,7 +2122,7 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:place", (hole) => window.place(bounds(hole)));
   handle("shell:place-pane", (hole) => window.placePane(bounds(hole)));
   handle("shell:menu", popup);
-  handle("shell:settings", showSettings);
+  handle("shell:settings", () => showSettings());
   handle("shell:new-project", () => showProject(null));
   handle("shell:project-settings", () => {
     if (view.kind !== "project") throw new Error("No project is open");

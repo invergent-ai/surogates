@@ -24,6 +24,7 @@ const BROWSER = NAMED ? findBrowsers().find((browser) => browser.executable === 
 const run = BROWSER !== null && process.env.SUROGATE_BROWSER_TESTS === "1";
 
 let home: string;
+let origin: string;
 let agent: FakeAgent;
 let app: ElectronApplication | undefined;
 let canary: Server;
@@ -70,7 +71,7 @@ async function operation(kind: string, args: Record<string, unknown>, invocation
 
 // The app launched and signed in, and *folder* bound to the chat in the desktop's own sheet.
 async function bound(folder: string): Promise<Page> {
-  const origin = await agent.start();
+  origin = await agent.start();
   // The app's own environment is the browser's: apart from the user's session, or no launch.
   isolated(shellEnv(home));
   if (NAMED && BROWSER) {
@@ -90,6 +91,33 @@ async function bound(folder: string): Promise<Page> {
   expect(await operation("bind", { folder, nonce: prepared.nonce }, "bind", 0)).toEqual({ ok: null });
   return page;
 }
+
+// A browser operation of a chat its user took the browser over.
+const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+
+// One of the bridge's calls about a chat's browser, made as the page's own button makes it, at its
+// user's click: what it answered, or why it was refused.
+async function atClick(client: Page, call: "show" | "takeOver" | "handBack" | "openSettings", chat = CHAT): Promise<unknown> {
+  await client.evaluate(([name, id]) => {
+    document.getElementById("ask")?.remove();
+    const button = Object.assign(document.createElement("button"), { id: "ask", textContent: name });
+    button.onclick = () => {
+      const desktop = window.surogateDesktop!;
+      // A call the desktop has not is answered as one it refused.
+      Promise.resolve().then((): Promise<unknown> => (name === "openSettings" ? desktop.openSettings!("browser") : desktop.browser![name](id))).then(
+        (answer) => (button.dataset.answer = JSON.stringify(answer ?? null)),
+        (error: Error) => (button.dataset.answer = JSON.stringify(error.message)),
+      );
+    };
+    document.body.append(button);
+  }, [call, chat] as const);
+  await client.click("#ask");
+  await client.waitForFunction(() => document.getElementById("ask")?.dataset.answer !== undefined, undefined, { timeout: 15_000 });
+  return JSON.parse((await client.getAttribute("#ask", "data-answer"))!);
+}
+
+// Whether Settings, or the project's dialog, is open over the window.
+const over = (file: string) => app!.windows().some((window) => window.url().includes(file));
 
 // The browser's processes with a profile under the app's state.
 const profiles = () => join(home, "surogate", "browser-profiles");
@@ -228,6 +256,153 @@ describe.skipIf(!run)("Custom… in Settings → Browser", () => {
     expect(JSON.parse(kept()).executable).toBe(BROWSER!.executable);
     expect(await settings.textContent("#browser-note")).not.toMatch(/cannot use|did not start/);
   }, 120_000);
+});
+
+describe("a chat's browser taken over, and handed back", () => {
+  const SHOW_AT_A_CLICK = "Surogate shows the agent's browser only when its user asks, with a click";
+  const SETTINGS_AT_A_CLICK = "Surogate opens its Settings only when its user asks, with a click";
+
+  it("answers the chat's browser operations paused while its user holds the browser, tells the page, and hands it back only at the desktop's own confirmation", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    await client.evaluate(() => {
+      const heard: string[] = [];
+      Object.assign(window, { heard });
+      window.surogateDesktop!.onBindingChanged!((chat) => heard.push(chat));
+    });
+    const binding = () => client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT);
+    const heard = () => client.evaluate(() => (window as unknown as { heard: string[] }).heard);
+    const takeOver = () => client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
+    // A hand back the page's own code asks for, with no click of its user's.
+    const handBack = () => client.evaluate((chat) => window.surogateDesktop!.browser!.handBack(chat), CHAT);
+    const boxes = () => app!.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string; buttons: string[] }> }).asked);
+    expect(await binding()).toMatchObject({ takenOver: false });
+    await takeOver();
+    expect(await binding()).toMatchObject({ folder, takenOver: true });
+    await expect.poll(heard, { timeout: 10_000 }).toEqual([CHAT]);
+    // Paused: answered at once, the user asked nothing, and no browser started for it.
+    expect(await operation("browser.navigate", { url: "https://example.com/", wait_until: "load" })).toEqual(PAUSED);
+    expect(await operation("browser.close", {})).toEqual(PAUSED);
+    expect(await promptsShown(app!)).toBe(0);
+    expect(browsers()).toEqual([]);
+    // Kept at the desktop's own confirmation: still the user's.
+    await app!.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    const before = (await boxes()).length;
+    expect(await handBack()).toBe(false);
+    expect(await binding()).toMatchObject({ takenOver: true });
+    // Keep control is its default and its cancel: Enter or Escape keeps the browser the user's.
+    expect((await boxes()).at(-1)).toMatchObject({
+      message: expect.stringMatching(/^Hand the browser back to .+\?$/), buttons: ["Hand back", "Keep control"], defaultId: 1, cancelId: 1,
+    });
+    // Kept: the page's own code asks no more, however often, and no box opens for it.
+    for (let n = 0; n < 3; n += 1) await expect(handBack()).rejects.toThrow("The user chose to keep the browser");
+    expect(await boxes()).toHaveLength(before + 1);
+    // Its user's own click still asks, and can still keep it.
+    expect(await atClick(client, "handBack")).toBe(false);
+    expect(await boxes()).toHaveLength(before + 2);
+    await app!.evaluate(() => Object.assign(globalThis, { answer: 0 }));
+    expect(await atClick(client, "handBack")).toBe(true);
+    expect(await binding()).toMatchObject({ takenOver: false });
+    await expect.poll(heard, { timeout: 10_000 }).toEqual([CHAT, CHAT]);
+    // Handed back, the chat's browser asks its first use, as before.
+    const navigating = operation("browser.navigate", { url: "https://example.com/", wait_until: "load" });
+    await press(await prompt(app!), "deny");
+    expect((await navigating).error.type).toBe("denied");
+    // Taken over anew, the page may ask once more: what its user chose at the last one is not held against it.
+    await takeOver();
+    expect(await handBack()).toBe(true);
+    expect(await boxes()).toHaveLength(before + 4);
+  });
+
+  it("refuses the browser's calls for a chat this computer did not bind", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    const other = "5e6f7a8b-9c0d-4e1f-a2b3-c4d5e6f7a8b9";
+    for (const call of ["show", "takeOver", "handBack"] as const) {
+      expect(await atClick(client, call, other), call).toContain("This chat has no folder on this computer");
+    }
+  });
+
+  it("shows the agent's browser and opens Settings only at its user's click: a page that keeps asking by itself brings nothing to the front", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    // The page's own code, asking again and again. Playwright's evaluate gives the page an activation, but no click of its user's.
+    const said = await client.evaluate(async (chat) => {
+      const desktop = window.surogateDesktop!;
+      const answers: string[] = [];
+      const answered = (asked: Promise<unknown>) => asked.then(() => "done", (error: Error) => error.message).then((answer) => answers.push(answer));
+      for (let n = 0; n < 3; n += 1) {
+        await answered(desktop.browser!.show(chat));
+        await answered(desktop.openSettings!("browser"));
+      }
+      // A click the page's own code made is no user's.
+      const button = document.createElement("button");
+      button.onclick = () => void answered(desktop.openSettings!("browser"));
+      document.body.append(button);
+      button.click();
+      await new Promise((done) => setTimeout(done, 100));
+      return answers;
+    }, CHAT);
+    expect(said).toEqual([SHOW_AT_A_CLICK, SETTINGS_AT_A_CLICK, SHOW_AT_A_CLICK, SETTINGS_AT_A_CLICK, SHOW_AT_A_CLICK, SETTINGS_AT_A_CLICK, SETTINGS_AT_A_CLICK]);
+    // A take-over by the page's own code pauses the chat, which only makes it safer.
+    await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
+    expect(await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT)).toMatchObject({ takenOver: true });
+    // None of it reached the desktop: Settings did not open.
+    expect(over("/settings.html")).toBe(false);
+    // At its user's click the desktop is asked: this chat has no page open to show.
+    expect(await atClick(client, "show")).toContain("The agent's browser has no page open for this chat");
+    // One click, one call: a second made with it is refused.
+    await client.evaluate((chat) => {
+      const desktop = window.surogateDesktop!;
+      const both = Object.assign(document.createElement("button"), { id: "both", textContent: "Both" });
+      both.onclick = () => {
+        const answers = [desktop.browser!.show(chat), desktop.openSettings!("browser")].map((asked) => asked.then(() => "done", (error: Error) => error.message));
+        void Promise.all(answers).then((all) => (both.dataset.answers = JSON.stringify(all)));
+      };
+      document.body.append(both);
+    }, CHAT);
+    await client.click("#both");
+    await client.waitForFunction(() => document.getElementById("both")?.dataset.answers !== undefined, undefined, { timeout: 15_000 });
+    expect(JSON.parse((await client.getAttribute("#both", "data-answers"))!)).toEqual([
+      expect.stringContaining("The agent's browser has no page open for this chat"), SETTINGS_AT_A_CLICK,
+    ]);
+    expect(over("/settings.html")).toBe(false);
+  });
+
+  it("opens Settings on Browser at a click in the agent's page, shows Browser in a Settings open already, and opens none over a project's dialog", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    const page = await bound(folder);
+    const client = await webClient(app!, origin);
+    expect(await atClick(client, "openSettings")).toBeNull();
+    let settings: Page | undefined;
+    await expect.poll(() => {
+      settings = app!.windows().find((window) => window.url().includes("/settings.html"));
+      return settings !== undefined;
+    }, { timeout: 10_000 }).toBe(true);
+    const selected = () => settings!.getAttribute('.settings-nav [data-section="browser"]', "class");
+    await expect.poll(() => settings!.isVisible('section[data-section="browser"]'), { timeout: 10_000 }).toBe(true);
+    await expect.poll(selected, { timeout: 10_000 }).toContain("selected");
+    // Open already, on another section: it is shown Browser.
+    await settings!.click('.settings-nav [data-section="general"]');
+    await expect.poll(selected, { timeout: 10_000 }).not.toContain("selected");
+    expect(await atClick(client, "openSettings")).toBeNull();
+    await expect.poll(selected, { timeout: 10_000 }).toContain("selected");
+    await expect.poll(() => settings!.isVisible('section[data-section="browser"]'), { timeout: 10_000 }).toBe(true);
+    // A project's dialog over the window: Settings does not open over it, and the page is told why.
+    await settings!.click("#close", { noWaitAfter: true }).catch(() => {});
+    await expect.poll(() => over("/settings.html"), { timeout: 10_000 }).toBe(false);
+    await page.evaluate(() => (window as unknown as { surogateShell: { newProject(): Promise<void> } }).surogateShell.newProject());
+    await expect.poll(() => over("/project.html"), { timeout: 10_000 }).toBe(true);
+    expect(await atClick(client, "openSettings")).toContain("Surogate has a project's dialog open: close it to open Settings");
+    expect(over("/settings.html")).toBe(false);
+  });
 });
 
 describe("Settings → Browser", () => {

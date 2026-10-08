@@ -17,6 +17,10 @@ function calls(): BridgeCalls & Record<string, ReturnType<typeof vi.fn>> {
     cancelPrepared: vi.fn(() => Promise.resolve()),
     getBinding: vi.fn(() => Promise.resolve({ folder: "/home/flavius/notes", mode: "ask" })),
     revealFolder: vi.fn(() => Promise.resolve()),
+    showBrowser: vi.fn(() => Promise.resolve()),
+    takeOver: vi.fn(() => Promise.resolve()),
+    handBack: vi.fn(() => Promise.resolve(true)),
+    openSettings: vi.fn(() => Promise.resolve()),
     getAppearance: vi.fn(() => ({ theme: "dark", textSize: "medium", transcriptWidth: "medium", motion: "system" })),
     setAccount: vi.fn(),
     registerProjects: vi.fn(),
@@ -59,6 +63,51 @@ describe("the bridge", () => {
     expect(made.getBinding).toHaveBeenCalledWith(SESSION);
     await handlers.revealFolder!(TOP, "7", SESSION);
     expect(made.revealFolder).toHaveBeenCalledWith(SESSION);
+    await handlers.showBrowser!(TOP, "7", SESSION);
+    expect(made.showBrowser).toHaveBeenCalledWith(SESSION);
+    await handlers.takeOver!(TOP, "7", SESSION);
+    expect(made.takeOver).toHaveBeenCalledWith(SESSION);
+    expect(await handlers.handBack!(TOP, "7", SESSION, true)).toBe(true);
+    expect(made.handBack).toHaveBeenCalledWith(SESSION, true);
+    await handlers.openSettings!(TOP, "7", "browser");
+    expect(made.openSettings).toHaveBeenCalledWith("browser");
+  });
+
+  it("brings a chat's page to the front at a take-over only when it came with its user's click, and says of a hand back whether it did", async () => {
+    const made = calls();
+    const handlers = bridgeHandlers(ORIGIN, made);
+    // The page's own code: the chat is taken over, which only makes it safer, and nothing is raised.
+    await handlers.takeOver!(TOP, "7", SESSION);
+    await handlers.takeOver!(TOP, "7", SESSION, "true");
+    expect(made.takeOver).toHaveBeenCalledTimes(2);
+    expect(made.showBrowser).not.toHaveBeenCalled();
+    // At its user's click, as the preload heard it: its page comes to the front too.
+    await handlers.takeOver!(TOP, "7", SESSION, true);
+    expect(made.showBrowser).toHaveBeenCalledWith(SESSION);
+    // A chat with no page open is taken over all the same.
+    (made.showBrowser as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("The agent's browser has no page open for this chat"));
+    await handlers.takeOver!(TOP, "7", SESSION, true);
+    expect(made.takeOver).toHaveBeenCalledTimes(4);
+    // A hand back says whether its user clicked: the page's own code is held to what they chose before.
+    await handlers.handBack!(TOP, "7", SESSION);
+    await handlers.handBack!(TOP, "7", SESSION, 1);
+    await handlers.handBack!(TOP, "7", SESSION, true);
+    expect((made.handBack as ReturnType<typeof vi.fn>).mock.calls).toEqual([[SESSION, false], [SESSION, false], [SESSION, true]]);
+  });
+
+  it("asks one hand back at a time for a window: a page cannot pile the desktop's confirmations up", async () => {
+    const made = calls();
+    let answer = (_handed: boolean) => {};
+    (made.handBack as ReturnType<typeof vi.fn>).mockImplementationOnce(() => new Promise<boolean>((resolve) => {
+      answer = resolve;
+    }));
+    const handlers = bridgeHandlers(ORIGIN, made);
+    const first = handlers.handBack!(TOP, "7", SESSION);
+    await expect(handlers.handBack!(TOP, "7", SESSION)).rejects.toThrow("Surogate is already asking");
+    await vi.waitFor(() => expect(made.handBack).toHaveBeenCalledTimes(1));
+    answer(false);
+    expect(await first).toBe(false);
+    expect(await handlers.handBack!(TOP, "7", SESSION)).toBe(true);
   });
 
   it("asks one question of each kind at a time for a window, and the next once that one is answered", async () => {
@@ -115,6 +164,11 @@ describe("the bridge", () => {
     ["cancelPrepared", ["short"], "Not a folder confirmation"],
     ["getBinding", ["not-a-session"], "Not a chat"],
     ["revealFolder", [{ toString: () => "0b6f3c1e-8a2d-4c5e-9f10-1a2b3c4d5e6f" }], "Not a chat"],
+    ["showBrowser", ["not-a-session"], "Not a chat"],
+    ["takeOver", [42], "Not a chat"],
+    ["handBack", ["not-a-session"], "Not a chat"],
+    // The page opens only the section its message names: Settings' others are the desktop's own to show.
+    ["openSettings", ["general"], "Not a section the agent's page may open"],
   ])("refuses %s(%o)", async (name, args, message) => {
     const made = calls();
     await expect(bridgeHandlers(ORIGIN, made)[name]!(TOP, "7", ...args)).rejects.toThrow(message);
