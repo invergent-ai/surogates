@@ -945,6 +945,13 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(standing(), what).toBe(before);
       expect(root(`test ! -e /opt/surogate/current && test ! -e ${helper} && find /opt/surogate/versions /opt/surogate/staging -mindepth 1`), what).toMatchObject({ status: 0, stdout: "" });
     }
+    // Nor is a link to nothing where the helper itself goes a computer at its first install,
+    // which would take this script's own list of keys: it is no helper an apply left.
+    expect(root(`find /opt/surogate -mindepth 1 -delete; mkdir /opt/surogate/bin && ln -s /nowhere ${helper}`).status).toBe(0);
+    const linked = standing();
+    expect(applied()).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}` });
+    expect(standing()).toBe(linked);
+    expect(root("test ! -e /opt/surogate/current && find /opt/surogate/versions /opt/surogate/staging -mindepth 1")).toMatchObject({ status: 0, stdout: "" });
     // With a helper: its mark does not say which release it is of, and neither is replaced.
     for (const [what, made] of notFiles) {
       expect(root("find /opt/surogate -mindepth 1 -delete").status, what).toBe(0);
@@ -1215,6 +1222,12 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     manifestOf("1.1.0", second, {}, next.privateKey);
     expect(apply(second, "stopped-helper.sh").status).toBe(137);
     expect(root(`cmp ${mark} /home/tester/manifest.json && cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout).toBe("/opt/surogate/versions/1.0.0\n");
+    // Only a version's own helper that is root's own is put where pkexec runs one: while the
+    // release's is another user's, the finishing by itself, from the script's functions without
+    // its last line, leaves the helper as it is.
+    const own = "/opt/surogate/versions/1.1.0/bin/surogate-apply-update";
+    expect(root(`chown tester ${own} && mkdir -p /root/paired && bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && paired /root/paired' && chown root ${own} && cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update`))
+      .toMatchObject({ status: 0, stdout: "", stderr: "" });
     // What the old key signs then, newer than both, is no release to this computer: the pair is
     // finished first, and the keys asked are the ones of the release the mark names.
     const third = releaseOf("1.2.0", listing([PUBLIC]));
