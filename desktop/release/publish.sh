@@ -36,7 +36,8 @@ case "$VERB" in
     # The release keys the installed apps and the install script trust: install.sh's RELEASE_KEYS,
     # read as install.sh sets them, from its functions alone: its last line, which runs it, is left
     # out. Were its last line any other, as after a blank line at its end, the line that runs it
-    # would be left in, and the install script would run here, where the release key is.
+    # would be left in: handed this call's two arguments, the script stops at its own usage, and
+    # the key would be said not to be trusted. So the script's end is looked at first, and said.
     [ "$(tail -n 1 "$HERE/install.sh")" = 'main "$@"' ] || fail 'install.sh does not end with the line that runs it (main "$@"): its release keys are not read'
     public="$(openssl pkey -pubout -in <(printf '%s\n' "$DESKTOP_RELEASE_KEY"))"
     bash -c '. <(sed "\$d" "$1") && settings && for key in "${RELEASE_KEYS[@]}"; do [ "$key" != "$2" ] || exit 0; done; exit 1' _ "$HERE/install.sh" "$public" \

@@ -120,8 +120,9 @@ describe("the desktop's release manifest", () => {
     });
   });
 
-  it("reads no key of an install.sh that does not end with the line that runs it: with that line left in, the install script would run where the release key is", () => {
-    // Its last line blank, as an editor leaves one, and in the place of the line that runs it, a mark of the test's own.
+  it("says that an install.sh does not end with the line that runs it, and reads no key from it: read without its last line, it would be run, and its refusal taken for a key that is not trusted", () => {
+    // Its last line blank, as an editor leaves one, and in the place of the line that runs it, a
+    // mark of the test's own: nothing of the script is run.
     const script = trusting().replace(/\nmain "\$@"\n$/, `\ntouch '${join(dir, "ran")}'\n\n`);
     expect(script.endsWith(`}\n\ntouch '${join(dir, "ran")}'\n\n`)).toBe(true);
     writeFileSync(join(dir, "release", "install.sh"), script);
