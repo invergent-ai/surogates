@@ -22,8 +22,18 @@ if (origin !== undefined && window.top === window && location.origin === origin)
   // The press last heard, by its own time. A label passes its click on to its control: a second click
   // of the one press, which carries the time of the first, and allows no second call.
   let press = NaN;
+  // Whether the key last pressed is held down still, and repeating: on a button the browser makes a click
+  // of each repeat, and none of those is a press of its user's. Not once the key comes up, or the window
+  // loses the keyboard, where its coming up would not be heard.
+  let repeating = false;
+  for (const type of ["keydown", "keyup", "blur"] as const) {
+    window.addEventListener(type, (event) => {
+      if (event.isTrusted) repeating = type === "keydown" && (event as KeyboardEvent).repeat;
+    }, true);
+  }
   window.addEventListener("click", (event) => {
-    if (!event.isTrusted || event.timeStamp === press) return;
+    // A click the keyboard made carries no count of presses (detail 0); the mouse's is a press whatever a key does.
+    if (!event.isTrusted || event.timeStamp === press || (repeating && event.detail === 0)) return;
     press = event.timeStamp;
     clickedAt = performance.now();
   }, true);

@@ -765,6 +765,53 @@ describe("a chat's browser taken over, and handed back", () => {
     expect(over("/settings.html")).toBe(false);
   });
 
+  it("lets one press of a key through one call, however long the key is held: its repeats are no presses", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    // A button of the page's own, with the keyboard on it: at each click it hears, the page asks to show the browser.
+    await client.evaluate((chat) => {
+      const desktop = window.surogateDesktop!;
+      const button = Object.assign(document.createElement("button"), { id: "held", textContent: "Held" });
+      const heard: boolean[] = [];
+      const answers: string[] = [];
+      Object.assign(window, { held: { heard, answers } });
+      button.addEventListener("click", (event) => {
+        heard.push(event.isTrusted);
+        void desktop.browser!.show(chat).then(() => "done", (error: Error) => error.message).then((answer) => answers.push(answer));
+      });
+      document.body.append(button);
+      button.focus();
+    }, CHAT);
+    const held = () => client.evaluate(() => (window as unknown as { held: { heard: boolean[]; answers: string[] } }).held);
+    // The calls that reached the desktop, which has no page to show for the chat, and those refused in the page.
+    const reached = async (clicks: number) => {
+      await expect.poll(async () => (await held()).answers.length, { timeout: 10_000 }).toBe(clicks);
+      const { heard, answers } = await held();
+      expect(heard).toEqual(Array.from({ length: clicks }, () => true));
+      return [
+        answers.filter((answer) => answer.includes("The agent's browser has no page open for this chat")).length,
+        answers.filter((answer) => answer === SHOW_AT_A_CLICK).length,
+      ];
+    };
+    // Enter held down: the keyboard repeats it, and the browser makes a click of each repeat, its own every one.
+    for (let n = 0; n < 6; n += 1) await client.keyboard.down("Enter");
+    await client.keyboard.up("Enter");
+    expect(await reached(6)).toEqual([1, 5]);
+    // The key came up: the next press of it is a press, and so is Space held and let go, whose one click comes as it rises.
+    await client.keyboard.press("Enter");
+    expect(await reached(7)).toEqual([2, 5]);
+    for (let n = 0; n < 4; n += 1) await client.keyboard.down(" ");
+    await client.keyboard.up(" ");
+    expect(await reached(8)).toEqual([3, 5]);
+    // A click of the mouse is a press whatever the keyboard does: here with a key still down, repeating.
+    for (let n = 0; n < 3; n += 1) await client.keyboard.down("a");
+    await client.click("#held");
+    await client.keyboard.up("a");
+    expect(await reached(9)).toEqual([4, 5]);
+  });
+
   it("brings the chat's page to the front at a take-over only at its user's click: one the page's own code makes raises nothing", async () => {
     const folder = join(home, "project");
     mkdirSync(folder);
