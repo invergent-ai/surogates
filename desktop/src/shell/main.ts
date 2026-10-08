@@ -45,7 +45,7 @@ import { Notifications } from "./notifications.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
 import { PreferencesStore } from "./preferences.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
-import { desktopPrompts } from "./prompts.js";
+import { type BrowserPrompts, desktopPrompts } from "./prompts.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { asShown } from "./pages/ui.js";
@@ -90,7 +90,7 @@ let theme: Theme;
 // After ready: safeStorage answers only then.
 let credentials: CredentialStore;
 // The desktop's own prompts, over the window, once it is made.
-let prompts: FolderPrompts & ApprovalPrompts;
+let prompts: FolderPrompts & ApprovalPrompts & BrowserPrompts;
 let sessionStore: SessionStore;
 // Who is signed in to the app, with the agent: what adds this computer, and what the window's web client takes its session from.
 let signedIn: DesktopSession | null = null;
@@ -1162,7 +1162,7 @@ async function signIn(agent: Agent): Promise<void> {
   }
 }
 
-// What a window asked for, a folder or Work freely: its prompts go once that window goes or its page is replaced.
+// What a window asked for, a folder, Work freely or a hand back: its prompts go once that window goes or its page is replaced.
 async function preparing<T>(window: string, prepare: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const contents = webContents.fromId(Number(window));
   const controller = new AbortController();
@@ -1246,34 +1246,27 @@ function bridge(contents: WebContents, agent: Agent): void {
       if (!stack.takeOver(sessionId)) throw new Error(HELD_FROM_ANOTHER_CHAT);
       contents.send("desktop:binding-changed", sessionId);
     },
-    // Only at the desktop's own confirmation: the user answers in a native box. The page's preload asks for
-    // it only at its user's click, before they kept the browser and after: a page cannot wear its user down.
-    handBack: async (sessionId) => {
+    // Only at the desktop's own confirmation, in a prompt window of its own: its Hand back takes nothing until
+    // the prompts' input protection has passed, so a press its user began for the page answers nothing there.
+    // The page's preload asks for it only at its user's click, before they kept the browser and after: a page
+    // cannot wear its user down.
+    handBack: (sessionId, window) => preparing(window, async (signal) => {
       const stack = await browsing(sessionId);
       const held = stack.tools.takenOver?.(sessionId) ?? false;
       // Nobody holds it: the agent drives it already.
       if (held === false) return true;
       // Held from another chat that is here: handed back there, and nothing is asked here.
       if (held === "elsewhere") throw new Error(HELD_FROM_ANOTHER_CHAT);
-      // Held from this chat, or from one that is gone, which can hand nothing back: this chat's to hand back.
-      // The chat by its title, as text: the page names only an id, and its user may hold more than one chat's browser.
-      const title = await titleSoon(sessionId);
-      // The window first, where it was hidden since the click: the box opens over it.
+      // Held from this chat, which the confirmation names by its title; or from one that is gone, which can
+      // hand nothing back and is named no more: this chat's to hand back.
+      const title = held === true ? await titleSoon(sessionId) : null;
+      // The window first, where it was hidden since the click: the confirmation opens over it.
       main?.show();
-      const handed = await ask({
-        type: "question",
-        message: `Hand the browser back to ${asShown(agent.name)}?`,
-        detail: `It acts in its browser on this computer again, for ${title === null ? "this chat" : `the chat “${asShown(title)}”`}.`,
-        buttons: ["Hand back", "Keep control"],
-        defaultId: 1,
-        cancelId: 1,
-        noLink: true,
-      });
-      if (!handed) return false;
+      if (!(await prompts.confirmHandBack({ agent: agent.name, gone: held !== true, title }, signal))) return false;
       stack.handBack(sessionId);
       contents.send("desktop:binding-changed", sessionId);
       return true;
-    },
+    }),
     openSettings: async (section) => {
       // A project's dialog is over the window: Settings does not open over it.
       if (projectDialog !== null && main?.settingsContents() === projectDialog) {
@@ -1776,10 +1769,10 @@ function chatTitle(root: string): Promise<string> {
   return read;
 }
 
-// How long a native box waits to name a chat: its user asked for it with a click, and an agent slow to answer holds it no longer.
+// How long a prompt waits to name a chat: its user asked for it with a click, and an agent slow to answer holds it no longer.
 const TITLE_MS = 2_000;
 
-/** Chat *root*'s title for a native box: null for one the agent names not, or does not name within TITLE_MS. */
+/** Chat *root*'s title for a prompt that names it: null for one the agent names not, or does not name within TITLE_MS. */
 async function titleSoon(root: string): Promise<string | null> {
   let late: NodeJS.Timeout | undefined;
   const title = await Promise.race([

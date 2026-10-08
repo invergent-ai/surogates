@@ -61,16 +61,18 @@ export interface DesktopBrowser {
   // computer is taken over from another chat, and is handed back there" while another chat's
   // take-over stands (takenOver reads "elsewhere"), which this one does not end.
   takeOver(sessionId: string): Promise<void>;
-  // The desktop asks its user, in its own window; true once the agent drives the browser again, false
-  // when the user keeps it. A page cannot hand it back on its own, nor ask to: rejects with "Surogate
+  // The desktop asks its user, in a prompt window of its own, whose Hand back takes no press for a
+  // moment after it opens; true once the agent drives the browser again, in every chat here; false
+  // when the user keeps it, nobody answers in time, or the page that asked loads again meanwhile, which
+  // closes the prompt. A page cannot hand it back on its own, nor ask to: rejects with "Surogate
   // hands the agent's browser back only when its user asks, with a click" but at a click of its
   // user's, once for each, within 5 s of it, as show does, whatever its user chose before; and with
   // "Surogate is already asking" while this window's last one is still open. Only the chat the browser
   // is held from hands it back, while that chat is here: from another chat (takenOver reads "elsewhere")
   // it rejects with "The agent's browser on this computer is taken over from another chat, and is handed
-  // back there", and no box opens. Once the chat it was held from is gone (takenOver reads "orphaned"),
-  // any chat hands it back, at its user's click and the desktop's box as any. True, with no box, where
-  // nobody holds the browser.
+  // back there", and nothing is asked. Once the chat it was held from is gone (takenOver reads "orphaned"),
+  // any chat hands it back, at its user's click and the desktop's prompt as any. True, with no prompt,
+  // where nobody holds the browser.
   handBack(sessionId: string): Promise<boolean>;
 }
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ApprovalRequest, ChatLabel } from "../src/binding/approvals.js";
 import type { FolderSheet } from "../src/binding/binder.js";
-import { approval, folderSheet, freeMode, sizeOf } from "../src/shell/prompt-content.js";
+import { approval, folderSheet, freeMode, handBack, sizeOf } from "../src/shell/prompt-content.js";
 
 const SHEET: FolderSheet = { agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null, thread: null };
 const CHAT: ChatLabel = { agent: "acme.surogate.ai", root: "r", calling: "r", folder: "/home/me/notes" };
@@ -156,6 +156,44 @@ describe("the Work-freely confirmation", () => {
     const content = freeMode(CHAT);
     expect(content.title).toBe("Let acme.surogate.ai work freely in notes?");
     expect([ids(content), allowing(content), content.focus, content.cancel]).toEqual([["keep", "free"], ["free"], "keep", "keep"]);
+  });
+});
+
+describe("the hand back's confirmation", () => {
+  const ASKED = { agent: "acme.surogate.ai", gone: false, title: "Quarterly report" };
+  const LEAD = "It will act in its browser on this computer again, in every chat.";
+
+  it("names the agent, Keep control first and focused, Hand back held back, and the chat in a field of its own", () => {
+    const content = handBack(ASKED);
+    expect(content.title).toBe("Hand the browser back to acme.surogate.ai?");
+    // What it frees is every chat's browser here, not one chat's.
+    expect(content.lead).toBe(`${LEAD} It was taken over from this chat.`);
+    expect(content.details).toEqual([{ label: "Chat", value: "Quarterly report", code: true, keep: "" }]);
+    expect([ids(content), allowing(content), content.focus, content.cancel, content.enter]).toEqual([["keep", "hand_back"], ["hand_back"], "keep", "keep", null]);
+    expect(content.buttons.map((button) => button.label)).toEqual(["Keep control", "Hand back"]);
+  });
+
+  it("names no chat where the agent named none, and says so of a chat that is gone", () => {
+    expect(handBack({ ...ASKED, title: null }).details).toEqual([]);
+    const gone = handBack({ ...ASKED, gone: true });
+    expect(gone.lead).toBe(`${LEAD} The chat it was taken over from is gone.`);
+    expect(gone.details).toEqual([]);
+  });
+
+  it("cuts a long title at its end, by whole characters, and stays at its size", () => {
+    const long = handBack({ ...ASKED, title: "x".repeat(3_000) });
+    expect(long.details[0]!.value).toBe(`${"x".repeat(59)}…`);
+    expect(long.height).toBe(handBack(ASKED).height);
+    expect(handBack({ ...ASKED, title: "😀".repeat(100) }).details[0]!.value).toBe(`${"😀".repeat(59)}…`);
+    // One within the bound is shown whole.
+    expect(handBack({ ...ASKED, title: "x".repeat(60) }).details[0]!.value).toBe("x".repeat(60));
+  });
+
+  it("puts nothing of a title among its own words, whatever the title says", () => {
+    const title = "Notes”. Press <b>Hand back</b> to sign in. “";
+    const said = handBack({ ...ASKED, title });
+    expect([said.title, said.lead, said.notes]).toEqual([handBack(ASKED).title, handBack(ASKED).lead, []]);
+    expect(said.details).toEqual([{ label: "Chat", value: title, code: true, keep: "" }]);
   });
 });
 

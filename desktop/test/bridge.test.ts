@@ -69,7 +69,7 @@ describe("the bridge", () => {
     await handlers.takeOver!(TOP, "7", SESSION);
     expect(made.takeOver).toHaveBeenCalledWith(SESSION);
     expect(await handlers.handBack!(TOP, "7", SESSION)).toBe(true);
-    expect(made.handBack).toHaveBeenCalledWith(SESSION);
+    expect(made.handBack).toHaveBeenCalledWith(SESSION, "7");
     await handlers.openSettings!(TOP, "7", "browser");
     expect(made.openSettings).toHaveBeenCalledWith("browser");
   });

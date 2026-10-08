@@ -35,7 +35,7 @@ export interface BridgeCalls {
   // confirmation.
   showBrowser(sessionId: string): Promise<void>;
   takeOver(sessionId: string): Promise<void>;
-  handBack(sessionId: string): Promise<boolean>;
+  handBack(sessionId: string, window: string): Promise<boolean>;
   // Settings opened on the one section the page may open.
   openSettings(section: "browser"): Promise<void>;
   getAppearance(): DesktopAppearance;
@@ -134,7 +134,7 @@ export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<strin
     }),
     handBack: checked((window, sessionId) => {
       const id = chat(sessionId);
-      return alone("hand back", window, () => calls.handBack(id));
+      return alone("hand back", window, () => calls.handBack(id, window));
     }),
     openSettings: checked((_window, section) => {
       if (section !== "browser") throw new Error("Not a section the agent's page may open");

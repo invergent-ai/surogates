@@ -284,6 +284,46 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
   };
 }
 
+// What the hand back's confirmation is asked about.
+export interface HandBackRequest {
+  agent: string;
+  // The chat the browser was taken over from is gone: deleted, or its folder forgotten on this computer.
+  gone: boolean;
+  // That chat's title, as the agent named it: null for one it names not, or did not name in time.
+  title: string | null;
+}
+
+// The most of a chat's title its field shows, in characters: the agent's own words, cut at their end.
+const TITLE_CHAT = 60;
+const cut = (title: string): string => {
+  const characters = [...title];
+  return characters.length > TITLE_CHAT ? `${characters.slice(0, TITLE_CHAT - 1).join("")}…` : title;
+};
+
+/**
+ * The desktop's own confirmation before the agent drives its browser again (spec, Section 5). Keep
+ * control first and focused, and what Escape and a closed window answer; Hand back is held back until
+ * the input protection has passed, so a press its user began for the page answers nothing here.
+ */
+export function handBack(request: HandBackRequest): PromptContent {
+  // The chat's title is the agent's words: in a field of its own, cut short, never among the prompt's own.
+  const details = request.gone || request.title === null ? [] : [code("Chat", cut(request.title))];
+  return {
+    title: `Hand the browser back to ${request.agent}?`,
+    // The browser is one for every chat of the agent's here: what is handed back is every chat's.
+    lead: `It will act in its browser on this computer again, in every chat. ${request.gone ? "The chat it was taken over from is gone." : "It was taken over from this chat."}`,
+    details,
+    notes: [],
+    choice: null,
+    buttons: [button("keep", "Keep control"), button("hand_back", "Hand back", true)],
+    focus: "keep",
+    cancel: "keep",
+    enter: null,
+    // With room for the field's two lines, which the longest title it shows takes: one size for any title.
+    height: details.length > 0 ? 300 : 230,
+  };
+}
+
 /** The desktop's own confirmation before a chat works freely (spec, Section 4). */
 export function freeMode(chat: ChatLabel): PromptContent {
   return {
