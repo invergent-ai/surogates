@@ -59,6 +59,8 @@ const ASKING_PAGES: Record<string, string> = {
   later: asking("LATER", "setTimeout(ask, 3500)"),
   // Asks every 2 s from its button's first press on, until told to stop.
   often: asking("OFTEN", "window.asking ??= setInterval(ask, 2000)"),
+  // Busy for three seconds from each click on its file input on: what it asked for by that click is heard of only then.
+  busy: asking("BUSY", "", "document.getElementById('file').addEventListener('click', () => setTimeout(() => { const until = performance.now() + 3000; while (performance.now() < until) {} }, 0));"),
 };
 
 let site: Server;
@@ -1090,7 +1092,7 @@ describe("a page's download, as the host stages it", () => {
       const frame = {};
       const page = {
         on, once: on, off: (event: string, heard: (event: unknown) => void) => void hears.get(event)?.delete(heard),
-        goto: () => new Promise(() => {}), mainFrame: () => frame, url: () => FORM_URL, title: () => Promise.resolve(""), isClosed: () => false,
+        goto: () => new Promise(() => {}), mainFrame: () => frame, frames: () => [], url: () => FORM_URL, title: () => Promise.resolve(""), isClosed: () => false,
       } as unknown as Page;
       if (!state().tabs.has(session)) {
         state().roots.set(session, "chat-1");
@@ -2911,6 +2913,76 @@ await navigator.serviceWorker.ready;`);
     asUser("click", String(x), String(y));
     await expect.poll(() => ownChoosers().length, { timeout: 10_000 }).toBe(1);
   }, 90_000);
+
+  it("keeps no input for an upload that asked before a hand back and is heard of only after it, its page having been busy: not one the agent's click opened before the take-over, nor one its user's own hand opened while they held the browser", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/asks/busy" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const unseen = (host as unknown as { unseen: Map<string, string[]> }).unseen;
+    const upload = () => op(a, "browser.set_input_files", { files: [REPORT] }, "chat-1");
+    // The page answers again, and what it had to say of before has been heard.
+    const answered = async () => {
+      await expect.poll(() => within(500, page.evaluate("1")), { timeout: 15_000 }).toBe(1);
+      await new Promise((done) => setTimeout(done, 500));
+    };
+    // The agent clicks the file input, and the page is busy from that click on: taken over 0.4 s after it, and handed back at 1 s.
+    const clicking = op(a, "browser.mouse", { action: "click", x: 60, y: 110, button: "left", clicks: 1 }, "chat-1");
+    await new Promise((done) => setTimeout(done, 400));
+    host.pause("chat-1", true);
+    await within(1_000, clicking);
+    await new Promise((done) => setTimeout(done, 600));
+    host.pause("chat-1", false);
+    await answered();
+    expect([kept(a), unseen.get(a) ?? []]).toEqual([undefined, []]);
+    expect((await upload()).error?.message).toBe(NOT_ASKED);
+    // Their own click on it while they hold the browser, in the seconds its pages are still heard; handed back before the page said so.
+    host.pause("chat-1", true);
+    await page.click("#file");
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", false);
+    await answered();
+    expect([kept(a), unseen.get(a) ?? []]).toEqual([undefined, []]);
+    expect((await upload()).error?.message).toBe(NOT_ASKED);
+    expect(await page.evaluate(filed)).toEqual([[]]);
+    // What the page asks for at the agent's click once the browser is its again is kept as ever.
+    await asksFor(a, () => op(a, "browser.mouse", { action: "click", x: 60, y: 110, button: "left", clicks: 1 }, "chat-1"));
+    await answered();
+    expect(await upload()).toMatchObject({ ok: { files: 1 } });
+    expect(await page.evaluate(filed)).toEqual([["report.pdf"]]);
+  }, 90_000);
+
+  it("keeps for an upload what a page asks for at a click the agent sends once the browser is its again, though the page is slow to answer after the hand back; and not what a click sent before the take-over makes it ask for after", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const unseen = (host as unknown as { unseen: Map<string, string[]> }).unseen;
+    const busy = async (ms: number) => {
+      await page.evaluate(`void setTimeout(() => { const until = Date.now() + ${ms}; while (Date.now() < until) {} }, 0)`);
+      await new Promise((done) => setTimeout(done, 100));
+    };
+    const click = () => op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 }, "chat-1");
+    // The agent's click on the file input waits on a busy page when its user takes the browser over, and still when
+    // they hand it back: it reaches the page after that, and the page asks then.
+    await busy(3_000);
+    const clicking = click();
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", true);
+    expect(await within(1_000, clicking)).toEqual(PAUSED);
+    await new Promise((done) => setTimeout(done, 600));
+    host.pause("chat-1", false);
+    await expect.poll(() => within(500, page.evaluate("1")), { timeout: 15_000 }).toBe(1);
+    await new Promise((done) => setTimeout(done, 1_000));
+    // The operation was answered paused: what it did after is kept for no upload, and its agent told nothing of it.
+    expect([kept(a), unseen.get(a) ?? []]).toEqual([undefined, []]);
+    // Taken over and handed back while the page is busy again: the agent's next click is sent only once the page has
+    // answered for what came before, so what it asks for then is the agent's own, and kept.
+    await busy(2_500);
+    host.pause("chat-1", true);
+    host.pause("chat-1", false);
+    await asksFor(a, click);
+    expect(await op(a, "browser.set_input_files", { files: [REPORT] }, "chat-1")).toMatchObject({ ok: { files: 1 } });
+    expect(await page.evaluate(filed)).toEqual([[], ["report.pdf"]]);
+  }, 60_000);
 
   it("lets a page be only five seconds after what the agent was doing there has reached it: a click still on its way to a busy page at the take-over arms no chooser of the browser's own", async () => {
     const a = session();

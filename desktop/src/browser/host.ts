@@ -492,6 +492,9 @@ export class BrowserHost {
   // for OWN_CHOOSER_MS: a file input is theirs then. *acting*: how many operations of the agent's are still
   // doing something in it. *quiet*: what lets it be, while it is held and heard.
   private readonly hearing = new Map<Page, { session: string; heard: ((chooser: FileChooser) => void) | null; acting: number; quiet?: NodeJS.Timeout }>();
+  // The pages that have not answered yet since the browser was last handed back (settle): what one of them
+  // asks for is kept for no one, and no operation of the agent's acts in it, until it has.
+  private readonly settling = new Map<Page, Promise<void>>();
   // The file input each session's pages asked for a file for last, until it is given one.
   private readonly choosers = new Map<string, FileChooser>();
   // What an upload's prompt named for each session: the input, with the address its frame was at and the
@@ -590,6 +593,7 @@ export class BrowserHost {
       for (const [page, kept] of this.hearing) {
         clearTimeout(kept.quiet);
         this.hear(page);
+        this.settle(page);
       }
       return;
     }
@@ -708,7 +712,9 @@ export class BrowserHost {
         if (!(await this.answers(page))) return ASKING;
         if (stop.aborted) return PAUSED;
       }
-      const work = this.doing(page, operation(page, args, stop));
+      // Handed back a moment ago, its page may not have answered yet for what it did before: it acts once it has.
+      const settled = this.settling.get(page);
+      const work = this.doing(page, settled ? settled.then(() => (stop.aborted ? undefined : operation(found, args, stop))) : operation(page, args, stop));
       const value = BOUNDED.has(kind) ? await this.bounded(page, work, stop) : await work;
       // Taken over while it acted: what its pages did meanwhile stays for its session's next answer.
       if (stop.aborted) return PAUSED;
@@ -812,6 +818,7 @@ export class BrowserHost {
       this.asking.delete(page);
       clearTimeout(this.hearing.get(page)?.quiet);
       this.hearing.delete(page);
+      this.settling.delete(page);
     });
     page.on("popup", (popup) => this.adopt(session, popup));
     this.hearing.set(page, { session, heard: null, acting: 0 });
@@ -835,6 +842,21 @@ export class BrowserHost {
     if (!kept?.heard) return;
     page.off("filechooser", kept.heard);
     kept.heard = null;
+  }
+
+  // *page* is asked to answer, in each of its frames, twice over, now that the browser is handed back.
+  // Playwright says a page asked for a file only once it has read the input, which a busy page keeps
+  // waiting: so what a page asked for while its user held the browser, or before they took it, can be
+  // heard of only after the hand back. That reading was sent before these, so it is heard of before they
+  // answer; until they have, what the page asks for is kept for no one (asks) and nothing of the agent's
+  // acts in it (act). Twice: what the page still had to do when the first was sent, as a click that waited
+  // on it, is heard of before the second answers.
+  private settle(page: Page): void {
+    const read = () => Promise.allSettled(page.frames().map((frame) => frame.evaluate("1")));
+    const settled: Promise<void> = this.doing(page, read().then(read)).then(() => {
+      if (this.settling.get(page) === settled) this.settling.delete(page);
+    });
+    this.settling.set(page, settled);
   }
 
   // *page*, held and heard, is let be OWN_CHOOSER_MS from now, unless it is heard of again before.
@@ -879,6 +901,8 @@ export class BrowserHost {
   // leave to ask again, so its quiet begins anew.
   private asks(page: Page, session: string, chooser: FileChooser): void {
     if (this.held !== null) return void this.quiet(page);
+    // Handed back, and not answered since: it asked for this before, under its user's hand or by what the take-over stopped.
+    if (this.settling.has(page)) return;
     this.choosers.set(session, chooser);
     this.note(session, FILE_ASKED);
   }
@@ -1230,6 +1254,7 @@ export class BrowserHost {
     this.untold.clear();
     for (const kept of this.hearing.values()) clearTimeout(kept.quiet);
     this.hearing.clear();
+    this.settling.clear();
     this.choosers.clear();
     this.named.clear();
   }
