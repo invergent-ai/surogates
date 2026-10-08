@@ -1247,6 +1247,63 @@ describe("AgentChat", () => {
     expect(buttons()).not.toContain("Retry");
   });
 
+  it("shows a chat the host only reads no Browser card, and its browser nothing that takes it over or shuts it down", async () => {
+    // The shell opens a socket as it mounts; happy-dom would dial it.
+    vi.stubGlobal("WebSocket", class {
+      readyState = 0;
+      onopen = null;
+      onmessage = null;
+      onclose = null;
+      onerror = null;
+      send() {}
+      close() {}
+    });
+    try {
+      const stream = new FakeEventStream();
+      const adapter = {
+        ...createAdapter(stream),
+        async acquireBrowserControl() {
+          return { outcome: "granted" as const, ownerUserId: "u" };
+        },
+        async closeBrowserSession() {},
+        browserShellUrl() {
+          return "ws://browser.test/shell";
+        },
+      };
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId="s-1" disabled />);
+        await Promise.resolve();
+      });
+      await act(async () => {
+        stream.emit("browser.provisioned", 10, { session_id: "s-1" });
+        await Promise.resolve();
+      });
+      expect(container.querySelector('[data-testid="session-pane-card-browser"]')).toBeNull();
+      // The composer's tools still show it, to watch.
+      await act(async () => {
+        container!.querySelector<HTMLElement>('[aria-label="Composer tools"]')!.click();
+      });
+      await act(async () => {
+        [...document.body.querySelectorAll<HTMLElement>('[role="option"]')]
+          .find((item) => item.textContent?.trim() === "Browser")!
+          .click();
+      });
+      expect(container.querySelector('[data-testid="browser-shell"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="browser-shell-control"]')).toBeNull();
+      await act(async () => {
+        container!.querySelector<HTMLButtonElement>('[data-testid="browser-shell"] button[aria-label="More"]')!.click();
+      });
+      const offered = [...container.querySelectorAll("button")].map((button) => button.textContent?.trim());
+      expect(offered).toContain("Maximize");
+      expect(offered).not.toContain("Close browser");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("renders consult_expert as a dedicated expert block instead of raw JSON", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);

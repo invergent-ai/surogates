@@ -455,7 +455,8 @@ export function AgentChat({
               canShowBrowser={browserAvailable}
               canShowWorkspace={workspaceAvailable}
               paneCards={{
-                browser: browserRunning
+                // A chat the host only reads offers its browser no card: the card is the way to take it over.
+                browser: browserRunning && !disabled
                   ? {
                       subtitle: browserState?.controlOwner
                         ? `${browserState.controlOwner} has control`
@@ -529,6 +530,7 @@ export function AgentChat({
                     state={browserState}
                     adapter={adapter}
                     onClose={() => setOpenPane(null)}
+                    readOnly={disabled === true}
                   />
                 </div>
               )}
