@@ -170,15 +170,17 @@ one_object() {
     | jq -ceRs 'select(utf8bytelength <= 4096 and test("\\A[^\\n]*\\n\\z")) | fromjson | select(type == "object")' 2>/dev/null
 }
 
-# A signed manifest's fields: a release of this channel for this platform, its tarball where every
-# release's is, its hash, each whole (jq's $ also matches before a last newline), its tarball's
-# size in bytes, a whole number above 0 and below 10^15, which jq writes in digits alone, and the
-# state schema of what the app keeps in each user's home, a whole number from 1 and below 10^15
-# as it rounds: jq compares a number as it is written, and 999999999999999.99 is 10^15.
-# The manifest is one JSON object on one line (one_object). Printed as "<version> <sha256> <size>".
+# A signed manifest's fields: a release of this channel for this platform, its version x.y.z with
+# no zero before a part (dpkg reads 1.2.03 as 1.2.3, and a version has one spelling), its tarball
+# where every release's is, its hash, each whole (jq's $ also matches before a last newline), its
+# tarball's size in bytes, a whole number above 0 and below 10^15, which jq writes in digits
+# alone, and the state schema of what the app keeps in each user's home, a whole number from 1
+# and below 10^15 as it rounds: jq compares a number as it is written, and 999999999999999.99 is
+# 10^15. The manifest is one JSON object on one line (one_object). Printed as
+# "<version> <sha256> <size>".
 release_of() {
   one_object "$1" | jq -er --arg channel "$CHANNEL" '
-    select((.version | type == "string" and test("\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))
+    select((.version | type == "string" and test("\\A(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\z"))
       and .channel == $channel and .platform == "linux" and .arch == "x64"
       and .url == "releases/\(.version)/surogate-desktop-\(.version)-linux-x64.tar.gz"
       and (.sha256 | type == "string" and test("\\A[0-9a-f]{64}\\z"))
@@ -200,7 +202,7 @@ installed_version() {
 helper_release() {
   [ -e "$HELPER" ] || [ -L "$HELPER" ] || return 0
   roots_own "$HELPER_MARK" 81a4 \
-    && one_object "$HELPER_MARK" | jq -er '.version | select(type == "string" and test("\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))' 2>/dev/null
+    && one_object "$HELPER_MARK" | jq -er '.version | select(type == "string" and test("\\A(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\z"))' 2>/dev/null
 }
 
 # Refuses release $2, whose signed manifest is $1, unless it can read what the installed version
@@ -716,10 +718,11 @@ http_url() {
 }
 
 # Whether $1 is a version, x.y.z in the ten digits, read in no locale of its caller's as a base is:
-# in most locales, more than ten characters are digits.
+# in most locales, more than ten characters are digits. No part has a zero before it, as none has
+# in a manifest (release_of).
 a_version() {
   local LC_ALL=C
-  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 }
 
 # An XDG folder: $1 when it is absolute, as the XDG specification reads it, else the default $2.

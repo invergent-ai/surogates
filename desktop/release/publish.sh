@@ -33,7 +33,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 VERB="${1:-}"
 VERSION="${2:-}"
 OUT="${3:-}"
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -d "$OUT" ] || { echo "usage: publish.sh sign|send <x.y.z> <out>" >&2; exit 2; }
+# A version is x.y.z with no zero before a part, as the install script takes one: dpkg reads
+# 1.2.03 as 1.2.3, and a release has one name.
+[[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] && [ -d "$OUT" ] || { echo "usage: publish.sh sign|send <x.y.z> <out>" >&2; exit 2; }
 TARBALL="surogate-desktop-$VERSION-linux-x64.tar.gz"
 fail() {
   echo "publish.sh: $*" >&2

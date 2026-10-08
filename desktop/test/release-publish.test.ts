@@ -362,7 +362,8 @@ describe("the desktop's release manifest", () => {
   });
 
   it("stops with its usage at a version that is no x.y.z or a verb it does not have, and says so where the tarball is not there", () => {
-    for (const [verb, version] of [["sign", "1.2"], ["sign", "1.2.3-rc1"], ["sign", "v1.2.3"], ["sign", "1.2.3/../1.2.3"], ["publish", "1.2.3"]] as const) {
+    // A part with a zero before it is no version either: dpkg reads 1.2.03 as 1.2.3, a second spelling of one release.
+    for (const [verb, version] of [["sign", "1.2"], ["sign", "1.2.3-rc1"], ["sign", "v1.2.3"], ["sign", "1.2.3/../1.2.3"], ["sign", "1.2.03"], ["sign", "01.2.3"], ["send", "1.02.3"], ["publish", "1.2.3"]] as const) {
       expect(publish(verb, version, { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball())) }), `${verb} ${version}`)
         .toMatchObject({ status: 2, stdout: "", stderr: "usage: publish.sh sign|send <x.y.z> <out>\n" });
     }

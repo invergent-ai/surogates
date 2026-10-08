@@ -415,6 +415,8 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const hash = sha256(readFileSync(tarball));
     for (const fields of [{ arch: "arm64" }, { platform: "darwin" }, { channel: "beta" }, { url: "https://elsewhere.example/r.tar.gz" }, { version: "1.0" },
       { version: "1.0.0\n", url: "releases/1.0.0\n/surogate-desktop-1.0.0\n-linux-x64.tar.gz" }, { sha256: `${hash}\n` },
+      // A part with a zero before it is no version: dpkg reads 1.0.00 as 1.0.0, a second spelling of one release.
+      { version: "1.0.00", url: "releases/1.0.00/surogate-desktop-1.0.00-linux-x64.tar.gz" }, { version: "01.0.0", url: "releases/01.0.0/surogate-desktop-01.0.0-linux-x64.tar.gz" },
       // Its tarball's size is a whole number of bytes, above 0 and below 10^15, or it is no release: undefined leaves the field out.
       { size: undefined }, { size: null }, { size: 0 }, { size: -1 }, { size: 1.5 }, { size: "4096" }, { size: [4096] }, { size: 1e15 }, { size: 1e300 },
       // Its state schema is a whole number from 1 and below 10^15, or it is no release.
@@ -871,7 +873,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(docker(["cp", join(box.dir, "mark"), `${box.container}:/root/mark`]).status).toBe(0);
       expect(root(`install -m 0644 /root/mark ${path}`).status).toBe(0);
     };
-    for (const [what, written] of [...notOne, ["an object that names no x.y.z", '{"version":"1.1"}\n']] as const) {
+    for (const [what, written] of [...notOne, ["an object that names no x.y.z", '{"version":"1.1"}\n'], ["a version with a zero before a part", '{"version":"1.0.00"}\n']] as const) {
       marked(mark, written);
       const before = standing();
       expect(root(`/opt/surogate-test/install.sh --apply ${files()}`), what).toMatchObject({
@@ -1351,7 +1353,8 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
   });
 
   it("takes for a version to roll back to only the ten digits, in a locale that has more: as the user who asks, before sudo, and as root", () => {
-    for (const version of ["1.2.\u0663", "1.2.\u00b3", "\uff11.\uff12.\uff10"]) for (const user of ["tester", "root"]) {
+    // Nor a part with a zero before it, in any locale: dpkg reads 1.2.03 as 1.2.3.
+    for (const version of ["1.2.\u0663", "1.2.\u00b3", "\uff11.\uff12.\uff10", "1.2.03", "01.2.3", "1.02.3"]) for (const user of ["tester", "root"]) {
       expect(docker(["exec", "-u", user, "-e", "LC_ALL=en_US.UTF-8", box.container, "/opt/surogate-test/install.sh", "--version", version]), `${version} as ${user}`)
         .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: usage: install.sh --version <x.y.z>\n" });
     }
