@@ -33,6 +33,8 @@ interface BrowserPaneProps {
    * it before invoking onClose so the agent can reclaim immediately.
    */
   onClose?: () => void;
+  /** A chat the host only reads: its browser is watched, never taken over or shut down from here. */
+  readOnly?: boolean;
 }
 
 export function BrowserPane({
@@ -40,6 +42,7 @@ export function BrowserPane({
   state,
   adapter,
   onClose,
+  readOnly = false,
 }: BrowserPaneProps) {
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
   const [openFullscreenOnControl, setOpenFullscreenOnControl] = useState(false);
@@ -121,9 +124,13 @@ export function BrowserPane({
       testId={testId}
       hasControl={localControlActive}
       onToggleControl={
-        hasControlAdapter ? () => void control.toggleControl() : undefined
+        hasControlAdapter && !readOnly
+          ? () => void control.toggleControl()
+          : undefined
       }
-      onClose={onClose ? () => control.setConfirmOpen(true) : undefined}
+      onClose={
+        onClose && !readOnly ? () => control.setConfirmOpen(true) : undefined
+      }
       onMaximize={
         fullscreenOpen ? undefined : () => setFullscreenOpen(true)
       }

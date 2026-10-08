@@ -50,6 +50,7 @@
       <ul class="nav">
         <li><button class="item" type="button" id="new" data-icon="square-pen">New</button></li>
         <li><button class="item" type="button" id="open-projects" data-icon="layout-grid">Projects</button></li>
+        <li><button class="item" type="button" data-path="/chats" data-icon="messages-square">Chats</button></li>
         <li><button class="item" type="button" data-path="/inbox" data-icon="inbox">Inbox</button></li>
         <li><button class="item" type="button" data-path="/missions" data-icon="target">Missions</button></li>
         <li><button class="item" type="button" data-path="/skills" data-icon="sparkles">Skills</button></li>
@@ -71,6 +72,8 @@
       <div class="popover" id="user-menu" role="menu" hidden>
         <p class="menu-head" id="user-email"></p>
         <button class="menu-item" type="button" role="menuitem" data-action="settings" data-icon="settings">Settings<span class="shortcut">Ctrl+Shift+,</span></button>
+        <button class="menu-item" type="button" role="menuitem" data-action="account" data-icon="circle-user-round">Account settings</button>
+        <button class="menu-item" type="button" role="menuitem" data-action="devices" data-icon="laptop">Devices</button>
         <button class="menu-item" type="button" role="menuitem" data-action="usage" data-icon="gauge">Usage</button>
         <button class="menu-item" type="button" role="menuitem" data-action="language" data-icon="languages" disabled title="Comes in a later version">Language</button>
         <button class="menu-item" type="button" role="menuitem" data-action="help" data-icon="circle-help">Get help</button>
@@ -143,6 +146,14 @@
       </div>
       <div class="library" id="routines" hidden>
         <ul id="routine-list"></ul>
+      </div>
+      <div class="reading" id="reading" hidden>
+        <div class="reading-head">
+          <button class="icon" id="reading-back" type="button" title="Back to the threads" data-icon="arrow-left"></button>
+          <span class="reading-title" id="reading-title"></span>
+          <button class="btn" id="reading-open" type="button">Open</button>
+        </div>
+        <div class="pane-hole" id="pane-hole"></div>
       </div>
     </aside>
   </body>

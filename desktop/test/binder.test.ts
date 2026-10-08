@@ -99,6 +99,13 @@ function binder(user: User, overrides: Partial<BinderOptions> = {}): Binder {
 
 const never = () => new AbortController().signal;
 
+// The look a test holds, ended, as the folder answering ends it. The looks are the process's: one a
+// failing test left held would refuse every later look in the file, and hide that first failure.
+async function ended(answer: (found: FolderLook) => void): Promise<void> {
+  answer(statSync(notes));
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
 // The user confirms *folder* through the dialog and the sheet.
 async function confirmed(user: User, chooser: Binder, folder = notes, mode: Mode = "free"): Promise<Prepared> {
   user.picks.push(folder);
@@ -797,12 +804,13 @@ describe("what the page may know of a chat's folder", () => {
     const { promise: answered, resolve: answer } = Promise.withResolvers<{ isDirectory(): boolean; dev: number; ino: number }>();
     const chooser = binder(user, { look: () => answered, lookMs: 50 });
     await chooser.admit(bindOp(ROOT, await confirmed(user, chooser)), never());
-    // A dead network or FUSE mount: its look holds a thread until it returns, so one look at a time.
-    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`The folder ${notes} did not answer within 0.05 s`);
-    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`Surogate is still looking for ${notes}`);
-    answer(statSync(notes));
-    await answered;
-    await new Promise((resolve) => setImmediate(resolve));
+    try {
+      // A dead network or FUSE mount: its look holds a thread until it returns, so one look at a time.
+      await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`The folder ${notes} did not answer within 0.05 s`);
+      await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`Surogate is still looking for ${notes}`);
+    } finally {
+      await ended(answer);
+    }
     expect(await chooser.folderToShow(ROOT)).toBe(notes);
   });
 
@@ -811,15 +819,16 @@ describe("what the page may know of a chat's folder", () => {
     const { promise: answered, resolve: answer } = Promise.withResolvers<FolderLook>();
     const chooser = binder(user, { look: () => answered, lookMs: 50 });
     for (const root of [ROOT, OTHER, THIRD]) await chooser.admit(bindOp(root, await confirmed(user, chooser)), never());
-    // Chats under one dead mount: each look holds one of libuv's four threads until it returns.
-    for (const root of [ROOT, OTHER]) await expect(chooser.folderToShow(root)).rejects.toThrow(`The folder ${notes} did not answer`);
-    await expect(chooser.folderToShow(THIRD)).rejects.toThrow("Surogate is still looking for another folder");
-    // A stack made again, as a rotation makes it, finds the looks still running.
     const again = binder(user, { look: () => answered, lookMs: 50 });
-    await expect(again.folderToShow(THIRD)).rejects.toThrow("Surogate is still looking for another folder");
-    answer(statSync(notes));
-    await answered;
-    await new Promise((resolve) => setImmediate(resolve));
+    try {
+      // Chats under one dead mount: each look holds one of libuv's four threads until it returns.
+      for (const root of [ROOT, OTHER]) await expect(chooser.folderToShow(root)).rejects.toThrow(`The folder ${notes} did not answer`);
+      await expect(chooser.folderToShow(THIRD)).rejects.toThrow("Surogate is still looking for another folder");
+      // A stack made again, as a rotation makes it, finds the looks still running.
+      await expect(again.folderToShow(THIRD)).rejects.toThrow("Surogate is still looking for another folder");
+    } finally {
+      await ended(answer);
+    }
     expect(await again.folderToShow(THIRD)).toBe(notes);
   });
 });

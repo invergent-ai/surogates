@@ -76,8 +76,8 @@ describe("the user menu", () => {
     expect(await page.isVisible("#user-menu")).toBe(true);
     expect(await page.getAttribute("#user", "aria-expanded")).toBe("true");
     expect(await page.textContent("#user-email")).toBe("flavius@example.com");
-    // An agent off surogate.ai has no console the app knows: no usage or billing.
-    expect(await texts(page, "#user-menu .menu-item")).toEqual(["SettingsCtrl+Shift+,", "Language", "Get help", "Log out", "Remove this agent…"]);
+    // An agent that names no console: no usage or billing.
+    expect(await texts(page, "#user-menu .menu-item")).toEqual(["SettingsCtrl+Shift+,", "Account settings", "Devices", "Language", "Get help", "Log out", "Remove this agent…"]);
     // One divider above Log out: none is doubled where the console's rows are hidden.
     expect(await page.$$eval("#user-menu hr", (found) => found.filter((hr) => (hr as HTMLElement).offsetParent !== null).length)).toBe(1);
     expect(await page.isDisabled('[data-action="logout"]')).toBe(false);
@@ -109,7 +109,7 @@ describe("the user menu", () => {
     await page.click('[data-action="help"]');
     // After the sign-in's own address, which the system browser opened first.
     await expect.poll(() => shell.evaluate(() => (globalThis as unknown as { opened: string[] }).opened.slice(1))).toEqual(["https://docs.surogate.ai/work/"]);
-    // Off surogate.ai there is no console; and a name that is no link, a prototype's included, opens nothing.
+    // The agent names no console; and a name that is no link, a prototype's included, opens nothing.
     for (const which of ["usage", "billing", "constructor", "__proto__"]) {
       await expect(page.evaluate((name) => (window as unknown as { surogateShell: { link(which: string): Promise<void> } })
         .surogateShell.link(name), which)).rejects.toThrow("No such link");
@@ -188,6 +188,8 @@ describe("Settings", () => {
       await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe(theme);
       // Each page hears the theme from its own media query, in its own time.
       await expect.poll(() => settings.evaluate(() => document.documentElement.dataset.theme)).toBe(theme);
+      // The agent's web client too: it takes the desktop's theme from its media query.
+      await expect.poll(() => client.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches)).toBe(theme === "dark");
       expect(await settings.getAttribute(`[data-setting="theme"] [data-value="${theme}"]`, "aria-pressed")).toBe("true");
     }
     const overlays = await shell.evaluate(() => (globalThis as unknown as { overlays: Array<{ color: string }> }).overlays);
@@ -197,6 +199,21 @@ describe("Settings", () => {
     const saved = () => JSON.parse(readFileSync(join(home, "surogate", "settings.json"), "utf8")) as Record<string, string>;
     await expect.poll(() => saved().textSize).toBe("large");
     expect(saved().theme).toBe("light");
+  });
+
+  it("paints the web client's first frame in a dark desktop's theme, its native controls too, before any script of its own", async () => {
+    // The web client's own HTML, its bundle and the fonts' sheet not served: only its head can theme the
+    // first frame, and the body's first script reads the root that frame paints from.
+    agent.page = readFileSync(join(import.meta.dirname, "..", "..", "..", "web", "index.html"), "utf8")
+      .replace(/<link [^>]*https:[^>]*>/g, "")
+      .replace("<body>", "<body><script>window.firstFrame = [document.documentElement.className, document.documentElement.style.colorScheme]</script>");
+    const { shell, page, client } = await signedIn();
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    await settings.click('[data-setting="theme"] [data-value="dark"]');
+    await expect.poll(() => client.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches)).toBe(true);
+    await client.reload();
+    expect(await client.evaluate(() => (window as unknown as { firstFrame: string[] }).firstFrame)).toEqual(["dark", "dark"]);
   });
 
   it("filters its nav and its rows by what is typed in its search", async () => {
@@ -210,7 +227,7 @@ describe("Settings", () => {
     expect(await texts(settings, ".settings-nav .item")).toEqual(["This computer"]);
     expect(await texts(settings, ".row:not([hidden]) .label > span:first-child")).toEqual(["Added"]);
     await settings.fill("#settings-search", "");
-    // Off surogate.ai Usage stays gone, the search cleared too.
+    // With no console named, Usage stays gone, the search cleared too.
     expect(await texts(settings, ".settings-nav .item")).toEqual([
       "General", "Account", "This computer", "Browser", "Folders and permissions", "SkillsLater", "ConnectorsLater",
     ]);

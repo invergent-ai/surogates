@@ -211,6 +211,12 @@ async def test_the_server_offers_local_folder_chats(api):
     assert response.json()["desktop_sessions"] is True
 
 
+async def test_the_server_names_its_console_only_once_the_operator_does(api):
+    assert (await api.client.get("/v1/auth/config")).json()["console_url"] is None
+    api.app.state.settings.api.console_url = "https://ops.acme.local"
+    assert (await api.client.get("/v1/auth/config")).json()["console_url"] == "https://ops.acme.local"
+
+
 async def is_bound(api, session_id: str) -> bool:
     return (await binding(api, session_id)).state == "bound"
 

@@ -14,6 +14,7 @@ import {
   SheetContent,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { getDesktop } from "@/lib/desktop-bridge";
 
 type AppShellProps = {
   sidebar: React.ReactNode;
@@ -41,6 +42,17 @@ export function AppShell({ sidebar, headerSlot, children }: AppShellProps) {
     if (sheetOpen) {
       setSheetOpen(false);
     }
+  }
+
+  // In Surogate Desktop the web client is the conversation alone: the desktop's own sidebar
+  // lists the projects, the chats (on /chats) and the pages, and its user menu reaches Settings.
+  if (getDesktop()) {
+    return (
+      <main className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden">
+        <ComputerAddedBanner />
+        {children}
+      </main>
+    );
   }
 
   return (

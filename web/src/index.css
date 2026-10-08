@@ -213,6 +213,37 @@
   }
 }
 
+/* Surogate Desktop's transcript settings (lib/appearance.ts) on the SDK's thread, the composer
+   with it ([data-transcript]): the width of their column, and the size of their text. Medium is
+   the web client's own. Reduced motion stops the page's animations and transitions; the SDK
+   shows a streaming answer whole under it. */
+:root[data-transcript-width="narrow"] [data-transcript] {
+  --container-4xl: 42rem;
+}
+:root[data-transcript-width="wide"] [data-transcript] {
+  --container-4xl: 72rem;
+}
+:root[data-text-size="small"] [data-transcript] {
+  --text-xs: 0.6875rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-lg: 1.0625rem;
+}
+:root[data-text-size="large"] [data-transcript] {
+  --text-xs: 0.8125rem;
+  --text-sm: 0.9375rem;
+  --text-base: 1.0625rem;
+  --text-lg: 1.1875rem;
+}
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

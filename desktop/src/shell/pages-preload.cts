@@ -22,12 +22,15 @@ if (location.protocol === "file:") {
     projects: () => ipcRenderer.invoke("shell:projects"),
     project: (id: string) => ipcRenderer.invoke("shell:project", id),
     thread: (id: string) => ipcRenderer.invoke("shell:thread", id),
+    read: (id: string | null) => ipcRenderer.invoke("shell:read", id),
+    focusPane: () => ipcRenderer.invoke("shell:focus-pane"),
     resolve: (id: string) => ipcRenderer.invoke("shell:resolve", id),
     reopen: (id: string) => ipcRenderer.invoke("shell:reopen", id),
     back: () => ipcRenderer.invoke("shell:back"),
     forward: () => ipcRenderer.invoke("shell:forward"),
     reload: () => ipcRenderer.invoke("shell:reload"),
     place: (hole: { x: number; y: number; width: number; height: number }) => ipcRenderer.invoke("shell:place", hole),
+    placePane: (hole: { x: number; y: number; width: number; height: number }) => ipcRenderer.invoke("shell:place-pane", hole),
     menu: (which: "app" | "project") => ipcRenderer.invoke("shell:menu", which),
     settings: () => ipcRenderer.invoke("shell:settings"),
     newProject: () => ipcRenderer.invoke("shell:new-project"),
@@ -36,6 +39,12 @@ if (location.protocol === "file:") {
     link: (which: string) => ipcRenderer.invoke("shell:link", which),
     sandbox: (action: string) => ipcRenderer.invoke("shell:sandbox", action),
     onChanged: listen("shell:changed"),
+    // Where the keyboard comes back to from the pane's transcript: its head's Open or Back.
+    onPaneLeft: (listener: (to: string) => void) => {
+      const relay = (_event: unknown, to: unknown) => listener(String(to));
+      ipcRenderer.on("shell:pane-left", relay);
+      return () => ipcRenderer.off("shell:pane-left", relay);
+    },
   });
   contextBridge.exposeInMainWorld("surogateProject", {
     state: () => ipcRenderer.invoke("project:state"),

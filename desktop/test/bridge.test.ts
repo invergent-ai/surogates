@@ -32,7 +32,8 @@ describe("the bridge", () => {
     ["a frame that has gone", null],
   ])("refuses every call from %s, and does nothing", async (_name, frame) => {
     const made = calls();
-    // Each handler the bridge has, a later one too, with arguments that would pass its own checks.
+    // Each handler the bridge has, a later one too, with arguments that reach its own checks: a handler
+    // without the frame check refuses them in its own words, or takes them, never as below.
     for (const [name, handler] of Object.entries(bridgeHandlers(ORIGIN, made))) {
       await expect(handler(frame as SenderFrame | null, "7", SESSION, "ask"), name).rejects.toThrow("Not the agent's web client");
     }
