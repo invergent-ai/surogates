@@ -65,6 +65,9 @@ const QUIT_MS = 2_000;
 const SHOW_MS = 2_000;
 // How long a page whose question was left to its user may take to show that it has been answered.
 const ASKING_MS = 500;
+// How long after a take-over the agent's pages still open no file chooser of the browser's own: what the
+// agent was doing in a page then (a click on its way, a button this host lets go) has reached it by then.
+export const OWN_CHOOSER_MS = 1_000;
 // How long a closing browser's processes may take to exit (Edge's take about 5 s on xvfb), below the client's STOP_MS.
 const RELEASE_MS = 6_000;
 export const PROXY_BYPASSED =
@@ -421,6 +424,11 @@ export class BrowserHost {
   // it began under: answered paused at once, it types, drags and loads no further, and is never taken up
   // again, at a hand back either. Those that begin after a hand back get the next.
   private interrupt = new AbortController();
+  // Each session's page this host took, and what hears it ask for a file. While a page is heard the browser
+  // opens no file chooser of its own there. Null while its user holds the browser: a file input is theirs then.
+  private readonly hearing = new Map<Page, { session: string; heard: ((chooser: FileChooser) => void) | null }>();
+  // What takes them off, a moment after a take-over.
+  private ownChooser: NodeJS.Timeout | undefined;
   // The file input each session's pages asked for a file for last, until it is given one.
   private readonly choosers = new Map<string, FileChooser>();
   // The one an upload's prompt named, by the frame of its input: that upload's files go to it, and to no input that asks after.
@@ -489,6 +497,9 @@ export class BrowserHost {
       if (this.held !== root) return;
       this.held = null;
       this.handed = { by: root, at: this.now() };
+      // The agent drives again: a file its pages ask for is heard, and opens no chooser of the browser's own.
+      clearTimeout(this.ownChooser);
+      for (const page of this.hearing.keys()) this.hear(page);
       return;
     }
     this.held = root;
@@ -502,6 +513,13 @@ export class BrowserHost {
     for (const download of this.arriving) void download.cancel().catch(() => {});
     // A button the agent pressed and holds, in any session's page, comes up: not left down under its user's hand.
     for (const pages of this.tabs.values()) for (const page of pages) void letGo(page);
+    // A file input is its user's while they hold the browser, opening the browser's own chooser: but only once
+    // what the agent was doing at this moment has reached its page, so that no act of the agent's opens one.
+    // Until then a page's ask is still heard, and kept for no one (asks).
+    clearTimeout(this.ownChooser);
+    this.ownChooser = setTimeout(() => {
+      if (this.held !== null) for (const page of this.hearing.keys()) this.unhear(page);
+    }, OWN_CHOOSER_MS);
   }
 
   /**
@@ -559,6 +577,7 @@ export class BrowserHost {
     // What it staged and nobody saved went with its browser; its folder goes now.
     if (this.staging !== null) await rm(this.staging, { recursive: true, force: true }).catch(() => {});
     this.staging = null;
+    clearTimeout(this.ownChooser);
   }
 
   // An operation at its turn. Taken over while it acts, it is answered paused at once, whatever it has
@@ -688,13 +707,39 @@ export class BrowserHost {
       const pages = this.tabs.get(session);
       if (pages?.includes(page)) pages.splice(pages.indexOf(page), 1);
       this.asking.delete(page);
+      this.hearing.delete(page);
     });
     page.on("popup", (popup) => this.adopt(session, popup));
-    // With a listener, the browser opens no file dialog of its own: no path the agent did not get reaches a page.
-    page.on("filechooser", (chooser) => {
-      this.choosers.set(session, chooser);
-      this.note(session, FILE_ASKED);
-    });
+    this.hearing.set(page, { session, heard: null });
+    // One that opens under its user's hand is heard from the hand back.
+    if (this.held === null) this.hear(page);
+  }
+
+  // A session's *page* is heard when it asks for a file. With a listener, the browser opens no file dialog
+  // of its own: no path the agent did not get reaches a page.
+  private hear(page: Page): void {
+    const kept = this.hearing.get(page);
+    if (!kept || kept.heard !== null) return;
+    const { session } = kept;
+    kept.heard = (chooser: FileChooser) => this.asks(session, chooser);
+    page.on("filechooser", kept.heard);
+  }
+
+  // *page* is heard no more: a file input in it opens the browser's own chooser, as in any browser.
+  private unhear(page: Page): void {
+    const kept = this.hearing.get(page);
+    if (!kept?.heard) return;
+    page.off("filechooser", kept.heard);
+    kept.heard = null;
+  }
+
+  // A page of *session*'s asked for a file: the input is kept for an upload, and its agent told. Not while
+  // its user holds the browser: what a page asks for then is their own doing, or the page's under their
+  // hand, and no input of theirs is the agent's to fill, at the hand back either.
+  private asks(session: string, chooser: FileChooser): void {
+    if (this.held !== null) return;
+    this.choosers.set(session, chooser);
+    this.note(session, FILE_ASKED);
   }
 
   // The session whose page *page* is now, a popup of its too: none for a tab its user opened themselves,
@@ -1012,6 +1057,9 @@ export class BrowserHost {
     this.spare = null;
     this.tabs.clear();
     this.untold.clear();
+    this.hearing.clear();
+    this.choosers.clear();
+    this.named.clear();
   }
 
   private async launch(launch: Launch): Promise<BrowserContext> {

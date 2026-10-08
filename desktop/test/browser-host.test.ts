@@ -22,7 +22,7 @@ import { PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge } from "../src/browser/downloads.js";
 import {
   AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, GIVEN_AS_TAKEN, holding, type Launch, NOT_ASKED, notFinished,
-  PROXY_BYPASSED, WEAKENING,
+  OWN_CHOOSER_MS, PROXY_BYPASSED, WEAKENING,
 } from "../src/browser/host.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
@@ -229,6 +229,21 @@ function xwindow(): { id: string; front: string } | undefined {
   })[0];
 }
 const front = () => xwindow()?.front;
+// The browser's own file choosers open on that display, each a window that says it is one. Under test/isolated.sh
+// the browser reaches no portal, so its chooser is GTK's.
+function ownChoosers(): string[] {
+  const ids = execFileSync("xwininfo", ["-root", "-tree"], { encoding: "utf8" }).split("\n").flatMap((line) => /^\s+(0x[0-9a-f]+) /.exec(line)?.[1] ?? []);
+  return ids.filter((id) => {
+    try {
+      return execFileSync("xprop", ["-id", id, "WM_WINDOW_ROLE"], { encoding: "utf8" }).includes("GtkFileChooserDialog");
+    } catch {
+      // Gone since it was listed.
+      return false;
+    }
+  });
+}
+// How many listeners *page* has for a file a page asks for: the host's, or none while its user holds the browser.
+const hears = (page: Page) => (page as unknown as { listenerCount(event: string): number }).listenerCount("filechooser");
 // The user's own hand on that display, as X events (x-user.py): the window given the keyboard, a click, keys typed.
 const X_USER = fileURLToPath(new URL("./x-user.py", import.meta.url));
 const asUser = (...args: string[]) => void execFileSync("python3", [X_USER, ...args]);
@@ -1985,6 +2000,89 @@ await navigator.serviceWorker.ready;`);
     host.pause("chat-1", false);
     expect((await op(a, "browser.mouse", { action: "move", x: 5, y: 5 }, "chat-1")).ok.notices).toEqual([]);
     expect(await holds()).toEqual([]);
+    expect((await op(a, "browser.set_input_files", { files: [REPORT] }, "chat-1")).error?.message).toBe(NOT_ASKED);
+  }, 30_000);
+
+  it("opens the browser's own chooser for a file input its user clicks while they hold the browser, tells the agent nothing of it and keeps no input of theirs; and none for the agent once it is handed back", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/t/HELD" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const holds = () => page.evaluate(() => [...(document.getElementById("file") as HTMLInputElement).files!].map((file) => file.name));
+    const click = () => op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 }, "chat-1");
+    const upload = () => op(a, "browser.set_input_files", { files: [REPORT] }, "chat-1");
+    // While the agent drives, a file input opens no chooser of the browser's: the page's ask is heard, for an upload.
+    expect((await click()).ok.notices).toEqual([FILE_ASKED]);
+    expect(ownChoosers()).toEqual([]);
+    host.pause("chat-1", true);
+    expect(await host.show("chat-1")).toBe(true);
+    await expect.poll(front, { timeout: 5_000 }).toBe("HELD");
+    // Once what the agent was doing at the take-over has had its moment, a file input is its user's as in any browser.
+    await expect.poll(() => hears(page), { timeout: OWN_CHOOSER_MS + 5_000 }).toBe(0);
+    const [x, y] = await onScreen(page, "file");
+    asUser("focus", xwindow()!.id);
+    asUser("click", String(x), String(y));
+    await expect.poll(() => ownChoosers().length, { timeout: 10_000 }).toBe(1);
+    // Handed back: the agent is told nothing of what they did there, and no input of theirs is kept for an upload.
+    host.pause("chat-1", false);
+    expect(hears(page)).toBe(1);
+    expect((await op(a, "browser.mouse", { action: "move", x: 5, y: 5 }, "chat-1")).ok.notices).toEqual([]);
+    expect((await upload()).error?.message).toBe(NOT_ASKED);
+    expect(await holds()).toEqual([]);
+    // The agent's own click opens none of the browser's own, as before: the page's ask is heard again, and answered by an upload.
+    expect((await click()).ok.notices).toEqual([FILE_ASKED]);
+    await new Promise((done) => setTimeout(done, 1_500));
+    expect(ownChoosers()).toHaveLength(1);
+    expect(await upload()).toEqual({ ok: { files: 1, notices: [] } });
+    expect(await holds()).toEqual(["report.pdf"]);
+  }, 60_000);
+
+  it("leaves a file input to its user in a window a session's page opens while they hold the browser too, and hears it for the agent from the hand back", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    host.pause("chat-1", true);
+    const [popup] = await Promise.all([page.waitForEvent("popup", { timeout: 10_000 }), page.evaluate("void window.open('/fileinput')")]);
+    await expect.poll(() => tabs().get(a)!.includes(popup), { timeout: 5_000 }).toBe(true);
+    await popup.waitForLoadState("load");
+    expect(hears(popup)).toBe(0);
+    await expect.poll(() => hears(page), { timeout: OWN_CHOOSER_MS + 5_000 }).toBe(0);
+    host.pause("chat-1", false);
+    expect([hears(page), hears(popup)]).toEqual([1, 1]);
+    // The window is the session's newest page: its agent's click there is heard, and its upload answers it.
+    expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 40, button: "left", clicks: 1 }, "chat-1")).ok.notices).toEqual([FILE_ASKED]);
+    expect(await op(a, "browser.set_input_files", { files: [REPORT] }, "chat-1")).toEqual({ ok: { files: 1, notices: [] } });
+    expect(await popup.evaluate(() => [...(document.getElementById("file") as HTMLInputElement).files!].map((file) => file.name))).toEqual(["report.pdf"]);
+    expect(ownChoosers()).toEqual([]);
+  }, 30_000);
+
+  it("opens no chooser of the browser's own for what the agent was doing when its user took the browser over: the button of a drag on a file input comes up heard, and kept for no upload", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const unseen = (host as unknown as { unseen: Map<string, string[]> }).unseen;
+    // A press and a release on a file input ask for a file, as a click does, though the pointer moved between them: heard a moment after.
+    await op(a, "browser.mouse", { action: "drag", path: [[45, 210], [50, 210], [55, 210]], button: "left" }, "chat-1");
+    await expect.poll(() => unseen.get(a), { timeout: 5_000 }).toEqual([FILE_ASKED]);
+    expect((await op(a, "browser.mouse", { action: "move", x: 60, y: 210 }, "chat-1")).ok.notices).toEqual([FILE_ASKED]);
+    // A long drag there: its user takes the browser over while it moves, and its button comes up after that, under their hand.
+    await page.evaluate(() => {
+      const seen = { moves: 0, ups: 0 };
+      Object.assign(window, { seen });
+      addEventListener("mousemove", () => (seen.moves += 1));
+      addEventListener("mouseup", () => (seen.ups += 1));
+    });
+    const seen = () => page.evaluate(() => (window as unknown as { seen: { moves: number; ups: number } }).seen);
+    const path = Array.from({ length: 1_000 }, (_, n) => [45 + (n % 30), 210]);
+    const dragging = op(a, "browser.mouse", { action: "drag", path, button: "left" }, "chat-1");
+    await expect.poll(async () => (await seen()).moves, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+    host.pause("chat-1", true);
+    expect(await within(1_000, dragging)).toEqual(PAUSED);
+    await expect.poll(async () => (await seen()).ups, { timeout: 5_000 }).toBe(1);
+    await new Promise((done) => setTimeout(done, OWN_CHOOSER_MS + 2_000));
+    expect(ownChoosers()).toEqual([]);
+    // What it asked for then is nobody's to answer: its agent is told nothing of it, and has no input to give a file.
+    host.pause("chat-1", false);
+    expect((await op(a, "browser.mouse", { action: "move", x: 5, y: 5 }, "chat-1")).ok.notices).toEqual([]);
     expect((await op(a, "browser.set_input_files", { files: [REPORT] }, "chat-1")).error?.message).toBe(NOT_ASKED);
   }, 30_000);
 
