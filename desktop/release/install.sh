@@ -38,6 +38,10 @@ settings() {
   LOCK_WAIT=300
   READ_WAIT=120
   SMALL_WAIT=5
+  # How long a download from the base may wait, as curl is told: 30 seconds to be connected, and a
+  # minute at under 1024 bytes a second. A base that takes the connection and never answers, or
+  # stops in the middle of an answer, would otherwise hold an install or a rollback for good.
+  TIMELY=(--connect-timeout 30 --speed-limit 1024 --speed-time 60)
   # Who reads the files an apply is handed, by user and group number, and by name: root, unless the
   # helper was run for another user (asker).
   READER=(0 0 root)
@@ -640,9 +644,9 @@ install_latest() {
   # may be memory: a manifest is a line of 4096 bytes at most, as an apply takes one; its signature
   # is Ed25519's 64 bytes, and one more shows one that is too long; and a tarball is the size its
   # signed manifest names.
-  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 4096 -o "$download/manifest.json" "$base/desktop/latest.json" \
+  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 4096 "${TIMELY[@]}" -o "$download/manifest.json" "$base/desktop/latest.json" \
     || fail "could not download $base/desktop/latest.json"
-  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 65 -o "$download/manifest.json.sig" "$base/desktop/latest.json.sig" \
+  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 65 "${TIMELY[@]}" -o "$download/manifest.json.sig" "$base/desktop/latest.json.sig" \
     || fail "could not download $base/desktop/latest.json.sig"
   signed "$download/manifest.json" "$download/manifest.json.sig" \
     || fail "$base/desktop/latest.json is not signed by Surogate's release key"
@@ -658,7 +662,7 @@ install_latest() {
   if ! whole "$download/manifest.json" "$ROOT/versions/$version"; then
     say "downloading Surogate Desktop $version"
     tarball="$download/release.tar.gz"
-    LC_ALL=C.UTF-8 curl -q -fSL --proto '=https,http' --max-filesize "$size" -o "$tarball" "$base/desktop/$(jq -r .url "$download/manifest.json")" \
+    LC_ALL=C.UTF-8 curl -q -fSL --proto '=https,http' --max-filesize "$size" "${TIMELY[@]}" -o "$tarball" "$base/desktop/$(jq -r .url "$download/manifest.json")" \
       || fail "could not download Surogate Desktop $version from $base"
   fi
   apply "$download/manifest.json" "$download/manifest.json.sig" "$tarball"
@@ -753,11 +757,12 @@ roll_back() {
   installed_schema >/dev/null || fail "the installed $installed names no state schema: run Surogate Desktop's install script again"
   # Its folder in /tmp, as the install's is, whatever TMPDIR root's own shell has.
   scratch download -p /tmp tmp.XXXXXXXXXX
-  # Each download as the install's own (install_latest): its address's letters read as UTF-8, and
-  # no more of it than it is for, a manifest's 4096 bytes and a signature's 64 and one more.
-  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 4096 -o "$download/manifest.json" "$base/desktop/releases/$version/manifest.json" \
+  # Each download as the install's own (install_latest): its address's letters read as UTF-8, no
+  # more of it than it is for, a manifest's 4096 bytes and a signature's 64 and one more, and for
+  # no longer than a download may wait.
+  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 4096 "${TIMELY[@]}" -o "$download/manifest.json" "$base/desktop/releases/$version/manifest.json" \
     || fail "could not download $base/desktop/releases/$version/manifest.json"
-  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 65 -o "$download/manifest.json.sig" "$base/desktop/releases/$version/manifest.json.sig" \
+  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 65 "${TIMELY[@]}" -o "$download/manifest.json.sig" "$base/desktop/releases/$version/manifest.json.sig" \
     || fail "could not download $base/desktop/releases/$version/manifest.json.sig"
   signed "$download/manifest.json" "$download/manifest.json.sig" \
     || fail "$base/desktop/releases/$version/manifest.json is not signed by Surogate's release key"
@@ -769,7 +774,7 @@ roll_back() {
   if ! whole "$download/manifest.json" "$ROOT/versions/$version"; then
     say "downloading Surogate Desktop $version"
     tarball="$download/release.tar.gz"
-    LC_ALL=C.UTF-8 curl -q -fSL --proto '=https,http' --max-filesize "$size" -o "$tarball" "$base/desktop/releases/$version/surogate-desktop-$version-linux-x64.tar.gz" \
+    LC_ALL=C.UTF-8 curl -q -fSL --proto '=https,http' --max-filesize "$size" "${TIMELY[@]}" -o "$tarball" "$base/desktop/releases/$version/surogate-desktop-$version-linux-x64.tar.gz" \
       || fail "could not download Surogate Desktop $version from $base"
   fi
   apply "$download/manifest.json" "$download/manifest.json.sig" "$tarball" older

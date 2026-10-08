@@ -2258,9 +2258,23 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       `timeout 60 /opt/surogate-test/install.sh --version ${version} >/tmp/said 2>&1; echo "$? $(wc -l </tmp/curled) $(cat /tmp/said)"`,
       last,
     ]).stdout;
-    // As an install wrote the record, the base is asked twice for a version that is here: its manifest, and its signature.
+    // As an install wrote the record, the base is asked: three times for a version whose folder
+    // has lost its program, for its manifest, its signature and its tarball. And each time for no
+    // longer than a bound: a base that takes the connection and never answers, or stops in the
+    // middle of an answer, would otherwise hold the rollback for good. The install's own three are
+    // asked the same way.
     expect(root(`stat -c '%f %u' ${record} ${mark} && cp -p ${record} /root/record && cp -p ${mark} /root/mark`).stdout).toBe("81a4 0\n81a4 0\n");
-    expect(rolled("1.6.0")).toBe("0 2 Surogate Desktop: 1.6.0 is installed\n");
+    const bounded = (files: string[]) => {
+      const requests = root("cat /tmp/curled").stdout.trim().split("\n");
+      expect(requests.map((request) => request.replace(/^.* [^ ]*\/desktop\//, ""))).toEqual(files);
+      for (const request of requests) expect(request).toContain("--connect-timeout 30 --speed-limit 1024 --speed-time 60");
+    };
+    const tarball = "releases/1.6.0/surogate-desktop-1.6.0-linux-x64.tar.gz";
+    const asked = rolled("1.6.0", "rm /opt/surogate/versions/1.6.0/surogate");
+    expect(asked.startsWith("0 3 ") && asked.endsWith("Surogate Desktop: 1.6.0 is installed\n"), asked).toBe(true);
+    bounded(["releases/1.6.0/manifest.json", "releases/1.6.0/manifest.json.sig", tarball]);
+    expect(swapped("curl", asking, ["rm /opt/surogate/versions/1.6.0/surogate", ": >/tmp/curled", `/opt/surogate-test/install.sh --base ${base} >/dev/null 2>&1; echo "$?"`]).stdout).toBe("0\n");
+    bounded(["latest.json", "latest.json.sig", tarball]);
     const installed = standing();
     const restored = `rm -rf ${record} ${mark}; cp -p /root/record ${record}; cp -p /root/mark ${mark}`;
     const refused = (what: string, made: string, said: string, version = "1.6.0") => {
