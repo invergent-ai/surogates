@@ -318,9 +318,11 @@ describe("a chat's browser taken over, and handed back", () => {
     expect(await atClick(client, "handBack")).toBe(false);
     expect(await binding()).toMatchObject({ takenOver: true });
     expect(await boxes()).toHaveLength(before + 1);
-    // Keep control is its default and its cancel: Enter or Escape keeps the browser the user's.
+    // Keep control is its default and its cancel: Enter or Escape keeps the browser the user's. A chat the agent
+    // names not is "this chat".
     expect((await boxes()).at(-1)).toMatchObject({
       message: expect.stringMatching(/^Hand the browser back to .+\?$/), buttons: ["Hand back", "Keep control"], defaultId: 1, cancelId: 1,
+      detail: "It acts in its browser on this computer again, for this chat.",
     });
     // Kept: the page's own code opens no box still, nor after a take-over it makes again.
     await app!.evaluate(() => Object.assign(globalThis, { answer: 0 }));
@@ -372,6 +374,60 @@ describe("a chat's browser taken over, and handed back", () => {
     for (let n = 0; n < 3; n += 1) expect(await reloadedAndAsked()).toBe(HAND_BACK_AT_A_CLICK);
     expect(await boxes()).toHaveLength(before + 1);
     expect(await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT)).toMatchObject({ takenOver: true });
+  });
+
+  it("names the chat in the hand back's box by its title, as text, and shows a hidden window before the box", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    // A title the agent wrote, with a right-to-left override in it: shown as text.
+    agent.titles.set(CHAT, "Quarterly‮report");
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
+    await app!.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    expect(await atClick(client, "handBack")).toBe(false);
+    expect((await boxes()).at(-1)).toMatchObject({
+      message: expect.stringMatching(/^Hand the browser back to .+\?$/),
+      detail: "It acts in its browser on this computer again, for the chat “QuarterlyU+202Ereport”.",
+    });
+    // Its user clicks, and the window is hidden before the page asks, as one closed to the tray: the window is
+    // shown again first, and the box opens over it.
+    await client.evaluate(() => document.body.append(Object.assign(document.createElement("button"), { id: "pressed", textContent: "Pressed" })));
+    await client.click("#pressed");
+    const hidden = await app!.evaluate(({ BrowserWindow, dialog }) => {
+      const window = BrowserWindow.getAllWindows().find((each) => each.webContents.getURL().endsWith("/shell.html"))!;
+      window.hide();
+      const ask = dialog.showMessageBox as (...args: unknown[]) => unknown;
+      dialog.showMessageBox = ((...args: unknown[]) => {
+        Object.assign(globalThis, { shownAtBox: window.isVisible() });
+        return ask(...args);
+      }) as typeof dialog.showMessageBox;
+      return !window.isVisible();
+    });
+    expect(hidden).toBe(true);
+    expect(await client.evaluate((chat) => window.surogateDesktop!.browser!.handBack(chat), CHAT)).toBe(false);
+    expect(await app!.evaluate(() => (globalThis as unknown as { shownAtBox?: boolean }).shownAtBox)).toBe(true);
+  });
+
+  it("opens the hand back's box without the chat's title while the agent is slow to say it, and names the chat once it has", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    agent.titles.set(CHAT, "Quarterly report");
+    const said = agent.hold("title");
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
+    await app!.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    const detail = async () => {
+      expect(await atClick(client, "handBack")).toBe(false);
+      return ((await boxes()).at(-1) as unknown as { detail: string }).detail;
+    };
+    // Its user's click is not left waiting for the agent: the box opens within the time a title is given.
+    const asked = Date.now();
+    expect(await detail()).toBe("It acts in its browser on this computer again, for this chat.");
+    expect(Date.now() - asked).toBeLessThan(10_000);
+    said();
+    await expect.poll(detail, { timeout: 15_000, interval: 500 }).toBe("It acts in its browser on this computer again, for the chat “Quarterly report”.");
   });
 
   it("refuses the browser's calls for a chat this computer did not bind", async () => {

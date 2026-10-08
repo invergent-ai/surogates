@@ -1248,10 +1248,14 @@ function bridge(contents: WebContents, agent: Agent): void {
     handBack: async (sessionId) => {
       const stack = await browsing(sessionId);
       if (!stack.tools.takenOver?.(sessionId)) return true;
+      // The chat by its title, as text: the page names only an id, and its user may hold more than one chat's browser.
+      const title = await titleSoon(sessionId);
+      // The window first, where it was hidden since the click: the box opens over it.
+      main?.show();
       const handed = await ask({
         type: "question",
         message: `Hand the browser back to ${asShown(agent.name)}?`,
-        detail: "It acts in its browser on this computer again, for this chat.",
+        detail: `It acts in its browser on this computer again, for ${title === null ? "this chat" : `the chat “${asShown(title)}”`}.`,
         buttons: ["Hand back", "Keep control"],
         defaultId: 1,
         cancelId: 1,
@@ -1762,6 +1766,22 @@ function chatTitle(root: string): Promise<string> {
     reads.set(root, read);
   }
   return read;
+}
+
+// How long a native box waits to name a chat: its user asked for it with a click, and an agent slow to answer holds it no longer.
+const TITLE_MS = 2_000;
+
+/** Chat *root*'s title for a native box: null for one the agent names not, or does not name within TITLE_MS. */
+async function titleSoon(root: string): Promise<string | null> {
+  let late: NodeJS.Timeout | undefined;
+  const title = await Promise.race([
+    chatTitle(root),
+    new Promise<string>((resolve) => {
+      late = setTimeout(resolve, TITLE_MS, "A chat");
+    }),
+  ]);
+  clearTimeout(late);
+  return title === "A chat" ? null : title;
 }
 
 // The device's stack while its journal is open: a computer the agent revoked keeps its stack, closed, until it is restored.
