@@ -22,6 +22,9 @@ page's own JavaScript (browser.evaluate), which runs in the page:
                        labels [{label, x, y}] drawn over the page       {"transfer": {size, sha256}}
                        for the shot                                     over MAX_PAYLOAD_BYTES
   browser.close                                                        {closed}
+  browser.set_input_files  paths [key, ...]: files of the chat's       {files: how many, notices}
+                       folder, as its own operations name them; given
+                       to the file input the page last asked for
 
 The scripts browser.observe takes, each a page function shipped with the app:
 
@@ -321,6 +324,16 @@ class DeviceBrowserClient(BrowserClientBase):
         if annotations is not None:
             result["annotations"] = annotations
         return result
+
+    async def set_input_files(self, keys: list[str]) -> int:
+        """Give the files at *keys* of the chat's folder to the file input the page last asked for: how many it took.
+
+        The computer reads each through the chat's file host, as any read of the folder.
+        """
+        value = await self._call("browser.set_input_files", paths=list(keys))
+        if not isinstance(value, dict) or not _whole(value.get("files")):
+            raise DeviceOperationError("The computer returned an invalid upload")
+        return int(value["files"])
 
     async def close_tab(self) -> bool:
         """Close this session's tab and the popups it opened; whether there was one."""

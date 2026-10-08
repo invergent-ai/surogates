@@ -315,6 +315,49 @@ async def test_a_pane_that_cannot_be_told_leaves_the_browser_call_answered(compu
     assert body["title"] == "Example"
 
 
+async def test_files_of_the_folder_go_to_the_page_once_it_asked_for_them(computer) -> None:
+    rig = computer({"ok": {"files": 1, "notices": []}})
+    (rig.folder / "report.pdf").write_bytes(b"%PDF")
+
+    body = json.loads(await browser._browser_upload_file_handler({"paths": ["report.pdf"]}, **rig.kwargs))
+
+    assert body == {"uploaded": 1}
+    # Named as the folder's own operations name it: the computer reads each through its file host.
+    assert rig.laptop.asked == [("browser.set_input_files", {"paths": [str(rig.folder / "report.pdf")]})]
+
+
+async def test_a_path_out_of_the_folder_never_reaches_the_computers_browser(computer) -> None:
+    rig = computer()
+
+    body = json.loads(await browser._browser_upload_file_handler({"paths": ["../../etc/passwd"]}, **rig.kwargs))
+
+    assert body["error"] == "upload_failed"
+    assert rig.laptop.asked == []
+
+
+async def test_a_page_that_asked_for_no_file_is_said_so(computer) -> None:
+    said = "The page has not asked for a file: click its upload button or its file input first"
+    rig = computer({"error": {"type": "browser", "message": said}})
+
+    body = json.loads(await browser._browser_upload_file_handler({"paths": ["a.txt"]}, **rig.kwargs))
+
+    assert body == {"error": "upload_failed", "detail": said}
+
+
+def test_the_upload_runs_in_the_harness_as_every_browser_tool_and_a_strict_coordinator_is_not_given_it() -> None:
+    from surogates.tools.builtin.coordinator import COORDINATOR_IMPLEMENTATION_TOOLS
+    from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+
+    assert TOOL_LOCATIONS["browser_upload_file"] is ToolLocation.HARNESS
+    assert "browser_upload_file" in COORDINATOR_IMPLEMENTATION_TOOLS
+
+
+async def test_a_chat_in_the_cloud_has_no_upload() -> None:
+    body = json.loads(await browser._browser_upload_file_handler({"paths": ["a.txt"]}, session_id=uuid4(), browser_pool=NoPool()))
+
+    assert body["error"] == "unsupported"
+
+
 # Every browser tool, with arguments it takes: none may reach the cloud's browser pool for a local-folder chat.
 EVERY_TOOL = [
     (browser._browser_navigate_handler, {"url": "https://example.com"}),
@@ -328,6 +371,7 @@ EVERY_TOOL = [
     (browser._browser_drag_handler, {"path": [[1, 2], [3, 4]]}),
     (browser._browser_wait_handler, {"ms": 0}),
     (browser._browser_screenshot_handler, {}),
+    (browser._browser_upload_file_handler, {"paths": ["a.txt"]}),
 ]
 
 
@@ -346,6 +390,7 @@ class AnyBrowser(Laptop):
             "browser.evaluate": {"value": 1},
             "browser.screenshot": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode("ascii"),
             "browser.close": {"closed": True},
+            "browser.set_input_files": {"files": 1, "notices": []},
         }.get(kind, {"notices": []})}
 
 

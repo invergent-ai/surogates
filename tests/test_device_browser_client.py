@@ -228,6 +228,17 @@ async def test_what_the_computer_refuses_is_the_tools_result_and_its_failures_ar
         )).navigate("https://nowhere.example")
 
 
+async def test_files_go_to_the_file_input_the_page_asked_for_as_keys_of_the_folder() -> None:
+    runner = ScriptedRunner({"ok": {"files": 2, "notices": ["The page asked for a file to upload."]}})
+    client = DeviceBrowserClient(runner)
+
+    assert await client.set_input_files(["/home/u/notes/a.pdf", "/home/u/notes/b.png"]) == 2
+    assert runner.asked == [("browser.set_input_files", {"paths": ["/home/u/notes/a.pdf", "/home/u/notes/b.png"]})]
+    assert client.notices == ["The page asked for a file to upload."]
+    with pytest.raises(DeviceOperationError, match="invalid upload"):
+        await DeviceBrowserClient(ScriptedRunner({"ok": {"notices": []}})).set_input_files(["/home/u/notes/a.pdf"])
+
+
 async def test_cloud_profiles_are_not_available_on_the_computer() -> None:
     client = DeviceBrowserClient(ScriptedRunner())
     with pytest.raises(NotImplementedError):

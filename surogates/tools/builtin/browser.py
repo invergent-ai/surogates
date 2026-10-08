@@ -1190,6 +1190,54 @@ async def _browser_screenshot_handler(
     return json.dumps(body)
 
 
+UPLOAD_FILE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "paths": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+            "maxItems": 10,
+            "description": "Files of the chat's folder, as read_file names them.",
+        },
+    },
+    "required": ["paths"],
+    "additionalProperties": False,
+}
+
+# What resolving a path of the folder on the user's computer can raise for one it refuses.
+_UNRESOLVED = (WorkspaceSandboxError, DeviceOperationError, OSError, ValueError)
+
+
+@answering_refusals
+async def _browser_upload_file_handler(
+    arguments: dict[str, Any],
+    *,
+    session_id: UUID | str | None = None,
+    session_config: dict[str, Any] | None = None,
+    workspace_io: Any = None,
+    **_: Any,
+) -> str:
+    if not (isinstance(workspace_io, DeviceWorkspaceIO) and session_id is not None):
+        if _on_a_computer(session_config):
+            return browser_unavailable_result(_NO_COMPUTER)
+        return json.dumps({
+            "error": "unsupported",
+            "detail": "Files can be given to a page only in a chat on a folder of the user's computer.",
+        })
+    # Each a file of the chat's folder, as the folder names it: one outside it is refused here, before the browser.
+    try:
+        keys = [await workspace_io.resolve(path) for path in arguments["paths"]]
+    except _UNRESOLVED as exc:
+        return json.dumps({"error": "upload_failed", "detail": str(exc)})
+    client = DeviceBrowserClient(workspace_io.runner, snapshot_cache=device_snapshot_cache(str(session_id)))
+    try:
+        given = await client.set_input_files(keys)
+    except RuntimeError as exc:
+        return json.dumps({"error": "upload_failed", "detail": str(exc)})
+    return json.dumps(_noted({"uploaded": given}, client))
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(
         name="browser_navigate",
@@ -1315,6 +1363,20 @@ def register(registry: ToolRegistry) -> None:
             parameters=WAIT_SCHEMA,
         ),
         handler=_browser_wait_handler,
+        toolset="browser",
+    )
+    registry.register(
+        name="browser_upload_file",
+        schema=ToolSchema(
+            name="browser_upload_file",
+            description=(
+                "Give files of the chat's folder to the page's file input. Click its "
+                "upload button or the file input first: the page asks for a file, "
+                "and this answers it. The browser's notices say when a page asked."
+            ),
+            parameters=UPLOAD_FILE_SCHEMA,
+        ),
+        handler=_browser_upload_file_handler,
         toolset="browser",
     )
     registry.register(

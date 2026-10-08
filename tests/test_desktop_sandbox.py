@@ -223,3 +223,19 @@ async def test_only_a_session_on_the_computer_is_told_what_git_and_shared_mappin
         assert terminal(describe_for_device(schemas, cloud)) == TERMINAL_TOOL_DESCRIPTION
     # The registry's schema, which every session shares, keeps the cloud's text.
     assert terminal(schemas) == TERMINAL_TOOL_DESCRIPTION
+
+
+async def test_only_a_session_on_the_computer_is_offered_the_browsers_upload():
+    from surogates.harness.tool_schemas import describe_for_device
+
+    tools = ToolRegistry()
+    ToolRuntime(tools).register_builtins()
+    schemas = tools.get_schemas()
+
+    def names(described: list[dict]) -> set[str]:
+        return {s["function"]["name"] for s in described}
+
+    assert "browser_upload_file" in names(describe_for_device(schemas, device_session().config))
+    for cloud in ({}, None, {"execution": {"kind": "cloud"}}):
+        assert "browser_upload_file" not in names(describe_for_device(schemas, cloud))
+        assert "browser_navigate" in names(describe_for_device(schemas, cloud))
