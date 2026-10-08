@@ -2198,12 +2198,17 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   it("rolls back with the system's own tools, whatever PATH root's own shell has, and through the user's proxy from a base whose name has a letter outside ASCII, for each of its three downloads", () => {
     expect(current()).toBe("/opt/surogate/versions/1.6.0");
     const installed = standing();
-    // First on root's PATH, an openssl that calls every signature good: it is not the one asked
-    // about a release that no release key signed.
-    expect(root("mkdir -p /tmp/caller && printf '#!/bin/sh\\nexit 0\\n' >/tmp/caller/openssl && chmod 755 /tmp/caller/openssl").status).toBe(0);
-    expect(root("PATH=/tmp/caller:$PATH /opt/surogate-test/install.sh --version 1.6.1"))
-      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${base}/desktop/releases/1.6.1/manifest.json is not signed by Surogate's release key\n` });
-    expect(standing()).toBe(installed);
+    // First on root's PATH, an openssl that calls every signature good, and a dpkg and a uname
+    // that write down that they ran before they run the system's: none of the three is run, by
+    // the script started by its name or read by bash, about a release that no release key signed.
+    expect(root("mkdir -p /tmp/caller && printf '#!/bin/sh\\nexit 0\\n' >/tmp/caller/openssl "
+      + "&& for tool in dpkg uname; do printf '#!/bin/sh\\necho %s >>/tmp/caller/ran\\nexec /usr/bin/%s \"$@\"\\n' \"$tool\" \"$tool\" >/tmp/caller/$tool; done && chmod 755 /tmp/caller/*").status).toBe(0);
+    for (const started of ["/opt/surogate-test/install.sh --version 1.6.1", "bash -s -- --version 1.6.1 </opt/surogate-test/install.sh"]) {
+      expect(root(`PATH=/tmp/caller:$PATH ${started}`), started)
+        .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${base}/desktop/releases/1.6.1/manifest.json is not signed by Surogate's release key\n` });
+      expect(root("cat /tmp/caller/ran 2>/dev/null").stdout, started).toBe("");
+      expect(standing(), started).toBe(installed);
+    }
     // A release that is not here, from a base that no resolver has: all three of its files are
     // asked of the proxy the user's shell names, which sudo's own environment does not have, and
     // the base's letters are read as UTF-8 for each, or curl refuses the name before it asks.

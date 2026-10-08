@@ -846,6 +846,9 @@ main() {
       install_all "$base"
       ;;
     --version)
+      # What rolls back as root is the system's own tools, wherever its caller's PATH points, from
+      # before it runs the first of them, as an apply's are.
+      [ "$EUID" -ne 0 ] || export PATH=/usr/sbin:/usr/bin:/sbin:/bin
       [ "$#" -eq 2 ] && a_version "$2" || fail "usage: install.sh --version <x.y.z>"
       supported
       unlinked
@@ -855,8 +858,6 @@ main() {
           | sudo -- bash -s -- "$@" || exit "$?"
         return
       fi
-      # What rolls back is the system's own tools, wherever its caller's PATH points.
-      export PATH=/usr/sbin:/usr/bin:/sbin:/bin
       roll_back "$2"
       ;;
     --uninstall)
