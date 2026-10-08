@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  GIVE_UP_MS, NOT_FINISHED, onDeviceOf, RETRY_FIRST_MS, RETRY_MOST_MS, untilAnswered,
+  computerOf, GIVE_UP_MS, NOT_FINISHED, onDeviceOf, refusalOf, RETRY_FIRST_MS, RETRY_MOST_MS, untilAnswered, untilOnline,
 } from "../web/src/api/device-requests.ts";
 
 // Each answer a status, [status, body], or "drop": a fetch that rejects, as a network that drops does.
@@ -139,4 +139,74 @@ test("hands its signal to a local-folder chat's sends only: a cloud chat's one f
   await untilAnswered(send, { onDevice: true, signal: stop.signal, sleep: async () => {} });
   await untilAnswered(send, { onDevice: false, signal: stop.signal, sleep: async () => {} });
   assert.deepEqual(signals, [stop.signal, undefined]);
+});
+
+test("tells each wait as it comes: for its user on the computer (202), or for its turn there (429)", async () => {
+  const { send } = answers(202, 429, 202, 201);
+  const waits = [];
+  const response = await untilAnswered(send, { onDevice: true, sleep: async () => {}, onWaiting: (status) => waits.push(status) });
+  assert.equal(response.status, 201);
+  assert.deepEqual(waits, [202, 429, 202]);
+});
+
+test("tells no wait of a change answered at once, or of a cloud chat's", async () => {
+  const waits = [];
+  await untilAnswered(answers(201).send, { onDevice: true, sleep: async () => {}, onWaiting: (status) => waits.push(status) });
+  await assert.rejects(untilAnswered(answers(202).send, { onDevice: false, onWaiting: (status) => waits.push(status) }));
+  assert.deepEqual(waits, []);
+});
+
+const OFFLINE = [503, { detail: { error: "device_offline", message: "The files are on thinkpad, which is offline" } }];
+
+test("reads again, every ten seconds, while the computer is offline, telling each wait, until it answers", async () => {
+  const { send, sent } = answers(OFFLINE, OFFLINE, 200);
+  const slept = [];
+  let waits = 0;
+  const response = await untilOnline(() => send("read", null), {
+    sleep: async (ms) => slept.push(ms),
+    onWaiting: () => waits++,
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual([sent.length, slept, waits], [3, [RETRY_MOST_MS, RETRY_MOST_MS], 2]);
+});
+
+test("never sends a change again once its computer is found offline: the server cancelled it, and one allowed just before may still land", async () => {
+  const { send, sent } = answers(OFFLINE, 201);
+  const response = await untilAnswered(send, { onDevice: true, sleep: async () => assert.fail("slept") });
+  assert.deepEqual([response.status, sent.length], [503, 1]);
+});
+
+test("answers any other refusal at once, a 503 of another kind and a revoked computer's included", async () => {
+  for (const answer of [[503, { detail: "Service unavailable" }], [403, { detail: { error: "device_revoked" } }], 404]) {
+    const { send, sent } = answers(answer);
+    const response = await untilOnline(() => send("read", null), { sleep: async () => assert.fail("slept") });
+    assert.deepEqual([response.status, sent.length], [Array.isArray(answer) ? answer[0] : answer, 1]);
+  }
+});
+
+test("stops reading once its signal stops it, with the signal's reason", async () => {
+  const stop = new AbortController();
+  const { send, sent } = answers(OFFLINE, OFFLINE);
+  const reading = untilOnline(() => send("read", null), {
+    signal: stop.signal,
+    sleep: async () => stop.abort(new Error("The panel closed")),
+  });
+  await assert.rejects(reading, { message: "The panel closed" });
+  assert.equal(sent.length, 1);
+});
+
+test("says a computer whose access ended, or that is offline, as the file panel draws them, asking its name only for that", async () => {
+  // Asking names the computer from the chat: a GET of the session, which no other refusal needs.
+  const unasked = () => assert.fail("asked for the computer");
+  assert.equal(await refusalOf({ error: "device_revoked", message: "Local access to thinkpad was revoked" }, unasked), "Local access revoked");
+  assert.equal(await refusalOf({ error: "device_offline", message: "x" }, async () => "thinkpad"), "thinkpad is offline. Try again once it is back.");
+  for (const detail of [{ error: "device_timeout", message: "x" }, "Not found", null, undefined]) {
+    assert.equal(await refusalOf(detail, unasked), undefined);
+  }
+});
+
+test("names a local-folder chat's computer as the server stamped it, and otherwise as the user's computer", () => {
+  assert.equal(computerOf({ execution: { kind: "device", device_id: "d", device_name: "thinkpad" } }), "thinkpad");
+  assert.equal(computerOf({ execution: { kind: "device", device_id: "d" } }), "your computer");
+  assert.equal(computerOf({ execution: { kind: "cloud" } }), "your computer");
 });

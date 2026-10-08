@@ -12,11 +12,23 @@ const MissionPage = lazy(() =>
   })),
 );
 
+const MissionsPage = lazy(() =>
+  import("@/features/missions/missions-page").then((m) => ({
+    default: m.MissionsPage,
+  })),
+);
+
 export const missionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/missions",
   beforeLoad: () => requireAuth(),
   component: Outlet,
+});
+
+export const missionsIndexRoute = createRoute({
+  getParentRoute: () => missionsRoute,
+  path: "/",
+  component: MissionsPage,
 });
 
 export const missionDetailRoute = createRoute({

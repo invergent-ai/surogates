@@ -43,7 +43,7 @@ import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } 
 import { PreferencesStore } from "./preferences.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
-import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
+import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { asShown } from "./pages/ui.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
@@ -56,6 +56,7 @@ delete process.env.ELECTRON_RUN_AS_NODE;
 const PAGES = join(import.meta.dirname, "pages");
 const PAGES_PRELOAD = join(import.meta.dirname, "pages-preload.cjs");
 const BRIDGE_PRELOAD = join(import.meta.dirname, "preload.cjs");
+const PANE_PRELOAD = join(import.meta.dirname, "pane-preload.cjs");
 const ASSETS = join(import.meta.dirname, "..", "..", "assets");
 // The app's version, as its package names it.
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf8")) as { version: string }).version;
@@ -161,10 +162,15 @@ let connecting = false;
 // What the web client tells once its user signed in (undefined until it has said), and the projects it serves.
 let account: DesktopAccount | null | undefined;
 
-// Whether the page is *who*'s. One that said nobody is signed in is no account's. One that has not
-// said yet is whoever is signed in to the app, whose sign-in gave it its session.
+// Whose the page is: the account it said is signed in, null once it said nobody is, and until it has
+// said, whoever is signed in to the app, whose sign-in gave it its session.
+function pageOwner(): DesktopAccount | null {
+  return account === undefined ? signedIn?.account ?? null : account;
+}
+
+// Whether the page is *who*'s. One that said nobody is signed in is no account's.
 function pageIs(who: { orgId: string; userId: string }): boolean {
-  const owner = account === undefined ? signedIn?.account ?? null : account;
+  const owner = pageOwner();
   return owner?.orgId === who.orgId && owner.userId === who.userId;
 }
 const projects = new PageProjects((message) => main?.webContents()?.send("desktop:projects", message));
@@ -195,6 +201,8 @@ let overview: { project: Project; threads: ThreadRow[]; library: LibraryEntry[];
 let unfollow = (): void => {};
 // The project dialog's view, while it is open over the window.
 let projectDialog: WebContents | null = null;
+// The open project's thread read in the Overview pane, beside its conversation.
+let reading: { id: string; title: string } | null = null;
 
 const report = (error: unknown): void => {
   console.error(error);
@@ -286,11 +294,38 @@ function changed(): void {
 const appearanceNow = () => ({ ...appearance.get(), theme: theme.dark ? ("dark" as const) : ("light" as const) });
 
 // The web client hears every change of how the app looks: the theme in effect, and the transcript's settings.
+// A thread read in the pane is read again in the transcript's settings, which its address carries.
 function tellAppearance(): void {
   main?.webContents()?.send("desktop:appearance", appearanceNow());
+  if (reading) main?.read(transcriptPath(reading.id));
 }
 
-const links = () => linksFor(agents.get()?.origin ?? null);
+// A thread's transcript, as the pane reads it: the web client's transcript page, in the transcript's settings.
+function transcriptPath(threadId: string): string {
+  const { textSize, transcriptWidth, motion } = appearance.get();
+  return `/transcript/${threadId}?${new URLSearchParams({ textSize, transcriptWidth, motion })}`;
+}
+
+/**
+ * Read *threadId*, a thread of the open project, in the Overview pane, beside the project's
+ * conversation (Section 12); null closes it. One that has left the pane since it was drawn is said
+ * so, and so is one whose id is no chat's.
+ */
+function read(threadId: string | null): void {
+  const thread = view.kind === "project" && overview?.project.id === view.id
+    ? overview.threads.find((found) => found.id === threadId) : undefined;
+  if (threadId !== null && (!thread || !webClientPath(`/chat/${thread.id}`))) {
+    failure = NO_SUCH_THREAD;
+    return changed();
+  }
+  reading = thread ? { id: thread.id, title: thread.title } : null;
+  // Read, it draws away the refusal of an earlier one: no choice of what the centre shows, so a project opening goes on.
+  if (thread) failure = null;
+  main?.read(reading ? transcriptPath(reading.id) : null);
+  changed();
+}
+
+const links = () => linksFor(agents.get());
 
 function openLink(which: unknown): void {
   const known = links();
@@ -439,6 +474,11 @@ function remember(project: Project): void {
 }
 
 function show(next: View): void {
+  // The pane's transcript is the open project's: anything else the centre shows closes it, its own thread included.
+  if (reading && !(next.kind === "project" && view.kind === "project" && next.id === view.id && next.thread?.id !== reading.id)) {
+    reading = null;
+    main?.read(null);
+  }
   view = next;
   follow();
   changed();
@@ -676,7 +716,8 @@ async function bindToComputer(agent: Agent, signal: AbortSignal): Promise<void> 
 
 /**
  * The agent's capabilities, read again: a server that gained local folders since it was added now
- * offers them. Kept while the agent is the one added; anything else is said and changes nothing.
+ * offers them, and the console it names now is the one the links open. Kept while the agent is the
+ * one added; anything else is said and changes nothing.
  */
 async function refreshAgent(agent: Agent): Promise<void> {
   try {
@@ -685,12 +726,13 @@ async function refreshAgent(agent: Agent): Promise<void> {
       report(new Error(`${agent.origin} now answers as agent ${fresh.agentId} at ${fresh.origin}: Surogate keeps the agent it added`));
       return;
     }
-    if (fresh.desktopSessions === agent.desktopSessions && fresh.multiSession === agent.multiSession) return;
+    const { desktopSessions, multiSession, consoleUrl } = fresh;
+    if (desktopSessions === agent.desktopSessions && multiSession === agent.multiSession && consoleUrl === agent.consoleUrl) return;
     // Removed while it was asked: it is not kept again.
     const now = agents.get();
     if (now?.origin !== agent.origin || now.agentId !== agent.agentId) return;
     // In place: the bridge and the device hold this agent.
-    Object.assign(agent, { desktopSessions: fresh.desktopSessions, multiSession: fresh.multiSession });
+    Object.assign(agent, { desktopSessions, multiSession, consoleUrl });
     agents.set(agent);
     changed();
     void registerComputer(agent);
@@ -1232,11 +1274,11 @@ function deviceLine(agent: Agent): string {
   return describeAgent(agent, kept?.token === null ? { status: "revoked", computer: kept.name } : null);
 }
 
-// Who the web client says is signed in, or until it has said, the app's own sign-in, whose organisation's name is Settings' alone.
+// Who the sidebar names: whose the page is (pageOwner), with the app's own sign-in's organisation, which is Settings' alone, left out.
 function sidebarAccount(): DesktopAccount | null {
-  if (account !== undefined) return account;
-  if (!signedIn) return null;
-  const { orgName: _, ...shown } = signedIn.account;
+  const owner: SignedInAccount | null = pageOwner();
+  if (owner === null) return null;
+  const { orgName: _, ...shown } = owner;
   return shown;
 }
 
@@ -1244,7 +1286,7 @@ function state() {
   const agent = agents.get();
   return {
     first: agent === null,
-    agent: agent && { name: agent.name },
+    agent: agent && { name: agent.name, desktopSessions: agent.desktopSessions },
     device: agent && {
       text: deviceLine(agent),
       status: device?.status ?? (kept?.token === null ? "revoked" : null),
@@ -1252,6 +1294,7 @@ function state() {
     account: sidebarAccount(),
     view,
     overview: view.kind === "project" && overview?.project.id === view.id ? overview : null,
+    reading,
     projects: listed,
     failure,
     links: Object.keys(links()),
@@ -1401,6 +1444,8 @@ function goWeb(path: string): void {
   const thread = open ? overview?.threads.find((found) => found.id === chatId) : undefined;
   if (open && (thread || chatId === open.masterSessionId)) {
     view = { ...open, thread: thread ? { id: thread.id, title: thread.title } : null };
+    // Shown in the centre, its transcript in the pane has nothing more to show.
+    if (thread && reading?.id === thread.id) read(null);
     changed();
   } else {
     show({ kind: "web" });
@@ -1864,9 +1909,16 @@ function wire(window: MainWindow, page: string): void {
       return changed();
     }
     view = { ...view, thread: { id: thread.id, title: thread.title } };
+    // Shown in the centre, its transcript in the pane has nothing more to show.
+    if (reading?.id === thread.id) read(null);
     window.go(path);
     changed();
   });
+  handle("shell:read", (id) => {
+    if (id !== null && typeof id !== "string") throw new Error("Not a thread");
+    read(id);
+  });
+  handle("shell:focus-pane", () => window.focusPane());
   // A thread of the open project resolved, or reopened, from its row: the page's answer is its row.
   // A row's action is no choice of what the centre shows, so a project opening meanwhile still opens:
   // it takes a number of its own, and only the latest action's refusal is said.
@@ -1906,6 +1958,7 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:forward", () => move(() => window.forward()));
   handle("shell:reload", () => window.reload());
   handle("shell:place", (hole) => window.place(bounds(hole)));
+  handle("shell:place-pane", (hole) => window.placePane(bounds(hole)));
   handle("shell:menu", popup);
   handle("shell:settings", showSettings);
   handle("shell:new-project", () => showProject(null));
@@ -2045,7 +2098,7 @@ if (!app.requestSingleInstanceLock()) {
     powerMonitor.on("resume", () => vm?.resume());
     const page = join(PAGES, "shell.html");
     main = new MainWindow({
-      states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed,
+      states, page, preload: PAGES_PRELOAD, panePreload: PANE_PRELOAD, dark: theme.dark, onChange: changed,
       // A quit already waiting for the threads asks nothing more: the window hides meanwhile, as with Keep running on.
       quitsOnClose: () => !preferences.get().keepRunning && !waiting,
       // Started at login: the window waits for the user, in the tray or at the next launch.

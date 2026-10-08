@@ -324,7 +324,7 @@ describe("BrowserShell", () => {
     const held = button.innerHTML;
 
     await act(async () => {
-      root?.render(<BrowserShell src="wss://x/shell" hasControl={false} />);
+      root?.render(<BrowserShell src="wss://x/shell" hasControl={false} onToggleControl={vi.fn()} />);
     });
     const idle = node.querySelector(
       "[data-testid='browser-shell-control']",

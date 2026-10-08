@@ -29,6 +29,7 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 | `api.workers` | `SUROGATES_API_WORKERS` | `1` | Uvicorn worker count |
 | `api.cors_origins` | `SUROGATES_API_CORS_ORIGINS` | `["*"]` | CORS allowed origins |
 | `api.web_url` | `SUROGATES_API_WEB_URL` | -- | Public URL for the web UI (used in pairing links) |
+| `api.console_url` | `SUROGATES_API_CONSOLE_URL` | -- | The console's address, served as `/auth/config`'s `console_url`: where Surogate Desktop opens Usage and Plans and billing. Empty, it names none, and the desktop shows neither |
 
 ## Worker (`worker`)
 
