@@ -1,16 +1,18 @@
 /**
- * WorkspacePanel — a change it sent stops waiting once the panel unmounts.
+ * WorkspacePanel — each chat's waits, refusals, locks and tree are that chat's.
  *
  * A local-folder chat's upload or delete may wait for its user on the
- * computer its folder is on, and the adapter sends it again meanwhile:
- * the panel hands it a signal it aborts on unmount, so nothing goes on
- * sending for a panel nobody sees.
+ * computer its folder is on, and the adapter sends it again meanwhile: it
+ * goes on once the panel is folded away or shows another chat, and its end
+ * is said over its own chat alone. The tree's read is the shown panel's:
+ * it stops as the panel goes.
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { WorkspacePanel } from "../src/components/workspace/workspace-panel";
+import { forgetChatFiles } from "../src/components/workspace/chat-files";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import type { AgentChatAdapter } from "../src/types";
 
@@ -25,10 +27,11 @@ afterEach(() => {
   root = null;
   container?.remove();
   container = null;
+  forgetChatFiles();
 });
 
 describe("WorkspacePanel", () => {
-  it("aborts an upload still waiting once it unmounts", async () => {
+  it("goes on sending an upload still waiting once it unmounts", async () => {
     const signals: Array<AbortSignal | undefined> = [];
     const adapter = {
       getWorkspaceTree: vi.fn().mockResolvedValue({ root: "r", entries: [], truncated: false }),
@@ -55,10 +58,42 @@ describe("WorkspacePanel", () => {
       input.dispatchEvent(new Event("change", { bubbles: true }));
     });
     expect(signals).toHaveLength(1);
-    expect(signals[0]?.aborted).toBe(false);
     act(() => root?.unmount());
     root = null;
-    expect(signals[0]?.aborted).toBe(true);
+    // Nothing the panel hands it stops it.
+    expect(signals[0]?.aborted ?? false).toBe(false);
+  });
+
+  it("shows a chat only its own tree under its wait, never the last chat's files", async () => {
+    const adapter = {
+      getWorkspaceTree: vi.fn(({ sessionId, onWaiting }: { sessionId: string; onWaiting?: (said: string) => void }) => {
+        if (sessionId === "s-1") {
+          return Promise.resolve({ root: "r", entries: [{ name: "notes.txt", path: "notes.txt", kind: "file" }], truncated: false });
+        }
+        onWaiting?.("Waiting for chat two's computer");
+        return new Promise(() => {});
+      }),
+      uploadWorkspaceFile: vi.fn(),
+      deleteWorkspaceFile: vi.fn(),
+      getWorkspaceDownloadUrl: vi.fn(() => "#"),
+    } as unknown as AgentChatAdapter;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const panel = (sessionId: string) => (
+      <TooltipProvider>
+        <WorkspacePanel adapter={adapter} sessionId={sessionId} selectedPath={null} onSelectedPathChange={() => {}} />
+      </TooltipProvider>
+    );
+    await act(async () => {
+      root?.render(panel("s-1"));
+    });
+    expect(container.textContent).toContain("notes.txt");
+    await act(async () => {
+      root?.render(panel("s-2"));
+    });
+    expect(container.querySelector('[data-testid="tree-waiting"]')?.textContent).toBe("Waiting for chat two's computer");
+    expect(container.textContent).not.toContain("notes.txt");
   });
 
   it("says it waits for the computer while the tree does, then shows its files, and nothing of a wait told after them", async () => {

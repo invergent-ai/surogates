@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { AgentChat } from "../src/agent-chat";
+import { forgetChatFiles } from "../src/components/workspace/chat-files";
 import type {
   AgentChatAdapter,
   AgentChatEventStream,
@@ -195,6 +196,7 @@ afterEach(() => {
   container?.remove();
   container = null;
   window.localStorage.removeItem("@invergent/agent-chat-react:viewMode");
+  forgetChatFiles();
 });
 
 describe("AgentChat", () => {
@@ -1067,6 +1069,136 @@ describe("AgentChat", () => {
     expect(
       container.querySelector('[data-testid="file-preview-panel"]'),
     ).toBeNull();
+  });
+
+  describe("a chat's files, as the user moves to another chat and back", () => {
+    // The adapter's upload as a local-folder chat's waits on its computer: told to stop, it stops.
+    function waitingUpload(said: string | null) {
+      const upload = { end: (_outcome: Error | null) => {}, signal: undefined as AbortSignal | undefined };
+      const uploadWorkspaceFile = (input: { sessionId: string; file: File; signal?: AbortSignal; onWaiting?: (said: string) => void }) => {
+        upload.signal = input.signal;
+        if (said) input.onWaiting?.(said);
+        return new Promise<{ path: string; size: number }>((resolve, reject) => {
+          input.signal?.addEventListener("abort", () => reject(input.signal?.reason));
+          upload.end = (outcome) => (outcome ? reject(outcome) : resolve({ path: "notes.txt", size: 5 }));
+        });
+      };
+      return { upload, uploadWorkspaceFile };
+    }
+    const notice = () => container!.querySelector('[data-testid="workspace-notice"]')?.textContent ?? null;
+    const locked = () => container!.querySelector<HTMLButtonElement>('button[aria-label="Upload files"]')?.disabled;
+    async function shown(adapter: AgentChatAdapter, sessionId: string): Promise<void> {
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId={sessionId} />);
+        await Promise.resolve();
+      });
+      await openPane(container!, "files");
+    }
+    async function upload(): Promise<void> {
+      const input = container!.querySelector('[data-testid="workspace-panel"] input[type=file]') as HTMLInputElement;
+      Object.defineProperty(input, "files", { value: [new File(["draft"], "notes.txt")] });
+      await act(async () => {
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    }
+
+    it("keeps an upload's wait and lock to its chat, finishes it meanwhile, and says its end there on the way back", async () => {
+      const stream = new FakeEventStream();
+      const { upload: sent, uploadWorkspaceFile } = waitingUpload("Waiting for you to allow this on chat one's ThinkPad");
+      const reads: string[] = [];
+      const base = createAdapter(stream);
+      const adapter = {
+        ...base,
+        uploadWorkspaceFile,
+        async getWorkspaceTree(input: { sessionId: string }) {
+          reads.push(input.sessionId);
+          return { root: "workspace", entries: [], truncated: false };
+        },
+      } satisfies AgentChatAdapter;
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await shown(adapter, "s-1");
+      await upload();
+      expect([notice(), locked()]).toEqual(["Waiting for you to allow this on chat one's ThinkPad", true]);
+      await shown(adapter, "s-2");
+      expect([notice(), locked()]).toEqual([null, false]);
+      await act(async () => {
+        sent.end(null);
+      });
+      expect([notice(), locked()]).toEqual([null, false]);
+      // Folded away from chat one, the panel asked nothing more of its computer.
+      expect(reads.filter((chat) => chat === "s-1")).toHaveLength(1);
+      await shown(adapter, "s-1");
+      expect([notice(), locked()]).toEqual(["Uploaded notes.txt", false]);
+    });
+
+    it("asks a folded chat's computer for nothing as its change ends, and says the end once unfolded", async () => {
+      const stream = new FakeEventStream();
+      const { upload: sent, uploadWorkspaceFile } = waitingUpload(null);
+      const reads: string[] = [];
+      const adapter = {
+        ...createAdapter(stream),
+        uploadWorkspaceFile,
+        async getWorkspaceTree(input: { sessionId: string }) {
+          reads.push(input.sessionId);
+          return { root: "workspace", entries: [], truncated: false };
+        },
+      } satisfies AgentChatAdapter;
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await shown(adapter, "s-1");
+      await upload();
+      await openPane(container, "files");
+      expect(container.querySelector('[data-testid="workspace-panel"]')).toBeNull();
+      await act(async () => {
+        sent.end(null);
+      });
+      expect(reads).toEqual(["s-1"]);
+      await openPane(container, "files");
+      expect(notice()).toBe("Uploaded notes.txt");
+    });
+
+    it("says a refusal of a chat's change only over that chat, once the user is back there", async () => {
+      const stream = new FakeEventStream();
+      const { upload: sent, uploadWorkspaceFile } = waitingUpload(null);
+      const adapter = { ...createAdapter(stream), uploadWorkspaceFile } satisfies AgentChatAdapter;
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await shown(adapter, "s-1");
+      await upload();
+      await shown(adapter, "s-2");
+      await act(async () => {
+        sent.end(new Error("Local access revoked"));
+      });
+      expect(notice()).toBeNull();
+      await shown(adapter, "s-1");
+      expect(notice()).toBe("Local access revoked");
+    });
+
+    it("says nothing of a chat's tree wait over the next chat's, and stops asking for it", async () => {
+      const stream = new FakeEventStream();
+      const signals: Record<string, AbortSignal | undefined> = {};
+      const adapter = {
+        ...createAdapter(stream),
+        getWorkspaceTree(input: { sessionId: string; signal?: AbortSignal; onWaiting?: (said: string) => void }) {
+          signals[input.sessionId] = input.signal;
+          if (input.sessionId === "s-1") input.onWaiting?.("Waiting for chat one's ThinkPad");
+          return new Promise<never>(() => {});
+        },
+      } satisfies AgentChatAdapter;
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      const waiting = () => container!.querySelector('[data-testid="tree-waiting"]')?.textContent ?? null;
+      await shown(adapter, "s-1");
+      expect(waiting()).toBe("Waiting for chat one's ThinkPad");
+      await shown(adapter, "s-2");
+      expect(waiting()).toBeNull();
+      expect(signals["s-1"]?.aborted).toBe(true);
+    });
   });
 
   it("keeps the workspace file viewer closed after clicking close", async () => {
