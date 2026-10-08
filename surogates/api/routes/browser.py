@@ -208,6 +208,19 @@ async def _computer_browser_state(app_state: Any, session_id: UUID) -> BrowserSt
     return BrowserStateResponse(status=status, control_owner=None, live_view_path="", computer=True)
 
 
+# What tells a local-folder chat that its user took its browser over on the computer, and handed it back.
+_COMPUTER_CONTROL = [EventType.BROWSER_CONTROL_GRANTED, EventType.BROWSER_CONTROL_RETURNED]
+
+
+async def _told_taken_over(app_state: Any, session_id: UUID) -> bool:
+    """Whether a local-folder chat was last told that its user took its browser over.
+
+    There is no lease to ask: the chat's own events say, as they say its browser's state.
+    """
+    events = await app_state.session_store.get_events(session_id, types=_COMPUTER_CONTROL)
+    return bool(events) and events[-1].type == EventType.BROWSER_CONTROL_GRANTED.value
+
+
 @router.get(
     "/api/sessions/{session_id}/browser/state",
     response_model=BrowserStateResponse,
@@ -285,13 +298,19 @@ async def post_browser_control(
 
     if computer:
         # Told to the chat as the cloud's are, its user having taken it over or handed it back in the
-        # desktop: there is no lease here. Handed back, its agent goes on.
+        # desktop: there is no lease here. Each is told once: a take-over while one stands, and a
+        # hand back with none standing, answer as done and tell the chat nothing. Handed back, its
+        # agent goes on.
         sid = str(session_id)
+        taken_over = await _told_taken_over(request.app.state, session_id)
         if body.action == "acquire":
+            if taken_over:
+                return {"outcome": "refreshed", "owner_user_id": owner_user_id}
             await emit(sid, EventType.BROWSER_CONTROL_GRANTED, {"session_id": sid, "owner_user_id": owner_user_id, "computer": True})
             return {"outcome": "granted", "owner_user_id": owner_user_id}
-        await emit(sid, EventType.BROWSER_CONTROL_RETURNED, {"session_id": sid, "released_by": owner_user_id, "computer": True})
-        await wake(sid)
+        if taken_over:
+            await emit(sid, EventType.BROWSER_CONTROL_RETURNED, {"session_id": sid, "released_by": owner_user_id, "computer": True})
+            await wake(sid)
         return {"outcome": "released"}
 
     if body.action == "acquire":

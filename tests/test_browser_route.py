@@ -98,6 +98,16 @@ class StubSessions:
         wanted = {kind.value for kind in types or []}
         return [SimpleNamespace(type=kind) for kind in self.events.get(session_id, []) if kind in wanted]
 
+    def emitter(self, events: list[tuple[str, str, dict]]):
+        """The app's emitter in a test: what it emits is recorded, and is in its session's log for the routes to read back."""
+        record = _event_recorder(events)
+
+        async def emit(session_id: str, event_type: Any, data: dict) -> None:
+            await record(session_id, event_type, data)
+            self.events.setdefault(UUID(session_id), []).append(events[-1][1])
+
+        return emit
+
 
 @pytest.fixture()
 def app_factory():
@@ -455,7 +465,7 @@ class TestControlEndpoint:
         def built(org_id: UUID = ORG_1) -> FastAPI:
             app = build(org_id=org_id)
             app.state.session_store = store
-            app.state.session_event_emitter = _event_recorder(events)
+            app.state.session_event_emitter = store.emitter(events)
             app.state.session_wake = _wake_recorder(wakes)
             return app
 
@@ -511,6 +521,74 @@ class TestControlEndpoint:
         assert set(answered.values()) == {404}, answered
         assert events == []
         assert wakes == []
+
+    async def test_a_local_folder_chats_hand_back_is_told_once_and_only_after_a_take_over(self, app_factory) -> None:
+        build, _resolver, _control = app_factory
+        sid = uuid4()
+        store = StubSessions()
+        store.sessions[sid] = SimpleNamespace(
+            org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
+        )
+        events: list[tuple[str, str, dict]] = []
+        wakes: list[str] = []
+        app = build()
+        app.state.session_store = store
+        app.state.session_event_emitter = store.emitter(events)
+        app.state.session_wake = _wake_recorder(wakes)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            async def control(action: str) -> httpx.Response:
+                return await client.post(f"/v1/sessions/{sid}/browser/control", json={"action": action})
+
+            # Never taken over: nothing to hand back, so the chat is told nothing and its agent is not woken.
+            unheld = await control("release")
+            assert (unheld.status_code, unheld.json()) == (200, {"outcome": "released"})
+            assert (events, wakes) == ([], [])
+
+            await control("acquire")
+            await control("release")
+            assert [kind for _, kind, _ in events] == ["browser.control_granted", "browser.control_returned"]
+            assert wakes == [str(sid)]
+
+            # Handed back already: a repeat answers the same, and tells and wakes no more.
+            again = await control("release")
+            assert (again.status_code, again.json()) == (200, {"outcome": "released"})
+
+        assert [kind for _, kind, _ in events] == ["browser.control_granted", "browser.control_returned"]
+        assert wakes == [str(sid)]
+
+    async def test_a_local_folder_chats_take_over_is_told_once_while_it_stands(self, app_factory) -> None:
+        build, _resolver, _control = app_factory
+        sid = uuid4()
+        store = StubSessions()
+        store.sessions[sid] = SimpleNamespace(
+            org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
+        )
+        events: list[tuple[str, str, dict]] = []
+        wakes: list[str] = []
+        app = build()
+        app.state.session_store = store
+        app.state.session_event_emitter = store.emitter(events)
+        app.state.session_wake = _wake_recorder(wakes)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            async def control(action: str) -> httpx.Response:
+                return await client.post(f"/v1/sessions/{sid}/browser/control", json={"action": action})
+
+            assert (await control("acquire")).json() == {"outcome": "granted", "owner_user_id": str(USER_1)}
+            # Told already: the cloud's own answer to an acquire that changes nothing.
+            again = await control("acquire")
+            assert (again.status_code, again.json()) == (200, {"outcome": "refreshed", "owner_user_id": str(USER_1)})
+            assert [kind for _, kind, _ in events] == ["browser.control_granted"]
+
+            # Handed back, a new take-over is told anew.
+            await control("release")
+            assert (await control("acquire")).json() == {"outcome": "granted", "owner_user_id": str(USER_1)}
+
+        assert [kind for _, kind, _ in events] == [
+            "browser.control_granted", "browser.control_returned", "browser.control_granted",
+        ]
+        assert wakes == [str(sid)]
 
 
 class _StubBrowserPool:
