@@ -1,4 +1,4 @@
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
@@ -1159,6 +1159,55 @@ describe("AgentChat", () => {
     const composer = container.querySelector("textarea");
     expect(footer?.textContent).toBe("On this computer");
     expect(composer!.compareDocumentPosition(footer!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it.each([false, true])("sends the host's first message once, as a new chat's, never into a chat it has, nor while disabled, and says how it went (StrictMode: %s)", async (strict) => {
+    const stream = new FakeEventStream();
+    const made: string[] = [];
+    const sent: string[] = [];
+    const told: Array<[string, string | null]> = [];
+    let refuse = false;
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(stream),
+      async createSession() {
+        if (refuse) throw new Error("No folder was chosen for this chat");
+        made.push("created");
+        return session("created");
+      },
+      async sendMessage(input) {
+        sent.push(`${input.sessionId}:${input.content}`);
+        return { eventId: 1, status: "accepted" };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const onFirstMessageSent = (id: string, error: string | null) => told.push([id, error]);
+    const draw = async (props: Partial<Parameters<typeof AgentChat>[0]>) => {
+      const chat = <AgentChat adapter={adapter} sessionId={null} onFirstMessageSent={onFirstMessageSent} {...props} />;
+      await act(async () => {
+        root?.render(strict ? <StrictMode>{chat}</StrictMode> : chat);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    };
+
+    await draw({ firstMessage: { id: "q-1", text: "Draft the March invoices" } });
+    // Drawn again, the same message is not sent again.
+    await draw({ firstMessage: { id: "q-1", text: "Draft the March invoices" } });
+    expect(made).toEqual(["created"]);
+    expect(sent).toEqual(["created:Draft the March invoices"]);
+    expect(container.textContent).toContain("Draft the March invoices");
+
+    await draw({ sessionId: "s-1", firstMessage: { id: "q-2", text: "Not into this chat" } });
+    await draw({ disabled: true, firstMessage: { id: "q-3", text: "Once the chat may send" } });
+    expect(sent).toEqual(["created:Draft the March invoices"]);
+    await draw({ firstMessage: { id: "q-3", text: "Once the chat may send" } });
+    expect(sent).toEqual(["created:Draft the March invoices", "created:Once the chat may send"]);
+    // A chat that could not be made: the host hears why.
+    refuse = true;
+    await draw({ firstMessage: { id: "q-4", text: "Nowhere to work" } });
+    expect(told).toEqual([["q-1", null], ["q-3", null], ["q-4", "No folder was chosen for this chat"]]);
   });
 
   it("disables the composer and workspace upload when chat is disabled", async () => {

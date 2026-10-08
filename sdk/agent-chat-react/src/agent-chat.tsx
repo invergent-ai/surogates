@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentChatAdapterProvider } from "./adapter-context";
 import { useProjectThreads } from "./components/chat/use-project-threads";
 import { BrowserPane } from "./components/browser/browser-pane";
@@ -103,6 +103,14 @@ export interface AgentChatProps {
    * folder of the user's computer. Omitted, nothing is shown there.
    */
   composerFooter?: React.ReactNode;
+  /**
+   * A message the host has a new chat send as its first, as if its user had typed and sent it:
+   * Surogate Desktop's quick entry hands one. Sent once per id, while the chat has no session and
+   * is not disabled; it goes through the adapter's createSession as any first message does.
+   */
+  firstMessage?: { id: string; text: string } | null;
+  /** Told what became of the host's first message, by its id: null once it was sent, or why it was not. */
+  onFirstMessageSent?: (id: string, error: string | null) => void;
 }
 
 // CSS variable controlling the desktop right-stack width. Inlined as a style
@@ -148,6 +156,8 @@ export function AgentChat({
   onOpenIntegrations,
   onOpenBilling,
   composerFooter,
+  firstMessage,
+  onFirstMessageSent,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   // What the drawer shows — separate from the tree selection above, because
@@ -289,6 +299,28 @@ export function AgentChat({
   useEffect(() => {
     onMessagesChange?.(runtime.messages);
   }, [onMessagesChange, runtime.messages]);
+
+  // The host's first message, once: a drawing again sends it no more. It goes once this commit's
+  // effects have run, StrictMode's second run of the runtime's reset included, which would wipe it
+  // from the transcript; an effect cleaned up before then sends nothing.
+  const firstSent = useRef<string | null>(null);
+  const send = runtime.send;
+  useEffect(() => {
+    if (!firstMessage || sessionId !== null || effectiveDisabled || firstSent.current === firstMessage.id) return;
+    let live = true;
+    queueMicrotask(() => {
+      if (!live || firstSent.current === firstMessage.id) return;
+      firstSent.current = firstMessage.id;
+      // A send that fails is marked on its message too, as one from the composer is.
+      send(firstMessage.text).then(
+        () => onFirstMessageSent?.(firstMessage.id, null),
+        (error: unknown) => onFirstMessageSent?.(firstMessage.id, error instanceof Error ? error.message : String(error)),
+      );
+    });
+    return () => {
+      live = false;
+    };
+  }, [firstMessage, sessionId, effectiveDisabled, send, onFirstMessageSent]);
 
   // One path for every "open this file" gesture — a tree row, a file chip in
   // the transcript — so they all land in the same drawer.
