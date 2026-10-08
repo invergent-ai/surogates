@@ -2,7 +2,7 @@
 // surogates/devices/browser.py), each on one page, with what the server sent taken as data.
 // No code from the server runs here but a page's own JavaScript, in the page (browser.evaluate).
 
-import type { Frame, Page } from "playwright-core";
+import type { Page, Response } from "playwright-core";
 
 import { MAX_FRAME_CHARS } from "../link/protocol.js";
 import { observe } from "./observe.js";
@@ -61,21 +61,29 @@ async function navigate(page: Page, args: Record<string, unknown>, stop: AbortSi
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("The agent's browser opens only http and https addresses");
   const waitUntil = typeof args.wait_until === "string" && WAITS.has(args.wait_until) ? args.wait_until : "load";
   // Taken over while it loads: the page its user holds is not replaced under them. Once the new page has
-  // taken the tab it is the one they hold, and it is left to arrive whole: stopped there, it would be cut short.
+  // begun to arrive it is the one they hold, and it is left to arrive whole: stopped there, it would be cut
+  // short. It has begun once a navigation of the tab's own frame is answered, not sent on elsewhere; an
+  // address the page they hold writes for itself meanwhile is no new page.
   let arrived = false;
-  const taken = (frame: Frame) => {
-    if (frame === page.mainFrame()) arrived = true;
+  const answered = (response: Response) => {
+    try {
+      const request = response.request();
+      const status = response.status();
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame() && (status < 300 || status === 304 || status >= 400)) arrived = true;
+    } catch {
+      // A request whose frame is not there to ask: not the tab's own.
+    }
   };
   const halt = () => {
     if (!arrived) void stopLoading(page);
   };
-  page.on("framenavigated", taken);
+  page.on("response", answered);
   stop.addEventListener("abort", halt, { once: true });
   try {
     await page.goto(url.href, { waitUntil: waitUntil as "load", timeout: NAVIGATION_MS });
   } finally {
     stop.removeEventListener("abort", halt);
-    page.off("framenavigated", taken);
+    page.off("response", answered);
   }
   return { url: page.url(), title: await page.title() };
 }

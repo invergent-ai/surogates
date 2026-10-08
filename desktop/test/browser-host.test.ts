@@ -1258,6 +1258,23 @@ await navigator.serviceWorker.ready;`);
     await expect.poll(() => within(500, page.evaluate("[document.getElementById('last') !== null, window.finished === true]")), { timeout: 10_000 }).toEqual([true, true]);
   }, 30_000);
 
+  it("stops a navigation not yet answered though the page it would replace changes its own address meanwhile", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/t/HELD" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    // A page that rewrites its own address as it goes, as many do: no new page has come for that.
+    await script(a, "setInterval(() => history.replaceState(null, '', '#' + Date.now()), 20); return 1;", "chat-1");
+    // A navigation to a page that answers 1.5 s on.
+    const going = op(a, "browser.navigate", { url: "http://fixture.test/slow" }, "chat-1");
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", true);
+    expect(await within(1_000, going)).toEqual(PAUSED);
+    // Past the slow page's answer: the page its user holds is the one they held.
+    await new Promise((done) => setTimeout(done, 2_500));
+    expect(new URL(page.url()).pathname).toBe("/t/HELD");
+    expect(await page.title()).toBe("HELD");
+  }, 30_000);
+
   it("brings a chat's own newest page to the front before a sub-agent's, and shows none for a chat with no page", async () => {
     const [child, another] = [session(), session()];
     expect(await host.show("chat-1")).toBe(false);
