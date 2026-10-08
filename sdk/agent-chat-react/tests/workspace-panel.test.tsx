@@ -426,6 +426,75 @@ describe("WorkspacePanel", () => {
     expect(dialog()).toBeNull();
   });
 
+  it("drops a delete the user left unanswered as it leaves the chat, and keeps one under way to its end", async () => {
+    let deleted: () => void = () => {};
+    const adapter = {
+      getWorkspaceTree: vi.fn().mockResolvedValue({
+        root: "r",
+        entries: [{ name: "notes.txt", path: "notes.txt", kind: "file" }],
+        truncated: false,
+      }),
+      uploadWorkspaceFile: vi.fn(),
+      deleteWorkspaceFile: vi.fn(() => new Promise<void>((resolve) => {
+        deleted = resolve;
+      })),
+      getWorkspaceDownloadUrl: vi.fn(() => "#"),
+    } as unknown as AgentChatAdapter;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const panel = (sessionId: string) => (
+      <TooltipProvider>
+        <WorkspacePanel adapter={adapter} sessionId={sessionId} selectedPath={null} onSelectedPathChange={() => {}} />
+      </TooltipProvider>
+    );
+    const dialog = () => document.body.querySelector('[role="dialog"]');
+    const button = (name: string) =>
+      [...(dialog()?.querySelectorAll("button") ?? [])].find((each) => each.textContent?.trim() === name);
+    const ask = () => act(async () => {
+      container!.querySelector<HTMLButtonElement>('button[aria-label="Delete notes.txt"]')?.click();
+    });
+    // The panel shows *sessionId* again, made anew, as AgentChat unfolds Files on a chat.
+    const remount = async (sessionId: string) => {
+      act(() => root?.unmount());
+      root = createRoot(container!);
+      await act(async () => {
+        root?.render(panel(sessionId));
+      });
+    };
+    await act(async () => {
+      root?.render(panel("s-1"));
+    });
+    // Asked, and left open as the panel shows another chat, and this one again.
+    await ask();
+    expect(dialog()).not.toBeNull();
+    await act(async () => {
+      root?.render(panel("s-2"));
+    });
+    await act(async () => {
+      root?.render(panel("s-1"));
+    });
+    expect(dialog()).toBeNull();
+    // Asked, and left open as the panel folds away with its chat, unfolds on another, and on this one again.
+    await ask();
+    expect(dialog()).not.toBeNull();
+    await remount("s-2");
+    await remount("s-1");
+    expect(dialog()).toBeNull();
+    // Under way, it is shown again, locked, until it ends.
+    await ask();
+    await act(async () => {
+      button("Delete")?.click();
+    });
+    await remount("s-2");
+    await remount("s-1");
+    expect(button("Delete")?.disabled).toBe(true);
+    await act(async () => {
+      deleted();
+    });
+    expect(dialog()).toBeNull();
+  });
+
   it("says what a change waits for on the computer while it is sent again", async () => {
     const adapter = {
       getWorkspaceTree: vi.fn().mockResolvedValue({ root: "r", entries: [], truncated: false }),

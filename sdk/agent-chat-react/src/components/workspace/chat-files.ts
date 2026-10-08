@@ -32,6 +32,15 @@ export function changeChatFiles(chat: string, changes: ChatFiles): void {
   for (const listener of listeners) listener();
 }
 
+/**
+ * The panel leaves *chat*, folded away or moved on: a delete it asked and the user left unanswered
+ * goes with it, and one under way keeps its dialog to its end.
+ */
+export function leaveChatFiles(chat: string): void {
+  const was = chats.get(chat);
+  if (was?.deleteTarget && !was.deleting) changeChatFiles(chat, { deleteTarget: null });
+}
+
 /** Every chat's entry gone: a test starts from none. */
 export function forgetChatFiles(): void {
   chats.clear();

@@ -36,7 +36,7 @@ import {
 import { ScrollArea } from "../ui/scroll-area";
 import { Skeleton } from "../ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
-import { changeChatFiles, useChatFiles } from "./chat-files";
+import { changeChatFiles, leaveChatFiles, useChatFiles } from "./chat-files";
 
 const SKELETON_WIDTHS = [75, 60, 90, 65, 80, 70, 85, 55];
 
@@ -236,6 +236,11 @@ export function WorkspacePanel({
 			stopReading();
 		};
 	}, [stopReading]);
+
+	// Leaving its chat, folded away or moved on: a delete asked there and left unanswered does not come back by itself.
+	useEffect(() => () => {
+		if (sessionId) leaveChatFiles(sessionId);
+	}, [sessionId]);
 
 	const fetchTree = useCallback(async () => {
 		// Made for a chat the panel has left, or by a panel gone, as a change that ends there calls it:
