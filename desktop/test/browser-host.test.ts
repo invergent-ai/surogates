@@ -998,24 +998,31 @@ await navigator.serviceWorker.ready;`);
   }, 30_000);
 
   it("brings a chat's own newest page to the front before a sub-agent's, and shows none for a chat with no page", async () => {
-    const child = session();
+    const [child, another] = [session(), session()];
     expect(await host.show("chat-1")).toBe(false);
-    await op(child, "browser.navigate", { url: "http://fixture.test/second" }, "chat-1");
-    // Each page is a window of its own here, visible and focused alike on xvfb's display, which has no window
-    // manager: which page is brought to the front is seen at the page itself.
-    const fronted: string[] = [];
-    const tabs = (host as unknown as { tabs: Map<string, Page[]> }).tabs;
-    const watch = (name: string, page: Page) => {
-      const bring = page.bringToFront.bind(page);
-      page.bringToFront = () => (fronted.push(name), bring());
+    // A sub-agent's page and another chat's, each a tab of the one window, the other chat's put in front.
+    await op(child, "browser.navigate", { url: "http://fixture.test/t/CHILD" }, "chat-1");
+    await op(another, "browser.navigate", { url: "http://fixture.test/t/ANOTHER" }, "chat-2");
+    const inFront = async (of: string, page = 0) => {
+      await tabs().get(of)![page]!.bringToFront();
+      await expect.poll(front, { timeout: 5_000 }).toBe(await tabs().get(of)![page]!.title());
     };
-    watch("child", tabs.get(child)![0]!);
+    await inFront(another);
+    // The chat has only its sub-agent's page: that one is shown.
     expect(await host.show("chat-1")).toBe(true);
-    await op("chat-1", "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
-    watch("chat", tabs.get("chat-1")![0]!);
+    await expect.poll(front, { timeout: 5_000 }).toBe("CHILD");
+    // Its own tab, once it has one, before its sub-agent's.
+    await op("chat-1", "browser.navigate", { url: "http://fixture.test/t/OWN" }, "chat-1");
     expect(await host.show("chat-1")).toBe(true);
-    expect(fronted).toEqual(["child", "chat"]);
-    expect(await host.show("chat-2")).toBe(false);
+    await expect.poll(front, { timeout: 5_000 }).toBe("OWN");
+    // A popup its tab opens is its newest page: shown, not the tab it came from.
+    await op("chat-1", "browser.evaluate", { code: "window.open('http://fixture.test/t/POPUP'); return 1;" }, "chat-1");
+    await expect.poll(async () => Promise.all((tabs().get("chat-1") ?? []).map((page) => page.title())), { timeout: 10_000 }).toEqual(["OWN", "POPUP"]);
+    await inFront(another);
+    expect(await host.show("chat-1")).toBe(true);
+    await expect.poll(front, { timeout: 5_000 }).toBe("POPUP");
+    expect(await host.show("chat-3")).toBe(false);
+    await expect.poll(front, { timeout: 5_000 }).toBe("POPUP");
   }, 30_000);
 
   it("closes every tab of a deleted chat's sessions, and no other chat's", async () => {
