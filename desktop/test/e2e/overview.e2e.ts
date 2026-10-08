@@ -242,9 +242,10 @@ describe("the Overview pane", () => {
   });
 
   it("keeps the keyboard on what had it when the window's page draws again: a project in the sidebar, a thread's row", async () => {
-    const { shell, page } = await opened();
+    const { shell, page, client } = await opened();
     const redraw = () => shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("shell:changed"));
-    for (const selector of [`#projects [data-project="${BUDGET}"] .project`, `[data-thread="${QUESTION}"]`]) {
+    const budget = `#projects [data-project="${BUDGET}"] .project`;
+    for (const selector of [budget, `[data-thread="${QUESTION}"]`]) {
       await page.focus(selector);
       const before = await page.evaluate(() => (document.activeElement as HTMLElement).outerHTML);
       await redraw();
@@ -252,6 +253,17 @@ describe("the Overview pane", () => {
       await expect.poll(() => page.evaluate((chosen) => document.activeElement === document.querySelector(chosen), selector)).toBe(true);
       expect(await page.evaluate(() => (document.activeElement as HTMLElement).outerHTML)).toBe(before);
     }
+    // A project that moves up the sidebar as it is drawn again takes the keyboard with it: its place goes to another.
+    const order = () => page.$$eval("#projects [data-project]", (rows) => rows.map((row) => (row as HTMLElement).dataset.project));
+    expect(await order()).toEqual([REPORT, BUDGET]);
+    await page.focus(budget);
+    await client.evaluate(([open, moved]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      fake.data.projects.find((project) => project.id === moved)!.updatedAt = new Date().toISOString();
+      fake.changed(open!, null);
+    }, [REPORT, BUDGET]);
+    await expect.poll(order).toEqual([BUDGET, REPORT]);
+    expect(await page.evaluate((chosen) => document.activeElement === document.querySelector(chosen), budget)).toBe(true);
   });
 
   it("gives the keyboard, after a Resolve or Reopen moves its row, to the row that took its place, or to where the row went", async () => {
