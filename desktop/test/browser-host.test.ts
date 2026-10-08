@@ -1036,6 +1036,34 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     expect((host as unknown as { unseen: Map<string, string[]> }).unseen.size).toBe(0);
   }, 40_000);
 
+  it("takes the page a new browser opens with for a tab no chat owns until a session takes it: a download its user makes there while they hold the browser is the holder's chat's", async () => {
+    const staged: StagedDownload[] = [];
+    host = hostWith({ downloaded: (download) => staged.push(download) });
+    const a = session();
+    const state = host as unknown as { running: Promise<BrowserContext> | null };
+    // The chat's first operation, and its user takes the browser over while it launches: no session takes the page it opens with.
+    const first = op(a, "browser.evaluate", { code: "return 1;" }, "chat-1");
+    await expect.poll(() => state.running !== null, { timeout: 5_000 }).toBe(true);
+    host.pause("chat-1", true);
+    expect(await first).toEqual(PAUSED);
+    const context = await state.running!;
+    await expect.poll(() => context.pages().length, { timeout: 5_000 }).toBe(1);
+    expect(tabs().has(a)).toBe(false);
+    // Their own hand in that page.
+    const spare = context.pages()[0]!;
+    await spare.goto("http://fixture.test/");
+    await spare.click("#dl");
+    await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(1);
+    expect(staged[0]).toMatchObject({ root: "chat-1", session: "chat-1", name: "report.txt", user: true });
+    // Handed back, the session takes that page as its tab: a download there is its chat's from then on.
+    host.pause("chat-1", false);
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1")).ok).toMatchObject({ title: "Fixture", opened: true });
+    expect(tabs().get(a)![0]).toBe(spare);
+    await script(a, "location.href = '/report.txt'; return 1;", "chat-1");
+    await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(2);
+    expect(staged[1]).toMatchObject({ root: "chat-1", session: a, name: "report.txt", user: false });
+  }, 40_000);
+
   it("keeps a download its user started theirs though it ends after they handed the browser back, with nobody holding it; and through a later take-over", async () => {
     const staged: StagedDownload[] = [];
     host = hostWith({ downloaded: (download) => staged.push(download) });
