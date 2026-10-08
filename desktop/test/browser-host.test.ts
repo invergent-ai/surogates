@@ -279,6 +279,10 @@ function ownChoosers(): string[] {
     }
   });
 }
+// The fixture's addresses the host keeps a navigation's request of, as not known to have ended as a page. Not the
+// address a new browser is asked first, to see that its requests come through its proxy: that one fails, and is kept its second.
+const requested = () => [...(host as unknown as { open: Map<{ url(): string }, unknown> }).open.keys()].map((request) => request.url())
+  .filter((url) => url.startsWith("http://fixture.test/"));
 // How many listeners *page* has for a file a page asks for: the host's, or none while its user holds the browser.
 const hears = (page: Page) => (page as unknown as { listenerCount(event: string): number }).listenerCount("filechooser");
 // The user's own hand on that display, as X events (x-user.py): the window given the keyboard, a click, keys typed.
@@ -501,6 +505,9 @@ describe("a page's download, as the host stages it", () => {
   const state = () => host as unknown as {
     roots: Map<string, string>; tabs: Map<string, Page[]>; unseen: Map<string, string[]>; interrupt: AbortController; arriving: Set<unknown>;
     open: Map<unknown, unknown>;
+    hearing: Map<Page, unknown>; choosers: Map<string, FileChooser>; named: Map<string, { input: { chooser: FileChooser } | null }>;
+    live: BrowserContext | null;
+    adopt(session: string, page: Page): void;
     arrived(page: Page, download: unknown): Promise<void>;
     requested(request: unknown): void;
     loaded(request: unknown): void;
@@ -1049,6 +1056,186 @@ describe("a page's download, as the host stages it", () => {
     const later = asks(`${SITE_URL}?later`, null, true, stopped.page);
     host.pause("chat-2", true);
     expect(state().open.has(later)).toBe(true);
+  });
+
+  describe("beside the files its pages ask for", () => {
+    const FORM_URL = "http://fixture.test/form";
+    const SUB_AGENT = "session-of-a-sub-agent";
+    // A page of *session*'s as the host takes one, at the form's address, with the browser's part of it as a test
+    // plays it. *heard*: how many hear it ask for a file. *input*: a file input of it clicked, as the browser says
+    // it to whatever hears; *made*: what an upload's files are once they are ready in the page, whose one step puts
+    // them into the input. *navigates*: the agent's own navigation in it, not answered yet, and its request.
+    const taken = (session = SESSION) => {
+      const hears = new Map<string, Set<(event: unknown) => void>>();
+      const on = (event: string, heard: (event: unknown) => void) => void hears.set(event, (hears.get(event) ?? new Set()).add(heard));
+      const frame = {};
+      const page = {
+        on, once: on, off: (event: string, heard: (event: unknown) => void) => void hears.get(event)?.delete(heard),
+        goto: () => new Promise(() => {}), mainFrame: () => frame, url: () => FORM_URL, title: () => Promise.resolve(""), isClosed: () => false,
+      } as unknown as Page;
+      if (!state().tabs.has(session)) {
+        state().roots.set(session, "chat-1");
+        state().tabs.set(session, []);
+      }
+      state().adopt(session, page);
+      return {
+        page,
+        heard: () => hears.get("filechooser")?.size ?? 0,
+        input: (made: unknown = {}) => {
+          const element = { evaluate: () => Promise.resolve({ here: true, href: FORM_URL, origin: new URL(FORM_URL).origin }), evaluateHandle: () => Promise.resolve(made) };
+          const chooser = { page: () => page, element: () => element } as unknown as FileChooser;
+          for (const heard of hears.get("filechooser") ?? []) heard(chooser);
+          return chooser;
+        },
+        navigates: (url: string) => {
+          void OPERATIONS["browser.navigate"]!(page, { url }, state().interrupt.signal).catch(() => {});
+          return asks(url, null, true, page);
+        },
+      };
+    };
+    // An upload of the session's as the main side sends it, launching nothing: *id*, the one its user was asked about.
+    const uploads = (id?: string) => host.perform(
+      { executable: join(profile, "no-browser-here"), profile }, "chat-1", SESSION, "browser.set_input_files", { files: [REPORT] }, new AbortController().signal, id,
+    );
+    // The session has no page but those a test's host takes.
+    const fresh = () => {
+      state().roots.set(SESSION, "chat-1");
+      state().tabs.set(SESSION, []);
+    };
+
+    beforeEach(fresh);
+
+    it("does at the one take-over all that it does for either, with nothing the browser says between: no input stays kept for an upload, the request of the navigation it stopped is forgotten and the download on its way stopped; its pages are heard a second more, for no one, and again from the hand back, when the minute begins", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const [tab, other] = [taken(), taken(SUB_AGENT)];
+        // The agent drives. A file input of its page asked, and an upload's prompt named it; a sub-agent's navigation
+        // to a download is not answered yet; and a download of its own is on its way.
+        const asked = tab.input();
+        expect(await host.address(SESSION, true, "upload-1")).toBe(FORM_URL);
+        const request = other.navigates(SITE_URL);
+        const own = fileOf(6);
+        let ends!: (path: string) => void;
+        const onItsWay = arrives(downloadOf("own.bin", own, new Promise((done) => {
+          ends = done;
+        })), tab.page);
+        expect([state().choosers.get(SESSION), state().named.get(SESSION)?.input?.chooser, state().open.has(request), state().arriving.size])
+          .toEqual([asked, asked, true, 1]);
+        expect([tab.heard(), other.heard()]).toEqual([1, 1]);
+        host.pause("chat-2", true);
+        // All of it is so by the time the take-over returns.
+        expect([state().choosers.size, state().named.size, state().open.has(request), did]).toEqual([0, 0, false, ["cancel"]]);
+        expect([tab.heard(), other.heard()]).toEqual([1, 1]);
+        // What the agent was doing reaches its page after that, and the page asks for a file: heard, so the browser
+        // opens no chooser of its own, and kept for no one.
+        tab.input();
+        expect([state().choosers.size, state().unseen.get(SESSION)]).toEqual([0, [FILE_ASKED]]);
+        // Their own download of the address the stopped navigation asked for, of which the browser says no request: theirs.
+        const theirs = fileOf(6);
+        await arrives(downloadOf("export.csv", theirs, Promise.resolve(theirs), SITE_URL), other.page);
+        expect(staged).toEqual([{ root: "chat-1", session: SUB_AGENT, name: "export.csv", path: theirs, user: true }]);
+        // The upload that prompt was for comes now: it gives nothing.
+        expect(await uploads("upload-1")).toEqual(PAUSED);
+        // A second after the take-over, and not before, a file input is their own to click.
+        vi.advanceTimersByTime(OWN_CHOOSER_MS - 1);
+        expect([tab.heard(), other.heard()]).toEqual([1, 1]);
+        vi.advanceTimersByTime(1);
+        expect([tab.heard(), other.heard()]).toEqual([0, 0]);
+        // Handed back: heard again at once, with nothing kept from before for either upload.
+        host.pause("chat-2", false);
+        expect([tab.heard(), other.heard(), state().choosers.size, state().named.size]).toEqual([1, 1, 0, 0]);
+        expect(await uploads("upload-1")).toEqual({ error: { type: "browser", message: NOT_AS_ASKED } });
+        expect(await uploads()).toEqual({ error: { type: "browser", message: NOT_ASKED } });
+        // And a download of which no request is known is theirs in doubt, from that same moment.
+        const doubt = fileOf(6);
+        await arrives(downloadOf("doubt.bin", doubt, Promise.resolve(doubt)), tab.page);
+        expect(staged[1]).toEqual({ root: "chat-1", session: SESSION, name: "doubt.bin", path: doubt, user: true, afterHandBack: true });
+        // The agent's own, stopped where it was: dropped once it has ended, and its agent told.
+        ends(own);
+        await onItsWay;
+        expect([staged.length, existsSync(own), state().unseen.get(SESSION)]).toEqual([2, false, [FILE_ASKED, interrupted("own.bin")]]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("reads each bound on the clock it can be read on: the minute after a hand back on the one that cannot be set, the second after a take-over on a timer, which the computer's clock moves no more, and the quarter second of an upload's step on the computer's own, the one its page reads too", async () => {
+      // The clock a host told none reads, and the computer's own, which its user or its network can set.
+      let steady = 5_000;
+      let wall = 1_700_000_000_000;
+      const clocks = [vi.spyOn(performance, "now").mockImplementation(() => steady), vi.spyOn(Date, "now").mockImplementation(() => wall)];
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        host = new BrowserHost({ downloaded: (download) => staged.push(download) });
+        fresh();
+        const tab = taken();
+        const comes = async (name: string) => {
+          const file = fileOf(6);
+          await arrives(downloadOf(name, file, Promise.resolve(file)), tab.page);
+          return staged.at(-1)?.name !== name ? "dropped" : staged.at(-1)!.user ? "theirs" : "the agent's";
+        };
+        // An upload's step is sent with the moment it is late from, which its page compares with its own reading of
+        // the computer's clock: the only clock both read. The first is taken late; the computer's clock is put back
+        // an hour meanwhile, and the next is late from an hour earlier. The steady one moves neither.
+        const lateFrom: number[] = [];
+        tab.input({
+          evaluate: (_put: unknown, { by }: { by: number }) => {
+            lateFrom.push(by);
+            wall -= 3_600_000;
+            steady += 7_000;
+            return Promise.resolve(lateFrom.length === 1 ? "late" : "given");
+          },
+          dispose: () => Promise.resolve(),
+        });
+        expect(await uploads()).toEqual({ ok: { files: 1, notices: [FILE_ASKED] } });
+        expect(lateFrom).toEqual([1_700_000_000_000 + 250, 1_700_000_000_000 - 3_600_000 + 250]);
+        // The second after a take-over is a timer's: neither clock put on an hour ends it, and the timer does.
+        host.pause("chat-2", true);
+        wall += 3_600_000;
+        steady += 3_600_000;
+        vi.advanceTimersByTime(OWN_CHOOSER_MS - 1);
+        expect(tab.heard()).toBe(1);
+        vi.advanceTimersByTime(1);
+        expect(tab.heard()).toBe(0);
+        // The minute after the hand back is the steady clock's: the computer's put on an hour does not end it, nor do
+        // the timers, and the steady one does.
+        host.pause("chat-2", false);
+        wall += 3_600_000;
+        vi.advanceTimersByTime(10 * AFTER_HAND_BACK_MS);
+        steady += AFTER_HAND_BACK_MS;
+        expect(await comes("within.bin")).toBe("theirs");
+        steady += 1;
+        wall -= 2 * 3_600_000;
+        expect(await comes("after.bin")).toBe("the agent's");
+      } finally {
+        vi.useRealTimers();
+        for (const clock of clocks) clock.mockRestore();
+      }
+    });
+
+    it("keeps nothing of a browser that closed, of the files its pages asked for or of what they requested: an upload is given to nothing after, and a download of an address it was asked is no answer to it", async () => {
+      const context = {} as BrowserContext;
+      state().live = context;
+      const tab = taken();
+      const asked = tab.input();
+      expect(await host.address(SESSION, true, "upload-1")).toBe(FORM_URL);
+      const request = tab.navigates(SITE_URL);
+      expect([state().choosers.get(SESSION), state().named.get(SESSION)?.input?.chooser, state().hearing.has(tab.page), state().open.has(request)])
+        .toEqual([asked, asked, true, true]);
+      state().closed(context);
+      expect([state().choosers.size, state().named.size, state().hearing.size, state().tabs.size, state().open.size, state().live]).toEqual([0, 0, 0, 0, 0, null]);
+      // The upload its user was asked about, and one nobody was asked about: neither has an input.
+      expect(await uploads("upload-1")).toEqual({ error: { type: "browser", message: NOT_AS_ASKED } });
+      expect(await uploads()).toEqual({ error: { type: "browser", message: NOT_ASKED } });
+      // Its user takes the next browser over, and downloads that address by the site's own link in a page of the
+      // session's: theirs, where the closed browser's request would have made it the agent's, stopped and dropped.
+      fresh();
+      const next = taken();
+      host.pause("chat-2", true);
+      const theirs = fileOf(6);
+      await arrives(downloadOf("export.csv", theirs, Promise.resolve(theirs), SITE_URL), next.page);
+      expect([staged, did]).toEqual([[{ root: "chat-1", session: SESSION, name: "export.csv", path: theirs, user: true }], []]);
+    });
   });
 });
 
@@ -1858,6 +2045,38 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     expect(open.size).toBe(0);
   }, 60_000);
 
+  it("drops at the one take-over both the input a page asked a file for and the request of the navigation it stops: their user's own download of that address is theirs, no chooser of the browser's own opens, and the upload that comes after the hand back is given to nothing", async () => {
+    const staged: StagedDownload[] = [];
+    host = hostWith({ downloaded: (download) => staged.push(download) });
+    const [a, b] = [session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    // A file input of the chat's page asked: kept for its agent's next upload.
+    expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 }, "chat-1")).ok.notices).toEqual([FILE_ASKED]);
+    // A sub-agent's navigation to a download its site has not answered when their user takes the browser over.
+    await op(b, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const other = tabs().get(b)![0]!;
+    const going = op(b, "browser.navigate", { url: "http://fixture.test/late.bin" }, "chat-1");
+    await new Promise((done) => setTimeout(done, 300));
+    expect([kept(a) !== undefined, requested(), hears(page), hears(other)]).toEqual([true, ["http://fixture.test/late.bin"], 1, 1]);
+    host.pause("chat-1", true);
+    // Both are so by the time the take-over returns; their pages are heard a moment more, for no one.
+    expect([kept(a), requested(), hears(page), hears(other)]).toEqual([undefined, [], 1, 1]);
+    expect(await within(1_000, going)).toEqual(PAUSED);
+    // Their own click on the site's link with `download` to that address, in the sub-agent's page, in that moment.
+    await other.evaluate("const link = document.createElement('a'); link.href = '/late.bin'; link.download = ''; document.body.append(link); link.click(); void 0");
+    await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(1);
+    expect(staged[0]).toEqual({ root: "chat-1", session: b, name: "late.bin", path: staged[0]!.path, user: true });
+    await expect.poll(() => [hears(page), hears(other)], { timeout: OWN_CHOOSER_MS + 5_000 }).toEqual([0, 0]);
+    expect(ownChoosers()).toEqual([]);
+    host.pause("chat-1", false);
+    expect([hears(page), hears(other)]).toEqual([1, 1]);
+    // Neither session's agent is told of any of it, and the upload has no input.
+    expect((await op(a, "browser.mouse", { action: "move", x: 5, y: 5 }, "chat-1")).ok.notices).toEqual([]);
+    expect((await op(b, "browser.mouse", { action: "move", x: 5, y: 5 }, "chat-1")).ok.notices).toEqual([]);
+    expect((await op(a, "browser.set_input_files", { files: [REPORT] }, "chat-1")).error?.message).toBe(NOT_ASKED);
+  }, 30_000);
+
   it("drops a download of the agent's whose request began before its user took the browser over and whose site answers while they hold it, or after they held it meanwhile", async () => {
     const staged: StagedDownload[] = [];
     host = hostWith({ downloaded: (download) => staged.push(download) });
@@ -1915,6 +2134,32 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     await expect.poll(() => processes().length, { timeout: 10_000 }).toBe(0);
     expect((await op(a, "browser.navigate", { url: "http://fixture.test/second" })).ok).toMatchObject({ title: "Second", opened: true });
   });
+
+  it("keeps nothing of a browser its user closed, of the file a page asked for or of a navigation it had not answered: an upload after is given to nothing, and their own download of that address in the next browser is theirs", async () => {
+    const staged: StagedDownload[] = [];
+    host = hostWith({ downloaded: (download) => staged.push(download) });
+    const [a, b] = [session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 }, "chat-1")).ok.notices).toEqual([FILE_ASKED]);
+    await op(b, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const going = op(b, "browser.navigate", { url: "http://fixture.test/late.bin" }, "chat-1");
+    await new Promise((done) => setTimeout(done, 300));
+    const open = (host as unknown as { open: Map<unknown, unknown> }).open;
+    expect([kept(a) !== undefined, requested()]).toEqual([true, ["http://fixture.test/late.bin"]]);
+    for (const { pid } of processes().filter(({ args }) => !args.some((arg) => arg.startsWith("--type=")))) process.kill(Number(pid), "SIGTERM");
+    await expect.poll(() => processes().length, { timeout: 10_000 }).toBe(0);
+    expect(((await within(10_000, going)) as { error?: { type: string } }).error?.type).toBe("browser");
+    await expect.poll(() => [kept(a), open.size, tabs().size], { timeout: 10_000 }).toEqual([undefined, 0, 0]);
+    expect((await op(a, "browser.set_input_files", { files: [REPORT] }, "chat-1")).error?.message).toBe(NOT_ASKED);
+    // The next browser, taken over: their own click on the site's link with `download` to that address.
+    expect((await op(b, "browser.navigate", { url: "http://fixture.test/" }, "chat-1")).ok).toMatchObject({ opened: true });
+    host.pause("chat-1", true);
+    await tabs().get(b)![0]!.evaluate("const link = document.createElement('a'); link.href = '/late.bin'; link.download = ''; document.body.append(link); link.click(); void 0");
+    await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(1);
+    expect(staged[0]).toEqual({ root: "chat-1", session: b, name: "late.bin", path: staged[0]!.path, user: true });
+    host.pause("chat-1", false);
+    expect((await op(b, "browser.mouse", { action: "move", x: 5, y: 5 }, "chat-1")).ok.notices).toEqual([]);
+  }, 60_000);
 
   it("answers a script's value under value, whatever its shape, a transfer's too", async () => {
     const a = session();
