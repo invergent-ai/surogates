@@ -70,28 +70,38 @@ function linked({ count, examples, complete }: LinkSummary): string {
   return `${complete ? "" : "At least "}${files} also linked from elsewhere; commands the agent runs can change those copies too: ${examples.join(", ")}${more}.`;
 }
 
+// A name the page sent, as a field of its own, and the height its lines take.
+const plain = (label: string, value: string): PromptDetail => ({ label, value, code: false, keep: "" });
+const tall = (value: string) => 26 + Math.ceil(value.length / 45) * 19;
+
 /** The folder sheet: the folder, its mode, and what the user should know; or why it cannot be used. */
 export function folderSheet(sheet: FolderSheet): PromptContent {
   const name = named(sheet.folder);
-  const folder = code("Folder", sheet.folder);
+  // A project's thread is named under its folder: the page's words, set as text.
+  const details = [code("Folder", sheet.folder)];
+  let room = 0;
+  if (sheet.thread !== null) {
+    details.push(plain("Project", sheet.thread.project), plain("Thread", sheet.thread.thread));
+    room = tall(sheet.thread.project) + tall(sheet.thread.thread);
+  }
   if (sheet.refusal !== null) {
     return {
       title: `${name} cannot be used`,
       lead: `${sheet.agent} cannot work in this folder: ${sheet.refusal}. Choose another folder.`,
-      details: [folder],
+      details,
       notes: [],
       choice: null,
       buttons: [button("cancel", "Cancel"), button("change", "Change…")],
       focus: "change",
       cancel: "cancel",
       enter: null,
-      height: 280,
+      height: 280 + room,
     };
   }
   return {
     title: `Work in ${name}?`,
     lead: `${sheet.agent} will read and change the files in this folder, and run commands there. It works in the cloud: the files it reads and what its commands print are sent to it, and can stay in the conversation.`,
-    details: [folder],
+    details,
     notes: sheet.links ? [linked(sheet.links)] : [],
     choice: { ...MODES, value: sheet.mode },
     buttons: [button("cancel", "Cancel"), button("change", "Change…"), button("accept", "Use this folder", true)],
@@ -99,7 +109,7 @@ export function folderSheet(sheet: FolderSheet): PromptContent {
     focus: "choice",
     cancel: "cancel",
     enter: "accept",
-    height: sheet.links ? 550 : 490,
+    height: (sheet.links ? 550 : 490) + room,
   };
 }
 

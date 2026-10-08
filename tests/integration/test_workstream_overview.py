@@ -867,14 +867,6 @@ async def test_a_card_starts_only_over_redis(api, monkeypatch):
     assert response.status_code == 503, response.text
 
 
-async def test_a_thread_on_the_users_computer_is_not_started_here(api):
-    project = await create(api)
-    master = await master_of(api, project)
-    response = await start_card(api, project, await proposed(api, master), "2")
-    assert response.status_code == 409, response.text
-    assert await events_of(api, master.id, EventType.WORKER_SPAWNED) == []
-
-
 async def test_only_a_card_of_the_projects_own_proposals_starts(api, session_factory):
     project = await create(api)
     proposal_id = await proposed(api, await master_of(api, project))

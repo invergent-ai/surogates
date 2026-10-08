@@ -18,6 +18,7 @@
     "test:local-chat": "node --experimental-strip-types --test ../scripts/web-local-chat.test.mjs",
     "test:oauth-consent": "node --experimental-strip-types --test ../scripts/oauth-consent.test.mjs",
     "test:projects": "node --experimental-strip-types --test ../scripts/web-projects.test.mjs",
+    "test:local-thread": "node --experimental-strip-types --test ../scripts/web-local-thread.test.mjs",
     "typecheck": "tsc -b --pretty false",
     "biome:check": "biome check .",
     "biome:fix": "biome check . --write"

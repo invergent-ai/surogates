@@ -15,7 +15,8 @@ from surogates.scheduled.store import ScheduledSessionStore
 
 from .test_desktop_link_client import built_client  # noqa: F401  (a fixture)
 from .test_devices import api, link_url  # noqa: F401  (fixtures)
-from .test_workstream_threads import threads_in_every_state
+from .test_local_threads import answered_by_the_journal
+from .test_workstream_threads import threads_in_every_state, turn_ends
 from .test_workstreams import create, master_of
 
 pytestmark = [pytest.mark.desktop, pytest.mark.asyncio(loop_scope="session")]
@@ -27,6 +28,10 @@ CHECK = ROOT / "scripts" / "desktop-projects-check.mjs"
 async def test_the_desktop_takes_every_answer_of_a_real_project(built_client, api, link_url, session_factory):
     project = await create(api, goal="The board's Q3 report")
     master = await master_of(api, project)
+    # A thread on the user's computer, which is not connected, and a file it made there:
+    # the first, so that the rows' first idle thread is still the one the check reads.
+    local = await answered_by_the_journal(api, project, master)
+    await turn_ends(api, local, files=["Totals.md"])
     made = await threads_in_every_state(api, master)
     # A file the user added, and a routine the master made.
     uploaded = await api.client.post(
@@ -47,6 +52,8 @@ async def test_the_desktop_takes_every_answer_of_a_real_project(built_client, ap
     seen = json.loads(out)
 
     assert [(listed["id"], listed["waiting"], listed["working"]) for listed in seen["listed"]] == [(project["id"], 4, 2)]
+    computer = {"kind": "device", "deviceId": local.config["execution"]["device_id"], "deviceName": "Flavius's ThinkPad", "online": False}
+    assert [row["place"] for row in seen["threads"] if row["id"] == str(local.id)] == [computer]
     assert (seen["opened"]["masterSessionId"], seen["opened"]["goal"]) == (project["master_session_id"], "The board's Q3 report")
     assert {row["title"]: (row["id"], row["group"], row["reason"]) for row in seen["threads"]} == {
         title: (str(made[title].id), *state) for title, state in {
@@ -60,13 +67,15 @@ async def test_the_desktop_takes_every_answer_of_a_real_project(built_client, ap
             "Book the room": ("resolved", None),
             "Book the review meeting": ("resolved", None),
         }.items()
-    }
+    } | {"Check the totals": (str(local.id), "idle", None)}
     idle = str(made["Collect the sales data"].id)
     assert [row["id"] for row in seen["one"]] == [idle]
     assert (seen["resolved"]["id"], seen["resolved"]["group"]) == (idle, "resolved")
     assert (seen["reopened"]["id"], seen["reopened"]["group"]) == (idle, "idle")
     assert (seen["renamed"]["name"], seen["renamed"]["threadTier"]) == ("Q3 report", "pro")
-    assert [(entry["path"], entry["origin"], entry["size"]) for entry in seen["library"]] == [("brief.pdf", "added", 14)]
+    assert sorted((entry["path"], entry["origin"], entry["size"], entry["place"]) for entry in seen["library"]) == [
+        ("Totals.md", "produced", None, computer), ("brief.pdf", "added", 14, {"kind": "cloud"}),
+    ]
     assert [(routine["name"], routine["scheduleDisplay"]) for routine in seen["routines"]] == [("Weekly cash report", "0 8 * * 1")]
     # The stream says it is ready: the shell reads the project whole.
     assert seen["heard"] == [None]

@@ -55,7 +55,7 @@ from surogates.api.routes._commerce_turn import (
     release_commerce_hold,
     runtime_commerce_payload,
 )
-from surogates.devices.binding import device_of
+from surogates.devices.binding import device_of, is_binding_root
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.store import DeviceRecord, DeviceStore
 from surogates.devices.workspace import DeviceOperationError
@@ -2002,7 +2002,7 @@ async def archive_session_tree(
     # which would close it.  A sub-agent's root keeps its folder.
     for archived in archived_sessions:
         device_id = device_of(archived.config)
-        if device_id is None or (archived.config or {}).get("sandbox_root_session_id"):
+        if device_id is None or not is_binding_root(archived.id, archived.config):
             continue
         try:
             await operations.retire(session_id=archived.id, device_id=device_id)
