@@ -190,7 +190,8 @@ describe("a download the agent's page started", () => {
     ran.length = 0;
     meanwhile = async () => writeFileSync(downloads, "made meanwhile");
     expect(await saveDownload(stage("report.txt"), journal.bindings, counting)).toBe(refused);
-    expect([asked.length, ran]).toEqual([1, ["resolve", "stat", "resolve", "stat", "write", "stat"]]);
+    // The write's refusal, then one more look at Downloads, which says why.
+    expect([asked.length, ran]).toEqual([1, ["resolve", "stat", "resolve", "stat", "write", "resolve", "stat"]]);
     expect(readFileSync(downloads, "utf8")).toBe("made meanwhile");
     // A file host that refuses the look at Downloads says why, in its own words.
     const failing: Saver = {
@@ -314,16 +315,65 @@ describe("a download the agent's page started", () => {
     expect([journal.bindings.get(ROOT)?.mode, existsSync(join(downloads, "payslip.pdf"))]).toEqual(["ask", false]);
   });
 
-  it("asks about one whose Downloads leads where the agent's own writes are not asked about", async () => {
+  it("saves nothing through a link at Downloads, wherever in the chat's folder it leads, and asks nobody", async () => {
     bind("ask");
-    mkdirSync(join(folder, ".surogates-results"));
-    symlinkSync(join(folder, ".surogates-results"), downloads);
+    const refused = 'The page downloaded "ci.yml", but it was not saved: Downloads in the chat\'s folder is a link, and nothing is saved through one.';
+    // To the folder's top, where a page's file would lie among the chat's own; to a folder whose files run by
+    // themselves; and to one the agent's own writes are not asked about.
+    for (const target of [".", ".github/workflows", ".surogates-results"]) {
+      mkdirSync(join(folder, target), { recursive: true });
+      symlinkSync(join(folder, target), downloads);
+      expect(await saveDownload(stage("ci.yml"), journal.bindings, saver), target).toBe(refused);
+      expect([asked, readdirSync(join(folder, target)).includes("ci.yml")], target).toEqual([[], false]);
+      rmSync(downloads);
+    }
+    // Made a link while the prompt is open, its user having allowed the save: nothing is written through it either.
+    meanwhile = async () => symlinkSync(folder, downloads);
+    expect(await saveDownload(stage("ci.yml"), journal.bindings, saver)).toBe(refused);
+    expect([asked.length, readdirSync(folder).includes("ci.yml")]).toEqual([1, false]);
+  });
+
+  it("asks about a write that saves a download wherever it lands, also where the agent's own writes are not asked about", async () => {
+    bind("ask");
     answer = "deny";
-    expect(await saveDownload(stage("report.txt"), journal.bindings, saver)).toBe(
-      'The page downloaded "report.txt", but it was not saved: The user denied this change on this computer.',
+    const write = {
+      id: "write-1", sessionId: ROOT, callingSessionId: ROOT, invocationId: "download", ordinal: 0, kind: "write",
+      args: { key: join(folder, ".surogates-results", "out.txt"), data: "" }, digest: "",
+    };
+    const signal = new AbortController().signal;
+    // The agent's own there is let through unasked; one that saves a download is asked about, whosever it is.
+    expect(await saver.admit(write, signal, undefined as never)).toBeNull();
+    expect(await saver.admit(write, signal, "page")).toMatchObject({ error: { code: "EACCES" } });
+    expect(await saver.admit(write, signal, "user")).toMatchObject({ error: { code: "EACCES" } });
+    expect(asked).toMatchObject([{ kind: "change", download: "page" }, { kind: "change", download: "user" }]);
+  });
+
+  it("passes over a name where a link was made while its prompt was open, and takes the next, asking nobody again", async () => {
+    bind("ask");
+    // A link to a file outside the folder, not there yet: written through, it would make that file.
+    meanwhile = async () => {
+      mkdirSync(downloads, { recursive: true });
+      symlinkSync(join(base, "outside.txt"), join(downloads, "report.txt"));
+    };
+    expect(await saveDownload(stage("report.txt", "the page's"), journal.bindings, saver)).toBe(
+      'The page downloaded "report.txt". It is saved in the chat\'s folder as Downloads/report (2).txt.',
     );
-    expect(asked).toMatchObject([{ kind: "change", action: "write", path: join(folder, ".surogates-results", "report.txt"), download: "page" }]);
-    expect(readdirSync(join(folder, ".surogates-results"))).toEqual([]);
+    expect([asked.length, read("report (2).txt"), existsSync(join(base, "outside.txt"))]).toEqual([1, "the page's", false]);
+    // A write its file host refuses for another reason is no name to pass over: the save ends, and says why.
+    const refusing: Saver = {
+      admit: saver.admit,
+      run: (operation, signal) => (operation.kind === "write"
+        ? Promise.resolve({ error: { type: "os", code: "ENOSPC", message: `No space left on device: '${String(operation.args.key)}'` } })
+        : saver.run(operation, signal)),
+    };
+    meanwhile = () => Promise.resolve();
+    expect(await saveDownload(stage("notes.txt"), journal.bindings, refusing)).toBe(
+      `The page downloaded "notes.txt", but it was not saved: No space left on device: '${join(downloads, "notes.txt")}'.`,
+    );
+    // Nor is its user's denial: no other name is asked about.
+    answer = "deny";
+    expect(await saveDownload(stage("notes.txt"), journal.bindings, saver)).toContain("The user denied this change on this computer.");
+    expect(asked.length).toBe(3);
   });
 
   it("saves none once a hundred files of its name are there: none is replaced, and nobody is asked", async () => {

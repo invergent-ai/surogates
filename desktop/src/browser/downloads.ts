@@ -83,6 +83,8 @@ export function savedName(suggested: string): string {
 const COULD_NOT = "this computer could not save it";
 // And where its chat was deleted meanwhile.
 const STOPPED = "its chat was deleted";
+// And where a link is at Downloads.
+const LINKED = "Downloads in the chat's folder is a link, and nothing is saved through one";
 // What stops no save: a save not told what would stop it.
 const NEVER = new AbortController().signal;
 /** What the agent is told of a download that came as no download this computer saves: not even its name is taken from it. */
@@ -165,19 +167,27 @@ async function save(download: StagedDownload, bindings: Pick<Bindings, "get">, s
       const why = strerror((error as NodeJS.ErrnoException | null)?.code);
       return notSaved(why === null ? COULD_NOT : `the file the browser kept could not be read (${why})`);
     }
-    // Where the chat's downloads go, as its file host resolves it: a link there that leads out of the folder is refused.
-    const into = await saver.run(op("resolve", { path: posix.join(binding.folder, DOWNLOADS) }), signal);
-    if ("error" in into) return notSaved(into.error.message);
-    // Something there that is no folder holds no download: said before anyone is asked, and before any write is tried.
-    const there = await saver.run(op("stat", { key: into.ok }), signal);
-    if ("error" in there) return notSaved(there.error.message);
-    if (there.ok !== null && (there.ok as { is_dir?: unknown }).is_dir !== true) return notSaved(osError("EEXIST", String(into.ok)).refusal.message);
+    // Where the chat's downloads go: the folder's own Downloads, there or still to be made. Why nothing is saved
+    // there now, otherwise: a link at it, wherever it leads (out of the folder, in its file host's words; within
+    // it, to the folder's top or to a folder whose files run by themselves), or something that is no folder.
+    const own = posix.join(binding.folder, DOWNLOADS);
+    const unfit = async (): Promise<string | null> => {
+      const into = await saver.run(op("resolve", { path: own }), signal);
+      if ("error" in into) return into.error.message;
+      if (into.ok !== own) return LINKED;
+      const there = await saver.run(op("stat", { key: own }), signal);
+      if ("error" in there) return there.error.message;
+      return there.ok !== null && (there.ok as { is_dir?: unknown }).is_dir !== true ? osError("EEXIST", own).refusal.message : null;
+    };
+    // Said before anyone is asked, and before any write is tried.
+    const why = await unfit();
+    if (why !== null) return notSaved(why);
     const name = savedName(download.name);
     let asked = false;
     // Why the file host refused the last name it would not take.
     let refused: string | null = null;
     for (let n = 1; n <= NAMES; n += 1) {
-      const key = posix.join(String(into.ok), numbered(name, n));
+      const key = posix.join(own, numbered(name, n));
       // A name that resolves elsewhere, as a link at it does, to anywhere, is passed over: never written through.
       const resolved = await saver.run(op("resolve", { path: key }), signal);
       if ("error" in resolved) refused = resolved.error.message;
@@ -191,18 +201,20 @@ async function save(download: StagedDownload, bindings: Pick<Bindings, "get">, s
       const denied = asked ? null : await saver.admit(write, signal, download.user ? "user" : "page");
       // Told to stop while it asked, or before: nobody answered, and nothing is written, in a chat that works freely either.
       if (signal.aborted) return notSaved(STOPPED);
-      const outcome = denied ?? (await saver.run(write, signal));
+      // Denied, or not answered: no other name is asked about.
+      if (denied !== null) return notSaved("error" in denied ? denied.error.message : COULD_NOT);
       asked = true;
-      if ("error" in outcome && outcome.error.code === "EEXIST") {
-        // Made there since the look, by another writer: left as it is, and the next name is tried. Where nothing
-        // is at the name, it is not the name that is taken, as when its folder became a file: no other is tried.
-        const taken = await saver.run(op("stat", { key }), signal);
-        if ("error" in taken || taken.ok === null) return notSaved(outcome.error.message);
-        refused = outcome.error.message;
-        continue;
-      }
-      if ("error" in outcome) return notSaved(outcome.error.message);
-      return `${said}. It is saved in the chat's folder as ${key.slice(binding.folder.length + 1)}.`;
+      const outcome = await saver.run(write, signal);
+      if (!("error" in outcome)) return `${said}. It is saved in the chat's folder as ${key.slice(binding.folder.length + 1)}.`;
+      // Refused. What is there now says whether another name may do: nothing is written through or over any of it.
+      // Downloads itself, made a link or a file since the look, ends the save.
+      const since = await unfit();
+      if (since !== null) return notSaved(since);
+      // A link made at the name since, or a file or a folder: left as it is, and the next name is tried.
+      const now = await saver.run(op("resolve", { path: key }), signal);
+      const taken = "error" in now || now.ok !== key ? null : await saver.run(op("stat", { key }), signal);
+      if (taken !== null && ("error" in taken || taken.ok === null)) return notSaved(outcome.error.message);
+      refused = outcome.error.message;
     }
     return notSaved(refused ?? `the chat's folder has ${NAMES} files of that name already`);
   } catch {
