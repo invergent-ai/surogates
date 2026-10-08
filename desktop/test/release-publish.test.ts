@@ -4,7 +4,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, type KeyObject, randomBytes, verify } from "node:crypto";
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -100,6 +100,18 @@ describe("the desktop's release manifest", () => {
     expect(publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: secret(generateKeyPairSync("ed25519").privateKey) })).toMatchObject({
       status: 1, stderr: "publish.sh: DESKTOP_RELEASE_KEY is not a key whose public half install.sh trusts\n",
     });
+  });
+
+  it("reads no key of an install.sh that does not end with the line that runs it: with that line left in, the install script would run where the release key is", () => {
+    // Its last line blank, as an editor leaves one, and in the place of the line that runs it, a mark of the test's own.
+    const script = trusting().replace(/\nmain "\$@"\n$/, `\ntouch '${join(dir, "ran")}'\n\n`);
+    expect(script.endsWith(`}\n\ntouch '${join(dir, "ran")}'\n\n`)).toBe(true);
+    writeFileSync(join(dir, "release", "install.sh"), script);
+    expect(publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE })).toMatchObject({
+      status: 1, stdout: "", stderr: 'publish.sh: install.sh does not end with the line that runs it (main "$@"): its release keys are not read\n',
+    });
+    expect(existsSync(join(dir, "ran"))).toBe(false);
+    expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
   });
 
   it("lists, in the repository, one release key: the public half in install.sh", () => {

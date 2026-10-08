@@ -34,7 +34,10 @@ case "$VERB" in
     : "${DESKTOP_RELEASE_KEY:?}"
     [ -f "$OUT/$TARBALL" ] || fail "$OUT/$TARBALL is not there: run scripts/package.sh first"
     # The release keys the installed apps and the install script trust: install.sh's RELEASE_KEYS,
-    # read as install.sh sets them, from its functions alone (its last line runs it).
+    # read as install.sh sets them, from its functions alone: its last line, which runs it, is left
+    # out. Were its last line any other, as after a blank line at its end, the line that runs it
+    # would be left in, and the install script would run here, where the release key is.
+    [ "$(tail -n 1 "$HERE/install.sh")" = 'main "$@"' ] || fail 'install.sh does not end with the line that runs it (main "$@"): its release keys are not read'
     public="$(openssl pkey -pubout -in <(printf '%s\n' "$DESKTOP_RELEASE_KEY"))"
     bash -c '. <(sed "\$d" "$1") && settings && for key in "${RELEASE_KEYS[@]}"; do [ "$key" != "$2" ] || exit 0; done; exit 1' _ "$HERE/install.sh" "$public" \
       || fail "DESKTOP_RELEASE_KEY is not a key whose public half install.sh trusts"
