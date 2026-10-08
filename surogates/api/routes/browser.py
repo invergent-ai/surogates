@@ -19,6 +19,7 @@ from surogates.browser.cdp import CdpClient
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.control import AcquireOutcome
 from surogates.browser.shell import ShellSession
+from surogates.devices.binding import device_of
 from surogates.session.events import EventType
 from surogates.tenant.auth.middleware import (
     authenticate_websocket_tenant,
@@ -35,6 +36,8 @@ class BrowserStateResponse(BaseModel):
     status: str
     control_owner: str | None
     live_view_path: str
+    # On the user's computer, in a local-folder chat: no live view, and no lease to take.
+    computer: bool = False
 
 
 class BrowserControlRequest(BaseModel):
@@ -163,6 +166,46 @@ async def _require_session_agent(
         raise HTTPException(status_code=404, detail="No browser for session")
 
 
+# What tells a local-folder chat's pane of its browser on the user's computer (surogates.devices.browser).
+_COMPUTER_BROWSER = [EventType.BROWSER_PROVISIONED, EventType.BROWSER_DESTROYED, EventType.BROWSER_UNAVAILABLE]
+
+
+async def _on_computer(app_state: Any, session_id: UUID, tenant: TenantContext) -> bool:
+    """Whether the session is a local-folder chat, whose browser is on the user's computer; 404 for another org's.
+
+    The server keeps no browser, no live view and no lease for it: the desktop holds it.
+    """
+    store = getattr(app_state, "session_store", None)
+    if store is None:
+        return False
+    try:
+        session = await store.get_session(session_id)
+    except Exception:
+        return False
+    if device_of(session.config) is None:
+        return False
+    if session.org_id != tenant.org_id:
+        raise HTTPException(status_code=404, detail="No browser for session")
+    return True
+
+
+async def _computer_browser_state(app_state: Any, session_id: UUID) -> BrowserStateResponse:
+    """A local-folder chat's browser, as its last browser event says it.
+
+    The browser is on the user's computer, which the server does not watch: a tab the
+    user closed there is still open here until the agent's next browser call says.
+    """
+    events = await app_state.session_store.get_events(session_id, types=_COMPUTER_BROWSER)
+    last = events[-1].type if events else None
+    if last == EventType.BROWSER_PROVISIONED.value:
+        status = "live"
+    elif last == EventType.BROWSER_UNAVAILABLE.value:
+        status = "unavailable"
+    else:
+        raise HTTPException(status_code=404, detail="No browser for session")
+    return BrowserStateResponse(status=status, control_owner=None, live_view_path="", computer=True)
+
+
 @router.get(
     "/api/sessions/{session_id}/browser/state",
     response_model=BrowserStateResponse,
@@ -180,6 +223,8 @@ async def get_browser_state(
     control = request.app.state.browser_control
 
     await _require_session_agent(request.app.state, session_id, tenant)
+    if await _on_computer(request.app.state, session_id, tenant):
+        return await _computer_browser_state(request.app.state, session_id)
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
@@ -222,11 +267,9 @@ async def post_browser_control(
         )
 
     await _require_session_agent(request.app.state, session_id, tenant)
-    resolved = await resolver.resolve(
-        str(session_id),
-        expected_org_id=str(tenant.org_id),
-    )
-    if resolved is None:
+    # A local-folder chat's browser is on the user's computer, which holds its pause.
+    computer = await _on_computer(request.app.state, session_id, tenant)
+    if not computer and await resolver.resolve(str(session_id), expected_org_id=str(tenant.org_id)) is None:
         raise HTTPException(status_code=404, detail="No browser for session")
 
     owner_user_id = body.owner_user_id if _route_prefix(request) == "/v1/api" else None
@@ -237,6 +280,17 @@ async def post_browser_control(
             status_code=403,
             detail="Browser control requires a user identity.",
         )
+
+    if computer:
+        # Told to the chat as the cloud's are, its user having taken it over or handed it back in the
+        # desktop: there is no lease here. Handed back, its agent goes on.
+        sid = str(session_id)
+        if body.action == "acquire":
+            await emit(sid, EventType.BROWSER_CONTROL_GRANTED, {"session_id": sid, "owner_user_id": owner_user_id, "computer": True})
+            return {"outcome": "granted", "owner_user_id": owner_user_id}
+        await emit(sid, EventType.BROWSER_CONTROL_RETURNED, {"session_id": sid, "released_by": owner_user_id, "computer": True})
+        await wake(sid)
+        return {"outcome": "released"}
 
     if body.action == "acquire":
         outcome, entry = await control.acquire(str(session_id), owner_user_id)

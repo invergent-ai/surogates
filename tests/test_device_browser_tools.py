@@ -10,10 +10,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from surogates.browser.control import paused_by_user_result
 from surogates.devices.browser import LOCATE, NO_BROWSER, SNAPSHOT
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.tools.builtin import browser
 from surogates.tools.workspace_io import LocalWorkspaceIO
+from surogates.session.events import EventType
 from tests.fake_laptop import InProcessRunner
 
 FRAMES = {
@@ -56,6 +58,17 @@ class NoPool:
         self.asked.append("destroy")
 
 
+class Events:
+    """The session's event log in a test: what each tool told the session's pane."""
+
+    def __init__(self) -> None:
+        self.emitted: list[tuple[UUID, EventType, dict[str, Any]]] = []
+
+    async def emit_event(self, session_id: UUID, event_type: EventType, data: dict[str, Any]) -> int:
+        self.emitted.append((session_id, event_type, data))
+        return len(self.emitted)
+
+
 @pytest.fixture()
 def computer(tmp_path):
     folder = (tmp_path / "laptop").resolve()
@@ -78,6 +91,7 @@ def computer(tmp_path):
                     "browser": {"profile_id": str(uuid4())},
                 },
                 "storage": SimpleNamespace(write=_no_cloud_write),
+                "session_store": Events(),
             },
         )
 
@@ -161,6 +175,9 @@ async def test_closing_closes_only_the_sessions_tab_on_the_computer(computer) ->
     # Not the page failing: the computer's access ended, and no retry brings it back.
     ({"type": "revoked", "message": "Local access to this computer was revoked"},
      {"error": "revoked", "detail": "Local access to this computer was revoked"}),
+    # Its user took the browser over: every browser tool answers as the cloud's do while a user holds its browser.
+    ({"type": "paused_by_user", "message": "The user took over the agent's browser on this computer"},
+     json.loads(paused_by_user_result())),
 ])
 async def test_what_the_computer_refuses_is_the_tools_result(computer, error, result) -> None:
     for handler, args in [
@@ -171,6 +188,53 @@ async def test_what_the_computer_refuses_is_the_tools_result(computer, error, re
     ]:
         rig = computer({"error": error})
         assert json.loads(await handler(args, **rig.kwargs)) == result
+
+
+async def test_the_sessions_pane_hears_its_tab_on_the_computer_opened_and_closed(computer) -> None:
+    rig = computer(
+        {"ok": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []}},
+        {"ok": {"url": "https://example.com/next", "title": "Next", "opened": False, "notices": []}},
+        {"ok": {"closed": True}},
+        {"ok": {"closed": False}},
+    )
+    session = rig.kwargs["session_id"]
+    told = {"session_id": str(session), "computer": True}
+
+    await browser._browser_navigate_handler({"url": "https://example.com", "snapshot": False}, **rig.kwargs)
+    # In the tab it has: nothing new for the pane.
+    await browser._browser_navigate_handler({"url": "https://example.com/next", "snapshot": False}, **rig.kwargs)
+    await browser._browser_close_handler({}, **rig.kwargs)
+    # No tab to close: nothing closed.
+    await browser._browser_close_handler({}, **rig.kwargs)
+
+    assert rig.kwargs["session_store"].emitted == [
+        (session, EventType.BROWSER_PROVISIONED, told), (session, EventType.BROWSER_DESTROYED, told),
+    ]
+
+
+async def test_the_sessions_pane_hears_there_is_no_browser_on_the_computer(computer) -> None:
+    rig = computer({"error": {"type": "no_browser", "message": "none"}}, {"error": {"type": "denied", "message": "no"}})
+    session = rig.kwargs["session_id"]
+
+    await browser._browser_navigate_handler({"url": "https://example.com"}, **rig.kwargs)
+    # A denial is the agent's to hear, not the pane's.
+    await browser._browser_get_state_handler({}, **rig.kwargs)
+
+    assert rig.kwargs["session_store"].emitted == [
+        (session, EventType.BROWSER_UNAVAILABLE, {"session_id": str(session), "computer": True}),
+    ]
+
+
+async def test_a_pane_that_cannot_be_told_leaves_the_browser_call_answered(computer) -> None:
+    rig = computer({"ok": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []}})
+
+    async def broken(*args: Any) -> int:
+        raise RuntimeError("the event log is away")
+
+    rig.kwargs["session_store"].emit_event = broken
+    body = json.loads(await browser._browser_navigate_handler({"url": "https://example.com", "snapshot": False}, **rig.kwargs))
+
+    assert body["title"] == "Example"
 
 
 # Every browser tool, with arguments it takes: none may reach the cloud's browser pool for a local-folder chat.

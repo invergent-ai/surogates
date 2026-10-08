@@ -20,7 +20,7 @@ from surogates.browser.base import (
     browser_unavailable_result,
 )
 from surogates.browser.client import KernelBrowserClient
-from surogates.browser.control import BrowserControlStore
+from surogates.browser.control import BrowserControlStore, paused_by_user_result
 from surogates.browser.pool import BrowserPool
 from surogates.browser.serialize import render_markdown
 from surogates.devices.browser import (
@@ -28,6 +28,7 @@ from surogates.devices.browser import (
     DeviceEndpoint,
     answering_refusals,
     forget_snapshot_cache,
+    tell_pane,
 )
 from surogates.devices.browser import snapshot_cache as device_snapshot_cache
 from surogates.devices.workspace import DeviceWorkspaceIO
@@ -72,24 +73,12 @@ def build_browser_screenshot_key(
         relative_path,
     )
 from surogates.devices.workspace import DeviceOperationError
+from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
 logger = logging.getLogger(__name__)
-
-
-def _paused_by_user_result() -> str:
-    return json.dumps(
-        {
-            "error": "paused_by_user",
-            "guidance": (
-                "The user has taken control of the browser. Wait for them to "
-                "finish before continuing; every browser_* tool will return "
-                "this error until they release control."
-            ),
-        }
-    )
 
 
 # A local-folder chat's browser is on the user's computer, reached only through its tool call's own
@@ -126,7 +115,7 @@ async def _resolve_session_browser(
 
     sid = str(session_id)
     if browser_control is not None and await browser_control.get(sid) is not None:
-        return _paused_by_user_result()
+        return paused_by_user_result()
 
     try:
         storage_bucket = (session_config or {}).get("storage_bucket")
@@ -325,6 +314,7 @@ async def _browser_navigate_handler(
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
+    session_store: Any = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -368,6 +358,9 @@ async def _browser_navigate_handler(
     except RuntimeError as exc:
         return json.dumps({"error": "navigate_failed", "detail": str(exc)})
 
+    # A tab of the session's opened on the user's computer: its pane shows that the browser is open there.
+    if getattr(client, "opened", False):
+        await tell_pane(session_store, session_id, EventType.BROWSER_PROVISIONED)
     payload: dict[str, Any] = _noted({"url": result["url"], "title": result["title"]}, client)
     if snapshot is None:
         payload["snapshot_error"] = (
@@ -583,12 +576,15 @@ async def _browser_close_handler(
     browser_control: BrowserControlStore | None = None,
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
+    session_store: Any = None,
     **_: Any,
 ) -> str:
     if isinstance(workspace_io, DeviceWorkspaceIO) and session_id is not None:
         # Its tab on the computer, and the popups it opened; the browser stays for the other sessions.
         closed = await DeviceBrowserClient(workspace_io.runner).close_tab()
         forget_snapshot_cache(str(session_id))
+        if closed:
+            await tell_pane(session_store, session_id, EventType.BROWSER_DESTROYED)
         return json.dumps({"closed": closed})
     if _on_a_computer(session_config):
         return browser_unavailable_result(_NO_COMPUTER)
@@ -598,7 +594,7 @@ async def _browser_close_handler(
 
     sid = str(session_id)
     if browser_control is not None and await browser_control.get(sid) is not None:
-        return _paused_by_user_result()
+        return paused_by_user_result()
 
     await browser_pool.destroy_for_session(sid)
     return json.dumps({"closed": True})

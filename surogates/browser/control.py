@@ -45,6 +45,20 @@ class ControlEntry:
         )
 
 
+def paused_by_user_result() -> str:
+    """A browser tool's result while its user holds the browser: the cloud's live view, or a computer's own take-over."""
+    return json.dumps(
+        {
+            "error": "paused_by_user",
+            "guidance": (
+                "The user has taken control of the browser. Wait for them to "
+                "finish before continuing; every browser_* tool will return "
+                "this error until they release control."
+            ),
+        }
+    )
+
+
 class AcquireOutcome(str, Enum):
     """Outcome of trying to acquire live browser control."""
 

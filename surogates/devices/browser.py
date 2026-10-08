@@ -33,7 +33,11 @@ The scripts browser.observe takes, each a page function shipped with the app:
                                         or {covered: "<tag#id.class>"}
 
 notices are what the page did that the agent could not see happen, such as a
-download the computer did not keep.  Errors:
+file it asked for.  opened is whether the navigation opened the
+session's tab: its first, or one after its last closed.  The session's browser pane
+hears of it (browser.provisioned), of a close that closed one (browser.destroyed) and
+of a computer with no supported browser (browser.unavailable), each with
+``computer: true``.  Errors:
 
   {"type": "browser", "message"}     the page or the browser failed: a RuntimeError,
                                      which the handlers report as their own failure
@@ -41,6 +45,8 @@ download the computer did not keep.  Errors:
   {"type": "no_browser", "message"}  no supported browser on this computer
   {"type": "unsupported", ...}       an app that has no browser yet
   {"type": "revoked", "message"}     the computer's access ended
+  {"type": "paused_by_user", ...}    its user took the browser over, for the chat, until
+                                     they hand it back in the desktop's own confirmation
   any other type                     DeviceOperationError(message), which the handlers
                                      report as their own failure too
 
@@ -55,17 +61,23 @@ from __future__ import annotations
 import base64
 import functools
 import json
+import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Self
+from uuid import UUID
 
 from surogates.browser.client import BrowserClientBase
+from surogates.browser.control import paused_by_user_result
 from surogates.devices.workspace import (
     MAX_MESSAGE_CHARS,
     DeviceOperationError,
     OperationRunner,
 )
+from surogates.session.events import EventType
+
+logger = logging.getLogger(__name__)
 
 SNAPSHOT = "snapshot@1"
 LOCATE = "locate@1"
@@ -88,16 +100,35 @@ class BrowserRefusal(Exception):
     def __init__(self, result: str) -> None:
         super().__init__(result)
         self.result = result
+        self.error = json.loads(result).get("error")
+
+
+async def tell_pane(session_store: Any, session_id: Any, event: EventType) -> None:
+    """Tell the session's browser pane of its browser on the user's computer.
+
+    The browser call is answered whether or not the pane hears: what it did on the computer is done.
+    """
+    if session_store is None or session_id is None:
+        return
+    try:
+        await session_store.emit_event(UUID(str(session_id)), event, {"session_id": str(session_id), "computer": True})
+    except Exception:
+        logger.warning("Could not tell the browser pane of session %s of %s", session_id, event.value, exc_info=True)
 
 
 def answering_refusals(handler: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
-    """A browser tool's handler that answers the computer's refusals as its result."""
+    """A browser tool's handler that answers the computer's refusals as its result.
+
+    A computer with no supported browser is said in the session's browser pane too.
+    """
 
     @functools.wraps(handler)
     async def answered(arguments: dict[str, Any], **kwargs: Any) -> str:
         try:
             return await handler(arguments, **kwargs)
         except BrowserRefusal as refusal:
+            if refusal.error == "no_browser":
+                await tell_pane(kwargs.get("session_store"), kwargs.get("session_id"), EventType.BROWSER_UNAVAILABLE)
             return refusal.result
 
     return answered
@@ -149,6 +180,8 @@ class DeviceBrowserClient(BrowserClientBase):
         self._runner = runner
         # What the page did that the agent could not see happen, in the order the computer said.
         self.notices: list[str] = []
+        # Whether the last navigation opened the session's tab on the computer.
+        self.opened = False
 
     async def __aenter__(self) -> Self:
         return self
@@ -164,6 +197,7 @@ class DeviceBrowserClient(BrowserClientBase):
         self._invalidate_snapshot_cache()
         if not isinstance(value, dict) or not all(isinstance(value.get(key, ""), str) for key in ("url", "title")):
             raise DeviceOperationError("The computer returned an invalid navigation")
+        self.opened = value.get("opened") is True
         return {"url": value.get("url", url), "title": value.get("title", "")}
 
     async def evaluate(self, code: str) -> Any:
@@ -313,6 +347,8 @@ class DeviceBrowserClient(BrowserClientBase):
                 raise BrowserRefusal(json.dumps({"error": "unsupported", "detail": OLD_APP}))
             if refused == "revoked":
                 raise BrowserRefusal(json.dumps({"error": "revoked", "detail": message}))
+            if refused == "paused_by_user":
+                raise BrowserRefusal(paused_by_user_result())
             raise DeviceOperationError(message)
         if "ok" not in outcome:
             raise DeviceOperationError(f"The computer returned no result for {kind}")

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -78,6 +80,23 @@ class StubControl:
             return False
         self.flag.pop(session_id, None)
         return True
+
+
+class StubSessions:
+    """The session store in a test: each session as its row has it, and the types of its browser events in order."""
+
+    def __init__(self) -> None:
+        self.sessions: dict[UUID, Any] = {}
+        self.events: dict[UUID, list[str]] = {}
+
+    async def get_session(self, session_id: UUID) -> Any:
+        if session_id not in self.sessions:
+            raise LookupError(session_id)
+        return self.sessions[session_id]
+
+    async def get_events(self, session_id: UUID, *, types: list[Any] | None = None, **_: Any) -> list[Any]:
+        wanted = {kind.value for kind in types or []}
+        return [SimpleNamespace(type=kind) for kind in self.events.get(session_id, []) if kind in wanted]
 
 
 @pytest.fixture()
@@ -183,6 +202,52 @@ class TestStateEndpoint:
             response = await client.get(f"/v1/sessions/{sid}/browser/state")
 
         assert response.status_code == 404
+
+    async def test_a_local_folder_chats_browser_is_as_its_last_browser_event_says(self, app_factory) -> None:
+        build, _resolver, _control = app_factory
+        sid = uuid4()
+        store = StubSessions()
+        store.sessions[sid] = SimpleNamespace(
+            org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
+        )
+        app = build()
+        app.state.session_store = store
+        on_computer = {"control_owner": None, "live_view_path": "", "computer": True}
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            async def state() -> httpx.Response:
+                return await client.get(f"/v1/sessions/{sid}/browser/state")
+
+            # Its agent has not opened a page on the computer yet.
+            assert (await state()).status_code == 404
+            store.events[sid] = ["browser.provisioned"]
+            assert (await state()).json() == {"status": "live", **on_computer}
+            store.events[sid].append("browser.unavailable")
+            assert (await state()).json() == {"status": "unavailable", **on_computer}
+            store.events[sid] += ["browser.provisioned", "browser.destroyed"]
+            assert (await state()).status_code == 404
+
+        # Another organisation's chat is not known here.
+        store.events[sid] = ["browser.provisioned"]
+        other = build(org_id=ORG_2)
+        other.state.session_store = store
+        async with AsyncClient(transport=ASGITransport(app=other), base_url="http://test") as client:
+            assert (await client.get(f"/v1/sessions/{sid}/browser/state")).status_code == 404
+
+    async def test_a_chat_in_the_cloud_is_answered_from_its_browser_as_before(self, app_factory) -> None:
+        build, resolver, _control = app_factory
+        sid = uuid4()
+        store = StubSessions()
+        store.sessions[sid] = SimpleNamespace(org_id=ORG_1, agent_id="agent", config={})
+        store.events[sid] = ["browser.provisioned"]
+        resolver.entries[str(sid)] = _resolved(str(sid))
+        app = build()
+        app.state.session_store = store
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            body = (await client.get(f"/v1/sessions/{sid}/browser/state")).json()
+
+        assert body == {"status": "live", "control_owner": None, "live_view_path": f"/v1/sessions/{sid}/browser/live/", "computer": False}
 
 
 class TestControlEndpoint:
@@ -347,6 +412,47 @@ class TestControlEndpoint:
             )
 
         assert response.status_code == 400
+
+    async def test_a_local_folder_chats_take_over_and_hand_back_are_told_to_the_chat_and_the_hand_back_wakes_it(
+        self, app_factory,
+    ) -> None:
+        build, _resolver, _control = app_factory
+        sid = uuid4()
+        store = StubSessions()
+        store.sessions[sid] = SimpleNamespace(
+            org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
+        )
+        events: list[tuple[str, str, dict]] = []
+        wakes: list[str] = []
+
+        def built(org_id: UUID = ORG_1) -> FastAPI:
+            app = build(org_id=org_id)
+            app.state.session_store = store
+            app.state.session_event_emitter = _event_recorder(events)
+            app.state.session_wake = _wake_recorder(wakes)
+            return app
+
+        async with AsyncClient(transport=ASGITransport(app=built()), base_url="http://test") as client:
+            async def control(action: str) -> httpx.Response:
+                return await client.post(f"/v1/sessions/{sid}/browser/control", json={"action": action})
+
+            # The pause is the user's computer's: no browser here and no lease, so each is told as it comes.
+            assert (await control("acquire")).json() == {"outcome": "granted", "owner_user_id": str(USER_1)}
+            assert wakes == []
+            assert (await control("release")).json() == {"outcome": "released"}
+
+        assert events == [
+            (str(sid), "browser.control_granted", {"session_id": str(sid), "owner_user_id": str(USER_1), "computer": True}),
+            (str(sid), "browser.control_returned", {"session_id": str(sid), "released_by": str(USER_1), "computer": True}),
+        ]
+        # Handed back: its agent goes on, as it does once a user hands the cloud's browser back.
+        assert wakes == [str(sid)]
+
+        # Another organisation's chat is not known here.
+        async with AsyncClient(transport=ASGITransport(app=built(ORG_2)), base_url="http://test") as client:
+            response = await client.post(f"/v1/sessions/{sid}/browser/control", json={"action": "release"})
+        assert response.status_code == 404
+        assert len(events) == 2
 
 
 class _StubBrowserPool:
