@@ -117,6 +117,16 @@ describe("the browser host's client", () => {
     expect(await first).toEqual({ ok: { url: "https://example.com/", title: "Example" } });
   });
 
+  it("closes nothing, and starts no host, for a close where no host runs", async () => {
+    const hosts: FakeHost[] = [];
+    const client = new BrowserClient(() => {
+      hosts.push(new FakeHost());
+      return hosts.at(-1)!;
+    });
+    expect(await client.perform(LAUNCH, operation("op-1", "browser.close", {}), new AbortController().signal)).toEqual({ ok: { closed: false } });
+    expect(hosts).toHaveLength(0);
+  });
+
   it("answers a cancel at once and tells the host", async () => {
     const host = new FakeHost();
     const client = new BrowserClient(() => host);

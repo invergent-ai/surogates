@@ -92,6 +92,8 @@ export class BrowserClient {
   /** One browser operation of a session's, in its tab. A cancel is answered at once; the host is told. Never rejects. */
   perform(launch: Launch, operation: Operation, signal: AbortSignal): Promise<Outcome> {
     if (signal.aborted) return Promise.resolve(CANCELLED);
+    // No host, no tab: a close has nothing to close, and starts none.
+    if (operation.kind === "browser.close" && !this.host && !this.stopping) return Promise.resolve({ ok: { closed: false } });
     return this.ask(this.pending, operation.id, {
       type: "op", id: operation.id, launch, root: operation.sessionId, session: operation.callingSessionId, kind: operation.kind, args: operation.args,
     }, signal);
