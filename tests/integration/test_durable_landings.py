@@ -99,11 +99,12 @@ async def test_a_landings_row_is_its_saga_written_as_it_runs(api, monkeypatch, p
 
     monkeypatch.setattr(landing_module, "save_landing", watched)
     await ends(api, pool, thread)
-    # Before the first apply, the steps as fixed; then each step's state as it changes.
-    assert seen[:2] == [("running", ["committed"]), ("running", ["committed", "pending", "pending"])]
-    # The record, fixed before its first try.
-    assert ("running", ["committed", "committed", "committed", "pending"]) in seen
-    assert seen[-1][0] == "completed"
+    # Its steps are written whole, so not at each: once fixed, before the first apply; with the record, before its first try; and at its end.
+    assert seen == [
+        ("running", ["committed", "pending", "pending"]),
+        ("running", ["committed", "committed", "committed", "pending"]),
+        ("completed", ["committed", "committed", "committed", "committed"]),
+    ]
     [row] = await rows(api, thread)
     assert (row.kind, row.saga_state, str(row.workstream_id)) == ("landing", "completed", thread.config["workstream_id"])
     assert [(s["tool_name"], s["state"]) for s in row.steps] == [
@@ -113,6 +114,38 @@ async def test_a_landings_row_is_its_saga_written_as_it_runs(api, monkeypatch, p
     assert sorted((f["path"], f["merged"]) for f in row.files) == [("Report.docx", True), ("a.md", True)]
     assert row.commit == git(pods.project / "_history", "rev-parse", "refs/heads/main")
     assert git(pods.project / "_history", "log", "-1", "--format=%(trailers:key=Surogate-Saga,valueonly)", row.commit) == row.saga_id
+
+
+async def test_a_landing_of_a_few_hundred_files_writes_its_steps_a_handful_of_times(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    files = 300
+    await edited(pool, thread, f"mkdir -p 'an archive' && for i in $(seq 1 {files}); do echo $i > \"an archive/a file with a long name $i.md\"; done")
+    save, touch = rows_module.save_landing, rows_module.touch_landing
+    written, touched = [], []
+
+    async def sized(session_factory, row, saga, **kwargs):
+        written.append(len(json.dumps(saga.to_dict()["steps"])))
+        await save(session_factory, row, saga, **kwargs)
+
+    async def counted(session_factory, row):
+        touched.append(row)
+        await touch(session_factory, row)
+
+    monkeypatch.setattr(landing_module, "save_landing", sized)
+    monkeypatch.setattr(landing_module, "touch_landing", counted)
+    began = time.monotonic()
+    await ends(api, pool, thread, settings=SimpleNamespace(default_step_timeout=30, default_max_retries=0, retry_delay=0))
+    took = time.monotonic() - began
+    [row] = await rows(api, thread)
+    assert row.saga_state == "completed" and len(row.files) == files
+    # Three writes whatever its size, and one more every few seconds: never one a file,
+    # which made a landing's cost grow with the square of its files.
+    most = 3 + took / landing_module._ROW_EVERY
+    assert len(written) <= most and sum(written) <= most * written[-1], (len(written), took)
+    # Each try of a step still marks the row alive, for another lock holder's fence.
+    assert len(touched) + len(written) >= files + 2
 
 
 async def test_a_thread_lands_over_three_turns_in_three_pods(api, monkeypatch, pods):
@@ -236,6 +269,18 @@ async def test_running_landings_are_the_projects_own_oldest_first_with_how_long_
     assert quiet < 10
 
 
+#: How a landing's row stands when its worker dies.  Its steps are written at
+#: most every few seconds, so a quick landing's row is ``behind``: as its steps
+#: were fixed.  A slow one's is, at best, ``exact``: written at the try it died in.
+ROWS = ["behind", "exact"]
+
+
+def rows_stand(monkeypatch, how: str) -> None:
+    if how == "exact":
+        monkeypatch.setattr(landing_module, "_ROW_EVERY", 0)
+        monkeypatch.setattr(landing_module, "_ROW_SHARE", 0)
+
+
 async def a_landing_killed(api, monkeypatch, pool, thread, *, after: str) -> None:
     """*thread*'s landing as a SIGKILL leaves it, once the pod has answered *after*: nothing more written, nothing put back.
 
@@ -275,7 +320,9 @@ async def a_landing_killed(api, monkeypatch, pool, thread, *, after: str) -> Non
         await db.commit()
 
 
-async def test_a_worker_killed_after_two_applies_is_put_back_by_the_next_landing(api, monkeypatch, pods):
+@pytest.mark.parametrize("row_is", ROWS)
+async def test_a_worker_killed_after_two_applies_is_put_back_by_the_next_landing(api, monkeypatch, pods, row_is):
+    rows_stand(monkeypatch, row_is)
     master = await master_of(api, await create(api))
     first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
     pool = SandboxPool(pods)
@@ -283,9 +330,12 @@ async def test_a_worker_killed_after_two_applies_is_put_back_by_the_next_landing
     await a_landing_killed(api, monkeypatch, pool, first, after="apply b.md")
     assert pods.real_names() == ["Report.docx", "a.md", "b.md", "notes.txt"]  # half landed
     [row] = await rows(api, first)
-    # b.md was written, and the row still has its apply pending: the kill came before its state was.
+    # Two files were written, and the row shows neither done: at best a.md done and b.md under way.
     assert row.saga_state == "running"
-    assert [s["state"] for s in row.steps if s["tool_name"] == "history.apply"] == ["committed", "pending", "pending", "pending"]
+    assert [s["state"] for s in row.steps if s["tool_name"] == "history.apply"] == {
+        "behind": ["pending", "pending", "pending", "pending"],
+        "exact": ["committed", "executing", "pending", "pending"],
+    }[row_is]
 
     await edited(pool, second, "echo by B > B.md")
     started = time.monotonic()
@@ -299,6 +349,33 @@ async def test_a_worker_killed_after_two_applies_is_put_back_by_the_next_landing
     assert git(pods.project / "_history", "ls-tree", "--name-only", f"refs/heads/threads/{first.id}").splitlines() == [
         "Report.docx", "a.md", "b.md", "c.md", "d.md", "notes.txt",
     ]
+
+
+@pytest.mark.parametrize("row_is", ROWS)
+async def test_a_recovery_from_a_row_behind_its_landing_puts_back_what_it_knows_and_writes_over_nothing(api, monkeypatch, pods, row_is):
+    rows_stand(monkeypatch, row_is)
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo a > a.md && mkdir -p made/deep && echo b > made/deep/b.md && echo more >> notes.txt && rm Report.docx")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply notes.txt")  # its deletion never ran
+    assert (pods.project / "made" / "deep" / "b.md").exists() and (pods.project / "Report.docx").exists()
+    (pods.project / "a.md").write_text("saved by you since\n")  # over the file the dead landing wrote
+
+    await edited(pool, second, "echo by B > B.md")
+    await ends(api, pool, second)
+    # Each file the dead landing wrote is as it was before it, and yours is never written over.
+    assert (pods.project / "notes.txt").read_text() == "v1 notes\n"
+    assert not (pods.project / "made" / "deep" / "b.md").exists()
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+    assert (pods.project / "a.md").read_text() == "saved by you since\n"
+    [row] = await rows(api, first)
+    if row_is == "exact":
+        # A row that shows the applies done knows the folders they made, and that your save is a conflict.
+        assert not (pods.project / "made").exists() and row.saga_state == "escalated"
+    else:
+        # A row behind them knows neither: the folders stay, empty, and the landing reads as put back.
+        assert list((pods.project / "made").rglob("*")) == [pods.project / "made" / "deep"] and row.saga_state == "compensated"
 
 
 async def test_a_worker_killed_right_after_its_push_is_completed_and_its_thread_told(api, monkeypatch, pods):
@@ -322,7 +399,9 @@ async def test_a_worker_killed_right_after_its_push_is_completed_and_its_thread_
     assert sorted((f["ref"], f["landing"]) for f in report["files"]) == [("a.md", "landed"), ("more.md", "landed")]
 
 
-async def test_a_worker_killed_while_putting_back_is_put_back_again_by_the_next_landing(api, monkeypatch, pods):
+@pytest.mark.parametrize("row_is", ROWS)
+async def test_a_worker_killed_while_putting_back_is_put_back_again_by_the_next_landing(api, monkeypatch, pods, row_is):
+    rows_stand(monkeypatch, row_is)
     master = await master_of(api, await create(api))
     first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
     pool = SandboxPool(pods)
@@ -362,17 +441,22 @@ async def test_a_worker_killed_while_putting_back_is_put_back_again_by_the_next_
         await db.commit()
     [row] = await rows(api, first)
     assert row.saga_state == "running"
+    # Never a put-back shown done that is not: at best the one done, and the one the kill cut off under way.
     assert [(s["tool_name"], s["arguments"].get("path"), s["state"]) for s in row.steps] == [
-        ("history.commit", None, "committed"), ("history.apply", "a.md", "compensating"),
-        ("history.apply", "notes.txt", "compensated"), ("history.apply", "z.md", "failed"),
+        ("history.commit", None, "committed"),
+        ("history.apply", "a.md", {"behind": "committed", "exact": "compensating"}[row_is]),
+        ("history.apply", "notes.txt", {"behind": "committed", "exact": "compensated"}[row_is]),
+        ("history.apply", "z.md", "failed"),
     ]
     assert pods.real_names() == ["Report.docx", "notes.txt"]
     assert (pods.project / "notes.txt").read_text() == "v1 notes\n"
 
     await edited(pool, second, "echo by B > B.md")
     await ends(api, pool, second)
-    # The put-back the kill cut off runs again, over a file already back; the one done does not run again.
-    assert put_back == [(str(first.id), "notes.txt"), (str(first.id), "a.md"), (str(second.id), "a.md")]
+    # The put-back the kill cut off runs again, over a file already back.  One the row shows done
+    # does not; one done that the row had not caught up with does, as safely.
+    again = {"behind": [(str(second.id), "notes.txt"), (str(second.id), "a.md")], "exact": [(str(second.id), "a.md")]}[row_is]
+    assert put_back == [(str(first.id), "notes.txt"), (str(first.id), "a.md"), *again]
     [row] = await rows(api, first)
     assert row.saga_state == "compensated"
     assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
@@ -519,7 +603,7 @@ async def test_a_put_back_goes_on_when_its_rows_cannot_be_written(api, monkeypat
     thread = await a_thread(api, "Draft A", master)
     pool = SandboxPool(pods)
     await edited(pool, thread, "echo a > a.md && echo b > b.md")
-    call, save, down = landing_module._call, landing_module.save_landing, []
+    call, down = landing_module._call, []
 
     async def b_fails_and_the_database_goes(sandbox_pool, owner, action, **arguments):
         if action == "apply" and arguments["path"] == "b.md":
@@ -527,13 +611,15 @@ async def test_a_put_back_goes_on_when_its_rows_cannot_be_written(api, monkeypat
             raise landing_module.LandingStepError("the pod's step timed out")
         return await call(sandbox_pool, owner, action, **arguments)
 
-    async def unwritten(*args, **kwargs):
+    async def unwritten(write, *args, **kwargs):
         if down:
             raise ConnectionError("the database is down")
-        await save(*args, **kwargs)
+        await write(*args, **kwargs)
 
     monkeypatch.setattr(landing_module, "_call", b_fails_and_the_database_goes)
-    monkeypatch.setattr(landing_module, "save_landing", unwritten)
+    # Neither its steps nor its mark that the landing is alive.
+    monkeypatch.setattr(landing_module, "save_landing", partial(unwritten, landing_module.save_landing))
+    monkeypatch.setattr(landing_module, "touch_landing", partial(unwritten, landing_module.touch_landing))
     await ends(api, pool, thread)
     # All or nothing all the same: a.md is put back, and the landing is rolled back, not escalated.
     assert pods.real_names() == ["Report.docx", "notes.txt"]
@@ -546,7 +632,7 @@ async def test_a_row_write_that_fails_once_never_fails_a_put_back_that_worked(ap
     thread = await a_thread(api, "Draft A", master)
     pool = SandboxPool(pods)
     await edited(pool, thread, "echo a > a.md && echo b > b.md")
-    call, compensate, save, putting_back = landing_module._call, landing_module.compensate_step, landing_module.save_landing, []
+    call, compensate, putting_back = landing_module._call, landing_module.compensate_step, []
 
     async def the_lock_goes_after_a(sandbox_pool, owner, action, **arguments):
         result = await call(sandbox_pool, owner, action, **arguments)
@@ -558,15 +644,17 @@ async def test_a_row_write_that_fails_once_never_fails_a_put_back_that_worked(ap
         putting_back.append(True)
         return await compensate(it, **kwargs)
 
-    async def fails_once(*args, **kwargs):
+    async def fails_once(write, *args, **kwargs):
         if putting_back == [True]:
             putting_back.append(False)
             raise ConnectionError("the database blinked")
-        await save(*args, **kwargs)
+        await write(*args, **kwargs)
 
     monkeypatch.setattr(landing_module, "_call", the_lock_goes_after_a)
     monkeypatch.setattr(landing_module, "compensate_step", watched)
-    monkeypatch.setattr(landing_module, "save_landing", fails_once)
+    # Whichever write comes next: the row's steps, or its mark that the landing is alive.
+    monkeypatch.setattr(landing_module, "save_landing", partial(fails_once, landing_module.save_landing))
+    monkeypatch.setattr(landing_module, "touch_landing", partial(fails_once, landing_module.touch_landing))
     await ends(api, pool, thread)
     assert pods.real_names() == ["Report.docx", "notes.txt"]
     [row] = await rows(api, thread)
@@ -575,12 +663,14 @@ async def test_a_row_write_that_fails_once_never_fails_a_put_back_that_worked(ap
     assert putting_back[:2] == [True, False]  # the write after a.md's put-back failed
 
 
-async def test_each_put_back_is_in_the_row_before_it_runs(api, monkeypatch, pods):
+@pytest.mark.parametrize("row_is", ROWS)
+async def test_each_put_back_marks_its_row_alive_first_and_is_never_shown_done_before_it_is(api, monkeypatch, pods, row_is):
+    rows_stand(monkeypatch, row_is)
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
     pool = SandboxPool(pods)
     await edited(pool, thread, "echo a > a.md && echo b > b.md && echo c > c.md")
-    call, compensate, seen = landing_module._call, landing_module.compensate_step, []
+    call, compensate, seen, marked = landing_module._call, landing_module.compensate_step, [], []
 
     async def c_fails(sandbox_pool, owner, action, **arguments):
         if action == "apply" and arguments["path"] == "c.md":
@@ -591,13 +681,18 @@ async def test_each_put_back_is_in_the_row_before_it_runs(api, monkeypatch, pods
         if it.tool_name == "history.apply":
             [row] = await rows(api, thread)  # from another connection, as the next lock holder reads it
             seen.append(next((s["arguments"]["path"], s["state"]) for s in row.steps if s["step_id"] == it.step_id))
+            marked.append(row.updated_at)
         return await compensate(it, **kwargs)
 
     monkeypatch.setattr(landing_module, "_call", c_fails)
     monkeypatch.setattr(landing_module, "compensate_step", watched)
     await ends(api, pool, thread)
-    # A put-back the row shows done is done: a worker killed in one leaves it compensating, to run again.
-    assert seen == [("b.md", "compensating"), ("a.md", "compensating")]
+    # A put-back the row shows done is done: a worker killed in one leaves it to run again,
+    # shown under way, or, in a row behind its landing, still as its apply left it.
+    state = {"behind": "committed", "exact": "compensating"}[row_is]
+    assert seen == [("b.md", state), ("a.md", state)]
+    # And each marked the row alive first: the next lock holder's fence waits for a put-back still running.
+    assert marked[0] < marked[1]
 
 
 async def test_a_put_back_the_pod_cut_off_at_its_own_timeout_is_not_recorded_as_done(api, monkeypatch, pods):
@@ -675,7 +770,9 @@ async def test_the_locks_check_fails_once_its_block_has_ended(api):
         await held()
 
 
-async def test_a_put_back_that_failed_before_its_worker_died_is_tried_again_by_the_next_landing(api, monkeypatch, pods):
+@pytest.mark.parametrize("row_is", ROWS)
+async def test_a_put_back_that_failed_before_its_worker_died_is_tried_again_by_the_next_landing(api, monkeypatch, pods, row_is):
+    rows_stand(monkeypatch, row_is)
     master = await master_of(api, await create(api))
     first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
     pool = SandboxPool(pods)
@@ -713,7 +810,10 @@ async def test_a_put_back_that_failed_before_its_worker_died_is_tried_again_by_t
         await db.execute(text("DELETE FROM session_leases WHERE session_id = :id"), {"id": first.id})
         await db.commit()
     [row] = await rows(api, first)
-    assert (row.saga_state, [s["state"] for s in row.steps]) == ("running", ["committed", "compensating", "compensation_failed", "failed"])
+    assert (row.saga_state, [s["state"] for s in row.steps]) == ("running", {
+        "behind": ["committed", "committed", "committed", "failed"],
+        "exact": ["committed", "compensating", "compensation_failed", "failed"],
+    }[row_is])
     assert pods.real_names() == ["Report.docx", "b.md", "notes.txt"]
 
     await edited(pool, second, "echo by B > B.md")
@@ -724,7 +824,9 @@ async def test_a_put_back_that_failed_before_its_worker_died_is_tried_again_by_t
     assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
 
 
-async def test_a_recovery_that_lost_its_lock_stops_and_the_next_holder_finishes_it(api, monkeypatch, pods):
+@pytest.mark.parametrize("row_is", ROWS)
+async def test_a_recovery_that_lost_its_lock_stops_and_the_next_holder_finishes_it(api, monkeypatch, pods, row_is):
+    rows_stand(monkeypatch, row_is)
     master = await master_of(api, await create(api))
     first, second, third = [await a_thread(api, name, master) for name in ("Draft A", "Draft B", "Draft C")]
     pool = SandboxPool(pods)
@@ -743,9 +845,11 @@ async def test_a_recovery_that_lost_its_lock_stops_and_the_next_holder_finishes_
     with monkeypatch.context() as patch:
         patch.setattr(landing_module, "compensate_history", the_lock_goes_after_the_first)
         await ends(api, pool, second)
-    # B's recovery stops at its lock's loss: b.md went back, a.md waits for the next holder.
-    assert put_back == ["b.md"]
-    assert pods.real_names() == ["Report.docx", "a.md", "notes.txt"]
+    # B's recovery stops at its lock's loss: one file went back, the other waits for the next holder.
+    # A row behind its landing shows both applies pending, and the first is put back first.
+    back, waits = {"behind": ("a.md", "b.md"), "exact": ("b.md", "a.md")}[row_is]
+    assert put_back == [back]
+    assert pods.real_names() == ["Report.docx", waits, "notes.txt"]
     [row] = await rows(api, first)
     assert row.saga_state == "running"
 
@@ -758,11 +862,12 @@ async def test_a_recovery_that_lost_its_lock_stops_and_the_next_holder_finishes_
 
 
 async def test_a_recovery_that_loses_its_lock_among_committed_put_backs_stops(api, monkeypatch, pods):
+    rows_stand(monkeypatch, "exact")  # a row that shows the applies done
     master = await master_of(api, await create(api))
     first, second, third = [await a_thread(api, name, master) for name in ("Draft A", "Draft B", "Draft C")]
     pool = SandboxPool(pods)
     await edited(pool, first, "for f in a b c d; do echo $f > $f.md; done")
-    await a_landing_killed(api, monkeypatch, pool, first, after="apply d.md")  # a, b, c committed; d pending
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply d.md")  # a, b, c committed; d under way
     await edited(pool, second, "echo by B > B.md")
     history, step, put_back = landing_module.compensate_history, landing_module.compensate_step, []
 

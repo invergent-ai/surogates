@@ -14,7 +14,8 @@ by decision, not by failure: the newer file stays, and the thread's
 version is kept in history as the landing's second parent.
 
 The saga's durable record is its ``workstream_history`` row, written as it
-runs.  The record step is the push of the project's history, the moment a
+runs: marked alive at every try, its steps at each turning point and every
+few seconds between.  The record step is the push of the project's history, the moment a
 landing counts: a landing counts only once ``main`` in the history carries
 its saga, and one that does is never put back.  The next holder of the
 project's lock settles a landing a killed worker left running before it
@@ -27,7 +28,6 @@ import asyncio
 import json
 import logging
 import time
-from functools import partial
 from typing import Any
 
 from surogates.governance.saga import SagaOrchestrator, SagaState, SagaStep, StepState, compensate_step
@@ -61,6 +61,12 @@ _PUT_BACK_BOUND = 300
 #: clone it from the mount, repack it and write it back.
 _PRUNE_BOUND = 300
 _PRUNE_PER_GIB = 180
+#: A landing's steps go to its row whole, so not at every step: between its
+#: turning points at most this often, in seconds, and never so often that
+#: writing them takes more than one part in _ROW_SHARE of its time.  A row
+#: written at every step cost a landing the square of its files.
+_ROW_EVERY = 5
+_ROW_SHARE = 20
 #: Each thread's put-back still running, kept until done: a cancel never cuts one short.
 _PUTTING_BACK: dict[str, asyncio.Future] = {}
 #: A cancelled landing's pod going, once its slow put-back is done.
@@ -82,6 +88,41 @@ async def put_back_settled(owner: str) -> bool:
     except BaseException:
         return False
     return True
+
+
+class _Row:
+    """A landing's row, as its saga runs.
+
+    Every try of a step and every put-back marks it alive first, which
+    writes no steps: another lock holder's fence runs from that mark.  The
+    steps are written at the landing's turning points: once they are fixed,
+    with the record before its first try, when a put-back begins, and at
+    the end.  Between those they are written at most every few seconds, in
+    place of the mark.
+
+    So a row is behind its landing by up to that long.  It never shows a
+    step done that is not: an apply it shows ``pending`` may have run, and
+    one it shows ``committed`` may have been put back.  Recovery puts both
+    back, which is safe to repeat.
+    """
+
+    def __init__(self, session_factory: Any, row: int, saga: Any) -> None:
+        self._session_factory, self._row, self._saga = session_factory, row, saga
+        self._due = time.monotonic() + _ROW_EVERY
+
+    async def write(self, **values: Any) -> None:
+        """The steps as they are, and the landing's outcome once it has one."""
+        began = time.monotonic()
+        await save_landing(self._session_factory, self._row, self._saga, **values)
+        done = time.monotonic()
+        self._due = done + max(_ROW_EVERY, _ROW_SHARE * (done - began))
+
+    async def alive(self) -> None:
+        """Mark the row alive, with its steps when they were last written long enough ago."""
+        if time.monotonic() >= self._due:
+            await self.write()
+        else:
+            await touch_landing(self._session_factory, self._row)
 
 
 async def _call(sandbox_pool: Any, owner: str, action: str, **arguments: Any) -> dict:
@@ -245,12 +286,11 @@ async def _land(
         *([["Surogate-Tool-Saga", tool_saga_id]] if tool_saga_id else []),
         *([["Surogate-Events", f"{calls[0].id}-{calls[-1].id}"]] if calls else []),
     ]
-    row = await start_landing(
+    row = _Row(session_factory, await start_landing(
         session_factory, saga, workstream_id=session.config["workstream_id"], thread_id=session.id,
         agent_id=str(session.agent_id), user_id=session.user_id, tool_saga_id=tool_saga_id,
         events=(calls[0].id, calls[-1].id) if calls else None,
-    )
-    save = partial(save_landing, session_factory, row, saga)
+    ), saga)
 
     def step(name: str, **arguments: Any) -> SagaStep:
         return orchestrator.add_step(
@@ -259,15 +299,11 @@ async def _land(
 
     async def run(it: SagaStep) -> dict:
         # Each try marks the row alive first: another lock holder's fence runs from here.
-        await touch_landing(session_factory, row)
+        await row.alive()
         return await _call(sandbox_pool, owner, it.tool_name.removeprefix("history."), **it.arguments)
 
     async def execute(it: SagaStep) -> dict:
-        try:
-            return await orchestrator.execute_step(saga.saga_id, it.step_id, lambda: run(it))
-        finally:
-            # Each step's state, as it ends, in the saga's row.
-            await save()
+        return await orchestrator.execute_step(saga.saga_id, it.step_id, lambda: run(it))
 
     outcome: dict[str, Any] = {
         "saga": saga.saga_id, "state": "completed", "commit": None,
@@ -295,7 +331,8 @@ async def _land(
         )
         if turn["commit"] is not None:
             applies = [step("apply", **change) for change in changes]
-            await save()
+            # The steps, fixed: all a put-back by another lock holder needs.
+            await row.write()
             for it in applies:
                 # A lock lost unseen frees the project: this landing stops, and is put back.
                 await held()
@@ -308,16 +345,17 @@ async def _land(
                     *(["Surogate-Not-Merged", o["path"]] for o in turn["overlapped"]),
                 ],
             )
-            await save()
+            # Before its first try: a landing whose row has no record step never pushed.
+            await row.write()
             await held()
             recorded = await execute(record)
             outcome.update(commit=recorded["commit"], landed=landed)
         saga.transition(SagaState.COMPLETED)
-        await save(state="completed", commit=outcome["commit"], files=_row_files(saga, "completed"))
+        await row.write(state="completed", commit=outcome["commit"], files=_row_files(saga, "completed"))
     except BaseException as exc:
         logger.warning("Landing of session %s did not finish", session.id, exc_info=True)
         # Kept, and shielded: a cancel never cuts a put-back short.
-        put_back = asyncio.ensure_future(_settle(saga, orchestrator, sandbox_pool, owner, save))
+        put_back = asyncio.ensure_future(_settle(saga, orchestrator, sandbox_pool, owner, row))
         _PUTTING_BACK[owner] = put_back
         put_back.add_done_callback(lambda done: _PUTTING_BACK.pop(owner, None) if _PUTTING_BACK.get(owner) is done else None)
         if not isinstance(exc, Exception) or _cancelling():
@@ -373,7 +411,7 @@ def _row_files(saga: Any, state: str) -> list[dict]:
 
 
 async def _settle(
-    saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str, save: Any,
+    saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str, row: _Row,
     *, recovered: bool = False, held: Any = None,
 ) -> tuple[str, str | None]:
     """End a landing that did not finish: ``completed`` with its commit when it pushed, else put back.
@@ -384,9 +422,12 @@ async def _settle(
     is a landing that pushed and was then landed over: that takes a lost lock
     and a fence that fell short.  A
     *recovered* landing's steps are as its row last had them: a step it
-    was in shows ``pending``.  Its put-backs ask *held* first, as a
-    landing's applies do.
+    was in, or had done since, shows ``pending``.  Its put-backs ask *held*
+    first, as a landing's applies do.
     """
+    if not recovered:
+        # Where it stopped, before anything goes back: its own row may be seconds behind.
+        await _written(row.write)
     record = next((s for s in saga.steps if s.tool_name == "history.record"), None)
     # Whatever its state: a try that pushed shows ``pending`` again in its retry's wait.
     if record is not None:
@@ -394,23 +435,23 @@ async def _settle(
         if looked["has_saga"]:
             if saga.state is SagaState.RUNNING:
                 saga.transition(SagaState.COMPLETED)
-            await _written(save, tries=2, state="completed", commit=looked["main"], files=_row_files(saga, "completed"))
+            await _written(row.write, tries=2, state="completed", commit=looked["main"], files=_row_files(saga, "completed"))
             return "completed", looked["main"]
-    failed = await _put_back(saga, orchestrator, sandbox_pool, owner, save, recovered=recovered, held=held)
+    failed = await _put_back(saga, orchestrator, sandbox_pool, owner, row, recovered=recovered, held=held)
     state = "escalated" if failed else "compensated"
-    await _written(save, tries=2, state=state)
+    await _written(row.write, tries=2, state=state)
     return state, None
 
 
-async def _written(save: Any, *, tries: int = 1, **values: Any) -> None:
-    """Write a landing's row, as best it can: an outcome already known stands without it.
+async def _written(write: Any, *, tries: int = 1, **values: Any) -> None:
+    """Write a landing's row, or mark it alive, as best it can: an outcome already known stands without it.
 
     A write that fails is caught up by the next, or by the next lock
     holder's settle, which puts the files back again: that is safe to repeat.
     """
     for _ in range(tries):
         try:
-            return await save(**values)
+            return await write(**values)
         except Exception:
             logger.warning("A landing's row was not written", exc_info=True)
 
@@ -439,7 +480,7 @@ async def settle_running(
             # The turn and its base: the versions a put-back writes.
             await _call(sandbox_pool, owner, "fetch", commits=[c for c in (committed["commit"], committed["base"]) if c])
         state, _ = await _settle(
-            saga, orchestrator, sandbox_pool, owner, partial(save_landing, session_factory, row.id, saga),
+            saga, orchestrator, sandbox_pool, owner, _Row(session_factory, row.id, saga),
             recovered=True, held=held,
         )
         logger.warning("Settled landing %s of %s, left running: %s", row.saga_id, row.thread_id, state)
@@ -477,7 +518,7 @@ async def _destroy_if_still(sandbox_pool: Any, owner: str, sandbox_id: str | Non
 
 
 async def _put_back(
-    saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str, save: Any,
+    saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str, row: _Row,
     *, recovered: bool = False, held: Any = None,
 ) -> list[SagaStep]:
     """Put back what a landing applied; the steps that could not be put back.
@@ -486,9 +527,12 @@ async def _put_back(
     file: its reply was lost, or it ran out of time.  It is put back first,
     only where the real file is the turn's version.  A *recovered*
     landing's apply still ``pending`` may have too: the kill came before its
-    state was written.  The saga's row is written before each put-back, the
-    step already ``compensating``: a worker killed in one leaves it to run again.
-    With *held*, each put-back asks it first, and a lock lost stops them all.
+    state was written.  Such an apply's put-back knows neither the folders
+    it made, which stay, empty, nor whether it ran: a file changed since is
+    left as it is and is no conflict.  Each put-back marks the saga's row
+    alive first, and the row never shows one done before it is: a worker
+    killed in one leaves it to run again.  With *held*, each put-back asks
+    it first, and a lock lost stops them all.
     """
     unsure = (StepState.FAILED, StepState.EXECUTING, *((StepState.PENDING,) if recovered else ()))
     failed: list[SagaStep] = []
@@ -507,7 +551,7 @@ async def _put_back(
     for it in saga.steps:
         if it.tool_name == "history.apply" and it.state in unsure:
             await still_held()
-            await _written(save)
+            await _written(row.alive)
             try:
                 await asyncio.wait_for(compensate_history(it, sandbox_pool, owner, ran=False), it.timeout_seconds)
             except Exception:
@@ -516,7 +560,7 @@ async def _put_back(
 
     async def compensate(it: SagaStep) -> Any:
         await still_held()
-        await _written(save)
+        await _written(row.alive)
         return await compensate_step(it, sandbox_pool=sandbox_pool, session_id=owner)
 
     failed += await orchestrator.compensate(saga.saga_id, compensate)
