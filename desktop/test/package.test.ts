@@ -69,8 +69,10 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarba
     chmodSync(dist, mode | 0o2000);
     const packed = (() => {
       try {
-        return spawnSync(join(DESKTOP, "scripts", "package.sh"), [VERSION, join(dir, "vm-manifest.json"), join(dir, "out")], {
-          encoding: "utf8", env: { ...process.env, SOURCE_DATE_EPOCH: "1790000000", TMPDIR: join(dir, "tmp") }, maxBuffer: 16 * 1024 * 1024,
+        // As the release's job calls it: from a folder that is not this package's, its two paths
+        // as that folder names them.
+        return spawnSync(join(DESKTOP, "scripts", "package.sh"), [VERSION, "vm-manifest.json", "out"], {
+          cwd: dir, encoding: "utf8", env: { ...process.env, SOURCE_DATE_EPOCH: "1790000000", TMPDIR: join(dir, "tmp") }, maxBuffer: 16 * 1024 * 1024,
         });
       } finally {
         chmodSync(dist, mode);

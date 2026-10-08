@@ -13,7 +13,8 @@
 #
 # The install script adds bin/bwrap, the system's copy, to each version it installs.
 #
-# Usage, from desktop/, after npm run build (which fetches and checks bin/node):
+# Usage, after npm run build (which fetches and checks bin/node), from any folder, with its two
+# paths as that folder names them:
 #   scripts/package.sh <version> <vm manifest.json> <out>
 # It writes <out>/surogate-desktop-<version>-linux-x64.tar.gz.
 set -euo pipefail
@@ -23,6 +24,10 @@ VM_MANIFEST="${2:-}"
 OUT="${3:-}"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -f "$VM_MANIFEST" ] && [ -n "$OUT" ] \
   || { echo "usage: scripts/package.sh <x.y.z> <vm manifest.json> <out>" >&2; exit 2; }
+# Its two paths are its caller's, and are read from where it was called, before it works from this
+# package's folder: the release's job calls it from the repository's root.
+VM_MANIFEST="$(realpath "$VM_MANIFEST")"
+OUT="$(realpath -m "$OUT")"
 cd "$(dirname "$0")/.."
 DESKTOP="$PWD"
 
