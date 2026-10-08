@@ -221,7 +221,7 @@ describe("Settings → Folders and permissions", () => {
     // Held still, and from that chat: a Take back hands nothing back, and asks nothing. Each chat's browser call
     // is answered paused, the chat's own too, whose first use nobody is asked while the browser is held.
     expect(await binding(CHAT)).toMatchObject({ takenOver: true });
-    expect(await binding(OTHER)).toMatchObject({ takenOver: false });
+    expect(await binding(OTHER)).toMatchObject({ takenOver: "elsewhere" });
     expect(await navigate(CHAT)).toEqual(PAUSED);
     expect(await navigate(OTHER)).toEqual(PAUSED);
     expect(await boxes()).toBe(before);

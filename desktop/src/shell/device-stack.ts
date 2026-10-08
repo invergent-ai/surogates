@@ -39,13 +39,12 @@ export interface ToolLayer extends Executor {
   // The address of the page a calling session's next browser operation acts in, for its prompt.
   address?(session: string): Promise<string>;
   // A chat's user takes the agent's browser over, for every chat, until that chat hands it back: whether the
-  // chat holds it now, which it does not while another chat's take-over stands. Whether a chat holds it, or
-  // "orphaned": held from a chat that is gone, which any chat may hand back. The chat it is held from, or
-  // null. A chat's newest page shown.
+  // chat holds it now, which it does not while another chat's take-over stands. Where it is held, as a chat
+  // is told: true from that chat, false by nobody, "elsewhere" from another chat that is here, "orphaned"
+  // from a chat that is gone, which any chat may hand back. A chat's newest page shown.
   takeOver?(root: string): boolean;
   handBack?(root: string): void;
-  takenOver?(root: string): boolean | "orphaned";
-  holder?(): string | null;
+  takenOver?(root: string): boolean | "orphaned" | "elsewhere";
   show?(root: string): Promise<boolean>;
 }
 

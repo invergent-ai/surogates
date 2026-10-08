@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { type BridgeCalls, bridgeHandlers, type SenderFrame } from "../src/shell/bridge.js";
+import type { DesktopBinding } from "../../web/src/lib/desktop-bridge-contract.js";
 
 const ORIGIN = "https://agent.example.com";
 const TOP: SenderFrame = { url: `${ORIGIN}/chat`, parent: null };
@@ -71,6 +72,18 @@ describe("the bridge", () => {
     expect(made.handBack).toHaveBeenCalledWith(SESSION);
     await handlers.openSettings!(TOP, "7", "browser");
     expect(made.openSettings).toHaveBeenCalledWith("browser");
+  });
+
+  it.each([
+    ["from this chat", true],
+    ["by nobody", false],
+    ["from another chat that is here", "elsewhere"],
+    ["from a chat that is gone", "orphaned"],
+  ] satisfies Array<[string, DesktopBinding["takenOver"]]>)("tells the page that the agent's browser is held %s, as the desktop says it", async (_where, takenOver) => {
+    const made = calls();
+    const binding: DesktopBinding = { folder: "/home/flavius/notes", mode: "ask", takenOver };
+    (made.getBinding as ReturnType<typeof vi.fn>).mockResolvedValueOnce(binding);
+    expect(await bridgeHandlers(ORIGIN, made).getBinding!(TOP, "7", SESSION)).toEqual({ folder: "/home/flavius/notes", mode: "ask", takenOver });
   });
 
   it("brings a chat's page to the front at a take-over only when it came with its user's click", async () => {

@@ -77,7 +77,6 @@ describe("the browser's kinds beside the tools", () => {
     const { browsing, browsed, paused, ran } = rig();
     expect(browsing.takeOver(ROOT)).toBe(true);
     expect(browsing.takenOver(ROOT)).toBe(true);
-    expect(browsing.holder()).toBe(ROOT);
     // The browser is the agent's one browser here: a chat that never asked for the take-over is answered so too.
     for (const root of [ROOT, OTHER]) {
       for (const kind of ["browser.navigate", "browser.observe", "browser.close"]) {
@@ -93,7 +92,7 @@ describe("the browser's kinds beside the tools", () => {
     expect(ran).toEqual(["read"]);
     browsing.handBack(ROOT);
     expect(browsing.takenOver(ROOT)).toBe(false);
-    expect(browsing.holder()).toBeNull();
+    expect(browsing.takenOver(OTHER)).toBe(false);
     for (const root of [ROOT, OTHER]) {
       expect(browsing.refusal(op("browser.navigate", root))).toBeNull();
       expect(await browsing.run(op("browser.navigate", root), signal)).toEqual({ ok: "browser" });
@@ -105,13 +104,13 @@ describe("the browser's kinds beside the tools", () => {
   it("lets no other chat take the browser from the chat that holds it, nor hand it back", async () => {
     const { browsing, paused } = rig();
     expect(browsing.takeOver(ROOT)).toBe(true);
-    // Another chat's take-over does not steal it: that chat does not hold it, and the first still does.
+    // Another chat's take-over does not steal it: that chat is told it is held elsewhere, and the first still holds it.
     expect(browsing.takeOver(OTHER)).toBe(false);
-    expect(browsing.takenOver(OTHER)).toBe(false);
+    expect(browsing.takenOver(OTHER)).toBe("elsewhere");
     expect(browsing.takenOver(ROOT)).toBe(true);
     // Nor does its hand back end it.
     browsing.handBack(OTHER);
-    expect(browsing.holder()).toBe(ROOT);
+    expect(browsing.takenOver(ROOT)).toBe(true);
     expect(browsing.refusal(op("browser.navigate", OTHER))).toEqual(PAUSED);
     // Taken over again by the chat that holds it: held as before, and the host is told nothing more.
     expect(browsing.takeOver(ROOT)).toBe(true);
@@ -124,7 +123,6 @@ describe("the browser's kinds beside the tools", () => {
     // Deleted, as a page can have a chat deleted: nothing is handed back by that.
     browsing.retired(ROOT);
     chats.delete(ROOT);
-    expect(browsing.holder()).toBe(ROOT);
     expect(browsing.refusal(op("browser.navigate", OTHER))).toEqual(PAUSED);
     expect(await browsing.run(op("browser.navigate", OTHER), signal)).toEqual(PAUSED);
     expect(browsed).toEqual([]);
@@ -132,7 +130,6 @@ describe("the browser's kinds beside the tools", () => {
     expect(browsing.takenOver(OTHER)).toBe("orphaned");
     // The chat that held it can hand nothing back, so any chat's hand back ends it: the desktop confirms that one as any.
     browsing.handBack(OTHER);
-    expect(browsing.holder()).toBeNull();
     expect(browsing.takenOver(OTHER)).toBe(false);
     expect(browsing.refusal(op("browser.navigate", OTHER))).toBeNull();
     expect(paused).toEqual([[ROOT, true], [ROOT, false]]);
@@ -147,14 +144,32 @@ describe("the browser's kinds beside the tools", () => {
     // Taken over from another chat: that one holds it now, as any holder.
     expect(browsing.takeOver(OTHER)).toBe(true);
     expect(browsing.takenOver(OTHER)).toBe(true);
-    expect(browsing.takenOver(ROOT)).toBe(false);
+    expect(browsing.takenOver(ROOT)).toBe("elsewhere");
     browsing.handBack(ROOT);
-    expect(browsing.holder()).toBe(OTHER);
+    expect(browsing.takenOver(OTHER)).toBe(true);
     browsing.handBack(OTHER);
-    expect(browsing.holder()).toBeNull();
+    expect(browsing.takenOver(OTHER)).toBe(false);
     expect(paused).toEqual([[ROOT, true], [OTHER, true], [OTHER, false]]);
     // Held anew from a chat that is here, it is that chat's alone again.
     browsing.takeOver(OTHER);
+    expect(browsing.takenOver(ROOT)).toBe("elsewhere");
+  });
+
+  it("tells each chat where the agent's browser is held: from it, by nobody, from another chat that is here, or from one that is gone", () => {
+    const { browsing, chats } = rig();
+    const told = () => [browsing.takenOver(ROOT), browsing.takenOver(OTHER)];
+    expect(told()).toEqual([false, false]);
+    browsing.takeOver(ROOT);
+    // The other chat can neither take it nor hand it back, and is told so: not "nobody holds it".
+    expect(told()).toEqual([true, "elsewhere"]);
+    browsing.handBack(ROOT);
+    expect(told()).toEqual([false, false]);
+    browsing.takeOver(OTHER);
+    expect(told()).toEqual(["elsewhere", true]);
+    // The chat it is held from is gone: any chat may hand it back, and each that is left is told that.
+    chats.delete(OTHER);
+    expect(browsing.takenOver(ROOT)).toBe("orphaned");
+    browsing.handBack(ROOT);
     expect(browsing.takenOver(ROOT)).toBe(false);
   });
 
@@ -164,7 +179,7 @@ describe("the browser's kinds beside the tools", () => {
     chats.delete(ROOT);
     expect(browsing.takenOver(OTHER)).toBe("orphaned");
     browsing.handBack(OTHER);
-    expect(browsing.holder()).toBeNull();
+    expect(browsing.takenOver(OTHER)).toBe(false);
   });
 
   it("asks the browser to show a chat's page", async () => {

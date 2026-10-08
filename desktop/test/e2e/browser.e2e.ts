@@ -373,9 +373,9 @@ describe("a chat's browser taken over, and handed back", () => {
     const binding = (chat: string) => client.evaluate((id) => window.surogateDesktop!.getBinding!(id), chat);
     await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
     expect(await binding(CHAT)).toMatchObject({ takenOver: true });
-    // The other chat does not hold the browser, and its agent's browser calls wait all the same: answered at
-    // once, its user asked nothing.
-    expect(await binding(OTHER)).toMatchObject({ folder: second, takenOver: false });
+    // The other chat does not hold the browser, and its page is told where it is held: neither "from this chat"
+    // nor "by nobody". Its agent's browser calls wait all the same: answered at once, its user asked nothing.
+    expect(await binding(OTHER)).toMatchObject({ folder: second, takenOver: "elsewhere" });
     expect(await operation("browser.navigate", { url: "https://example.com/", wait_until: "load" }, undefined, 1, OTHER)).toEqual(PAUSED);
     expect(await promptsShown(app!)).toBe(0);
     // Its take-over does not steal the browser, and it hands nothing back: each says where it is held, at its
@@ -385,12 +385,14 @@ describe("a chat's browser taken over, and handed back", () => {
     expect(await atClick(client, "takeOver", OTHER)).toContain(HELD_FROM_ANOTHER_CHAT);
     expect(await atClick(client, "handBack", OTHER)).toContain(HELD_FROM_ANOTHER_CHAT);
     expect(await boxes()).toHaveLength(before);
-    expect(await binding(OTHER)).toMatchObject({ takenOver: false });
+    expect(await binding(OTHER)).toMatchObject({ takenOver: "elsewhere" });
     expect(await binding(CHAT)).toMatchObject({ takenOver: true });
     expect(await operation("browser.close", {}, undefined, 1, OTHER)).toEqual(PAUSED);
-    // Handed back from the chat that holds it: the other chat's browser asks its first use, as any chat's.
+    // Handed back from the chat that holds it: nobody holds it, as the other chat's page is told, and its
+    // browser asks its first use, as any chat's.
     expect(await atClick(client, "handBack")).toBe(true);
     expect(await boxes()).toHaveLength(before + 1);
+    expect(await binding(OTHER)).toMatchObject({ takenOver: false });
     const navigating = operation("browser.navigate", { url: "https://example.com/", wait_until: "load" }, undefined, 1, OTHER);
     await press(await prompt(app!), "deny");
     expect((await navigating).error.type).toBe("denied");

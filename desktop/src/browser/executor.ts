@@ -92,17 +92,14 @@ export class Browsing implements ToolLayer {
   }
 
   /**
-   * Whether the chat's user holds the browser from this chat; "orphaned" where it is held from a chat
-   * that is gone, which any chat may hand back; false where nobody holds it, or another chat here does.
+   * Where the browser is held, as the chat is told: true from this chat; false by nobody, the agent drives
+   * it; "elsewhere" from another chat that is here, which alone hands it back; "orphaned" from a chat that
+   * is gone, which any chat may hand back.
    */
-  takenOver(root: string): boolean | "orphaned" {
+  takenOver(root: string): boolean | "orphaned" | "elsewhere" {
+    if (this.held === null) return false;
     if (this.held === root) return true;
-    return this.orphaned() ? "orphaned" : false;
-  }
-
-  /** The chat the browser is held from, or null: the agent drives it. */
-  holder(): string | null {
-    return this.held;
+    return this.orphaned() ? "orphaned" : "elsewhere";
   }
 
   /** The chat's newest page brought to the front: whether there was one. */
