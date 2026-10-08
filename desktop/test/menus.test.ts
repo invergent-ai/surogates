@@ -71,16 +71,20 @@ describe("the tray", () => {
       show: () => asked.push("show"), quickEntry: () => asked.push("quickEntry"), settings: () => asked.push("settings"),
       quit: () => asked.push("quit"), quitNow: () => asked.push("quitNow"),
     };
-    const menu = trayMenu({ device: "Connected as Laptop", quitting: null }, actions);
+    const menu = trayMenu({ device: "Connected as Laptop", quitting: null, shortcut: null }, actions);
     expect(menu.map((item) => [item.label ?? item.type, item.enabled ?? true])).toEqual([
       ["Show Surogate", true], ["Quick entry", true], ["Connected as Laptop", false], ["separator", true], ["Settings…", true], ["Quit Surogate", true],
     ]);
     for (const item of menu) (item.click as (() => void) | undefined)?.();
     expect(asked).toEqual(["show", "quickEntry", "settings", "quit"]);
-    expect(trayMenu({ device: null, quitting: null }, actions).map((item) => item.label ?? item.type))
+    expect(trayMenu({ device: null, quitting: null, shortcut: null }, actions).map((item) => item.label ?? item.type))
       .toEqual(["Show Surogate", "Quick entry", "separator", "Settings…", "Quit Surogate"]);
+    // Quick entry says the keys that open it while the app holds them, and leaves them to the app's own hold.
+    expect(menu[1]?.accelerator).toBeUndefined();
+    const keyed = trayMenu({ device: null, quitting: null, shortcut: "Ctrl+Alt+Space" }, actions)[1];
+    expect([keyed?.label, keyed?.accelerator, keyed?.registerAccelerator]).toEqual(["Quick entry", "Ctrl+Alt+Space", false]);
     // While a quit waits for the threads working on this computer: quit now, with no question.
-    const waiting = trayMenu({ device: "Connected as Laptop", quitting: 2 }, actions);
+    const waiting = trayMenu({ device: "Connected as Laptop", quitting: 2, shortcut: null }, actions);
     expect(waiting.at(-1)?.label).toBe("Quit now");
     (waiting.at(-1)?.click as () => void)();
     expect(asked.at(-1)).toBe("quitNow");

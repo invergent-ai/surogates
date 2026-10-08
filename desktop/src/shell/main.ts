@@ -9,7 +9,7 @@ import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
 import {
-  app, BrowserWindow, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, powerMonitor, safeStorage, session, shell, Tray, utilityProcess,
+  app, BrowserWindow, dialog, globalShortcut, type IpcMainEvent, Menu, nativeTheme, net, Notification, powerMonitor, safeStorage, session, shell, Tray, utilityProcess,
   type WebContents, webContents,
 } from "electron";
 
@@ -43,7 +43,7 @@ import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } 
 import { PreferencesStore } from "./preferences.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
-import { QuickEntry } from "./quick-entry.js";
+import { QUICK_ENTRY_KEYS, QuickEntry, waylandSession } from "./quick-entry.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
 import { asShown } from "./pages/ui.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
@@ -1279,14 +1279,14 @@ const trayImage = (): string => join(ASSETS, trayIcon(theme.dark, process.env.XD
 function updateTray(): void {
   if (!tray) return;
   const agent = agents.get();
-  const template = trayMenu({ device: agent ? deviceLine(agent) : null, quitting: waiting ? (device?.stack?.working() ?? 0) : null }, {
+  const template = trayMenu({ device: agent ? deviceLine(agent) : null, quitting: waiting ? (device?.stack?.working() ?? 0) : null, shortcut }, {
     show: () => main?.show(),
     quickEntry: toggleQuickEntry,
     settings: menuActions.settings,
     quit: () => app.quit(),
     quitNow: () => waiting?.(),
   });
-  const drawn = JSON.stringify(template.map((item) => [item.label, item.enabled]));
+  const drawn = JSON.stringify(template.map((item) => [item.label, item.enabled, item.accelerator]));
   if (drawn === trayDrawn) return;
   trayDrawn = drawn;
   tray.setContextMenu(Menu.buildFromTemplate(template));
@@ -1418,6 +1418,8 @@ function goWeb(path: string): Promise<boolean> {
 
 // Quick entry, once the app is ready: what the user types there starts the chat New starts.
 let quickEntry: QuickEntry | null = null;
+// The keys that open it from anywhere, once the app holds them: never in a Wayland session, nor while another app holds them.
+let shortcut: string | null = null;
 
 /** Quick entry shown, or hidden when it shows. With nobody signed in, the window shows instead: it asks them to sign in. */
 function toggleQuickEntry(): void {
@@ -2120,6 +2122,13 @@ if (!app.requestSingleInstanceLock()) {
     tray.on("click", () => main?.show());
     updateTray();
     quickEntry = new QuickEntry({ page: join(PAGES, "quick.html"), preload: PAGES_PRELOAD, send: sendQuickEntry });
+    // From anywhere on the display, where the X server grabs keys for an app: a Wayland session has
+    // its GlobalShortcuts portal instead, which Surogate does not ask. There the tray opens quick entry.
+    if (!waylandSession(process.env)) {
+      if (globalShortcut.register(QUICK_ENTRY_KEYS, toggleQuickEntry)) shortcut = QUICK_ENTRY_KEYS;
+      else report(new Error(`Another app holds ${QUICK_ENTRY_KEYS}: quick entry opens from the tray only`));
+      updateTray();
+    }
     main.window.on("focus", () => void refreshProjects());
     // The window going away, or coming back, starts or ends the follow of the chat it shows.
     app.on("browser-window-focus", () => followAgent());

@@ -3,13 +3,14 @@
 // through the bridge, as the web client's chat page does, sends it as that chat's first message, and
 // says so: until then the box keeps the text.
 
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { rmSync } from "node:fs";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { dataHome, launch, pickInTray, quit, shellPage, stubNative, trayLabels, watchTray } from "./launch.js";
+import { dataHome, launch, pickInTray, quit, shellEnv, shellPage, stubNative, trayLabels, watchTray } from "./launch.js";
 
 let home: string;
 let agent: FakeAgent;
@@ -99,6 +100,107 @@ const watchHanded = (shell: ElectronApplication) => shell.evaluate(({ webContent
   };
 }, origin);
 const handed = (shell: ElectronApplication) => shell.evaluate(() => (globalThis as unknown as { handed: unknown[] }).handed);
+
+// The X server's own calls, through Python's ctypes: what a shortcut meets on the display. "press"
+// presses the keysyms named together, then lets them go, through XTest, as the user does; "hold"
+// grabs Ctrl+Alt+Space, as another app holding it does, and keeps it until its input closes.
+const X11 = `
+import ctypes, sys
+x = ctypes.CDLL("libX11.so.6")
+x.XOpenDisplay.restype = ctypes.c_void_p
+x.XStringToKeysym.restype = ctypes.c_ulong
+x.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+x.XDefaultRootWindow.restype = ctypes.c_ulong
+x.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+display = x.XOpenDisplay(None)
+if not display:
+    sys.exit("no display")
+codes = [x.XKeysymToKeycode(display, x.XStringToKeysym(name.encode())) for name in sys.argv[2:]]
+if sys.argv[1] == "press":
+    t = ctypes.CDLL("libXtst.so.6")
+    t.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
+    for code in codes:
+        t.XTestFakeKeyEvent(display, code, 1, 0)
+    for code in reversed(codes):
+        t.XTestFakeKeyEvent(display, code, 0, 0)
+    x.XSync(display, 0)
+else:
+    x.XGrabKey.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    # ControlMask | Mod1Mask, with both modes GrabModeAsync.
+    x.XGrabKey(display, codes[0], 4 | 8, x.XDefaultRootWindow(display), 0, 1, 1)
+    x.XSync(display, 0)
+    print("held", flush=True)
+    sys.stdin.read()
+`;
+// xvfb's display and its authority only, as shellEnv takes them: it throws on any other display, the user's included.
+const xEnv = () => {
+  const { PATH, DISPLAY, XAUTHORITY } = shellEnv(home);
+  return { PATH, DISPLAY, XAUTHORITY };
+};
+
+function pressCtrlAltSpace(): void {
+  const pressed = spawnSync("python3", ["-c", X11, "press", "Control_L", "Alt_L", "space"], { env: xEnv(), encoding: "utf8" });
+  if (pressed.status !== 0) throw new Error(`XTest did not press Ctrl+Alt+Space: ${pressed.stderr}`);
+}
+
+// Ctrl+Alt+Space grabbed by another client of the display, until the returned process is killed.
+async function holdCtrlAltSpace(): Promise<ChildProcess> {
+  const holder = spawn("python3", ["-c", X11, "hold", "space"], { env: xEnv(), stdio: ["pipe", "pipe", "inherit"] });
+  await new Promise<void>((resolve, reject) => {
+    holder.stdout!.once("data", () => resolve());
+    holder.once("exit", (code) => reject(new Error(`The holder exited with ${code}`)));
+  });
+  return holder;
+}
+
+// The keys quick entry's item in the tray says, and whether the app holds them.
+const trayKeys = (shell: ElectronApplication) => shell.evaluate(() =>
+  (globalThis as unknown as { trayMenu: Electron.Menu | null }).trayMenu?.items.find((item) => item.label === "Quick entry")?.accelerator ?? null);
+const held = (shell: ElectronApplication) => shell.evaluate(({ globalShortcut }) => globalShortcut.isRegistered("Ctrl+Alt+Space"));
+
+describe("quick entry's shortcut", () => {
+  it("opens quick entry on Ctrl+Alt+Space from anywhere on the display, and hides it on the next, as the tray says", async () => {
+    await signedIn();
+    await expect.poll(() => trayKeys(app!)).toBe("Ctrl+Alt+Space");
+    pressCtrlAltSpace();
+    await quickPage(app!);
+    pressCtrlAltSpace();
+    await expect.poll(async () => (await quickWindow(app!))?.shown).toBe(false);
+  });
+
+  it("takes no keys another app holds, and opens from the tray all the same", async () => {
+    const holder = await holdCtrlAltSpace();
+    try {
+      await signedIn();
+      await expect.poll(() => trayLabels(app!)).toContain("Quick entry");
+      expect(await held(app!)).toBe(false);
+      expect(await trayKeys(app!)).toBeNull();
+      pressCtrlAltSpace();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(await quickWindow(app!)).toBeNull();
+      await pickInTray(app!, "Quick entry");
+      await quickPage(app!);
+    } finally {
+      holder.kill();
+    }
+  });
+
+  it("takes none in a Wayland session, which has no grab for it, and opens from the tray there", async () => {
+    // A Wayland session, drawn on xvfb's display all the same.
+    app = await launch(home, { XDG_SESSION_TYPE: "wayland" }, ["--ozone-platform=x11"]);
+    await stubNative(app);
+    await watchTray(app);
+    const page = await shellPage(app);
+    await connect(page, origin);
+    await signedInAndAdded(app, page, agent);
+    expect(await held(app)).toBe(false);
+    await expect.poll(() => trayLabels(app!)).toContain("Quick entry");
+    expect(await trayKeys(app)).toBeNull();
+    await pickInTray(app, "Quick entry");
+    await quickPage(app);
+  });
+});
 
 describe("quick entry", () => {
   it("opens from the tray as a frameless 606 by 470 window over every other, which Escape hides, its text kept", async () => {
