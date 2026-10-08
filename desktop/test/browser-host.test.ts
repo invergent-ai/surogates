@@ -15,14 +15,14 @@ import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { BrowserContext, FileChooser, JSHandle, Page } from "playwright-core";
+import type { BrowserContext, FileChooser, Frame, JSHandle, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge } from "../src/browser/downloads.js";
 import {
-  AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, GIVEN_AS_TAKEN, holding, type Launch, NOT_ASKED, notFinished,
-  OWN_CHOOSER_MS, PROXY_BYPASSED, WEAKENING,
+  AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, GIVEN_AS_TAKEN, holding, type Launch, NO_SITE, NOT_AS_ASKED,
+  NOT_ASKED, notFinished, OWN_CHOOSER_MS, PROXY_BYPASSED, WEAKENING,
 } from "../src/browser/host.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
@@ -67,9 +67,22 @@ beforeEach(async () => {
 <iframe src="http://fixture.test/fileinput" style="position:absolute;left:0;top:0;width:400px;height:200px;border:0"></iframe>
 <input id="top" type="file" style="position:absolute;left:20px;top:220px;width:200px;height:40px">`);
     }
-    if (req.url === "/fileinput") {
+    if (req.url === "/fileinput" || req.url === "/fileinput?second") {
       return void res.writeHead(200, { "content-type": "text/html" })
         .end(`<input id="file" type="file" style="position:absolute;left:20px;top:20px;width:200px;height:40px">`);
+    }
+    // fixture.test's page framing two pages of its own, each with a file input.
+    if (req.url === "/twoframes") {
+      return void res.writeHead(200, { "content-type": "text/html" })
+        .end(`<title>Two</title><iframe id="f" src="/fileinput"></iframe><iframe id="g" src="/fileinput?second"></iframe>`);
+    }
+    // And framing three file inputs in frames with no address of their own: one the page spells out, one it writes into an
+    // empty frame, and one from a data address, which runs as no site at all.
+    if (req.url === "/unaddressed") {
+      return void res.writeHead(200, { "content-type": "text/html" }).end(`<title>Unaddressed</title>
+<iframe id="spelled" srcdoc='<input id="file" type="file">'></iframe><iframe id="written"></iframe>
+<iframe id="data" src="data:text/html,<input id=file type=file>"></iframe>
+<script>const written = document.getElementById("written").contentDocument; written.write('<input id="file" type="file">'); written.close();</script>`);
     }
     // other.test's page, which embeds fixture.test's frame: the frame registers a worker of its own, or loads and navigates itself once.
     if (req.headers.host === "other.test") {
@@ -210,6 +223,16 @@ const script = async (session: string, code: string, root = ROOT) => (await op(s
 const session = () => `session-${(next += 1)}`;
 // A file of the chat's folder, as the main side sends it to the page: its name, its type and what it holds.
 const REPORT = { name: "report.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7").toString("base64") };
+// The file input the host keeps for *session*'s next upload, if any.
+const kept = (session: string) => (host as unknown as { choosers: Map<string, FileChooser> }).choosers.get(session);
+// A page of *session*'s asks for a file at *click*, a click in it as its agent's would be: settled once the host has heard it.
+async function asksFor(session: string, click: () => Promise<unknown>): Promise<void> {
+  const before = kept(session);
+  await click();
+  await expect.poll(() => kept(session) !== undefined && kept(session) !== before, { timeout: 10_000 }).toBe(true);
+}
+// The names of the files each file input of a page or a frame holds.
+const filed = () => [...document.querySelectorAll("input")].map((input) => [...(input.files ?? [])].map((file) => file.name));
 // What *work* answers within *ms*, or "late".
 const within = <T>(ms: number, work: Promise<T>) => Promise.race([work, new Promise<"late">((done) => setTimeout(() => done("late"), ms))]);
 
@@ -1049,6 +1072,130 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 40, button: "left", clicks: 1 })).ok.notices).toEqual([FILE_ASKED]);
     expect(await op(a, "browser.set_input_files", { files: [{ ...report, name: "scan.pdf" }] })).toMatchObject({ ok: { files: 1 } });
     expect(await held()).toEqual([["scan.pdf"], []]);
+  }, 30_000);
+
+  it("gives an upload its user was asked about nothing where the input its prompt named is gone from its page, moved to another frame, or at another address by then", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/twoframes" });
+    const page = tabs().get(a)![0]!;
+    const [f, g] = ["/fileinput", "/fileinput?second"].map((path) => page.frames().find((frame) => frame.url() === `http://fixture.test${path}`)!) as [Frame, Frame];
+    const upload = () => op(a, "browser.set_input_files", { files: [REPORT] });
+    // The frame's input asks, and an upload's prompt names it by its frame.
+    const named = async () => {
+      await f.goto("http://fixture.test/fileinput");
+      await asksFor(a, () => f.click("#file"));
+      expect(await host.address(a, true)).toBe("http://fixture.test/fileinput");
+    };
+    // Taken out of its page, and kept by the page's script: a file given to it would still be the script's to read.
+    await named();
+    await f.evaluate(() => {
+      const input = document.getElementById("file")!;
+      Object.assign(window, { taken: input });
+      input.remove();
+    });
+    expect((await upload()).error?.message).toBe(NOT_AS_ASKED);
+    expect(await f.evaluate(() => [...(window as unknown as { taken: HTMLInputElement }).taken.files!].map((file) => file.name))).toEqual([]);
+    // Moved into another frame of the page, which the prompt did not name.
+    await named();
+    await page.evaluate(() => {
+      const [from, to] = ["f", "g"].map((id) => (document.getElementById(id) as HTMLIFrameElement).contentDocument!) as [Document, Document];
+      to.body.append(to.adoptNode(from.getElementById("file")!));
+    });
+    expect((await upload()).error?.message).toBe(NOT_AS_ASKED);
+    expect(await g.evaluate(filed)).toEqual([[], []]);
+    // Its frame at another address than the prompt said, the page it shows staying as it was.
+    await named();
+    await f.evaluate(() => history.pushState({}, "", "/elsewhere"));
+    expect((await upload()).error?.message).toBe(NOT_AS_ASKED);
+    expect(await f.evaluate(filed)).toEqual([[]]);
+    // Its frame gone to another page: said in the browser's own words, and the page that came is given nothing.
+    await named();
+    await f.goto("http://fixture.test/fileinput?second");
+    expect((await upload()).error?.type).toBe("browser");
+    expect(await f.evaluate(filed)).toEqual([[]]);
+    // Its page closed.
+    await named();
+    const [popup] = await Promise.all([page.waitForEvent("popup", { timeout: 10_000 }), page.evaluate("void window.open('/fileinput')")]);
+    await asksFor(a, () => popup.click("#file"));
+    expect(await host.address(a, true)).toBe("http://fixture.test/fileinput");
+    await popup.close();
+    expect((await upload()).error?.message).toBe(NOT_ASKED);
+    // Where the prompt said, as the prompt said: given.
+    await named();
+    expect(await upload()).toMatchObject({ ok: { files: 1 } });
+    expect(await f.evaluate(filed)).toEqual([["report.pdf"]]);
+  }, 60_000);
+
+  it("gives nothing to an input that asks only after an upload's prompt was made about a page that had asked for none", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    const page = tabs().get(a)![0]!;
+    const upload = () => op(a, "browser.set_input_files", { files: [REPORT] });
+    // Nothing has asked: the prompt names the tab's page, and the upload it is about will be refused.
+    expect(await host.address(a, true)).toBe("http://fixture.test/");
+    // The page makes its input ask while that prompt is open.
+    await asksFor(a, () => page.click("#file"));
+    expect((await upload()).error?.message).toBe(NOT_ASKED);
+    expect(await page.evaluate(filed)).toEqual([[], []]);
+    // The next upload, about which nobody was asked, is given to the input that asked last, as before.
+    expect(await upload()).toMatchObject({ ok: { files: 1 } });
+    expect(await page.evaluate(filed)).toEqual([[], ["report.pdf"]]);
+  }, 30_000);
+
+  it("gives a chat's upload to no file input of another chat's tab, nor to one in a tab no chat owns, whichever asked last", async () => {
+    const [a, b] = [session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    await op(b, "browser.navigate", { url: "http://fixture.test/" }, "chat-2");
+    const [mine, theirs] = [tabs().get(a)![0]!, tabs().get(b)![0]!];
+    const upload = (session: string, root: string) => op(session, "browser.set_input_files", { files: [REPORT] }, root);
+    // Another chat's page asks: the last input to ask in the whole browser, and none of this chat's.
+    await asksFor(b, () => theirs.click("#file"));
+    // Asked about or not, this chat's upload has no input: its prompt names its own tab's page, and nothing is given.
+    expect((await upload(a, "chat-1")).error?.message).toBe(NOT_ASKED);
+    expect(await host.address(a, true)).toBe("http://fixture.test/");
+    expect((await upload(a, "chat-1")).error?.message).toBe(NOT_ASKED);
+    expect(await theirs.evaluate(filed)).toEqual([[], []]);
+    // Nor under the other chat's session, named by this chat: only the server could send that.
+    expect((await upload(b, "chat-1")).error?.message).toBe("This session's tab in the agent's browser on this computer is another chat's");
+    expect(await theirs.evaluate(filed)).toEqual([[], []]);
+    // A tab its user opened themselves is no session's: a file input there opens the browser's own chooser, and no chat hears it.
+    const own = await (await (host as unknown as { running: Promise<BrowserContext> }).running).newPage();
+    await own.goto("http://fixture.test/");
+    await own.click("#file");
+    await expect.poll(() => ownChoosers().length, { timeout: 10_000 }).toBe(1);
+    for (const of of [a, b]) expect(await host.address(of, true)).toBe("http://fixture.test/");
+    expect((await upload(a, "chat-1")).error?.message).toBe(NOT_ASKED);
+    expect(await own.evaluate(filed)).toEqual([[], []]);
+    // The other chat's own upload is given to its own page's input, and to no other page's.
+    expect(await upload(b, "chat-2")).toMatchObject({ ok: { files: 1 } });
+    expect([await mine.evaluate(filed), await theirs.evaluate(filed), await own.evaluate(filed)]).toEqual([[[], []], [[], ["report.pdf"]], [[], []]]);
+  }, 30_000);
+
+  it("names an input in a frame with no address of its own by the site that frame runs as, and gives no file to one that runs as none", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/unaddressed" });
+    const page = tabs().get(a)![0]!;
+    const frameOf = async (id: string) => (await (await page.$(`#${id}`))!.contentFrame())!;
+    const upload = () => op(a, "browser.set_input_files", { files: [REPORT] });
+    // One the page spells out runs as the page's site: named by it, where the frame's own address names nothing.
+    const spelled = await frameOf("spelled");
+    expect(spelled.url()).toBe("about:srcdoc");
+    await asksFor(a, () => spelled.click("#file"));
+    expect(await host.address(a, true)).toBe("http://fixture.test");
+    expect(await upload()).toMatchObject({ ok: { files: 1 } });
+    expect(await spelled.evaluate(filed)).toEqual([["report.pdf"]]);
+    // One the page wrote into an empty frame is at the page's own address.
+    const written = await frameOf("written");
+    expect(written.url()).toBe("about:blank");
+    await asksFor(a, () => written.click("#file"));
+    expect(await host.address(a, true)).toBe("http://fixture.test/unaddressed");
+    expect(await upload()).toMatchObject({ ok: { files: 1 } });
+    // One from a data address runs as no site: there is none to ask its user about, so it is given nothing.
+    const data = await frameOf("data");
+    await asksFor(a, () => data.click("#file"));
+    expect(await host.address(a, true)).toMatch(/^data:text\/html,/);
+    expect((await upload()).error?.message).toBe(NO_SITE);
+    expect(await data.evaluate(filed)).toEqual([[]]);
   }, 30_000);
 
   it("stages a download a session's page finished in its own temporary folder, and hands it on for the chat's folder; one its user started while they hold the browser as theirs, the agent told nothing", async () => {

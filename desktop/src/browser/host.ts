@@ -68,6 +68,8 @@ const ASKING_MS = 500;
 // How long after a take-over the agent's pages still open no file chooser of the browser's own: what the
 // agent was doing in a page then (a click on its way, a button this host lets go) has reached it by then.
 export const OWN_CHOOSER_MS = 1_000;
+// How long a page may take to say where a file input of its is, for an upload's prompt.
+const LOOK_MS = 2_000;
 // How long a closing browser's processes may take to exit (Edge's take about 5 s on xvfb), below the client's STOP_MS.
 const RELEASE_MS = 6_000;
 export const PROXY_BYPASSED =
@@ -98,6 +100,10 @@ const MAX_NOTICES = 20;
 export const FILE_ASKED =
   "The page asked for a file to upload. Nothing was chosen: browser_upload_file gives it files of the chat's folder.";
 export const NOT_ASKED = "The page has not asked for a file: click its upload button or its file input first";
+// An upload its user was asked about, whose input is not where its prompt said by the time its files come.
+export const NOT_AS_ASKED =
+  "The page is not as it was when the user was asked about this upload, so it was given nothing: click its upload button or its file input again, then upload again";
+export const NO_SITE = "The file input that asked is in a frame that runs as no site, so it is given no files";
 export const ONE_FILE = "The page's file input takes one file at a time";
 export const BUSY = "The page was too busy to take the files, so it was given none of them";
 // How long the one step that puts an upload's files into its input may take to reach the page, and how
@@ -211,8 +217,27 @@ function filesOf(value: unknown): UploadFile[] | null {
   return files.every((file) => file !== null) ? files : null;
 }
 
-// The two steps a file input is given its files in. Each runs in the page, in the isolated world its
-// input's handle lives in (Playwright's own, one for each frame), which no script of the page's reaches.
+// Where a file input is: whether it is still a file input of its frame's own document, at what address
+// that frame is, and as what site it runs. Said in the page, in the isolated world the input's handle
+// lives in (Playwright's own, one for each frame), which no script of the page's reaches: so it is the
+// browser's word, not the page's.
+interface Place {
+  here: boolean;
+  href: string;
+  origin: string;
+}
+const place = (input: Node): Place => ({
+  here: input instanceof HTMLInputElement && input.type === "file" && input.isConnected && input.ownerDocument === document,
+  href: location.href,
+  origin: self.origin,
+});
+// The address that names the site a file given there goes to: its frame's own, or, for a frame with none
+// (one its page spells out or writes, a blob), the site it runs as. Null for one that runs as no site, as
+// a data address does: there is nothing to ask its user about.
+const SITE = /^https?:/;
+const siteOf = ({ href, origin }: Place): string | null => (SITE.test(href) ? href : SITE.test(origin) ? origin : null);
+
+// The two steps a file input is given its files in, each in that same world of the page.
 // First the files are made there: the input has none of them yet, and the page sees nothing.
 const make = (_input: Node, sent: UploadFile[]): DataTransfer => {
   const made = new DataTransfer();
@@ -226,10 +251,16 @@ const make = (_input: Node, sent: UploadFile[]): DataTransfer => {
 };
 // Then they are put into the input, in one step of the page's, heard there as a person's choice of them is
 // (input, then change): "given", or why not. "late": the step ran after *by*, on this computer's clock,
-// as when the page was busy: it gives nothing then, since its user may hold the browser by now.
-const put = (made: DataTransfer, { input, by }: { input: Node; by: number }): "given" | "gone" | "single" | "late" => {
+// as when the page was busy: it gives nothing then, since its user may hold the browser by now. "gone":
+// it is no file input of its frame's own document now. "moved": its frame is not at the address, or does
+// not run as the site, that *at* says, which is what its user was asked about. Looked at and given in the
+// one step, so that nothing the page does comes between.
+const put = (
+  made: DataTransfer, { input, by, at }: { input: Node; by: number; at: { href: string; origin: string } | null },
+): "given" | "gone" | "moved" | "single" | "late" => {
   if (Date.now() > by) return "late";
-  if (!(input instanceof HTMLInputElement) || input.type !== "file") return "gone";
+  if (!(input instanceof HTMLInputElement) || input.type !== "file" || !input.isConnected || input.ownerDocument !== document) return "gone";
+  if (at !== null && (location.href !== at.href || self.origin !== at.origin)) return "moved";
   if (made.files.length > 1 && !input.multiple) return "single";
   input.files = made.files;
   input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
@@ -431,8 +462,10 @@ export class BrowserHost {
   private ownChooser: NodeJS.Timeout | undefined;
   // The file input each session's pages asked for a file for last, until it is given one.
   private readonly choosers = new Map<string, FileChooser>();
-  // The one an upload's prompt named, by the frame of its input: that upload's files go to it, and to no input that asks after.
-  private readonly named = new Map<string, FileChooser>();
+  // What an upload's prompt named for each session: the input, with the address its frame was at and the
+  // site it ran as then; that upload's files go to it, there, and to no input that asks after. Or no
+  // input, and *why* that upload is given to none: nothing had asked, or what had runs as no site.
+  private readonly named = new Map<string, { input: { chooser: FileChooser; href: string; origin: string } | null; why: string }>();
   // Where this host stages downloads, once it has launched a browser: its own folder, until it closes.
   private staging: string | null = null;
   // The agent's downloads on their way, until each is handed on or dropped: a take-over stops them all.
@@ -474,17 +507,26 @@ export class BrowserHost {
    * The address of the page *session*'s next operation acts in, once those before it in its line
    * have run: its newest open page's, a popup's or its tab's, or a new tab's. For an *upload*: of
    * the frame of the file input its pages asked for last, which is the site that gets the files,
-   * whatever page frames it; that input is then held for the upload, so one that asks after cannot
-   * take the files in its place. Never rejects.
+   * whatever page frames it, as the browser says it and not the page (place); that input is then held
+   * for the upload, so one that asks after cannot take the files in its place, and the upload gives
+   * nothing if the input is elsewhere by then. Never rejects.
    */
   address(session: string, upload = false): Promise<string> {
     return this.inLine(session, async () => {
-      const chooser = upload ? this.choosers.get(session) : undefined;
-      if (chooser && !chooser.page().isClosed()) {
-        this.named.set(session, chooser);
-        return (await chooser.element().ownerFrame())?.url() ?? chooser.page().url();
+      const tab = (this.tabs.get(session) ?? []).filter((page) => !page.isClosed()).at(-1)?.url() ?? NEW_TAB;
+      if (!upload) return tab;
+      const chooser = this.choosers.get(session);
+      const at = chooser ? await this.placed(session, chooser) : null;
+      // Its user holds the browser, or took it over meanwhile: no input is named, or kept, for any upload.
+      if (this.held !== null) return tab;
+      if (!chooser || !at?.here) {
+        // Nothing has asked: its user is asked by the tab's page, and the upload is given to nothing, though an input asks after.
+        this.named.set(session, { input: null, why: NOT_ASKED });
+        return tab;
       }
-      return (this.tabs.get(session) ?? []).filter((page) => !page.isClosed()).at(-1)?.url() ?? NEW_TAB;
+      const site = siteOf(at);
+      this.named.set(session, site === null ? { input: null, why: NO_SITE } : { input: { chooser, href: at.href, origin: at.origin }, why: NOT_AS_ASKED });
+      return site ?? at.href;
     }).catch(() => NEW_TAB);
   }
 
@@ -733,6 +775,21 @@ export class BrowserHost {
     kept.heard = null;
   }
 
+  // Where *chooser*'s input is now, as the browser says it (place). Null where its page is closed or
+  // this session's no more, went elsewhere since it asked, or does not say within LOOK_MS.
+  private async placed(session: string, chooser: FileChooser): Promise<Place | null> {
+    if (this.sessionOf(chooser.page()) !== session) return null;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), LOOK_MS);
+    });
+    try {
+      return await Promise.race([chooser.element().evaluate(place).catch(() => null), late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // A page of *session*'s asked for a file: the input is kept for an upload, and its agent told. Not while
   // its user holds the browser: what a page asks for then is their own doing, or the page's under their
   // hand, and no input of theirs is the agent's to fill, at the hand back either.
@@ -833,14 +890,17 @@ export class BrowserHost {
   // prompt named, or, unasked, to the one the session's pages asked for last: the page is given names
   // and what they hold, never a path. Taken over while it is on its way, it gives the page nothing (give).
   private async upload(session: string, args: Record<string, unknown>, stop: AbortSignal): Promise<Outcome> {
-    const chooser = this.named.get(session) ?? this.choosers.get(session);
+    const named = this.named.get(session);
     this.named.delete(session);
-    if (!chooser || chooser.page().isClosed()) return failed(NOT_ASKED);
+    if (named && named.input === null) return failed(named.why);
+    const chooser = named?.input?.chooser ?? this.choosers.get(session);
+    // Its page closed, or is this session's no more.
+    if (!chooser || this.sessionOf(chooser.page()) !== session) return failed(NOT_ASKED);
     const files = filesOf(args.files);
     if (!files) return failed("A file for the page is a name, its type and what it holds");
     let refused: unknown;
     try {
-      refused = await this.bounded(chooser.page(), this.give(session, chooser, files, stop), stop);
+      refused = await this.bounded(chooser.page(), this.give(session, chooser, files, named?.input ?? null, stop), stop);
     } catch (error) {
       if (stop.aborted) return PAUSED;
       return failed(said(error));
@@ -861,19 +921,22 @@ export class BrowserHost {
   // files only if the page takes it within GIVE_MS: a page too busy for that is given nothing by it, and
   // is looked at again first. So a page gets a file at most GIVE_MS after its user took the browser over,
   // and only from a step sent before they did; its session's next answer then says so, since this
-  // operation's own is paused.
-  private async give(session: string, chooser: FileChooser, files: UploadFile[], stop: AbortSignal): Promise<string | null | typeof HELD> {
+  // operation's own is paused. *at*: where the upload's prompt said the input is; null for an upload
+  // nobody was asked about.
+  private async give(
+    session: string, chooser: FileChooser, files: UploadFile[], at: { href: string; origin: string } | null, stop: AbortSignal,
+  ): Promise<string | null | typeof HELD> {
     const input = chooser.element();
     if (stop.aborted) return HELD;
     const made = await input.evaluateHandle(make, files);
     try {
       for (let tries = 0; tries < GIVE_TRIES; tries += 1) {
         if (stop.aborted) return HELD;
-        const came = await made.evaluate(put, { input, by: Date.now() + GIVE_MS });
+        const came = await made.evaluate(put, { input, by: Date.now() + GIVE_MS, at: at && { href: at.href, origin: at.origin } });
         // The page was too busy to take them in time: looked at again, and sent again.
         if (came === "late") continue;
         if (came === "single") return ONE_FILE;
-        if (came !== "given") return NOT_ASKED;
+        if (came !== "given") return at ? NOT_AS_ASKED : NOT_ASKED;
         if (stop.aborted) this.keep(session, GIVEN_AS_TAKEN);
         return null;
       }
