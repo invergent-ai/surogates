@@ -352,12 +352,18 @@ describe("the Projects page", () => {
     await page.click("#open-projects");
     await expect.poll(() => page.$eval("#cards", (found) => getComputedStyle(found).gridTemplateColumns.split(" ").length), { timeout: 5_000 }).toBe(3);
     // The ring the first project's row draws with the keyboard on it, inside the list that scrolls.
+    // The keyboard comes to it by Tab, as its user's does: a ring is drawn only for a focus the keys brought.
     await page.focus(row(REPORT));
-    const [ring, list] = await page.evaluate((chosen) => {
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    const [ring, list, drawn] = await page.evaluate((chosen) => {
       const button = document.querySelector(chosen)!;
-      const width = Number.parseFloat(getComputedStyle(button).outlineWidth) + Number.parseFloat(getComputedStyle(button).outlineOffset);
-      return [button.getBoundingClientRect().top - width, document.querySelector("#projects")!.getBoundingClientRect().top];
+      if (document.activeElement !== button) return [0, 0, 0];
+      const style = getComputedStyle(button);
+      const drawn = style.outlineStyle === "none" ? 0 : Number.parseFloat(style.outlineWidth);
+      return [button.getBoundingClientRect().top - drawn - Number.parseFloat(style.outlineOffset), document.querySelector("#projects")!.getBoundingClientRect().top, drawn];
     }, row(REPORT));
+    expect(drawn).toBeGreaterThan(0);
     expect(ring).toBeGreaterThanOrEqual(list);
     agent.pagesRedirect = "https://sso.example.com/login";
     await client.reload().catch(() => {});
