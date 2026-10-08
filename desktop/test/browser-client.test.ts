@@ -312,7 +312,8 @@ describe.skipIf(!run)("the browser host's process", () => {
       const waiting = client.perform(launch, operation("op-3", "browser.evaluate", { code: "document.title = 'ran after the pause'; return 'waited';" }), signal);
       await new Promise((done) => setTimeout(done, 300));
       client.pause("root", true);
-      expect(await holding).toEqual({ ok: { value: "held" } });
+      // The one acting is answered paused, with nothing it read after; the one waiting never acts.
+      expect(await holding).toEqual(PAUSED);
       expect(await waiting).toEqual(PAUSED);
       expect(await client.perform(launch, operation("op-4", "browser.close", {}), signal)).toEqual(PAUSED);
       expect(await answered(client.show("root"))).toBe(true);

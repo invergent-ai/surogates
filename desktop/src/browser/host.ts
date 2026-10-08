@@ -52,6 +52,7 @@ const BOUNDED: ReadonlySet<string> = new Set([
   "browser.navigate", "browser.evaluate", "browser.observe", "browser.mouse", "browser.keyboard", "browser.screenshot",
 ]);
 const LATE = Symbol("late");
+const HELD = Symbol("held");
 // How long a launch's proof that the proxy carries the browser's requests may take.
 const CHECK_MS = 15_000;
 // How long a new tab may take; and how long a browser that refused one may take to quit, as it does after its last tab.
@@ -79,6 +80,20 @@ export const said = (error: unknown): string => (error instanceof Error ? error.
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+// What *work* settles with, or *answer* at once when *stop* aborts first: whatever *work* settles with
+// after that is dropped. Leaves no listener on *stop*, which lasts until the browser is next taken over.
+function until<T, S>(work: Promise<T>, stop: AbortSignal, answer: S): Promise<T | S> {
+  if (stop.aborted) {
+    work.catch(() => {});
+    return Promise.resolve(answer);
+  }
+  return new Promise((resolve, reject) => {
+    const stopped = () => resolve(answer);
+    stop.addEventListener("abort", stopped, { once: true });
+    work.then(resolve, reject).finally(() => stop.removeEventListener("abort", stopped));
+  });
+}
 
 // The browser's own name for *page*: its target's.
 async function targetOf(page: Page): Promise<string> {
@@ -275,6 +290,10 @@ export class BrowserHost {
   // answered paused meanwhile. The browser is the agent's one browser on this computer, every tab a tab of
   // one window, on one profile.
   private held: string | null = null;
+  // Aborted when the browser is taken over, for the operations acting then, each of which keeps the signal
+  // it began under: answered paused at once, it types, drags and loads no further, and is never taken up
+  // again, at a hand back either. Those that begin after a hand back get the next.
+  private interrupt = new AbortController();
   private closing = false;
 
   constructor(private readonly options: BrowserHostOptions = {}) {}
@@ -289,7 +308,7 @@ export class BrowserHost {
       : this.inLine(session, () => {
         if (this.forgets.get(root) !== forgets) return Promise.resolve(DELETED);
         // Its user took the browser over while it waited: it does nothing there.
-        return this.held !== null ? Promise.resolve(PAUSED) : this.run(launch, session, kind, args, signal);
+        return this.held !== null ? Promise.resolve(PAUSED) : this.run(launch, session, kind, args, signal, this.interrupt.signal);
       });
     return Promise.race([work, new Promise<Outcome>((resolve) => {
       if (signal.aborted) resolve(CANCELLED);
@@ -311,8 +330,13 @@ export class BrowserHost {
    * the chat that holds it. Which chat may take it is its client's to say: the last one told holds it.
    */
   pause(root: string, paused: boolean): void {
-    if (paused) this.held = root;
-    else if (this.held === root) this.held = null;
+    if (!paused) {
+      if (this.held === root) this.held = null;
+      return;
+    }
+    this.held = root;
+    this.interrupt.abort();
+    this.interrupt = new AbortController();
   }
 
   /**
@@ -369,24 +393,34 @@ export class BrowserHost {
     this.proxy = null;
   }
 
-  private async run(launch: Launch, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
+  // An operation at its turn. Taken over while it acts, it is answered paused at once, whatever it has
+  // done: nothing it reads from the page after that is the agent's, and its session's line goes on.
+  private run(launch: Launch, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, stop: AbortSignal): Promise<Outcome> {
+    return until(this.act(launch, session, kind, args, signal, stop), stop, PAUSED);
+  }
+
+  private async act(launch: Launch, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, stop: AbortSignal): Promise<Outcome> {
     if (signal.aborted) return CANCELLED;
     const operation = OPERATIONS[kind];
     if (!operation) return { error: { type: "unsupported", message: `This computer's browser does not handle ${kind}` } };
     let page: Page | undefined;
     try {
-      const found = await this.pageFor(launch, session);
+      const found = await this.pageFor(launch, session, stop);
       // Its user took the browser over while it launched, or while its tab opened: it has no page, and does
       // nothing in one. The last look before it acts, and the only one where its session has its tab already.
-      if (found === null || this.held !== null) return PAUSED;
+      if (found === null || stop.aborted) return PAUSED;
       page = found.page;
       const { opened } = found;
-      const value = BOUNDED.has(kind) ? await this.bounded(page, operation(page, args)) : await operation(page, args);
+      const value = BOUNDED.has(kind) ? await this.bounded(page, operation(page, args, stop), stop) : await operation(page, args, stop);
+      // Taken over while it acted: what its pages did meanwhile stays for its session's next answer.
+      if (stop.aborted) return PAUSED;
       if (!isRecord(value) || kind === "browser.observe" || kind === "browser.evaluate") return { ok: value ?? null };
       const notices = this.unseen.get(session) ?? [];
       this.unseen.delete(session);
       return { ok: { ...value, ...(kind === "browser.navigate" ? { opened } : {}), notices } };
     } catch (error) {
+      // Taken over: a navigation stopped for it is no failure to wait an error page for.
+      if (stop.aborted) return PAUSED;
       if (kind !== "browser.navigate") return failed(said(error));
       // The error page a refused navigation shows can commit after goto has given up, and paint
       // later still: the next operation would meet it arriving, a script or a shot (Edge). So it
@@ -420,11 +454,11 @@ export class BrowserHost {
 
   // The newest open page of the session's: a popup it opened, or its tab, made if it has none. Null where
   // none is made for it: its user took the browser over meanwhile.
-  private async pageFor(launch: Launch, session: string): Promise<{ page: Page; opened: boolean } | null> {
+  private async pageFor(launch: Launch, session: string, stop: AbortSignal): Promise<{ page: Page; opened: boolean } | null> {
     const open = (this.tabs.get(session) ?? []).filter((page) => !page.isClosed());
     const newest = open.at(-1);
     if (newest) return { page: newest, opened: false };
-    const page = await this.tab(launch);
+    const page = await this.tab(launch, stop);
     if (page === null) return null;
     this.tabs.set(session, []);
     this.adopt(session, page);
@@ -433,11 +467,11 @@ export class BrowserHost {
 
   // A new tab: the new browser's first page, or one opened now. A browser that was closing
   // refuses one or never answers: then the tab is opened in the next browser, once. Null once its user
-  // holds the browser: none is taken or opened for an operation that waited for the launch, and one that
-  // opened meanwhile is closed again, no session's.
-  private async tab(launch: Launch, again = true): Promise<Page | null> {
+  // took the browser over (*stop*): none is taken or opened for an operation that waited for the launch,
+  // and one that opened meanwhile is closed again, no session's.
+  private async tab(launch: Launch, stop: AbortSignal, again = true): Promise<Page | null> {
     const context = await this.browser(launch);
-    if (this.held !== null) return null;
+    if (stop.aborted) return null;
     const spare = this.spare !== null && !this.spare.isClosed() ? this.spare : null;
     this.spare = null;
     if (spare) return spare;
@@ -445,10 +479,10 @@ export class BrowserHost {
     try {
       page = await opened(context);
     } catch (error) {
-      if (again && (await this.gone(context))) return this.tab(launch, false);
+      if (again && (await this.gone(context))) return this.tab(launch, stop, false);
       throw error;
     }
-    if (this.held === null) return page;
+    if (!stop.aborted) return page;
     await page.close().catch(() => {});
     return null;
   }
@@ -490,14 +524,20 @@ export class BrowserHost {
   }
 
   // A page that does not answer within the bound is closed: the call stuck on it ends, and its
-  // session's line is free again. Another page of the session's is not touched.
-  private async bounded(page: Page, work: Promise<unknown>): Promise<unknown> {
+  // session's line is free again. Another page of the session's is not touched. Once its user took the
+  // browser over (*stop*) the wait ends there, and the page stays: no bound closes a page they hold, nor
+  // the browser with its last one.
+  private async bounded(page: Page, work: Promise<unknown>, stop: AbortSignal): Promise<unknown> {
     const limit = this.options.boundMs ?? BOUND_MS;
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<typeof LATE>((resolve) => {
       timer = setTimeout(() => resolve(LATE), limit);
     });
-    const first = await Promise.race([work, late]).finally(() => clearTimeout(timer));
+    const first = await until(Promise.race([work, late]), stop, HELD).finally(() => clearTimeout(timer));
+    if (first === HELD) {
+      work.catch(() => {});
+      return undefined;
+    }
     if (first !== LATE) return first;
     work.catch(() => {});
     await this.closePages([page]);

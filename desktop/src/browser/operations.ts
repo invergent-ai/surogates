@@ -7,7 +7,9 @@ import type { Page } from "playwright-core";
 import { MAX_FRAME_CHARS } from "../link/protocol.js";
 import { observe } from "./observe.js";
 
-export type PageOperation = (page: Page, args: Record<string, unknown>) => Promise<unknown>;
+// *stop* aborts once its user takes the browser over while the operation acts: it does nothing more in
+// the page that it can leave undone, and what it answers after is given to no one.
+export type PageOperation = (page: Page, args: Record<string, unknown>, stop: AbortSignal) => Promise<unknown>;
 
 // Below the host's bound (BOUND_MS), so a page that does not load answers goto's own time-out and keeps its tab.
 const NAVIGATION_MS = 50_000;
@@ -37,7 +39,18 @@ function buttonOf(value: unknown): Button {
   return value as Button;
 }
 
-async function navigate(page: Page, args: Record<string, unknown>): Promise<unknown> {
+// The page's navigation in flight stopped, as its Stop button stops it: the page it shows stays.
+async function stopLoading(page: Page): Promise<void> {
+  try {
+    const session = await page.context().newCDPSession(page);
+    await session.send("Page.stopLoading");
+    await session.detach();
+  } catch {
+    // The page went meanwhile.
+  }
+}
+
+async function navigate(page: Page, args: Record<string, unknown>, stop: AbortSignal): Promise<unknown> {
   let url: URL;
   try {
     url = new URL(text(args.url, "url"));
@@ -47,7 +60,14 @@ async function navigate(page: Page, args: Record<string, unknown>): Promise<unkn
   // goto opens what route interception would not stop: chrome://, edge://, view-source: and file:.
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("The agent's browser opens only http and https addresses");
   const waitUntil = typeof args.wait_until === "string" && WAITS.has(args.wait_until) ? args.wait_until : "load";
-  await page.goto(url.href, { waitUntil: waitUntil as "load", timeout: NAVIGATION_MS });
+  // Taken over while it loads: the page its user holds is not replaced under them.
+  const halt = () => void stopLoading(page);
+  stop.addEventListener("abort", halt, { once: true });
+  try {
+    await page.goto(url.href, { waitUntil: waitUntil as "load", timeout: NAVIGATION_MS });
+  } finally {
+    stop.removeEventListener("abort", halt);
+  }
   return { url: page.url(), title: await page.title() };
 }
 
@@ -82,7 +102,7 @@ async function settled(page: Page, act: () => Promise<void>): Promise<void> {
   }
 }
 
-async function mouse(page: Page, args: Record<string, unknown>): Promise<unknown> {
+async function mouse(page: Page, args: Record<string, unknown>, stop: AbortSignal): Promise<unknown> {
   const { action } = args;
   if (action === "drag") {
     const path = args.path;
@@ -94,8 +114,13 @@ async function mouse(page: Page, args: Record<string, unknown>): Promise<unknown
     const button = buttonOf(args.button);
     const [first, ...rest] = points;
     await page.mouse.move(first![0], first![1]);
+    if (stop.aborted) return {};
     await page.mouse.down({ button });
-    for (const [x, y] of rest) await page.mouse.move(x, y);
+    for (const [x, y] of rest) {
+      // Taken over: the pointer moves no further, and the button comes up where it is, not left held under its user's hand.
+      if (stop.aborted) break;
+      await page.mouse.move(x, y);
+    }
     await page.mouse.up({ button });
     return {};
   }
@@ -131,7 +156,7 @@ async function mouse(page: Page, args: Record<string, unknown>): Promise<unknown
   throw new Error(`No mouse action ${JSON.stringify(String(action))}`);
 }
 
-async function keyboard(page: Page, args: Record<string, unknown>): Promise<unknown> {
+async function keyboard(page: Page, args: Record<string, unknown>, stop: AbortSignal): Promise<unknown> {
   const delay = whole(args.delay ?? 0, "delay");
   const options = delay > 0 ? { delay: Math.min(delay, 1_000) } : {};
   if (args.action === "type") {
@@ -144,12 +169,18 @@ async function keyboard(page: Page, args: Record<string, unknown>): Promise<unkn
       await page.waitForFunction(() => document.activeElement !== null && document.activeElement !== document.body, undefined, { timeout: 2_000 })
         .catch(() => {});
     }
-    await page.keyboard.type(typed, options);
+    // A character at a time, as Playwright's own type sends them, so that not one more goes once its user
+    // has taken the browser over: the rest would land wherever they put the focus.
+    for (const character of typed) {
+      if (stop.aborted) break;
+      await page.keyboard.type(character, options);
+    }
     return {};
   }
   if (args.action === "press") {
     const keys = text(args.keys, "keys");
     if (keys === "" || keys.length > MAX_KEYS) throw new Error("keys is one chord");
+    // One chord is one step: begun, its keys come up again.
     await page.keyboard.press(keys, options);
     return {};
   }

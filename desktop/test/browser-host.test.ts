@@ -7,6 +7,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
+import { getEventListeners } from "node:events";
 import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { connect as connectTcp } from "node:net";
@@ -85,6 +86,8 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<scrip
     if (req.url === "/inner") return void res.writeHead(200, { "content-type": "text/html" }).end(`<a href="/x">Inner link</a>`);
     if (req.url === "/report.txt") return void res.writeHead(200, { "content-type": "text/plain", "content-disposition": "attachment" }).end("report");
     if (req.url === "/second") return void res.writeHead(200, { "content-type": "text/html" }).end("<title>Second</title>");
+    // A page that answers a moment late: a navigation to it is in flight meanwhile.
+    if (req.url === "/slow") return void setTimeout(() => res.writeHead(200, { "content-type": "text/html" }).end("<title>Slow</title>"), 1_500);
     // The fixture's page under a title of the test's own: the browser's window is named after the tab in front.
     if (req.url?.startsWith("/t/")) return void res.writeHead(200, { "content-type": "text/html" }).end(PAGE.replace("<title>Fixture</title>", `<title>${req.url.slice(3)}</title>`));
     // A page whose outline is larger than the link carries: ten thousand buttons with long names.
@@ -731,8 +734,8 @@ await navigator.serviceWorker.ready;`);
     const waiting = op(a, "browser.evaluate", { code: "return document.title;" }, "chat-1");
     await new Promise((done) => setTimeout(done, 300));
     host.pause("chat-1", true);
-    // What ran already ends as it would; what waited does nothing.
-    expect((await holding).ok?.value).toBe(1);
+    // What was acting is answered paused, with nothing it read after; what waited does nothing.
+    expect(await holding).toEqual(PAUSED);
     expect(await waiting).toEqual(PAUSED);
     expect(await op(a, "browser.close", {}, "chat-1")).toEqual(PAUSED);
     // Another chat's, which never asked for the take-over: the browser its user holds is the agent's one browser.
@@ -797,8 +800,10 @@ await navigator.serviceWorker.ready;`);
     // Not launched yet: the operation has no page to act in.
     expect(state.live).toBeNull();
     host.pause("chat-1", true);
+    // Answered at once, not when the launch has ended: the browser is not up yet.
     expect(await first).toEqual(PAUSED);
-    // The browser came up meanwhile, with the one page a browser opens with: no session's, and none beside it.
+    expect(state.live).toBeNull();
+    // Then it comes up, with the one page a browser opens with: no session's, and none beside it.
     await state.running;
     expect(tabs().has(a)).toBe(false);
     expect(await host.show("chat-1")).toBe(false);
@@ -833,10 +838,133 @@ await navigator.serviceWorker.ready;`);
     const queued = op(a, "browser.evaluate", { code: "document.title = 'ran after the pause'; return 2;" }, "chat-1");
     await new Promise((done) => setTimeout(done, 300));
     host.pause("chat-1", true);
-    expect((await held).ok?.value).toBe(1);
+    expect(await held).toEqual(PAUSED);
     expect(await queued).toEqual(PAUSED);
     host.pause("chat-1", false);
     expect(await script(a, "return document.title;")).toBe("Fixture");
+  }, 30_000);
+
+  it("types not one more character once its user took the browser over", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const typed = () => page.evaluate(() => (document.getElementById("name") as HTMLInputElement).value);
+    await page.evaluate(() => document.getElementById("name")!.focus());
+    const text = "abcdefghijklmnopqrstuvwxyz0123";
+    const typing = op(a, "browser.keyboard", { action: "type", text, at: null, delay: 200 }, "chat-1");
+    await expect.poll(async () => (await typed()).length, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
+    host.pause("chat-1", true);
+    // Answered at once, not when the last character would have come.
+    expect(await within(1_000, typing)).toEqual(PAUSED);
+    // The key that was down comes up; then nothing of the agent's follows, whatever its user does in the page.
+    await new Promise((done) => setTimeout(done, 300));
+    const atPause = await typed();
+    expect(text.startsWith(atPause) && atPause.length < 10, atPause).toBe(true);
+    await new Promise((done) => setTimeout(done, 1_500));
+    expect(await typed()).toBe(atPause);
+  }, 30_000);
+
+  it("moves a drag no further once its user took the browser over, and lets its button go", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    await page.evaluate(() => {
+      const seen = { moves: 0, ups: 0 };
+      Object.assign(window, { seen });
+      addEventListener("mousemove", () => (seen.moves += 1));
+      addEventListener("mouseup", () => (seen.ups += 1));
+    });
+    const seen = () => page.evaluate(() => (window as unknown as { seen: { moves: number; ups: number } }).seen);
+    const path = Array.from({ length: 1_000 }, (_, n) => [20 + (n % 500), 20 + Math.floor(n / 4)]);
+    const dragging = op(a, "browser.mouse", { action: "drag", path, button: "left" }, "chat-1");
+    await expect.poll(async () => (await seen()).moves, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+    host.pause("chat-1", true);
+    expect(await within(1_000, dragging)).toEqual(PAUSED);
+    // The move that was under way ends, and the button comes up where the pointer is: then nothing more.
+    await expect.poll(async () => (await seen()).ups, { timeout: 5_000 }).toBe(1);
+    const atPause = await seen();
+    expect(atPause.moves).toBeLessThan(900);
+    await new Promise((done) => setTimeout(done, 1_000));
+    expect(await seen()).toEqual(atPause);
+  }, 30_000);
+
+  it("answers an operation in flight paused at once, and gives the agent nothing it read after its user took the browser over", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    // A script that reads the page's field a moment on: by then its user has typed there.
+    const reading = op(a, "browser.evaluate", { code: "await new Promise((done) => setTimeout(done, 1500)); return document.getElementById('name').value;" }, "chat-1");
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", true);
+    expect(await within(1_000, reading)).toEqual(PAUSED);
+    await page.evaluate(() => {
+      (document.getElementById("name") as HTMLInputElement).value = "typed by its user";
+    });
+    host.pause("chat-1", false);
+    // An outline and a shot asked of a page too busy to answer before the take-over: neither is given once it can.
+    for (const [kind, args] of [["browser.observe", { script: "snapshot@1", params: {} }], ["browser.screenshot", { clip: null, labels: [] }]] as const) {
+      void page.evaluate("const until = Date.now() + 1500; while (Date.now() < until) {}").catch(() => {});
+      const asked = op(a, kind, args, "chat-1");
+      await new Promise((done) => setTimeout(done, 300));
+      host.pause("chat-1", true);
+      expect(await within(1_000, asked), kind).toEqual(PAUSED);
+      host.pause("chat-1", false);
+      // The page answers again before the next is asked of it.
+      await expect.poll(() => within(500, page.evaluate("1")), { timeout: 10_000 }).toBe(1);
+    }
+  }, 30_000);
+
+  it("keeps what a page did for its session's next answer when the operation that would have told of it was answered paused", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const unseen = (host as unknown as { unseen: Map<string, string[]> }).unseen;
+    // An operation whose answer carries notices, long enough to be acting still when the browser is taken over.
+    const typing = op(a, "browser.keyboard", { action: "type", text: "abcdefgh", at: null, delay: 200 }, "chat-1");
+    // Meanwhile the page asks for a file.
+    await page.click("#file");
+    await expect.poll(() => unseen.get(a), { timeout: 5_000 }).toEqual([FILE_ASKED]);
+    host.pause("chat-1", true);
+    expect(await within(1_000, typing)).toEqual(PAUSED);
+    // What is left of the operation ends, its answer given to no one.
+    await new Promise((done) => setTimeout(done, 500));
+    host.pause("chat-1", false);
+    expect((await op(a, "browser.mouse", { action: "move", x: 5, y: 5 }, "chat-1")).ok.notices).toEqual([FILE_ASKED]);
+  }, 30_000);
+
+  it("keeps nothing of an operation, once it has answered, on what a take-over would stop it by", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    // One signal for every operation until the browser is next taken over, which may be never in a run of the app.
+    const stops = () => getEventListeners((host as unknown as { interrupt: AbortController }).interrupt.signal, "abort");
+    for (let n = 0; n < 20; n += 1) expect(await script(a, `return ${n};`)).toBe(n);
+    await op(a, "browser.navigate", { url: "http://fixture.test/second" }, "chat-1");
+    expect(stops()).toHaveLength(0);
+  }, 30_000);
+
+  it("leaves the page its user holds where it is: a navigation in flight is stopped, and no bound closes it", async () => {
+    await host.close();
+    host = hostWith({ boundMs: 3_000 });
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/t/HELD" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    // A navigation to a page that answers 1.5 s on.
+    const going = op(a, "browser.navigate", { url: "http://fixture.test/slow" }, "chat-1");
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", true);
+    expect(await within(1_000, going)).toEqual(PAUSED);
+    host.pause("chat-1", false);
+    // A script that never answers: left to its bound, its page would be closed, and the browser with its last page.
+    const stuck = op(a, "browser.evaluate", { code: "await new Promise(() => {}); return 1;" }, "chat-1");
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", true);
+    expect(await within(1_000, stuck)).toEqual(PAUSED);
+    // Past the slow page's answer, and past the bound: the page is the one its user holds, open.
+    await new Promise((done) => setTimeout(done, 3_500));
+    expect(page.isClosed()).toBe(false);
+    expect(page.url()).toBe("http://fixture.test/t/HELD");
+    expect(await page.title()).toBe("HELD");
+    expect(await pages()).toBe(1);
   }, 30_000);
 
   it("brings a chat's own newest page to the front before a sub-agent's, and shows none for a chat with no page", async () => {
