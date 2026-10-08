@@ -256,4 +256,39 @@ class ReleaseWorkflowTest < Minitest::Test
     refute_includes release_needs, "desktop-build"
     refute_includes release_needs, "desktop-publish"
   end
+
+  def test_desktop_publish_is_the_tag_s_checkout_the_tarball_s_download_and_publish_sh_and_nothing_else
+    job = @workflow.fetch("jobs").fetch("desktop-publish")
+    steps = job.fetch("steps")
+
+    # A step need not name npm to run it: package.sh does, and so may an action, a container's
+    # image, or a runner that kept what an earlier job's npm left on it. The job that holds the
+    # keys is these four steps, each with these keys alone, on a runner of its own.
+    assert_equal [
+      { "uses" => "actions/checkout@v4" },
+      { "uses" => "actions/download-artifact@v4" },
+      { "run" => 'desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop' },
+      { "run" => 'desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop' },
+    ], steps.map { |step| step.slice("uses", "run") }
+    # The checkout names no ref, repository or path: publish.sh and install.sh are the tag's.
+    assert_equal [%w[uses], %w[name uses with], %w[env name run], %w[env name run]], steps.map { |step| step.keys.sort }
+    assert_equal %w[concurrency environment needs permissions runs-on steps timeout-minutes], job.keys.sort
+    assert_equal "blacksmith-4vcpu-ubuntu-2404", job.fetch("runs-on")
+  end
+
+  def test_the_desktop_s_secrets_reach_no_other_job_however_they_are_named
+    jobs = @workflow.fetch("jobs")
+
+    # An Environment's secrets reach every job that names it, all of them at once through
+    # toJSON(secrets), which names none.
+    jobs.except("desktop-publish").each do |name, job|
+      refute_includes job["environment"].to_s, "desktop-release", "#{name} runs in the desktop's Environment"
+    end
+    # secrets.X, secrets['X'] or all of them: the build names no secret in any form.
+    refute_match(/\bsecrets\b/, jobs.fetch("desktop-build").to_s)
+    # R2's keys can rewrite desktop/install.sh, which runs as root on each new install: the guest
+    # image's job and the desktop's publish job read them, and no other.
+    r2 = /\bR2_(ENDPOINT|BUCKET|ACCESS_KEY_ID|SECRET_ACCESS_KEY)\b/
+    assert_equal %w[desktop-vm-image desktop-publish], jobs.select { |_, job| job.to_s.match?(r2) }.keys
+  end
 end
