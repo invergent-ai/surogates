@@ -6,7 +6,7 @@
 
 import { type ChildProcess, execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -390,6 +390,30 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     }
     expect(root("test -e /opt/surogate/current").status).toBe(1);
     expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
+  });
+
+  it("takes only a tree whose app and helper are programs, the helper in a bin folder of its own, and gives it its mark, its bwrap and its mode itself", () => {
+    const refusals: Array<(top: string) => void> = [
+      (top) => { rmSync(join(top, "surogate")); mkdirSync(join(top, "surogate")); },
+      (top) => { rmSync(join(top, "bin", "surogate-apply-update")); mkdirSync(join(top, "bin", "surogate-apply-update")); },
+      (top) => { renameSync(join(top, "bin"), join(top, "tools")); symlinkSync("tools", join(top, "bin")); },
+    ];
+    for (const [index, change] of refusals.entries()) {
+      const tarball = releaseOf("1.0.0", change);
+      manifestOf("1.0.0", tarball);
+      expect(apply(tarball), `refusal ${index}`).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's archive is not Surogate Desktop\n" });
+    }
+    // A release.json and a bin/bwrap of the archive's own, here folders, and a top folder only its owner opens.
+    const tarball = releaseOf("1.0.0", (top) => {
+      mkdirSync(join(top, "release.json"));
+      writeFileSync(join(top, "release.json", "inside"), "");
+      mkdirSync(join(top, "bin", "bwrap"));
+      chmodSync(top, 0o700);
+    });
+    manifestOf("1.0.0", tarball);
+    expect(apply(tarball)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+    expect(root("stat -c %a /opt/surogate/versions/1.0.0").stdout).toBe("755\n");
+    expect(root("test -f /opt/surogate/current/release.json && cmp /home/tester/manifest.json /opt/surogate/current/release.json && cmp /usr/bin/bwrap /opt/surogate/current/bin/bwrap").status).toBe(0);
   });
 
   it("keeps the version before it, and removes older ones once nothing runs from them", () => {

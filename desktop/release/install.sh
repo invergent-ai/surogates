@@ -202,11 +202,18 @@ apply() {
     while IFS= read -r -d '' link; do
       [[ "$(realpath -m "$link")" == "$top"/* ]] || fail "the release's archive links outside itself: ${link#"$top"/}"
     done < <(find "$top" -type l -print0)
-    [ -x "$top/surogate" ] && [ -x "$top/bin/surogate-apply-update" ] || fail "the release's archive is not Surogate Desktop"
+    # The app and its helper are programs, no folders, and bin a folder of the tree's own, where
+    # this version's bwrap goes.
+    [ -f "$top/surogate" ] && [ -x "$top/surogate" ] && [ -d "$top/bin" ] && [ ! -L "$top/bin" ] \
+      && [ -f "$top/bin/surogate-apply-update" ] && [ -x "$top/bin/surogate-apply-update" ] \
+      || fail "the release's archive is not Surogate Desktop"
     chmod -R go-w "$top"
-    # Last: a version folder with its manifest is whole. A release.json of the archive's is replaced,
-    # never written through.
-    cp --remove-destination "$work/manifest.json" "$top/release.json"
+    chmod 0755 "$top"
+    # Its mark and its bwrap are made here: whatever the archive has under their names goes, a link
+    # or a folder too, and is never written through or into.
+    rm -rf -- "$top/release.json" "$top/bin/bwrap"
+    # Last: a version folder with its manifest is whole.
+    cp "$work/manifest.json" "$top/release.json"
     [ ! -e "$folder" ] || mv -T "$folder" "$work/replaced"
     mv -T "$top" "$folder"
   fi
