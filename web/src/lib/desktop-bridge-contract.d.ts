@@ -88,6 +88,16 @@ export interface DesktopBridge {
   // Hears each chat bound on this computer, each change of a chat's mode, and each chat's folder
   // forgotten here, as for a deleted chat, by the chat's id.
   onBindingChanged?(listener: (sessionId: string) => void): () => void;
+  // Hears what the user sent from the desktop's quick entry, by an id of the desktop's, once the
+  // desktop has opened a new chat (/chat) for it: the page sends it as that chat's first message.
+  // What came before the page listened is held for its first listener, while the page stays on that
+  // chat. Desktops built before it have none: the page looks first.
+  onQuickEntry?(
+    listener: (message: { id: string; text: string }) => void,
+  ): () => void;
+  // Tells the desktop what became of what quick entry handed the page: null once it was sent, or
+  // why it was not, which quick entry's box says. Until then the box keeps the text.
+  answerQuickEntry?(id: string, refused: string | null): void;
   getAppearance(): Promise<DesktopAppearance>;
   onAppearanceChanged(listener: (appearance: DesktopAppearance) => void): () => void;
   // Who is signed in; null once nobody is.

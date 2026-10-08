@@ -65,19 +65,20 @@ describe("the app's menu", () => {
 });
 
 describe("the tray", () => {
-  it("shows the window, says how this computer is connected, opens Settings and quits", () => {
+  it("shows the window, opens quick entry, says how this computer is connected, opens Settings and quits", () => {
     const asked: string[] = [];
     const actions = {
-      show: () => asked.push("show"), settings: () => asked.push("settings"), quit: () => asked.push("quit"), quitNow: () => asked.push("quitNow"),
+      show: () => asked.push("show"), quickEntry: () => asked.push("quickEntry"), settings: () => asked.push("settings"),
+      quit: () => asked.push("quit"), quitNow: () => asked.push("quitNow"),
     };
     const menu = trayMenu({ device: "Connected as Laptop", quitting: null }, actions);
     expect(menu.map((item) => [item.label ?? item.type, item.enabled ?? true])).toEqual([
-      ["Show Surogate", true], ["Connected as Laptop", false], ["separator", true], ["Settings…", true], ["Quit Surogate", true],
+      ["Show Surogate", true], ["Quick entry", true], ["Connected as Laptop", false], ["separator", true], ["Settings…", true], ["Quit Surogate", true],
     ]);
     for (const item of menu) (item.click as (() => void) | undefined)?.();
-    expect(asked).toEqual(["show", "settings", "quit"]);
+    expect(asked).toEqual(["show", "quickEntry", "settings", "quit"]);
     expect(trayMenu({ device: null, quitting: null }, actions).map((item) => item.label ?? item.type))
-      .toEqual(["Show Surogate", "separator", "Settings…", "Quit Surogate"]);
+      .toEqual(["Show Surogate", "Quick entry", "separator", "Settings…", "Quit Surogate"]);
     // While a quit waits for the threads working on this computer: quit now, with no question.
     const waiting = trayMenu({ device: "Connected as Laptop", quitting: 2 }, actions);
     expect(waiting.at(-1)?.label).toBe("Quit now");

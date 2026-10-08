@@ -308,9 +308,9 @@ export class MainWindow {
     this.web?.view.setBounds(hole);
   }
 
-  /** Load *path* of the web client: settled once it has loaded, or failed to. */
-  go(path: string): Promise<void> {
-    return this.web ? this.load(this.web, path) : Promise.resolve();
+  /** Load *path* of the web client: true once it has loaded, false once it failed, or another load or the shell's refusal ended it. */
+  go(path: string): Promise<boolean> {
+    return this.web ? this.load(this.web, path) : Promise.resolve(false);
   }
 
   back(): void {
@@ -334,9 +334,9 @@ export class MainWindow {
     contents.setZoomLevel(step === 0 ? 0 : Math.min(3, Math.max(-3, contents.getZoomLevel() + step)));
   }
 
-  private load(web: WebView, path: string): Promise<void> {
+  private load(web: WebView, path: string): Promise<boolean> {
     clearTimeout(web.retry);
-    return web.view.webContents.loadURL(`${web.agent.origin}${path}`).catch(() => {});
+    return web.view.webContents.loadURL(`${web.agent.origin}${path}`).then(() => true, () => false);
   }
 
   // A failed load is tried again, with the link's backoff, once the agent answers its /auth/config.

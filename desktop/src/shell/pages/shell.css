@@ -1403,3 +1403,39 @@ body.about-page {
   padding: 0;
   border: 0;
 }
+
+/* Quick entry: a box in the middle of a transparent window, over every other. */
+body.quick-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  background: transparent;
+}
+
+.quick {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: calc(100% - 32px);
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--raised);
+  box-shadow: 0 16px 48px rgb(0 0 0 / 0.35);
+}
+
+.quick textarea {
+  width: 100%;
+  min-height: 72px;
+  max-height: 360px;
+  padding: 0;
+  border: none;
+  outline: none;
+  resize: none;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: 15px;
+  user-select: text;
+}

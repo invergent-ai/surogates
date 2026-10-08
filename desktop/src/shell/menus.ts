@@ -74,15 +74,17 @@ export interface TrayState {
 
 export interface TrayActions {
   show(): void;
+  quickEntry(): void;
   settings(): void;
   quit(): void;
   quitNow(): void; // a quit that waits goes now, with no question
 }
 
-// The tray's menu, as Claude Desktop's (index.chunk-B33tFrRY.js): the window first, then what to know, then Quit.
+// The tray's menu, as Claude Desktop's (index.chunk-B33tFrRY.js): the window and quick entry first, then what to know, then Quit.
 export function trayMenu(state: TrayState, act: TrayActions): MenuItemConstructorOptions[] {
   return [
     { label: "Show Surogate", click: () => act.show() },
+    { label: "Quick entry", click: () => act.quickEntry() },
     ...(state.device === null ? [] : [{ label: state.device, enabled: false }]),
     { type: "separator" },
     { label: "Settings…", click: () => act.settings() },

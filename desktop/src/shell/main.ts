@@ -43,6 +43,7 @@ import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } 
 import { PreferencesStore } from "./preferences.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
+import { QuickEntry } from "./quick-entry.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
 import { asShown } from "./pages/ui.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
@@ -1110,11 +1111,16 @@ function bridge(contents: WebContents, agent: Agent): void {
   contents.ipc.on("desktop:projects-changed", (event, id: unknown, threadId: unknown) => {
     if (fromView(event)) projects.changed(id, threadId);
   });
+  contents.ipc.on("desktop:quick-entry-answer", (event, id: unknown, refused: unknown) => {
+    if (fromView(event)) handed(id, typeof refused === "string" ? refused : null);
+  });
   // A page that loads again starts with no source, until it registers one. Until its load commits,
   // the page there still serves: a load the shell cancels, as to an address outside the agent's, changes nothing.
   onReplaced(contents, () => {
     load += 1;
     if (served) withdrawProjects(false);
+    // A text quick entry handed the page that went is not sent: its box says so.
+    if (handing) handed(handing.id, LEFT_CHAT);
   });
 }
 
@@ -1275,6 +1281,7 @@ function updateTray(): void {
   const agent = agents.get();
   const template = trayMenu({ device: agent ? deviceLine(agent) : null, quitting: waiting ? (device?.stack?.working() ?? 0) : null }, {
     show: () => main?.show(),
+    quickEntry: toggleQuickEntry,
     settings: menuActions.settings,
     quit: () => app.quit(),
     quitNow: () => waiting?.(),
@@ -1389,9 +1396,10 @@ function notifyAsking(): void {
   notifications?.show({ tag: "asking", title: "Surogate is asking you something", body: "Open Surogate to answer.", open: () => main?.show() });
 }
 
-// A page of the web client in the centre: what the sidebar's links, New chat and a notification open.
-function goWeb(path: string): void {
-  if (!main) return;
+// A page of the web client in the centre: what the sidebar's links, New chat, quick entry and a
+// notification open. True once it has loaded; false once it failed, or another load took its place.
+function goWeb(path: string): Promise<boolean> {
+  if (!main) return Promise.resolve(false);
   choose();
   // The open project's conversation, or a thread its pane lists, keeps the project open, with its
   // crumb and Overview, as View thread does; any other page leaves it.
@@ -1405,7 +1413,62 @@ function goWeb(path: string): void {
     show({ kind: "web" });
   }
   main.showWeb(true);
-  void main.go(path);
+  return main.go(path);
+}
+
+// Quick entry, once the app is ready: what the user types there starts the chat New starts.
+let quickEntry: QuickEntry | null = null;
+
+/** Quick entry shown, or hidden when it shows. With nobody signed in, the window shows instead: it asks them to sign in. */
+function toggleQuickEntry(): void {
+  if (leaving || !main) return;
+  if (!signedIn || !main.webContents()) return main.show();
+  quickEntry?.toggle();
+}
+
+// The text quick entry handed the agent's page, until the page says what became of it.
+let handing: { id: string; settle(refused: string | null): void } | null = null;
+const LEFT_CHAT = "Surogate's window left the new chat before it was made, so nothing was sent.";
+
+// The page's word on the text it was handed: null once it sent it, or why it did not.
+function handed(id: unknown, refused: string | null): void {
+  if (!handing || handing.id !== id) return;
+  const { settle } = handing;
+  handing = null;
+  settle(refused);
+}
+
+// Quick entry's text starts a new chat, as New does: Settings closes, the window shows, and its web
+// client loads /chat. Only once that load is the page on screen is the text handed to it, by an id
+// of its own: the page sends it as the new chat's first message once it may, and says so. Its
+// preload holds it until the page listens. Why it was not sent, or null once the page sent it.
+async function sendQuickEntry(text: string): Promise<string | null> {
+  const agent = agents.get();
+  const shown = main;
+  const view = shown?.webContents();
+  const session = signedIn;
+  // A page that said nobody, or another account, is not who the text is from: before the load, nor
+  // after it, as when the user logs out while it loads.
+  const notTheirs = () => leaving || session === null || signedIn !== session || !pageIs(session.account);
+  const SIGN_IN = "Sign in to your agent in Surogate's window first.";
+  if (!shown || !view || !agent || notTheirs()) return SIGN_IN;
+  const unreachable = `Surogate cannot reach ${agent.name} right now, so nothing was sent.`;
+  if (shown.unreachable !== null) return unreachable;
+  // A newer message takes the place of one still on its way.
+  if (handing) handed(handing.id, "A newer message took its place.");
+  quickEntry?.hide();
+  shown.closeSettings();
+  shown.show();
+  const loaded = await goWeb("/chat");
+  if (shown.unreachable !== null) return unreachable;
+  if (notTheirs()) return SIGN_IN;
+  // A load another replaced, or one that ended on another page, is not the new chat.
+  if (!loaded || shown.webContents() !== view || new URL(view.getURL()).pathname !== "/chat") return LEFT_CHAT;
+  const id = crypto.randomUUID();
+  return new Promise((settle) => {
+    handing = { id, settle };
+    view.send("desktop:quick-entry", { id, text });
+  });
 }
 
 // The window's menu button opens the app's own menu, as Claude Desktop's does; the project's opens its own.
@@ -2056,6 +2119,7 @@ if (!app.requestSingleInstanceLock()) {
     tray.setToolTip("Surogate");
     tray.on("click", () => main?.show());
     updateTray();
+    quickEntry = new QuickEntry({ page: join(PAGES, "quick.html"), preload: PAGES_PRELOAD, send: sendQuickEntry });
     main.window.on("focus", () => void refreshProjects());
     // The window going away, or coming back, starts or ends the follow of the chat it shows.
     app.on("browser-window-focus", () => followAgent());
