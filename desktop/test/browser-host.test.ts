@@ -356,10 +356,15 @@ describe("a page's download, as the host stages it", () => {
   let staged: StagedDownload[];
   let did: string[];
   const SESSION = "session-of-its-own";
+  // The session's page, and a tab that is no session's: one its user opened themselves.
+  const PAGE = {} as Page;
+  const TAB = {} as Page;
   const state = () => host as unknown as {
-    roots: Map<string, string>; unseen: Map<string, string[]>; interrupt: AbortController; arriving: Set<unknown>;
-    stage(session: string, download: unknown): Promise<void>;
+    roots: Map<string, string>; tabs: Map<string, Page[]>; unseen: Map<string, string[]>; interrupt: AbortController; arriving: Set<unknown>;
+    arrived(page: Page, download: unknown): Promise<void>;
   };
+  // A download the browser announces in *page*.
+  const arrives = (download: unknown, page = PAGE) => state().arrived(page, download);
   // A download named *name*, whose file is *file* once *ends* settles: with its path, or with why it did not finish.
   const downloadOf = (name: string, file: string, ends: Promise<string>) => ({
     suggestedFilename: () => name,
@@ -382,17 +387,18 @@ describe("a page's download, as the host stages it", () => {
     host = new BrowserHost({ downloaded: (download) => staged.push(download) });
     // The session's tab, as its chat's: an operation of the session's says whose it is.
     state().roots.set(SESSION, "chat-1");
+    state().tabs.set(SESSION, [PAGE]);
   });
 
   it("hands on one of exactly what a write may carry, and none a byte over, which it removes and says", async () => {
     const most = fileOf(MAX_WRITE_BYTES);
-    await state().stage(SESSION, downloadOf("most.bin", most, Promise.resolve(most)));
+    await arrives(downloadOf("most.bin", most, Promise.resolve(most)));
     expect(staged).toEqual([{ root: "chat-1", session: SESSION, name: "most.bin", path: most, user: false }]);
     expect([did, existsSync(most), state().unseen.get(SESSION)]).toEqual([[], true, undefined]);
     // Handed on, nothing is kept of it for a take-over to stop.
     expect([state().arriving.size, getEventListeners(state().interrupt.signal, "abort")]).toEqual([0, []]);
     const over = fileOf(MAX_WRITE_BYTES + 1);
-    await state().stage(SESSION, downloadOf("over.bin", over, Promise.resolve(over)));
+    await arrives(downloadOf("over.bin", over, Promise.resolve(over)));
     expect([staged.length, did, existsSync(over)]).toEqual([1, ["delete"], false]);
     expect([MAX_WRITE_BYTES, state().unseen.get(SESSION)]).toEqual([50 * 1024 * 1024, [tooLarge("over.bin", MAX_WRITE_BYTES + 1)]]);
     expect(tooLarge("over.bin", MAX_WRITE_BYTES + 1)).toBe(
@@ -401,27 +407,28 @@ describe("a page's download, as the host stages it", () => {
     // A host told another limit names that one.
     host = new BrowserHost({ downloaded: (download) => staged.push(download), downloadBytes: 3 });
     state().roots.set(SESSION, "chat-1");
+    state().tabs.set(SESSION, [PAGE]);
     const small = fileOf(4);
-    await state().stage(SESSION, downloadOf("small.bin", small, Promise.resolve(small)));
+    await arrives(downloadOf("small.bin", small, Promise.resolve(small)));
     expect(state().unseen.get(SESSION)).toEqual([
       'The page downloaded "small.bin" (4 bytes), too large to save in the chat\'s folder at once (at most 3 bytes), so it was not saved.',
     ]);
   });
 
-  it("hands on none it cannot measure, nor one that did not finish, nor one whose session's tab has closed, and tells the agent of the first two", async () => {
+  it("hands on none it cannot measure, nor one that did not finish, nor one of a page its session has closed, and tells the agent of the first two", async () => {
     const gone = join(profile, "gone");
-    await state().stage(SESSION, downloadOf("gone.txt", gone, Promise.resolve(gone)));
-    await state().stage(SESSION, downloadOf("broken.txt", gone, Promise.reject(new Error("canceled"))));
+    await arrives(downloadOf("gone.txt", gone, Promise.resolve(gone)));
+    await arrives(downloadOf("broken.txt", gone, Promise.reject(new Error("canceled"))));
     // What else the browser says of one that did not finish is not passed on: an error's own text is not the agent's to read.
-    await state().stage(SESSION, downloadOf("closed.txt", gone, Promise.reject(new Error(`Target page, context or browser has been closed: ${profile}`))));
+    await arrives(downloadOf("closed.txt", gone, Promise.reject(new Error(`Target page, context or browser has been closed: ${profile}`))));
     expect(state().unseen.get(SESSION)).toEqual([
       'The page downloaded "gone.txt", but its size could not be measured, so it was not saved.', notFinished("broken.txt", "canceled"),
       'The page\'s download of "closed.txt" did not finish (the browser stopped it), so it was not saved.',
     ]);
-    // A session with no tab left is no chat's: what its page finished after is removed, and nobody is told.
+    // A page that is no session's any more, as one its session closed: what it finished after is removed, and nobody is told.
     const late = fileOf(6);
-    await state().stage("session-closed", downloadOf("late.txt", late, Promise.resolve(late)));
-    expect([staged, existsSync(late), state().unseen.has("session-closed")]).toEqual([[], false, false]);
+    await arrives(downloadOf("late.txt", late, Promise.resolve(late)), {} as Page);
+    expect([staged, existsSync(late), [...state().unseen.keys()]]).toEqual([[], false, [SESSION]]);
     // A name as long as a page likes is quoted at what a name may be.
     expect(notFinished("x".repeat(300), "canceled")).toBe(`The page's download of "${"x".repeat(200)}" did not finish (canceled), so it was not saved.`);
   });
@@ -429,7 +436,7 @@ describe("a page's download, as the host stages it", () => {
   it("drops one of the agent's that had finished, but was not handed on yet, when its user takes the browser over: its file removed, and its agent told", async () => {
     const file = fileOf(6);
     const ends = Promise.withResolvers<string>();
-    const staging = state().stage(SESSION, downloadOf("report.txt", file, ends.promise));
+    const staging = arrives(downloadOf("report.txt", file, ends.promise));
     // Taken over from another chat, as it ends: stopped by what it began under, though that changes nothing of one that has ended.
     host.pause("chat-2", true);
     ends.resolve(file);
@@ -441,7 +448,7 @@ describe("a page's download, as the host stages it", () => {
     host.pause("chat-2", false);
     const again = fileOf(6);
     const later = Promise.withResolvers<string>();
-    const second = state().stage(SESSION, downloadOf("again.txt", again, later.promise));
+    const second = arrives(downloadOf("again.txt", again, later.promise));
     host.pause("chat-2", true);
     host.pause("chat-2", false);
     later.resolve(again);
@@ -450,7 +457,7 @@ describe("a page's download, as the host stages it", () => {
     // One still on its way ends there, as the browser ends one that is cancelled: said as interrupted, not as a failure of its own.
     const slow = fileOf(3);
     const cut = Promise.withResolvers<string>();
-    const third = state().stage(SESSION, downloadOf("slow.bin", slow, cut.promise));
+    const third = arrives(downloadOf("slow.bin", slow, cut.promise));
     host.pause("chat-1", true);
     cut.reject(new Error("canceled"));
     await third;
@@ -460,7 +467,7 @@ describe("a page's download, as the host stages it", () => {
   it("stops every one of the agent's on its way at a take-over, however many, with nothing of each on what the take-over stops operations by", async () => {
     const ends = Array.from({ length: 12 }, () => Promise.withResolvers<string>());
     const files = ends.map(() => fileOf(6));
-    const staging = ends.map((end, at) => state().stage(SESSION, downloadOf(`${at}.bin`, files[at]!, end.promise)));
+    const staging = ends.map((end, at) => arrives(downloadOf(`${at}.bin`, files[at]!, end.promise)));
     // On their way: none has added to the signal, which lasts until the browser is next taken over.
     expect([state().arriving.size, getEventListeners(state().interrupt.signal, "abort")]).toEqual([12, []]);
     host.pause("chat-2", true);
@@ -472,11 +479,35 @@ describe("a page's download, as the host stages it", () => {
     expect([...(state().unseen.get(SESSION) ?? [])].sort()).toEqual(ends.map((_, at) => interrupted(`${at}.bin`)).sort());
   });
 
+  it("takes one in a tab no chat owns for its user's while they hold the browser, for the chat it is held from; with nobody holding it, or that chat deleted, stops it at once and removes its file", async () => {
+    // Nobody holds the browser: no chat is there to ask, so it is stopped, and what it left removed, as before downloads were kept.
+    const first = fileOf(6);
+    await arrives(downloadOf("first.txt", first, Promise.resolve(first)), TAB);
+    expect([staged, did, existsSync(first)]).toEqual([[], ["cancel", "delete"], false]);
+    // Held: theirs, saved in the chat they took the browser over from, as that chat's own.
+    host.pause("chat-2", true);
+    const second = fileOf(6);
+    await arrives(downloadOf("second.txt", second, Promise.resolve(second)), TAB);
+    expect(staged).toEqual([{ root: "chat-2", session: "chat-2", name: "second.txt", path: second, user: true }]);
+    // One too large to save is removed there too.
+    const over = fileOf(MAX_WRITE_BYTES + 1);
+    await arrives(downloadOf("over.bin", over, Promise.resolve(over)), TAB);
+    expect([staged.length, existsSync(over)]).toEqual([1, false]);
+    // The chat it is held from deleted: held still, with no chat to save in.
+    await host.forget("chat-2");
+    const third = fileOf(6);
+    did.length = 0;
+    await arrives(downloadOf("third.txt", third, Promise.resolve(third)), TAB);
+    expect([staged.length, did, existsSync(third)]).toEqual([1, ["cancel", "delete"], false]);
+    // No agent is told of any of them, and none is kept as on its way.
+    expect([state().unseen.size, state().arriving.size]).toEqual([0, 0]);
+  });
+
   it("takes one that starts while its user holds the browser for theirs, from whichever chat: handed on as theirs, stopped by no take-over, and the agent told nothing of it, saved or not", async () => {
     host.pause("chat-2", true);
     const file = fileOf(6);
     const ends = Promise.withResolvers<string>();
-    const staging = state().stage(SESSION, downloadOf("statement.pdf", file, ends.promise));
+    const staging = arrives(downloadOf("statement.pdf", file, ends.promise));
     // Handed back, and taken over again, while it is on its way.
     host.pause("chat-2", false);
     host.pause("chat-1", true);
@@ -486,9 +517,9 @@ describe("a page's download, as the host stages it", () => {
     expect(did).toEqual([]);
     // Too large, not finished, or not measured: gone without a word to the agent.
     const over = fileOf(MAX_WRITE_BYTES + 1);
-    await state().stage(SESSION, downloadOf("over.bin", over, Promise.resolve(over)));
-    await state().stage(SESSION, downloadOf("broken.txt", over, Promise.reject(new Error("canceled"))));
-    await state().stage(SESSION, downloadOf("gone.txt", join(profile, "gone"), Promise.resolve(join(profile, "gone"))));
+    await arrives(downloadOf("over.bin", over, Promise.resolve(over)));
+    await arrives(downloadOf("broken.txt", over, Promise.reject(new Error("canceled"))));
+    await arrives(downloadOf("gone.txt", join(profile, "gone"), Promise.resolve(join(profile, "gone"))));
     host.pause("chat-1", false);
     expect([staged.length, existsSync(over), state().unseen.has(SESSION)]).toEqual([1, false, false]);
   });
@@ -766,6 +797,38 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     // It is the one file in the host's temporary folder: nothing is left there of the one that was stopped.
     expect(readdirSync(dirname(staged[0]!.path))).toEqual([basename(staged[0]!.path)]);
   }, 30_000);
+
+  it("takes a download in a tab no chat owns for its user's while they hold the browser, saved in the chat it is held from; with nobody holding it, or that chat gone, stops it at once, and leaves nothing of any in its temporary folder", async () => {
+    const staged: StagedDownload[] = [];
+    host = hostWith({ downloaded: (download) => staged.push(download) });
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const context = await (host as unknown as { running: Promise<BrowserContext> }).running;
+    // A tab its user opens themselves, as with Ctrl+T, and goes to a site in.
+    const own = await context.newPage();
+    await own.goto("http://fixture.test/");
+    const starts = async (code: string) => (await Promise.all([own.waitForEvent("download", { timeout: 10_000 }), own.evaluate(code)]))[0];
+    // Nobody holds the browser: one on its way is stopped at once, and one that came whole is removed.
+    expect(await within(2_000, (await starts("void (location.href = '/slow.bin')")).failure())).toBe("canceled");
+    await starts("document.getElementById('dl').click()");
+    // Held, from the agent's chat: theirs, for that chat, asked there as any of theirs.
+    host.pause("chat-1", true);
+    await starts("document.getElementById('dl').click()");
+    await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(1);
+    expect(staged[0]).toMatchObject({ root: "chat-1", session: "chat-1", name: "report.txt", user: true });
+    expect(await readFile(staged[0]!.path, "utf8")).toBe("report");
+    // It is the one file in the host's temporary folder: nothing is left there of the two that were stopped.
+    await expect.poll(() => readdirSync(dirname(staged[0]!.path)), { timeout: 5_000 }).toEqual([basename(staged[0]!.path)]);
+    // The chat it is held from deleted, its tabs closed with it: held still, and no chat is there to save in.
+    await host.forget("chat-1");
+    expect(await within(2_000, (await starts("void (location.href = '/slow.bin')")).failure())).toBe("canceled");
+    await starts("document.getElementById('dl').click()");
+    await new Promise((done) => setTimeout(done, 1_000));
+    expect(staged).toHaveLength(1);
+    expect(readdirSync(dirname(staged[0]!.path))).toEqual([basename(staged[0]!.path)]);
+    // No agent was told of any of them.
+    expect((host as unknown as { unseen: Map<string, string[]> }).unseen.size).toBe(0);
+  }, 40_000);
 
   it("keeps a download its user started theirs though it ends after they handed the browser back, and through a later take-over", async () => {
     const staged: StagedDownload[] = [];

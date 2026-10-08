@@ -543,8 +543,8 @@ export class BrowserHost {
   }
 
   // *page* is *session*'s, and so is every popup it opens. A file it asks for opens no dialog, and
-  // its agent is told with its next answer; a download it finishes is staged, to be saved under the
-  // chat's folder. No service worker answers it (bypassWorkers).
+  // its agent is told with its next answer; a download in it is its chat's (arrived). No service
+  // worker answers it (bypassWorkers).
   private adopt(session: string, page: Page): void {
     this.tabs.get(session)?.push(page);
     // Gone from the session's pages once it closes: a long session opens many popups.
@@ -556,23 +556,47 @@ export class BrowserHost {
     page.on("popup", (popup) => this.adopt(session, popup));
     // With a listener, the browser opens no file dialog of its own: no path the agent did not get reaches a page.
     page.on("filechooser", () => this.note(session, FILE_ASKED));
-    page.on("download", (download) => void this.stage(session, download));
+  }
+
+  // The session whose page *page* is now, a popup of its too: none for a tab its user opened themselves,
+  // for the page a new browser opens with until a session takes it, and for one its session has closed.
+  private sessionOf(page: Page): string | undefined {
+    for (const [session, pages] of this.tabs) {
+      if (pages.includes(page)) return session;
+    }
+    return undefined;
+  }
+
+  // A download the browser announces in *page*, any page of its: a session's is its chat's. One in a tab
+  // no chat owns is its user's while they hold the browser, and goes to the chat the browser is held
+  // from, asked there as any of theirs. With nobody holding it, or that chat deleted, no chat is there
+  // to ask: it is stopped at once and what it left removed, as before downloads were kept.
+  private arrived(page: Page, download: Download): Promise<void> {
+    const session = this.sessionOf(page);
+    const held = this.held;
+    if (session !== undefined) return this.stage(download, { root: this.roots.get(session), session }, held === null ? this.interrupt.signal : null);
+    if (held === null || this.forgets.has(held)) return this.discard(download);
+    return this.stage(download, { root: held, session: held }, null);
+  }
+
+  // Stopped where it is, and what it had written removed: one that had ended already too. Never rejects.
+  private async discard(download: Download): Promise<void> {
+    await download.cancel().catch(() => {});
+    await download.delete().catch(() => {});
   }
 
   // A download once it has finished, in Playwright's temporary folder: handed on for the chat's folder,
   // or, when it did not finish, cannot be measured or is too large to save, gone, and its agent told why.
-  // Whose it is goes by when it started, which is when the browser says so. Started while its user holds
-  // the browser, from whichever chat, it is theirs: nothing of it is told to the agent, and no later
-  // take-over stops it. Started while the agent drives, it is the agent's, and is interrupted as the
+  // *of*: the chat it is saved in, and the session it is told to. *stop*: null for its user's own, which
+  // nothing of the agent's stops and of which the agent is told nothing. The agent's is interrupted as the
   // operation that started it is, by the signal it began under: taken over before it is handed on, it is
   // stopped where it is and dropped, never taken up again at a hand back, and its agent is told so with its
   // session's next answer. One handed on before the take-over is the chat's to save, as a write of the
   // chat's that waits or asks goes on.
-  private async stage(session: string, download: Download): Promise<void> {
+  private async stage(download: Download, of: { root: string | undefined; session: string }, stop: AbortSignal | null): Promise<void> {
     const name = download.suggestedFilename();
-    const root = this.roots.get(session);
-    const user = this.held !== null;
-    const stop = user ? null : this.interrupt.signal;
+    const { root, session } = of;
+    const user = stop === null;
     if (stop) this.arriving.add(download);
     // The agent's own is told whatever came of it, held meanwhile or not: it began before any take-over.
     const tell = (notice: string) => {
@@ -739,6 +763,11 @@ export class BrowserHost {
     const context = await chromium.launchPersistentContext(launch.profile, launchOptions(launch.executable, this.proxy.port, this.options.args));
     context.on("close", () => this.retire(context));
     context.on("dialog", (dialog) => this.asked(dialog));
+    // A download is heard in every page of the browser's, whoever opened it: the page it opens with, a
+    // session's tab, a popup, and a tab its user opens themselves.
+    const watch = (page: Page) => void page.on("download", (download) => void this.arrived(page, download));
+    context.on("page", watch);
+    context.pages().forEach(watch);
     try {
       await this.bypassWorkers(context);
       this.spare = await this.proxied(context, this.proxy.server);
