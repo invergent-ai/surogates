@@ -185,6 +185,7 @@ async def test_what_the_computer_refuses_is_the_tools_result(computer, error, re
         (browser._browser_click_handler, {"x": 1, "y": 2}),
         (browser._browser_screenshot_handler, {}),
         (browser._browser_close_handler, {}),
+        (browser._browser_upload_file_handler, {"paths": ["a.txt"]}),
     ]:
         rig = computer({"error": error})
         assert json.loads(await handler(args, **rig.kwargs)) == result
