@@ -319,6 +319,8 @@ export class BrowserHost {
   // it began under: answered paused at once, it types, drags and loads no further, and is never taken up
   // again, at a hand back either. Those that begin after a hand back get the next.
   private interrupt = new AbortController();
+  // The agent's downloads on their way, until each is handed on or dropped: a take-over stops them all.
+  private readonly arriving = new Set<Download>();
   private closing = false;
 
   constructor(private readonly options: BrowserHostOptions = {}) {}
@@ -366,6 +368,8 @@ export class BrowserHost {
     this.held = root;
     this.interrupt.abort();
     this.interrupt = new AbortController();
+    // The agent's downloads on their way stop where they are: each is dropped once it has ended.
+    for (const download of this.arriving) void download.cancel().catch(() => {});
     // A button the agent pressed and holds, in any session's page, comes up: not left down under its user's hand.
     for (const pages of this.tabs.values()) for (const page of pages) void letGo(page);
   }
@@ -569,8 +573,7 @@ export class BrowserHost {
     const root = this.roots.get(session);
     const user = this.held !== null;
     const stop = user ? null : this.interrupt.signal;
-    const halt = () => void download.cancel().catch(() => {});
-    stop?.addEventListener("abort", halt, { once: true });
+    if (stop) this.arriving.add(download);
     // The agent's own is told whatever came of it, held meanwhile or not: it began before any take-over.
     const tell = (notice: string) => {
       if (!user) this.keep(session, notice);
@@ -592,7 +595,7 @@ export class BrowserHost {
       }
       this.options.downloaded({ root, session, name, path, user });
     } finally {
-      stop?.removeEventListener("abort", halt);
+      this.arriving.delete(download);
     }
   }
 

@@ -357,7 +357,8 @@ describe("a page's download, as the host stages it", () => {
   let did: string[];
   const SESSION = "session-of-its-own";
   const state = () => host as unknown as {
-    roots: Map<string, string>; unseen: Map<string, string[]>; interrupt: AbortController; stage(session: string, download: unknown): Promise<void>;
+    roots: Map<string, string>; unseen: Map<string, string[]>; interrupt: AbortController; arriving: Set<unknown>;
+    stage(session: string, download: unknown): Promise<void>;
   };
   // A download named *name*, whose file is *file* once *ends* settles: with its path, or with why it did not finish.
   const downloadOf = (name: string, file: string, ends: Promise<string>) => ({
@@ -388,8 +389,8 @@ describe("a page's download, as the host stages it", () => {
     await state().stage(SESSION, downloadOf("most.bin", most, Promise.resolve(most)));
     expect(staged).toEqual([{ root: "chat-1", session: SESSION, name: "most.bin", path: most, user: false }]);
     expect([did, existsSync(most), state().unseen.get(SESSION)]).toEqual([[], true, undefined]);
-    // Handed on, it keeps nothing on what a take-over would have stopped it by, which may last the app's whole run.
-    expect(getEventListeners(state().interrupt.signal, "abort")).toHaveLength(0);
+    // Handed on, nothing is kept of it for a take-over to stop.
+    expect([state().arriving.size, getEventListeners(state().interrupt.signal, "abort")]).toEqual([0, []]);
     const over = fileOf(MAX_WRITE_BYTES + 1);
     await state().stage(SESSION, downloadOf("over.bin", over, Promise.resolve(over)));
     expect([staged.length, did, existsSync(over)]).toEqual([1, ["delete"], false]);
@@ -454,6 +455,21 @@ describe("a page's download, as the host stages it", () => {
     cut.reject(new Error("canceled"));
     await third;
     expect([staged, did.at(-1), state().unseen.get(SESSION)?.at(-1)]).toEqual([[], "cancel", interrupted("slow.bin")]);
+  });
+
+  it("stops every one of the agent's on its way at a take-over, however many, with nothing of each on what the take-over stops operations by", async () => {
+    const ends = Array.from({ length: 12 }, () => Promise.withResolvers<string>());
+    const files = ends.map(() => fileOf(6));
+    const staging = ends.map((end, at) => state().stage(SESSION, downloadOf(`${at}.bin`, files[at]!, end.promise)));
+    // On their way: none has added to the signal, which lasts until the browser is next taken over.
+    expect([state().arriving.size, getEventListeners(state().interrupt.signal, "abort")]).toEqual([12, []]);
+    host.pause("chat-2", true);
+    expect(did).toEqual(ends.map(() => "cancel"));
+    ends.forEach((end, at) => end.resolve(files[at]!));
+    await Promise.all(staging);
+    expect([staged, state().arriving.size, files.some((file) => existsSync(file))]).toEqual([[], 0, false]);
+    // Each measured in its own time: told in whatever order they ended.
+    expect([...(state().unseen.get(SESSION) ?? [])].sort()).toEqual(ends.map((_, at) => interrupted(`${at}.bin`)).sort());
   });
 
   it("takes one that starts while its user holds the browser for theirs, from whichever chat: handed on as theirs, stopped by no take-over, and the agent told nothing of it, saved or not", async () => {
@@ -671,8 +687,8 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     // Not in the profile, nor anywhere the browser's own downloads go.
     expect(staged[0]!.path.startsWith(profile)).toBe(false);
     expect(readdirSync(profile).some((name) => name.includes("report"))).toBe(false);
-    // Handed on, it keeps nothing on what a take-over would have stopped it by, which may last the app's whole run.
-    expect(getEventListeners((host as unknown as { interrupt: AbortController }).interrupt.signal, "abort")).toHaveLength(0);
+    // Handed on, nothing is kept of it for a take-over to stop.
+    expect((host as unknown as { arriving: Set<unknown> }).arriving.size).toBe(0);
     // Its user takes the browser over, and clicks the link themselves.
     host.pause("chat-1", true);
     await tabs().get(a)![0]!.click("#dl");
