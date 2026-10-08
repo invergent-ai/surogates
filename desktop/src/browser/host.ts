@@ -77,6 +77,8 @@ export const tooLarge = (name: string, bytes: number): string =>
   `The page downloaded ${quoted(name)} (${bytes} bytes), too large to save in the chat's folder at once (at most ${MAX_WRITE_BYTES} bytes), so it was not saved.`;
 export const notFinished = (name: string, why: string): string => `The page's download of ${quoted(name)} did not finish (${why}), so it was not saved.`;
 const unmeasured = (name: string): string => `The page downloaded ${quoted(name)}, but its size could not be measured, so it was not saved.`;
+export const interrupted = (name: string): string =>
+  `The page's download of ${quoted(name)} was interrupted when the user took over the agent's browser on this computer, so it was not saved.`;
 
 const failed = (message: string): Outcome => ({ error: { type: "browser", message } });
 const DELETED = failed("The chat was deleted, and its tabs closed with it");
@@ -552,29 +554,41 @@ export class BrowserHost {
   // A download once it has finished, in Playwright's temporary folder: handed on for the chat's folder,
   // or, when it did not finish, cannot be measured or is too large to save, gone, and its agent told why.
   // Whose it is goes by when it started, which is when the browser says so. Started while its user holds
-  // the browser, from whichever chat, it is theirs: nothing of it is told to the agent.
+  // the browser, from whichever chat, it is theirs: nothing of it is told to the agent, and no later
+  // take-over stops it. Started while the agent drives, it is the agent's, and is interrupted as the
+  // operation that started it is, by the signal it began under: taken over before it is handed on, it is
+  // stopped where it is and dropped, never taken up again at a hand back, and its agent is told so with its
+  // session's next answer. One handed on before the take-over is the chat's to save, as a write of the
+  // chat's that waits or asks goes on.
   private async stage(session: string, download: Download): Promise<void> {
     const name = download.suggestedFilename();
     const root = this.roots.get(session);
     const user = this.held !== null;
+    const stop = user ? null : this.interrupt.signal;
+    const halt = () => void download.cancel().catch(() => {});
+    stop?.addEventListener("abort", halt, { once: true });
     // The agent's own is told whatever came of it, held meanwhile or not: it began before any take-over.
     const tell = (notice: string) => {
       if (!user) this.keep(session, notice);
     };
-    let path: string;
     try {
-      path = await download.path();
-    } catch (error) {
-      tell(notFinished(name, (await download.failure().catch(() => null)) ?? said(error)));
-      return;
+      let path: string;
+      try {
+        path = await download.path();
+      } catch (error) {
+        tell(stop?.aborted ? interrupted(name) : notFinished(name, (await download.failure().catch(() => null)) ?? said(error)));
+        return;
+      }
+      const size = await stat(path).then((found) => found.size, () => null);
+      if (stop?.aborted || root === undefined || !this.options.downloaded || size === null || size > (this.options.downloadBytes ?? MAX_WRITE_BYTES)) {
+        if (root !== undefined && this.options.downloaded) tell(stop?.aborted ? interrupted(name) : size === null ? unmeasured(name) : tooLarge(name, size));
+        await download.delete().catch(() => {});
+        return;
+      }
+      this.options.downloaded({ root, session, name, path, user });
+    } finally {
+      stop?.removeEventListener("abort", halt);
     }
-    const size = await stat(path).then((found) => found.size, () => null);
-    if (root === undefined || !this.options.downloaded || size === null || size > (this.options.downloadBytes ?? MAX_WRITE_BYTES)) {
-      if (root !== undefined && this.options.downloaded) tell(size === null ? unmeasured(name) : tooLarge(name, size));
-      await download.delete().catch(() => {});
-      return;
-    }
-    this.options.downloaded({ root, session, name, path, user });
   }
 
   // A page's own question (an alert, a confirm, a prompt, a leave-this-page), in any tab of the browser's:
