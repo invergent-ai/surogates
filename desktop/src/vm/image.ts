@@ -288,8 +288,9 @@ async function download(options: DeliverOptions, file: ImageFile, partial: strin
         have = 0;
         hash = createHash("sha256");
         got(have);
-      } else if (response.status === 206 && !response.headers.get("content-range")?.startsWith(`bytes ${have}-`)) {
-        // A range, but not from where it stopped: asked again, it would be the same, so the next try starts it afresh.
+      } else if ((response.status === 206 && !response.headers.get("content-range")?.startsWith(`bytes ${have}-`)) || (response.status === 416 && have > 0)) {
+        // A range, but not from where it stopped, or none at all, as for an object shorter than what is
+        // kept: asked again, it would be the same, so the next try starts it afresh.
         void response.body?.cancel().catch(() => {});
         rmSync(partial, { force: true });
         throw new Error(`the download of ${file.download} did not resume where it stopped`);

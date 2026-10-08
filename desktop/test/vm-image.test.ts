@@ -176,6 +176,25 @@ describe("the guest image's delivery", () => {
     expect(heard.filter(({ url }) => url.endsWith("rootfs.img.zst")).map(({ range }) => range)).toEqual([undefined, `bytes=${cut}-`]);
   });
 
+  it("starts a download afresh when its resume is answered 416, as when the server's object is shorter than the manifest says", async () => {
+    // Another build's object under the key: a zstd file, as a download begins, and shorter than the manifest's.
+    const other = spawnSync("zstd", ["-q", "-c"], { input: randomBytes(100_000), maxBuffer: 1024 * 1024 }).stdout;
+    served.set(`/desktop/vm/${KEY}/rootfs.img.zst`, other);
+    answer = (request, response, body) => {
+      const from = Number(/^bytes=(\d+)-$/.exec(request.headers.range ?? "")?.[1] ?? 0);
+      if (from >= body.length) return void response.writeHead(416, { "content-range": `bytes */${body.length}` }).end();
+      ranged(request, response, body);
+    };
+    const partial = join(images(), `${KEY}.partial`, "rootfs.img.zst.partial");
+    await expect(deliver(options())).rejects.toThrow(/^the download of rootfs\.img\.zst stopped: it ended after /);
+    expect(statSync(partial).size).toBe(other.length);
+    await expect(deliver(options())).rejects.toThrow("the download of rootfs.img.zst did not resume where it stopped");
+    expect(existsSync(partial)).toBe(false);
+    // The bucket put right: the next try asks for the file whole.
+    publish("rootfs.img", rootfs);
+    expect(readFileSync(join(await deliver(options()), "rootfs.img")).equals(rootfs)).toBe(true);
+  });
+
   it("gives a download's first bytes the whole idle bound once its headers have come", async () => {
     answer = (request, response, body) => {
       if (!request.url?.endsWith("rootfs.img.zst")) return ranged(request, response, body);
