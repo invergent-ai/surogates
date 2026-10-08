@@ -113,6 +113,10 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     expect(hits).toEqual([]);
     expect(readdirSync(profiles())).toHaveLength(1);
     expect(browsers().length).toBeGreaterThan(0);
+    // What the browser and Playwright keep while it runs goes under the identity's profiles, not the app's temp folder.
+    const [identity] = readdirSync(profiles());
+    expect(readdirSync(join(profiles(), identity!, "tmp")).some((name) => name.startsWith("playwright-artifacts-"))).toBe(true);
+    expect(readdirSync(shellEnv(home).TMPDIR!).filter((name) => /playwright|chromium|chrome|edge/i.test(name))).toEqual([]);
     // Allowed for the chat: nothing asks again. A read and a screenshot come back whole.
     expect((await operation("browser.observe", { script: "snapshot@1", params: { selector: null } })).ok.frames).toEqual(expect.any(Array));
     const shot = await operation("browser.screenshot", { clip: null, labels: [] });

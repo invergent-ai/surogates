@@ -4,7 +4,7 @@
 // Readiness is awaited with then(), never a top-level await: an ES module main that
 // awaits app.whenReady() deadlocks.
 
-import { readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -194,14 +194,16 @@ const trying = (write: () => void): void => {
 
 // A process of the app's own in an Electron utility process: the VM manager (spec, Section 11)
 // and each device's browser host (Section 1). A hang or a crash there leaves the windows and the
-// device link alone. What is sent before it has spawned waits.
-function utility<To, From>(script: string, serviceName: string): {
+// device link alone. What is sent before it has spawned waits. *temp*: its temp folder, made now; the app's by default.
+function utility<To, From>(script: string, serviceName: string, temp?: string): {
   send(message: To): void;
   onMessage(listener: (message: From) => void): void;
   onExit(listener: () => void): void;
   kill(): void;
 } {
-  const child = utilityProcess.fork(script, [], { serviceName, stdio: "inherit" });
+  if (temp) mkdirSync(temp, { recursive: true, mode: 0o700 });
+  const env = temp ? { env: { ...process.env, TMPDIR: temp } } : {};
+  const child = utilityProcess.fork(script, [], { serviceName, stdio: "inherit", ...env });
   const waiting: To[] = [];
   let spawned = false;
   let exited = false;
@@ -228,7 +230,9 @@ function utility<To, From>(script: string, serviceName: string): {
 }
 
 const utilityManager = (): ManagerProcess => utility<ToManager, FromManager>(MANAGER, "Surogate VM");
-const utilityBrowser = () => utility<ToBrowser, FromBrowser>(BROWSER_HOST, "Surogate browser");
+// A browser host keeps its own temp files, the browser's and Playwright's, under *profiles*: they go
+// with the profiles, and a host that is killed leaves none in the system's temp folder.
+const utilityBrowser = (profiles: string) => () => utility<ToBrowser, FromBrowser>(BROWSER_HOST, "Surogate browser", join(profiles, "tmp"));
 
 // The app's one VM, shared by every device, for this computer's user.
 let vm: VmClient | null = null;
@@ -495,7 +499,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     // VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
     tools: (bindings, network, changed) => new Browsing({
       tools: new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(), changed }),
-      browser: new BrowserClient(utilityBrowser),
+      browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
       bindingOf: (bound) => bindings.get(bound),
       launch: () => {
         const browser = chosenBrowser(browserSetting.get(), findBrowsers());
@@ -1441,7 +1445,8 @@ async function chooseBrowser(value: unknown): Promise<void> {
       browserFailure = `Surogate cannot use ${real}: ${why}.`;
       return;
     }
-    const once = new BrowserClient(utilityBrowser);
+    // A try's own profile is a passing one, in the folder of every identity's profiles.
+    const once = new BrowserClient(utilityBrowser(join(root, "browser-profiles")));
     const tried = await once.tryBrowser(real).finally(() => once.stop());
     if ("error" in tried) browserFailure = `${real} did not start as a browser Surogate can drive: ${tried.error.message}`;
     else browserSetting.set({ choice: "custom", executable: real, version: String((tried.ok as { version?: unknown } | null)?.version ?? "") });

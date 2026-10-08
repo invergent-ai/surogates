@@ -141,6 +141,10 @@ export function launchOptions(executable: string, port: number, extra: readonly 
     serviceWorkers: "block" as const,
     // Nothing the agent's pages download is kept: no file reaches this computer that way.
     acceptDownloads: false,
+    // The browser's own temp folder holds its singleton's socket, whose path a Unix socket keeps
+    // under 108 bytes: a profile's folder is too deep for it, so it goes in the user's runtime
+    // folder (this host's own temp files, Playwright's, go under the profiles: main.ts).
+    env: { ...process.env, TMPDIR: process.env.XDG_RUNTIME_DIR || "/tmp" },
     // The host decides when the browser ends: with its own end.
     handleSIGINT: false,
     handleSIGTERM: false,
