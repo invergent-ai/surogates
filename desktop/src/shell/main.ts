@@ -65,7 +65,9 @@ const appearance = new AppearanceStore(join(root, "settings.json"));
 const preferences = new PreferencesStore(join(root, "preferences.json"));
 // Start at login's entry, in the user's XDG config folder; and what it starts: the installed app's
 // launcher, or a development build's Electron on this main.
-const autostart = autostartFile(app.getPath("appData"));
+// A relative XDG_CONFIG_HOME is ignored, as the XDG Base Directory specification says: Electron's appData takes it as it is.
+const configHome = process.env.XDG_CONFIG_HOME?.startsWith("/") ? process.env.XDG_CONFIG_HOME : join(app.getPath("home"), ".config");
+const autostart = autostartFile(configHome);
 const loginCommand = (): string[] => (app.isPackaged ? [LAUNCHER] : [process.execPath, import.meta.filename]);
 const agents = new AgentStore(join(root, "agent.json"));
 let main: MainWindow | null = null;

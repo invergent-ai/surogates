@@ -1,7 +1,7 @@
 import { once } from "node:events";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { ElectronApplication, Page } from "playwright-core";
@@ -280,6 +280,19 @@ describe("Settings → General", () => {
     await settings.click('[data-setting="startAtLogin"] [data-value="off"]');
     await expect.poll(() => pressed(settings, "startAtLogin")).toBe("off");
     expect(existsSync(entry)).toBe(false);
+  });
+
+  it("starts at login from the user's own ~/.config when XDG_CONFIG_HOME is not an absolute path, as the XDG Base Directory specification says", async () => {
+    // A relative one, which would land in the test's own folder were it taken.
+    app = await launch(home, { XDG_CONFIG_HOME: relative(process.cwd(), join(home, "relative")) });
+    await shellPage(app);
+    await app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("settings")!.click());
+    const settings = await settingsPage(app);
+    await settings.click('[data-setting="startAtLogin"] [data-value="on"]');
+    await expect.poll(() => pressed(settings, "startAtLogin")).toBe("on");
+    // The test's own home: never the user's.
+    expect(existsSync(join(home, "h", ".config", "autostart", "surogate.desktop"))).toBe(true);
+    expect(existsSync(join(home, "relative", "autostart"))).toBe(false);
   });
 
   // The main window, once there is one: whether its page still loads, and whether it shows.
