@@ -364,9 +364,9 @@ export class MainWindow {
     contents.on("will-redirect", (event) => {
       if (event.isMainFrame && !onTranscript(event.url)) event.preventDefault();
     });
-    // A footnote or an anchor scrolls the transcript; any other page the web client routes to loads it again.
+    // A footnote, an anchor or its own address rewritten keeps the transcript; any other page the web client routes to loads it again.
     contents.on("did-navigate-in-page", (_event, to, isMainFrame) => {
-      if (isMainFrame && to.split("#", 1)[0] !== url) void contents.loadURL(url).catch(() => {});
+      if (isMainFrame && !onTranscript(to)) void contents.loadURL(url).catch(() => {});
     });
     contents.on("will-attach-webview", (event) => event.preventDefault());
     contents.setWindowOpenHandler(({ url: opening }) => {

@@ -433,6 +433,13 @@ describe("a thread read in the Overview pane", () => {
     }).catch(() => {});
     await expect.poll(() => shell.evaluate(() => (globalThis as unknown as { opened: string[] }).opened)).toContain("https://example.com/report");
     expect((await pane(shell))?.url).toBe(transcript(QUESTION));
+    // Its router's own rewrite of its address, the query left out: still its transcript, not loaded again.
+    await reader.evaluate(() => {
+      (window as unknown as { kept: boolean }).kept = true;
+      history.replaceState(null, "", location.pathname);
+    });
+    await pause(500);
+    expect(await where()).toBe(`${origin}/transcript/${QUESTION}true`);
   });
 });
 
