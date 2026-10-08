@@ -243,7 +243,7 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
       focus: "deny",
       cancel: "deny",
       enter: null,
-      height: 360,
+      height: 380,
     };
   }
   if (request.action === "open") {
