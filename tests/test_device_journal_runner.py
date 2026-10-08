@@ -65,3 +65,21 @@ async def test_operations_of_one_call_asked_for_together_each_get_their_own_data
     await asyncio.sleep(0)
     gate.set()
     assert await asyncio.gather(first, second) == [{"ok": b"first file"}, {"ok": b"second file"}]
+
+
+class GoneOperations(FakeOperations):
+    """A transfer named in the journal whose data was reaped since."""
+
+    async def transfer_chunks(self, calling_session_id, invocation_id, ordinal):
+        return []
+
+
+@pytest.mark.parametrize(("kind", "args", "said"), [
+    ("read", {"key": "/f/a", "max_bytes": None}, "The computer's answer to this read is no longer kept: read the file again"),
+    ("browser.screenshot", {"clip": None, "labels": []}, "The computer's screenshot is no longer kept: take it again"),
+])
+async def test_a_transfer_no_longer_kept_is_said_in_its_operations_own_words(kind, args, said):
+    runner = runner_over(GoneOperations({1: b"the data"}))
+    with pytest.raises(operations_module.TransferGone) as gone:
+        await runner.run(kind, args)
+    assert str(gone.value) == said

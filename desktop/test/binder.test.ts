@@ -439,6 +439,29 @@ describe("a chat's bind operation", () => {
     expect(asked).toEqual(["command"]);
   });
 
+  it("asks no one about an operation the tool hosts refuse anyway, and answers their refusal", async () => {
+    journal.bindings.add({ root: ROOT, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "ask", boundAt: 1 });
+    const asked: string[] = [];
+    const chooser = binder(new User(), {
+      refusal: (operation) => (operation.kind === "browser.navigate" ? { error: { type: "no_browser", message: "none" } } : null),
+      approvalPrompts: { approve: (request) => (asked.push(request.kind), Promise.resolve("allow")), confirmFreeMode: () => Promise.resolve(false) },
+    });
+    const navigate = { ...bindOp(ROOT, { folder: notes, nonce: "n" }), kind: "browser.navigate", invocationId: "1:c", ordinal: 1, args: { url: "https://example.com/" } };
+    expect(await chooser.admit(navigate, never())).toEqual({ error: { type: "no_browser", message: "none" } });
+    expect(asked).toEqual([]);
+    expect(await chooser.admit({ ...navigate, kind: "write", args: { key: `${notes}/a.md`, data: "" } }, never())).toBeNull();
+    expect(asked).toEqual(["change"]);
+  });
+
+  it("tells the hosts of a deleted chat's retirement, so its browser tabs close", async () => {
+    journal.bindings.add({ root: ROOT, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "ask", boundAt: 1 });
+    const retired: string[] = [];
+    const chooser = binder(new User(), { retired: (root) => void retired.push(root) });
+    expect(await chooser.admit({ ...bindOp(ROOT, { folder: notes, nonce: "n" }), kind: "retire", invocationId: "retire", ordinal: 0, args: {} }, never())).toEqual({ ok: null });
+    expect(retired).toEqual([ROOT]);
+    expect(journal.bindings.get(ROOT)).toBeUndefined();
+  });
+
   it("tells the approvals the command each background process runs, as it starts", async () => {
     const asked: ApprovalRequest[] = [];
     hosts.run = (operation) => Promise.resolve(operation.kind === "start" ? { ok: { session_id: "proc_1", pid: 7 } } : { ok: null });

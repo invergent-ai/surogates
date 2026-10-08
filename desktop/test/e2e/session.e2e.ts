@@ -7,6 +7,7 @@ import { readdirSync, rmSync, statSync } from "node:fs";
 import type { ElectronApplication } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { notIsolated } from "../isolated.js";
 import { dataHome, launch, quit, secondLaunch, shellEnv } from "./launch.js";
 
 let home: string;
@@ -25,7 +26,7 @@ afterEach(async () => {
 // All a test app's environment holds: the image a VM test names, when the caller names one.
 const LISTED = [
   "DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "GDK_BACKEND", "HOME", "LANG", "NO_AT_BRIDGE", "PATH", "XAUTHORITY",
-  "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_SESSION_TYPE", "XDG_STATE_HOME",
+  "TMPDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_SESSION_TYPE", "XDG_STATE_HOME",
   ...(process.env.SUROGATE_VM_IMAGE ? ["SUROGATE_VM_IMAGE"] : []),
 ].sort();
 
@@ -50,7 +51,8 @@ describe("the tests' own session", () => {
   it("is all a test app's environment holds: no bus, its own folders, X11 on xvfb, and the basic store, a second launch's too", async () => {
     const own = (environment: Record<string, string | undefined>) => {
       expect(environment).toMatchObject({ DBUS_SESSION_BUS_ADDRESS: "disabled:", NO_AT_BRIDGE: "1", XDG_SESSION_TYPE: "x11", GDK_BACKEND: "x11", XDG_DATA_HOME: home });
-      for (const name of ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"]) {
+      // Its temp folder too: what its browser and Playwright leave there goes with the data home.
+      for (const name of ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "TMPDIR"]) {
         expect(environment[name]?.startsWith(`${home}/`), name).toBe(true);
       }
       // Short, under /tmp, and the user's alone: QEMU's control socket under it stays within 108 bytes.
@@ -64,11 +66,14 @@ describe("the tests' own session", () => {
     const environment = shellEnv(home);
     expect(Object.keys(environment).sort()).toEqual(LISTED);
     own(environment);
+    // Apart from the user's session as the headed browser tests' gate counts it, so an app's browser can launch.
+    expect(notIsolated(environment)).toEqual([]);
     app = await launch(home);
     await app.firstWindow();
     const launched = await app.evaluate(() => ({ ...process.env }));
     own(launched);
     expect(launched).toMatchObject(environment);
+    expect(await app.evaluate(() => process.getBuiltinModule("node:os").tmpdir())).toBe(environment.TMPDIR);
     // Beside it, only what Chromium sets as it starts.
     expect(Object.keys(launched).filter((name) => !LISTED.includes(name)).sort()).toEqual(["CHROME_DESKTOP", "FC_FONTATIONS"]);
     expect(await app.evaluate(() => process.argv)).toContain("--password-store=basic");

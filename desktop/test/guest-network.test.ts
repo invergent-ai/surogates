@@ -45,6 +45,7 @@ beforeEach(async () => {
     egress: { ask: (root, request) => (asked.push([root, request]), answer()) },
     resolve: async (name) => (name === "echo.example" ? ["192.0.2.10"] : []),
     local: () => [],
+    subnets: () => [],
     connect: () => connectTcp({ host: "127.0.0.1", port: echoPort, allowHalfOpen: true }),
   });
   // A destination line has 200 ms here.

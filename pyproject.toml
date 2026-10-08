@@ -84,6 +84,9 @@ surogates = [
     "web/dist/**/*",
     "harness/prompts/**/*.md",
     "security/*.yaml",
+    # The snapshot's page half, which the cloud's browser client runs and the
+    # desktop app ships too (surogates.devices.browser's snapshot@1).
+    "browser/observe/*.js",
     # DDL scripts surogates.db.engine applies at migration time; the ops
     # server installs this package as a wheel and runs those migrations.
     "db/*.sql",

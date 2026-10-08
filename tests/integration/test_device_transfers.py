@@ -290,6 +290,18 @@ async def test_a_transfer_for_an_operation_that_is_not_a_read_is_a_protocol_erro
     await stop(waiting)
 
 
+async def test_a_transfer_for_a_browser_operation_that_sends_none_is_rejected(laptop_rig):
+    rig = laptop_rig
+    # A script's value, shaped as a transfer's header: only a read and a screenshot send one.
+    request = OperationRequest(**{**_fields(read_request(rig)), "kind": "browser.evaluate", "args": {"code": "return 1;"}})
+    waiting = asyncio.create_task(rig.ops.run(request))
+    await eventually(lambda: _pending_count(rig, 1))
+    [op] = await rig.ops.pending(rig.device_id, 1)
+    sha = hashlib.sha256(DATA).hexdigest()
+    assert await rig.ops.start_transfer(rig.device_id, 1, "conn", op.id, op.digest, len(DATA), sha) == "rejected"
+    await stop(waiting)
+
+
 def racing(engine, table: str, meanwhile, kinds: tuple[type, ...] = (Insert, Update)):
     """Sessions that run *meanwhile* once, just before their first statement of *kinds* on *table*:
     another transaction landing between a check and a write."""
@@ -486,11 +498,16 @@ async def test_a_resumed_call_whose_result_is_no_longer_kept_is_reported_interru
     assert len(rig.laptop.ran) == ran
 
 
-async def answered(rig, ops: DeviceOperations, data: bytes = DATA, device_id: UUID | None = None, root=None) -> UUID:
-    """A read answered with a whole transfer, stored as the link stores it."""
+SCREENSHOT = {"kind": "browser.screenshot", "args": {"clip": None, "labels": []}}
+
+
+async def answered(
+    rig, ops: DeviceOperations, data: bytes = DATA, device_id: UUID | None = None, root=None, of: dict | None = None,
+) -> UUID:
+    """A read (or what *of* names) answered with a whole transfer, stored as the link stores it."""
     device_id, root = device_id or rig.device_id, root or rig.root
     request = OperationRequest(**{**_fields(read_request(rig)), "device_id": device_id, "root_session_id": root,
-                                  "calling_session_id": root})
+                                  "calling_session_id": root, **(of or {})})
     waiting = asyncio.create_task(ops.run(request))
     await eventually(lambda: _has_open(ops, device_id))
     [op] = await ops.pending(device_id, 1)
@@ -548,6 +565,9 @@ async def test_the_reaper_deletes_what_nothing_will_read_and_keeps_every_operati
     await aged(session_factory, orphan, created_at=func.now() - timedelta(days=8))
     waiting_for_its_tool = await answered(rig, ops)
     await aged(session_factory, waiting_for_its_tool, created_at=func.now() - timedelta(days=1))
+    # A screenshot's, as a read's: none read it within ORPHAN_AFTER.
+    orphan_shot = await answered(rig, ops, of=SCREENSHOT)
+    await aged(session_factory, orphan_shot, created_at=func.now() - timedelta(days=8))
     stopped_mid_way, stopped = await half_sent(rig, ops, rig.device_id, rig.root)
     await ops.cancel([rig.root])
     await asyncio.wait_for(stopped, 5.0)
@@ -557,14 +577,14 @@ async def test_the_reaper_deletes_what_nothing_will_read_and_keeps_every_operati
     async with session_factory() as db:
         operations = (await db.execute(select(func.count()).select_from(DeviceOperation))).scalar_one()
 
-    assert await reap_transfers(session_factory) == 3
+    assert await reap_transfers(session_factory) == 4
 
     assert await kept(session_factory) == {consumed_lately, waiting_for_its_tool, under_way}
     async with session_factory() as db:
         assert (await db.execute(select(func.count()).select_from(DeviceOperation))).scalar_one() == operations
         assert (await db.execute(
             select(func.count()).select_from(DeviceTransferChunk)
-            .where(DeviceTransferChunk.operation_id.in_([consumed_long_ago, orphan, stopped_mid_way]))
+            .where(DeviceTransferChunk.operation_id.in_([consumed_long_ago, orphan, orphan_shot, stopped_mid_way]))
         )).scalar_one() == 0
     await stop(still_open)
 

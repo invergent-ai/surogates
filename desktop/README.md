@@ -58,3 +58,22 @@ Until the image is delivered, the app boots the image built here (or
 The shell's tests that run a command boot it too:
 
     SUROGATE_VM_TESTS=1 npm run test:e2e
+
+The agent's browser is one installed here: Chrome or Edge from its `.deb` (Brave, Vivaldi
+and a Chromium that is not the Snap are detected, not verified), chosen in Settings →
+Browser. The browser host, in a utility process of its own, launches it headed with its own
+sandbox, over a pipe, in a profile of the agent's own under `browser-profiles/` in the state
+root, and sends its every request through a pinning proxy that reaches nothing on this
+computer or its private networks. The browser dies with the host. Its tests drive the real
+browser, headed, so they run apart from your session: `test/isolated.sh` gives them a display
+of xvfb's own, an X11 session (else the browser finds your Wayland compositor), a dead session
+bus (else it reaches your keyring), and a scratch home, XDG folders and temp folder. They
+are behind `SUROGATE_BROWSER_TESTS=1`, which it sets, and refuse to launch a browser without
+all of it:
+
+    npm run test:browser -- test/browser-host.test.ts test/browser-client.test.ts
+    npm run build && sh test/isolated.sh npx vitest run -c vitest.e2e.config.ts test/e2e/browser.e2e.ts
+
+They launch Chrome where it is installed, else Edge; `SUROGATE_TEST_BROWSER` names another:
+
+    SUROGATE_TEST_BROWSER=/opt/microsoft/msedge/msedge npm run test:browser -- test/browser-host.test.ts
