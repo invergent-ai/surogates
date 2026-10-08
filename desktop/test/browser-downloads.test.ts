@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { type ApprovalAnswer, type ApprovalRequest, Approvals } from "../src/binding/approvals.js";
 import { BOOT_ID } from "../src/binding/folder.js";
-import { downloadSaver, quoted, type Saver, saveDownload, savedName, type StagedDownload } from "../src/browser/downloads.js";
+import { downloadSaver, quoted, type Saver, saveDownload, savedName, type StagedDownload, tooLarge, UNSAVED } from "../src/browser/downloads.js";
+import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { perform } from "../src/files/operations.js";
 import type { Mode } from "../src/journal/bindings.js";
 import { OperationJournal } from "../src/journal/journal.js";
@@ -115,10 +116,15 @@ describe("a download the agent's page started", () => {
   it("goes on to a chat's next download after one whose save failed outright, which it says was not saved", async () => {
     bind("free");
     const save = downloadSaver(journal.bindings, saver);
-    // As a browser host gone wrong would stage one: with no name, and no path.
+    // As a browser host gone wrong would stage one: with no name, and no path; and with a file, but no name.
     const broken = save({ root: ROOT, session: CHILD, user: false } as unknown as StagedDownload);
+    const nameless = stage("report.txt");
+    const unnamed = save({ ...nameless, name: undefined } as unknown as StagedDownload);
     const next = save(stage("report.txt"));
-    expect(await broken).toBe("The page downloaded a file, but it was not saved: this computer could not save it.");
+    expect([await broken, await unnamed]).toEqual([UNSAVED, UNSAVED]);
+    expect(UNSAVED).toBe("The page downloaded a file, but it was not saved: this computer could not save it.");
+    // What was staged for it goes all the same.
+    expect(existsSync(nameless.path)).toBe(false);
     expect(await next).toBe('The page downloaded "report.txt". It is saved in the chat\'s folder as Downloads/report.txt.');
     // And to the one after: the line is the chat's for as long as the device runs.
     expect(await save(stage("report.txt"))).toContain("as Downloads/report (2).txt.");
@@ -236,6 +242,33 @@ describe("a download the agent's page started", () => {
     ]);
     for (const notice of said) expect(notice).not.toContain(base);
     expect([existsSync(broken.path), existsSync(staging)]).toEqual([false, true]);
+    // A link where the staged file was is not read through: what it leads to is neither saved nor removed.
+    writeFileSync(join(base, "outside.txt"), "the user's own");
+    symlinkSync(join(base, "outside.txt"), join(staging, "link"));
+    expect(await saveDownload({ ...stage("keys.txt"), path: join(staging, "link") }, journal.bindings, saver)).toBe(
+      'The page downloaded "keys.txt", but it was not saved: the file the browser kept could not be read (Too many levels of symbolic links).',
+    );
+    expect([readFileSync(join(base, "outside.txt"), "utf8"), existsSync(downloads), existsSync(join(staging, "link"))]).toEqual(["the user's own", false, false]);
+  });
+
+  it("looks at a staged file's size before it reads it: one over what a write may carry is not read, and nobody is asked about it", async () => {
+    bind("ask");
+    const ran: string[] = [];
+    const counting: Saver = { admit: saver.admit, run: (operation, signal) => (ran.push(operation.kind), saver.run(operation, signal)) };
+    // Its size without its bytes: a hole.
+    const over = stage("over.bin", "");
+    truncateSync(over.path, MAX_WRITE_BYTES + 1);
+    expect(await saveDownload(over, journal.bindings, counting)).toBe(tooLarge("over.bin", MAX_WRITE_BYTES + 1));
+    expect(tooLarge("over.bin", MAX_WRITE_BYTES + 1)).toBe(
+      'The page downloaded "over.bin" (52428801 bytes), too large to save in the chat\'s folder at once (at most 52428800 bytes), so it was not saved.',
+    );
+    expect([asked, ran, existsSync(over.path)]).toEqual([[], [], false]);
+    // One of exactly that much is saved whole.
+    journal.bindings.setMode(ROOT, "free");
+    const most = stage("most.bin", "");
+    truncateSync(most.path, MAX_WRITE_BYTES);
+    expect(await saveDownload(most, journal.bindings, saver)).toContain("as Downloads/most.bin.");
+    expect(statSync(join(downloads, "most.bin")).size).toBe(MAX_WRITE_BYTES);
   });
 
   it("saves nothing for a chat this computer did not bind", async () => {

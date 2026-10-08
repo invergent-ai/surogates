@@ -4,7 +4,8 @@
 // is ever replaced: the file is made create-only, and the next free name is taken.
 
 import { randomUUID } from "node:crypto";
-import { readFile, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, rm } from "node:fs/promises";
 import { extname, posix } from "node:path";
 
 import type { DownloadBy } from "../binding/approvals.js";
@@ -97,12 +98,45 @@ function numbered(name: string, n: number): string {
   return `${name.slice(0, name.length - extension.length)} (${n})${extension}`;
 }
 
+// What is staged at *path*, whole; or its size, where that is over what a write may carry. Its size is
+// looked at before it is read, and no more than that is read: whatever is there, no more than a write's
+// most is held in memory. A link at its last name is not followed.
+async function stagedAt(path: string): Promise<Buffer | number> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const { size } = await file.stat();
+    if (size > MAX_WRITE_BYTES) return size;
+    const data = Buffer.alloc(size);
+    let read = 0;
+    while (read < size) {
+      const { bytesRead } = await file.read(data, read, size - read, read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
+    }
+    return data.subarray(0, read);
+  } finally {
+    await file.close();
+  }
+}
+
 /**
  * Save *download* under Downloads in its chat's folder, and say what came of it, for the agent to
  * hear at its next answer. Asked once, as a write of the chat's; made create-only, so what is at a
- * name by then is never replaced: the next name is taken. The staged file goes either way.
+ * name by then is never replaced: the next name is taken. The staged file goes either way, and
+ * this never rejects: of one it cannot even name, as a browser host gone wrong would stage, it says
+ * that a file was not saved.
  */
 export async function saveDownload(download: StagedDownload, bindings: Pick<Bindings, "get">, saver: Saver): Promise<string> {
+  try {
+    return await save(download, bindings, saver);
+  } catch {
+    return UNSAVED;
+  } finally {
+    await rm(download.path, { force: true }).catch(() => {});
+  }
+}
+
+async function save(download: StagedDownload, bindings: Pick<Bindings, "get">, saver: Saver): Promise<string> {
   const said = `The page downloaded ${quoted(download.name)}`;
   const notSaved = (why: string) => `${said}, but it was not saved: ${why}.`;
   const op = (kind: string, args: Record<string, unknown>): Operation => ({
@@ -116,7 +150,9 @@ export async function saveDownload(download: StagedDownload, bindings: Pick<Bind
     if (!binding) return `${said}, but this chat has no folder on this computer, so it was not saved.`;
     let data: string;
     try {
-      data = (await readFile(download.path)).toString("base64");
+      const staged = await stagedAt(download.path);
+      if (typeof staged === "number") return tooLarge(download.name, staged);
+      data = staged.toString("base64");
     } catch (error) {
       // Gone with the browser's close, say. Told by the error's code alone, in the file tools' words for it:
       // what the error says itself names where the browser host keeps its files on this computer.
@@ -163,8 +199,6 @@ export async function saveDownload(download: StagedDownload, bindings: Pick<Bind
   } catch {
     // Not in the error's own words, which can name a path of this computer.
     return notSaved(COULD_NOT);
-  } finally {
-    await rm(download.path, { force: true }).catch(() => {});
   }
 }
 
@@ -176,10 +210,8 @@ export function downloadSaver(bindings: Pick<Bindings, "get">, saver: Saver): (d
   // Each chat's last save in line.
   const lines = new Map<string, Promise<string>>();
   return (download) => {
-    // A save never rejects: it says why it saved nothing. One that fails outright all the same, as on what a
-    // browser host gone wrong staged, has saved nothing either, and the chat's line goes on to the next.
-    const mine = (lines.get(download.root) ?? Promise.resolve("")).then(() => saveDownload(download, bindings, saver))
-      .catch(() => UNSAVED);
+    // A save never rejects: it says why it saved nothing, so the chat's line goes on to the next whatever came of it.
+    const mine = (lines.get(download.root) ?? Promise.resolve("")).then(() => saveDownload(download, bindings, saver));
     lines.set(download.root, mine);
     void mine.then(() => {
       if (lines.get(download.root) === mine) lines.delete(download.root);
