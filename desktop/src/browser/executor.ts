@@ -49,8 +49,12 @@ const UNSHOWN = /[\p{Cc}\p{Zl}\p{Zp}]/u;
 function unfit(paths: unknown): string | null {
   if (!Array.isArray(paths)) return null;
   for (const path of paths) {
-    if (typeof path === "string" && UNSHOWN.test(path)) {
-      return `An upload gives a page no file whose path holds a line break or another control character: ${JSON.stringify(path)}`;
+    if (typeof path !== "string") continue;
+    if (UNSHOWN.test(path)) return `An upload gives a page no file whose path holds a line break or another control character: ${JSON.stringify(path)}`;
+    // The page is given a file by its last name alone. A backslash in that is a folder's separator elsewhere, and
+    // the browser host takes no such name for a file's (host.ts, filesOf).
+    if (basename(path).includes("\\")) {
+      return `An upload gives a page no file whose name holds a backslash, which a page can take for a folder's: ${JSON.stringify(path)}`;
     }
   }
   return null;

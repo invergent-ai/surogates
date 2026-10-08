@@ -546,6 +546,16 @@ describe("the browser's kinds beside the tools", () => {
     expect([ran, browsed]).toEqual([[], []]);
     // A name with a space, a quote, a letter of another script or a mark that shows is a name as any other.
     expect(browsing.refusal(names("/home/u/notes/a b 'c' \"d\" é 日本 <e>.pdf"))).toBeNull();
+    // A file's own name with a backslash in it, which a page can take for a folder's: refused the same way, before
+    // anyone is asked and before anything is read. A folder on the way to the file may be named so.
+    const slashed = "/home/u/notes/..\\secret.txt";
+    const refused = { error: { type: "browser", message: `An upload gives a page no file whose name holds a backslash, which a page can take for a folder's: ${JSON.stringify(slashed)}` } };
+    for (const paths of [[slashed], [good, slashed]]) {
+      expect(browsing.refusal(names(...paths))).toEqual(refused);
+      expect(await browsing.run(names(...paths), signal)).toEqual(refused);
+    }
+    expect([ran, browsed]).toEqual([[], []]);
+    expect(browsing.refusal(names("/home/u/no\\tes/report.pdf"))).toBeNull();
     // While its user holds the browser an upload is answered paused, as every operation in it.
     browsing.takeOver(ROOT);
     expect(browsing.refusal(names("/home/u/notes/a\nb"))).toEqual(PAUSED);
