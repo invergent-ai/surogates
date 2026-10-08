@@ -226,7 +226,7 @@ export class Browsing implements ToolLayer {
     return { ok: { ...ok, notices: [...(ok as { notices: unknown[] }).notices, ...told] } };
   }
 
-  address(session: string, upload?: boolean, of?: string): Promise<string> {
+  address(session: string, upload?: boolean, of?: string): Promise<string | { refused: string }> {
     return this.options.browser.address(session, upload, of);
   }
 

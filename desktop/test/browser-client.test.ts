@@ -197,6 +197,11 @@ describe("the browser host's client", () => {
     // And which upload it is asked for, by its operation: the input named is that upload's alone.
     void client.address("child", true, "op-7");
     expect(hosts[0]!.sent.at(-1)).toMatchObject({ type: "address", session: "child", upload: true, of: "op-7" });
+    // A host that says an upload can be given to nothing says why, and that is its answer.
+    const refusing = client.address("child", true, "op-9");
+    const asked9 = hosts[0]!.sent.at(-1) as { id: string };
+    hosts[0]!.say({ type: "address", id: asked9.id, url: "about:blank", refused: "runs as no site" });
+    expect(await refusing).toEqual({ refused: "runs as no site" });
     // No other act's address names an upload.
     void client.address("child", false, "op-8");
     expect(Object.keys(hosts[0]!.sent.at(-1)!).sort()).toEqual(["id", "session", "type"]);
@@ -420,7 +425,7 @@ describe.skipIf(!run)("the browser host's process", () => {
       // One its user is asked about: the host names the input for that operation, and the operation finds what was named for it.
       // Here that is an input in a page that runs as no site, so it is told so, and given nothing.
       await asks();
-      expect(await client.address("child", true, "asked-first")).toMatch(/^chrome-error:/);
+      expect(await client.address("child", true, "asked-first")).toEqual({ refused: NO_SITE });
       expect((await sent("browser.set_input_files", { files }, "asked-first")).error?.message).toBe(NO_SITE);
       expect(await holds()).toBeNull();
       // One asked about, whose agent acted before its files came: given nothing. One nobody was asked about then goes to what asked last.

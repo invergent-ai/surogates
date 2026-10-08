@@ -1774,10 +1774,11 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     await asksFor(a, () => written.click("#file"));
     expect(await host.address(a, true)).toBe("http://fixture.test/unaddressed");
     expect(await upload()).toMatchObject({ ok: { files: 1 } });
-    // One from a data address runs as no site: there is none to ask its user about, so it is given nothing.
+    // One from a data address runs as no site: there is none to ask its user about. The prompt is told so, in place
+    // of an address, and an upload that comes all the same is given nothing.
     const data = await frameOf("data");
     await asksFor(a, () => data.click("#file"));
-    expect(await host.address(a, true)).toMatch(/^data:text\/html,/);
+    expect(await host.address(a, true)).toEqual({ refused: NO_SITE });
     expect((await upload()).error?.message).toBe(NO_SITE);
     expect(await data.evaluate(filed)).toEqual([[]]);
   }, 30_000);

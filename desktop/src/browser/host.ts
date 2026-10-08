@@ -557,9 +557,10 @@ export class BrowserHost {
    * whatever page frames it, as the browser says it and not the page (place); that input is then held
    * for the upload, so one that asks after cannot take the files in its place, and the upload gives
    * nothing if the input is elsewhere by then. *of*: that upload, by its operation's id; the input is
-   * kept for it alone. Never rejects.
+   * kept for it alone. Where the input is in a frame that runs as no site, there is none to ask its user
+   * about, and the upload is given to nothing: answered so, in place of an address. Never rejects.
    */
-  address(session: string, upload = false, of?: string): Promise<string> {
+  address(session: string, upload = false, of?: string): Promise<string | { refused: string }> {
     return this.inLine(session, async () => {
       const tab = (this.tabs.get(session) ?? []).filter((page) => !page.isClosed()).at(-1)?.url() ?? NEW_TAB;
       if (!upload) return tab;
@@ -579,7 +580,7 @@ export class BrowserHost {
       }
       const site = siteOf(at);
       this.named.set(session, site === null ? { input: null, why: NO_SITE, of } : { input: { chooser, href: at.href, origin: at.origin }, why: NOT_AS_ASKED, of });
-      return site ?? at.href;
+      return site ?? { refused: NO_SITE };
     }).catch(() => NEW_TAB);
   }
 

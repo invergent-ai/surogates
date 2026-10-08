@@ -1107,6 +1107,22 @@ describe("the browser on this computer", () => {
     }
   });
 
+  it("asks nobody about an upload the browser says can be given to nothing, as one for an input in a frame that runs as no site: refused in the browser's words", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    const why = "The file input that asked is in a frame that runs as no site, so it is given no files";
+    approvals = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant",
+      address: (_session, upload) => Promise.resolve(upload ? { refused: why } : "https://bank.example/account"),
+    });
+    expect(await approvals.admit(op("browser.set_input_files", { paths: [`${FOLDER}/report.pdf`] }), never())).toEqual({ error: { type: "browser", message: why } });
+    expect(user.asked).toEqual([]);
+    // Any other act in that page is asked about as ever.
+    expect(await approvals.admit(op("browser.evaluate", { code: "return 1;" }), never())).toBeNull();
+    expect(user.asked).toMatchObject([{ action: "script", page: "https://bank.example/account" }]);
+  });
+
   it("names a mouse press and a mouse release for what they are, not a click", async () => {
     bind(ROOT, "ask");
     journal.bindings.allowBrowser(ROOT);

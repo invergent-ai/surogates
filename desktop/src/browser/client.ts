@@ -60,7 +60,8 @@ export type FromBrowser =
   | { type: "result"; id: string; outcome: Outcome }
   // A try's answer: its ids are the client's own, apart from the link's operation ids.
   | { type: "tried"; id: string; outcome: Outcome }
-  | { type: "address"; id: string; url: string }
+  // refused: for an upload's address, why that upload can be given to nothing.
+  | { type: "address"; id: string; url: string; refused?: string }
   | { type: "shown"; id: string; shown: boolean }
   // A download a session's page started, finished and staged by the host, for the chat's folder.
   | ({ type: "download" } & StagedDownload)
@@ -97,7 +98,7 @@ export class BrowserClient {
   private host: BrowserProcess | null = null;
   private readonly pending = new Map<string, (outcome: Outcome) => void>();
   private readonly trying = new Map<string, (outcome: Outcome) => void>();
-  private readonly addressing = new Map<string, (url: string) => void>();
+  private readonly addressing = new Map<string, (url: string, refused?: string) => void>();
   private readonly showing = new Map<string, (shown: boolean) => void>();
   private downloaded: (download: StagedDownload) => void = () => {};
   private stopping: Promise<void> | null = null;
@@ -131,16 +132,17 @@ export class BrowserClient {
   /**
    * The address of the page *session*'s next operation acts in: a new tab's, about:blank, where no host runs.
    * For an *upload*, of the frame of the file input its page asked for; *of* is that upload's operation,
-   * by its id, for which alone the host then keeps that input. Never rejects.
+   * by its id, for which alone the host then keeps that input; or why the host gives that upload to
+   * nothing. Never rejects.
    */
-  address(session: string, upload = false, of?: string): Promise<string> {
+  address(session: string, upload = false, of?: string): Promise<string | { refused: string }> {
     const host = this.host;
     if (!host || this.stopping) return Promise.resolve(NEW_TAB);
     const id = `address-${(this.addresses += 1)}`;
     return new Promise((resolve) => {
-      this.addressing.set(id, (url) => {
+      this.addressing.set(id, (url, refused) => {
         this.addressing.delete(id);
-        resolve(url);
+        resolve(refused === undefined ? url : { refused });
       });
       host.send({ type: "address", id, session, ...(upload ? { upload, ...(of === undefined ? {} : { of }) } : {}) });
     });
@@ -228,7 +230,7 @@ export class BrowserClient {
     host.onMessage((message) => {
       if (message.type === "result") this.pending.get(message.id)?.(message.outcome);
       else if (message.type === "tried") this.trying.get(message.id)?.(message.outcome);
-      else if (message.type === "address") this.addressing.get(message.id)?.(message.url);
+      else if (message.type === "address") this.addressing.get(message.id)?.(message.url, typeof message.refused === "string" ? message.refused : undefined);
       else if (message.type === "shown") this.showing.get(message.id)?.(message.shown);
       else if (message.type === "download") {
         this.downloaded({

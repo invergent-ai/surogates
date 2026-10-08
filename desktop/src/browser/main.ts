@@ -3,7 +3,7 @@
 // the tests. The browser it launches dies with it: its pipe closes.
 
 import type { Outcome } from "../link/protocol.js";
-import type { FromBrowser, ToBrowser } from "./client.js";
+import { type FromBrowser, NEW_TAB, type ToBrowser } from "./client.js";
 import { BrowserHost } from "./host.js";
 
 // Electron's, in a utility process.
@@ -48,7 +48,7 @@ function received(message: ToBrowser): void {
     answer(message.id, host.tryBrowser(message.executable), "tried");
   } else if (message.type === "address") {
     void host.address(message.session, message.upload === true, typeof message.of === "string" ? message.of : undefined)
-      .then((url) => send({ type: "address", id: message.id, url }));
+      .then((said) => send(typeof said === "string" ? { type: "address", id: message.id, url: said } : { type: "address", id: message.id, url: NEW_TAB, ...said }));
   } else if (message.type === "pause") {
     host.pause(message.root, message.paused);
   } else if (message.type === "show") {
