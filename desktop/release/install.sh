@@ -135,18 +135,26 @@ roots_own() {
 # script's list never stands in for it, and would be an older one where the script is.
 trusted() {
   local -n list="$1"
-  local text
   list=("${RELEASE_KEYS[@]}")
   [ -e "$HELPER" ] || [ -L "$HELPER" ] || return 0
   list=()
   roots_own "$HELPER" 81ed || fail "$HELPER is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again"
-  text="$(sed -n '/^[[:space:]]*RELEASE_KEYS=($/,/^[[:space:]]*)$/p' "$HELPER")"
+  listed list "$HELPER"
+  [ "${#list[@]}" -gt 0 ] || fail "$HELPER lists no release key: remove Surogate Desktop with --uninstall, and install it again"
+}
+
+# The release keys that helper $2 lists, into the array $1 names: its list as settings writes one,
+# each entry between its two quotes. The helper is read, and not run.
+listed() {
+  local -n entries="$1"
+  local text
+  entries=()
+  text="$(sed -n '/^[[:space:]]*RELEASE_KEYS=($/,/^[[:space:]]*)$/p' "$2")"
   while [[ "$text" == *\'*\'* ]]; do
     text="${text#*\'}"
-    list+=("${text%%\'*}")
+    entries+=("${text%%\'*}")
     text="${text#*\'}"
   done
-  [ "${#list[@]}" -gt 0 ] || fail "$HELPER lists no release key: remove Surogate Desktop with --uninstall, and install it again"
 }
 
 # Whether manifest $1 is signed, in signature $2, by the private half of one of the release keys
@@ -197,13 +205,46 @@ installed_version() {
   basename "$target"
 }
 
-# The release the helper pkexec runs is of, as its mark beside it names it: nothing on a computer
-# with no helper. Fails where a helper has no mark of root's own that is a release's manifest as
-# an apply copies one (one_object), and names a release.
-helper_release() {
-  [ -e "$HELPER" ] || [ -L "$HELPER" ] || return 0
+# The release that the helper's mark names. Fails where there is no mark of root's own that is a
+# release's manifest as an apply copies one (one_object), and names a release.
+marked() {
   roots_own "$HELPER_MARK" 81a4 \
     && one_object "$HELPER_MARK" | jq -er '.version | select(type == "string" and test("\\A(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\z"))' 2>/dev/null
+}
+
+# The release the helper pkexec runs is of, as its mark beside it names it: nothing on a computer
+# with no helper. Fails where a helper has no mark that names one (marked).
+helper_release() {
+  [ -e "$HELPER" ] || [ -L "$HELPER" ] || return 0
+  marked
+}
+
+# Finishes a helper's pair that an apply left half done, stopped between its mark's rename and the
+# helper's: the mark names a release, and the helper is still the one before, or at a first
+# install none. That release's folder is here whole, as it had its name before the mark had: its
+# own helper is put where pkexec runs one, by one rename, from a copy in $1, a folder of this
+# apply's own. So the keys this computer trusts are those of the release its mark names before
+# anything is asked of them: stopped there, an update that dropped a key would otherwise leave the
+# key trusted until a later release came, and what the key signed meanwhile would be taken.
+# Nothing is done where the mark is not root's own word for a version that is here whole, where
+# the helper is not as an apply leaves one, or where a version is installed and has no helper:
+# each is refused where it is read (trusted, apply), and none is mended.
+paired() {
+  local version of keys
+  version="$(marked)" || return 0
+  of="$ROOT/versions/$version"
+  whole "$HELPER_MARK" "$of" && roots_own "$of/release.json" 81a4 && roots_own "$of/bin/surogate-apply-update" 81ed || return 0
+  if [ -e "$HELPER" ] || [ -L "$HELPER" ]; then
+    roots_own "$HELPER" 81ed || return 0
+    listed keys "$HELPER"
+    [ "${#keys[@]}" -gt 0 ] || return 0
+    ! cmp -s "$of/bin/surogate-apply-update" "$HELPER" || return 0
+  else
+    [ ! -e "$ROOT/current" ] && [ ! -L "$ROOT/current" ] || return 0
+  fi
+  install -m 0755 "$of/bin/surogate-apply-update" "$1/paired"
+  sync -f "$1"
+  mv -T "$1/paired" "$HELPER"
 }
 
 # The state schema of what the installed version keeps in each user's home, as its mark names it:
@@ -346,13 +387,14 @@ taken() {
 # downloaded them can still change, so each is read once, as that user, into root's staging, and
 # only the copies are checked and used. The tree is extracted in staging, refused when anything in
 # it is not a plain file, folder or link inside it, moved into versions/<version> with its own copy
-# of bwrap, and /opt/surogate/current is switched to it by one rename. Its helper is then the one
-# pkexec runs, unless this computer has installed a newer release: that one's helper stays, and
-# the release keys it lists with it. An older version than the installed one is refused, unless
-# $4 is "older", as only an administrator's --version asks; it is then refused when it cannot read
-# what the installed one keeps for its users. The previous version is kept, and older ones not
-# running are removed, by an update; a repair removes none. A version that is here whole is
-# repaired as it is, and its tarball is not read: $3 may then be empty.
+# of bwrap, and /opt/surogate/current is switched to it by one rename. Its helper is the one
+# pkexec runs from just before that, unless this computer has installed a newer release: that
+# one's helper stays, and the release keys it lists with it. A helper's pair that an earlier apply
+# left half done is finished first (paired). An older version than the installed one is refused,
+# unless $4 is "older", as only an administrator's --version asks; it is then refused when it
+# cannot read what the installed one keeps for its users. The previous version is kept, and older
+# ones not running are removed, by an update; a repair removes none. A version that is here whole
+# is repaired as it is, and its tarball is not read: $3 may then be empty.
 apply() {
   local manifest="$1" signature="$2" tarball="$3" older="${4:-}" file
   # A folder or a missing file is refused here; a link, as each is copied, below.
@@ -385,6 +427,9 @@ apply() {
   find "$ROOT/staging" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
   local work
   scratch work "$ROOT/staging/apply.XXXXXX"
+  # Before anything is read or checked: the keys asked below are those of the release that the
+  # helper's mark names, where an apply was stopped between the two.
+  paired "$work"
   # A manifest is a line, and its signature Ed25519's 64 bytes.
   taken "$manifest" "$work/manifest.json" 4096 "$SMALL_WAIT" || fail "$(named "$manifest") is not a downloaded release's file"
   taken "$signature" "$work/manifest.json.sig" 64 "$SMALL_WAIT" || fail "$(named "$signature") is not a downloaded release's file"
@@ -503,16 +548,20 @@ apply() {
   else
     mv -T "$work/bwrap" "$folder/bin/bwrap"
   fi
-  mv -T "$work/current" "$ROOT/current"
   # The helper pkexec runs, at a path with no link in it: polkit 127 (Ubuntu 26.04) matches an
   # action's exec.path against the program's resolved path, polkit 124 (24.04) against the path given.
-  # Its mark first: stopped between the two, the helper is still the release's before, which the
-  # same apply, run again, replaces; with the helper first, its mark would name an older release
-  # than it is of, and a release between the two could then take its place.
+  # Its mark first: stopped between the two, the helper is still the release's before, under a
+  # mark that no older release passes, and the next apply puts the mark's own helper in before
+  # anything else (paired). With the helper first, its mark would name an older release than it
+  # is of, and a release between the two could then take its place.
   if [ -z "$keep" ]; then
     mv -T "$work/helper.json" "$HELPER_MARK"
     mv -T "$work/helper" "$HELPER"
   fi
+  # And current last: a version that is installed has its helper. So one with none is no first
+  # install that was stopped half way, and an update is not installed before the keys it brings
+  # are the ones this computer trusts.
+  mv -T "$work/current" "$ROOT/current"
   stoppable
 
   # Kept: this version and the one before it. Removed: the rest, once nothing runs from them.

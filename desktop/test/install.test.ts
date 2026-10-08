@@ -952,8 +952,8 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     }
     // Nothing was written through a link.
     expect(root("cat /root/elsewhere").stdout).toBe("kept\n");
-    // A file there with no helper, as an apply stopped between its last two renames leaves its
-    // own mark, or as anyone left one before the folder was root's: replaced, and never read.
+    // A file there with no helper that is not root's own, as anyone left one before the folder
+    // was root's: replaced, and never read.
     expect(root(`find /opt/surogate -mindepth 1 -delete; mkdir /opt/surogate/bin && echo '{"version":"9.9.9"}' >${mark} && chown tester ${mark}`).status).toBe(0);
     expect(applied()).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
     expect(root(`cmp /home/tester/manifest.json ${mark} && stat -c '%a %U' ${mark}`).stdout).toBe("644 root\n");
@@ -1150,7 +1150,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(seen).toEqual(new Set(["1.0.0 whole", "1.1.0 whole"]));
   }, 300_000);
 
-  it("puts the helper's mark in before the helper, wherever an update stops between its renames: the helper is never of a newer release than its mark names, and the same apply, run again, puts it in", () => {
+  it("puts the helper's mark in before the helper, and both before it switches to the version, wherever an update stops between its renames: the helper is never of a newer release than its mark names, and no version is installed before its helper", () => {
     const first = releaseOf("1.0.0");
     manifestOf("1.0.0", first);
     expect(apply(first).status).toBe(0);
@@ -1167,14 +1167,59 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     // So the mark is never behind the helper. With the helper first, a stop between the two would
     // leave the update's helper under a mark that still names the release before, and a release
     // between the two could then put an older helper, and its older list of keys, in its place.
-    // As it is, a stop between the two leaves the helper the computer had, which the list of keys
-    // it trusted before the update is still read from, under a mark no older release passes.
+    // As it is, a stop between the two leaves the helper the computer had under a mark no older
+    // release passes, and the next apply, whatever it is of, puts the mark's own helper in first.
+    // And current is switched last: a version that is installed has its helper, so that one with
+    // none is no first install stopped half way, and the update is not installed until its keys are.
     const again = "again 0: current 1.1.0, mark 1.1.0, helper the update's";
     expect([...new Set(lines)]).toEqual([
       `current 1.0.0, mark 1.0.0, helper the release's before; ${again}`,
-      `current 1.1.0, mark 1.0.0, helper the release's before; ${again}`,
-      `current 1.1.0, mark 1.1.0, helper the release's before; ${again}`,
+      `current 1.0.0, mark 1.1.0, helper the release's before; ${again}`,
+      `current 1.0.0, mark 1.1.0, helper the update's; ${again}`,
     ]);
+  });
+
+  it("finishes a helper's pair that an apply left half done before it asks the helper's keys about anything, at an update and at a first install: a release that dropped a key is not left trusting it", () => {
+    const helper = "/opt/surogate/bin/surogate-apply-update";
+    const mark = "/opt/surogate/bin/release.json";
+    const script = readFileSync(SCRIPT, "utf8");
+    const listing = (trusted: string[]) => (top: string) => writeFileSync(join(top, "bin", "surogate-apply-update"), withKeys(script, trusted), { mode: 0o755 });
+    // The script, killed where it would make one of its last three renames: the mark's, the helper's, and current's.
+    const stopping: Array<[string, string]> = [
+      ["mark", String.raw`s|^    mv -T "\$work/helper.json" "\$HELPER_MARK"$|    kill -KILL $$|`],
+      ["helper", String.raw`s|^    mv -T "\$work/helper" "\$HELPER"$|    kill -KILL $$|`],
+      ["current", String.raw`s|^  mv -T "\$work/current" "\$ROOT/current"$|  kill -KILL $$|`],
+    ];
+    for (const [at, change] of stopping) {
+      expect(root(`sed '${change}' /opt/surogate-test/install.sh >/opt/surogate-test/stopped-${at}.sh && chmod 755 /opt/surogate-test/stopped-${at}.sh && ! cmp -s /opt/surogate-test/install.sh /opt/surogate-test/stopped-${at}.sh`).status, at).toBe(0);
+    }
+    // A rotation's first release: the old key signs it, and its helper lists the old key and the new.
+    const first = releaseOf("1.0.0", listing([PUBLIC, pem(next.publicKey)]));
+    manifestOf("1.0.0", first);
+    // A first install stopped at each of the three: the same apply, run again, finishes it, pair and all.
+    for (const [at] of stopping) {
+      expect(root("find /opt/surogate -mindepth 1 -delete").status, at).toBe(0);
+      expect(apply(first, `stopped-${at}.sh`).status, at).toBe(137);
+      expect(root("test ! -e /opt/surogate/current").status, at).toBe(0);
+      expect(root(`/opt/surogate-test/install.sh --apply ${files()}`), at).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+      expect(root(`cmp ${helper} /opt/surogate/current/bin/surogate-apply-update && cmp ${mark} /opt/surogate/current/release.json`).status, at).toBe(0);
+    }
+    // The release that drops the old key: the new key signs it, and its helper lists the new key
+    // alone. Its update is stopped between the mark's rename and the helper's.
+    const second = releaseOf("1.1.0", listing([pem(next.publicKey)]));
+    manifestOf("1.1.0", second, {}, next.privateKey);
+    expect(apply(second, "stopped-helper.sh").status).toBe(137);
+    expect(root(`cmp ${mark} /home/tester/manifest.json && cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout).toBe("/opt/surogate/versions/1.0.0\n");
+    // What the old key signs then, newer than both, is no release to this computer: the pair is
+    // finished first, and the keys asked are the ones of the release the mark names.
+    const third = releaseOf("1.2.0", listing([PUBLIC]));
+    manifestOf("1.2.0", third);
+    expect(apply(third)).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
+    expect(root(`cmp ${helper} /opt/surogate/versions/1.1.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout).toBe("/opt/surogate/versions/1.0.0\n");
+    // The update itself, applied again, is installed.
+    manifestOf("1.1.0", second, {}, next.privateKey);
+    expect(apply(second)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.1.0 is installed\n" });
+    expect(current()).toBe("/opt/surogate/versions/1.1.0");
   });
 
   it("unpacks the installed version again when its folder has lost a program, and takes an older version out of versions by one rename", () => {
