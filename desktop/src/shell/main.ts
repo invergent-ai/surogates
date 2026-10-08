@@ -1254,8 +1254,9 @@ function bridge(contents: WebContents, agent: Agent): void {
   contents.ipc.on("desktop:projects-changed", (event, id: unknown, threadId: unknown) => {
     if (fromView(event)) projects.changed(id, threadId);
   });
+  // The page's word on a text it was handed, by the id it was handed with: its reason is text, bounded as every text of the page's is.
   contents.ipc.on("desktop:quick-entry-answer", (event, id: unknown, refused: unknown) => {
-    if (fromView(event)) handed(id, typeof refused === "string" ? refused : null);
+    if (fromView(event) && typeof id === "string") handed(id, typeof refused === "string" ? refused.slice(0, 1_000) : null);
   });
   // A page that loads again starts with no source, until it registers one. Until its load commits,
   // the page there still serves: a load the shell cancels, as to an address outside the agent's, changes nothing.
@@ -1580,7 +1581,7 @@ let handing: { id: string; settle(refused: string | null): void } | null = null;
 const LEFT_CHAT = "Surogate's window left the new chat before it was made, so nothing was sent.";
 
 // The page's word on the text it was handed: null once it sent it, or why it did not.
-function handed(id: unknown, refused: string | null): void {
+function handed(id: string, refused: string | null): void {
   if (!handing || handing.id !== id) return;
   const { settle } = handing;
   handing = null;

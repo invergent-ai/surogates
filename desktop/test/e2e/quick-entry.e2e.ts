@@ -347,6 +347,22 @@ describe("quick entry", () => {
     expect(await heard(client)).toEqual([]);
   });
 
+  it("says no more than the first 1,000 characters of the page's reason", async () => {
+    const { client } = await signedIn();
+    await watchHanded(app!);
+    await pickInTray(app!, "Quick entry");
+    const quick = await quickPage(app!);
+    await quick.fill("#text", "Draft the March invoices");
+    await quick.press("#text", "Enter");
+    await expect.poll(() => handed(app!)).toHaveLength(1);
+    await client.waitForLoadState();
+    await listen(client);
+    await expect.poll(() => heard(client)).toHaveLength(1);
+    await answer(client, `${"The agent's page says a great deal. ".repeat(100)}`);
+    await expect.poll(async () => (await quick.textContent("#refused"))?.length).toBe(1_000);
+    expect(await quick.inputValue("#text")).toBe("Draft the March invoices");
+  });
+
   it("hands nothing to a page that says nobody is signed in to it while the new chat loads", async () => {
     const { client } = await signedIn();
     await watchHanded(app!);
