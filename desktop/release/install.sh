@@ -62,9 +62,21 @@ unexpected() {
   fail "stopped, as this step failed: $1"
 }
 
-# Run as main ends, however it ends.
+# Run as main ends, however it ends. No signal stops it: a second one, as Ctrl+C pressed twice
+# sends, would end its rm, and leave what that had not removed yet.
 cleanup() {
+  trap '' HUP INT PIPE TERM
   [ "${#OWN[@]}" -eq 0 ] || rm -rf -- "${OWN[@]}"
+}
+
+# A folder of this run's own, for it alone, which goes however the run ends: named as mktemp names
+# one for $2 and what follows, listed as this run's, and only then made, so that a signal between
+# any two of the three leaves nothing. Its name is put in the variable $1 names.
+scratch() {
+  local -n made="$1"
+  made="$(mktemp -u "${@:2}")"
+  OWN+=("$made")
+  mkdir -m 0700 "$made"
 }
 
 # Ubuntu 24.04 LTS or a later LTS release, on x64. Nothing is changed before this passes.
@@ -209,8 +221,7 @@ apply() {
   # own folder goes however it ends.
   find "$ROOT/staging" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
   local work
-  work="$(mktemp -d "$ROOT/staging/apply.XXXXXX")"
-  OWN+=("$work")
+  scratch work "$ROOT/staging/apply.XXXXXX"
   # A manifest is a line, and its signature Ed25519's 64 bytes.
   taken "$manifest" "$work/manifest.json" 4096 || fail "$(named "$manifest") is not a downloaded release's file"
   taken "$signature" "$work/manifest.json.sig" 64 || fail "$(named "$signature") is not a downloaded release's file"
@@ -366,8 +377,7 @@ kvm_group() {
 # version newer than it stays (a mirror can lag, or a cache): the rest of the install repairs around it.
 install_latest() {
   local base="$1" download release version installed tarball=""
-  download="$(mktemp -d)"
-  OWN+=("$download")
+  scratch download --tmpdir tmp.XXXXXXXXXX
   curl -q -fsSL --proto '=https,http' -o "$download/manifest.json" "$base/desktop/latest.json" \
     || fail "could not download $base/desktop/latest.json"
   curl -q -fsSL --proto '=https,http' -o "$download/manifest.json.sig" "$base/desktop/latest.json.sig" \

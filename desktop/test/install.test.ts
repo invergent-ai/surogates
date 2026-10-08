@@ -39,7 +39,7 @@ createServer((request, response) => {
 // The helper stopped (SIGKILL) before each command it runs, in turn, each time from the install
 // kept in /opt/pristine. A line for each stop: what current names and whether that folder is
 // whole, then how the same apply, run again to its end, exits and what it leaves.
-const STOPS = String.raw`
+const STATE = String.raw`
 state() {
   local now
   now="$(readlink /opt/surogate/current)"
@@ -48,6 +48,8 @@ state() {
   else echo "$(basename "$now") broken"
   fi
 }
+`;
+const STOPS = String.raw`${STATE}
 for stop in $(seq 1000); do
   find /opt/surogate -mindepth 1 -delete
   cp -a /opt/pristine/. /opt/surogate/
@@ -57,6 +59,28 @@ for stop in $(seq 1000); do
   /opt/surogate-test/install.sh --apply "$@" >/dev/null 2>&1
   echo "$stop: $stopped; again $?: $(state), versions $(ls /opt/surogate/versions | tr '\n' ' '), staging $(ls -A /opt/surogate/staging | wc -l)"
 done
+`;
+
+// The helper stopped by a signal (SIGTERM) to itself before each command its own shell runs, in
+// turn, each time from the install kept in /opt/pristine. A line for each stop: how the helper
+// ended, what current names and whether that folder is whole, and how much is left in staging.
+const SIGNALS = String.raw`${STATE}
+for stop in $(seq 1000); do
+  find /opt/surogate -mindepth 1 -delete
+  cp -a /opt/pristine/. /opt/surogate/
+  rm -f /tmp/sent
+  STOP="$stop" bash -T -c 'n=0; trap "(( BASHPID == \$\$ )) && (( ++n == STOP )) && { : >/tmp/sent; kill -TERM \$\$; }" DEBUG; . /opt/surogate-test/install.sh "$@"' stopped --apply "$@" >/dev/null 2>&1
+  ended="$?"
+  [ -e /tmp/sent ] || { echo "end $stop"; exit 0; }
+  echo "$stop: $ended $(state), staging $(ls -A /opt/surogate/staging 2>/dev/null | wc -l)"
+done
+`;
+
+// The system's rm, kept as /opt/hold/rm, which sends a signal to all of the helper's processes, itself
+// among them, as it is asked to clear an apply's folder: the second signal of two.
+const SIGNALLING = String.raw`#!/bin/sh
+case "$*" in *" /opt/surogate/staging/apply."*) kill -TERM 0 ;; esac
+exec /opt/hold/rm "$@"
 `;
 
 // The system's rm, kept as /opt/cut/rm, until it is asked to remove /opt/surogate itself: there it
@@ -239,9 +263,9 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     "wait $!",
   ].join("\n"));
 
-  // Every stop of the apply of *these*, from the install as it is now.
-  const stops = (these = files()) => {
-    writeFileSync(join(box.dir, "stops.sh"), STOPS);
+  // Every stop of the apply of *these*, from the install as it is now: by a kill, or by a signal.
+  const stops = (these = files(), script = STOPS) => {
+    writeFileSync(join(box.dir, "stops.sh"), script);
     expect(docker(["cp", join(box.dir, "stops.sh"), `${box.container}:/opt/surogate-test/stops.sh`]).status).toBe(0);
     expect(root("rm -rf /opt/pristine && cp -a /opt/surogate /opt/pristine").status).toBe(0);
     const lines = root(`bash /opt/surogate-test/stops.sh ${these}`).stdout.trim().split("\n");
@@ -865,6 +889,29 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     }
     expect(apply(second)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.1.0 is installed\n" });
   });
+
+  it("leaves nothing in staging wherever one signal stops it, nor when a second comes as it clears up, as Ctrl+C pressed twice sends", () => {
+    for (const version of ["1.0.0", "1.1.0"]) {
+      const tarball = releaseOf(version);
+      manifestOf(version, tarball);
+      expect(apply(tarball).status).toBe(0);
+    }
+    // The installed version built again: its apply makes a folder of its own, unpacks, and replaces a version's folder.
+    const rebuilt = releaseOf("1.1.0", (top) => writeFileSync(join(top, "resources", "app", "rebuilt"), ""));
+    manifestOf("1.1.0", rebuilt);
+    stage(rebuilt);
+    const lines = stops(files(), SIGNALS);
+    expect(lines.length).toBeGreaterThan(100);
+    for (const line of lines) expect(line).toMatch(/^\d+: \d+ 1\.1\.0 (whole|gone), staging 0$/);
+    // A second signal, to all of the helper's processes, as it removes what it staged: here of an apply it refused.
+    manifestOf("1.1.0", rebuilt, {}, other.privateKey);
+    stage(rebuilt);
+    writeFileSync(join(box.dir, "signalling"), SIGNALLING, { mode: 0o755 });
+    expect(docker(["cp", join(box.dir, "signalling"), `${box.container}:/opt/surogate-test/signalling`]).status).toBe(0);
+    const twice = root("mkdir -p /opt/hold && cp -L /usr/bin/rm /opt/hold/rm && mv /usr/bin/rm /usr/bin/rm.away && cp /opt/surogate-test/signalling /usr/bin/rm"
+      + `; setsid -w /opt/surogate-test/install.sh --apply ${files()}; said=$?; mv -f /usr/bin/rm.away /usr/bin/rm; echo "$said $(ls -A /opt/surogate/staging | wc -l)"`);
+    expect(twice).toMatchObject({ stdout: "1 0\n", stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
+  }, 300_000);
 
   it("says what stops it: its arguments, a user who is not root, too little room, and bubblewrap missing", () => {
     const usage = "Surogate Desktop: usage: surogate-apply-update --apply <manifest> <signature> <tarball>\n";
