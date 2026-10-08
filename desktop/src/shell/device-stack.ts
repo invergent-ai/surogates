@@ -41,9 +41,10 @@ export interface ToolLayer extends Executor {
   // A chat's user takes the agent's browser over, for every chat, until that chat hands it back: whether the
   // chat holds it now, which it does not while another chat's take-over stands. Where it is held, as a chat
   // is told: true from that chat, false by nobody, "elsewhere" from another chat that is here, "orphaned"
-  // from a chat that is gone, which any chat may hand back. A chat's newest page shown.
+  // from a chat that is gone, which any chat may hand back. A hand back says whether it handed anything back.
+  // A chat's newest page shown.
   takeOver?(root: string): boolean;
-  handBack?(root: string): void;
+  handBack?(root: string): boolean;
   takenOver?(root: string): boolean | "orphaned" | "elsewhere";
   show?(root: string): Promise<boolean>;
 }
@@ -84,8 +85,9 @@ export interface DeviceStack {
   /**
    * Its user hands the browser back: the agent's browser operations run again. From the chat that holds it,
    * or from any chat once the one it was held from is gone; from another chat while its holder is here, nothing.
+   * Whether it was handed back.
    */
-  handBack(root: string): void;
+  handBack(root: string): boolean;
   working(): number;
   stop(): Promise<void>;
   /** Revoke this device on its own link, then stop: true once the agent confirmed, false when it could not hear it in time. */
@@ -233,7 +235,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
       if (held) binder.approvals.dismissBrowser();
       return held;
     },
-    handBack: (root) => tools.handBack?.(root),
+    handBack: (root) => tools.handBack?.(root) === true,
     working,
     stop,
     retire: () => {

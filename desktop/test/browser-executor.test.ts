@@ -90,7 +90,9 @@ describe("the browser's kinds beside the tools", () => {
     expect(browsing.refusal(op("read"))).toEqual({ error: { type: "other", message: "from the tools" } });
     expect(await browsing.run(op("read"), signal)).toEqual({ ok: "tools" });
     expect(ran).toEqual(["read"]);
-    browsing.handBack(ROOT);
+    // Handed back, and said so: then there is nothing more to hand back, which is said too.
+    expect(browsing.handBack(ROOT)).toBe(true);
+    expect(browsing.handBack(ROOT)).toBe(false);
     expect(browsing.takenOver(ROOT)).toBe(false);
     expect(browsing.takenOver(OTHER)).toBe(false);
     for (const root of [ROOT, OTHER]) {
@@ -108,8 +110,8 @@ describe("the browser's kinds beside the tools", () => {
     expect(browsing.takeOver(OTHER)).toBe(false);
     expect(browsing.takenOver(OTHER)).toBe("elsewhere");
     expect(browsing.takenOver(ROOT)).toBe(true);
-    // Nor does its hand back end it.
-    browsing.handBack(OTHER);
+    // Nor does its hand back end it, and it is told that nothing was handed back.
+    expect(browsing.handBack(OTHER)).toBe(false);
     expect(browsing.takenOver(ROOT)).toBe(true);
     expect(browsing.refusal(op("browser.navigate", OTHER))).toEqual(PAUSED);
     // Taken over again by the chat that holds it: held as before, and the host is told nothing more.
@@ -129,7 +131,7 @@ describe("the browser's kinds beside the tools", () => {
     // No chat holds it now, and every chat is told so: neither "held from this chat" nor "not held".
     expect(browsing.takenOver(OTHER)).toBe("orphaned");
     // The chat that held it can hand nothing back, so any chat's hand back ends it: the desktop confirms that one as any.
-    browsing.handBack(OTHER);
+    expect(browsing.handBack(OTHER)).toBe(true);
     expect(browsing.takenOver(OTHER)).toBe(false);
     expect(browsing.refusal(op("browser.navigate", OTHER))).toBeNull();
     expect(paused).toEqual([[ROOT, true], [ROOT, false]]);
@@ -145,9 +147,10 @@ describe("the browser's kinds beside the tools", () => {
     expect(browsing.takeOver(OTHER)).toBe(true);
     expect(browsing.takenOver(OTHER)).toBe(true);
     expect(browsing.takenOver(ROOT)).toBe("elsewhere");
-    browsing.handBack(ROOT);
+    // A hand back confirmed for the deleted chat's sake, while it was gone, releases nothing now: another chat holds it.
+    expect(browsing.handBack(ROOT)).toBe(false);
     expect(browsing.takenOver(OTHER)).toBe(true);
-    browsing.handBack(OTHER);
+    expect(browsing.handBack(OTHER)).toBe(true);
     expect(browsing.takenOver(OTHER)).toBe(false);
     expect(paused).toEqual([[ROOT, true], [OTHER, true], [OTHER, false]]);
     // Held anew from a chat that is here, it is that chat's alone again.

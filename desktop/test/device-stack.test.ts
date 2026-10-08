@@ -57,8 +57,10 @@ class Tools implements ToolLayer {
     return this.taken === root;
   }
 
-  handBack(root: string): void {
-    if (this.taken === root) this.taken = null;
+  handBack(root: string): boolean {
+    if (this.taken !== root) return false;
+    this.taken = null;
+    return true;
   }
 
   run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
@@ -204,10 +206,12 @@ describe("one agent's device", () => {
     expect(tools.bindings?.browsing(OTHER)).toBe(false);
     // Another chat's take-over does not steal it, and its hand back ends nothing.
     expect(device.takeOver(OTHER)).toBe(false);
-    device.handBack(OTHER);
+    expect(device.handBack(OTHER)).toBe(false);
     expect(tools.taken).toBe(ROOT);
-    device.handBack(ROOT);
+    // Handed back by the chat that holds it, and the stack says whether its tools released anything.
+    expect(device.handBack(ROOT)).toBe(true);
     expect(tools.taken).toBeNull();
+    expect(device.handBack(ROOT)).toBe(false);
   });
 
   it("stops its link when the welcome names another identity, and says why", async () => {

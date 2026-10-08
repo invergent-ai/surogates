@@ -1263,7 +1263,9 @@ function bridge(contents: WebContents, agent: Agent): void {
       // The window first, where it was hidden since the click: the confirmation opens over it.
       main?.show();
       if (!(await prompts.confirmHandBack({ agent: agent.name, gone: held !== true, title }, signal))) return false;
-      stack.handBack(sessionId);
+      // Whether anything was handed back: the browser may have been taken over from another chat while the
+      // confirmation was up, and is that chat's to hand back then.
+      if (!stack.handBack(sessionId)) return false;
       contents.send("desktop:binding-changed", sessionId);
       return true;
     }),

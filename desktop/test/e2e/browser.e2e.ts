@@ -22,6 +22,7 @@ import { dataHome, key, launch, MAIN, press, prompt, promptsShown, quit, shellEn
 const CHAT = "4e5f6a7b-8c9d-4e0f-a1b2-c3d4e5f6a7b8";
 // Another chat of the agent's, where a test binds one.
 const OTHER = "6f7a8b9c-0d1e-4f2a-b3c4-d5e6f7a8b9c0";
+const THIRD = "7a8b9c0d-1e2f-4a3b-84c5-d6e7f8a9b0c1";
 // The browser Settings would choose, or the one SUROGATE_TEST_BROWSER names, chosen in Settings before each launch.
 const NAMED = process.env.SUROGATE_TEST_BROWSER;
 const BROWSER = NAMED ? findBrowsers().find((browser) => browser.executable === NAMED) ?? null : chosenBrowser({ choice: "auto" }, findBrowsers());
@@ -535,6 +536,30 @@ describe("a chat's browser taken over, and handed back", () => {
     const navigating = navigated();
     await press(await prompt(app!), "deny");
     expect((await navigating).error.type).toBe("denied");
+  });
+
+  it("tells the page nothing was handed back when the browser was taken over from another chat while the confirmation was up", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    await alsoBound(client, join(home, "second"));
+    await alsoBound(client, join(home, "third"), THIRD);
+    const binding = (chat: string) => client.evaluate((id) => window.surogateDesktop!.getBinding!(id), chat);
+    await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
+    // The chat it is held from is deleted: any chat may ask to hand it back, and one does, at its user's click.
+    expect(await operation("retire", {}, "retire", 0, CHAT)).toEqual({ ok: null });
+    const answer = await clicked(client, "handBack", OTHER);
+    const asked = await prompted();
+    // While the confirmation is up, the page's own code takes the browser over from a third chat, which needs no click.
+    await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), THIRD);
+    expect(await binding(THIRD)).toMatchObject({ takenOver: true });
+    // Hand back, for the chat that asked: the browser is the third chat's to hand back now, so nothing is, and the page is told so.
+    await press(asked, "hand_back");
+    expect(await answer()).toBe(false);
+    expect(await binding(THIRD)).toMatchObject({ takenOver: true });
+    expect(await binding(OTHER)).toMatchObject({ takenOver: "elsewhere" });
+    expect(await operation("browser.navigate", { url: "https://example.com/", wait_until: "load" }, undefined, 1, OTHER)).toEqual(PAUSED);
   });
 
   it("asks nothing for a page that loads itself again and asks to hand the browser back, before its user kept it or after", async () => {

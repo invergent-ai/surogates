@@ -82,13 +82,15 @@ export class Browsing implements ToolLayer {
 
   /**
    * The browser handed back, through the desktop's own confirmation: by the chat that holds it, or by
-   * any chat once the one it was held from is gone. Another chat hands nothing back while its holder is here.
+   * any chat once the one it was held from is gone. Another chat hands nothing back while its holder is
+   * here. Whether it was handed back: who holds it can change while the confirmation is up.
    */
-  handBack(root: string): void {
+  handBack(root: string): boolean {
     const holder = this.held;
-    if (holder === null || (holder !== root && !this.orphaned())) return;
+    if (holder === null || (holder !== root && !this.orphaned())) return false;
     this.held = null;
     this.options.browser.pause(holder, false);
+    return true;
   }
 
   /**
