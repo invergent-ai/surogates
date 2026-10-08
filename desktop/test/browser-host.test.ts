@@ -277,6 +277,14 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     expect(hits).toEqual([]);
   });
 
+  it("runs the operation sent right after a refused navigation, in the error page that comes after it", async () => {
+    for (let round = 0; round < 3; round += 1) {
+      const a = session();
+      expect((await op(a, "browser.navigate", { url: `http://127.0.0.1:${ports.canary}/` })).error?.type).toBe("browser");
+      expect(await op(a, "browser.evaluate", { code: "return 1;" })).toEqual({ ok: { value: 1 } });
+    }
+  });
+
   it("opens only http and https addresses", async () => {
     const a = session();
     await op(a, "browser.navigate", { url: "http://fixture.test/" });

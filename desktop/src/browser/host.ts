@@ -244,16 +244,25 @@ export class BrowserHost {
     if (signal.aborted) return CANCELLED;
     const operation = OPERATIONS[kind];
     if (!operation) return { error: { type: "unsupported", message: `This computer's browser does not handle ${kind}` } };
+    let page: Page | undefined;
     try {
-      const { page, opened } = await this.pageFor(launch, session);
+      const found = await this.pageFor(launch, session);
+      page = found.page;
+      const { opened } = found;
       const value = BOUNDED.has(kind) ? await this.bounded(page, operation(page, args)) : await operation(page, args);
       if (!isRecord(value) || kind === "browser.observe" || kind === "browser.evaluate") return { ok: value ?? null };
       const notices = this.unseen.get(session) ?? [];
       this.unseen.delete(session);
       return { ok: { ...value, ...(kind === "browser.navigate" ? { opened } : {}), notices } };
     } catch (error) {
+      if (kind !== "browser.navigate") return failed(said(error));
+      // The error page a refused navigation shows can commit after goto has given up: the next
+      // operation would meet it arriving (Edge). So it is waited for, a moment, before the answer.
+      if (said(error).includes("net::ERR_")) {
+        await page?.waitForURL((url) => url.protocol === "chrome-error:", { waitUntil: "commit", timeout: 2_000 }).catch(() => {});
+      }
       // The browser says only net::ERR_* of what its proxy refused: a navigation's answer says why.
-      return failed((kind === "browser.navigate" ? await this.refused(args.url) : null) ?? said(error));
+      return failed((await this.refused(args.url)) ?? said(error));
     }
   }
 
