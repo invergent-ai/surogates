@@ -460,9 +460,12 @@ kvm_group() {
 install_latest() {
   local base="$1" download release version installed tarball=""
   scratch download --tmpdir tmp.XXXXXXXXXX
-  curl -q -fsSL --proto '=https,http' -o "$download/manifest.json" "$base/desktop/latest.json" \
+  # curl reads its address's letters as UTF-8 (C.UTF-8, which has no language of its own): a
+  # server's name may have letters outside ASCII, as the name the user fetched this script from
+  # may, and in a locale without them curl refuses the name before it looks it up.
+  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' -o "$download/manifest.json" "$base/desktop/latest.json" \
     || fail "could not download $base/desktop/latest.json"
-  curl -q -fsSL --proto '=https,http' -o "$download/manifest.json.sig" "$base/desktop/latest.json.sig" \
+  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' -o "$download/manifest.json.sig" "$base/desktop/latest.json.sig" \
     || fail "could not download $base/desktop/latest.json.sig"
   signed "$download/manifest.json" "$download/manifest.json.sig" \
     || fail "$base/desktop/latest.json is not signed by Surogate's release key"
@@ -478,7 +481,7 @@ install_latest() {
   if ! whole "$download/manifest.json" "$ROOT/versions/$version"; then
     say "downloading Surogate Desktop $version"
     tarball="$download/release.tar.gz"
-    curl -q -fSL --proto '=https,http' -o "$tarball" "$base/desktop/$(jq -r .url "$download/manifest.json")" \
+    LC_ALL=C.UTF-8 curl -q -fSL --proto '=https,http' -o "$tarball" "$base/desktop/$(jq -r .url "$download/manifest.json")" \
       || fail "could not download Surogate Desktop $version from $base"
   fi
   apply "$download/manifest.json" "$download/manifest.json.sig" "$tarball"

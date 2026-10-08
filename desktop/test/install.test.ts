@@ -1665,15 +1665,16 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   it("starts the system's tools in no locale and no language of its caller's, in each part that runs as root: the install, an apply and the removal", () => {
     german();
     // What each of *tools* was started with, of all that names a locale or a language, as *part* started it for a caller whose desktop is German.
-    const started = (part: string, tools: string[]) => {
+    // One of *letters* is started in no language too, and reads letters as UTF-8: C.UTF-8 has no words of its own.
+    const started = (part: string, tools: string[], letters: string[] = []) => {
       const traced = root(`${GERMAN} strace --seccomp-bpf -f -qq -v -s 256 -o /tmp/trace -e trace=execve ${part} >/dev/null 2>&1; echo "$?"; grep -E '^[0-9]+ +execve\\("[^"]*/(${tools.join("|")})", ' /tmp/trace`);
       const [status, ...calls] = traced.stdout.trim().split("\n");
       expect(status, part).toBe("0");
       const named = calls.map((call) => [/^\d+ +execve\("[^"]*\/([^"/]+)", /.exec(call)?.[1], ...[...call.matchAll(/"((?:LANG|LANGUAGE|LC_\w+)=[^"]*)"/g)].map((match) => match[1]).sort()].join(" "));
-      expect([...new Set(named)].sort(), part).toEqual(tools.map((tool) => `${tool} LANG=C LC_ALL=C`).sort());
+      expect([...new Set(named)].sort(), part).toEqual(tools.map((tool) => `${tool} LANG=C LC_ALL=${letters.includes(tool) ? "C.UTF-8" : "C"}`).sort());
     };
     publish("2.0.0");
-    started(`/opt/surogate-test/install.sh --base ${base}`, ["apt-get", "curl", "jq"]);
+    started(`/opt/surogate-test/install.sh --base ${base}`, ["apt-get", "curl", "jq"], ["curl"]);
     started(`/opt/surogate-test/install.sh --apply ${staged("2.2.0")}`, ["flock", "df", "tar"]);
     started("/opt/surogate-test/install.sh --uninstall", ["flock", "mountpoint", "rm"]);
     expect(root("test ! -e /opt/surogate").status).toBe(0);
@@ -1684,6 +1685,21 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     // The lock by itself, from the script's functions without its last line, in German: its folder made, then found there.
     const alone = root(`rm -rf ${LOCKS}; for found in no yes; do ${GERMAN} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && lock' || exit; done; stat -c '%f %u' ${LOCKS}`);
     expect(alone).toMatchObject({ status: 0, stdout: "41c0 0\n", stderr: "" });
+  });
+
+  it("looks up a server whose name has a letter outside ASCII, as the user's own download of the script did: root's part reads its base's letters as UTF-8", () => {
+    // A name no resolver has: the download gets as far as looking it up, and curl says so. In a
+    // locale with no letters but ASCII's, curl refuses the name before it looks it up (its
+    // "URL using bad/illegal format"), and no server so named can be installed from.
+    for (const locale of ["C.UTF-8", "de_DE.UTF-8"]) {
+      const installed = as("tester", `curl -fsSL ${base}/desktop/install.sh | LC_ALL=${locale} bash -s -- --base http://b\u00fccher.invalid`);
+      expect(installed.status, locale).toBe(1);
+      expect(installed.stderr.trimEnd().split("\n").slice(-2), locale).toEqual([
+        expect.stringMatching(/^curl: \(6\) Could not resolve host: /),
+        "Surogate Desktop: could not download http://b\u00fccher.invalid/desktop/latest.json",
+      ]);
+    }
+    expect(root("test ! -e /opt/surogate && test ! -e /etc/surogate").status).toBe(0);
   });
 });
 
