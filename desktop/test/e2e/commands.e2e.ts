@@ -608,6 +608,8 @@ async function thisComputer(shell: ElectronApplication): Promise<Page> {
   }).toBe(true);
   await found!.waitForSelector('.settings-nav [data-section="computer"]');
   await found!.click('.settings-nav [data-section="computer"]');
+  // Its first state comes a moment after the page: until then the row is empty.
+  await found!.waitForFunction(() => document.querySelector("#sandbox")?.textContent !== "");
   return found!;
 }
 
