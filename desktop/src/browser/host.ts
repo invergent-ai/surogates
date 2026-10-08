@@ -526,7 +526,10 @@ export class BrowserHost {
     page.on("download", (download) => this.note(session, downloaded(download.suggestedFilename())));
   }
 
+  // What a session's page did that its agent could not see happen. While its user holds the browser, what
+  // a page asks or starts is their own doing, or the page's under their hand: its agent is told nothing of it.
   private note(session: string, notice: string): void {
+    if (this.held !== null) return;
     const notices = this.unseen.get(session) ?? [];
     if (notices.length < MAX_NOTICES) notices.push(notice);
     this.unseen.set(session, notices);

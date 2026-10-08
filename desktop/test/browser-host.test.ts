@@ -999,6 +999,22 @@ await navigator.serviceWorker.ready;`);
     expect(stops()).toHaveLength(0);
   }, 30_000);
 
+  it("tells the agent nothing of a file asked for, or a download started, while its user held the browser", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    host.pause("chat-1", true);
+    // Its user's own hand in the page they hold: its file input, then its download.
+    const [asked] = await Promise.all([page.waitForEvent("filechooser", { timeout: 10_000 }), page.click("#file")]);
+    const [started] = await Promise.all([page.waitForEvent("download", { timeout: 10_000 }), page.click("#dl")]);
+    expect([asked.isMultiple(), started.suggestedFilename()]).toEqual([false, "report.txt"]);
+    host.pause("chat-1", false);
+    // Handed back, its agent's next answer carries neither.
+    expect((await op(a, "browser.mouse", { action: "move", x: 5, y: 5 }, "chat-1")).ok.notices).toEqual([]);
+    // What the page does once the agent drives again is told as before.
+    expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 }, "chat-1")).ok.notices).toEqual([FILE_ASKED]);
+  }, 30_000);
+
   it("leaves the page its user holds where it is: a navigation in flight is stopped, and no bound closes it", async () => {
     await host.close();
     host = hostWith({ boundMs: 3_000 });
