@@ -212,7 +212,15 @@ describe("the browser tests' gate", () => {
     const scratch = mkdtempSync(join(tmpdir(), "sb-gate-"));
     try {
       mkdirSync(join(scratch, "tmp"));
-      expect(notIsolated({ TMPDIR: join(scratch, "tmp") })).not.toContain("TMPDIR is not a scratch folder");
+      mkdirSync(join(scratch, "own"));
+      // A temp folder of the run's own: under the scratch root its home is in.
+      expect(notIsolated({ HOME: join(scratch, "own"), TMPDIR: join(scratch, "tmp") })).not.toContain("TMPDIR is not a scratch folder");
+      // Anywhere else it is shared, or the user's: another temp root, the user's home, or with no scratch home to be under.
+      const { homedir: real } = userInfo();
+      for (const temp of ["/var/tmp", real, tmpdir()]) {
+        expect(notIsolated({ HOME: join(scratch, "own"), TMPDIR: temp }), temp).toContain("TMPDIR is not a scratch folder");
+      }
+      expect(notIsolated({ TMPDIR: join(scratch, "tmp") })).toContain("TMPDIR is not a scratch folder");
       // A link is where it leads: into the user's home, or to the session's own runtime folder.
       const { uid, homedir } = userInfo();
       symlinkSync(homedir, join(scratch, "home"));

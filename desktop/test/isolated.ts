@@ -5,7 +5,7 @@
 
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { userInfo } from "node:os";
-import { basename, isAbsolute, relative } from "node:path";
+import { basename, dirname, isAbsolute, relative } from "node:path";
 
 const SCRATCH = ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"];
 
@@ -63,9 +63,14 @@ export function notIsolated(env: Record<string, string | undefined> = process.en
     }
   })();
   if (runtime === null || !kept || within(runtime, real(`/run/user/${uid}`) ?? `/run/user/${uid}`) || within(runtime, home)) missing.push("XDG_RUNTIME_DIR is not a scratch folder of mode 0700");
-  // The browser's and Playwright's own folders go to TMPDIR, and a browser that is killed leaves them.
+  // The browser's and Playwright's own folders go to TMPDIR, and a browser that is killed leaves them:
+  // so it is the run's own, under the scratch root its home is in, and that root no shared temp root.
   const temp = real(env.TMPDIR);
-  if (temp === null || temp === (real("/tmp") ?? "/tmp")) missing.push("TMPDIR is not a scratch folder");
+  const root = real(env.HOME) === null ? null : dirname(real(env.HOME)!);
+  const shared = ["/", "/tmp", "/var/tmp", "/dev/shm"].map((path) => real(path) ?? path);
+  if (temp === null || root === null || shared.includes(root) || !within(temp, root) || within(temp, home) || within(home, temp)) {
+    missing.push("TMPDIR is not a scratch folder");
+  }
   const display = /^(:\d+)(\.\d+)?$/.exec(env.DISPLAY ?? "")?.[1];
   if (display === undefined || !xvfb(display)) missing.push("DISPLAY is not an Xvfb's");
   return missing;
