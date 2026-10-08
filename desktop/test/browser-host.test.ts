@@ -133,6 +133,8 @@ const hostWith = (options: Omit<BrowserHostOptions, "proxy"> = {}) => new Browse
   proxy: {
     resolve: (name) => (name === "fixture.test" ? Promise.resolve([SITE]) : name === "other.test" ? Promise.resolve([OTHER]) : Promise.reject(new Error("ENOTFOUND"))),
     local: () => ["127.0.0.1", "::1"],
+    // The networks this computer is on: none here, so no test reads the machine's own.
+    subnets: () => [],
     connect: (address, port) => connectTcp({ host: "127.0.0.1", port: (address === SITE || address === OTHER) && port === 80 ? ports.site : 9 }),
   },
   ...options,
