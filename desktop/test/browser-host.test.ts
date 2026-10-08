@@ -802,6 +802,31 @@ describe("a page's download, as the host stages it", () => {
     expect(state().unseen.get(SESSION)).toEqual([tooLarge("report.bin", MAX_WRITE_BYTES + 1)]);
   });
 
+  it("begins the minute only at a hand back that hands the browser back: not at one by a chat that does not hold it, nor at a second one in a row", async () => {
+    const whose = async (name: string) => {
+      const file = fileOf(6);
+      await arrives(downloadOf(name, file, Promise.resolve(file)));
+      const handed = staged.at(-1);
+      return handed?.name !== name ? "not staged" : handed.user ? (handed.afterHandBack ? "theirs, just after" : "theirs") : "the agent's";
+    };
+    // Nobody holds the browser: a hand back hands nothing back, and no minute begins.
+    host.pause("chat-2", false);
+    expect(await whose("first.bin")).toBe("the agent's");
+    // Held from one chat: another's hand back ends nothing, and the browser is held still.
+    host.pause("chat-1", true);
+    host.pause("chat-2", false);
+    expect(await whose("held.bin")).toBe("theirs");
+    // Handed back by the chat that holds it: the minute begins, and runs out.
+    host.pause("chat-1", false);
+    expect(await whose("after.bin")).toBe("theirs, just after");
+    clock += AFTER_HAND_BACK_MS + 1;
+    expect(await whose("later.bin")).toBe("the agent's");
+    // A second hand back, by that chat or another, with nobody holding it: the minute is not begun again.
+    host.pause("chat-1", false);
+    host.pause("chat-2", false);
+    expect(await whose("again.bin")).toBe("the agent's");
+  });
+
   it("takes one whose request began while nobody held the browser for the agent's, in the minute after a hand back too; and one whose request began while it was held for its user's however late it comes", async () => {
     // Held, handed back, and then a navigation of the agent's: its request is known to have begun after.
     host.pause("chat-2", true);
@@ -872,7 +897,17 @@ describe("a page's download, as the host stages it", () => {
     const file = fileOf(6);
     await arrives(downloadOf("statement.pdf", file, Promise.resolve(file), SITE_URL), TAB);
     expect(staged).toEqual([{ root: "chat-2", session: "chat-2", name: "statement.pdf", path: file, user: true }]);
+    // And another, begun under the first, where the second chat has held the browser and handed it back since: the
+    // chat it began under, not the one that handed it back last.
     host.pause("chat-1", false);
+    host.pause("chat-2", true);
+    asks(`${SITE_URL}?second`);
+    host.pause("chat-2", false);
+    host.pause("chat-1", true);
+    host.pause("chat-1", false);
+    const second = fileOf(6);
+    await arrives(downloadOf("payslip.pdf", second, Promise.resolve(second), `${SITE_URL}?second`), TAB);
+    expect(staged.pop()).toEqual({ root: "chat-2", session: "chat-2", name: "payslip.pdf", path: second, user: true });
     // No request known, in the minute after the hand back: in doubt, theirs, for the chat that handed it back.
     const doubt = fileOf(6);
     await arrives(downloadOf("doubt.bin", doubt, Promise.resolve(doubt)), TAB);
