@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import Device, DeviceOperation, DeviceTransfer, DeviceTransferChunk
 from surogates.db.models import Session as SessionRow
-from surogates.devices.binding import BIND, RETIRE, binding_of, device_of
+from surogates.devices.binding import BIND, RETIRE, binding_of, device_of, is_binding_root
 from surogates.devices.presence import DevicePresence, control_channel
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import (
@@ -197,7 +197,7 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
         raise ValueError("Only the root session's own first operation is its binding")
     if (request.kind == RETIRE) != is_retiring:
         raise ValueError("Only the root session's own retirement retires its folder")
-    if (is_binding or is_retiring) and (root.config or {}).get("sandbox_root_session_id"):
+    if (is_binding or is_retiring) and not is_binding_root(root.id, root.config):
         # A session created under another works in that session's folder.
         raise ValueError("Only a root session is bound to a folder")
     if not is_binding and (await binding_of(db, request.root_session_id)).state != "bound":

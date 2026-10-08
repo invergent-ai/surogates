@@ -1,7 +1,7 @@
 /**
  * The cards of a project's master conversation (desktop design, Section 12):
  * a card per thread or worker the session started, updated in place by its
- * reports, and a card per proposal, whose cloud threads the user starts.
+ * reports, and a card per proposal, whose threads the user starts, in the cloud or in a folder of their computer.
  */
 import { act, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -217,9 +217,8 @@ describe("the cards in the conversation", () => {
       ["Summarise B", "Summarise B.pdf."],
       ["Check the totals", "Check the totals in Budget.xlsx."],
     ]);
-    // A thread on the user's computer is not started from the cloud's card.
-    expect(cards[2]?.querySelector("button")).toBeNull();
-    expect(cards[2]?.textContent).toContain("Works in a folder on your computer");
+    // A thread on the user's computer is started from Surogate Desktop, or in the cloud instead.
+    expect([...cards[2]!.querySelectorAll("button")].map((found) => found.textContent)).toEqual(["Run in the cloud instead"]);
 
     await act(async () => button(dom, "Start", cards[0]).click());
     expect(startProposedThread).toHaveBeenCalledWith({ projectId: "project-1", proposalId: PROPOSAL, key: "1" });
@@ -401,6 +400,74 @@ describe("the cards in the conversation", () => {
     act(() => root?.render(provided(thread(startedElsewhere, "simple"), adapter, context)));
     await act(async () => refuse());
     const card = dom.querySelector('[data-testid="proposed-thread"]')!;
+    expect(card.textContent).toContain("Started");
+    expect(card.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("asks for a folder on this computer for a thread proposed there, from Surogate Desktop", async () => {
+    const startLocalThread = vi.fn(async ({ key }: { key: string }) => ({
+      id: `thread-${key}`, title: "", group: "working" as const, reason: null, statusLine: null, progress: null, files: [],
+    }));
+    const startProposedThread = vi.fn();
+    const dom = mount(thread(applied(proposed), "simple"), adapterStub({ startProposedThread, startLocalThread }), {
+      projectId: "project-1",
+    });
+    const card = [...dom.querySelectorAll('[data-testid="proposed-thread"]')][2]!;
+    expect(card.textContent).toContain("Allow Surogate to work in a folder on your device");
+    const allow = button(dom, "Allow", card);
+    expect(allow.getAttribute("aria-label")).toBe("Allow Check the totals");
+    await act(async () => allow.click());
+    expect(startLocalThread).toHaveBeenCalledWith({ projectId: "project-1", proposalId: PROPOSAL, key: "3", title: "Check the totals" });
+    expect(card.textContent).toContain("Started");
+    expect(startProposedThread).not.toHaveBeenCalled();
+    // Start all is the cloud's: it never asks for a folder.
+    expect(dom.textContent).toContain("Start all");
+  });
+
+  it("runs a thread proposed for the user's computer in the cloud instead, when the user says so", async () => {
+    const startProposedThread = vi.fn(async ({ key }: { key: string }) => ({
+      id: `thread-${key}`, title: "", group: "working" as const, reason: null, statusLine: null, progress: null, files: [],
+    }));
+    const dom = mount(thread(applied(proposed), "simple"), adapterStub({ startProposedThread }), { projectId: "project-1" });
+    const card = [...dom.querySelectorAll('[data-testid="proposed-thread"]')][2]!;
+    // In a browser: no folder of this computer to ask for.
+    expect(card.textContent).toContain("This works in a folder on your device, which needs Surogate Desktop");
+    const cloud = button(dom, "Run in the cloud instead", card);
+    expect(cloud.getAttribute("aria-label")).toBe("Run Check the totals in the cloud instead");
+    await act(async () => cloud.click());
+    expect(startProposedThread).toHaveBeenCalledWith({ projectId: "project-1", proposalId: PROPOSAL, key: "3" });
+    expect(card.textContent).toContain("Started");
+  });
+
+  it("says only the button pressed is starting, and lets neither start the thread again meanwhile", async () => {
+    const pending = () => new Promise<AgentChatThreadRow>(() => {});
+    for (const [pressed, other] of [["Run in the cloud instead", "Allow"], ["Allow", "Run in the cloud instead"]] as const) {
+      const dom = mount(thread(applied(proposed), "simple"), adapterStub({
+        startProposedThread: vi.fn(pending), startLocalThread: vi.fn(pending),
+      }), { projectId: "project-1" });
+      const card = [...dom.querySelectorAll('[data-testid="proposed-thread"]')][2]!;
+      await act(async () => button(dom, pressed, card).click());
+      const starting = button(dom, "Starting…", card);
+      expect(starting.getAttribute("aria-label")).toBe("Starting Check the totals");
+      expect(starting.disabled).toBe(true);
+      // The other way keeps its words, and waits.
+      expect(button(dom, other, card).disabled).toBe(true);
+      act(() => root?.unmount());
+      dom.remove();
+    }
+  });
+
+  it("says why a thread did not start on this computer, and lets the user allow it again", async () => {
+    const startLocalThread = vi.fn()
+      .mockRejectedValueOnce(new Error("No folder was chosen for this thread"))
+      .mockResolvedValueOnce({ id: "thread-3", title: "", group: "working", reason: null, statusLine: null, progress: null, files: [] });
+    const dom = mount(thread(applied(proposed), "simple"), adapterStub({ startProposedThread: vi.fn(), startLocalThread }), {
+      projectId: "project-1",
+    });
+    const card = [...dom.querySelectorAll('[data-testid="proposed-thread"]')][2]!;
+    await act(async () => button(dom, "Allow", card).click());
+    expect(card.querySelector('[role="alert"]')?.textContent).toBe("No folder was chosen for this thread");
+    await act(async () => button(dom, "Allow", card).click());
     expect(card.textContent).toContain("Started");
     expect(card.querySelector('[role="alert"]')).toBeNull();
   });

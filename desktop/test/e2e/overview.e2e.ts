@@ -1,4 +1,5 @@
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -48,6 +49,26 @@ const texts = (page: Page, selector: string) => page.$$eval(selector, (found) =>
 const views = (shell: ElectronApplication) => shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.contentView.children.length);
 const rows = (page: Page) => page.$$eval(".section .thread", (found) => found.length);
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+// The pane's transcript, the window's view at /transcript/: its address and its bounds, or null while it shows none.
+const pane = (shell: ElectronApplication) => shell.evaluate(({ BrowserWindow }) => {
+  const found = (BrowserWindow.getAllWindows()[0]!.contentView.children as Electron.WebContentsView[])
+    .find((view) => new URL(view.webContents.getURL() || "about:blank").pathname.startsWith("/transcript/"));
+  if (!found) return null;
+  const { x, y, width, height } = found.getBounds();
+  return { url: found.webContents.getURL(), bounds: [x, y, width, height] };
+});
+const transcript = (thread: string, settings = "textSize=medium&transcriptWidth=medium&motion=system") =>
+  `${origin}/transcript/${thread}?${settings}`;
+// The hole the pane's transcript fills, as the window's page lays it out.
+const hole = (page: Page) => page.$eval("#pane-hole", (found) => {
+  const { x, y, width, height } = found.getBoundingClientRect();
+  return [Math.round(x), Math.round(y), Math.round(width), Math.round(height)];
+});
+// *thread* in the centre, as its row's transcript in the pane opens it there.
+async function viewThread(page: Page, thread: string): Promise<void> {
+  await page.click(`[data-thread="${thread}"]`);
+  await page.click("#reading-open");
+}
 
 // The fake page's source, as the page keeps it (fake-agent.ts).
 interface Served {
@@ -100,13 +121,30 @@ describe("the Overview pane", () => {
     expect(await texts(page, "#routine-list .from")).toEqual(["On the 1st of every month at 09:00", "Every Monday at 08:00"]);
   });
 
-  it("opens a thread in the centre, with its project as the way back, and draws no second web client", async () => {
+  it("marks a file a thread made on the user's computer with its laptop, apart from the cloud's file of that name", async () => {
+    const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+    agent.projects!.library[REPORT] = [
+      { path: "Budget.xlsx", origin: "added", threadId: null, size: 14, updatedAt: minutesAgo(5), place: { kind: "cloud" } },
+      {
+        path: "Budget.xlsx", origin: "produced", threadId: FIXTURE_IDS.computer, size: null, updatedAt: minutesAgo(1),
+        place: { kind: "device", deviceId: "d", deviceName: "thinkpad", online: true },
+      },
+    ];
+    const { page } = await opened();
+    await page.click('[data-tab="library"]');
+    expect(await page.$$eval("#files li", (files) => files.map((file) => [
+      file.querySelector(".from")!.textContent, file.querySelector(".place")?.getAttribute("title") ?? null,
+    ]))).toEqual([["From Tidy the shared folder", "On thinkpad, which is online"], ["Added by you · 1 KB", null]]);
+  });
+
+  it("opens a thread in the centre from the pane's Open, with its project as the way back, and draws no second web client", async () => {
     const { shell, page, client } = await opened();
-    await page.click(`[data-thread="${QUESTION}"]`);
+    await viewThread(page, QUESTION);
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${QUESTION}`);
     expect(await page.textContent("#title")).toBe("Check the revenue figures");
     expect(await page.textContent("#to-project")).toBe("Quarterly report");
-    expect(await views(shell)).toBe(1);
+    await expect.poll(() => views(shell)).toBe(1);
+    expect(await page.isVisible("#threads")).toBe(true);
     await page.click("#to-project");
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${REPORT}`);
     expect(await page.isVisible("#to-project")).toBe(false);
@@ -115,7 +153,7 @@ describe("the Overview pane", () => {
 
   it("goes back to the project's conversation when the open thread drops out of the project", async () => {
     const { page, client } = await opened();
-    await page.click(`[data-thread="${QUESTION}"]`);
+    await viewThread(page, QUESTION);
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${QUESTION}`);
     const drop = (data: ProjectFixtures) => {
       data.threads[REPORT] = data.threads[REPORT]!.filter((thread) => thread.id !== QUESTION);
@@ -296,6 +334,280 @@ describe("the Overview pane", () => {
   });
 });
 
+describe("a thread read in the Overview pane", () => {
+  it("is its transcript, from a page of the web client's own with no bridge, beside the project's conversation", async () => {
+    const { shell, page, client } = await opened();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    expect(await page.textContent("#reading-title")).toBe("Check the revenue figures");
+    expect(await page.isVisible("#threads")).toBe(false);
+    expect(await page.isVisible(".tabs")).toBe(false);
+    expect(client.url()).toBe(`${origin}/chat/${REPORT}`);
+    expect(await page.textContent("#title")).toBe("Quarterly report");
+    await expect.poll(async () => (await pane(shell))?.bounds).toEqual(await hole(page));
+    const reader = shell.windows().find((found) => found.url().includes("/transcript/"))!;
+    expect(await reader.evaluate(() => "surogateDesktop" in window)).toBe(false);
+    // Folded away, the pane's transcript goes with it.
+    await page.click("#overview");
+    await expect.poll(async () => (await pane(shell))?.bounds[2]).toBe(0);
+  });
+
+  it("stays over its hole as the window is resized, which moves the pane at its widest without resizing it", async () => {
+    const { shell, page } = await opened();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    for (const width of [2400, 2200]) {
+      await shell.evaluate(({ BrowserWindow }, wide) => BrowserWindow.getAllWindows()[0]!.setBounds({ width: wide, height: 900 }), width);
+      await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(width);
+      await expect.poll(async () => (await pane(shell))?.bounds).toEqual(await hole(page));
+    }
+  });
+
+  it("goes with Back, with another project, and with the account", async () => {
+    const { shell, page, client } = await opened();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    await page.click("#reading-back");
+    await expect.poll(() => pane(shell)).toBeNull();
+    expect(await page.isVisible("#threads")).toBe(true);
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    await page.click(`#projects [data-project="${BUDGET}"] .project`);
+    await expect.poll(() => pane(shell)).toBeNull();
+    await page.click(`#projects [data-project="${REPORT}"] .project`);
+    await page.click(`[data-thread="${IDLE}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(IDLE));
+    await client.evaluate(() => window.surogateDesktop!.setAccount(null));
+    await expect.poll(() => pane(shell)).toBeNull();
+  });
+
+  it("goes as the centre shows its thread, from a card's View thread or a notification's click", async () => {
+    const { shell, page, client } = await opened();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    // A thread card's View thread: the web client routes to the thread in place.
+    await client.evaluate((id) => history.pushState(null, "", `/chat/${id}`), QUESTION);
+    await expect.poll(() => page.textContent("#title")).toBe("Check the revenue figures");
+    await expect.poll(() => pane(shell)).toBeNull();
+    await page.click("#to-project");
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${REPORT}`);
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    // A notification's click: the centre loads the thread's page.
+    await page.evaluate((path) => (window as unknown as { surogateShell: { go(path: string): Promise<void> } }).surogateShell.go(path),
+      `/chat/${QUESTION}`);
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${QUESTION}`);
+    await expect.poll(() => pane(shell)).toBeNull();
+  });
+
+  it("takes the keyboard to its Back as it opens, and back to the thread's row as it closes", async () => {
+    const { shell, page } = await opened();
+    await page.focus(`[data-thread="${QUESTION}"]`);
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe("reading-back");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => pane(shell)).toBeNull();
+    await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.thread)).toBe(QUESTION);
+  });
+
+  it("takes the keyboard into its transcript after its head, to scroll it there, and out only at its edges", async () => {
+    const { shell, page } = await opened();
+    await page.focus(`[data-thread="${QUESTION}"]`);
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    const reader = shell.windows().find((found) => found.url().includes("/transcript/"))!;
+    await reader.waitForLoadState();
+    // Two controls of its own, and room to scroll.
+    await reader.evaluate(() => {
+      document.body.insertAdjacentHTML("afterbegin", '<button id="one">One</button><button id="two">Two</button>');
+      document.body.style.height = "5000px";
+    });
+    // Which has the keyboard, as the app's own process sees it: the window's page, and the pane's transcript.
+    const keyboardIn = () => shell.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0]!;
+      const reading = (window.contentView.children as Electron.WebContentsView[]).find((view) => view.webContents.getURL().includes("/transcript/"));
+      return [window.webContents.isFocused(), reading?.webContents.isFocused() ?? false];
+    });
+    // A key the user presses in the transcript, as the window's input reaches it.
+    const pressed = (keyCode: string, modifiers: Array<"shift"> = []) => shell.evaluate(({ BrowserWindow }, [code, held]) => {
+      const reading = (BrowserWindow.getAllWindows()[0]!.contentView.children as Electron.WebContentsView[])
+        .find((view) => view.webContents.getURL().includes("/transcript/"))!;
+      for (const type of ["keyDown", "keyUp"] as const) reading.webContents.sendInputEvent({ type, keyCode: code as string, modifiers: held as Array<"shift"> });
+    }, [keyCode, modifiers] as const);
+    const focused = () => reader.evaluate(() => document.activeElement?.id ?? "");
+    const inShell = () => page.evaluate(() => document.activeElement?.id);
+    await expect.poll(inShell).toBe("reading-back");
+    await page.keyboard.press("Tab");
+    expect(await inShell()).toBe("reading-open");
+    await page.keyboard.press("Tab");
+    await expect.poll(keyboardIn).toEqual([false, true]);
+    await reader.keyboard.press("PageDown");
+    await expect.poll(() => reader.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+    const paged = await reader.evaluate(() => window.scrollY);
+    await reader.keyboard.press("ArrowDown");
+    await expect.poll(() => reader.evaluate(() => window.scrollY)).toBeGreaterThan(paged);
+    // Shift+Tab from a later control steps back inside the page; from its first, out to the head's Open.
+    await reader.evaluate(() => document.getElementById("two")!.focus());
+    await pressed("Tab", ["shift"]);
+    await expect.poll(focused).toBe("one");
+    expect(await keyboardIn()).toEqual([false, true]);
+    await pressed("Tab", ["shift"]);
+    await expect.poll(keyboardIn).toEqual([true, false]);
+    expect(await inShell()).toBe("reading-open");
+    await page.keyboard.press("Tab");
+    await expect.poll(keyboardIn).toEqual([false, true]);
+    // Escape closes the page's dialog, which takes the key as a Radix dialog does, and only that: gone at once here,
+    // its taking the key is all that keeps it the page's.
+    await reader.evaluate(() => {
+      document.body.insertAdjacentHTML("beforeend", '<div role="dialog" id="dialog">A dialog</div>');
+      document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape" || !document.getElementById("dialog")) return;
+        event.preventDefault();
+        document.getElementById("dialog")!.remove();
+      }, { capture: true });
+    });
+    await pressed("Escape");
+    await expect.poll(() => reader.evaluate(() => document.getElementById("dialog") === null)).toBe(true);
+    expect(await keyboardIn()).toEqual([false, true]);
+    // A dialog that keeps the key to itself keeps the keyboard in the page too.
+    await reader.evaluate(() => document.body.insertAdjacentHTML("beforeend", '<div role="dialog" id="kept">Kept</div>'));
+    await pressed("Escape");
+    await pause(300);
+    expect(await keyboardIn()).toEqual([false, true]);
+    await reader.evaluate(() => document.getElementById("kept")!.remove());
+    // With nothing open, Escape gives the keyboard back to Back.
+    await pressed("Escape");
+    await expect.poll(keyboardIn).toEqual([true, false]);
+    expect(await inShell()).toBe("reading-back");
+  });
+
+  it("is read again as Settings shapes the transcript", async () => {
+    const { shell, page } = await opened();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    await page.click("#open-settings");
+    let settings: Page | undefined;
+    await expect.poll(() => {
+      settings = shell.windows().find((found) => found.url().endsWith("/settings.html"));
+      return settings !== undefined;
+    }).toBe(true);
+    await settings!.waitForSelector('[data-setting="textSize"] [data-value="large"]');
+    await settings!.click('[data-setting="textSize"] [data-value="large"]');
+    await expect.poll(async () => (await pane(shell))?.url)
+      .toBe(transcript(QUESTION, "textSize=large&transcriptWidth=medium&motion=system"));
+  });
+
+  it("paints its first frame in a dark desktop's theme, with no bridge, before any script of its own", async () => {
+    const { shell, page, client } = await opened();
+    await page.click("#open-settings");
+    let settings: Page | undefined;
+    await expect.poll(() => {
+      settings = shell.windows().find((found) => found.url().endsWith("/settings.html"));
+      return settings !== undefined;
+    }).toBe(true);
+    await settings!.waitForSelector('[data-setting="theme"] [data-value="dark"]');
+    await settings!.click('[data-setting="theme"] [data-value="dark"]');
+    await expect.poll(() => client.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches)).toBe(true);
+    // Escape closes the page before Playwright sends the key up.
+    await settings!.keyboard.press("Escape").catch(() => {});
+    await expect.poll(() => shell.windows().some((found) => found.url().endsWith("/settings.html"))).toBe(false);
+    // From now on the agent serves the web client's own HTML, its bundle and the fonts' sheet not: only its
+    // head can theme the pane's first frame, and the body's first script reads the root that frame paints from.
+    agent.page = readFileSync(join(import.meta.dirname, "..", "..", "..", "web", "index.html"), "utf8")
+      .replace(/<link [^>]*https:[^>]*>/g, "")
+      .replace("<body>", "<body><script>window.firstFrame = document.documentElement.className</script>");
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    const reader = shell.windows().find((found) => found.url().includes("/transcript/"))!;
+    await reader.waitForLoadState();
+    expect(await reader.evaluate(() => "surogateDesktop" in window)).toBe(false);
+    expect(await reader.evaluate(() => (window as unknown as { firstFrame: string }).firstFrame)).toBe("dark");
+  });
+
+  it("stays on its transcript, and sends an address outside the agent's to the browser", async () => {
+    const { shell, page } = await opened();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    const reader = shell.windows().find((found) => found.url().includes("/transcript/"))!;
+    await reader.waitForLoadState();
+    const where = () => reader.evaluate(() => location.href + String((window as unknown as { kept?: boolean }).kept ?? false))
+      .catch(() => "");
+    // A footnote of its own: the pane scrolls to it, and is not loaded again.
+    await reader.evaluate(() => {
+      (window as unknown as { kept: boolean }).kept = true;
+      location.hash = "note";
+    });
+    await pause(500);
+    expect(await where()).toBe(`${transcript(QUESTION)}#notetrue`);
+    // A page of the agent's it would load in its place: the pane stays where it was.
+    await reader.evaluate(() => {
+      location.href = "/settings";
+    }).catch(() => {});
+    await pause(500);
+    expect(await where()).toBe(`${transcript(QUESTION)}#notetrue`);
+    // A page of its own the web client would route to in place: the pane loads its transcript again.
+    await reader.evaluate(() => {
+      (window as unknown as { kept: boolean }).kept = true;
+      history.pushState(null, "", "/chat");
+    });
+    await expect.poll(where).toBe(`${transcript(QUESTION)}false`);
+    await reader.evaluate(() => {
+      location.href = "https://example.com/report";
+    }).catch(() => {});
+    await expect.poll(() => shell.evaluate(() => (globalThis as unknown as { opened: string[] }).opened)).toContain("https://example.com/report");
+    expect((await pane(shell))?.url).toBe(transcript(QUESTION));
+    // Its router's own rewrite of its address, the query left out: still its transcript, not loaded again.
+    await reader.evaluate(() => {
+      (window as unknown as { kept: boolean }).kept = true;
+      history.replaceState(null, "", location.pathname);
+    });
+    await pause(500);
+    expect(await where()).toBe(`${origin}/transcript/${QUESTION}true`);
+  });
+});
+
+describe("a thread read in the Overview pane, as the agent answers", () => {
+  it("is loaded again once the agent answers after its load failed, and after its page crashed", async () => {
+    const { shell, page } = await opened();
+    // *code* run in the pane's page, while one is there to answer: null while none is, as when it crashes.
+    const inPane = (code: string) => shell.evaluate(({ BrowserWindow }, script) => {
+      const found = (BrowserWindow.getAllWindows()[0]!.contentView.children as Electron.WebContentsView[])
+        .find((view) => view.webContents.getURL().includes("/transcript/"));
+      if (!found || found.webContents.isCrashed()) return null;
+      return Promise.race([found.webContents.executeJavaScript(script), new Promise((resolve) => setTimeout(() => resolve(null), 500))]);
+    }, code);
+    await agent.stop();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await pause(1_000);
+    expect(await inPane("document.title")).not.toBe("Fake agent");
+    await agent.start(Number(new URL(origin).port));
+    await expect.poll(() => inPane("document.title"), { timeout: 10_000 }).toBe("Fake agent");
+    await inPane("window.kept = true");
+    // Its page's process ends, as a crash ends it.
+    await shell.evaluate(({ BrowserWindow }) => process.kill((BrowserWindow.getAllWindows()[0]!.contentView.children as Electron.WebContentsView[])
+      .find((view) => view.webContents.getURL().includes("/transcript/"))!.webContents.getOSProcessId(), "SIGKILL"));
+    await expect.poll(() => inPane("[document.title, window.kept === true]"), { timeout: 10_000 }).toEqual(["Fake agent", false]);
+  });
+
+  it("follows a redirect of its load only to its own transcript", async () => {
+    const { shell, page } = await opened();
+    const shown = () => shell.evaluate(({ BrowserWindow }) =>
+      (BrowserWindow.getAllWindows()[0]!.contentView.children as Electron.WebContentsView[]).map((view) => view.webContents.getURL()));
+    // To another page of the agent's: refused, and that page is drawn nowhere.
+    agent.pagesRedirect = `${origin}/settings`;
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await pause(1_000);
+    expect(await shown()).not.toContain(`${origin}/settings`);
+    await page.click("#reading-back");
+    await expect.poll(() => page.isVisible("#threads")).toBe(true);
+    // To its own transcript, in other settings: followed.
+    agent.pagesRedirect = transcript(QUESTION, "textSize=large&transcriptWidth=medium&motion=system");
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(agent.pagesRedirect);
+  });
+});
+
 describe("the Overview pane, at its edges", () => {
   it("forgets a project's threads when another account signs in, or the user signs out", async () => {
     const { page, client } = await opened();
@@ -335,7 +647,7 @@ describe("the Overview pane, at its edges", () => {
 
   it("takes the centre to a new chat when the open project is archived elsewhere", async () => {
     const { page, client } = await opened();
-    await page.click(`[data-thread="${QUESTION}"]`);
+    await viewThread(page, QUESTION);
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${QUESTION}`);
     // Archived on another device: the page lists it no more, and says the project changed.
     await expect.poll(async () => {
@@ -433,7 +745,7 @@ describe("the Overview pane, at its edges", () => {
 
   it("keeps the header in step with a thread that is renamed", async () => {
     const { page, client } = await opened();
-    await page.click(`[data-thread="${QUESTION}"]`);
+    await viewThread(page, QUESTION);
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${QUESTION}`);
     await expect.poll(async () => {
       await client.evaluate(([project, thread]) => {
@@ -447,9 +759,31 @@ describe("the Overview pane, at its edges", () => {
     }).toBe("Check the third quarter's revenue");
   });
 
-  it("never loads a master session that is not a chat when a thread leaves", async () => {
+  it("keeps a transcript's title in the pane in step with a thread that is renamed", async () => {
     const { page, client } = await opened();
     await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(() => page.textContent("#reading-title")).toBe("Check the revenue figures");
+    await client.evaluate(([project, thread]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      fake.data.threads[project!]!.find((each) => each.id === thread)!.title = "Check the third quarter's revenue";
+      fake.changed(project!, thread!);
+    }, [REPORT, QUESTION]);
+    await expect.poll(() => page.textContent("#reading-title")).toBe("Check the third quarter's revenue");
+  });
+
+  it("draws away a read's refusal once a thread is read", async () => {
+    const { shell, page } = await opened();
+    await page.evaluate((id) => (window as unknown as { surogateShell: { read(id: string): Promise<void> } }).surogateShell.read(id),
+      "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d");
+    await expect.poll(() => page.textContent("#failure")).toBe("No such thread in the open project");
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    await expect.poll(() => page.isVisible("#failure")).toBe(false);
+  });
+
+  it("never loads a master session that is not a chat when a thread leaves", async () => {
+    const { page, client } = await opened();
+    await viewThread(page, QUESTION);
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${QUESTION}`);
     // The thread's page serves the projects and the shell has read them: the change below is read
     // after that read, never across it.

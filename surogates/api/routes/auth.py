@@ -130,6 +130,10 @@ class AuthConfigResponse(BaseModel):
     # self-registration. Public data — the buy page itself is public.
     commerce_mode: str = "free"
     commerce_buy_url: str | None = None
+    # Where the agent's users see their usage and billing: the console the
+    # operator names (SUROGATES_API_CONSOLE_URL).  None: the agent names
+    # none, and Surogate Desktop shows no Usage or Plans and billing.
+    console_url: str | None = None
 
 
 class FirebaseExchangeRequest(BaseModel):
@@ -178,6 +182,7 @@ async def auth_config(
         linkable_channels=list(agent_runtime.linkable_channels),
         commerce_mode=str(commerce.get("commerce_mode") or "free"),
         commerce_buy_url=commerce.get("commerce_buy_url"),
+        console_url=request.app.state.settings.api.console_url or None,
     )
     cache = getattr(request.app.state, "firebase_config_cache", None)
     project_id = getattr(agent_runtime, "project_id", None)

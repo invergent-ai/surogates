@@ -38,7 +38,7 @@ interface ExpertResult {
 
 export function ExpertToolBlock({ tc }: { tc: ToolCallInfo }) {
   const [expanded, setExpanded] = useState(false);
-  const { adapter, sessionId } = useAgentChatAdapterContext();
+  const { adapter, sessionId, readOnly } = useAgentChatAdapterContext();
   // Optimistic marker: set the moment the user clicks, cleared when the
   // server responds.  Authoritative rating arrives via the SSE stream as
   // tc.expertFeedback; we prefer it once present.
@@ -48,7 +48,9 @@ export function ExpertToolBlock({ tc }: { tc: ToolCallInfo }) {
 
   const rating = tc.expertFeedback?.rating ?? pending;
   const alreadyRated = tc.expertFeedback !== undefined;
+  // A chat the host only reads is rated from nowhere but where it is written.
   const canRate =
+    !readOnly &&
     tc.expertResultEventId !== undefined &&
     sessionId !== null &&
     adapter.submitExpertFeedback !== undefined &&

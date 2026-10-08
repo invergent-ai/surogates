@@ -4,7 +4,9 @@
 // placed as the user left it; hidden when the user closes it, unless Keep running is off. Its own
 // page draws the sidebar, the centre's header and the Overview pane. The agent's web
 // client fills the centre's hole, in a WebContentsView of the agent's own partition
-// that stays on the agent's origin, as claude.ai fills Claude Desktop's window.
+// that stays on the agent's origin, as claude.ai fills Claude Desktop's window. A thread read in
+// the Overview pane fills the pane's hole, in a second view of the same partition that has no
+// bridge and stays on its transcript.
 
 import { app, BrowserWindow, net, screen, shell, type WebContents, WebContentsView, webContents } from "electron";
 
@@ -79,6 +81,14 @@ function confine(contents: WebContents, origin: string, onRefused: (url: string)
     permitted(origin, permission, requestingOrigin));
 }
 
+// A thread's transcript in the Overview pane: the web client's page at *url*.
+interface PaneView {
+  view: WebContentsView;
+  url: string;
+  attempt: number;
+  retry?: NodeJS.Timeout;
+}
+
 interface WebView {
   agent: Agent;
   view: WebContentsView;
@@ -92,6 +102,7 @@ export interface MainWindowOptions {
   states: WindowStates;
   page: string;
   preload: string; // the page's
+  panePreload: string; // the pane's transcript's: it tells where the keyboard leaves it, and exposes nothing
   dark: boolean;
   onChange(): void; // what the centre shows changed
   quitsOnClose(): boolean; // asked as the window closes: true quits the app, through its quit's questions, where it would hide
@@ -104,6 +115,8 @@ export class MainWindow {
   private webShown = true; // false while the centre shows a page of the shell's own, the Projects page
   private gated = false; // nobody is signed in to the app: the web client stays hidden under the sign-in
   private hole: Bounds = { x: 0, y: 0, width: 0, height: 0 };
+  private pane: PaneView | null = null;
+  private paneHole: Bounds = { x: 0, y: 0, width: 0, height: 0 };
   // Settings, over everything: a transparent view whose page dims the window beneath it.
   private settingsView: WebContentsView | null = null;
   private opener: WebContents | null = null; // what had the keyboard when Settings opened
@@ -170,6 +183,8 @@ export class MainWindow {
     this.window.setBackgroundColor(background);
     this.window.setTitleBarOverlay(overlay);
     this.web?.view.setBackgroundColor(background);
+    // The pane's own colour, never a dimmed title bar's.
+    this.pane?.view.setBackgroundColor(chrome(dark).overlay.color);
   }
 
   get unreachable(): string | null {
@@ -239,6 +254,7 @@ export class MainWindow {
   detach(): void {
     const web = this.web;
     if (!web) return;
+    this.read(null);
     this.web = null;
     clearTimeout(web.retry);
     this.window.contentView.removeChildView(web.view);
@@ -309,6 +325,100 @@ export class MainWindow {
   place(hole: Bounds): void {
     this.hole = hole;
     this.web?.view.setBounds(hole);
+  }
+
+  /**
+   * The web client's page at *path*, a thread's transcript, in the Overview pane's hole; null takes it
+   * away. It has the agent's partition, so its session, and no preload, so no bridge. It stays on
+   * its page: a page the web client routes to in place is its transcript again, an address off the
+   * agent's, and any popup, opens in the system browser, and nothing else of the agent's loads there.
+   */
+  read(path: string | null): void {
+    const web = this.web;
+    const url = path === null || !web ? null : `${web.agent.origin}${path}`;
+    if (this.pane?.url === url) return;
+    if (this.pane) {
+      clearTimeout(this.pane.retry);
+      this.window.contentView.removeChildView(this.pane.view);
+      this.pane.view.webContents.close();
+      this.pane = null;
+    }
+    if (url === null || !web) return;
+    const view = new WebContentsView({
+      webPreferences: {
+        partition: partitionFor(web.agent.origin, web.agent.agentId),
+        preload: this.options.panePreload,
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    });
+    view.setBackgroundColor(chrome(this.dark).overlay.color);
+    view.setBounds(this.paneHole);
+    // Over the web client, under Settings when it is open.
+    const settings = this.settingsView ? this.window.contentView.children.indexOf(this.settingsView) : -1;
+    this.window.contentView.addChildView(view, settings < 0 ? undefined : settings);
+    const contents = view.webContents;
+    const stay = (event: { preventDefault(): void; url: string }) => {
+      event.preventDefault();
+      if (!sameOrigin(web.agent.origin, event.url)) openOutside(event.url);
+    };
+    contents.on("will-navigate", stay);
+    // Its page, wherever its address says: the agent's origin and the transcript's path.
+    const own = new URL(url);
+    const onTranscript = (to: string) => {
+      const at = URL.parse(to);
+      return at?.origin === own.origin && at.pathname === own.pathname;
+    };
+    // A redirect of its load goes nowhere but its own transcript: the agent's other pages are refused too.
+    contents.on("will-redirect", (event) => {
+      if (event.isMainFrame && !onTranscript(event.url)) event.preventDefault();
+    });
+    // A footnote, an anchor or its own address rewritten keeps the transcript; any other page the web client routes to loads it again.
+    contents.on("did-navigate-in-page", (_event, to, isMainFrame) => {
+      if (isMainFrame && !onTranscript(to)) void contents.loadURL(url).catch(() => {});
+    });
+    contents.on("will-attach-webview", (event) => event.preventDefault());
+    // The keyboard left the transcript at one of its edges, as its preload heard it: back to the window's
+    // page, which puts it on the pane's Open or Back. Only the transcript's own top frame says so.
+    contents.ipc.on("pane:leave", (event, to) => {
+      if (event.senderFrame !== contents.mainFrame || !onTranscript(event.senderFrame.url)) return;
+      this.window.webContents.focus();
+      this.window.webContents.send("shell:pane-left", to === "open" ? "open" : "back");
+    });
+    contents.setWindowOpenHandler(({ url: opening }) => {
+      openOutside(opening);
+      return { action: "deny" };
+    });
+    const pane: PaneView = { view, url, attempt: 0 };
+    // A load that failed, or a page that crashed, is loaded again, with the link's backoff, while the pane reads it.
+    const again = () => {
+      clearTimeout(pane.retry);
+      pane.retry = setTimeout(() => {
+        if (this.pane === pane) void contents.loadURL(url).catch(() => {});
+      }, reconnectDelayMs(pane.attempt++));
+    };
+    contents.on("did-fail-load", (_event, code, _description, _url, isMainFrame) => {
+      // -3 is a load another replaced.
+      if (isMainFrame && code !== -3) again();
+    });
+    contents.on("render-process-gone", again);
+    contents.on("did-navigate", () => {
+      pane.attempt = 0;
+    });
+    this.pane = pane;
+    void contents.loadURL(url).catch(() => {});
+  }
+
+  /** The keyboard into the pane's transcript, where its keys scroll it. */
+  focusPane(): void {
+    this.pane?.view.webContents.focus();
+  }
+
+  // The Overview pane's hole, as the page measures it: none while the pane is folded away.
+  placePane(hole: Bounds): void {
+    this.paneHole = hole;
+    this.pane?.view.setBounds(hole);
   }
 
   /** Load *path* of the web client: true once it has loaded, false once it failed, or another load or the shell's refusal ended it. */

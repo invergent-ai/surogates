@@ -184,12 +184,14 @@ function ConversationalAsk({
   question: AskUserQuestionQuestion;
   assistantContent?: string;
 }) {
-  const { adapter, sessionId } = useAgentChatAdapterContext();
+  const { adapter, sessionId, readOnly } = useAgentChatAdapterContext();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const answered = tc.askUserQuestionAnswers !== undefined;
-  const pending = !answered && tc.status === "running";
+  const open = !answered && tc.status === "running";
+  // A chat the host only reads shows the question, and offers no answer to it.
+  const pending = open && !readOnly;
 
   const choices = question.choices ?? [];
   // Every historical ask re-renders whenever anything in the thread
@@ -271,7 +273,7 @@ function ConversationalAsk({
 
       {/* The call is over with nothing recorded: the wait timed out, or
           the session ended while the question was open. */}
-      {!answered && !pending && (
+      {!answered && !open && (
         <p className="text-xs italic text-muted-foreground/70">
           No answer recorded.
         </p>
@@ -327,7 +329,7 @@ function BatchAsk({
   questions: AskUserQuestionQuestion[];
   viewMode: "simple" | "expert";
 }) {
-  const { adapter, sessionId } = useAgentChatAdapterContext();
+  const { adapter, sessionId, readOnly } = useAgentChatAdapterContext();
 
   const [active, setActive] = useState(0);
   const [selections, setSelections] = useState<Selection[]>(() =>
@@ -336,7 +338,8 @@ function BatchAsk({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const locked = tc.askUserQuestionAnswers !== undefined || tc.status !== "running";
+  // A chat the host only reads shows the questions as they stand, with nothing to answer them.
+  const locked = readOnly || tc.askUserQuestionAnswers !== undefined || tc.status !== "running";
 
   // Clamp active tab when questions change (shouldn't, but defensive).
   useEffect(() => {
@@ -706,7 +709,7 @@ function BatchAskLocked({
   return (
     <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-sm max-w-2xl">
       <div className="mb-1 text-xs text-muted-foreground">
-        {cancelled ? "Clarification cancelled" : "Clarification answered"}
+        {cancelled ? "Clarification cancelled" : answers ? "Clarification answered" : "Waiting for an answer"}
       </div>
       <ul className="space-y-1.5">
         {questions.map((q, i) => {

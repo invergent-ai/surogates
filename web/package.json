@@ -12,6 +12,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test:shared-sdk": "node ../scripts/web-shared-chat-sdk.test.mjs",
+    "test:appearance": "node --experimental-strip-types --test ../scripts/web-appearance.test.mjs",
     "test:desktop-bridge": "node --experimental-strip-types --test ../scripts/desktop-bridge.test.mjs",
     "test:device-requests": "node --experimental-strip-types --test ../scripts/web-device-requests.test.mjs",
     "test:devices": "node --experimental-strip-types --test ../scripts/web-devices.test.mjs",
@@ -19,6 +20,7 @@
     "test:chat-page": "node --test ../scripts/web-chat-page.test.mjs",
     "test:oauth-consent": "node --experimental-strip-types --test ../scripts/oauth-consent.test.mjs",
     "test:projects": "node --experimental-strip-types --test ../scripts/web-projects.test.mjs",
+    "test:local-thread": "node --experimental-strip-types --test ../scripts/web-local-thread.test.mjs",
     "typecheck": "tsc -b --pretty false",
     "biome:check": "biome check .",
     "biome:fix": "biome check . --write"

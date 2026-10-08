@@ -144,6 +144,9 @@ class APISettings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=lambda: ["*"])
     web_url: str = "https://surogates.k8s.localhost"  # Public URL for the web UI (used in pairing links, emails, etc.)
     rate_limit_rpm: int = 300
+    # The Surogate console's own address, where the agent's users see their usage and
+    # billing. Served on /auth/config, so Surogate Desktop links there. Empty: none.
+    console_url: str = ""
 
 
 class ToolOutputSettings(BaseSettings):

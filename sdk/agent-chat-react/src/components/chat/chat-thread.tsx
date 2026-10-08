@@ -2210,7 +2210,8 @@ export function ChatThread({
       // input floating mid-screen with dead space under it, and the keyboard
       // then opens across that gap. There the composer keeps its usual place
       // at the bottom edge and the greeting takes the space above it.
-      <div className="flex flex-1 flex-col items-center justify-end overflow-hidden bg-background px-3 text-base md:justify-center">
+      // data-transcript: the host's transcript settings shape this, the composer with it.
+      <div data-transcript="" className="flex flex-1 flex-col items-center justify-end overflow-hidden bg-background px-3 text-base md:justify-center">
         <div className="flex w-full flex-1 flex-col justify-center md:flex-none">
           <h2 className="mb-6 text-center text-2xl font-bold text-foreground md:mb-8">
             What should we do ?
@@ -2222,7 +2223,8 @@ export function ChatThread({
   }
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden bg-background text-base">
+    // data-transcript: the host's transcript settings shape this, the composer with it.
+    <div data-transcript="" className="flex flex-1 flex-col overflow-hidden bg-background text-base">
       <Conversation className="relative flex-1 min-h-0">
         <ConversationContent className="mx-auto w-full max-w-4xl">
           {messages.length === 0 && isLoadingHistory ? (

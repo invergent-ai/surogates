@@ -23,8 +23,11 @@ import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
-import { type FromManager, MANAGER, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../vm/client.js";
+import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmEnv, vmOptions } from "../vm/client.js";
 import { VmExecutor } from "../vm/executor.js";
+import { type Delivery, ImageDelivery, installBase, readManifest } from "../vm/image.js";
+import { missingTools, toolsMissing } from "../vm/linux.js";
+import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
@@ -44,7 +47,8 @@ import { PreferencesStore } from "./preferences.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
 import { QUICK_ENTRY_KEYS, QuickEntry, waylandSession } from "./quick-entry.js";
-import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
+import { type SandboxAction, sandboxLine } from "./sandbox.js";
+import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { asShown } from "./pages/ui.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
@@ -57,6 +61,7 @@ delete process.env.ELECTRON_RUN_AS_NODE;
 const PAGES = join(import.meta.dirname, "pages");
 const PAGES_PRELOAD = join(import.meta.dirname, "pages-preload.cjs");
 const BRIDGE_PRELOAD = join(import.meta.dirname, "preload.cjs");
+const PANE_PRELOAD = join(import.meta.dirname, "pane-preload.cjs");
 const ASSETS = join(import.meta.dirname, "..", "..", "assets");
 // The app's version, as its package names it.
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf8")) as { version: string }).version;
@@ -162,10 +167,15 @@ let connecting = false;
 // What the web client tells once its user signed in (undefined until it has said), and the projects it serves.
 let account: DesktopAccount | null | undefined;
 
-// Whether the page is *who*'s. One that said nobody is signed in is no account's. One that has not
-// said yet is whoever is signed in to the app, whose sign-in gave it its session.
+// Whose the page is: the account it said is signed in, null once it said nobody is, and until it has
+// said, whoever is signed in to the app, whose sign-in gave it its session.
+function pageOwner(): DesktopAccount | null {
+  return account === undefined ? signedIn?.account ?? null : account;
+}
+
+// Whether the page is *who*'s. One that said nobody is signed in is no account's.
 function pageIs(who: { orgId: string; userId: string }): boolean {
-  const owner = account === undefined ? signedIn?.account ?? null : account;
+  const owner = pageOwner();
   return owner?.orgId === who.orgId && owner.userId === who.userId;
 }
 const projects = new PageProjects((message) => main?.webContents()?.send("desktop:projects", message));
@@ -196,6 +206,8 @@ let overview: { project: Project; threads: ThreadRow[]; library: LibraryEntry[];
 let unfollow = (): void => {};
 // The project dialog's view, while it is open over the window.
 let projectDialog: WebContents | null = null;
+// The open project's thread read in the Overview pane, beside its conversation.
+let reading: { id: string; title: string } | null = null;
 
 const report = (error: unknown): void => {
   console.error(error);
@@ -252,20 +264,116 @@ const utilityManager = (): ManagerProcess => utility<ToManager, FromManager>(MAN
 // with the profiles, and a host that is killed leaves none in the system's temp folder.
 const utilityBrowser = (profiles: string) => () => utility<ToBrowser, FromBrowser>(BROWSER_HOST, "Surogate browser", join(profiles, "tmp"));
 
+// What the VM needs of this computer (spec, Section 11, Requirements): what it lacks, looked for
+// once the app is ready (null until then); its image's download, in a packaged app, or why there
+// is none to make; its last boot.
+let lacking: string[] | null = null;
+let lackingFound: Promise<string[]> = Promise.resolve([]);
+const VM_RESOURCES = app.isPackaged ? join(process.resourcesPath, "vm") : null;
+// The environment the VM is made from: a packaged app's has no image or KVM device of a test's.
+const VM_ENV = vmEnv(process.env, app.isPackaged);
+let delivery: ImageDelivery | null = null;
+// Aborted at the quit: a download or an unpack under way stops with the app, never writing on after it.
+const stopDelivery = new AbortController();
+let undeliverable: string | null = null;
+let boot: Boot | null = null;
+const deliveryState = (): Delivery | null => delivery?.state ?? (undeliverable === null ? null : { state: "failed", why: undeliverable });
+const vmUser = () => {
+  const { uid, gid, username } = userInfo();
+  return { uid, gid, name: username, home: env.HOME };
+};
+
+// The guest's image: a packaged app downloads it from where it was installed from (the install
+// script's record), and a development build boots the repository's, unless SUROGATE_INSTALL_JSON
+// names an install record of a test's. SUROGATE_VM_IMAGE names an image to boot as it is, in a
+// development build only.
+function imageDelivery(): ImageDelivery | null {
+  const record = app.isPackaged ? "/etc/surogate/install.json" : process.env.SUROGATE_INSTALL_JSON;
+  if (VM_ENV.SUROGATE_VM_IMAGE || !record) return null;
+  return new ImageDelivery({
+    manifest: readManifest(join(VM_RESOURCES ?? REPO_IMAGE, "manifest.json")),
+    // An installed app's record is root's alone to write, as the install script leaves it.
+    base: () => installBase(record, app.isPackaged),
+    images: join(root, "vm", "images"),
+    // No cookie of the app's own session goes with it, and none of it through the HTTP cache: a second
+    // copy of what is downloaded, and cached ranges in a resume.
+    fetch: (url, init) => net.fetch(url, { ...init, credentials: "omit", cache: "no-store" }),
+    signal: stopDelivery.signal,
+  }, changed);
+}
+
+// The image's delivery started, once made: its manifest unreadable is a delivery that failed, so a
+// packaged app never boots the repository's image in its place. *check*: as Retry asks.
+function startDelivery(check = false): void {
+  try {
+    delivery ??= imageDelivery();
+    undeliverable = null;
+    delivery?.start(check);
+  } catch (error) {
+    undeliverable = error instanceof Error ? error.message : String(error);
+  }
+}
+
+// What the VM lacks of this computer, looked for: at the app's start, and at the line's Check again.
+// zstd counts only while the image's delivery has something left to unpack.
+function lookForTools(): void {
+  lackingFound = missingTools({}, delivery !== null && delivery.state.state !== "ready").then((found) => {
+    lacking = found;
+    changed();
+    return found;
+  });
+}
+
+// Resolves once the VM can boot: it lacks nothing of this computer, and its image is here.
+async function vmReady(signal: AbortSignal): Promise<void> {
+  const found = await lackingFound;
+  if (found.length > 0) throw new Error(`cannot start: ${toolsMissing(found)}`);
+  if (undeliverable !== null) throw new Error(`could not be downloaded: ${undeliverable}`);
+  try {
+    await delivery?.wait(signal);
+  } catch (error) {
+    if (signal.aborted) throw error;
+    throw new Error(`could not be downloaded: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 // The app's one VM, shared by every device, for this computer's user, and the background processes
 // alive in it, which Settings shows with Stop as they change.
 let vm: VmClient | null = null;
 const alive = new LiveProcesses();
 const vmFor = (): VmClient => {
   if (vm) return vm;
-  const { uid, gid, username } = userInfo();
-  vm = new VmClient({ vm: vmOptions(root, { uid, gid, name: username, home: env.HOME }), spawn: utilityManager });
+  vm = new VmClient({
+    vm: vmOptions(root, vmUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
+    ready: vmReady,
+    spawn: utilityManager,
+  });
+  // The status line follows each boot, and the first on this version's image lets the older ones go.
+  vm.onBoot((told) => {
+    boot = told;
+    if ("emulated" in told) delivery?.prune();
+    changed();
+  });
   vm.onProcesses((processRoot, change) => {
     alive.heard(processRoot, change);
     main?.settingsContents()?.send("settings:changed");
   });
   return vm;
 };
+
+// The status line's buttons, each only while the line shows it: Show log of a boot that did not
+// start; Check again for the tools; Retry the image's download, or, after a boot of the delivered
+// image did not start, its check by its hashes, and the next boot's line is the next boot's.
+function sandboxAction(action: unknown): void {
+  if (!sandboxLine(lacking, deliveryState(), boot).actions.includes(action as SandboxAction)) return;
+  if (action === "log") return void shell.openPath(vmOptions(root, vmUser(), VM_ENV).console);
+  if (action === "check") return lookForTools();
+  // The manager forgets that boot too, so the line never says Ready while it still refuses.
+  boot = null;
+  vm?.retry();
+  startDelivery(true);
+  changed();
+}
 
 function bounds(value: unknown): Bounds {
   const { x, y, width, height } = (value ?? {}) as Partial<Bounds>;
@@ -287,11 +395,38 @@ function changed(): void {
 const appearanceNow = () => ({ ...appearance.get(), theme: theme.dark ? ("dark" as const) : ("light" as const) });
 
 // The web client hears every change of how the app looks: the theme in effect, and the transcript's settings.
+// A thread read in the pane is read again in the transcript's settings, which its address carries.
 function tellAppearance(): void {
   main?.webContents()?.send("desktop:appearance", appearanceNow());
+  if (reading) main?.read(transcriptPath(reading.id));
 }
 
-const links = () => linksFor(agents.get()?.origin ?? null);
+// A thread's transcript, as the pane reads it: the web client's transcript page, in the transcript's settings.
+function transcriptPath(threadId: string): string {
+  const { textSize, transcriptWidth, motion } = appearance.get();
+  return `/transcript/${threadId}?${new URLSearchParams({ textSize, transcriptWidth, motion })}`;
+}
+
+/**
+ * Read *threadId*, a thread of the open project, in the Overview pane, beside the project's
+ * conversation (Section 12); null closes it. One that has left the pane since it was drawn is said
+ * so, and so is one whose id is no chat's.
+ */
+function read(threadId: string | null): void {
+  const thread = view.kind === "project" && overview?.project.id === view.id
+    ? overview.threads.find((found) => found.id === threadId) : undefined;
+  if (threadId !== null && (!thread || !webClientPath(`/chat/${thread.id}`))) {
+    failure = NO_SUCH_THREAD;
+    return changed();
+  }
+  reading = thread ? { id: thread.id, title: thread.title } : null;
+  // Read, it draws away the refusal of an earlier one: no choice of what the centre shows, so a project opening goes on.
+  if (thread) failure = null;
+  main?.read(reading ? transcriptPath(reading.id) : null);
+  changed();
+}
+
+const links = () => linksFor(agents.get());
 
 function openLink(which: unknown): void {
   const known = links();
@@ -440,6 +575,11 @@ function remember(project: Project): void {
 }
 
 function show(next: View): void {
+  // The pane's transcript is the open project's: anything else the centre shows closes it, its own thread included.
+  if (reading && !(next.kind === "project" && view.kind === "project" && next.id === view.id && next.thread?.id !== reading.id)) {
+    reading = null;
+    main?.read(null);
+  }
   view = next;
   follow();
   changed();
@@ -677,7 +817,8 @@ async function bindToComputer(agent: Agent, signal: AbortSignal): Promise<void> 
 
 /**
  * The agent's capabilities, read again: a server that gained local folders since it was added now
- * offers them. Kept while the agent is the one added; anything else is said and changes nothing.
+ * offers them, and the console it names now is the one the links open. Kept while the agent is the
+ * one added; anything else is said and changes nothing.
  */
 async function refreshAgent(agent: Agent): Promise<void> {
   try {
@@ -686,12 +827,13 @@ async function refreshAgent(agent: Agent): Promise<void> {
       report(new Error(`${agent.origin} now answers as agent ${fresh.agentId} at ${fresh.origin}: Surogate keeps the agent it added`));
       return;
     }
-    if (fresh.desktopSessions === agent.desktopSessions && fresh.multiSession === agent.multiSession) return;
+    const { desktopSessions, multiSession, consoleUrl } = fresh;
+    if (desktopSessions === agent.desktopSessions && multiSession === agent.multiSession && consoleUrl === agent.consoleUrl) return;
     // Removed while it was asked: it is not kept again.
     const now = agents.get();
     if (now?.origin !== agent.origin || now.agentId !== agent.agentId) return;
     // In place: the bridge and the device hold this agent.
-    Object.assign(agent, { desktopSessions: fresh.desktopSessions, multiSession: fresh.multiSession });
+    Object.assign(agent, { desktopSessions, multiSession, consoleUrl });
     agents.set(agent);
     changed();
     void registerComputer(agent);
@@ -1070,7 +1212,8 @@ function bridge(contents: WebContents, agent: Agent): void {
       if (typeof code !== "string") throw new Error("The agent gave this window no session");
       return { code };
     },
-    prepareFolder: (choice, window) => preparing(window, async (signal) => (await registered()).binder.prepareFolder(choice, window, signal)),
+    prepareFolder: (choice, window, thread) =>
+      preparing(window, async (signal) => (await registered()).binder.prepareFolder(choice, window, signal, thread)),
     bindSession: async (sessionId, token, window) => {
       await (await registered()).binder.bindSession(sessionId, token, window);
     },
@@ -1237,11 +1380,11 @@ function deviceLine(agent: Agent): string {
   return describeAgent(agent, kept?.token === null ? { status: "revoked", computer: kept.name } : null);
 }
 
-// Who the web client says is signed in, or until it has said, the app's own sign-in, whose organisation's name is Settings' alone.
+// Who the sidebar names: whose the page is (pageOwner), with the app's own sign-in's organisation, which is Settings' alone, left out.
 function sidebarAccount(): DesktopAccount | null {
-  if (account !== undefined) return account;
-  if (!signedIn) return null;
-  const { orgName: _, ...shown } = signedIn.account;
+  const owner: SignedInAccount | null = pageOwner();
+  if (owner === null) return null;
+  const { orgName: _, ...shown } = owner;
   return shown;
 }
 
@@ -1249,7 +1392,7 @@ function state() {
   const agent = agents.get();
   return {
     first: agent === null,
-    agent: agent && { name: agent.name },
+    agent: agent && { name: agent.name, desktopSessions: agent.desktopSessions },
     device: agent && {
       text: deviceLine(agent),
       status: device?.status ?? (kept?.token === null ? "revoked" : null),
@@ -1257,6 +1400,7 @@ function state() {
     account: sidebarAccount(),
     view,
     overview: view.kind === "project" && overview?.project.id === view.id ? overview : null,
+    reading,
     projects: listed,
     failure,
     links: Object.keys(links()),
@@ -1267,6 +1411,7 @@ function state() {
     deviceAction: deviceAction(agent),
     // While a quit waits for the threads working on this computer: how many it waits for.
     quitting: waiting ? (device?.stack?.working() ?? 0) : null,
+    sandbox: sandboxLine(lacking, deliveryState(), boot),
   };
 }
 
@@ -1408,6 +1553,8 @@ function goWeb(path: string): Promise<boolean> {
   const thread = open ? overview?.threads.find((found) => found.id === chatId) : undefined;
   if (open && (thread || chatId === open.masterSessionId)) {
     view = { ...open, thread: thread ? { id: thread.id, title: thread.title } : null };
+    // Shown in the centre, its transcript in the pane has nothing more to show.
+    if (thread && reading?.id === thread.id) read(null);
     changed();
   } else {
     show({ kind: "web" });
@@ -1667,6 +1814,7 @@ async function settingsState() {
       agents: agent ? [agent.name] : [],
     },
     links: { usage: "usage" in links() },
+    sandbox: sandboxLine(lacking, deliveryState(), boot),
   };
 }
 
@@ -1853,6 +2001,7 @@ function showSettings(): void {
       }
     });
     handle("settings:link", openLink);
+    handle("settings:sandbox", sandboxAction);
     handle("settings:close", () => main?.closeSettings());
   });
 }
@@ -1928,9 +2077,16 @@ function wire(window: MainWindow, page: string): void {
       return changed();
     }
     view = { ...view, thread: { id: thread.id, title: thread.title } };
+    // Shown in the centre, its transcript in the pane has nothing more to show.
+    if (reading?.id === thread.id) read(null);
     window.go(path);
     changed();
   });
+  handle("shell:read", (id) => {
+    if (id !== null && typeof id !== "string") throw new Error("Not a thread");
+    read(id);
+  });
+  handle("shell:focus-pane", () => window.focusPane());
   // A thread of the open project resolved, or reopened, from its row: the page's answer is its row.
   // A row's action is no choice of what the centre shows, so a project opening meanwhile still opens:
   // it takes a number of its own, and only the latest action's refusal is said.
@@ -1970,6 +2126,7 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:forward", () => move(() => window.forward()));
   handle("shell:reload", () => window.reload());
   handle("shell:place", (hole) => window.place(bounds(hole)));
+  handle("shell:place-pane", (hole) => window.placePane(bounds(hole)));
   handle("shell:menu", popup);
   handle("shell:settings", showSettings);
   handle("shell:new-project", () => showProject(null));
@@ -1980,6 +2137,7 @@ function wire(window: MainWindow, page: string): void {
   // A quit waiting for the threads goes now: the user said so, in the window.
   handle("shell:quit-now", () => waiting?.());
   handle("shell:link", openLink);
+  handle("shell:sandbox", sandboxAction);
 }
 
 // Quitting, as Claude Desktop quits (its updater's session guard): with threads working on this
@@ -2052,6 +2210,7 @@ async function quit(): Promise<void> {
   // A log out under way finishes first: it keeps the revocation owed, and forgets the folders.
   await signingOut;
   await Promise.all([...revocations.values()].map((revoking) => revoking.stop()));
+  stopDelivery.abort(new Error("Surogate quit"));
   // The device, then the VM, which stops even when the device's stop fails. A stop that
   // fails still quits: the next launch answers what it cut off.
   try {
@@ -2107,9 +2266,12 @@ if (!app.requestSingleInstanceLock()) {
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
     // The VM slept with the computer: at its wake its clock is set, and its keepalive starts afresh.
     powerMonitor.on("resume", () => vm?.resume());
+    // Its image downloaded in the background, and what the VM needs of this computer looked for.
+    startDelivery();
+    lookForTools();
     const page = join(PAGES, "shell.html");
     main = new MainWindow({
-      states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed,
+      states, page, preload: PAGES_PRELOAD, panePreload: PANE_PRELOAD, dark: theme.dark, onChange: changed,
       // A quit already waiting for the threads asks nothing more: the window hides meanwhile, as with Keep running on.
       quitsOnClose: () => !preferences.get().keepRunning && !waiting,
       // Started at login: the window waits for the user, in the tray or at the next launch.

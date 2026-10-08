@@ -12,6 +12,9 @@ permissions:
 jobs:
   wheel:
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    # It uploads an artifact, never a release asset: the release's assets anchor the desktop's image.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -75,6 +78,10 @@ jobs:
   images:
     needs: npm
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    # GHCR's, and no release asset.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -174,6 +181,104 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/publish-sdk-packages.mjs --version="${GITHUB_REF_NAME#v}"
 
+  # Surogate Desktop's VM guest (images/guest/), published on R2 under desktop/vm/<key>/
+  # only when its inputs changed: images/guest/inputs.sh names the key. R2 is never the
+  # truth: each release that ships a key attaches its manifest to itself
+  # (desktop-vm-manifest, below), and later releases take it from there and check R2's
+  # files against it. The manifest is kept for the desktop's tarball, published or found.
+  # The cloud's release does not wait for it; the desktop's does.
+  desktop-vm-image:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Past a cold build of the guest, and past fetch's wait of up to 15 minutes for a key's manifest.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      state: ${{ steps.published.outputs.state }}
+    # One build of a key at a time: a second release's finds it published. A third release
+    # pushed meanwhile cancels the second's run while it waits, as GitHub's groups do.
+    concurrency:
+      group: desktop-vm-image
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      # The guest kernel is the only boundary between two chats' commands: a desktop
+      # release does not ship while noble-security has a newer one than the pin.
+      - name: Check the guest's kernel pin is current
+        run: images/guest/kernel-current.sh
+
+      - name: Look for the image's key in our releases, and check R2 against it
+        id: published
+        env:
+          S3_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          state="$(images/guest/publish.sh fetch images/guest/out)"
+          echo "state=${state}" >> "$GITHUB_OUTPUT"
+
+      # The guest stage adds LibreOffice, the Python data stack and Node, and the disk
+      # is made inside the build: reclaim the toolchains the runner never uses.
+      - name: Free disk space
+        if: steps.published.outputs.state == 'missing'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache/CodeQL}"
+          df -h /
+
+      - name: Build the image
+        if: steps.published.outputs.state == 'missing'
+        run: images/guest/build.sh --packed images/guest/out
+
+      - name: Publish the image
+        if: steps.published.outputs.state == 'missing'
+        env:
+          S3_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: images/guest/publish.sh send images/guest/out
+
+      - name: Keep the image's manifest for the desktop's tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-vm-manifest
+          path: images/guest/out/manifest.json
+          if-no-files-found: error
+
+  # The manifest of the image this release ships, attached to the release as
+  # desktop-vm-<key>.json once the release exists, whether this release published the key or
+  # checked R2 against an earlier release's copy: the next releases' desktop-vm-image takes it
+  # from any of them, never from R2, so deleting one release strands no key.
+  desktop-vm-manifest:
+    needs:
+      - release
+      - desktop-vm-image
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-vm-manifest
+          path: out
+
+      - name: Attach the image's manifest to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          key="$(jq -r .key out/manifest.json)"
+          cp out/manifest.json "desktop-vm-${key}.json"
+          # A re-run finds it attached already: desktop-vm-image's fetch then took these bytes from here.
+          attached="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq "any(.assets[]; .name == \"desktop-vm-${key}.json\")")"
+          if [ "$attached" != true ]; then
+            gh release upload "$GITHUB_REF_NAME" "desktop-vm-${key}.json" --repo "$GITHUB_REPOSITORY"
+          fi
+
   release:
     needs:
       - wheel
@@ -207,5 +312,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          # The wheel and the sdist alone: never another file the build left in dist/.
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
           body_path: release-notes.md

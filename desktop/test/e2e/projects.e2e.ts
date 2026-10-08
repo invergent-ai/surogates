@@ -215,6 +215,30 @@ describe("the sidebar's projects", () => {
   });
 });
 
+describe("the sidebar's pages", () => {
+  it("open the web client's list of chats, a page of its own, and the user menu's Devices its Settings there", async () => {
+    const { page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click('[data-path="/chats"]');
+    await expect.poll(() => client.url()).toBe(`${origin}/chats`);
+    await expect.poll(() => page.textContent("#title")).toBe(new URL(origin).host);
+    await page.click("#user");
+    await page.click('#user-menu [data-action="devices"]');
+    await expect.poll(() => client.url()).toBe(`${origin}/settings?tab=devices`);
+    expect(await page.isVisible("#user-menu")).toBe(false);
+  });
+
+  it.each([["with", true], ["without", false]])("open the web client's own Settings from the user menu, for an agent %s local folders, and Devices only with them", async (_, localFolders) => {
+    agent.config = { ...agent.config, desktop_sessions: localFolders };
+    const { page, client } = await signedIn();
+    await page.click("#user");
+    expect(await page.isVisible('#user-menu [data-action="devices"]')).toBe(localFolders);
+    await page.click('#user-menu [data-action="account"]');
+    await expect.poll(() => client.url()).toBe(`${origin}/settings`);
+    expect(await page.isVisible("#user-menu")).toBe(false);
+  });
+});
+
 describe("the Projects page", () => {
   it("shows the projects as cards, sorted and searched, in place of the web client and the Overview", async () => {
     const { shell, page } = await signedIn();
@@ -308,7 +332,9 @@ describe("the Projects page", () => {
     const { page, client } = await signedIn();
     await opened(page, client, REPORT);
     const thread = FIXTURE_IDS.question;
+    // Its row reads it in the pane; the pane's Open shows it in the centre.
     await page.click(`[data-thread="${thread}"]`);
+    await page.click("#reading-open");
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${thread}`);
     await page.click("#open-projects");
     await expect.poll(() => page.isVisible("#projects-page")).toBe(true);

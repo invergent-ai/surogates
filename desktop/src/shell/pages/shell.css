@@ -735,6 +735,10 @@ body.main.first {
   gap: 2px;
 }
 
+.tabs[hidden] {
+  display: none;
+}
+
 .tab {
   display: inline-flex;
   align-items: center;
@@ -939,7 +943,8 @@ body.main.first {
   visibility: hidden;
 }
 
-.thread .place {
+.thread .place,
+.file .place {
   display: inline-flex;
   margin-left: 6px;
   vertical-align: -2px;
@@ -995,6 +1000,40 @@ body.main.first {
 .library .desc {
   padding: 12px;
   font-size: 13px;
+}
+
+/* A thread read in the pane: its head, then the hole its transcript, the agent's page, fills. */
+.reading {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.reading[hidden] {
+  display: none;
+}
+
+.reading-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.reading-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-hole {
+  flex: 1;
+  min-height: 0;
 }
 
 
@@ -1434,6 +1473,16 @@ body.about-page {
 
 .about .mark {
   display: inline-flex;
+}
+
+/* What a screen reader hears of the sandbox's line, outside it: each change of its state, not each percent. */
+#sandbox-said {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* Empty, the waiting quit's line takes no room, and stays a live region. */

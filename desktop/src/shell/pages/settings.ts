@@ -1,6 +1,7 @@
 // The Settings dialog's page, over the dimmed window: a nav searched by label, and
 // sections of rows, each a label, a description and its control. All text comes from
-// the main process and is set with textContent only.
+// the main process and is set with textContent, or with showText where it may hold the
+// user's paths or QEMU's words.
 
 import { asShown, byId, fillIcons, keepFocus, markTheme, showText } from "./ui.js";
 
@@ -19,6 +20,7 @@ interface State {
   account: { name: string; email: string } | null;
   computer: { name: string; connection: string; added: string | null; organisation: string | null; agents: string[] };
   links: { usage: boolean };
+  sandbox: { text: string; actions: Array<"retry" | "log" | "check"> };
 }
 
 // A folder this computer's chats work on, and each chat on it (folders.ts).
@@ -34,6 +36,7 @@ interface Settings {
   stop(root: string, id: string): Promise<void>;
   set(key: string, value: string): Promise<void>;
   link(which: "usage"): Promise<void>;
+  sandbox(action: "retry" | "log" | "check"): Promise<void>;
   close(): Promise<void>;
   onChanged(listener: () => void): () => void;
 }
@@ -199,6 +202,10 @@ async function render(): Promise<void> {
   byId("connection").textContent = state.computer.connection;
   byId("added").textContent = date(state.computer.added);
   byId("agents").textContent = state.computer.agents.join(", ");
+  showText(byId("sandbox"), state.sandbox.text);
+  byId("sandbox-log").hidden = !state.sandbox.actions.includes("log");
+  byId("sandbox-retry").hidden = !state.sandbox.actions.includes("retry");
+  byId("sandbox-check").hidden = !state.sandbox.actions.includes("check");
   // A link the agent lacks goes for good: no search brings it back.
   for (const link of document.querySelectorAll<HTMLElement>("[data-link]")) {
     if (!state.links[link.dataset.link as "usage"]) link.remove();
@@ -220,6 +227,10 @@ for (const control of document.querySelectorAll<HTMLElement>("[data-setting]")) 
     option.addEventListener("click", () => void settings.set(control.dataset.setting ?? "", option.dataset.value ?? "").then(render));
   }
 }
+// The main process acts only on a button its line shows.
+byId("sandbox-log").addEventListener("click", () => void settings.sandbox("log"));
+byId("sandbox-retry").addEventListener("click", () => void settings.sandbox("retry"));
+byId("sandbox-check").addEventListener("click", () => void settings.sandbox("check"));
 // Custom… opens the system's dialog: the page shows the choice kept once the main process answers.
 byId<HTMLSelectElement>("browser").addEventListener("change", (event) => {
   void settings.set("browser", (event.target as HTMLSelectElement).value).then(render, render);

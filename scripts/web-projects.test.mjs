@@ -386,6 +386,30 @@ test("a project route whose answer is not JSON, or not of its shape, says the ro
   }
 });
 
+test("a thread on the user's computer is made from its card with the folder confirmed there, and begun at its own route", async () => {
+  const { asked, routes } = routesOver((url) => Response.json(url.endsWith("/start") ? ROW : { thread_id: "t-1" }, { status: 201 }));
+  const folder = { kind: "device", device_id: "d-1", folder: "/home/flavius/Budget", nonce: "n".repeat(43) };
+  assert.equal(await routes.makeOnComputer("p/1", "pr-1", "2", folder), "t-1");
+  assert.equal((await routes.begin("p-1", "t/1")).id, "t-1");
+  assert.deepEqual(asked, [
+    ["POST", "/api/v1/workstreams/p%2F1/threads", { proposal_id: "pr-1", key: "2", execution: folder }, "application/json"],
+    ["POST", "/api/v1/workstreams/p-1/threads/t%2F1/start", undefined, undefined],
+  ]);
+  // An answer of another shape is the route's own failure, never a thread with no id.
+  for (const body of ["{}", '{"thread_id": 7}', "[]"]) {
+    const { routes: hollow } = routesOver(() => new Response(body, { headers: { "content-type": "application/json" } }));
+    await assert.rejects(hollow.makeOnComputer("p-1", "pr-1", "2", folder), { message: "The thread could not be started." });
+    await assert.rejects(hollow.begin("p-1", "t-1"), { message: "The thread could not be started." });
+  }
+  // A folder the server refuses is said in words.
+  const { routes: refusing } = routesOver(() => Response.json({
+    detail: [{ type: "string_pattern_mismatch", loc: ["body", "execution", "nonce"], msg: "String should match pattern '^[A-Za-z0-9_-]{16,128}$'" }],
+  }, { status: 422 }));
+  await assert.rejects(refusing.makeOnComputer("p-1", "pr-1", "2", folder), {
+    message: "nonce: String should match pattern '^[A-Za-z0-9_-]{16,128}$'",
+  });
+});
+
 test("a project route that refuses a field says why in words, never as the route's raw detail", async () => {
   const { routes } = routesOver(() => Response.json({
     detail: [

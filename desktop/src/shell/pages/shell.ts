@@ -1,8 +1,9 @@
 // The main window's own page: the sidebar, the centre's header and pages, and the
 // Overview pane. The agent's web client is drawn over the centre's hole, in a view of
-// its own. All text comes from the main process and is set with textContent only.
+// its own. All text comes from the main process and is set with textContent, or with showText
+// where it may hold the user's paths or QEMU's words.
 
-import { aged, ago, byId, fillIcons, freshen, icon, keepFocus, markTheme, projectMark } from "./ui.js";
+import { aged, ago, byId, fillIcons, freshen, icon, keepFocus, markTheme, projectMark, showText } from "./ui.js";
 
 // A project, as Section 12's ProjectSummary has it.
 interface ProjectRow {
@@ -29,15 +30,19 @@ interface ThreadRow {
 
 interface State {
   first: boolean; // no agent yet: the first run fills the window
-  agent: { name: string } | null;
+  agent: { name: string; desktopSessions: boolean } | null; // desktopSessions: its web client lists this computer in Settings → Devices
   view: { kind: "web" } | { kind: "projects" } | { kind: "project"; id: string; name: string; thread: { id: string; title: string } | null };
   projects: ProjectRow[]; // as the page listed them
   failure: string | null; // why what the user last asked for, a project or a thread's resolve, did not happen
   overview: {
     threads: ThreadRow[]; // last active first
-    library: Array<{ path: string; origin: "added" | "produced"; threadId: string | null; size: number | null; updatedAt: string | null }>;
+    library: Array<{
+      path: string; origin: "added" | "produced"; threadId: string | null; size: number | null; updatedAt: string | null;
+      place: ThreadRow["place"];
+    }>;
     routines: Array<{ name: string; scheduleDisplay: string }>;
   } | null;
+  reading: { id: string; title: string } | null; // the thread read in the pane, beside the project's conversation
   device: { text: string; status: string | null } | null;
   account: { name: string; email: string; userId: string; orgId: string } | null;
   links: string[]; // the user menu's links the app knows for this agent
@@ -46,6 +51,7 @@ interface State {
   signIn: { needed: boolean; pending: boolean; failure: string | null }; // the app's own sign-in, in the system browser
   deviceAction: { text: string; button: string; action: "sign-in" | "restore" } | null; // what the user can do about this computer
   quitting: number | null; // while a quit waits for the threads working on this computer: how many
+  sandbox: { text: string; said: string; actions: Array<"retry" | "log" | "check">; ready: boolean }; // what stops the agent's commands, or slows them
 }
 
 interface Shell {
@@ -59,19 +65,24 @@ interface Shell {
   projects(): Promise<void>;
   project(id: string): Promise<void>;
   thread(id: string): Promise<void>;
+  read(id: string | null): Promise<void>;
   resolve(id: string): Promise<void>;
   reopen(id: string): Promise<void>;
   back(): Promise<void>;
   forward(): Promise<void>;
   reload(): Promise<void>;
   place(hole: { x: number; y: number; width: number; height: number }): Promise<void>;
+  placePane(hole: { x: number; y: number; width: number; height: number }): Promise<void>;
   menu(which: "app" | "project"): Promise<void>;
   settings(): Promise<void>;
   newProject(): Promise<void>;
   projectSettings(): Promise<void>;
   quitNow(): Promise<void>;
   link(which: string): Promise<void>;
+  sandbox(action: "retry" | "log" | "check"): Promise<void>;
   onChanged(listener: () => void): () => void;
+  focusPane(): Promise<void>;
+  onPaneLeft(listener: (to: string) => void): () => void;
 }
 
 const shell = (globalThis as unknown as { surogateShell: Shell }).surogateShell;
@@ -160,18 +171,23 @@ const REASONS = { question: "Question", approval: "Approval", failed: "Failed", 
 const GROUPS = { waiting: "Waiting", working: "Working", idle: "Idle", resolved: "Resolved" } as const;
 let tab = "threads";
 
+// A thread's, or a file's, on the user's computer: a laptop, titled with the computer and whether it is online.
+function laptop(place: ThreadRow["place"]): HTMLElement[] {
+  if (place.kind !== "device") return [];
+  const mark = element("span", "place");
+  mark.title = `On ${place.deviceName}, which is ${place.online ? "online" : "offline"}`;
+  mark.append(icon("laptop", 14));
+  return [mark];
+}
+
+// A row reads its thread in the pane; the pane's Open shows it in the centre.
 function threadRow(thread: ThreadRow): HTMLElement {
-  const row = button("thread", "", () => void shell.thread(thread.id));
+  const row = button("thread", "", () => void shell.read(thread.id));
   row.dataset.group = thread.group;
   row.dataset.thread = thread.id;
   row.dataset.focus = `thread:${thread.id}`;
   const title = element("span", "title", thread.title);
-  if (thread.place.kind === "device") {
-    const place = element("span", "place");
-    place.title = `On ${thread.place.deviceName}, which is ${thread.place.online ? "online" : "offline"}`;
-    place.append(icon("laptop", 14));
-    title.append(place);
-  }
+  title.append(...laptop(thread.place));
   const words = thread.reason ? REASONS[thread.reason] : GROUPS[thread.group];
   const side = element("span", "side");
   if (thread.progress) side.append(element("span", "progress", `${thread.progress.done}/${thread.progress.total}`));
@@ -194,9 +210,11 @@ function threadRow(thread: ThreadRow): HTMLElement {
   return item;
 }
 
-function listRow(first: string, second: string, third: string): HTMLElement {
+function listRow(first: string, second: string, third: string, place: ThreadRow["place"] = { kind: "cloud" }): HTMLElement {
   const item = element("li", "file");
-  item.append(element("span", "path", first), element("span", "from", second), element("span", "age", third));
+  const from = element("span", "from", second);
+  from.append(...laptop(place));
+  item.append(element("span", "path", first), from, element("span", "age", third));
   return item;
 }
 
@@ -226,6 +244,7 @@ function renderOverview(state: State): void {
     entry.path,
     `${entry.origin === "added" ? "Added by you" : `From ${titles.get(entry.threadId ?? "") ?? "a thread"}`}${kilobytes(entry.size)}`,
     entry.updatedAt ? ago(entry.updatedAt) : "",
+    entry.place,
   )));
   byId("no-files").hidden = library.length > 0;
   const routines = overview?.routines ?? [];
@@ -235,11 +254,28 @@ function renderOverview(state: State): void {
   showTab();
 }
 
+// The thread read in the pane when it was last drawn.
+let readingShown: string | null = null;
+
+// The tab chosen; or, while a thread is read in the pane, its transcript in their place. As one
+// opens there the keyboard goes to its Back, and as it closes, back to its row, while the pane
+// has the keyboard: the row that had it is hidden meanwhile.
 function showTab(): void {
+  const reading = last?.reading ?? null;
   for (const each of document.querySelectorAll<HTMLElement>("[data-tab]")) each.setAttribute("aria-selected", String(each.dataset.tab === tab));
-  byId("threads").hidden = tab !== "threads";
-  byId("library").hidden = tab !== "library";
-  byId("routines").hidden = tab !== "routines";
+  document.querySelector<HTMLElement>(".panel .tabs")!.hidden = reading !== null;
+  byId("threads").hidden = reading !== null || tab !== "threads";
+  byId("library").hidden = reading !== null || tab !== "library";
+  byId("routines").hidden = reading !== null || tab !== "routines";
+  byId("reading").hidden = reading === null;
+  // As last listed: a rename shows here too.
+  byId("reading-title").textContent = reading ? (last?.overview?.threads.find((found) => found.id === reading.id)?.title ?? reading.title) : "";
+  const was = readingShown;
+  readingShown = reading?.id ?? null;
+  const inPane = document.activeElement === document.body || byId("panel").contains(document.activeElement);
+  if (readingShown === was || !inPane) return;
+  if (reading) byId("reading-back").focus();
+  else document.querySelector<HTMLElement>(`[data-thread="${CSS.escape(was ?? "")}"]`)?.focus();
 }
 
 // Drawn anew, the lists keep the keyboard where it was.
@@ -289,6 +325,8 @@ function draw(state: State): void {
   for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-link]")) {
     row.hidden = !state.links.includes(row.dataset.link ?? "");
   }
+  // Devices is the web client's Settings tab, which only an agent with local folders has.
+  byId("user-menu").querySelector<HTMLElement>('[data-action="devices"]')!.hidden = state.agent?.desktopSessions !== true;
   // The divider under Plans and billing goes with it: no two dividers meet.
   byId("user-menu").querySelector<HTMLElement>("hr:last-of-type")!.hidden = !state.links.includes("billing");
   const device = byId("device");
@@ -301,6 +339,17 @@ function draw(state: State): void {
   byId("device-action-text").textContent = state.deviceAction?.text ?? "";
   byId("device-action-button").textContent = state.deviceAction?.button ?? "";
   byId("device-action-button").hidden = !state.deviceAction?.button;
+  // Its words may hold QEMU's, which name the user's paths.
+  byId("sandbox").hidden = state.sandbox.ready;
+  showText(byId("sandbox-text"), state.sandbox.ready ? "" : state.sandbox.text);
+  // Set only when it changes, so the live region speaks once a state: Ready too, once it follows
+  // another, and nothing for a sandbox ready from the start.
+  const live = byId("sandbox-said");
+  const said = state.sandbox.ready && !live.textContent ? "" : state.sandbox.said;
+  if (live.textContent !== said) showText(live, said);
+  byId("sandbox-log").hidden = !state.sandbox.actions.includes("log");
+  byId("sandbox-retry").hidden = !state.sandbox.actions.includes("retry");
+  byId("sandbox-check").hidden = !state.sandbox.actions.includes("check");
   // The quit's line is a live region that stays, empty, so that a screen reader hears it when it speaks.
   byId("quit-now").hidden = state.quitting === null;
   byId("quitting-text").textContent = state.quitting === null ? ""
@@ -332,6 +381,10 @@ byId("device-action-button").addEventListener("click", () => {
   else if (last?.deviceAction?.action === "restore") void shell.restore();
 });
 byId("quit-now").addEventListener("click", () => void shell.quitNow());
+// The main process acts only on a button its line shows.
+byId("sandbox-log").addEventListener("click", () => void shell.sandbox("log"));
+byId("sandbox-retry").addEventListener("click", () => void shell.sandbox("retry"));
+byId("sandbox-check").addEventListener("click", () => void shell.sandbox("check"));
 byId("search").addEventListener("input", filterSidebar);
 byId("project-search").addEventListener("input", renderCards);
 byId("sort").addEventListener("change", renderCards);
@@ -339,6 +392,18 @@ byId("new").addEventListener("click", () => void shell.go("/chat"));
 byId("new-project").addEventListener("click", () => void shell.newProject());
 byId("project-settings").addEventListener("click", () => void shell.projectSettings());
 byId("open-projects").addEventListener("click", () => void shell.projects());
+byId("reading-back").addEventListener("click", () => void shell.read(null));
+// Tab after the head's last control takes the keyboard into the transcript; it comes back from the transcript's
+// edges: Shift+Tab from its first control to Open, Escape to Back.
+byId("reading-open").addEventListener("keydown", (event) => {
+  if (event.key !== "Tab" || event.shiftKey) return;
+  event.preventDefault();
+  void shell.focusPane();
+});
+shell.onPaneLeft((to) => byId(to === "open" ? "reading-open" : "reading-back").focus());
+byId("reading-open").addEventListener("click", () => {
+  if (last?.reading) void shell.thread(last.reading.id);
+});
 byId("to-project").addEventListener("click", () => {
   if (last?.view.kind === "project") void shell.project(last.view.id);
 });
@@ -401,6 +466,9 @@ for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-actio
   row.addEventListener("click", () => {
     menu(false);
     if (action === "settings") void shell.settings();
+    // The account, the user's computers and desktop sign-ins are the agent's: its web client's Settings has them.
+    else if (action === "account") void shell.go("/settings");
+    else if (action === "devices") void shell.go("/settings?tab=devices");
     else if (action === "logout") void shell.signOut();
     else if (action === "remove") void shell.remove();
     else if (row.dataset.link) void shell.link(action);
@@ -426,11 +494,20 @@ byId("close-panel").addEventListener("click", () => {
   byId("overview").focus();
 });
 
-// The web client is placed over the hole, wherever the layout puts it.
-new ResizeObserver(() => {
-  const { x, y, width, height } = byId("hole").getBoundingClientRect();
-  void shell.place({ x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) });
-}).observe(byId("hole"));
+// The web client is placed over the hole, wherever the layout puts it, and a thread read in the
+// pane over the pane's: none while the pane is folded away or shows something else. Each is
+// measured again as its size changes, and as the window's does, which moves the pane without
+// resizing it once the pane is at its widest.
+function placed(hole: string, place: (bounds: { x: number; y: number; width: number; height: number }) => Promise<void>): void {
+  const measure = () => {
+    const { x, y, width, height } = byId(hole).getBoundingClientRect();
+    void place({ x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) });
+  };
+  new ResizeObserver(measure).observe(byId(hole));
+  window.addEventListener("resize", measure);
+}
+placed("hole", shell.place);
+placed("pane-hole", shell.placePane);
 
 // Ages tell the time gone by, between redraws too.
 setInterval(freshen, 60_000);
