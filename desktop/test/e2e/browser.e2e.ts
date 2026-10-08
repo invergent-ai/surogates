@@ -151,6 +151,10 @@ async function handBackWith(client: Page, button: "hand_back" | "keep", chat = C
   return answer();
 }
 
+// The app's own window: whether it is on the screen, and hidden as one closed to the tray is.
+const windowShown = () => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.isVisible());
+const hideWindow = () => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.hide());
+
 // Whether Settings, or the project's dialog, is open over the window.
 const over = (file: string) => app!.windows().some((window) => window.url().includes(file));
 
@@ -600,12 +604,11 @@ describe("a chat's browser taken over, and handed back", () => {
     // shown again first, and the confirmation opens over it.
     await client.evaluate(() => document.body.append(Object.assign(document.createElement("button"), { id: "pressed", textContent: "Pressed" })));
     await client.click("#pressed");
-    const shown = () => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.isVisible());
-    await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.hide());
-    expect(await shown()).toBe(false);
+    await hideWindow();
+    expect(await windowShown()).toBe(false);
     const asking = client.evaluate((chat) => window.surogateDesktop!.browser!.handBack(chat), CHAT);
     await expect.poll(() => promptsShown(app!), { timeout: 10_000 }).toBe(1);
-    expect(await shown()).toBe(true);
+    expect(await windowShown()).toBe(true);
     await press(await prompt(app!), "keep");
     expect(await asking).toBe(false);
   });
@@ -859,6 +862,21 @@ describe("a chat's browser taken over, and handed back", () => {
 });
 
 describe("Settings → Browser", () => {
+  it("shows a hidden window before Settings opens over it at a click in the agent's page", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    // Its user clicks, and the window is hidden before the page asks, as one closed to the tray.
+    await client.evaluate(() => document.body.append(Object.assign(document.createElement("button"), { id: "pressed", textContent: "Pressed" })));
+    await client.click("#pressed");
+    await hideWindow();
+    expect(await windowShown()).toBe(false);
+    await client.evaluate(() => window.surogateDesktop!.openSettings!("browser"));
+    expect(await windowShown()).toBe(true);
+    await expect.poll(() => over("/settings.html"), { timeout: 10_000 }).toBe(true);
+  });
+
   it("lists the browsers found here, with Automatic and Custom…, and keeps the one chosen for the next launch", async () => {
     const settings = await browserSettings();
     await expect.poll(() => settings!.$$eval("#browser option", (options) => options.length)).toBeGreaterThan(1);

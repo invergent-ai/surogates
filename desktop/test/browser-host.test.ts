@@ -843,8 +843,10 @@ await navigator.serviceWorker.ready;`);
     // Answered at once, not when the launch has ended: the browser is not up yet.
     expect(await first).toEqual(PAUSED);
     expect(state.live).toBeNull();
-    // Then it comes up, with the one page a browser opens with: no session's, and none beside it.
+    // Then it comes up, with the one page a browser opens with: no session's, and none beside it. Read a
+    // moment after the launch has ended: in the turn it ends, the host has not yet gone on to take a page.
     await state.running;
+    await new Promise((done) => setTimeout(done, 300));
     expect(tabs().has(a)).toBe(false);
     expect(await host.show("chat-1")).toBe(false);
     expect(await pages()).toBe(1);
@@ -899,6 +901,51 @@ await navigator.serviceWorker.ready;`);
     expect(await queued).toEqual(PAUSED);
     host.pause("chat-1", false);
     expect(await script(a, "return document.title;", "chat-1")).toBe("Fixture");
+  }, 30_000);
+
+  it("does nothing in a page for an operation that was waiting to see whether the page answers when its user took the browser over", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/t/HELD" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const asking = (host as unknown as { asking: Set<Page> }).asking;
+    // A page whose question its user left open, as its agent's next operation finds it: here one only slow
+    // to answer, for a quarter of a second, which the host waits out.
+    asking.add(page);
+    void page.evaluate("(() => { const until = Date.now() + 250; while (Date.now() < until) {} })()").catch(() => {});
+    const going = op(a, "browser.navigate", { url: "http://fixture.test/second" }, "chat-1");
+    // Its user takes the browser over while the operation waits.
+    await new Promise((done) => setTimeout(done, 100));
+    host.pause("chat-1", true);
+    expect(await within(1_000, going)).toEqual(PAUSED);
+    // The page answered after that, as the host saw: nothing is done in it, and it is not left.
+    await new Promise((done) => setTimeout(done, 1_500));
+    expect(asking.has(page)).toBe(false);
+    expect(page.url()).toBe("http://fixture.test/t/HELD");
+    expect(await page.title()).toBe("HELD");
+  }, 30_000);
+
+  it("presses nothing for a drag whose pointer was on its way to its start when its user took the browser over", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    await page.evaluate(() => {
+      const seen = { downs: 0, ups: 0, clicks: 0 };
+      Object.assign(window, { seen });
+      addEventListener("mousedown", () => (seen.downs += 1));
+      addEventListener("mouseup", () => (seen.ups += 1));
+      addEventListener("click", () => (seen.clicks += 1));
+    });
+    // Taken over as the pointer reaches the drag's start, before its button goes down.
+    const move = page.mouse.move.bind(page.mouse);
+    page.mouse.move = async (...args: Parameters<typeof move>) => {
+      await move(...args);
+      host.pause("chat-1", true);
+    };
+    // Over the fixture's button: a press and a release there would be a click of it.
+    expect(await within(2_000, op(a, "browser.mouse", { action: "drag", path: [[60, 55], [70, 55], [80, 55]], button: "left" }, "chat-1"))).toEqual(PAUSED);
+    await new Promise((done) => setTimeout(done, 500));
+    expect(await page.evaluate(() => (window as unknown as { seen: unknown }).seen)).toEqual({ downs: 0, ups: 0, clicks: 0 });
+    expect(await page.title()).toBe("Fixture");
   }, 30_000);
 
   it("types not one more character once its user took the browser over", async () => {
