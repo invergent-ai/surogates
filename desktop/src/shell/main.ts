@@ -1472,7 +1472,7 @@ const openStack = (): DeviceStack | null => (kept?.token === null ? null : devic
 // Settings → Folders and permissions: the folders this computer works on for its device's account.
 async function folderRows(): Promise<FolderRow[]> {
   if (kept?.token === null) throw new Error(REVOKED);
-  const stack = openStack();
+  const stack = device?.stack;
   return stack ? listFolders(stack.bindings, chatTitle, alive) : [];
 }
 

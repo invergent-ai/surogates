@@ -83,7 +83,7 @@ const INVOKED = /^Error invoking remote method '[^']*': (?:Error: )?/;
 const said = (error: unknown): string => (error instanceof Error ? error.message : String(error)).replace(INVOKED, "");
 
 // Why the user's last Take back or Stop failed: null once one goes through.
-let refused: string | null = null;
+let failure: string | null = null;
 
 // A line under a chat: what it holds, as text, and the button that ends it, named by what it ends, as it is shown.
 function line(text: string, action: string, name: string, act: () => Promise<void>): HTMLElement {
@@ -97,9 +97,9 @@ function line(text: string, action: string, name: string, act: () => Promise<voi
   button.setAttribute("aria-label", `${action} ${asShown(name)}`);
   // Drawn again either way: a list that changed meanwhile shows what holds, and a refusal is said above it.
   button.addEventListener("click", () => void act().then(() => {
-    refused = null;
+    failure = null;
   }, (error: unknown) => {
-    refused = `Surogate did not ${action.toLowerCase()} ${name}: ${said(error)}.`;
+    failure = `Surogate did not ${action.toLowerCase()} ${name}: ${said(error)}.`;
   }).finally(render));
   held.append(what, button);
   return held;
@@ -137,7 +137,7 @@ async function renderFolders(): Promise<void> {
   } catch (error) {
     unread = said(error);
   }
-  showText(byId("folders-failed"), unread ?? refused ?? "");
+  showText(byId("folders-failed"), unread ?? failure ?? "");
   byId("folders-none").hidden = folders.length > 0 || unread !== null;
   byId("folders").replaceChildren(...folders.map((folder) => {
     const group = document.createElement("div");
