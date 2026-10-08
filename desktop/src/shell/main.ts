@@ -20,8 +20,11 @@ import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
-import { type FromManager, MANAGER, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../vm/client.js";
+import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmOptions } from "../vm/client.js";
 import { VmExecutor } from "../vm/executor.js";
+import { type Delivery, ImageDelivery, installBase, readManifest } from "../vm/image.js";
+import { missingTools, toolsMissing } from "../vm/linux.js";
+import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
@@ -37,6 +40,7 @@ import { Notifications } from "./notifications.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
+import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
 import { segments } from "./pages/ui.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
@@ -221,13 +225,89 @@ function utilityManager(): ManagerProcess {
   };
 }
 
+// What the VM needs of this computer (spec, Section 11, Requirements): what it lacks, looked for
+// once the app is ready (null until then); its image's download, in a packaged app, or why there
+// is none to make; its last boot.
+let lacking: string[] | null = null;
+let lackingFound: Promise<string[]> = Promise.resolve([]);
+const VM_RESOURCES = app.isPackaged ? join(process.resourcesPath, "vm") : null;
+let delivery: ImageDelivery | null = null;
+let undeliverable: string | null = null;
+let boot: Boot | null = null;
+const deliveryState = (): Delivery | null => delivery?.state ?? (undeliverable === null ? null : { state: "failed", why: undeliverable });
+const vmUser = () => {
+  const { uid, gid, username } = userInfo();
+  return { uid, gid, name: username, home: env.HOME };
+};
+
+// The guest's image: a packaged app downloads it from where it was installed from (the install
+// script's record), and a development build boots the repository's, unless SUROGATE_INSTALL_JSON
+// names an install record of a test's. SUROGATE_VM_IMAGE names an image to boot as it is.
+function imageDelivery(): ImageDelivery | null {
+  const record = app.isPackaged ? "/etc/surogate/install.json" : process.env.SUROGATE_INSTALL_JSON;
+  if (process.env.SUROGATE_VM_IMAGE || !record) return null;
+  return new ImageDelivery({
+    manifest: readManifest(join(VM_RESOURCES ?? REPO_IMAGE, "manifest.json")),
+    base: () => installBase(record),
+    images: join(root, "vm", "images"),
+    // No cookie of the app's own session goes with it.
+    fetch: (url, init) => net.fetch(url, { ...init, credentials: "omit" }),
+  }, changed);
+}
+
+// The image's delivery started, once made: its manifest unreadable is a delivery that failed, so a
+// packaged app never boots the repository's image in its place. *check*: as Retry asks.
+function startDelivery(check = false): void {
+  try {
+    delivery ??= imageDelivery();
+    undeliverable = null;
+    delivery?.start(check);
+  } catch (error) {
+    undeliverable = error instanceof Error ? error.message : String(error);
+  }
+}
+
+// Resolves once the VM can boot: it lacks nothing of this computer, and its image is here.
+async function vmReady(signal: AbortSignal): Promise<void> {
+  const found = await lackingFound;
+  if (found.length > 0) throw new Error(`cannot start: ${toolsMissing(found)}`);
+  if (undeliverable !== null) throw new Error(`could not be downloaded: ${undeliverable}`);
+  try {
+    await delivery?.wait(signal);
+  } catch (error) {
+    if (signal.aborted) throw error;
+    throw new Error(`could not be downloaded: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 // The app's one VM, shared by every device, for this computer's user.
 let vm: VmClient | null = null;
 const vmFor = (): VmClient => {
-  const { uid, gid, username } = userInfo();
-  vm ??= new VmClient({ vm: vmOptions(root, { uid, gid, name: username, home: env.HOME }), spawn: utilityManager });
+  if (vm) return vm;
+  vm = new VmClient({
+    vm: vmOptions(root, vmUser(), process.env, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
+    ready: vmReady,
+    spawn: utilityManager,
+  });
+  // The status line follows each boot, and the first on this version's image lets the older ones go.
+  vm.onBoot((told) => {
+    boot = told;
+    if ("emulated" in told) delivery?.prune();
+    changed();
+  });
   return vm;
 };
+
+// The status line's buttons, each only while the line shows it: Show log of a boot that did not
+// start; Retry the image's download, or, after a boot of the delivered image did not start, its
+// check by its hashes, and the next boot's line is the next boot's.
+function sandboxAction(action: unknown): void {
+  if (!sandboxLine(lacking, deliveryState(), boot).actions.includes(action as SandboxAction)) return;
+  if (action === "log") return void shell.openPath(vmOptions(root, vmUser()).console);
+  boot = null;
+  startDelivery(true);
+  changed();
+}
 
 function bounds(value: unknown): Bounds {
   const { x, y, width, height } = (value ?? {}) as Partial<Bounds>;
@@ -1186,6 +1266,7 @@ function state() {
     deviceAction: deviceAction(agent),
     // While a quit waits for the threads working on this computer: how many it waits for.
     quitting: waiting ? (device?.stack?.working() ?? 0) : null,
+    sandbox: sandboxLine(lacking, deliveryState(), boot),
   };
 }
 
@@ -1385,6 +1466,7 @@ function settingsState() {
       agents: agent ? [agent.name] : [],
     },
     links: { usage: "usage" in links() },
+    sandbox: sandboxLine(lacking, deliveryState(), boot),
   };
 }
 
@@ -1541,6 +1623,7 @@ function showSettings(): void {
       }
     });
     handle("settings:link", openLink);
+    handle("settings:sandbox", sandboxAction);
     handle("settings:close", () => main?.closeSettings());
   });
 }
@@ -1668,6 +1751,7 @@ function wire(window: MainWindow, page: string): void {
   // A quit waiting for the threads goes now: the user said so, in the window.
   handle("shell:quit-now", () => waiting?.());
   handle("shell:link", openLink);
+  handle("shell:sandbox", sandboxAction);
 }
 
 // Quitting, as Claude Desktop quits (its updater's session guard): with threads working on this
@@ -1795,6 +1879,13 @@ if (!app.requestSingleInstanceLock()) {
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
     // The VM slept with the computer: at its wake its clock is set, and its keepalive starts afresh.
     powerMonitor.on("resume", () => vm?.resume());
+    // What the VM needs of this computer, looked for once; its image downloaded in the background.
+    lackingFound = missingTools().then((found) => {
+      lacking = found;
+      changed();
+      return found;
+    });
+    startDelivery();
     const page = join(PAGES, "shell.html");
     main = new MainWindow({ states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed });
     wire(main, page);

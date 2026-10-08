@@ -1,8 +1,9 @@
 // The main window's own page: the sidebar, the centre's header and pages, and the
 // Overview pane. The agent's web client is drawn over the centre's hole, in a view of
-// its own. All text comes from the main process and is set with textContent only.
+// its own. All text comes from the main process and is set with textContent, or with showText
+// where it may hold the user's paths or QEMU's words.
 
-import { ago, byId, fillIcons, icon, markTheme } from "./ui.js";
+import { ago, byId, fillIcons, icon, markTheme, showText } from "./ui.js";
 
 // A project, as Section 12's ProjectSummary has it.
 interface ProjectRow {
@@ -46,6 +47,7 @@ interface State {
   signIn: { needed: boolean; pending: boolean; failure: string | null }; // the app's own sign-in, in the system browser
   deviceAction: { text: string; button: string; action: "sign-in" | "restore" } | null; // what the user can do about this computer
   quitting: number | null; // while a quit waits for the threads working on this computer: how many
+  sandbox: { text: string; actions: Array<"retry" | "log">; ready: boolean }; // what stops the agent's commands, or slows them
 }
 
 interface Shell {
@@ -71,6 +73,7 @@ interface Shell {
   projectSettings(): Promise<void>;
   quitNow(): Promise<void>;
   link(which: string): Promise<void>;
+  sandbox(action: "retry" | "log"): Promise<void>;
   onChanged(listener: () => void): () => void;
 }
 
@@ -291,6 +294,11 @@ async function render(): Promise<void> {
   byId("device-action-text").textContent = state.deviceAction?.text ?? "";
   byId("device-action-button").textContent = state.deviceAction?.button ?? "";
   byId("device-action-button").hidden = !state.deviceAction?.button;
+  // Its words may hold QEMU's, which name the user's paths.
+  byId("sandbox").hidden = state.sandbox.ready;
+  showText(byId("sandbox-text"), state.sandbox.ready ? "" : state.sandbox.text);
+  byId("sandbox-log").hidden = !state.sandbox.actions.includes("log");
+  byId("sandbox-retry").hidden = !state.sandbox.actions.includes("retry");
   // The quit's line is a live region that stays, empty, so that a screen reader hears it when it speaks.
   byId("quit-now").hidden = state.quitting === null;
   byId("quitting-text").textContent = state.quitting === null ? ""
@@ -322,6 +330,9 @@ byId("device-action-button").addEventListener("click", () => {
   else if (last?.deviceAction?.action === "restore") void shell.restore();
 });
 byId("quit-now").addEventListener("click", () => void shell.quitNow());
+// The main process acts only on a button its line shows.
+byId("sandbox-log").addEventListener("click", () => void shell.sandbox("log"));
+byId("sandbox-retry").addEventListener("click", () => void shell.sandbox("retry"));
 byId("search").addEventListener("input", filterSidebar);
 byId("project-search").addEventListener("input", renderCards);
 byId("sort").addEventListener("change", renderCards);

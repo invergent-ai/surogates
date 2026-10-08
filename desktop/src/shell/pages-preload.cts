@@ -34,6 +34,7 @@ if (location.protocol === "file:") {
     projectSettings: () => ipcRenderer.invoke("shell:project-settings"),
     quitNow: () => ipcRenderer.invoke("shell:quit-now"),
     link: (which: string) => ipcRenderer.invoke("shell:link", which),
+    sandbox: (action: string) => ipcRenderer.invoke("shell:sandbox", action),
     onChanged: listen("shell:changed"),
   });
   contextBridge.exposeInMainWorld("surogateProject", {
@@ -46,6 +47,7 @@ if (location.protocol === "file:") {
     state: () => ipcRenderer.invoke("settings:state"),
     set: (key: string, value: string) => ipcRenderer.invoke("settings:set", key, value),
     link: (which: string) => ipcRenderer.invoke("settings:link", which),
+    sandbox: (action: string) => ipcRenderer.invoke("settings:sandbox", action),
     close: () => ipcRenderer.invoke("settings:close"),
     onChanged: listen("settings:changed"),
   });

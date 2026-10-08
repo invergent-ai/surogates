@@ -277,6 +277,26 @@ describe("ImageDelivery", () => {
     expect(heard.map(({ url }) => url).sort()).toEqual([`/desktop/vm/${KEY}/rootfs.img.zst`, `/desktop/vm/${KEY}/vmlinuz.zst`]);
   });
 
+  // Each of the agent's operations waits on it before it goes to the VM.
+  it("answers each wait at once once the image is here, with no fresh look on disk", async () => {
+    const delivery = new ImageDelivery(delivering());
+    delivery.start();
+    await delivery.wait(new AbortController().signal);
+    heard = [];
+    // Gone from under it: a fresh look would find no image.
+    rmSync(images(), { recursive: true, force: true });
+    let answered = 0;
+    for (let n = 0; n < 3; n += 1) {
+      void delivery.wait(new AbortController().signal).then(() => {
+        answered += 1;
+      });
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(answered).toBe(3);
+    expect(delivery.state).toEqual({ state: "ready", folder: delivery.folder });
+    expect(heard).toEqual([]);
+  });
+
   it("keeps only the image of this version once it has booted", () => {
     for (const name of [KEY, "b".repeat(64), `${"c".repeat(64)}.partial`]) mkdirSync(join(images(), name), { recursive: true });
     new ImageDelivery(delivering()).prune();

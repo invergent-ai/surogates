@@ -1,8 +1,9 @@
 // The Settings dialog's page, over the dimmed window: a nav searched by label, and
 // sections of rows, each a label, a description and its control. All text comes from
-// the main process and is set with textContent only.
+// the main process and is set with textContent, or with showText where it may hold the
+// user's paths or QEMU's words.
 
-import { byId, fillIcons, markTheme } from "./ui.js";
+import { byId, fillIcons, markTheme, showText } from "./ui.js";
 
 interface Appearance {
   theme: "system" | "light" | "dark";
@@ -16,12 +17,14 @@ interface State {
   account: { name: string; email: string } | null;
   computer: { name: string; connection: string; added: string | null; organisation: string | null; agents: string[] };
   links: { usage: boolean };
+  sandbox: { text: string; actions: Array<"retry" | "log"> };
 }
 
 interface Settings {
   state(): Promise<State>;
   set(key: string, value: string): Promise<void>;
   link(which: "usage"): Promise<void>;
+  sandbox(action: "retry" | "log"): Promise<void>;
   close(): Promise<void>;
   onChanged(listener: () => void): () => void;
 }
@@ -82,6 +85,9 @@ async function render(): Promise<void> {
   byId("connection").textContent = state.computer.connection;
   byId("added").textContent = date(state.computer.added);
   byId("agents").textContent = state.computer.agents.join(", ");
+  showText(byId("sandbox"), state.sandbox.text);
+  byId("sandbox-log").hidden = !state.sandbox.actions.includes("log");
+  byId("sandbox-retry").hidden = !state.sandbox.actions.includes("retry");
   // A link the agent lacks goes for good: no search brings it back.
   for (const link of document.querySelectorAll<HTMLElement>("[data-link]")) {
     if (!state.links[link.dataset.link as "usage"]) link.remove();
@@ -100,6 +106,9 @@ for (const control of document.querySelectorAll<HTMLElement>("[data-setting]")) 
     option.addEventListener("click", () => void settings.set(control.dataset.setting ?? "", option.dataset.value ?? "").then(render));
   }
 }
+// The main process acts only on a button its line shows.
+byId("sandbox-log").addEventListener("click", () => void settings.sandbox("log"));
+byId("sandbox-retry").addEventListener("click", () => void settings.sandbox("retry"));
 byId("settings-search").addEventListener("input", search);
 byId("close").addEventListener("click", () => void settings.close());
 byId("backdrop").addEventListener("click", () => void settings.close());

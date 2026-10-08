@@ -5,7 +5,12 @@
 // npm run agent-disk.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, truncateSync, writeFileSync,
+} from "node:fs";
+import { open } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,7 +19,9 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { NODE } from "../../src/hosts/tool-hosts.js";
-import { vmOptions } from "../../src/vm/client.js";
+import { REPO_IMAGE, vmOptions } from "../../src/vm/client.js";
+import { readManifest } from "../../src/vm/image.js";
+import { EMULATED_NOTICE } from "../../src/vm/manager.js";
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
 import { dataHome, ELECTRON, launch, press, prompt, promptsShown, quit, shellPage, stubNative } from "./launch.js";
 
@@ -51,10 +58,11 @@ async function operation(kind: string, args: Record<string, unknown>, invocation
     type: "op", id, session_id: chat, calling_session_id: chat, invocation_id: invocation, ordinal, kind, args, digest: `d-${id}`,
   });
   let result: Record<string, unknown> | undefined;
+  // An emulated guest's first command comes about 20 s after its launch here.
   await expect.poll(() => {
     result = agent.link.received.find((frame) => frame.type === "op_result" && frame.id === id);
     return result !== undefined;
-  }, { timeout: 30_000 }).toBe(true);
+  }, { timeout: 120_000 }).toBe(true);
   agent.link.send({ type: "op_ack", id });
   return result?.outcome;
 }
@@ -64,7 +72,7 @@ async function bound(folder: string): Promise<void> {
   await bind(await launched(), folder);
 }
 
-// The app launched and signed in: the agent's web client in it.
+// The app launched and signed in, with *env* in its environment: the agent's web client in it.
 async function launched(env: Record<string, string> = {}): Promise<Page> {
   const origin = await agent.start();
   app = await launch(home, { XDG_RUNTIME_DIR: runtime, SUROGATE_VM_IMAGE: IMAGE, ...env });
@@ -426,5 +434,216 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM's processes throu
     app = undefined;
     expect(alive(qemu)).toBe(false);
     expect(existsSync(vmRun())).toBe(false);
+  });
+});
+
+// The install's base, serving the image this build's manifest names as R2 serves a release's,
+// <base>/desktop/vm/<key>/<file>, with a Range; and the install record that names it. While
+// *held*, rootfs.img.zst stops after its first 64 MiB; while *missing*, every file is a 404.
+// *heard*: each request for a file, its Range and the cookie it carried.
+async function installedFrom(state: { held: boolean; missing: boolean }) {
+  const { key } = readManifest(join(REPO_IMAGE, "manifest.json"));
+  const heard: Array<{ name: string; range: string | undefined; cookie: string | undefined }> = [];
+  let release = () => {};
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const server = createServer((request, response) => void (async () => {
+    const name = request.url?.startsWith(`/desktop/vm/${key}/`) ? request.url.slice(`/desktop/vm/${key}/`.length) : "";
+    heard.push({ name, range: request.headers.range, cookie: request.headers.cookie });
+    if (state.missing || !["rootfs.img.zst", "vmlinuz.zst"].includes(name)) return void response.writeHead(404).end();
+    const file = await open(join(REPO_IMAGE, name));
+    const { size } = await file.stat();
+    const from = Number(/^bytes=(\d+)-$/.exec(request.headers.range ?? "")?.[1] ?? 0);
+    response.writeHead(from > 0 ? 206 : 200, { "content-length": size - from, ...(from > 0 ? { "content-range": `bytes ${from}-${size - 1}/${size}` } : {}) });
+    const chunk = Buffer.alloc(1024 * 1024);
+    for (let at = from; at < size && !response.destroyed;) {
+      if (state.held && name === "rootfs.img.zst" && at >= 64 * 1024 * 1024) await released;
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, at);
+      if (!response.write(chunk.subarray(0, bytesRead))) await new Promise((resolve) => response.once("drain", resolve));
+      at += bytesRead;
+    }
+    response.end();
+    await file.close();
+  })());
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const record = join(home, "install.json");
+  writeFileSync(record, JSON.stringify({ base }));
+  servers.push(server);
+  return { key, base, host: new URL(base).host, record, release, heard };
+}
+const servers: Array<ReturnType<typeof createServer>> = [];
+afterEach(async () => {
+  for (const server of servers.splice(0)) {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+// The Settings dialog's page, once it is open over the window, on This computer.
+async function thisComputer(shell: ElectronApplication): Promise<Page> {
+  let found: Page | undefined;
+  await expect.poll(() => {
+    found = shell.windows().find((page) => page.url().endsWith("/settings.html"));
+    return found !== undefined;
+  }).toBe(true);
+  await found!.waitForSelector('.settings-nav [data-section="computer"]');
+  await found!.click('.settings-nav [data-section="computer"]');
+  return found!;
+}
+
+const NO_KVM = "This computer has no hardware virtualization, so Surogate runs the agent's commands emulated. They work, but several times slower. "
+  + "Turning on virtualization (VT-x or AMD-V) in the computer's firmware settings makes them fast";
+
+describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery and status, through the app", () => {
+  it("downloads its image at the first launch from where Surogate was installed from, says how far it has come, and runs the agent's command on it", { timeout: 180_000 }, async () => {
+    const served = await installedFrom({ held: true, missing: false });
+    // An older version's image, which goes once this one has booted.
+    const images = join(home, "surogate", "vm", "images");
+    mkdirSync(join(images, "0".repeat(64)), { recursive: true });
+    const folder = join(home, "delivered");
+    mkdirSync(folder);
+    const client = await launched({ SUROGATE_VM_IMAGE: "", SUROGATE_INSTALL_JSON: served.record });
+    const page = await shellPage(app!);
+    await expect.poll(() => page.textContent("#sandbox-text"), { timeout: 30_000 }).toMatch(/^Downloading the sandbox for the agent's commands: (\d|1\d)%$/);
+    await bind(client, folder);
+    // The command waits for the image; the rest of it comes a moment later.
+    const ran = operation("run", { command: "echo delivered", workdir: null, timeout: 30 });
+    setTimeout(served.release, 1_000);
+    expect(await ran).toEqual({ ok: { output: "delivered\n", returncode: 0, timed_out: false } });
+    expect(readdirSync(images)).toEqual([served.key]);
+    await expect.poll(() => page.isHidden("#sandbox")).toBe(true);
+    await page.click("#open-settings");
+    expect(await (await thisComputer(app!)).textContent("#sandbox")).toBe("Ready");
+  });
+
+  it("says it could not download its image, with Retry, answers the agent why, and downloads it at Retry", { timeout: 180_000 }, async () => {
+    const state = { held: false, missing: true };
+    const served = await installedFrom(state);
+    const folder = join(home, "retried");
+    mkdirSync(folder);
+    const client = await launched({ SUROGATE_VM_IMAGE: "", SUROGATE_INSTALL_JSON: served.record });
+    const page = await shellPage(app!);
+    await expect.poll(() => page.textContent("#sandbox-text")).toBe(`Surogate could not download its sandbox: ${served.host} answered 404 for rootfs.img.zst`);
+    expect(await page.textContent("#sandbox-retry")).toBe("Retry");
+    expect(await page.isHidden("#sandbox-log")).toBe(true);
+    await bind(client, folder);
+    expect(await operation("run", { command: "echo retried", workdir: null, timeout: 30 })).toEqual({
+      error: { type: "unavailable", message: `This computer's sandbox could not be downloaded: ${served.host} answered 404 for rootfs.img.zst` },
+    });
+    state.missing = false;
+    await page.click("#sandbox-retry");
+    await expect.poll(() => page.isHidden("#sandbox"), { timeout: 60_000 }).toBe(true);
+    expect(await operation("run", { command: "echo retried", workdir: null, timeout: 30 })).toEqual({ ok: { output: "retried\n", returncode: 0, timed_out: false } });
+  });
+
+  it("stops a download that nothing comes for in 30 s, with Retry, answers the agent why, and resumes it at Retry with no cookie of the app's", { timeout: 240_000 }, async () => {
+    const served = await installedFrom({ held: true, missing: false });
+    const folder = join(home, "stalled");
+    mkdirSync(folder);
+    const client = await launched({ SUROGATE_VM_IMAGE: "", SUROGATE_INSTALL_JSON: served.record });
+    // A cookie for the install's base in the app's own session, as a page it showed could set.
+    await app!.evaluate(({ session }, url) => session.defaultSession.cookies.set({ url, name: "who", value: "the-user" }), served.base);
+    const page = await shellPage(app!);
+    await bind(client, folder);
+    const stopped = "the download of rootfs.img.zst stopped: nothing came for 30 s";
+    expect(await operation("run", { command: "echo resumed", workdir: null, timeout: 30 })).toEqual({
+      error: { type: "unavailable", message: `This computer's sandbox could not be downloaded: ${stopped}` },
+    });
+    expect(await page.textContent("#sandbox-text")).toBe(`Surogate could not download its sandbox: ${stopped}`);
+    served.release();
+    await page.click("#sandbox-retry");
+    await expect.poll(() => page.isHidden("#sandbox"), { timeout: 60_000 }).toBe(true);
+    // The rest of what had come, asked for with a Range.
+    expect(served.heard.filter(({ name }) => name === "rootfs.img.zst").map(({ range }) => range)).toEqual([undefined, expect.stringMatching(/^bytes=[1-9]\d*-$/)]);
+    expect(served.heard.filter(({ cookie }) => cookie !== undefined)).toEqual([]);
+    expect(await operation("run", { command: "echo resumed", workdir: null, timeout: 30 })).toEqual({ ok: { output: "resumed\n", returncode: 0, timed_out: false } });
+  });
+
+  it("says its sandbox did not start on the image it delivered, with Show log and Retry, and at Retry checks the image and downloads it again", { timeout: 240_000 }, async () => {
+    const served = await installedFrom({ held: false, missing: false });
+    // An image's folder whole by its sizes and its last step, and nothing but zeros: no kernel to boot.
+    const image = join(home, "surogate", "vm", "images", served.key);
+    mkdirSync(image, { recursive: true });
+    for (const file of readManifest(join(REPO_IMAGE, "manifest.json")).files) {
+      writeFileSync(join(image, file.name), "");
+      truncateSync(join(image, file.name), file.size);
+    }
+    writeFileSync(join(image, "complete"), `${served.key}\n`);
+    const folder = join(home, "damaged");
+    mkdirSync(folder);
+    const client = await launched({ SUROGATE_VM_IMAGE: "", SUROGATE_INSTALL_JSON: served.record });
+    const page = await shellPage(app!);
+    await bind(client, folder);
+    const outcome = await operation("run", { command: "true", workdir: null, timeout: 30 }) as { error: { message: string } };
+    expect(outcome.error.message).toMatch(/^This computer's sandbox did not start: /);
+    expect(served.heard).toEqual([]);
+    await expect.poll(() => page.textContent("#sandbox-text")).toBe(outcome.error.message);
+    expect([await page.textContent("#sandbox-log"), await page.textContent("#sandbox-retry")]).toEqual(["Show log", "Retry"]);
+    await page.click("#sandbox-retry");
+    await expect.poll(() => page.isHidden("#sandbox"), { timeout: 90_000 }).toBe(true);
+    expect(served.heard.map(({ name }) => name).sort()).toEqual(["rootfs.img.zst", "vmlinuz.zst"]);
+    expect(await operation("run", { command: "echo checked", workdir: null, timeout: 30 })).toEqual({ ok: { output: "checked\n", returncode: 0, timed_out: false } });
+  });
+
+  it("says why the agent's commands run emulated for as long as they do, in the sidebar and in Settings, and tells the agent once", { timeout: 240_000 }, async () => {
+    const folder = join(home, "emulated");
+    mkdirSync(folder);
+    const client = await launched({ SUROGATE_VM_KVM: join(home, "no-kvm") });
+    await bind(client, folder);
+    const ran = (output: string) => ({ ok: { output, returncode: 0, timed_out: false } });
+    expect(await operation("run", { command: "echo slow", workdir: null, timeout: 60 })).toEqual(ran(`slow\n\n${EMULATED_NOTICE}`));
+    expect(await operation("run", { command: "echo slow", workdir: null, timeout: 60 })).toEqual(ran("slow\n"));
+    const page = await shellPage(app!);
+    expect(await page.textContent("#sandbox-text")).toBe(NO_KVM);
+    expect([await page.isHidden("#sandbox-log"), await page.isHidden("#sandbox-retry")]).toEqual([true, true]);
+    await page.click("#open-settings");
+    expect(await (await thisComputer(app!)).textContent("#sandbox")).toBe(NO_KVM);
+  });
+
+  it("says its sandbox did not start, with QEMU's words, and Show log opens the guest's console", async () => {
+    const folder = join(home, "unstarted");
+    mkdirSync(folder);
+    const empty = mkdtempSync(join(home, "no-image-"));
+    const client = await launched({ SUROGATE_VM_IMAGE: empty });
+    await app!.evaluate(({ shell }) => {
+      const opened: string[] = [];
+      Object.assign(globalThis, { openedPaths: opened });
+      shell.openPath = (path: string) => {
+        opened.push(path);
+        return Promise.resolve("");
+      };
+    });
+    await bind(client, folder);
+    const outcome = await operation("run", { command: "true", workdir: null, timeout: 30 }) as { error: { message: string } };
+    // QEMU's own words: it opens its sockets, then exits on the disk it cannot open.
+    expect(outcome.error.message).toMatch(/^This computer's sandbox did not start: QEMU.*: Could not open '[^']*\/rootfs\.img': No such file or directory$/);
+    const page = await shellPage(app!);
+    await expect.poll(() => page.textContent("#sandbox-text")).toBe(outcome.error.message);
+    // An image of the build's own, not the app's to check: no Retry.
+    expect([await page.textContent("#sandbox-log"), await page.isHidden("#sandbox-retry")]).toEqual(["Show log", true]);
+    await page.click("#sandbox-log");
+    await expect.poll(() => app!.evaluate(() => (globalThis as unknown as { openedPaths: string[] }).openedPaths)).toEqual([
+      join(home, "surogate", "logs", "vm-console.log"),
+    ]);
+  });
+});
+
+describe("the sandbox's tools, through the app", () => {
+  it("says Surogate's sandbox tools are missing while QEMU is older than it needs, and answers the agent so", async () => {
+    const bin = mkdtempSync(join(home, "bin-"));
+    writeFileSync(join(bin, "qemu-system-x86_64"), "#!/bin/sh\necho 'QEMU emulator version 7.2.0 (Debian 1:7.2+dfsg-7)'\n");
+    chmodSync(join(bin, "qemu-system-x86_64"), 0o755);
+    const folder = join(home, "tools");
+    mkdirSync(folder);
+    const client = await launched({ PATH: `${bin}:${process.env.PATH ?? ""}` });
+    const page = await shellPage(app!);
+    const missing = "Surogate's sandbox tools are missing. Run the install script again. It lacks QEMU 8.2 or later";
+    await expect.poll(() => page.textContent("#sandbox-text")).toBe(missing);
+    await bind(client, folder);
+    expect(await operation("run", { command: "true", workdir: null, timeout: 30 })).toEqual({
+      error: { type: "unavailable", message: `This computer's sandbox cannot start: ${missing}` },
+    });
   });
 });
