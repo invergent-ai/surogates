@@ -23,12 +23,30 @@ const secret = (key: KeyObject) => key.export({ type: "pkcs8", format: "pem" }).
 const PRIVATE = secret(keys.privateKey);
 const PUBLIC = pem(keys.publicKey);
 // *program* as publish.sh calls it, in *dir*/bin, each argument it is given written down first, in
-// *dir*/<program>-argv.
-const recording = (dir: string, program: string) => {
+// *dir*/<program>-argv; then *program* itself, or the lines *instead* gives for its path.
+const recording = (dir: string, program: string, instead = (real: string) => [`exec '${real}' "$@"`]) => {
   const real = spawnSync("sh", ["-c", `command -v ${program}`], { encoding: "utf8" }).stdout.trim();
   mkdirSync(join(dir, "bin"), { recursive: true });
-  writeFileSync(join(dir, "bin", program), `#!/bin/sh\nprintf '%s\\n' "$@" >> '${join(dir, `${program}-argv`)}'\nexec '${real}' "$@"\n`, { mode: 0o755 });
+  writeFileSync(join(dir, "bin", program), ["#!/bin/sh", `printf '%s\\n' "$@" >> '${join(dir, `${program}-argv`)}'`, ...instead(real), ""].join("\n"), { mode: 0o755 });
 };
+// curl with one fault of a bucket's, for the object FAULT names as "<fault> <object>": "refused",
+// its PUT answered 503; "unread", any other request for it answered 503; "changed", the copy read
+// back from it a byte longer than what it was sent.
+const faulty = (curl: string) => [
+  "upload=; into=; before=",
+  "for arg; do",
+  '  [ "$before" = -T ] && upload=1',
+  '  [ "$before" = -o ] && into="$arg"',
+  '  before="$arg"',
+  "done",
+  // The request's address is its last argument.
+  'case "$arg" in */desktop/"${FAULT#* }") fault="${FAULT%% *}" ;; *) fault= ;; esac',
+  'if [ "$fault" = refused ] && [ -n "$upload" ]; then printf 503; exit 0; fi',
+  'if [ "$fault" = unread ] && [ -z "$upload" ]; then printf 503; exit 0; fi',
+  `'${curl}' "$@" || exit`,
+  'if [ "$fault" = changed ] && [ -z "$upload" ] && [ "$into" != /dev/null ]; then printf x >> "$into"; fi',
+  "exit 0",
+];
 // install.sh with *trusted* in the release keys' place.
 const trusting = (trusted = [PUBLIC]) => readFileSync(join(RELEASE, "install.sh"), "utf8")
   .replace(/RELEASE_KEYS=\(\n[^)]*\)/, `RELEASE_KEYS=(\n${trusted.map((key) => `    '${key}'`).join("\n")}\n  )`);
@@ -114,6 +132,16 @@ describe("the desktop's release manifest", () => {
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
   });
 
+  it("stops with its usage at a version that is no x.y.z or a verb it does not have, and says so where the tarball is not there", () => {
+    for (const [verb, version] of [["sign", "1.2"], ["sign", "1.2.3-rc1"], ["sign", "v1.2.3"], ["sign", "1.2.3/../1.2.3"], ["publish", "1.2.3"]] as const) {
+      expect(publish(verb, version, { DESKTOP_RELEASE_KEY: PRIVATE }), `${verb} ${version}`).toMatchObject({ status: 2, stdout: "", stderr: "usage: publish.sh sign|send <x.y.z> <out>\n" });
+    }
+    expect(publish("sign", "1.2.4", { DESKTOP_RELEASE_KEY: PRIVATE })).toMatchObject({
+      status: 1, stdout: "", stderr: `publish.sh: ${out}/surogate-desktop-1.2.4-linux-x64.tar.gz is not there: run scripts/package.sh first\n`,
+    });
+    expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+  });
+
   it("lists, in the repository, one release key: the public half in install.sh", () => {
     const script = readFileSync(join(RELEASE, "install.sh"), "utf8");
     expect(script.match(/-----BEGIN PUBLIC KEY-----/g)).toHaveLength(1);
@@ -163,7 +191,7 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     copyFileSync(join(RELEASE, "publish.sh"), join(dir, "release", "publish.sh"));
     spawnSync("chmod", ["755", join(dir, "release", "publish.sh")]);
     writeFileSync(join(dir, "release", "install.sh"), trusting());
-    recording(dir, "curl");
+    recording(dir, "curl", faulty);
     writeFileSync(join(dir, "s3.json"), JSON.stringify({
       identities: [{ name: "release", credentials: [{ accessKey: CREDENTIALS.AWS_ACCESS_KEY_ID, secretKey: CREDENTIALS.AWS_SECRET_ACCESS_KEY }], actions: ["Admin", "Read", "Write", "List"] }],
     }));
@@ -213,6 +241,55 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     expect(send("2.0.5", released("2.0.5"))).toMatchObject({ status: 0, stdout: "published desktop/releases/2.0.5; desktop/latest.json stays 2.1.0\n" });
     expect(object("latest.json")?.equals(readFileSync(join(newest, "manifest.json")))).toBe(true);
     expect(object("releases/2.0.5/manifest.json")).not.toBeNull();
+  });
+
+  it("moves latest.json and the install script to a newer release, its numbers compared as numbers, and leaves both for an older line's", () => {
+    const script = readFileSync(join(dir, "release", "install.sh"));
+    expect(send("2.9.0", released("2.9.0")).stdout).toBe("published desktop/releases/2.9.0 as desktop/latest.json\n");
+    // Letter by letter, 2.10.0 would come before 2.9.0, and 2.9.5 after 2.10.0.
+    const newest = released("2.10.0");
+    expect(send("2.10.0", newest).stdout).toBe("published desktop/releases/2.10.0 as desktop/latest.json\n");
+    expect(object("latest.json")?.equals(readFileSync(join(newest, "manifest.json")))).toBe(true);
+    // An older line's tag holds an install script of its own, signed for before it is changed here.
+    const older = released("2.9.5");
+    writeFileSync(join(dir, "release", "install.sh"), Buffer.concat([Buffer.from("# an older line's\n"), script]));
+    try {
+      expect(send("2.9.5", older).stdout).toBe("published desktop/releases/2.9.5; desktop/latest.json stays 2.10.0\n");
+    } finally {
+      writeFileSync(join(dir, "release", "install.sh"), script);
+    }
+    expect(object("install.sh")?.equals(script)).toBe(true);
+    expect(object("latest.json")?.equals(readFileSync(join(newest, "manifest.json")))).toBe(true);
+  });
+
+  it("leaves a release unpublished when its send stops part-way, so that the next send sends it whole", () => {
+    const out = released("1.0.0");
+    expect(send("1.0.0", out, { FAULT: "refused latest.json" })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: sending desktop/latest.json got 503\n" });
+    // Its own manifest, the mark that it is published, is not there: with it there, the next send would be refused.
+    expect(object("releases/1.0.0/manifest.json")).toBeNull();
+    expect(send("1.0.0", out)).toMatchObject({ status: 0, stdout: "published desktop/releases/1.0.0 as desktop/latest.json\n" });
+    const manifest = readFileSync(join(out, "manifest.json"));
+    expect(object("latest.json")?.equals(manifest)).toBe(true);
+    expect(object("releases/1.0.0/manifest.json")?.equals(manifest)).toBe(true);
+    // Nothing of a send stays beside what was sent.
+    expect(readdirSync(out).sort()).toEqual(["manifest.json", "manifest.json.sig", "surogate-desktop-1.0.0-linux-x64.tar.gz"]);
+  });
+
+  it("takes nothing for sent that the bucket does not give back as it was sent", () => {
+    const tarball = "releases/1.0.0/surogate-desktop-1.0.0-linux-x64.tar.gz";
+    expect(send("1.0.0", released("1.0.0"), { FAULT: `changed ${tarball}` })).toMatchObject({
+      status: 1, stdout: "", stderr: `publish.sh: the bucket's desktop/${tarball} is not what was sent\n`,
+    });
+    expect(object("releases/1.0.0/manifest.json")).toBeNull();
+    expect(object("latest.json")).toBeNull();
+  });
+
+  it("stops when the bucket does not say which release is its newest, rather than taking it to have none", () => {
+    const newest = released("2.1.0");
+    expect(send("2.1.0", newest).status).toBe(0);
+    expect(send("2.0.5", released("2.0.5"), { FAULT: "unread latest.json" })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: looking for desktop/latest.json got 503\n" });
+    expect(object("latest.json")?.equals(readFileSync(join(newest, "manifest.json")))).toBe(true);
+    expect(object("releases/2.0.5/surogate-desktop-2.0.5-linux-x64.tar.gz")).toBeNull();
   });
 
   it("keeps the bucket's secret off curl's command line, where any process of the runner's could read it", () => {
