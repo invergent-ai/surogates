@@ -130,6 +130,14 @@ made="$(/opt/hold/mktemp "$@")" || exit
 echo "$made"
 `;
 
+// The system's id, kept as /opt/hold/id, which says in /tmp/asked that it was asked, and answers
+// after a moment: long enough for a signal to reach the script while it waits for the answer.
+const SLOW_ID = String.raw`#!/bin/sh
+: >>/tmp/asked
+/opt/hold/sleep 0.3
+exec /opt/hold/id "$@"
+`;
+
 // The lock that one install, update or removal at a time holds, in root's own folder under /run;
 // and a shell of the test's own that holds it, on its descriptor 8.
 const LOCKS = "/run/surogate-desktop";
@@ -1148,6 +1156,26 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       ]);
       expect(signalled.stdout, signal).toBe("0: 1 made, 0 left, staging 0; Surogate Desktop: 1.0.0 is installed\n");
     }
+  });
+
+  it("ends as a signal ends it when one comes while it asks who reads its files, as pkexec starts it at every update, and not with an error of bash's own", () => {
+    const uid = root("id -u tester").stdout.trim();
+    // The helper for a user, stopped once, by a signal to itself alone, while the first of its two
+    // questions of who reads is still unanswered. Ubuntu 24.04's bash runs the signal's handler
+    // while it reads the second of two substitutions of one command, and then cannot read the
+    // handler's own text: each of the script's commands holds one substitution at most.
+    const stopped = swapped("id", SLOW_ID, [
+      "cp -L /usr/bin/sleep /opt/hold/sleep",
+      "for run in 1 2 3 4 5; do",
+      "  rm -f /tmp/asked",
+      `  PKEXEC_UID=${uid} /opt/surogate-test/install.sh --apply ${files()} >/tmp/said 2>&1 & helper=$!`,
+      "  for try in $(seq 200); do [ -e /tmp/asked ] && break; /opt/hold/sleep 0.01; done",
+      "  [ -e /tmp/asked ] || echo 'never asked'",
+      "  kill -TERM \"$helper\"; wait \"$helper\"",
+      "  echo \"$? $(cat /tmp/said)\"",
+      "done",
+    ]);
+    expect(stopped.stdout).toBe("143 \n".repeat(5));
   });
 
   it("says what stops it: its arguments, a user who is not root, too little room, and bubblewrap missing", () => {

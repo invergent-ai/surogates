@@ -198,7 +198,7 @@ lock() {
 # caller's environment held. Nothing else is asked who it was. Naming a user only ever lowers the
 # helper's rights to read, from root's to that user's.
 asker() {
-  local name uid gid entry
+  local name uid gid entry reads_as
   for name in PKEXEC_UID SUDO_UID; do
     uid="${!name:-}"
     [ -n "$uid" ] || continue
@@ -208,8 +208,12 @@ asker() {
     entry="$(getent passwd "$uid")" && gid="$(cut -d: -f4 <<<"$entry")" && [[ "$gid" =~ ^[0-9]+$ ]] || fail "$name names no user of this computer"
     READER=("$uid" "$gid" "${entry%%:*}")
     # The reader is that user, and no other: setpriv takes digits for a user's name where one is so
-    # named, and counts a number past the last one from 0 again.
-    [ "$(as_reader "$SMALL_WAIT" id -u 2>/dev/null):$(as_reader "$SMALL_WAIT" id -g 2>/dev/null)" = "$uid:$gid" ] || fail "$name names no user of this computer"
+    # named, and counts a number past the last one from 0 again. Asked in two commands, as wherever
+    # this script would put two $( ) in one: a signal that comes while the first is answered ends
+    # Ubuntu 24.04's bash with an error of its own, before this script's handler has run.
+    reads_as="$(as_reader "$SMALL_WAIT" id -u 2>/dev/null)" || reads_as=
+    reads_as+=":$(as_reader "$SMALL_WAIT" id -g 2>/dev/null)" || reads_as=
+    [ "$reads_as" = "$uid:$gid" ] || fail "$name names no user of this computer"
     return 0
   done
 }
@@ -228,8 +232,11 @@ as_reader() {
 # is not theirs to read, and what makes one so. A name that is no whole path is looked for where
 # the helper was started, which under pkexec is root's home.
 unread() {
-  [ "${READER[0]}" -ne 0 ] || fail "$(named "$1") is not a downloaded release's file"
-  fail "$(named "$1") cannot be read by $(named "${READER[2]}"): name it by its whole path, in a folder of that user's own"
+  local file reader
+  file="$(named "$1")"
+  [ "${READER[0]}" -ne 0 ] || fail "$file is not a downloaded release's file"
+  reader="$(named "${READER[2]}")"
+  fail "$file cannot be read by $reader: name it by its whole path, in a folder of that user's own"
 }
 
 # Copies file $1, which an apply was handed, to $2 in root's staging: read once, as the user who
@@ -623,16 +630,20 @@ uninstall() {
   runuser -u "$user" -- rm -f -- "$config/autostart/surogate.desktop"
   # As the user too, whether they have data: root may not see into a home that another computer serves.
   runuser -u "$user" -- test -e "$data/surogate" || runuser -u "$user" -- test -e "$cache/surogate" || return 0
+  # The two folders as this script says a name, each in a command of its own.
+  local in_data in_cache
+  in_data="$(named "$data/surogate")"
+  in_cache="$(named "$cache/surogate")"
   # Asked on the terminal, as this script's input is itself; with none to ask on, the data stays.
   if (exec </dev/tty) 2>/dev/null; then
-    read -r -p "Surogate Desktop: also delete $user's sign-in, device token and browser profiles, in $(named "$data/surogate")? Chat folders stay. [y/N] " answer </dev/tty || answer=
+    read -r -p "Surogate Desktop: also delete $user's sign-in, device token and browser profiles, in $in_data? Chat folders stay. [y/N] " answer </dev/tty || answer=
   fi
   if [[ "$answer" == [Yy]* ]]; then
     runuser -u "$user" -- rm -rf -- "$data/surogate" "$cache/surogate" 2>/dev/null \
-      || fail "could not delete all of $user's app data: what $user may not change stays, in $(named "$data/surogate") and $(named "$cache/surogate")"
+      || fail "could not delete all of $user's app data: what $user may not change stays, in $in_data and $in_cache"
     say "deleted $user's app data"
   else
-    say "kept $user's app data, in $(named "$data/surogate")"
+    say "kept $user's app data, in $in_data"
   fi
 }
 
@@ -687,9 +698,11 @@ main() {
         [ "$#" -eq 1 ] || fail "usage: install.sh --uninstall"
         say "removing it needs administrator rights: sudo asks for your password once"
         # The user's own folders go with it, as their session names them: sudo resets the environment.
-        { declare -f; echo 'main "$@"'; } | sudo -- bash -s -- --uninstall \
-          "$(xdg "${XDG_CONFIG_HOME:-}" "$HOME/.config")" "$(xdg "${XDG_DATA_HOME:-}" "$HOME/.local/share")" "$(xdg "${XDG_CACHE_HOME:-}" "$HOME/.cache")" \
-          || exit "$?"
+        local config data cache
+        config="$(xdg "${XDG_CONFIG_HOME:-}" "$HOME/.config")"
+        data="$(xdg "${XDG_DATA_HOME:-}" "$HOME/.local/share")"
+        cache="$(xdg "${XDG_CACHE_HOME:-}" "$HOME/.cache")"
+        { declare -f; echo 'main "$@"'; } | sudo -- bash -s -- --uninstall "$config" "$data" "$cache" || exit "$?"
         return
       fi
       # What removes it is the system's own tools, wherever its caller's PATH points.
