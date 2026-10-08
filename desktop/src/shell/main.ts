@@ -1266,6 +1266,10 @@ function bridge(contents: WebContents, agent: Agent): void {
     // A text quick entry handed the page that went is not sent: its box says so.
     if (handing) handed(handing.id, LEFT_CHAT);
   });
+  // Nor is one handed a page whose view went with no other page in its place, as removing the agent takes it.
+  contents.once("destroyed", () => {
+    if (handing) handed(handing.id, LEFT_CHAT);
+  });
 }
 
 function open(window: MainWindow, agent: Agent): void {

@@ -363,6 +363,22 @@ describe("quick entry", () => {
     expect(await quick.inputValue("#text")).toBe("Draft the March invoices");
   });
 
+  it("says the window left the new chat when the agent is removed with a text still on its way", async () => {
+    const { page } = await signedIn();
+    await watchHanded(app!);
+    await pickInTray(app!, "Quick entry");
+    const quick = await quickPage(app!);
+    await quick.fill("#text", "Draft the March invoices");
+    await quick.press("#text", "Enter");
+    await expect.poll(() => handed(app!)).toHaveLength(1);
+    // Removed before its page answered: the page goes with its view, and no other loads in its place.
+    await page.click("#user");
+    await page.click('[data-action="remove"]');
+    await expect.poll(() => page.isVisible("#first-run")).toBe(true);
+    await expect.poll(() => quick.textContent("#refused")).toBe("Surogate's window left the new chat before it was made, so nothing was sent.");
+    expect(await quick.inputValue("#text")).toBe("Draft the March invoices");
+  });
+
   it("hands nothing to a page that says nobody is signed in to it while the new chat loads", async () => {
     const { client } = await signedIn();
     await watchHanded(app!);
