@@ -77,6 +77,8 @@ export class FakeAgent {
   meStatus = 200;
   // While set, the web client's page loads only once it settles.
   pagesHeld: Promise<void> | null = null;
+  // The web client's own HTML, served in place of the page standing for it.
+  page: string | null = null;
   // What the app's OAuth calls sent, form by form.
   readonly oauth: Array<Record<string, string>> = [];
   private readonly codes = new Map<string, { challenge: string; redirectUri: string }>();
@@ -215,7 +217,8 @@ export class FakeAgent {
       return;
     }
     const served =this.projects === null ? "" : `<script>(${serveProjects.toString()})(${JSON.stringify(this.projects).replace(/</g, "\\u003c")}, ${this.registerAfterMs})</script>`;
-    response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(`<!doctype html><title>Fake agent</title><p>The web client</p>${served}`);
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
+      .end(this.page ?? `<!doctype html><title>Fake agent</title><p>The web client</p>${served}`);
   }
 
   /** A new item in the user's inbox, as the agent makes one, told on every inbox stream open: its id. */

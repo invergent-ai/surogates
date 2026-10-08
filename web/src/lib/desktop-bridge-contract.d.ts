@@ -33,7 +33,7 @@ export interface DesktopBinding {
 }
 
 export interface DesktopAppearance {
-  theme: "light" | "dark"; // the theme in effect
+  theme: "light" | "dark"; // the theme in effect: it drives the page's prefers-color-scheme, which the web client follows
   textSize: "small" | "medium" | "large";
   transcriptWidth: "narrow" | "medium" | "wide";
   motion: "system" | "reduced";

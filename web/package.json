@@ -12,6 +12,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test:shared-sdk": "node ../scripts/web-shared-chat-sdk.test.mjs",
+    "test:appearance": "node --experimental-strip-types --test ../scripts/web-appearance.test.mjs",
     "test:desktop-bridge": "node --experimental-strip-types --test ../scripts/desktop-bridge.test.mjs",
     "test:device-requests": "node --experimental-strip-types --test ../scripts/web-device-requests.test.mjs",
     "test:devices": "node --experimental-strip-types --test ../scripts/web-devices.test.mjs",

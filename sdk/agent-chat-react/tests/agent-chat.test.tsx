@@ -1141,6 +1141,31 @@ describe("AgentChat", () => {
     expect(region()?.textContent).toBe("");
   });
 
+  it("marks the transcript and its composer as the one the host's transcript settings shape, with or without a chat", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId={null} />);
+      await Promise.resolve();
+    });
+    expect(container.querySelector("[data-transcript] textarea")).not.toBeNull();
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+    act(() => {
+      stream.emit("user.message", 1, { content: "Tidy my notes" });
+    });
+    const transcript = container.querySelector("[data-transcript]");
+    expect(transcript?.textContent).toContain("Tidy my notes");
+    expect(transcript?.querySelector("textarea")).not.toBeNull();
+  });
+
   it("shows what the host puts under the composer", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);
