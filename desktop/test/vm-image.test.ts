@@ -3,7 +3,9 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync,
+} from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -245,6 +247,19 @@ describe("the guest image's delivery", () => {
     stop.abort(new Error("the app quit"));
     await expect(delivered).rejects.toThrow("the app quit");
     await expect.poll(unpacking, { timeout: 2_000 }).toBe(0);
+  });
+
+  it("takes nothing in its folder by its name alone: an unpacked file of another size is made again, and a link there is not followed", async () => {
+    const work = join(images(), `${KEY}.partial`);
+    mkdirSync(work, { recursive: true });
+    writeFileSync(join(work, "rootfs.img"), "not the disk\n");
+    const outside = join(dir, "the user's file");
+    writeFileSync(outside, "the user's own\n");
+    symlinkSync(outside, join(work, "vmlinuz.zst.partial"));
+    const folder = await deliver(options());
+    expect(readFileSync(join(folder, "rootfs.img")).equals(rootfs)).toBe(true);
+    expect(readFileSync(join(folder, "vmlinuz")).equals(kernel)).toBe(true);
+    expect(readFileSync(outside, "utf8")).toBe("the user's own\n");
   });
 
   it("checks the free space before it fetches anything, once what a killed unpack left no longer holds any of it", async () => {

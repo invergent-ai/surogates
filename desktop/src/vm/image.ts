@@ -9,7 +9,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, truncateSync, writeFileSync,
+  closeSync, createReadStream, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, truncateSync, writeFileSync,
 } from "node:fs";
 import { open, statfs } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -151,8 +151,13 @@ export async function deliver(options: DeliverOptions): Promise<string> {
   rmSync(folder, { recursive: true, force: true });
   const work = `${folder}.partial`;
   mkdirSync(work, { recursive: true, mode: 0o700 });
-  // What an unpack killed partway left: never taken, and it holds disk the delivery needs.
-  for (const file of manifest.files) rmSync(`${join(work, file.name)}.partial`, { force: true });
+  // What is there is taken only as a regular file, never through a link, and an unpacked file only at
+  // its manifest's size. What an unpack killed partway left is never taken, and holds disk the delivery needs.
+  for (const name of readdirSync(work)) if (!lstatSync(join(work, name)).isFile()) rmSync(join(work, name), { recursive: true, force: true });
+  for (const file of manifest.files) {
+    rmSync(`${join(work, file.name)}.partial`, { force: true });
+    if (sizeOf(join(work, file.name)) !== file.size) rmSync(join(work, file.name), { force: true });
+  }
   const total = manifest.files.reduce((sum, file) => sum + file.downloadSize, 0);
   // What is here already: a file unpacked, a download whole or in part.
   const here = (file: ImageFile) => (existsSync(join(work, file.name)) ? file.downloadSize
