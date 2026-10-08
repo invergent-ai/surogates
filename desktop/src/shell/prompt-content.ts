@@ -180,9 +180,10 @@ export function approval(request: ApprovalRequest): PromptContent {
         // Its user's own asks in either mode, so there is no asking to stop.
         ...(own ? { buttons: [button("deny", "Deny"), button("allow", "Save", true)] } : {}),
         title: `Save ${named(request.path)}?`,
-        // One that came while its user held the browser says when, not who clicked: a page can start one by itself then.
+        // One taken for its user's says when it came, not who clicked: a page can start one by itself under their
+        // hand, and one that comes just after they handed the browser back may have been asked for before.
         lead: own
-          ? `This file was downloaded while you had control of ${chat.agent}'s browser, ${sizeOf(bytes)}. Save it${where}? ${chat.agent} can read what is saved there.`
+          ? `This file was downloaded while you had control of ${chat.agent}'s browser, or just after you handed it back, ${sizeOf(bytes)}. Save it${where}? ${chat.agent} can read what is saved there.`
           : `A page in ${chat.agent}'s browser downloaded this file, ${sizeOf(bytes)}. Save it${where}?`,
         details: [file, content],
         height: 420,
