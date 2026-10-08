@@ -2,9 +2,10 @@
 // desktop's own prompt, the browser host in its utility process, and the user's own browser.
 // Behind SUROGATE_BROWSER_TESTS=1, apart from the user's session as the browser unit tests are:
 //   npm run build && sh test/isolated.sh npx vitest run -c vitest.e2e.config.ts test/e2e/browser.e2e.ts
+// with SUROGATE_TEST_BROWSER naming another browser to drive than Settings would choose.
 // Skipped where no supported browser is installed. Settings → Browser launches none, and runs anywhere.
 
-import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { join } from "node:path";
 
@@ -17,7 +18,9 @@ import { isolated } from "../isolated.js";
 import { dataHome, launch, press, prompt, promptsShown, quit, shellEnv, shellPage, stubNative } from "./launch.js";
 
 const CHAT = "4e5f6a7b-8c9d-4e0f-a1b2-c3d4e5f6a7b8";
-const BROWSER = chosenBrowser({ choice: "auto" }, findBrowsers());
+// The browser Settings would choose, or the one SUROGATE_TEST_BROWSER names, chosen in Settings before each launch.
+const NAMED = process.env.SUROGATE_TEST_BROWSER;
+const BROWSER = NAMED ? findBrowsers().find((browser) => browser.executable === NAMED) ?? null : chosenBrowser({ choice: "auto" }, findBrowsers());
 const run = BROWSER !== null && process.env.SUROGATE_BROWSER_TESTS === "1";
 
 let home: string;
@@ -70,6 +73,10 @@ async function bound(folder: string): Promise<Page> {
   const origin = await agent.start();
   // The app's own environment is the browser's: apart from the user's session, or no launch.
   isolated(shellEnv(home));
+  if (NAMED && BROWSER) {
+    mkdirSync(join(home, "surogate"), { recursive: true });
+    writeFileSync(join(home, "surogate", "browser.json"), JSON.stringify({ choice: BROWSER.id }));
+  }
   app = await launch(home);
   await stubNative(app);
   const page = await shellPage(app);
@@ -113,6 +120,8 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     expect(hits).toEqual([]);
     expect(readdirSync(profiles())).toHaveLength(1);
     expect(browsers().length).toBeGreaterThan(0);
+    // The browser chosen: Settings' own, or the one the run names.
+    expect(browsers().some((pid) => readFileSync(`/proc/${pid}/cmdline`, "utf8").startsWith(BROWSER!.executable))).toBe(true);
     // What the browser and Playwright keep while it runs goes under the identity's profiles, not the app's temp folder.
     const [identity] = readdirSync(profiles());
     expect(readdirSync(join(profiles(), identity!, "tmp")).some((name) => name.startsWith("playwright-artifacts-"))).toBe(true);
@@ -120,6 +129,7 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     // Allowed for the chat: nothing asks again. A read and a screenshot come back whole.
     expect((await operation("browser.observe", { script: "snapshot@1", params: { selector: null } })).ok.frames).toEqual(expect.any(Array));
     const shot = await operation("browser.screenshot", { clip: null, labels: [] });
+    expect(shot).toMatchObject({ ok: expect.any(String) });
     expect(Buffer.from(shot.ok as string, "base64").subarray(1, 4).toString("latin1")).toBe("PNG");
     expect(await promptsShown(app!)).toBe(0);
     // An app that is killed takes the browser with it.
@@ -157,6 +167,9 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     // The identity's profiles go; another identity's would stay beside them.
     await expect.poll(() => readdirSync(profiles()), { timeout: 15_000 }).toEqual([]);
     expect(browsers()).toEqual([]);
+    // And nothing of the browser writes it again after: the profile is forgotten whole.
+    await new Promise((done) => setTimeout(done, 2_000));
+    expect(readdirSync(profiles())).toEqual([]);
   });
 });
 
