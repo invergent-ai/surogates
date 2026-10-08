@@ -58,6 +58,17 @@ export function vmOptions(dataDir: string, user: HostUser, env: NodeJS.ProcessEn
   };
 }
 
+/**
+ * What of *env* the VM's files are made from: in a packaged app, nothing of SUROGATE_VM_IMAGE or
+ * SUROGATE_VM_KVM, which are a development build's and the tests', so it boots only the image
+ * its manifest checks, and opens /dev/kvm for KVM.
+ */
+export function vmEnv(env: NodeJS.ProcessEnv, packaged: boolean): NodeJS.ProcessEnv {
+  if (!packaged) return env;
+  const { SUROGATE_VM_IMAGE: _image, SUROGATE_VM_KVM: _kvm, ...rest } = env;
+  return rest;
+}
+
 export type ToManager =
   | { type: "start"; options: VmOptions }
   | { type: "op"; operation: VmOperation }

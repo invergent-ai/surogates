@@ -20,7 +20,7 @@ import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
-import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmOptions } from "../vm/client.js";
+import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmEnv, vmOptions } from "../vm/client.js";
 import { VmExecutor } from "../vm/executor.js";
 import { type Delivery, ImageDelivery, installBase, readManifest } from "../vm/image.js";
 import { missingTools, toolsMissing } from "../vm/linux.js";
@@ -243,6 +243,8 @@ function utilityManager(): ManagerProcess {
 let lacking: string[] | null = null;
 let lackingFound: Promise<string[]> = Promise.resolve([]);
 const VM_RESOURCES = app.isPackaged ? join(process.resourcesPath, "vm") : null;
+// The environment the VM is made from: a packaged app's has no image or KVM device of a test's.
+const VM_ENV = vmEnv(process.env, app.isPackaged);
 let delivery: ImageDelivery | null = null;
 // Aborted at the quit: a download or an unpack under way stops with the app, never writing on after it.
 const stopDelivery = new AbortController();
@@ -256,10 +258,11 @@ const vmUser = () => {
 
 // The guest's image: a packaged app downloads it from where it was installed from (the install
 // script's record), and a development build boots the repository's, unless SUROGATE_INSTALL_JSON
-// names an install record of a test's. SUROGATE_VM_IMAGE names an image to boot as it is.
+// names an install record of a test's. SUROGATE_VM_IMAGE names an image to boot as it is, in a
+// development build only.
 function imageDelivery(): ImageDelivery | null {
   const record = app.isPackaged ? "/etc/surogate/install.json" : process.env.SUROGATE_INSTALL_JSON;
-  if (process.env.SUROGATE_VM_IMAGE || !record) return null;
+  if (VM_ENV.SUROGATE_VM_IMAGE || !record) return null;
   return new ImageDelivery({
     manifest: readManifest(join(VM_RESOURCES ?? REPO_IMAGE, "manifest.json")),
     // An installed app's record is root's alone to write, as the install script leaves it.
@@ -313,7 +316,7 @@ const alive = new LiveProcesses();
 const vmFor = (): VmClient => {
   if (vm) return vm;
   vm = new VmClient({
-    vm: vmOptions(root, vmUser(), process.env, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
+    vm: vmOptions(root, vmUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
     ready: vmReady,
     spawn: utilityManager,
   });
@@ -335,7 +338,7 @@ const vmFor = (): VmClient => {
 // image did not start, its check by its hashes, and the next boot's line is the next boot's.
 function sandboxAction(action: unknown): void {
   if (!sandboxLine(lacking, deliveryState(), boot).actions.includes(action as SandboxAction)) return;
-  if (action === "log") return void shell.openPath(vmOptions(root, vmUser()).console);
+  if (action === "log") return void shell.openPath(vmOptions(root, vmUser(), VM_ENV).console);
   if (action === "check") return lookForTools();
   boot = null;
   startDelivery(true);

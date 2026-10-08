@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
-import { forkManager, type FromManager, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmOptions } from "../src/vm/client.js";
+import { forkManager, type FromManager, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmEnv, vmOptions } from "../src/vm/client.js";
 import { type Boot, unavailable, type VmOperation, type VmOptions } from "../src/vm/manager.js";
 
 let dir: string;
@@ -356,6 +356,16 @@ describe("the VM's files", () => {
     expect(vmOptions("/d", ana, { SUROGATE_VM_IMAGE: "/mine" }, delivered).rootfs).toBe("/mine/rootfs.img");
     expect(vmOptions("/d", ana, {}).rootfs).toBe(join(REPO_IMAGE, "rootfs.img"));
     expect(vmOptions("/d", ana, { SUROGATE_VM_KVM: "/nowhere" }).kvm).toBe("/nowhere");
+  });
+
+  it("take SUROGATE_VM_IMAGE and SUROGATE_VM_KVM only in a development build: a packaged app boots only the image its manifest checks", () => {
+    const delivered = { image: "/d/vm/images/abc" };
+    const env = { SUROGATE_VM_IMAGE: "/mine", SUROGATE_VM_KVM: "/nowhere", XDG_RUNTIME_DIR: "/run/user/1000" };
+    const packaged = vmOptions("/d", ana, vmEnv(env, true), delivered);
+    expect([packaged.rootfs, packaged.kvm]).toEqual(["/d/vm/images/abc/rootfs.img", undefined]);
+    expect(packaged.run).toMatch(/^\/run\/user\/1000\/surogate\//);
+    const developed = vmOptions("/d", ana, vmEnv(env, false), delivered);
+    expect([developed.rootfs, developed.kvm]).toEqual(["/mine/rootfs.img", "/nowhere"]);
   });
 });
 
