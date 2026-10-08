@@ -53,6 +53,7 @@ interface State {
   deviceAction: { text: string; button: string; action: "sign-in" | "restore" } | null; // what the user can do about this computer
   quitting: number | null; // while a quit waits for the threads working on this computer: how many
   sandbox: { text: string; said: string; actions: Array<"retry" | "log" | "check">; ready: boolean }; // what stops the agent's commands, or slows them
+  update: { text: string; button: string | null } | null; // a newer Surogate, and what the user can do about it
 }
 
 interface Shell {
@@ -341,6 +342,11 @@ async function render(): Promise<void> {
   byId("sandbox-log").hidden = !state.sandbox.actions.includes("log");
   byId("sandbox-retry").hidden = !state.sandbox.actions.includes("retry");
   byId("sandbox-check").hidden = !state.sandbox.actions.includes("check");
+  // The update's line is a live region that stays, empty, as the quit's does.
+  // Shown as text is: it may hold the root helper's own words, and the user's paths.
+  showText(byId("update-text"), state.update?.text ?? "");
+  byId("update-button").textContent = state.update?.button ?? "";
+  byId("update-button").hidden = !state.update?.button;
   // The quit's line is a live region that stays, empty, so that a screen reader hears it when it speaks.
   byId("quit-now").hidden = state.quitting === null;
   byId("quitting-text").textContent = state.quitting === null ? ""

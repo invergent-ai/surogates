@@ -50,6 +50,7 @@ import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { appTools, BWRAP } from "./tools.js";
 import { asShown } from "./text.js";
+import { CHECK_MS, installedUpdates, ROOT_RECORD, updateLine, Updates } from "./updates.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
@@ -282,8 +283,17 @@ const VM_RESOURCES = app.isPackaged ? join(process.resourcesPath, "vm") : null;
 // The environment the VM is made from: a packaged app's has no image or KVM device of a test's.
 const VM_ENV = vmEnv(process.env, app.isPackaged);
 let delivery: ImageDelivery | null = null;
-// Aborted at the quit: a download or an unpack under way stops with the app, never writing on after it.
+// Aborted at the quit: a download or an unpack under way stops with the app, never writing on after
+// it. The image's and an update's.
 const stopDelivery = new AbortController();
+// Where the install script recorded the base the app was installed from: root's, in an installed
+// app. A development build reads only SUROGATE_INSTALL_JSON's, a test's, so it never downloads
+// from an installed app's base.
+const INSTALL_RECORD = app.isPackaged ? ROOT_RECORD : process.env.SUROGATE_INSTALL_JSON;
+// What the app downloads from that base: no cookie of its own session goes with it, and none of it
+// through the HTTP cache: a second copy of what is downloaded, and cached ranges in a resume.
+const fromBase = (url: string, init: { headers: Record<string, string>; signal?: AbortSignal }) =>
+  net.fetch(url, { ...init, credentials: "omit", cache: "no-store" });
 let undeliverable: string | null = null;
 let boot: Boot | null = null;
 const deliveryState = (): Delivery | null => delivery?.state ?? (undeliverable === null ? null : { state: "failed", why: undeliverable });
@@ -297,18 +307,39 @@ const vmUser = () => {
 // names an install record of a test's. SUROGATE_VM_IMAGE names an image to boot as it is, in a
 // development build only.
 function imageDelivery(): ImageDelivery | null {
-  const record = app.isPackaged ? "/etc/surogate/install.json" : process.env.SUROGATE_INSTALL_JSON;
-  if (VM_ENV.SUROGATE_VM_IMAGE || !record) return null;
+  if (VM_ENV.SUROGATE_VM_IMAGE || !INSTALL_RECORD) return null;
   return new ImageDelivery({
     manifest: readManifest(join(VM_RESOURCES ?? REPO_IMAGE, "manifest.json")),
     // An installed app's record is root's alone to write, as the install script leaves it.
-    base: () => installBase(record, app.isPackaged),
+    base: () => installBase(INSTALL_RECORD, app.isPackaged),
     images: join(root, "vm", "images"),
-    // No cookie of the app's own session goes with it, and none of it through the HTTP cache: a second
-    // copy of what is downloaded, and cached ranges in a resume.
-    fetch: (url, init) => net.fetch(url, { ...init, credentials: "omit", cache: "no-store" }),
+    fetch: fromBase,
     signal: stopDelivery.signal,
   }, changed);
+}
+
+// Updates (spec, Section 9, "In-app updates"): an installed app checks the base it was installed
+// from at its start and every 6 hours, trusting the release keys that the helper pkexec runs
+// lists, and downloads into the user's cache. A development build updates only when a test names
+// an install record and a helper of its own, SUROGATE_UPDATE_HELPER.
+// A relative XDG_CACHE_HOME is ignored, as the XDG Base Directory specification says.
+const cacheHome = process.env.XDG_CACHE_HOME?.startsWith("/") ? process.env.XDG_CACHE_HOME : join(app.getPath("home"), ".cache");
+let updates: Updates | null = null;
+
+function startUpdates(): void {
+  const cache = join(cacheHome, "surogate", "updates");
+  const helper = process.env.SUROGATE_UPDATE_HELPER;
+  if (app.isPackaged) {
+    updates = new Updates(installedUpdates(VERSION, cache, fromBase, stopDelivery.signal), changed);
+  } else if (INSTALL_RECORD && helper) {
+    updates = new Updates({ version: VERSION, record: INSTALL_RECORD, rootOwned: false, helper, installed: null, cache, fetch: fromBase, signal: stopDelivery.signal }, changed);
+  } else {
+    return;
+  }
+  // A check that finds none it can take is said in the log, and tried again at the next.
+  const check = () => void updates?.check().catch(report);
+  check();
+  setInterval(check, CHECK_MS).unref();
 }
 
 // The image's delivery started, once made: its manifest unreadable is a delivery that failed, so a
@@ -1452,6 +1483,7 @@ function state() {
     // While a quit waits for the threads working on this computer: how many it waits for.
     quitting: waiting ? (device?.stack?.working() ?? 0) : null,
     sandbox: sandboxLine(lacking, deliveryState(), boot),
+    update: updateLine(updates?.state ?? null),
   };
 }
 
@@ -2250,6 +2282,7 @@ if (!app.requestSingleInstanceLock()) {
     // Its image downloaded in the background, and what the VM needs of this computer looked for.
     startDelivery();
     lookForTools();
+    startUpdates();
     const page = join(PAGES, "shell.html");
     main = new MainWindow({
       states, page, preload: PAGES_PRELOAD, panePreload: PANE_PRELOAD, dark: theme.dark, onChange: changed,

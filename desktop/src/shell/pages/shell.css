@@ -1446,8 +1446,9 @@ body.about-page {
   white-space: nowrap;
 }
 
-/* Empty, the waiting quit's line takes no room, and stays a live region. */
-#quitting:has(#quitting-text:empty) {
+/* Empty, the waiting quit's line and the update's take no room, and stay live regions. */
+#quitting:has(#quitting-text:empty),
+#update:has(#update-text:empty) {
   margin: 0;
   padding: 0;
   border: 0;
