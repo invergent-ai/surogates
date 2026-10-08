@@ -381,7 +381,7 @@ describe("the bindings", () => {
     after.close();
   });
 
-  it("forget a deleted root's binding and its allowed hosts both or neither", () => {
+  it("forget a deleted root's binding and its allowed hosts both or neither, and tell of it once forgotten", () => {
     const journal = new OperationJournal(path);
     journal.bindings.add(binding("r1", 1));
     journal.bindings.allowDomain("r1", "example.com");
@@ -399,10 +399,17 @@ describe("the bindings", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
-    expect(() => new Bindings(failing).retire("r1")).toThrow("disk I/O error");
+    const told: string[] = [];
+    const unwritten = new Bindings(failing);
+    unwritten.watch((root) => told.push(root));
+    expect(() => unwritten.retire("r1")).toThrow("disk I/O error");
     expect([journal.bindings.get("r1"), journal.bindings.domains("r1")]).toEqual([binding("r1", 1), ["example.com"]]);
+    journal.bindings.watch((root) => told.push(root));
     journal.bindings.retire("r1");
     expect([journal.bindings.get("r1"), journal.bindings.domains("r1")]).toEqual([undefined, []]);
+    // A root with no binding left changes nothing, and tells nothing.
+    journal.bindings.retire("r1");
+    expect(told).toEqual(["r1"]);
     journal.close();
   });
 

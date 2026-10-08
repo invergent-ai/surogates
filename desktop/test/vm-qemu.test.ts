@@ -11,7 +11,7 @@ import { guestCpus, Qmp, qemuArgs, virtiofsdArgs } from "../src/vm/qemu.js";
 const DISKS = { kernel: "/i/vmlinuz", rootfs: "/i/rootfs.img", agentDisk: "/a/agent.img", sessions: "/d/sessions.img" };
 
 describe("QEMU's command line", () => {
-  it("is Section 11's, with eight empty root ports for shares, the net port, and no network device", () => {
+  it("is Section 11's, with eight empty root ports for shares, the net port, no network device, and the guest's free pages reported", () => {
     const ports = Array.from({ length: 8 }, (_, n) => ["-device", `pcie-root-port,id=rp${n + 1},chassis=${n + 1}`]).flat();
     expect(qemuArgs(DISKS, "/run/user/1000/surogate/vm", "/d/logs/vm-console.log", 4)).toEqual([
       "-nodefaults", "-no-user-config", "-display", "none", "-no-reboot",
@@ -30,6 +30,7 @@ describe("QEMU's command line", () => {
       "-chardev", "file,id=console,path=/d/logs/vm-console.log", "-device", "virtconsole,chardev=console",
       ...ports,
       "-device", "virtio-rng-pci", "-nic", "none",
+      "-device", "virtio-balloon-pci,free-page-reporting=on",
       "-qmp", "unix:/run/user/1000/surogate/vm/qmp.sock,server=on,wait=off",
       "-pidfile", "/run/user/1000/surogate/vm/qemu.pid",
       "-sandbox", "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny",

@@ -6,18 +6,24 @@
 import { fork } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { setTimeout as wait } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
 import type { HostUser } from "../guest/protocol.js";
 import type { NetworkAnswer, NetworkAsk } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
+import { Backoff } from "./backoff.js";
 import { type ProcessesChange, unavailable, type VmOperation, type VmOptions } from "./manager.js";
 
 // The same from src/vm and from dist/vm.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
 export const MANAGER = join(PACKAGE, "dist", "vm", "main.js");
-const STOP_MS = 5_000;
+// Past the guest's own 5 s to power off once asked, and the manager's exit after it.
+const STOP_MS = 10_000;
+// A ping to the manager every PING_MS; MISSED in a row unanswered is a manager that hangs.
+const PING_MS = 10_000;
+const MISSED = 3;
 // Past the manager's own bounds on a teardown: 15 s for a setup under way, 15 s for the
 // agent's answer, and 15 s for the share's removal.
 const TEARDOWN_MS = 50_000;
@@ -53,11 +59,16 @@ export type ToManager =
   | { type: "teardown"; id: string; root: string }
   // The app's answer to an ask of the host proxy's.
   | { type: "answer"; id: number; allow: boolean }
+  // The keepalive, answered by a pong.
+  | { type: "ping" }
+  // The computer woke from sleep (Electron's powerMonitor).
+  | { type: "resume" }
   | { type: "stop" };
 
 export type FromManager =
   // It runs, and took its start.
   | { type: "ready" }
+  | { type: "pong" }
   | { type: "result"; id: string; outcome: Outcome }
   // Unasked: a root's background processes in the guest changed.
   | { type: "processes"; root: string; change: ProcessesChange }
@@ -102,29 +113,45 @@ export interface VmClientOptions {
   vm: VmOptions;
   spawn?: () => ManagerProcess;
   teardownMs?: number;
+  pingMs?: number;
 }
 
 export class VmClient {
   private manager: ManagerProcess | null = null;
   private readonly pending = new Map<string, (outcome: Outcome) => void>();
   private stopping: Promise<void> | null = null;
+  // Aborted at the stop: an operation waiting out the backoff is answered then, not when its wait ends.
+  private readonly halted = new AbortController();
   private teardowns = 0;
   private readonly listeners = new Set<(root: string, change: ProcessesChange) => void>();
   private readonly askers = new Set<Asker>();
   // The roots whose processes the manager has told of: a manager that goes takes them with its guest.
   private readonly told = new Set<string>();
+  // A manager that went by itself is started again once this has passed (Section 11, Lifecycle).
+  private readonly backoff = new Backoff();
+  // Pings in a row the manager has not answered.
+  private missed = 0;
 
   constructor(private readonly options: VmClientOptions) {}
 
-  /** One process operation of a root's, in the guest. A cancel is answered at once; the manager is told. Never rejects. */
-  perform(operation: VmOperation, signal: AbortSignal): Promise<Outcome> {
-    if (this.stopping) return Promise.resolve(unavailable("is stopping"));
-    if (signal.aborted) return Promise.resolve(CANCELLED);
+  /**
+   * One process operation of a root's, in the guest. A cancel is answered at once; the
+   * manager is told. One that comes while a manager that went backs off waits for it,
+   * until it is cancelled or the VM is stopped. Never rejects.
+   */
+  async perform(operation: VmOperation, signal: AbortSignal): Promise<Outcome> {
+    if (!this.manager && !this.stopping && this.backoff.wait > 0) {
+      // Its cancel, or the stop, is answered just below.
+      await wait(this.backoff.wait, undefined, { signal: AbortSignal.any([signal, this.halted.signal]) }).catch(() => {});
+    }
+    if (this.stopping) return unavailable("is stopping");
+    if (signal.aborted) return CANCELLED;
     let manager: ManagerProcess;
     try {
       manager = this.manager ?? this.start();
     } catch (error) {
-      return Promise.resolve(unavailable(`did not start: ${error instanceof Error ? error.message : String(error)}`));
+      this.backoff.down();
+      return unavailable(`did not start: ${error instanceof Error ? error.message : String(error)}`);
     }
     return new Promise((resolve) => {
       const answer = (outcome: Outcome) => {
@@ -170,6 +197,12 @@ export class VmClient {
     await gone;
   }
 
+  /** The computer woke: its manager is told, and the pings it missed meanwhile are not held against it. */
+  resume(): void {
+    this.missed = 0;
+    if (!this.stopping) this.manager?.send({ type: "resume" });
+  }
+
   /** Asked about each root's destination off the package hosts, whichever device's it is. Returns what stops it. */
   onAsk(asker: Asker): () => void {
     this.askers.add(asker);
@@ -184,6 +217,7 @@ export class VmClient {
 
   // The manager stops its guest and exits; one that does not is killed, and its guest goes with it.
   stop(): Promise<void> {
+    this.halted.abort();
     this.stopping ??= (async () => {
       const manager = this.manager;
       if (!manager) return;
@@ -202,15 +236,29 @@ export class VmClient {
     this.manager = manager;
     // A manager that exits before it says it runs never ran what it was given.
     let ran = false;
+    // One that answers no ping for MISSED of them hangs: it is killed, and its guest goes with it.
+    this.missed = 0;
+    const keepalive = setInterval(() => {
+      if (this.missed >= MISSED) return manager.kill();
+      this.missed += 1;
+      manager.send({ type: "ping" });
+    }, this.options.pingMs ?? PING_MS);
+    keepalive.unref();
     manager.onMessage((message) => {
-      if (message.type === "ready") ran = true;
+      if (message.type === "ready") {
+        ran = true;
+        this.backoff.up();
+      } else if (message.type === "pong") this.missed = 0;
       else if (message.type === "result") this.pending.get(message.id)?.(message.outcome);
       else if (message.type === "processes") this.tell(message.root, message.change);
       else if (message.type === "ask") this.asked(manager, message);
       else if (message.type === "stopped") manager.kill();
     });
     manager.onExit(() => {
+      clearInterval(keepalive);
       if (this.manager === manager) this.manager = null;
+      // One that went by itself, or hung: the next is started once its backoff has passed.
+      if (!this.stopping) this.backoff.down();
       // Before what it ran is answered: the next operation finds them ended.
       for (const root of this.told) this.tell(root, { gone: true });
       const outcome = ran ? SANDBOX_STOPPED : unavailable("did not start: its manager exited");

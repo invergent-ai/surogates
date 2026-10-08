@@ -10,6 +10,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -337,6 +338,23 @@ async def test_the_list_shows_which_devices_are_online(api, redis_client):
     await DevicePresence(redis_client).claim(device_id, "pod-a:1")
     listed = (await api.client.get("/v1/devices", headers=api.auth())).json()
     assert listed[0]["online"] is True
+
+
+async def test_the_list_says_when_a_computer_was_added_and_when_it_was_reauthorized(api):
+    issued = await register(api)
+    [listed] = (await api.client.get("/v1/devices", headers=api.auth())).json()
+    assert (listed["created_at"], listed["reauthorized_at"]) == (issued["created_at"], None)
+
+    response = await api.client.post(f"/v1/devices/{issued['id']}/reauthorize", headers=api.auth())
+    assert response.status_code == 200, response.text
+    restored = response.json()
+    assert restored["reauthorized_at"] is not None
+    [listed] = (await api.client.get("/v1/devices", headers=api.auth())).json()
+    assert (listed["created_at"], listed["reauthorized_at"]) == (issued["created_at"], restored["reauthorized_at"])
+    # UTC, with its zone: a browser reads a time without one as its own local time.
+    added, reauthorized = (datetime.fromisoformat(listed[key]) for key in ("created_at", "reauthorized_at"))
+    assert added.utcoffset() == reauthorized.utcoffset() == timedelta(0)
+    assert reauthorized >= added
 
 
 async def test_revoking_and_reauthorizing_notify_the_connection(api, redis_client):

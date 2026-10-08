@@ -4,6 +4,7 @@
 import type { StateCreator } from "zustand";
 import type { AppState } from "./app-store";
 import { fetchAuthConfig } from "@/api/auth";
+import { desktopSessionsOf } from "@/lib/local-chat";
 
 // Per-agent capability state for the standalone web app. The agent is
 // resolved server-side (Host header / ?agent_id=), so the client just
@@ -22,6 +23,10 @@ export type CapabilitiesSlice = {
   // "Live browser support" capability. ``null`` = unknown (fail open —
   // browser affordances shown); ``false`` hides them.
   browserEnabled: boolean | null;
+  // "Local folders" capability: a chat can work on a folder of the user's computer through
+  // Surogate Desktop. ``null`` = not read yet, or the read failed; ``false`` = this server has
+  // none, or says nothing of them, as an older one.
+  desktopSessions: boolean | null;
   // Messaging channels an end-user can link their identity to. ``null`` =
   // unknown (not loaded); an array (possibly empty) is authoritative — an
   // empty array hides "Connected Channels".
@@ -40,6 +45,7 @@ export const createCapabilitiesSlice: StateCreator<
   agentId: null,
   multiSession: null,
   browserEnabled: null,
+  desktopSessions: null,
   linkableChannels: null,
 
   fetchCapabilities: async () => {
@@ -51,6 +57,7 @@ export const createCapabilitiesSlice: StateCreator<
       agentId: config.agent_id ?? null,
       multiSession: config.multi_session ?? null,
       browserEnabled: config.browser_enabled ?? null,
+      desktopSessions: desktopSessionsOf(config),
       linkableChannels: config.linkable_channels ?? null,
     });
   },

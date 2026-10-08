@@ -457,10 +457,12 @@ async def test_create_agent_session_stamps_device_execution_after_the_cloud_work
         agent_id="a-1",
         channel="web",
         device_id=device_id,
+        device_name="Flavius's ThinkPad",
         folder="/home/flavius/notes",
     )
     cfg = store.create_session.await_args.kwargs["config"]
-    assert cfg["execution"] == {"kind": "device", "device_id": str(device_id)}
+    # The computer's name rides with the chat, so its rows name it in every list.
+    assert cfg["execution"] == {"kind": "device", "device_id": str(device_id), "device_name": "Flavius's ThinkPad"}
     assert cfg["workspace_path"] == "/home/flavius/notes"
     # Kept for create_child_session, never used for a session on a device.
     assert cfg["storage_bucket"] == "tenant-bucket"

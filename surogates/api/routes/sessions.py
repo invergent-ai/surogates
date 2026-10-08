@@ -57,7 +57,7 @@ from surogates.api.routes._commerce_turn import (
 )
 from surogates.devices.binding import device_of
 from surogates.devices.operations import DeviceOperations
-from surogates.devices.store import DeviceStore
+from surogates.devices.store import DeviceRecord, DeviceStore
 from surogates.devices.workspace import DeviceOperationError
 from surogates.session.events import SEED_SYNTHETIC_MARKER, EventType
 from surogates.session.models import Session
@@ -462,6 +462,7 @@ class SessionTreeNode(BaseModel):
     agent_id: str
     agent_type: str | None = None  # from session.config.agent_type
     run_kind: str | None = None  # derived from channel/config, e.g. dynamic_loop
+    computer: str | None = None  # a local-folder chat's computer, as session.config.execution names it
     channel: str
     status: str
     title: str | None = None
@@ -757,8 +758,8 @@ async def _require_local_device(
     *,
     channel: str,
     user_id: UUID | None,
-) -> None:
-    """Refuse unless *execution* names the caller's own live device, saying why."""
+) -> DeviceRecord:
+    """The caller's own live device *execution* names; refused, saying why, for any other."""
     if channel != "web" or user_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -774,6 +775,7 @@ async def _require_local_device(
             status_code=status.HTTP_409_CONFLICT,
             detail="Local access to this computer was revoked.",
         )
+    return device
 
 
 async def _create_session(
@@ -812,8 +814,9 @@ async def _create_session(
     # Checked before creating anything: a refusal afterwards would leave a
     # session row and a workspace nobody uses.
     execution = body.execution
+    device = None
     if execution is not None:
-        await _require_local_device(
+        device = await _require_local_device(
             request, tenant, agent_id, execution, channel=channel, user_id=user_id,
         )
 
@@ -834,7 +837,8 @@ async def _create_session(
         channel=channel,
         config=config,
         service_account_id=service_account_id,
-        device_id=execution.device_id if execution is not None else None,
+        device_id=device.id if device is not None else None,
+        device_name=device.name if device is not None else None,
         folder=execution.folder if execution is not None else None,
     )
     if execution is not None:
@@ -1474,7 +1478,10 @@ async def get_session(
 ) -> Session:
     """Retrieve metadata for a single session."""
     _require_service_account_api_route(request, tenant)
-    return await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
+    # A local-folder chat names its user's computer and folder: theirs to read.
+    await require_device_access(request, session, tenant, bound=False)
+    return session
 
 
 def _tree_node_from_row(row: dict) -> SessionTreeNode:
@@ -1492,6 +1499,7 @@ def _tree_node_from_row(row: dict) -> SessionTreeNode:
         agent_id=row["agent_id"],
         agent_type=config.get("agent_type"),
         run_kind=_session_run_kind(row["channel"], config),
+        computer=(config.get("execution") or {}).get("device_name"),
         channel=row["channel"],
         status=row["status"],
         title=row.get("title"),
@@ -1544,7 +1552,9 @@ async def get_session_tree(
     ``session.config.agent_type``) so the frontend can display badges
     for sub-agent types without extra lookups.
     """
-    await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
+    # A local-folder chat's tree names its user's computer: theirs to read. Its sessions are its root's user's.
+    await require_device_access(request, session, tenant, bound=False)
 
     session_factory = request.app.state.session_factory
     agent_id = agent_runtime.agent_id
@@ -1611,7 +1621,9 @@ async def get_session_children(
     Authorization: the parent session must belong to this tenant and
     agent; child rows inherit tenancy.
     """
-    await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
+    # A local-folder chat's children name its user's computer: theirs to read.
+    await require_device_access(request, session, tenant, bound=False)
 
     session_factory = request.app.state.session_factory
     agent_id = agent_runtime.agent_id
