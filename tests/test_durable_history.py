@@ -623,6 +623,8 @@ def test_pruning_keeps_the_window_and_cuts_at_the_size_rule_and_kept_ids_still_o
     pod = a_pod(tmp_path, project, "live")
     assert (pod.copy / "live.md").read_text() == "unlanded"
     land(pod, "saga:after")
+    # Work older than the window, on a base the cut went below, lands all the same.
+    assert (project / "live.md").read_text() == "unlanded"
     assert git(durable, "fsck", "--no-dangling") == ""
 
 
@@ -1249,6 +1251,36 @@ def test_a_helpers_version_the_thread_did_not_take_stays_in_the_history_with_the
     assert a_pod(tmp_path, project, "t2").prune(keep=[], now=time.time())["pruned"] is True
     assert git(durable, "show", f"{handed_back}:notes.txt") == "the helper's notes"
     assert git(durable, "fsck", "--no-dangling") == ""
+
+
+def test_the_commit_step_takes_up_what_a_helper_kept_since_the_copy_last_did(tmp_path, project):
+    thread = a_pod(tmp_path, project)
+    (thread.copy / "outline.md").write_text("outline")
+    thread.hand_off(author=A, trailers=KEPT)
+    helper = a_helper(tmp_path, project)
+    (helper.copy / "sources.md").write_text("sources")
+    (helper.copy / "outline.md").write_text("the helper's outline")
+    (thread.copy / "outline.md").write_text("the thread's outline, since")
+    # The helper keeps after the thread's last step: nothing takes its work up before the turn's end.
+    helper.hand_back(author=A, trailers=KEPT)
+    turn = thread.commit_turn(author=A, trailers=TURN)
+    # It lands with the turn all the same, and the file the thread changed too is named.
+    assert [c["path"] for c in turn["changes"]] == ["outline.md", "sources.md"]
+    assert turn["not_taken"] == ["outline.md"]
+    assert (thread.copy / "sources.md").read_text() == "sources"
+
+
+def test_a_helper_with_no_hand_off_starts_at_its_threads_branch_with_the_work_it_has_not_landed(tmp_path, project):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first)
+    thread = a_pod(tmp_path, project)
+    (thread.copy / "draft.md").write_text("kept, not landed")
+    thread.keep(author=A, trailers=KEPT, base=True)  # a failed turn's work, on its branch
+    helper = a_helper(tmp_path, project)
+    # Not at main, which lacks it: a helper of the thread goes on from the thread's own work.
+    assert (helper.copy / "draft.md").read_text() == "kept, not landed"
+    assert not (project / "draft.md").exists()
 
 
 def test_a_failed_helpers_copy_is_kept_apart_and_never_handed_back(tmp_path, project):

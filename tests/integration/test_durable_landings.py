@@ -604,6 +604,104 @@ async def test_a_landing_that_lost_its_lock_never_writes_over_the_next_landing(a
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by B"
 
 
+async def test_a_landing_that_lost_its_lock_after_its_last_apply_records_nothing(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md && echo b > b.md")
+    call = landing_module._call
+
+    async def the_lock_goes_after_the_last_apply(sandbox_pool, owner, action, **arguments):
+        result = await call(sandbox_pool, owner, action, **arguments)
+        if action == "apply" and arguments["path"] == "b.md":
+            await lose_the_lock(api, thread)  # no apply is left to find it gone
+        return result
+
+    monkeypatch.setattr(landing_module, "_call", the_lock_goes_after_the_last_apply)
+    await ends(api, pool, thread)
+    # The record is the push that counts: it is not made without the lock, and the files go back.
+    [row] = await rows(api, thread)
+    assert (row.saga_state, row.commit) == ("compensated", None)
+    assert "refs/heads/main" not in (pods.project / "_history" / "packed-refs").read_text()
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
+
+
+async def test_a_recovery_puts_back_your_upload_that_the_dead_landing_wrote_over(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo start > start.md")
+    await ends(api, pool, first)  # a first landing: main is made
+    (pods.project / "upload.md").write_text("uploaded by you after the last landing\n")  # main never held it
+    await edited(pool, first, "echo ' edited by A' >> upload.md && echo a > a.md")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply upload.md")
+    assert "edited by A" in (pods.project / "upload.md").read_text()  # half landed, over your file
+    await edited(pool, second, "echo by B > B.md")
+    await ends(api, pool, second)
+    # Your version was only in the dead pod's own pickup, its turn's base: the next holder fetched it by its id.
+    assert (pods.project / "upload.md").read_text() == "uploaded by you after the last landing\n"
+    assert [r.saga_state for r in await rows(api, first)] == ["completed", "compensated"]
+    assert pods.real_names() == ["B.md", "Report.docx", "notes.txt", "start.md", "upload.md"]
+
+
+async def test_a_turn_with_no_tool_settles_a_landing_another_thread_left_running(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pods = stored(api, first, tmp_path)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo a > a.md && echo b > b.md")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")
+    async with api.app.state.session_factory() as db:  # long quiet: its worker is dead
+        await db.execute(text("UPDATE workstream_history SET updated_at = now() - interval '10 minutes' WHERE thread_id = :t"), {"t": first.id})
+        await db.commit()
+    assert "a.md" in pods.real_names()
+    # B answers its master and stops: no pod, nothing of its own to land.  The half-landed file does not wait for a turn that uses one.
+    await ends(api, SandboxPool(pods), second)
+    assert [r.saga_state for r in await rows(api, first)] == ["compensated"]
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
+
+
+async def test_a_failed_turn_whose_keep_fails_reads_as_not_saved(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo half > half.md")
+    call = landing_module._call
+
+    async def the_keep_fails(sandbox_pool, owner, action, **arguments):
+        if action == "keep":
+            raise landing_module.LandingStepError("the pod's step timed out")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    monkeypatch.setattr(landing_module, "_call", the_keep_fails)
+    await ends(api, pool, thread, failed=True)
+    # Its work went with its pod: its next copy lacks it, and the thread is then told so.
+    [failed] = [e.data for e in await api.app.state.session_store.get_events(thread.id, types=[EventType.SESSION_FAIL])]
+    assert failed["saved"] is False
+    assert not (pods.project / "_history").exists()
+
+
+async def test_a_turn_with_no_tool_opens_no_pod_in_a_project_that_went_over_the_cap(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo half > half.md")
+    await ends(api, pool, thread, failed=True)  # kept on its branch: work that waits to land
+    assert "threads" in (pods.project / "_history" / "packed-refs").read_text()
+    # The project has since grown past the cap: it has no history, and its threads work on the real files.
+    over = thread.model_copy(update={"config": {**thread.config, "history_off": True}})
+    provision, made = pods.provision, []
+
+    async def counted(spec):
+        made.append(spec)
+        return await provision(spec)
+
+    monkeypatch.setattr(pods, "provision", counted)
+    await ends(api, SandboxPool(pods), over)
+    # Nothing lands without a history: no pod is made to land it.
+    assert made == [] and "half.md" not in pods.real_names()
+
+
 async def test_a_failed_turns_work_is_on_its_branch_at_the_next_turn_and_lands_then(api, monkeypatch, tmp_path):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
