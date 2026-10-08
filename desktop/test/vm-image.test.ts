@@ -338,6 +338,18 @@ describe("the guest image's delivery", () => {
     await expect(deliver(options())).rejects.toThrow(`${new URL(base).host} answered 404 for rootfs.img.zst`);
   });
 
+  it("lets go of an answer it does not take, so its connection is not held open", async () => {
+    let closed = false;
+    answer = (_request, response) => {
+      response.writeHead(500).write("x".repeat(1000));
+      response.once("close", () => {
+        closed = true;
+      });
+    };
+    await expect(deliver(options())).rejects.toThrow(`${new URL(base).host} answered 500 for rootfs.img.zst`);
+    await expect.poll(() => closed, { timeout: 2_000 }).toBe(true);
+  });
+
   it("stops at its signal, and keeps what it downloaded for the next try", async () => {
     const stop = new AbortController();
     answer = (_request, response, body) => {

@@ -267,6 +267,7 @@ async function download(options: DeliverOptions, file: ImageFile, partial: strin
         rmSync(partial, { force: true });
         throw new Error(`the download of ${file.download} did not resume where it stopped`);
       } else if (response.status !== 200 && response.status !== 206) {
+        void response.body?.cancel().catch(() => {});
         throw new Error(`${new URL(url).host} answered ${response.status} for ${file.download}`);
       }
       const out = await open(partial, have > 0 ? "a" : "w", 0o600);
