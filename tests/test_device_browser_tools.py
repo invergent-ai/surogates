@@ -145,6 +145,9 @@ async def test_closing_closes_only_the_sessions_tab_on_the_computer(computer) ->
     ({"type": "denied", "message": "The user did not let the agent use the browser on this computer"},
      {"error": "denied", "detail": "The user did not let the agent use the browser on this computer"}),
     ({"type": "no_browser", "message": "none"}, {"error": "no_browser", "detail": NO_BROWSER}),
+    # Not the page failing: the computer's access ended, and no retry brings it back.
+    ({"type": "revoked", "message": "Local access to this computer was revoked"},
+     {"error": "revoked", "detail": "Local access to this computer was revoked"}),
 ])
 async def test_what_the_computer_refuses_is_the_tools_result(computer, error, result) -> None:
     for handler, args in [

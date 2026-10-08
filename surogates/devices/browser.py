@@ -40,7 +40,9 @@ download the computer did not keep.  Errors:
   {"type": "denied", "message"}      the computer's user did not allow it
   {"type": "no_browser", "message"}  no supported browser on this computer
   {"type": "unsupported", ...}       an app that has no browser yet
-  any other type                     DeviceOperationError(message)
+  {"type": "revoked", "message"}     the computer's access ended
+  any other type                     DeviceOperationError(message), which the handlers
+                                     report as their own failure too
 
 Every args object and every outcome fits in one link frame, as in
 surogates.devices.workspace; a screenshot over MAX_PAYLOAD_BYTES is a transfer,
@@ -302,6 +304,8 @@ class DeviceBrowserClient(BrowserClientBase):
                 raise BrowserRefusal(json.dumps({"error": "no_browser", "detail": NO_BROWSER}))
             if refused == "unsupported":
                 raise BrowserRefusal(json.dumps({"error": "unsupported", "detail": OLD_APP}))
+            if refused == "revoked":
+                raise BrowserRefusal(json.dumps({"error": "revoked", "detail": message}))
             raise DeviceOperationError(message)
         if "ok" not in outcome:
             raise DeviceOperationError(f"The computer returned no result for {kind}")
