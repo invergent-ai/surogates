@@ -181,7 +181,8 @@ export class MainWindow {
     this.window.setBackgroundColor(background);
     this.window.setTitleBarOverlay(overlay);
     this.web?.view.setBackgroundColor(background);
-    this.pane?.view.setBackgroundColor(overlay.color);
+    // The pane's own colour, never a dimmed title bar's.
+    this.pane?.view.setBackgroundColor(chrome(dark).overlay.color);
   }
 
   get unreachable(): string | null {
