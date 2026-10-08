@@ -69,6 +69,55 @@ async function viewThread(page: Page, thread: string): Promise<void> {
   await page.click(`[data-thread="${thread}"]`);
   await page.click("#reading-open");
 }
+// Which has the keyboard, as the app's own process sees it: the window's page, and the pane's transcript.
+const keyboardIn = (shell: ElectronApplication) => shell.evaluate(({ BrowserWindow }) => {
+  const window = BrowserWindow.getAllWindows()[0]!;
+  const reading = (window.contentView.children as Electron.WebContentsView[]).find((view) => view.webContents.getURL().includes("/transcript/"));
+  return [window.webContents.isFocused(), reading?.webContents.isFocused() ?? false];
+});
+// A key the user presses in the transcript, as the window's input reaches it.
+const pressed = (shell: ElectronApplication, keyCode: string, modifiers: Array<"shift"> = []) => shell.evaluate(({ BrowserWindow }, [code, held]) => {
+  const reading = (BrowserWindow.getAllWindows()[0]!.contentView.children as Electron.WebContentsView[])
+    .find((view) => view.webContents.getURL().includes("/transcript/"))!;
+  for (const type of ["keyDown", "keyUp"] as const) reading.webContents.sendInputEvent({ type, keyCode: code as string, modifiers: held as Array<"shift"> });
+}, [keyCode, modifiers] as const);
+// Where the app's process has sent the keyboard out of the transcript, in order: to the head's Open or Back.
+const left = (shell: ElectronApplication) => shell.evaluate(() => (globalThis as unknown as { left: unknown[] }).left);
+
+// A thread's transcript in the pane, with the keyboard in it from the head's Open, and every way out of it the app's
+// process tells the window's page kept for left().
+async function inTranscript(): Promise<{ shell: ElectronApplication; page: Page; reader: Page }> {
+  const { shell, page } = await opened();
+  await page.click(`[data-thread="${QUESTION}"]`);
+  await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+  const reader = shell.windows().find((found) => found.url().includes("/transcript/"))!;
+  await reader.waitForLoadState();
+  await shell.evaluate(({ BrowserWindow }) => {
+    const contents = BrowserWindow.getAllWindows()[0]!.webContents;
+    const kept = globalThis as unknown as { left: unknown[] };
+    kept.left = [];
+    const send = contents.send.bind(contents);
+    contents.send = (channel: string, ...args: unknown[]) => {
+      if (channel === "shell:pane-left") kept.left.push(args[0]);
+      return send(channel, ...args);
+    };
+  });
+  await page.focus("#reading-open");
+  await page.keyboard.press("Tab");
+  await expect.poll(() => keyboardIn(shell)).toEqual([false, true]);
+  return { shell, page, reader };
+}
+
+// The pane's transcript as the app's process holds it, and its `pane:leave` heard as from *frame*: the transcript's
+// "top" frame, its first "sub" frame, "none", or a "lookalike" of its top frame's address. Each in turn, saying *to*.
+const heard = (shell: ElectronApplication, said: Array<[frame: "top" | "sub" | "none" | "lookalike", to: unknown]>) =>
+  shell.evaluate(({ BrowserWindow }, calls) => {
+    const contents = (BrowserWindow.getAllWindows()[0]!.contentView.children as Electron.WebContentsView[])
+      .find((view) => view.webContents.getURL().includes("/transcript/"))!.webContents;
+    const frames = { top: contents.mainFrame, sub: contents.mainFrame.frames[0], none: null, lookalike: { url: contents.getURL(), parent: null } };
+    const ipc = contents.ipc as unknown as { emit(channel: string, ...args: unknown[]): boolean };
+    for (const [frame, to] of calls) ipc.emit("pane:leave", { senderFrame: frames[frame] }, to);
+  }, said);
 
 // The fake page's source, as the page keeps it (fake-agent.ts).
 interface Served {
@@ -386,25 +435,13 @@ describe("a thread read in the Overview pane", () => {
       document.body.insertAdjacentHTML("afterbegin", '<button id="one">One</button><button id="two">Two</button>');
       document.body.style.height = "5000px";
     });
-    // Which has the keyboard, as the app's own process sees it: the window's page, and the pane's transcript.
-    const keyboardIn = () => shell.evaluate(({ BrowserWindow }) => {
-      const window = BrowserWindow.getAllWindows()[0]!;
-      const reading = (window.contentView.children as Electron.WebContentsView[]).find((view) => view.webContents.getURL().includes("/transcript/"));
-      return [window.webContents.isFocused(), reading?.webContents.isFocused() ?? false];
-    });
-    // A key the user presses in the transcript, as the window's input reaches it.
-    const pressed = (keyCode: string, modifiers: Array<"shift"> = []) => shell.evaluate(({ BrowserWindow }, [code, held]) => {
-      const reading = (BrowserWindow.getAllWindows()[0]!.contentView.children as Electron.WebContentsView[])
-        .find((view) => view.webContents.getURL().includes("/transcript/"))!;
-      for (const type of ["keyDown", "keyUp"] as const) reading.webContents.sendInputEvent({ type, keyCode: code as string, modifiers: held as Array<"shift"> });
-    }, [keyCode, modifiers] as const);
     const focused = () => reader.evaluate(() => document.activeElement?.id ?? "");
     const inShell = () => page.evaluate(() => document.activeElement?.id);
     await expect.poll(inShell).toBe("reading-back");
     await page.keyboard.press("Tab");
     expect(await inShell()).toBe("reading-open");
     await page.keyboard.press("Tab");
-    await expect.poll(keyboardIn).toEqual([false, true]);
+    await expect.poll(() => keyboardIn(shell)).toEqual([false, true]);
     await reader.keyboard.press("PageDown");
     await expect.poll(() => reader.evaluate(() => window.scrollY)).toBeGreaterThan(0);
     const paged = await reader.evaluate(() => window.scrollY);
@@ -412,14 +449,14 @@ describe("a thread read in the Overview pane", () => {
     await expect.poll(() => reader.evaluate(() => window.scrollY)).toBeGreaterThan(paged);
     // Shift+Tab from a later control steps back inside the page; from its first, out to the head's Open.
     await reader.evaluate(() => document.getElementById("two")!.focus());
-    await pressed("Tab", ["shift"]);
+    await pressed(shell, "Tab", ["shift"]);
     await expect.poll(focused).toBe("one");
-    expect(await keyboardIn()).toEqual([false, true]);
-    await pressed("Tab", ["shift"]);
-    await expect.poll(keyboardIn).toEqual([true, false]);
+    expect(await keyboardIn(shell)).toEqual([false, true]);
+    await pressed(shell, "Tab", ["shift"]);
+    await expect.poll(() => keyboardIn(shell)).toEqual([true, false]);
     expect(await inShell()).toBe("reading-open");
     await page.keyboard.press("Tab");
-    await expect.poll(keyboardIn).toEqual([false, true]);
+    await expect.poll(() => keyboardIn(shell)).toEqual([false, true]);
     // Escape closes the page's dialog, which takes the key as a Radix dialog does, and only that: gone at once here,
     // its taking the key is all that keeps it the page's.
     await reader.evaluate(() => {
@@ -430,19 +467,55 @@ describe("a thread read in the Overview pane", () => {
         document.getElementById("dialog")!.remove();
       }, { capture: true });
     });
-    await pressed("Escape");
+    await pressed(shell, "Escape");
     await expect.poll(() => reader.evaluate(() => document.getElementById("dialog") === null)).toBe(true);
-    expect(await keyboardIn()).toEqual([false, true]);
+    expect(await keyboardIn(shell)).toEqual([false, true]);
     // A dialog that keeps the key to itself keeps the keyboard in the page too.
     await reader.evaluate(() => document.body.insertAdjacentHTML("beforeend", '<div role="dialog" id="kept">Kept</div>'));
-    await pressed("Escape");
+    await pressed(shell, "Escape");
     await pause(300);
-    expect(await keyboardIn()).toEqual([false, true]);
+    expect(await keyboardIn(shell)).toEqual([false, true]);
     await reader.evaluate(() => document.getElementById("kept")!.remove());
     // With nothing open, Escape gives the keyboard back to Back.
-    await pressed("Escape");
-    await expect.poll(keyboardIn).toEqual([true, false]);
+    await pressed(shell, "Escape");
+    await expect.poll(() => keyboardIn(shell)).toEqual([true, false]);
     expect(await inShell()).toBe("reading-back");
+  });
+
+  it("takes the keyboard out of its transcript for no key its page makes up", async () => {
+    const { shell, reader } = await inTranscript();
+    // Escape, and Shift+Tab from no control, as the page dispatches them itself: on its window, its document and its body.
+    await reader.evaluate(() => {
+      (document.activeElement as HTMLElement | null)?.blur();
+      for (const target of [window, document, document.body] as EventTarget[]) {
+        target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+        target.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true }));
+      }
+    });
+    // The user's own Escape, after them, is the one way out the app's process hears of.
+    await pressed(shell, "Escape");
+    await expect.poll(() => left(shell)).toEqual(["back"]);
+    expect(await keyboardIn(shell)).toEqual([true, false]);
+  });
+
+  it("hears the keyboard's way out of its transcript only from the transcript's own top frame", async () => {
+    const { shell, reader } = await inTranscript();
+    await reader.evaluate(() => new Promise<void>((resolve) => {
+      document.body.insertAdjacentHTML("beforeend", '<iframe id="sub" srcdoc="<p>Inner</p>"></iframe>');
+      document.getElementById("sub")!.addEventListener("load", () => resolve());
+    }));
+    await heard(shell, [["sub", "open"], ["none", "open"], ["lookalike", "open"]]);
+    expect(await left(shell)).toEqual([]);
+    expect(await keyboardIn(shell)).toEqual([false, true]);
+    await heard(shell, [["top", "open"]]);
+    expect(await left(shell)).toEqual(["open"]);
+  });
+
+  it("takes the keyboard out of its transcript only to the head's Open or Back, whatever its top frame says", async () => {
+    const { shell, page } = await inTranscript();
+    await heard(shell, [["top", { to: "elsewhere" }], ["top", "javascript:alert(1)"], ["top", undefined], ["top", "open"], ["top", "back"]]);
+    expect(await left(shell)).toEqual(["back", "back", "back", "open", "back"]);
+    await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe("reading-back");
   });
 
   it("is read again as Settings shapes the transcript", async () => {
