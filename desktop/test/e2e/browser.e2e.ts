@@ -707,7 +707,7 @@ describe("a chat's browser taken over, and handed back", () => {
       return answers;
     }, CHAT);
     expect(said).toEqual([SHOW_AT_A_CLICK, SETTINGS_AT_A_CLICK, SHOW_AT_A_CLICK, SETTINGS_AT_A_CLICK, SHOW_AT_A_CLICK, SETTINGS_AT_A_CLICK, SETTINGS_AT_A_CLICK]);
-    // A take-over by the page's own code pauses the chat, which only makes it safer.
+    // A take-over by the page's own code holds the browser, which stops the agent and lets it do nothing more.
     await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
     expect(await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT)).toMatchObject({ takenOver: true });
     // None of it reached the desktop: Settings did not open.

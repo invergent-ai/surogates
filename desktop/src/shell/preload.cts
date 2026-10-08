@@ -106,7 +106,8 @@ if (origin !== undefined && window.top === window && location.origin === origin)
     browser: {
       // Only at its user's click: the agent's page cannot bring the agent's browser over what its user is doing.
       show: atClick("showBrowser", "Surogate shows the agent's browser only when its user asks, with a click"),
-      // A take-over needs no click, and raises the chat's page only with one.
+      // A take-over needs no click: it stops the agent's browser, in every chat here, and lets it do nothing
+      // more. It raises the chat's page only with one.
       takeOver: (sessionId: unknown) => ipcRenderer.invoke("desktop:takeOver", sessionId, clicked()),
       // Only at its user's click: the agent's page cannot open the desktop's confirmation by itself, whatever its user chose before.
       handBack: atClick("handBack", "Surogate hands the agent's browser back only when its user asks, with a click"),

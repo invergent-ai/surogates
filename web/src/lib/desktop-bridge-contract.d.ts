@@ -56,8 +56,10 @@ export interface DesktopBrowser {
   show(sessionId: string): Promise<void>;
   // The user drives the browser from now on, held from this chat: the agent's browser calls in every
   // chat on this computer answer that the user has taken control, and their browser questions waiting
-  // here go. It needs no click, since it only makes the chats safer; the chat's page comes to the
-  // front only at a click of its user's, as show's does. Rejects with "The agent's browser on this
+  // here go, with what the agent was doing in the browser, cut short. It needs no click, since it
+  // stops the agent and lets it do nothing more: so call it only at its user's own, as a page that
+  // calls it by itself stops every chat's browser until its user hands it back. The chat's page comes
+  // to the front only at a click of its user's, as show's does. Rejects with "The agent's browser on this
   // computer is taken over from another chat, and is handed back there" while another chat's
   // take-over stands (takenOver reads "elsewhere"), which this one does not end.
   takeOver(sessionId: string): Promise<void>;

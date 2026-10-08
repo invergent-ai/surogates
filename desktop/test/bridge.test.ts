@@ -89,7 +89,7 @@ describe("the bridge", () => {
   it("brings a chat's page to the front at a take-over only when it came with its user's click", async () => {
     const made = calls();
     const handlers = bridgeHandlers(ORIGIN, made);
-    // The page's own code: the chat is taken over, which only makes it safer, and nothing is raised.
+    // The page's own code: the browser is taken over, which stops the agent and lets it do nothing more, and nothing is raised.
     await handlers.takeOver!(TOP, "7", SESSION);
     await handlers.takeOver!(TOP, "7", SESSION, "true");
     expect(made.takeOver).toHaveBeenCalledTimes(2);

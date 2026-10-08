@@ -128,8 +128,10 @@ export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<strin
     takeOver: checked(async (_window, sessionId, clicked) => {
       const id = chat(sessionId);
       await calls.takeOver(id);
-      // Its page comes to the front only at its user's click, as the preload heard it: a page that takes the chat
-      // over by itself makes it safer, and raises nothing. A chat with no page open is taken over all the same.
+      // Its page comes to the front only at its user's click, as the preload heard it: a page that takes the
+      // browser over by itself raises nothing. It does stop the agent's browser in every chat here, with what it
+      // was doing and every chat's browser prompts, until its user hands it back: the agent stopped, never let
+      // on. A chat with no page open is taken over all the same.
       if (clicked === true) await calls.showBrowser(id).catch(() => {});
     }),
     handBack: checked((window, sessionId) => {
