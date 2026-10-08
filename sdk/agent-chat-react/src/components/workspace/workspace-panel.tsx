@@ -53,6 +53,15 @@ interface WorkspacePanelProps {
 	disabled?: boolean;
 }
 
+/** What a chat's changes say and hold. */
+interface ChatChanges {
+	notice?: string | null;
+	uploading?: boolean;
+	// The file a delete is asked for, and whether it is under way.
+	deleteTarget?: string | null;
+	deleting?: boolean;
+}
+
 function collectExpandedPaths(
 	entries: AgentChatWorkspaceEntry[],
 	depth = 0,
@@ -202,9 +211,18 @@ export function WorkspacePanel({
 	const [treeWaiting, setTreeWaiting] = useState<string | null>(null);
 	// The tree stopped short of the whole folder: at its caps, or a computer out of handles.
 	const [treeTruncated, setTreeTruncated] = useState(false);
-	const [notice, setNotice] = useState<string | null>(null);
-	const [uploading, setUploading] = useState(false);
-	const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+	// Kept by chat: the panel shows the shown chat's alone, and a change of a chat it has left
+	// goes on, to be shown again once the panel is back there.
+	const [changesOf, setChangesOf] = useState<Record<string, ChatChanges>>({});
+	const change = useCallback((chat: string, changes: ChatChanges) => {
+		setChangesOf((all) => ({ ...all, [chat]: { ...all[chat], ...changes } }));
+	}, []);
+	const {
+		notice = null,
+		uploading = false,
+		deleteTarget = null,
+		deleting = false,
+	} = (sessionId ? changesOf[sessionId] : undefined) ?? {};
 	const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
 	const sessionIdRef = useRef(sessionId);
 	// Aborted on unmount: an upload or a delete still waiting for the computer
@@ -243,6 +261,7 @@ export function WorkspacePanel({
 		const current = () =>
 			readingRef.current === reading && sessionIdRef.current === requestedSessionId;
 		setTreeLoading(true);
+		setTreeWaiting(null);
 		setTreeError(null);
 		try {
 			const tree = await adapter.getWorkspaceTree({
@@ -317,62 +336,59 @@ export function WorkspacePanel({
 	const handleUpload = useCallback(
 		async (files: FileList) => {
 			if (disabled || !sessionId || files.length === 0) return;
-			setUploading(true);
-			setNotice(null);
+			change(sessionId, { uploading: true, notice: null });
 			try {
 				for (const uploadedFile of Array.from(files)) {
 					await adapter.uploadWorkspaceFile({
 						sessionId,
 						file: uploadedFile,
 						signal: changesRef.current?.signal,
-						// Said only over the chat it waits in.
-						onWaiting: (said) => {
-							if (sessionIdRef.current === sessionId) setNotice(said);
-						},
+						onWaiting: (said) => change(sessionId, { notice: said }),
 					});
 				}
-				setNotice(
-					files.length === 1
-						? `Uploaded ${files[0]?.name ?? "file"}`
-						: `Uploaded ${files.length} files`,
-				);
+				change(sessionId, {
+					notice:
+						files.length === 1
+							? `Uploaded ${files[0]?.name ?? "file"}`
+							: `Uploaded ${files.length} files`,
+				});
 				await fetchTree();
 			} catch (error) {
-				setNotice((error as Error).message);
+				change(sessionId, { notice: (error as Error).message });
 			} finally {
-				setUploading(false);
+				change(sessionId, { uploading: false });
 				if (fileInputRef.current) fileInputRef.current.value = "";
 			}
 		},
-		[adapter, disabled, fetchTree, sessionId],
+		[adapter, change, disabled, fetchTree, sessionId],
 	);
 
 	const handleDelete = useCallback(
 		async (path: string) => {
 			if (disabled || !sessionId) return;
+			change(sessionId, { deleting: true });
 			try {
 				await adapter.deleteWorkspaceFile({
 					sessionId,
 					path,
 					signal: changesRef.current?.signal,
-					// Said only over the chat it waits in.
-					onWaiting: (said) => {
-						if (sessionIdRef.current === sessionId) setNotice(said);
-					},
+					onWaiting: (said) => change(sessionId, { notice: said }),
 				});
-				if (selectedPath === path) {
+				// The selection is the shown chat's.
+				if (sessionIdRef.current === sessionId && selectedPath === path) {
 					onSelectedPathChange(null);
 				}
-				setNotice(`Deleted ${path.split("/").pop() ?? path}`);
+				change(sessionId, { notice: `Deleted ${path.split("/").pop() ?? path}` });
 				await fetchTree();
 			} catch (error) {
-				setNotice((error as Error).message);
+				change(sessionId, { notice: (error as Error).message });
 			} finally {
-				setDeleteTarget(null);
+				change(sessionId, { deleteTarget: null, deleting: false });
 			}
 		},
 		[
 			adapter,
+			change,
 			disabled,
 			fetchTree,
 			onSelectedPathChange,
@@ -514,7 +530,9 @@ export function WorkspacePanel({
 						>
 							<RenderEntries
 								entries={entries}
-								onDelete={setDeleteTarget}
+								onDelete={(path) => {
+									if (sessionId) change(sessionId, { deleteTarget: path });
+								}}
 								downloadUrlFor={(path) =>
 									sessionId
 										? adapter.getWorkspaceDownloadUrl({ sessionId, path })
@@ -533,10 +551,13 @@ export function WorkspacePanel({
 					deleteTarget?.split("/").pop() ?? "this file"
 				} from the workspace.`}
 				confirmLabel="Delete"
-				onConfirm={() =>
-					deleteTarget ? handleDelete(deleteTarget) : Promise.resolve()
-				}
-				onCancel={() => setDeleteTarget(null)}
+				loading={deleting}
+				onConfirm={() => {
+					if (deleteTarget) void handleDelete(deleteTarget);
+				}}
+				onCancel={() => {
+					if (sessionId) change(sessionId, { deleteTarget: null });
+				}}
 			/>
 		</aside>
 	);
@@ -547,7 +568,8 @@ interface ConfirmDialogProps {
 	title: string;
 	description: ReactNode;
 	confirmLabel: string;
-	onConfirm: () => Promise<void> | void;
+	loading: boolean;
+	onConfirm: () => void;
 	onCancel: () => void;
 }
 
@@ -556,20 +578,10 @@ function ConfirmDialog({
 	title,
 	description,
 	confirmLabel,
+	loading,
 	onConfirm,
 	onCancel,
 }: ConfirmDialogProps) {
-	const [loading, setLoading] = useState(false);
-
-	const handleConfirm = async () => {
-		setLoading(true);
-		try {
-			await onConfirm();
-		} finally {
-			setLoading(false);
-		}
-	};
-
 	return (
 		<Dialog
 			open={open}
@@ -589,7 +601,7 @@ function ConfirmDialog({
 					<Button
 						variant="destructive"
 						disabled={loading}
-						onClick={handleConfirm}
+						onClick={onConfirm}
 					>
 						{loading && (
 							<Loader2Icon className="mr-1.5 size-3.5 animate-spin" />
