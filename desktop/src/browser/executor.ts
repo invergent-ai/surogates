@@ -109,7 +109,8 @@ export class Browsing implements ToolLayer {
   // its folder: the browser is given the files, never a path, and nothing outside the folder.
   private async withFiles(operation: Operation, signal: AbortSignal): Promise<Operation | Outcome> {
     const { paths } = operation.args;
-    if (!Array.isArray(paths) || paths.length === 0 || paths.length > MAX_UPLOAD_FILES || !paths.every((path) => typeof path === "string")) {
+    // The server refuses these already (surogates/tools/builtin/browser.py): this computer checks what it is sent all the same.
+    if (!Array.isArray(paths) || paths.length === 0 || paths.length > MAX_UPLOAD_FILES || !paths.every((path) => typeof path === "string" && path !== "")) {
       return failed(`An upload names 1 to ${MAX_UPLOAD_FILES} files of the chat's folder`);
     }
     const files: Array<{ name: string; mimeType: string; buffer: string }> = [];
@@ -119,7 +120,9 @@ export class Browsing implements ToolLayer {
       if (this.held !== null) return PAUSED;
       const read = await this.options.tools.run({ ...operation, id: `${operation.id}:read-${files.length}`, kind: "read", args: { key, max_bytes: null } }, signal);
       if ("error" in read) return failed(`${key} could not be read for the page: ${read.error.message}`);
-      const buffer = String(read.ok);
+      // A read answers the file's data, in base64: anything else is no file to give.
+      if (typeof read.ok !== "string") return failed(`${key} could not be read for the page: its file host answered no data`);
+      const buffer = read.ok;
       bytes += Buffer.byteLength(buffer, "base64");
       if (bytes > MAX_WRITE_BYTES) return failed(`The files are too large to give the page at once: at most ${MAX_WRITE_BYTES} bytes`);
       files.push({ name: basename(key), mimeType: TYPES[extname(key).toLowerCase()] ?? "application/octet-stream", buffer });

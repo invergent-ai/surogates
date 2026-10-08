@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -8,6 +9,8 @@ import { PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, UNSAVED } from "../src/browser/downloads.js";
 import { Browsing, NO_BROWSER } from "../src/browser/executor.js";
 import type { Launch } from "../src/browser/host.js";
+import { MAX_READ_BYTES, MAX_WRITE_BYTES } from "../src/files/answers.js";
+import { perform } from "../src/files/operations.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
 import type { ToolLayer } from "../src/shell/device-stack.js";
@@ -37,7 +40,8 @@ const kept = (name: string): string => {
   return join(staging, name);
 };
 
-function rig(launch: Launch | null = LAUNCH, bound = true) {
+// *reads*: what reads a chat's files in place of the rig's own, as the file helper would.
+function rig(launch: Launch | null = LAUNCH, bound = true, reads?: (operation: Operation, signal: AbortSignal) => Promise<Outcome>) {
   const ran: string[] = [];
   const browsed: Array<{ launch: Launch; kind: string; args?: Record<string, unknown> }> = [];
   const stopped: string[] = [];
@@ -54,9 +58,10 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
   // What happens while a file is read, as the test says: nothing unless it does.
   const reading = { then: (): void => {} };
   const tools: ToolLayer = {
-    run: (operation) => {
+    run: (operation, stop) => {
       ran.push(operation.kind);
       if (operation.kind !== "read" || operation.args.key === undefined) return Promise.resolve({ ok: "tools" });
+      if (reads) return reads(operation, stop);
       reading.then();
       const data = files[String(operation.args.key)];
       return Promise.resolve(data === undefined
@@ -485,6 +490,30 @@ describe("the browser's kinds beside the tools", () => {
     expect(browsed).toHaveLength(1);
   });
 
+  it("gives the browser none of an upload that does not name one to ten files, and reads nothing for it", async () => {
+    const { browsing, browsed, ran } = rig();
+    const names = (paths: unknown) => browsing.run({ ...op("browser.set_input_files"), args: { paths } }, signal);
+    const one = "/home/u/notes/report.pdf";
+    for (const paths of [undefined, null, one, {}, [], Array.from({ length: 11 }, () => one), [one, 7], [one, ""], [one, null], [[one]]]) {
+      expect(await names(paths), JSON.stringify(paths)).toEqual({ error: { type: "browser", message: "An upload names 1 to 10 files of the chat's folder" } });
+    }
+    expect([ran, browsed]).toEqual([[], []]);
+    // Ten are read, each once, and given.
+    expect(await names(Array.from({ length: 10 }, () => one))).toEqual({ ok: "browser" });
+    expect(ran).toEqual(Array.from({ length: 10 }, () => "read"));
+    expect((browsed[0]?.args as { files: unknown[] }).files).toHaveLength(10);
+  });
+
+  it("gives the browser nothing where the chat's file host answers a read with anything but the file's data", async () => {
+    for (const answered of [{ ok: null }, { ok: 7 }, { ok: { transfer: { size: 3, sha256: "x" } } }, { ok: ["UE5H"] }] as Outcome[]) {
+      const { browsing, browsed } = rig(LAUNCH, true, () => Promise.resolve(answered));
+      expect(await browsing.run({ ...op("browser.set_input_files"), args: { paths: ["/home/u/notes/scan.png"] } }, signal), JSON.stringify(answered)).toEqual({
+        error: { type: "browser", message: "/home/u/notes/scan.png could not be read for the page: its file host answered no data" },
+      });
+      expect(browsed).toEqual([]);
+    }
+  });
+
   it("asks the browser for the address of the page a session acts in, and for an upload, of the file input that asked", async () => {
     expect(await rig().browsing.address("child")).toBe("https://example.com/child");
     expect(await rig().browsing.address("child", true)).toBe("https://example.com/child/the-input");
@@ -503,5 +532,92 @@ describe("the browser's kinds beside the tools", () => {
     await browsing.end();
     await browsing.stop();
     expect(stopped).toEqual(["browser ended", "tools ended", "browser", "tools"]);
+  });
+});
+
+describe("an upload's files, read as the chat's file host reads them", () => {
+  // The file helper's own operations on a folder of the test's (files/operations.ts), as its sandboxed process
+  // runs them for a chat's file host: without the sandbox, which answers no differently for a read.
+  let base: string;
+  let folder: string;
+  beforeEach(() => {
+    base = realpathSync(mkdtempSync(join(tmpdir(), "browsing-upload-")));
+    folder = join(base, "folder");
+    mkdirSync(join(folder, "sub"), { recursive: true });
+    mkdirSync(join(base, "outside"));
+    writeFileSync(join(folder, "a.txt"), "alpha\n");
+    writeFileSync(join(base, "outside", "o.txt"), "outside\n");
+  });
+  afterEach(() => rmSync(base, { recursive: true, force: true }));
+  const filed = () => {
+    const made = rig(LAUNCH, true, (operation, stop) => perform(operation.kind, operation.args, { folder, home: "/home/tester", env: { PATH: "/usr/bin:/bin", HOME: "/home/tester" } }, stop));
+    const upload = (...paths: string[]) => made.browsing.run({ ...op("browser.set_input_files"), args: { paths } }, signal);
+    return { ...made, upload };
+  };
+  const b64 = (text: string) => Buffer.from(text).toString("base64");
+  // A file of the folder that is *bytes* long, of which the disk holds none.
+  const sparse = (name: string, bytes: number) => {
+    writeFileSync(join(folder, name), "");
+    truncateSync(join(folder, name), bytes);
+  };
+
+  it("gives a page a file of the chat's folder by its name, its type and what it holds", async () => {
+    const { browsed, upload } = filed();
+    writeFileSync(join(folder, "sub", "Scan 1.PNG"), "PNG");
+    expect(await upload(`${folder}/a.txt`, `${folder}/sub/Scan 1.PNG`)).toEqual({ ok: "browser" });
+    expect(browsed.at(-1)?.args).toEqual({ files: [
+      { name: "a.txt", mimeType: "text/plain", buffer: b64("alpha\n") }, { name: "Scan 1.PNG", mimeType: "image/png", buffer: b64("PNG") },
+    ] });
+  });
+
+  it("gives a page nothing its chat's file host does not read: nothing outside the folder, through a link, by a path that is not the file's own, or that is no file; and nothing at all of an upload that names one such", async () => {
+    const { browsed, upload } = filed();
+    symlinkSync(join(base, "outside", "o.txt"), join(folder, "to-outside"));
+    symlinkSync("a.txt", join(folder, "to-inside"));
+    symlinkSync(join(base, "outside"), join(folder, "out"));
+    execFileSync("mkfifo", [join(folder, "pipe")]);
+    sparse("large.bin", MAX_READ_BYTES + 1);
+    const refused: Array<[string, string]> = [
+      [`${base}/outside/o.txt`, `Not a path in this folder: '${base}/outside/o.txt'`],
+      ["/etc/passwd", "Not a path in this folder: '/etc/passwd'"],
+      [`${folder}/../outside/o.txt`, `Not a path in this folder: '${folder}/../outside/o.txt'`],
+      [`${folder}/to-outside`, `Not a path in this folder: '${folder}/to-outside'`],
+      [`${folder}/out/o.txt`, `Not a path in this folder: '${folder}/out/o.txt'`],
+      // A link to a file of the folder's own is no name of that file: the file is named by its own path.
+      [`${folder}/to-inside`, `Not a path in this folder: '${folder}/to-inside'`],
+      ["a.txt", "Not a path in this folder: 'a.txt'"],
+      [`${folder}/sub`, `Is a directory: '${folder}/sub'`],
+      [`${folder}/pipe`, `Not a regular file: '${folder}/pipe'`],
+      [`${folder}/missing.txt`, `No such file or directory: '${folder}/missing.txt'`],
+      [`${folder}/large.bin`, "File too large to read from a local folder (over 50 MiB)"],
+    ];
+    for (const [key, why] of refused) {
+      for (const paths of [[key], [`${folder}/a.txt`, key], [key, `${folder}/a.txt`]]) {
+        expect(await upload(...paths), paths.join(" ")).toEqual({ error: { type: "browser", message: `${key} could not be read for the page: ${why}` } });
+      }
+    }
+    expect(browsed).toEqual([]);
+  });
+
+  it("gives a page files of up to what a write may carry, in all, and none of an upload a byte over", async () => {
+    const { browsed, upload } = filed();
+    for (const name of ["half-1.bin", "half-2.bin"]) sparse(name, MAX_WRITE_BYTES / 2);
+    writeFileSync(join(folder, "one.bin"), "1");
+    expect(await upload(`${folder}/half-1.bin`, `${folder}/one.bin`, `${folder}/half-2.bin`)).toEqual({
+      error: { type: "browser", message: "The files are too large to give the page at once: at most 52428800 bytes" },
+    });
+    expect(browsed).toEqual([]);
+    expect(await upload(`${folder}/half-1.bin`, `${folder}/half-2.bin`)).toEqual({ ok: "browser" });
+    const given = (browsed[0]?.args as { files: Array<{ buffer: string }> }).files;
+    expect(given.map((file) => Buffer.byteLength(file.buffer, "base64"))).toEqual([MAX_WRITE_BYTES / 2, MAX_WRITE_BYTES / 2]);
+  });
+
+  it("reads a name the file host keeps from being written as it reads any file of the folder: an upload is a read, and the file host refuses no read by its name", async () => {
+    const { browsed, upload } = filed();
+    mkdirSync(join(folder, ".git"));
+    writeFileSync(join(folder, ".git", "config"), "[remote]\n");
+    writeFileSync(join(folder, ".env"), "KEY=value\n");
+    expect(await upload(`${folder}/.git/config`, `${folder}/.env`)).toEqual({ ok: "browser" });
+    expect((browsed[0]?.args as { files: Array<{ name: string }> }).files.map((file) => file.name)).toEqual(["config", ".env"]);
   });
 });

@@ -21,8 +21,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge } from "../src/browser/downloads.js";
 import {
-  AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, GIVEN_AS_TAKEN, holding, type Launch, NO_SITE, NOT_AS_ASKED,
-  NOT_ASKED, notFinished, OWN_CHOOSER_MS, PROXY_BYPASSED, WEAKENING,
+  A_FOLDER, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding, type Launch, NO_SITE,
+  NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, OWN_CHOOSER_MS, PROXY_BYPASSED, WEAKENING,
 } from "../src/browser/host.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
@@ -405,6 +405,41 @@ describe("what a host that was killed left staged", () => {
     } finally {
       rmSync(temp, { recursive: true, force: true });
     }
+  });
+});
+
+describe("an upload's files, as the host takes them from the main side", () => {
+  const data = Buffer.from("%PDF-1.7").toString("base64");
+  const file = (changed: Record<string, unknown> = {}) => ({ name: "report.pdf", mimeType: "application/pdf", buffer: data, ...changed });
+
+  it("takes one to ten, each a plain name, a type and what it holds in base64, and gives the page those three and nothing else of each", () => {
+    expect(filesOf([file()])).toEqual([{ name: "report.pdf", mimeType: "application/pdf", buffer: data }]);
+    expect(filesOf(Array.from({ length: 10 }, () => file()))).toHaveLength(10);
+    // Whatever else came with one, as a path would, is not the page's.
+    expect(filesOf([file({ path: "/home/u/notes/report.pdf", lastModified: 1 })])).toEqual([{ name: "report.pdf", mimeType: "application/pdf", buffer: data }]);
+    // A name as a folder holds it, with what a shell or a page might read into it left as it is; an empty file; no type.
+    expect(filesOf([file({ name: "a b (2) #1 & c.tar.gz", buffer: "", mimeType: "" })])).toEqual([{ name: "a b (2) #1 & c.tar.gz", mimeType: "", buffer: "" }]);
+  });
+
+  it("takes none where there are no files, more than ten, or one that is not a plain name, a type and base64", () => {
+    for (const files of [undefined, null, "report.pdf", {}, [], Array.from({ length: 11 }, () => file())]) expect(filesOf(files), JSON.stringify(files)?.slice(0, 40)).toBeNull();
+    for (const changed of [
+      { name: "" }, { name: "." }, { name: ".." }, { name: "../etc/passwd" }, { name: "/etc/passwd" }, { name: "a\\b" }, { name: "a\0b" }, { name: 7 },
+      { name: "n".repeat(256) }, { mimeType: 7 }, { mimeType: undefined }, { mimeType: "t".repeat(256) },
+      { buffer: 7 }, { buffer: undefined }, { buffer: Buffer.from("x") }, { buffer: "not base64!" }, { buffer: "QQ" }, { buffer: "QQ=\n" }, { buffer: "=QQ=" },
+    ]) {
+      expect(filesOf([file(changed)]), JSON.stringify(changed)).toBeNull();
+      // One such among good ones: none of the upload is taken.
+      expect(filesOf([file(), file(changed)]), JSON.stringify(changed)).toBeNull();
+    }
+    for (const one of [null, "report.pdf", [], 7]) expect(filesOf([one])).toBeNull();
+  });
+
+  it("takes up to what a write may carry, in all, and none of an upload a byte over", () => {
+    const half = Buffer.alloc(MAX_WRITE_BYTES / 2).toString("base64");
+    expect(filesOf([file({ buffer: half }), file({ buffer: half })])).toHaveLength(2);
+    expect(filesOf([file({ buffer: half }), file({ buffer: half }), file({ buffer: "QQ==" })])).toBeNull();
+    expect(filesOf([file({ buffer: Buffer.alloc(MAX_WRITE_BYTES + 1).toString("base64") })])).toBeNull();
   });
 });
 
@@ -1183,6 +1218,40 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     // The next upload, about which nobody was asked, is given to the input that asked last, as before.
     expect(await upload()).toMatchObject({ ok: { files: 1 } });
     expect(await page.evaluate(filed)).toEqual([[], ["report.pdf"]]);
+  }, 30_000);
+
+  it("gives a file input as many files as it takes: one where it takes one, several where it takes several, and none where it asks for a folder", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    const page = tabs().get(a)![0]!;
+    const click = () => op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 });
+    const upload = (...names: string[]) => op(a, "browser.set_input_files", { files: names.map((name) => ({ ...REPORT, name })) });
+    const holds = () => page.evaluate(() => [...(document.getElementById("file") as HTMLInputElement).files!].map((file) => file.name));
+    // Two for an input that takes one: neither is given, and the input that asked is still there for one.
+    await click();
+    expect(await upload("a.pdf", "b.pdf")).toEqual({ error: { type: "browser", message: ONE_FILE } });
+    expect(await holds()).toEqual([]);
+    expect(await upload("a.pdf")).toMatchObject({ ok: { files: 1 } });
+    expect(await holds()).toEqual(["a.pdf"]);
+    // An input that takes several is given each, in the order they were named, and its page hears them as a person's choice.
+    await page.evaluate(() => {
+      const input = document.getElementById("file") as HTMLInputElement;
+      input.multiple = true;
+      const heard: string[] = [];
+      Object.assign(window, { heard });
+      for (const kind of ["input", "change"]) input.addEventListener(kind, () => heard.push(`${kind} ${input.files!.length}`));
+    });
+    await click();
+    expect(await upload("c.pdf", "b.pdf")).toMatchObject({ ok: { files: 2 } });
+    expect(await holds()).toEqual(["c.pdf", "b.pdf"]);
+    expect(await page.evaluate(() => (window as unknown as { heard: string[] }).heard)).toEqual(["input 2", "change 2"]);
+    // One that asks for a folder is given no files: what it holds stays.
+    await page.evaluate(() => {
+      (document.getElementById("file") as HTMLInputElement).webkitdirectory = true;
+    });
+    await click();
+    expect(await upload("d.pdf")).toEqual({ error: { type: "browser", message: A_FOLDER } });
+    expect(await holds()).toEqual(["c.pdf", "b.pdf"]);
   }, 30_000);
 
   it("gives a chat's upload to no file input of another chat's tab, nor to one in a tab no chat owns, whichever asked last", async () => {

@@ -105,6 +105,7 @@ export const NOT_AS_ASKED =
   "The page is not as it was when the user was asked about this upload, so it was given nothing: click its upload button or its file input again, then upload again";
 export const NO_SITE = "The file input that asked is in a frame that runs as no site, so it is given no files";
 export const ONE_FILE = "The page's file input takes one file at a time";
+export const A_FOLDER = "The page asked for a folder, which the agent's browser on this computer does not give";
 export const BUSY = "The page was too busy to take the files, so it was given none of them";
 // How long the one step that puts an upload's files into its input may take to reach the page, and how
 // many times it is sent to a page too busy for that.
@@ -204,17 +205,32 @@ interface UploadFile {
   buffer: string;
 }
 
-// An upload's files as the main side sent them, each a plain name, a type and its data in base64; null for anything else.
-function filesOf(value: unknown): UploadFile[] | null {
-  if (!Array.isArray(value) || value.length === 0) return null;
+// The most files one upload gives a page, as the main side reads them (executor.ts); and the longest a
+// file's name or its type may be, in bytes: what a file system takes for a name.
+const MAX_UPLOAD_FILES = 10;
+const MAX_NAME_BYTES = 255;
+// Base64 as the page decodes it: its alphabet, padded to a whole number of fours. Scanned once, end to end.
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/**
+ * An upload's files as the main side sent them: one to ten, each a plain name, a type and its data in
+ * base64, of at most what a write may carry in all. Null for anything else: the page is then given none
+ * of them. Only those three of each go on to the page.
+ */
+export function filesOf(value: unknown): UploadFile[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_UPLOAD_FILES) return null;
+  let bytes = 0;
   const files = value.map((file: unknown) => {
     if (!isRecord(file)) return null;
     const { name, mimeType, buffer } = file;
-    const plain = typeof name === "string" && name !== "" && name !== "." && name !== ".." && !/[/\\\0]/.test(name);
-    if (!plain || typeof mimeType !== "string" || typeof buffer !== "string") return null;
+    const plain = typeof name === "string" && name !== "" && name !== "." && name !== ".." && !/[/\\\0]/.test(name)
+      && Buffer.byteLength(name) <= MAX_NAME_BYTES;
+    if (!plain || typeof mimeType !== "string" || mimeType.length > MAX_NAME_BYTES) return null;
+    if (typeof buffer !== "string" || buffer.length % 4 !== 0 || !BASE64.test(buffer)) return null;
+    bytes += Buffer.byteLength(buffer, "base64");
     return { name, mimeType, buffer };
   });
-  return files.every((file) => file !== null) ? files : null;
+  return bytes <= MAX_WRITE_BYTES && files.every((file) => file !== null) ? files : null;
 }
 
 // Where a file input is: whether it is still a file input of its frame's own document, at what address
@@ -257,10 +273,11 @@ const make = (_input: Node, sent: UploadFile[]): DataTransfer => {
 // one step, so that nothing the page does comes between.
 const put = (
   made: DataTransfer, { input, by, at }: { input: Node; by: number; at: { href: string; origin: string } | null },
-): "given" | "gone" | "moved" | "single" | "late" => {
+): "given" | "gone" | "moved" | "single" | "folder" | "late" => {
   if (Date.now() > by) return "late";
   if (!(input instanceof HTMLInputElement) || input.type !== "file" || !input.isConnected || input.ownerDocument !== document) return "gone";
   if (at !== null && (location.href !== at.href || self.origin !== at.origin)) return "moved";
+  if (input.webkitdirectory) return "folder";
   if (made.files.length > 1 && !input.multiple) return "single";
   input.files = made.files;
   input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
@@ -957,6 +974,7 @@ export class BrowserHost {
         // The page was too busy to take them in time: looked at again, and sent again.
         if (came === "late") continue;
         if (came === "single") return ONE_FILE;
+        if (came === "folder") return A_FOLDER;
         if (came !== "given") return at ? NOT_AS_ASKED : NOT_ASKED;
         if (stop.aborted) this.keep(session, GIVEN_AS_TAKEN);
         return null;
