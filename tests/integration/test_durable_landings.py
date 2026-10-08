@@ -611,6 +611,11 @@ async def test_a_failed_turns_work_is_on_its_branch_at_the_next_turn_and_lands_t
     pool = SandboxPool(pods)
     await edited(pool, thread, "printf ' half made' >> Report.docx")
     await ends(api, pool, thread, failed=True)
+    # The master hears that it failed, and that its work is not lost.
+    [failed] = [e.data for e in await api.app.state.session_store.get_events(master.id, types=[EventType.WORKER_FAILED])]
+    assert worker_note(EventType.WORKER_FAILED.value, failed)["content"].endswith(
+        "failed: provider_error. Its work is kept, and lands with the thread's next turn]"
+    )
     # Not landed, kept on its branch; and its pod is gone.
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
     assert git(pods.project / "_history", "show", f"refs/heads/threads/{thread.id}:Report.docx") == "PK\x03\x04 report v1 half made"
@@ -988,7 +993,11 @@ async def test_a_landing_that_could_not_settle_another_threads_is_kept_and_lands
     assert git(pods.project / "_history", "show", f"refs/heads/threads/{second.id}:B.md") == "by B"
     assert [done["saved"] for done in await turn_ends(api, second)] == [True]
     [report] = await reports(api, master)
-    assert report["landing"] == "compensated"  # not landed, and the project's files are as they were
+    # The master reads that it did not land, that the project's files are as they were, and that the work is kept.
+    assert (report["landing"], report["saved"]) == ("compensated", True)
+    said = worker_note(EventType.WORKER_COMPLETE.value, report)["content"]
+    assert "\nNot landed, and the project's files are as they were: " in said
+    assert said.endswith("\nThe thread's work is kept, and lands with its next turn")
     assert await rows(api, second) == [] and [r.saga_state for r in await rows(api, first)] == ["running"]
     # B's next turn, with no tool, settles A's landing and lands its own.
     await ends(api, SandboxPool(pods), second)

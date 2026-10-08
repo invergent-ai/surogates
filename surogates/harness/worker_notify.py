@@ -205,6 +205,9 @@ async def notify_parent_on_completion(
                         payload[f"{key}_count"] = len(landing[key])
             if landing is not None and landing["state"] != "completed":
                 payload["landing"] = landing["state"]
+                if landing.get("saved"):
+                    # Not landed, and not lost: the turn is on the thread's branch.
+                    payload["saved"] = True
 
         await session_store.emit_event(
             parent_session_id,

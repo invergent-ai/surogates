@@ -1299,6 +1299,9 @@ class ArtifactCompletionMixin:
         error = f"{reason}: {data}" if data else reason
         if left:
             error += f". Its changes to {', '.join(left)} were kept apart, not brought into the thread's copy"
+        elif saved and is_project_thread(session.config):
+            # Said as a landing that did not finish says it: nothing of the turn is lost.
+            error += ". Its work is kept, and lands with the thread's next turn"
         await announce_failure(
             self._store, session, error=error, summary=_last_assistant_message_excerpt(messages),
         )

@@ -242,9 +242,11 @@ async def test_an_apply_that_fails_on_the_third_of_five_files_puts_the_first_two
     [report] = await reports(api, master)
     assert report["landing"] == "compensated"
     assert {f["landing"] for f in report["files"]} == {"not_merged"}
+    # The master hears that nothing landed, and that the turn's work is not lost for it.
     assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
         "Files: none\n"
-        "Not landed, and the project's files are as they were: a.md, b.md, c.md, d.md, e.md"
+        "Not landed, and the project's files are as they were: a.md, b.md, c.md, d.md, e.md\n"
+        "The thread's work is kept, and lands with its next turn"
     )
 
 
@@ -378,7 +380,10 @@ async def landing_told(api, monkeypatch, pool) -> tuple[dict, str]:
 async def test_a_landing_that_never_knew_its_files_still_tells_the_master(api, monkeypatch, pods):
     report, note = await landing_told(api, monkeypatch, FailsToCommit(pods))
     assert report["landing"] == "compensated"
-    assert note.endswith("Files: none\nNot landed, and the project's files are as they were: a.md")
+    assert note.endswith(
+        "Files: none\nNot landed, and the project's files are as they were: a.md\n"
+        "The thread's work is kept, and lands with its next turn"
+    )
     assert not (pods.project / "a.md").exists()
 
 

@@ -168,6 +168,10 @@ _NOT_LANDED = {
     "escalated": "Could not finish landing these; check them",
     "failed": "Not saved, because the landing failed",
 }
+#: A landing that failed with the turn's work kept all the same.
+_FAILED_KEPT = "Not landed, because the landing failed"
+#: What a report adds when the work that did not land is in the history, on the thread's branch.
+WORK_KEPT = "The thread's work is kept, and lands with its next turn"
 #: What a report says of a thread's files a landing left out, by why it left them out.
 _NOT_MERGED = {
     "changed": "Not merged, because the project's file changed after the thread started (the newer file was kept)",
@@ -201,7 +205,10 @@ def _landing_lines(data: dict, kept: list, deleted: list) -> str:
     if data.get("landing") in _NOT_LANDED:
         # Said even when no file is known: the master must hear the turn did not land.
         named = _listed(kept) if kept else "the turn's files could not be read"
-        lines += f"\n{_NOT_LANDED[data['landing']]}: {named}"
+        saved = data.get("saved") is True and data["landing"] != "escalated"
+        words = _FAILED_KEPT if saved and data["landing"] == "failed" else _NOT_LANDED[data["landing"]]
+        # And that nothing is lost for it, when the turn is on the thread's branch.
+        lines += f"\n{words}: {named}" + (f"\n{WORK_KEPT}" if saved else "")
     elif kept:
         # A report from before reasons were given says the file changed.
         why: dict[str, list] = {reason: [] for reason in _NOT_MERGED}
