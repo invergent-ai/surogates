@@ -93,6 +93,15 @@ class ReleaseWorkflowTest < Minitest::Test
     end
   end
 
+  def test_only_the_jobs_that_write_a_release_may_write_its_assets
+    jobs = @workflow.fetch("jobs")
+
+    # A release's desktop-vm-<key>.json anchors the desktop's image: wheel builds with unpinned
+    # dependencies and images runs third-party actions, and neither uploads a release asset.
+    assert_equal({ "contents" => "read" }, jobs.fetch("wheel").fetch("permissions"))
+    assert_equal({ "contents" => "read", "packages" => "write" }, jobs.fetch("images").fetch("permissions"))
+  end
+
   def test_desktop_vm_jobs_are_bounded_past_the_wait_for_a_key_s_manifest
     jobs = @workflow.fetch("jobs")
 

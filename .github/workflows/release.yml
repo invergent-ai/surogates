@@ -12,6 +12,9 @@ permissions:
 jobs:
   wheel:
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    # It uploads an artifact, never a release asset: the release's assets anchor the desktop's image.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -75,6 +78,10 @@ jobs:
   images:
     needs: npm
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    # GHCR's, and no release asset.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
