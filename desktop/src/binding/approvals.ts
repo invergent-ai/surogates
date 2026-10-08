@@ -281,7 +281,8 @@ export class Approvals {
         return { answer: browserDenied(couldNotAsk(error)) };
       }
       if (!binding) return { answer: FOLDER_UNAVAILABLE };
-      // A chat whose agent may not use the browser has no tab: its close closes nothing, and asks nothing.
+      // A chat whose agent may not use the browser asks nothing at a close: it has no tab, or only those left
+      // open since its user took the browser back from it in Settings, which its close still closes.
       if (!allowed && operation.kind === "browser.close") return { answer: null };
       const act = binding.mode !== "free" && acts(operation);
       return allowed && !act ? { answer: null } : { binding, use: !allowed, act };

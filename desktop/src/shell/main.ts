@@ -1984,6 +1984,7 @@ function showSettings(section?: "browser"): void {
       bindings.disallowDomain(root, host);
     });
     // A chat's browser taken back by its user: its agent's next browser call asks its first use again. Its tabs stay.
+    // The agent's browser held from that chat stays held: taking this back hands nothing back.
     handle("settings:take-back-browser", (root) => {
       const bindings = openStack()?.bindings;
       if (!bindings || typeof root !== "string" || !bindings.browsing(root)) throw new Error("This chat does not use the browser on this computer");
