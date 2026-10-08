@@ -3,11 +3,11 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } fr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
-import { forkManager, type FromManager, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../src/vm/client.js";
-import { unavailable, type VmOperation, type VmOptions } from "../src/vm/manager.js";
+import { forkManager, type FromManager, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmOptions } from "../src/vm/client.js";
+import { type Boot, unavailable, type VmOperation, type VmOptions } from "../src/vm/manager.js";
 
 let dir: string;
 let path: string | undefined;
@@ -18,13 +18,15 @@ let clients: VmClient[];
 const SLEEP = "31.357";
 const running = () => Number(spawnSync("pgrep", ["-fc", `^sleep ${SLEEP}$`], { encoding: "utf8" }).stdout.trim() || 0);
 
-function client(): VmClient {
+// *ready*: what the client waits for before a boot, as the app's image.
+function client(ready?: (signal: AbortSignal) => Promise<void>): VmClient {
   const options: VmOptions = {
     kernel: "/i/vmlinuz", rootfs: "/i/rootfs.img", agentDisk: "/a/agent.img", sessions: join(dir, "sessions.img"), run: join(dir, "run"),
     console: join(dir, "console.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" },
   };
   const made = new VmClient({
     vm: options,
+    ready,
     spawn: () => {
       const manager = forkManager();
       spawned.push(manager);
@@ -342,6 +344,96 @@ describe("the VM's files", () => {
     // Without XDG_RUNTIME_DIR: the user's own folder logind makes, never /tmp.
     expect(vmOptions("/d", { ...ana, uid: 1234 }, {}).run).toMatch(/^\/run\/user\/1234\/surogate\/vm-[0-9a-f]{8}$/);
   });
+
+  it("boot the image the app delivered with its agent disk, SUROGATE_VM_IMAGE's in its place when set, and open SUROGATE_VM_KVM for KVM", () => {
+    const delivered = { image: "/d/vm/images/abc", agentDisk: "/opt/surogate/current/resources/vm/agent.img" };
+    const installed = vmOptions("/d", ana, {}, delivered);
+    expect([installed.kernel, installed.rootfs, installed.agentDisk, installed.kvm]).toEqual([
+      "/d/vm/images/abc/vmlinuz", "/d/vm/images/abc/rootfs.img", "/opt/surogate/current/resources/vm/agent.img", undefined,
+    ]);
+    expect(vmOptions("/d", ana, { SUROGATE_VM_IMAGE: "/mine" }, delivered).rootfs).toBe("/mine/rootfs.img");
+    expect(vmOptions("/d", ana, {}).rootfs).toBe(join(REPO_IMAGE, "rootfs.img"));
+    expect(vmOptions("/d", ana, { SUROGATE_VM_KVM: "/nowhere" }).kvm).toBe("/nowhere");
+  });
+});
+
+describe("the delivered image, and each boot", () => {
+  it("waits for the VM to be able to boot, its image here, before it starts a manager, and starts one once it is", async () => {
+    let here = () => {};
+    const vm = client(() => new Promise<void>((resolve) => {
+      here = resolve;
+    }));
+    const answered = vm.perform(operation(), signal());
+    expect(await within(answered, 300)).toBe("no answer");
+    expect(spawned).toHaveLength(0);
+    here();
+    // The stand-in QEMU cannot start: the manager ran, and said so.
+    expect(await answered).toEqual(unavailable("did not start: QEMU exited: no KVM here"));
+    expect(spawned).toHaveLength(1);
+  });
+
+  it("answers what waits with why the VM cannot boot, as an image that could not be downloaded, and starts no manager", async () => {
+    const vm = client(async () => {
+      throw new Error("could not be downloaded: there is not enough free disk space: it needs 3.5 GB, and 1.2 GB is free");
+    });
+    expect(await vm.perform(operation(), signal())).toEqual(
+      unavailable("could not be downloaded: there is not enough free disk space: it needs 3.5 GB, and 1.2 GB is free"),
+    );
+    expect(spawned).toHaveLength(0);
+  });
+
+  it("answers a cancel, and the app's quit, at once while it waits for the VM to be able to boot", async () => {
+    const waiting = (cancel: AbortSignal) => new Promise<void>((_resolve, reject) => cancel.addEventListener("abort", () => reject(cancel.reason), { once: true }));
+    const vm = client(waiting);
+    const cancel = new AbortController();
+    const cancelled = vm.perform(operation(), cancel.signal);
+    cancel.abort();
+    expect(await cancelled).toEqual(CANCELLED);
+    const quitting = vm.perform(operation(), signal());
+    await vm.stop();
+    expect(await quitting).toEqual(unavailable("is stopping"));
+  });
+
+  for (const [emulated, bound] of [[null, 10_000], ["no-kvm", 35_000]] as const) {
+    it(`tells each boot, and gives a manager whose last guest ran ${emulated ? "emulated" : "with KVM"} ${bound / 1000} s to stop before it is killed`, async () => {
+      vi.useFakeTimers();
+      try {
+        const killed = { count: 0 };
+        const exits: Array<() => void> = [];
+        let tell = (_message: FromManager) => {};
+        const vm = new VmClient({
+          vm: { kernel: "/k", rootfs: "/r", agentDisk: "/a", sessions: join(dir, "s.img"), run: join(dir, "run"), console: join(dir, "c.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" } },
+          // It says it runs, and from then on lets its stops go unheard.
+          spawn: () => ({
+            send: (message) => void (message.type === "start" && setTimeout(() => tell({ type: "ready" }), 1)),
+            onMessage: (listener) => {
+              tell = listener;
+            },
+            onExit: (listener) => void exits.push(listener),
+            kill: () => {
+              killed.count += 1;
+              for (const exit of exits.splice(0)) exit();
+            },
+          }),
+        });
+        const boots: Boot[] = [];
+        vm.onBoot((boot) => boots.push(boot));
+        void vm.perform(operation(), signal());
+        await vi.advanceTimersByTimeAsync(10);
+        tell({ type: "boot", boot: { failed: "QEMU exited" } });
+        tell({ type: "boot", boot: { emulated } });
+        expect(boots).toEqual([{ failed: "QEMU exited" }, { emulated }]);
+        const stopped = vm.stop();
+        await vi.advanceTimersByTimeAsync(bound - 100);
+        expect(killed.count).toBe(0);
+        await vi.advanceTimersByTimeAsync(200);
+        expect(killed.count).toBe(1);
+        await stopped;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  }
 });
 
 describe("a manager that runs on", () => {

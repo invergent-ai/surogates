@@ -15,7 +15,7 @@ import { Control, type ControlRoots } from "../src/guest/control.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { bootLinux, emulation, sweep } from "../src/vm/linux.js";
 import {
-  type BootVm, bootFor, EMULATED_NOTICE, type Emulated, type Folder, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions, WAITS,
+  type Boot, type BootVm, bootFor, EMULATED_NOTICE, type Emulated, type Folder, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions, WAITS,
 } from "../src/vm/manager.js";
 import { VIRTIOFSD } from "../src/vm/qemu.js";
 
@@ -1043,5 +1043,26 @@ describe("the emulated VM", () => {
     expect(await run(kvm, "root-1")).toEqual(plain);
     await kvm.stop();
     expect(EMULATED_NOTICE).toBe("This computer runs commands in an emulated sandbox, about 5 to 20 times slower than usual. Give long commands more time.");
+  });
+
+  it("tells each boot: with KVM, emulated and why, or why it did not start", async () => {
+    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+    const folder = { path: dir, ...statSync(dir) };
+    const which = (manager: VmManager) => manager.perform({ id: "1", root: "root-1", folder, kind: "which", args: {} }, new AbortController().signal);
+    for (const emulated of [null, "relogin"] as const) {
+      const told: Boot[] = [];
+      const manager = new VmManager(options(), fakeVm(roots, true, emulated), undefined, undefined, (boot) => told.push(boot));
+      expect(await which(manager)).toEqual({ ok: true });
+      expect(told).toEqual([{ emulated }]);
+      await manager.stop();
+    }
+    const told: Boot[] = [];
+    const failing: BootVm = async () => {
+      throw new Error("QEMU exited: qemu-system-x86_64: -drive if=none,id=root: Could not open '/i/rootfs.img': No such file or directory");
+    };
+    const manager = new VmManager(options(), failing, undefined, undefined, (boot) => told.push(boot));
+    expect(await which(manager)).toEqual(unavailable("did not start: QEMU exited: qemu-system-x86_64: -drive if=none,id=root: Could not open '/i/rootfs.img': No such file or directory"));
+    expect(told).toEqual([{ failed: "QEMU exited: qemu-system-x86_64: -drive if=none,id=root: Could not open '/i/rootfs.img': No such file or directory" }]);
+    await manager.stop();
   });
 });

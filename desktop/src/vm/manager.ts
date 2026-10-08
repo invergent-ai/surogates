@@ -46,6 +46,9 @@ const MAX_TIMER_MS = 2 ** 31 - 1;
 // from the next login on (relogin) or is not (no-access); or QEMU could not use it (kvm-failed).
 export type Emulated = "no-kvm" | "no-access" | "relogin" | "kvm-failed";
 
+// What a boot told the app: the guest runs, with KVM (null) or emulated, or it did not start, and why.
+export type Boot = { emulated: Emulated | null } | { failed: string };
+
 export interface VmOptions extends Disks {
   run: string; // the backend's runtime folder, this user's own: on Linux, the sockets and pidfiles
   console: string; // the guest's console log
@@ -492,11 +495,13 @@ export class VmManager {
   private readonly noticed = new Set<string>();
 
   // *told*: each change of a root's processes in its guests. *egress*: who lets a root's commands reach past the package hosts.
+  // *report*: each boot, and how it went.
   constructor(
     private readonly options: VmOptions,
     private readonly boot: BootVm | null = bootFor(process.platform),
     private readonly told: Told = () => {},
     private readonly egress: Egress = REFUSING,
+    private readonly report: (boot: Boot) => void = () => {},
   ) {}
 
   /**
@@ -597,12 +602,14 @@ export class VmManager {
     booting.then(async (guest) => {
       this.failed = null;
       this.backoff.up();
+      this.report({ emulated: guest.emulated });
       await guest.gone;
       // One that crashed, or stuck, backs off its next boot; one that stopped, idle or asked, does not.
       if (guest.lost) this.backoff.down();
     }, (error: unknown) => {
       if (this.stopping) return;
       this.failed = describe(error);
+      this.report({ failed: this.failed });
       this.backoff.down();
     }).finally(() => {
       if (this.guest === booting) this.guest = null;
