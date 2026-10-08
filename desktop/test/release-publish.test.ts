@@ -4,7 +4,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, type KeyObject, randomBytes, verify } from "node:crypto";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,13 @@ const pem = (key: KeyObject) => key.export({ type: "spki", format: "pem" }).toSt
 const secret = (key: KeyObject) => key.export({ type: "pkcs8", format: "pem" }).toString();
 const PRIVATE = secret(keys.privateKey);
 const PUBLIC = pem(keys.publicKey);
+// *program* as publish.sh calls it, in *dir*/bin, each argument it is given written down first, in
+// *dir*/<program>-argv.
+const recording = (dir: string, program: string) => {
+  const real = spawnSync("sh", ["-c", `command -v ${program}`], { encoding: "utf8" }).stdout.trim();
+  mkdirSync(join(dir, "bin"), { recursive: true });
+  writeFileSync(join(dir, "bin", program), `#!/bin/sh\nprintf '%s\\n' "$@" >> '${join(dir, `${program}-argv`)}'\nexec '${real}' "$@"\n`, { mode: 0o755 });
+};
 // install.sh with *trusted* in the release keys' place.
 const trusting = (trusted = [PUBLIC]) => readFileSync(join(RELEASE, "install.sh"), "utf8")
   .replace(/RELEASE_KEYS=\(\n[^)]*\)/, `RELEASE_KEYS=(\n${trusted.map((key) => `    '${key}'`).join("\n")}\n  )`);
@@ -31,7 +38,7 @@ describe("the desktop's release manifest", () => {
   let out: string;
   // publish.sh and an install.sh that trusts the test's key, beside each other as in the repository.
   const publish = (verb: string, version: string, env: Record<string, string> = {}) => spawnSync(join(dir, "release", "publish.sh"), [verb, version, out], {
-    encoding: "utf8", env: { ...process.env, ...env },
+    encoding: "utf8", env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}`, ...env },
   });
 
   beforeEach(() => {
@@ -43,6 +50,7 @@ describe("the desktop's release manifest", () => {
     out = join(dir, "out");
     mkdirSync(out);
     writeFileSync(join(out, "surogate-desktop-1.2.3-linux-x64.tar.gz"), randomBytes(4096));
+    recording(dir, "openssl");
   });
 
   it("signs the exact bytes of a manifest that names the tarball by its hash and its size", () => {
@@ -65,6 +73,21 @@ describe("the desktop's release manifest", () => {
       encoding: "utf8",
     });
     expect(checked).toMatchObject({ status: 0, stdout: `1.2.3 ${sha256(readFileSync(join(out, "surogate-desktop-1.2.3-linux-x64.tar.gz")))} 4096\n`, stderr: "" });
+  });
+
+  it("hands the release key to openssl through a pipe alone: never on a command line, where any process of the runner's could read it, and in no file", () => {
+    expect(publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE }).status).toBe(0);
+    // The key's own line of its PEM: the rest is every such key's.
+    const body = PRIVATE.split("\n")[1] ?? "";
+    expect(body).toMatch(/^[A-Za-z0-9+/]{64}$/);
+    const argv = readFileSync(join(dir, "openssl-argv"), "utf8");
+    expect(argv).toContain("-sign");
+    expect(argv).not.toContain(body);
+    // Every file openssl is given is a pipe, but the manifest it signs and the signature it writes.
+    expect(argv.split("\n").filter((arg) => arg.startsWith("/") && !/^\/dev\/fd\/\d+$/.test(arg))).toEqual([join(out, "manifest.json"), join(out, "manifest.json.sig")]);
+    // Beside the tarball, the manifest and its signature, and nothing else.
+    expect(readdirSync(out).sort()).toEqual(["manifest.json", "manifest.json.sig", "surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+    expect(spawnSync("grep", ["-rlF", body, dir], { encoding: "utf8" }).stdout).toBe("");
   });
 
   it("signs with either key a rotating install.sh lists, and refuses a key whose public half it does not list", () => {
@@ -118,7 +141,7 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     return out;
   };
   const send = (version: string, out: string, env: Record<string, string> = {}) => spawnSync(join(dir, "release", "publish.sh"), ["send", version, out], {
-    encoding: "utf8", env: { ...process.env, S3_ENDPOINT: endpoint, S3_BUCKET: bucket, ...CREDENTIALS, ...env },
+    encoding: "utf8", env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}`, S3_ENDPOINT: endpoint, S3_BUCKET: bucket, ...CREDENTIALS, ...env },
   });
 
   beforeAll(() => {
@@ -128,6 +151,7 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     copyFileSync(join(RELEASE, "publish.sh"), join(dir, "release", "publish.sh"));
     spawnSync("chmod", ["755", join(dir, "release", "publish.sh")]);
     writeFileSync(join(dir, "release", "install.sh"), trusting());
+    recording(dir, "curl");
     writeFileSync(join(dir, "s3.json"), JSON.stringify({
       identities: [{ name: "release", credentials: [{ accessKey: CREDENTIALS.AWS_ACCESS_KEY_ID, secretKey: CREDENTIALS.AWS_SECRET_ACCESS_KEY }], actions: ["Admin", "Read", "Write", "List"] }],
     }));
@@ -177,6 +201,14 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     expect(send("2.0.5", released("2.0.5"))).toMatchObject({ status: 0, stdout: "published desktop/releases/2.0.5; desktop/latest.json stays 2.1.0\n" });
     expect(object("latest.json")?.equals(readFileSync(join(newest, "manifest.json")))).toBe(true);
     expect(object("releases/2.0.5/manifest.json")).not.toBeNull();
+  });
+
+  it("keeps the bucket's secret off curl's command line, where any process of the runner's could read it", () => {
+    rmSync(join(dir, "curl-argv"), { force: true });
+    expect(send("1.0.0", released("1.0.0")).status).toBe(0);
+    const argv = readFileSync(join(dir, "curl-argv"), "utf8");
+    expect(argv).toContain("aws:amz:auto:s3");
+    expect(argv).not.toContain(CREDENTIALS.AWS_SECRET_ACCESS_KEY);
   });
 
   it("stops at a bucket that refuses it, rather than taking the release for unpublished", () => {

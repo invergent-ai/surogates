@@ -49,9 +49,11 @@ case "$VERB" in
   send)
     : "${S3_ENDPOINT:?}" "${S3_BUCKET:?}" "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
     bucket="${S3_ENDPOINT%/}/$S3_BUCKET/desktop"
-    # A request to the bucket, signed; its HTTP status on stdout.
+    # A request to the bucket, signed; its HTTP status on stdout. The secret reaches curl through a
+    # pipe from printf, a builtin, never its command line (R2's are hex, so nothing in it needs
+    # quoting for curl's config).
     s3() {
-      curl -q -sS --aws-sigv4 "aws:amz:auto:s3" --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" -w '%{http_code}' "$@"
+      curl -q -sS -K <(printf 'user = "%s:%s"\n' "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY") --aws-sigv4 "aws:amz:auto:s3" -w '%{http_code}' "$@"
     }
     # $1 sent as $2, of type $3 and served with cache control $4 when it is given, with its sha256 as
     # the payload's hash, then read back: an S3 need not check a body against its hash.
