@@ -276,10 +276,13 @@ export class BrowserHost {
       return { ok: { ...value, ...(kind === "browser.navigate" ? { opened } : {}), notices } };
     } catch (error) {
       if (kind !== "browser.navigate") return failed(said(error));
-      // The error page a refused navigation shows can commit after goto has given up: the next
-      // operation would meet it arriving (Edge). So it is waited for, a moment, before the answer.
-      if (said(error).includes("net::ERR_")) {
-        await page?.waitForURL((url) => url.protocol === "chrome-error:", { waitUntil: "commit", timeout: 2_000 }).catch(() => {});
+      // The error page a refused navigation shows can commit after goto has given up, and paint
+      // later still: the next operation would meet it arriving, a script or a shot (Edge). So it
+      // is waited for, a moment, until it has drawn a frame, before the answer.
+      if (page && said(error).includes("net::ERR_")) {
+        const drawn = page.waitForURL((url) => url.protocol === "chrome-error:", { waitUntil: "commit", timeout: 2_000 })
+          .then(() => page?.evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"));
+        await Promise.race([drawn, new Promise((done) => setTimeout(done, 2_000))]).catch(() => {});
       }
       // The browser says only net::ERR_* of what its proxy refused: a navigation's answer says why.
       return failed((await this.refused(args.url)) ?? said(error));
