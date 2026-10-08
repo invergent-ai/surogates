@@ -17,6 +17,7 @@ from sqlalchemy.exc import DBAPIError
 from surogates.db.models import WorkstreamHistory
 from surogates.governance.saga import SagaOrchestrator
 from surogates.harness import landing as landing_module
+from surogates.harness.loop_context_replay import not_handed_back, worker_note
 from surogates.harness.tool_exec import _build_session_sandbox_spec
 from surogates.sandbox.history import History
 from surogates.sandbox.pool import SandboxPool
@@ -1233,6 +1234,48 @@ async def test_a_failed_helpers_files_never_land_and_its_thread_is_told(api, mon
     await ends(api, SandboxPool(pods), thread)
     assert pods.real_names() == ["Report.docx", "notes.txt"]
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+
+
+@pytest.mark.parametrize("apart", ["kept apart", "not kept apart either"])
+async def test_a_helper_whose_hand_back_fails_says_so_and_its_thread_is_told_which_files(api, monkeypatch, tmp_path, apart):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    helper = await a_helper(api, thread)
+    call = landing_module._call
+
+    async def the_pod_times_out(sandbox_pool, owner, action, **arguments):
+        if action == "hand_back" or (action == "keep_apart" and apart != "kept apart"):
+            raise landing_module.LandingStepError("the pod's step timed out")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "_call", the_pod_times_out)
+        await a_turn(api, monkeypatch, helper, [
+            calling(("terminal", {"command": "echo sources > sources.md"})), _final_response("Wrote sources.md."),
+        ], pool=SandboxPool(pods))
+    store = api.app.state.session_store
+    # Its completion is marked, and its thread's report of it says the work is not in the thread's copy.
+    [done] = await turn_ends(api, helper)
+    [told] = [e.data for e in await store.get_events(thread.id, types=[EventType.WORKER_COMPLETE])]
+    note = worker_note(EventType.WORKER_COMPLETE.value, told)["content"]
+    if apart == "kept apart":
+        assert (done["kept"], done["left"]) == (False, ["sources.md"])
+        assert "its changes to sources.md were kept apart, not brought into the thread's copy" in note.splitlines()[0]
+        assert git(pods.project / "_history", "show", f"refs/helpers/{thread.id}/{helper.id}:sources.md") == "sources"
+    else:
+        assert done["kept"] is False and "left" not in done
+        assert "could not be handed back, and its changes are not in the thread's copy" in note.splitlines()[0]
+    # A thread that waited on it in a step reads the same in the step's result.
+    assert not_handed_back(done, copy="this copy").endswith("this copy")
+    await ends(api, SandboxPool(pods), thread)
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
+
+
+async def test_a_helper_whose_work_was_handed_back_says_nothing_of_it():
+    assert not_handed_back({"reason": "completed"}) == "" and not_handed_back({"not_kept": ["a.md"]}) == ""
+    done = {"worker_id": "w1", "result": "Done."}
+    assert worker_note(EventType.WORKER_COMPLETE.value, done)["content"] == "[Worker w1 completed]\nDone."
 
 
 async def test_a_pruning_keeps_a_live_threads_hand_off_and_its_helpers_copies_kept_apart(api):

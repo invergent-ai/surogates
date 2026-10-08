@@ -177,6 +177,22 @@ _NOT_MERGED = {
 }
 
 
+def not_handed_back(data: dict, *, copy: str = "the thread's copy") -> str:
+    """What a helper's completion says of a hand-back that failed; nothing when its work was handed back.
+
+    Its changes are then on no hand-off, and land with no turn of its
+    thread: kept apart in the project's history when ``left`` names them,
+    else gone with its pod.
+    """
+    if data.get("kept") is not False:
+        return ""
+    left = data.get("left")
+    if isinstance(left, list) and left:
+        named = _listed([{"label": name} for name in left if isinstance(name, str)], limit=_MAX_LISTED_LEFT_OUT)
+        return f"Its work could not be handed back: its changes to {named} were kept apart, not brought into {copy}"
+    return f"Its work could not be handed back, and its changes are not in {copy}"
+
+
 def _landing_lines(data: dict, kept: list, deleted: list) -> str:
     """A thread report's lines on the files it deleted, the files that did
     not land, the excluded files it made, and the folders inside a git
@@ -216,7 +232,9 @@ def worker_note(event_type: str, data: dict) -> dict:
     if title is None and failed:
         content = f"[Worker {worker_id} failed: {data.get('error', 'unknown error')}]"
     elif title is None:
-        content = f"[Worker {worker_id} completed]\n{data.get('result', '')}"
+        # Said in the harness's own line, before the worker's words.
+        unkept = not_handed_back(data)
+        content = f"[Worker {worker_id} completed{f'. {unkept}' if unkept else ''}]\n{data.get('result', '')}"
     else:
         # A title is one line, but it can hold a quote.
         named = f"[Thread {json.dumps(title, ensure_ascii=False)} ({worker_id})"

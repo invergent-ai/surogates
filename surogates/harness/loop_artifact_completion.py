@@ -945,6 +945,8 @@ class ArtifactCompletionMixin:
                 landing = {"state": "failed", "files": [], "excluded": [], "repositories": []}
 
         not_kept: list[str] = []
+        # What a hand-back that failed leaves: its completion's mark, and the files kept apart.
+        unkept: dict[str, Any] = {}
         if (
             session.config.get("history_thread") and self._sandbox_pool is not None
             and self._sandbox_pool.holds_copy(sandbox_session_key(session))
@@ -958,6 +960,7 @@ class ArtifactCompletionMixin:
                 not_kept = kept["not_kept"] if kept else []
             except Exception:
                 logger.exception("Could not hand the copy of %s back to its thread", session.id)
+                unkept = await self._kept_apart(session)
 
         # The turn's tool saga ends with it: a later stop compensates only its own turn.
         if self._turn_saga is not None:
@@ -1054,6 +1057,8 @@ class ArtifactCompletionMixin:
             "reason": reason,
             "worker_id": self._worker_id,
             **({"not_kept": not_kept} if not_kept else {}),
+            # A helper whose hand-back failed: its work is on no hand-off, and its thread is told.
+            **unkept,
         }
         if cost_tracker is not None:
             complete_data["cost_summary"] = cost_tracker.summary()
@@ -1165,6 +1170,7 @@ class ArtifactCompletionMixin:
                     session_factory=self._session_factory,
                     files=files,
                     landing=landing,
+                    unkept=unkept,
                 )
             except Exception:
                 logger.warning(
@@ -1194,6 +1200,24 @@ class ArtifactCompletionMixin:
                 "Failed to advance cursor after session completion for %s",
                 session.id,
             )
+
+    async def _kept_apart(self, session: Session) -> dict[str, Any]:
+        """A helper's copy whose hand-back failed, kept apart before its pod goes; what its completion says of it.
+
+        Nothing when the helper changed no file.  Else ``kept`` false, and
+        ``left``, the files kept apart, as a failed helper's are; no
+        ``left`` when the copy could not be kept apart either.
+        """
+        try:
+            apart = await keep_copy(
+                session_factory=self._session_factory, sandbox_pool=self._sandbox_pool,
+                session=session, saga_settings=self._saga_settings, action="keep_apart", settle=False,
+            )
+        except Exception:
+            logger.exception("Could not keep the copy of %s apart", session.id)
+            return {"kept": False}
+        left = apart.get("left", []) if apart else []
+        return {"kept": False, "left": left} if left else {}
 
     async def _open_copy_to_land(self, session: Session) -> None:
         """Give a thread's turn that never used its pod one, when its end lands all the same."""

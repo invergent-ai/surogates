@@ -115,6 +115,7 @@ async def notify_parent_on_completion(
     session_factory: Any | None = None,
     files: list[dict[str, Any]] | None = None,
     landing: dict[str, Any] | None = None,
+    unkept: dict[str, Any] | None = None,
 ) -> None:
     """Emit a ``WORKER_COMPLETE`` event into the parent session and re-enqueue it.
 
@@ -147,6 +148,9 @@ async def notify_parent_on_completion(
     files instead, each landed or not merged, the excluded files it made,
     the folders inside a git repository it wrote into, and the landing's
     state when it did not complete.
+
+    A thread's helper whose hand-back failed reports *unkept*: ``kept``
+    false, and ``left``, the files kept apart, which its thread's copy lacks.
     """
     try:
         from surogates.harness.message_utils import extract_final_response
@@ -157,6 +161,7 @@ async def notify_parent_on_completion(
         payload: dict[str, Any] = {
             "worker_id": str(worker_session_id),
             "result": final_response[:_MAX_RESULT_CHARS],
+            **(unkept or {}),
         }
         if task_id is not None:
             payload["task_id"] = str(task_id)
