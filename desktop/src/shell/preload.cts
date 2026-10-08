@@ -19,10 +19,15 @@ if (origin !== undefined && window.top === window && location.origin === origin)
   // one such call, for as long as Chromium's activation lasts.
   const CLICK_MS = 5_000;
   let clickedAt = -Infinity;
+  // The press last heard, by its own time. A label passes its click on to its control: a second click
+  // of the one press, which carries the time of the first, and allows no second call.
+  let press = NaN;
   window.addEventListener("click", (event) => {
-    if (event.isTrusted) clickedAt = performance.now();
+    if (!event.isTrusted || event.timeStamp === press) return;
+    press = event.timeStamp;
+    clickedAt = performance.now();
   }, true);
-  // Whether its user just clicked: true once for each click.
+  // Whether its user just clicked: true once for each press.
   const clicked = (): boolean => {
     const now = navigator.userActivation.isActive && performance.now() - clickedAt < CLICK_MS;
     clickedAt = -Infinity;

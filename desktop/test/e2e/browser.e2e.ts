@@ -433,6 +433,42 @@ describe("a chat's browser taken over, and handed back", () => {
     expect(over("/settings.html")).toBe(false);
   });
 
+  it("lets one press of its user's through one call, though a label passes its click on to the control it wraps", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    // A label that wraps a checkbox, with words to press on. A press on the words is a click at the label, which
+    // the browser passes on to the checkbox as a second: the page asks to show the browser at the first, and
+    // for Settings at the second.
+    await client.evaluate((chat) => {
+      const desktop = window.surogateDesktop!;
+      const label = Object.assign(document.createElement("label"), { id: "wrapped" });
+      label.style.cssText = "display: block; width: 300px; padding: 20px";
+      label.append(Object.assign(document.createElement("input"), { type: "checkbox" }), " Words to press on");
+      const heard: string[] = [];
+      const answers: Record<string, string> = {};
+      Object.assign(window, { pressed: { heard, answers } });
+      label.addEventListener("click", (event) => {
+        if (!event.isTrusted) return;
+        const first = event.target === label;
+        heard.push(first ? "label" : "checkbox");
+        const [name, asked] = first ? (["show", desktop.browser!.show(chat)] as const) : (["openSettings", desktop.openSettings!("browser")] as const);
+        void asked.then(() => "done", (error: Error) => error.message).then((answer) => (answers[name] = answer));
+      });
+      document.body.append(label);
+    }, CHAT);
+    await client.click("#wrapped", { position: { x: 200, y: 30 } });
+    const pressed = () => client.evaluate(() => (window as unknown as { pressed: { heard: string[]; answers: Record<string, string> } }).pressed);
+    await expect.poll(async () => Object.keys((await pressed()).answers).length, { timeout: 10_000 }).toBe(2);
+    // Two clicks of the one press, both the browser's own, and one call let through.
+    expect(await pressed()).toEqual({
+      heard: ["label", "checkbox"],
+      answers: { show: expect.stringContaining("The agent's browser has no page open for this chat"), openSettings: SETTINGS_AT_A_CLICK },
+    });
+    expect(over("/settings.html")).toBe(false);
+  });
+
   it("brings the chat's page to the front at a take-over only at its user's click: one the page's own code makes raises nothing", async () => {
     const folder = join(home, "project");
     mkdirSync(folder);
