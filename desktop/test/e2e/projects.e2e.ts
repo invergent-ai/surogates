@@ -283,6 +283,36 @@ describe("the Projects page", () => {
     const mark = (selector: string) => page.$eval(selector, (found) => `${(found as HTMLElement).dataset.hue} ${found.querySelector("svg")!.innerHTML}`);
     const sidebar = await Promise.all([REPORT, BUDGET, HIRING].map((id) => mark(`#projects [data-project="${id}"] .pmark`)));
     expect(new Set(sidebar).size).toBeGreaterThan(1);
+    // Each of the six hues reads on the sidebar at 3:1 or better, in the light theme and the dark, as WCAG measures it.
+    const contrasts = await page.evaluate(() => {
+      const luminance = (colour: string) => {
+        const [red, green, blue] = (colour.match(/[\d.]+/g) ?? []).map((channel) => {
+          const part = Number(channel) / 255;
+          return part <= 0.04045 ? part / 12.92 : ((part + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * red! + 0.7152 * green! + 0.0722 * blue!;
+      };
+      const root = document.documentElement;
+      const before = root.dataset.theme;
+      const probe = document.createElement("span");
+      probe.className = "pmark";
+      document.getElementById("projects")!.append(probe);
+      const found: string[] = [];
+      for (const theme of ["light", "dark"]) {
+        root.dataset.theme = theme;
+        const under = luminance(getComputedStyle(document.getElementById("sidebar")!).backgroundColor);
+        for (const hue of ["0", "1", "2", "3", "4", "5"]) {
+          probe.dataset.hue = hue;
+          const over = luminance(getComputedStyle(probe).color);
+          const contrast = (Math.max(over, under) + 0.05) / (Math.min(over, under) + 0.05);
+          if (!(contrast >= 3)) found.push(`hue ${hue}, ${theme}: ${contrast.toFixed(2)}`);
+        }
+      }
+      probe.remove();
+      root.dataset.theme = before;
+      return found;
+    });
+    expect(contrasts).toEqual([]);
     // The dot that says a thread waits sits on the mark, whole: what is drawn past the mark's edge is the dot's too.
     const dot = `#projects [data-project="${REPORT}"] .pmark .waiting`;
     await expect.poll(() => page.$eval(dot, (found) => {
