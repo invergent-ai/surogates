@@ -20,6 +20,10 @@
 # Environment for send: S3_ENDPOINT (R2's https://<account>.r2.cloudflarestorage.com), S3_BUCKET,
 # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
 set -euo pipefail
+# The release key is this shell's own from here on, and in the environment of no program it
+# starts: sign hands it to openssl alone, through a pipe. All that reads the build's tarball, or
+# what it unpacks to, would otherwise have it, and the build holds no key.
+export -n DESKTOP_RELEASE_KEY
 # All it reads, it reads in no locale and no language of its caller's: in most locales, more than
 # ten characters are digits, and a version's are the ten.
 export LC_ALL=C LANG=C
@@ -60,7 +64,8 @@ case "$VERB" in
     # later update is checked against. The build holds no key, and a helper of its own would need
     # none. The helper is read from the tarball unpacked whole, as the helper that installs it
     # unpacks it: a member under the helper's own name may be replaced by a later one, or through
-    # a link to its folder. The tarball is the build's, and is unpacked without the key.
+    # a link to its folder. The tarball is the build's, and is unpacked, as it is read, without
+    # the key: no program this script starts has it.
     # What is unpacked is gone however the signing ends, whatever the modes of its folders, which
     # are the build's too. A signal ends the signing once the command it runs has ended, as the
     # script would end by itself: removed beside a tar that still writes, the folder would keep
@@ -76,7 +81,7 @@ case "$VERB" in
     # A removal that fails as the signing ends leaves its status as it was.
     trap 'cleanup || :' EXIT
     trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 141' PIPE; trap 'exit 143' TERM
-    env -u DESKTOP_RELEASE_KEY tar -xzf "$OUT/$TARBALL" -C "$unpacked" --no-same-owner --no-same-permissions 2>/dev/null || fail "$OUT/$TARBALL could not be unpacked"
+    tar -xzf "$OUT/$TARBALL" -C "$unpacked" --no-same-owner --no-same-permissions 2>/dev/null || fail "$OUT/$TARBALL could not be unpacked"
     helper="surogate-desktop-$VERSION-linux-x64/bin/surogate-apply-update"
     # A file of the tree's own: no link, and under no folder that is one. Asked in two commands: a
     # signal that comes while the first of two $( ) of one command is answered ends Ubuntu 24.04's

@@ -269,6 +269,46 @@ describe("the desktop's release manifest", () => {
     expect(calls).toEqual(calls.map(() => "0"));
   });
 
+  it("starts no program with the release key in its environment, whatever the program is and however it is started: the key is the script's own shell's, and reaches openssl alone, through a pipe", () => {
+    // A program's environment is what the shell that starts it exports, and what the command that
+    // starts it gives it by name. So the signing is run with every command that its shell, or a
+    // subshell of it, is about to run written down first (bash's DEBUG trap, which -T hands on to
+    // functions and subshells): once where a variable the shell exports then holds the key's own
+    // line, under whatever name, and once where the command names the key.
+    const seen = join(dir, "seen");
+    const watched = [
+      // The key's own line of its PEM, in a variable of the shell's that is not exported.
+      "watched=\"${DESKTOP_RELEASE_KEY#*$'\\n'}\"",
+      "watched=\"${watched%%$'\\n'*}\"",
+      "set -T",
+      `trap 'if [[ "$(export -p)" == *"$watched"* ]]; then printf "exported %s\\0" "$BASH_COMMAND" >>"${seen}"; fi; `
+        + `if [[ "$BASH_COMMAND" == *DESKTOP_RELEASE_KEY* ]]; then printf "named %s\\0" "$BASH_COMMAND" >>"${seen}"; fi' DEBUG`,
+      '. "$0" "$@"',
+    ].join("\n");
+    const signed = spawnSync("bash", ["-c", watched, join(dir, "release", "publish.sh"), "sign", "1.2.3", out], {
+      encoding: "utf8", env: { ...process.env, TMPDIR: tmp, DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball())) },
+    });
+    expect(signed).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
+    expect(verify(null, readFileSync(join(out, "manifest.json")), keys.publicKey, readFileSync(join(out, "manifest.json.sig")))).toBe(true);
+    const commands = readFileSync(seen, "utf8").split("\0").filter(Boolean);
+    expect(commands.length).toBeGreaterThan(5);
+    // Exported, as the job gives it, only until the script's first lines take it out of the
+    // environment: the watch's own start of the script, and two commands of the shell's own.
+    expect(commands.filter((command) => command.startsWith("exported ")).map((command) => command.slice("exported ".length))).toEqual([
+      '. "$0" "$@"', "set -euo pipefail", "export -n DESKTOP_RELEASE_KEY",
+    ]);
+    // Named only there, where it is checked for, and where the shell itself writes it into a pipe
+    // that openssl reads: for its public half, and to sign.
+    expect([...new Set(commands.filter((command) => command.startsWith("named ")).map((command) => command.slice("named ".length)))]).toEqual([
+      "export -n DESKTOP_RELEASE_KEY",
+      ': "${DESKTOP_RELEASE_KEY:?}" "${DESKTOP_TARBALL_SHA256:?}"',
+      `public="$(openssl pkey -pubout -in <(printf '%s\\n' "$DESKTOP_RELEASE_KEY"))"`,
+      `openssl pkey -pubout -in <(printf '%s\\n' "$DESKTOP_RELEASE_KEY")`,
+      `printf '%s\\n' "$DESKTOP_RELEASE_KEY"`,
+      `openssl pkeyutl -sign -inkey <(printf '%s\\n' "$DESKTOP_RELEASE_KEY") -rawin -in "$OUT/manifest.json" -out "$OUT/manifest.json.sig"`,
+    ]);
+  });
+
   it("signs with either key a rotating install.sh lists, and refuses a key whose public half it does not list", () => {
     const next = generateKeyPairSync("ed25519");
     writeFileSync(join(dir, "release", "install.sh"), trusting([PUBLIC, pem(next.publicKey)]));
