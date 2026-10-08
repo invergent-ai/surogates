@@ -265,8 +265,9 @@ byId("settings-search").addEventListener("input", search);
 byId("close").addEventListener("click", () => void settings.close());
 byId("backdrop").addEventListener("click", () => void settings.close());
 // Escape in a search with text clears it, as a search field's does; any other closes Settings.
+// One that cancels an input method's composition is the composition's.
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
+  if (event.key !== "Escape" || event.isComposing) return;
   const query = byId<HTMLInputElement>("settings-search");
   if (event.target === query && query.value !== "") {
     event.preventDefault();

@@ -313,6 +313,23 @@ describe("Settings", () => {
     await expect.poll(() => settingsOpen(shell)).toBe(false);
   });
 
+  it("leaves an Escape that cancels an input method's composition to the composition: its search keeps its text, and it stays open", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    const cancelled = () => settings.evaluate(() => {
+      document.getElementById("settings-search")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", isComposing: true, bubbles: true }));
+    });
+    await settings.fill("#settings-search", "width");
+    await cancelled();
+    expect(await settings.inputValue("#settings-search")).toBe("width");
+    // In an empty search too, where an Escape of the user's own closes Settings.
+    await settings.fill("#settings-search", "");
+    await cancelled();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await settingsOpen(shell)).toBe(true);
+  });
+
   it("keeps its own page: a dropped file cannot replace it", async () => {
     const { shell, page } = await signedIn();
     await page.click("#open-settings");
