@@ -62,6 +62,17 @@ unexpected() {
   fail "stopped, as this step failed: $1"
 }
 
+# Stopped by a signal, the script ends as it would by itself, once the command it runs has ended:
+# a hangup, as from a terminal that is closed, would otherwise end it with its folders left. It
+# clears up before it ends: where the signal comes as the script is ending already, to end again
+# would leave out the clearing up that had just begun.
+stoppable() {
+  trap 'cleanup; exit 129' HUP
+  trap 'cleanup; exit 130' INT
+  trap 'cleanup; exit 141' PIPE
+  trap 'cleanup; exit 143' TERM
+}
+
 # Run as main ends, however it ends. No signal stops it: a second one, as Ctrl+C pressed twice
 # sends, would end its rm, and leave what that had not removed yet.
 cleanup() {
@@ -305,6 +316,10 @@ apply() {
   # new file's bytes do: a power cut soon after would leave a version's folder under its name, its
   # mark there or not, with files that are empty, and current may name it already.
   sync -f "$work"
+  # From its first rename to its last, no signal stops it: stopped between the two that replace the
+  # installed version's own folder, it would clear up the folder it had taken out, and leave
+  # current naming none.
+  trap '' HUP INT PIPE TERM
   if [ -n "$top" ]; then
     # One rename gives the tree its name. Where that is the installed version's, its old folder
     # leaves the name first.
@@ -317,6 +332,7 @@ apply() {
   # The helper pkexec runs, at a path with no link in it: polkit 127 (Ubuntu 26.04) matches an
   # action's exec.path against the program's resolved path, polkit 124 (24.04) against the path given.
   mv -T "$work/helper" "$ROOT/bin/surogate-apply-update"
+  stoppable
 
   # Kept: this version and the one before it. Removed: the rest, once nothing runs from them.
   # Each leaves versions by one rename, into this apply's folder, so that none is ever left under
@@ -557,14 +573,7 @@ main() {
   umask 022
   settings
   trap cleanup EXIT
-  # Stopped by a signal, it ends as it would by itself, once the command it runs has ended: a
-  # hangup, as from a terminal that is closed, would otherwise end it with its folders left. It
-  # clears up before it ends: where the signal comes as the script is ending already, to end again
-  # would leave out the clearing up that had just begun.
-  trap 'cleanup; exit 129' HUP
-  trap 'cleanup; exit 130' INT
-  trap 'cleanup; exit 141' PIPE
-  trap 'cleanup; exit 143' TERM
+  stoppable
   # Where a failure ends the script (-e), and not inside a $( ): there, its caller decides.
   trap '[ "$BASH_SUBSHELL" -gt 0 ] || unexpected "$BASH_COMMAND"' ERR
   case "${1:-}" in

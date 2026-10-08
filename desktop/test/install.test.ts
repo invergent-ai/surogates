@@ -890,7 +890,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(apply(second)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.1.0 is installed\n" });
   });
 
-  it("leaves nothing in staging wherever one signal stops it, nor when a second comes as it clears up, as Ctrl+C pressed twice sends", () => {
+  it("leaves nothing in staging and current naming a whole version wherever one signal stops it, and nothing when a second comes as it clears up, as Ctrl+C pressed twice sends", () => {
     for (const version of ["1.0.0", "1.1.0"]) {
       const tarball = releaseOf(version);
       manifestOf(version, tarball);
@@ -902,7 +902,11 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     stage(rebuilt);
     const lines = stops(files(), SIGNALS);
     expect(lines.length).toBeGreaterThan(100);
-    for (const line of lines) expect(line).toMatch(/^\d+: \d+ 1\.1\.0 (whole|gone), staging 0$/);
+    for (const line of lines) expect(line).toMatch(/^\d+: (143|0) 1\.1\.0 whole, staging 0$/);
+    // Stopped (143) up to its first rename, let finish (0) from there to its last, where a signal
+    // would leave current naming no folder, and stopped again after it, until it clears up.
+    expect(lines.map((line) => line.split(" ")[1]).join(" ")).toMatch(/^(143 )+(0 )+(143 )+(0 ?)+$/);
+    expect(root("test -e /opt/surogate/current/resources/app/rebuilt").status).toBe(0);
     // An apply it refuses ends with its own folder still to clear: a signal that comes as it starts to, as wherever else.
     manifestOf("1.1.0", rebuilt, {}, other.privateKey);
     stage(rebuilt);
