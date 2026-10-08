@@ -1060,8 +1060,9 @@ describe("the browser on this computer", () => {
     expect(await approvals.admit(first, never())).toBeNull();
     expect(await approvals.admit(second, never())).toBeNull();
     expect(await approvals.admit(op("browser.evaluate", { code: "return 1;" }), never())).toBeNull();
-    // Each upload by its own operation; any other act names no upload.
-    expect(said).toEqual([[CHILD, true, first.id], [ROOT, true, second.id], [ROOT, false, undefined]]);
+    // Each upload by its own operation; any other act names no upload. And each with the chat it is of: a
+    // session is asked after only for its own chat.
+    expect(said).toEqual([[CHILD, true, first.id, ROOT], [ROOT, true, second.id, ROOT], [ROOT, false, undefined, ROOT]]);
   });
 
   it("asks nobody about an upload whose site the browser does not say in time, and gives it no leave: its prompt would name no site", async () => {

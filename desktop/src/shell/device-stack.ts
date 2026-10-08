@@ -39,8 +39,8 @@ export interface ToolLayer extends Executor {
   retired?(root: string): void;
   // The address of the page a calling session's next browser operation acts in, for its prompt; for an
   // upload, of the frame of the file input its page asked for, *of* being the upload's operation, by its id; or
-  // why that upload can be given to nothing.
-  address?(session: string, upload?: boolean, of?: string): Promise<string | { refused: string }>;
+  // why that upload can be given to nothing. *root*: the chat that asks, which is told of no other chat's session.
+  address?(session: string, upload?: boolean, of?: string, root?: string): Promise<string | { refused: string }>;
   // An upload the browser was asked about, by its operation's id, got no leave: the browser keeps nothing for it.
   notComing?(of: string): void;
   // A chat's user takes the agent's browser over, for every chat, until that chat hands it back: whether the

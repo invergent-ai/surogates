@@ -90,8 +90,8 @@ export interface BinderOptions {
   refusal?(operation: Operation): Outcome | null; // what the hosts refuse anyway, before anyone is asked
   retired?(root: string): void; // a deleted chat's root: the hosts let go of what they keep for it
   // The page a session's next browser operation acts in, for its prompt; for an upload, the frame of the file input
-  // that asked, *of* being the upload's operation.
-  address?(session: string, upload?: boolean, of?: string): Promise<string | { refused: string }>;
+  // that asked, *of* being the upload's operation; *root*, the chat that asks.
+  address?(session: string, upload?: boolean, of?: string, root?: string): Promise<string | { refused: string }>;
   notComing?(of: string): void; // an upload the browser was asked about, by its operation, that got no leave
   // The user is asked about every other operation first in a chat that asks every time,
   // and about a network destination off the package hosts in either mode.

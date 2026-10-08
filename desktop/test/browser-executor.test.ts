@@ -87,8 +87,10 @@ function rig(launch: Launch | null = LAUNCH, bound = true, reads?: (operation: O
       forget: (root) => void forgotten.push(`browser ${root}`),
       stop: () => (stopped.push("browser"), Promise.resolve()),
       end: () => (stopped.push("browser ended"), Promise.resolve()),
-      address: (session, upload, of) => Promise.resolve(
-        session === "nowhere" ? { refused: "no site" } : `https://example.com/${session}${upload ? "/the-input" : ""}${of === undefined ? "" : `#${of}`}`,
+      address: (session, upload, of, root) => Promise.resolve(
+        session === "nowhere"
+          ? { refused: "no site" }
+          : `https://example.com/${session}${upload ? "/the-input" : ""}${of === undefined ? "" : `#${of}`}${root === undefined ? "" : `@${root}`}`,
       ),
       pause: (root, held) => void paused.push([root, held]),
       notComing: (of) => void unasked.push(of),
@@ -607,6 +609,8 @@ describe("the browser's kinds beside the tools", () => {
     expect(await rig().browsing.address("child", true)).toBe("https://example.com/child/the-input");
     // And which upload it is asked for.
     expect(await rig().browsing.address("child", true, "op-7")).toBe("https://example.com/child/the-input#op-7");
+    // And for which chat.
+    expect(await rig().browsing.address("child", true, "op-7", ROOT)).toBe(`https://example.com/child/the-input#op-7@${ROOT}`);
     // Where the browser says the upload can be given to nothing, that is its answer.
     expect(await rig().browsing.address("nowhere", true, "op-8")).toEqual({ refused: "no site" });
   });

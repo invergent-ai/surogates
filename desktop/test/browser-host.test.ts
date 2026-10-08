@@ -1270,6 +1270,24 @@ describe("a page's download, as the host stages it", () => {
       expect(state().unseen.get(SESSION)).toEqual([FILE_ASKED, GIVEN_AS_TAKEN]);
     });
 
+    it("says a session's page, and names its file input, only for the chat the session is of: asked under another chat, as only the server could ask, it says a new tab's and keeps what is named as it is", async () => {
+      const tab = taken();
+      tab.input({ evaluate: () => Promise.resolve("given"), dispose: () => Promise.resolve() });
+      // The chat's own upload is asked about: its input is named for it.
+      expect(await host.address(SESSION, true, "upload-1", "chat-1")).toBe(FORM_URL);
+      const named = state().named.get(SESSION);
+      // Another chat's prompt asks after that session: it is told nothing of the page, and nothing changes for the chat whose it is.
+      expect(await host.address(SESSION, true, "theirs-1", "chat-2")).toBe("about:blank");
+      expect(await host.address(SESSION, false, undefined, "chat-2")).toBe("about:blank");
+      expect([state().named.get(SESSION) === named, [...(host as unknown as { prompted: Set<string> }).prompted]]).toEqual([true, ["upload-1"]]);
+      // Its own chat is told as ever, with or without saying which chat asks.
+      expect(await host.address(SESSION, false, undefined, "chat-1")).toBe(FORM_URL);
+      expect(await host.address(SESSION)).toBe(FORM_URL);
+      expect(await uploads("upload-1")).toMatchObject({ ok: { files: 1 } });
+      // A session with no tab yet is any chat's to open one for.
+      expect(await host.address("session-with-no-tab", false, undefined, "chat-2")).toBe("about:blank");
+    });
+
     it("reads each bound on the clock it can be read on: the minute after a hand back on the one that cannot be set, the five seconds after a take-over on a timer, which the computer's clock moves no more, and the quarter second of an upload's step on the computer's own, the one its page reads too", async () => {
       // The clock a host told none reads, and the computer's own, which its user or its network can set.
       let steady = 5_000;

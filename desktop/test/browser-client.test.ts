@@ -218,6 +218,11 @@ describe("the browser host's client", () => {
     // No other act's address names an upload.
     void client.address("child", false, "op-8");
     expect(Object.keys(hosts[0]!.sent.at(-1)!).sort()).toEqual(["id", "session", "type"]);
+    // The chat that asks goes with it: the host says a session's page only to its own chat.
+    void client.address("child", true, "op-9", "root");
+    expect(hosts[0]!.sent.at(-1)).toMatchObject({ type: "address", session: "child", upload: true, of: "op-9", root: "root" });
+    void client.address("child", false, undefined, "root");
+    expect(hosts[0]!.sent.at(-1)).toMatchObject({ type: "address", session: "child", root: "root" });
     // A host that goes with one asked: the next operation opens a new tab.
     const pending = client.address("child");
     hosts[0]!.exit();

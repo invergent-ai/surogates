@@ -108,8 +108,8 @@ export interface ApprovalsOptions {
   // The address of the page a calling session's next browser operation acts in: a page moves itself, so an act's prompt names it.
   // For an *upload*: of the frame of the file input its page asked for, which the browser then holds for that upload alone,
   // *of* being that upload's operation, by its id. Or why the upload can be given to nothing, whatever its user would
-  // answer: then nobody is asked.
-  address?: (session: string, upload?: boolean, of?: string) => Promise<string | { refused: string }>;
+  // answer: then nobody is asked. *root*: the chat that asks; a session is asked after only for its own.
+  address?: (session: string, upload?: boolean, of?: string, root?: string) => Promise<string | { refused: string }>;
   // An upload the browser was asked about, by its operation's id, got no leave, however its prompt ended: it is not coming.
   notComing?: (of: string) => void;
   // What the tools refuse anyway, asked again when a browser operation's turn comes: its user may have taken the browser over meanwhile.
@@ -364,7 +364,7 @@ export class Approvals {
         // An open names where it goes; any other act, the page it acts in now; an upload, the frame of the input that gets the files.
         const page = act.action === "open"
           ? undefined
-          : await this.pageOf(operation.callingSessionId, asking, act.action === "upload" ? operation.id : null);
+          : await this.pageOf(operation, asking, act.action === "upload");
         // The browser says the upload can be given to nothing: refused in its words, and nobody asked.
         if (typeof page === "object" && page !== null) return { error: { type: "browser", message: page.refused } };
         // An upload is asked about by the site that gets its files. Where the browser did not say it in time, its
@@ -404,15 +404,15 @@ export class Approvals {
     this.browsing.clear();
   }
 
-  // The address of the page *session*'s act would act in, as the browser says it; null when it does not in time.
-  // For an *upload*, its operation's id, of the frame of the file input that asked: the browser holds that input for that
-  // upload. Or why the browser gives that upload to nothing.
-  private async pageOf(session: string, signal: AbortSignal, upload: string | null): Promise<string | { refused: string } | null> {
+  // The address of the page *operation*'s session would act in, as the browser says it; null when it does not in time.
+  // For an *upload*, of the frame of the file input that asked: the browser holds that input for that operation. Or why
+  // the browser gives that upload to nothing.
+  private async pageOf({ id, sessionId, callingSessionId }: Operation, signal: AbortSignal, upload: boolean): Promise<string | { refused: string } | null> {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), ADDRESS_MS);
     });
-    const said = Promise.resolve().then(() => this.options.address?.(session, upload !== null, upload ?? undefined) ?? null).catch(() => null);
+    const said = Promise.resolve().then(() => this.options.address?.(callingSessionId, upload, upload ? id : undefined, sessionId) ?? null).catch(() => null);
     try {
       return (await settled(Promise.race([said, late]), signal)) ?? null;
     } finally {

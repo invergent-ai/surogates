@@ -574,11 +574,15 @@ export class BrowserHost {
    * for the upload, so one that asks after cannot take the files in its place, and the upload gives
    * nothing if the input is elsewhere by then. *of*: that upload, by its operation's id; the input is
    * kept for it alone. Where the input is in a frame that runs as no site, there is none to ask its user
-   * about, and the upload is given to nothing: answered so, in place of an address. Never rejects.
+   * about, and the upload is given to nothing: answered so, in place of an address. *root*: the chat that
+   * asks. A session's page is said, and its input named, only for the chat the session is of: any other
+   * is told a new tab's, as its operation there would be refused (perform). Never rejects.
    */
-  address(session: string, upload = false, of?: string): Promise<string | { refused: string }> {
+  address(session: string, upload = false, of?: string, root?: string): Promise<string | { refused: string }> {
     return this.inLine(session, async () => {
-      const tab = (this.tabs.get(session) ?? []).filter((page) => !page.isClosed()).at(-1)?.url() ?? NEW_TAB;
+      const open = (this.tabs.get(session) ?? []).filter((page) => !page.isClosed());
+      if (root !== undefined && open.length > 0 && this.roots.get(session) !== root) return NEW_TAB;
+      const tab = open.at(-1)?.url() ?? NEW_TAB;
       if (!upload) return tab;
       // Asked about from here on, whatever is named for it.
       if (of !== undefined) this.prompted.add(of);

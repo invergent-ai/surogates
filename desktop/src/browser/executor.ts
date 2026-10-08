@@ -237,8 +237,8 @@ export class Browsing implements ToolLayer {
     return { ok: { ...ok, notices: [...(ok as { notices: unknown[] }).notices, ...told] } };
   }
 
-  address(session: string, upload?: boolean, of?: string): Promise<string | { refused: string }> {
-    return this.options.browser.address(session, upload, of);
+  address(session: string, upload?: boolean, of?: string, root?: string): Promise<string | { refused: string }> {
+    return this.options.browser.address(session, upload, of, root);
   }
 
   /** An upload the browser was asked about, by its operation's id, got no leave: it is not coming. */
