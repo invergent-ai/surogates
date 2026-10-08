@@ -4,6 +4,7 @@
 # /opt/surogate/bin/surogate-apply-update is the one pkexec runs.
 #
 #   curl -fsSL https://surogate.ai/desktop/install.sh | bash                      install, update or repair
+#   curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --uninstall    remove it
 #   install.sh --base <url>                                   install from another server (an enterprise's)
 #   surogate-apply-update --apply <manifest> <signature> <tarball>      as root: apply a downloaded release
 #
@@ -119,6 +120,14 @@ whole() {
     && [ -f "$2/bin/surogate-apply-update" ] && [ -x "$2/bin/surogate-apply-update" ]
 }
 
+# One install, update or removal at a time, by a lock on staging, a folder only root can open: any
+# user may open one that all may read, hold a lock on it, and so stop every update. It is waited
+# for LOCK_WAIT at most, and held until this script ends or closes it.
+lock() {
+  exec 9<"$ROOT/staging"
+  flock -w "$LOCK_WAIT" 9 || fail "another install or update of Surogate Desktop is still running: try again once it has finished"
+}
+
 # The user the helper was run for, who reads the files it is handed: pkexec's caller, or sudo's.
 # Each names that user by number in the helper's environment, and sets it itself, whatever its own
 # caller's environment held. Nothing else is asked who it was. Naming a user only ever lowers the
@@ -176,10 +185,7 @@ apply() {
   ( umask 077 && mkdir -p "$ROOT/staging" )
   chmod 0755 "$ROOT" "$ROOT/versions" "$ROOT/bin"
   chmod 0700 "$ROOT/staging"
-  # One at a time, by a lock on a folder only root can open: any user may open one that all may
-  # read, hold a lock on it, and so stop every update.
-  exec 9<"$ROOT/staging"
-  flock -w "$LOCK_WAIT" 9 || fail "another install or update of Surogate Desktop is still running: try again once it has finished"
+  lock
   # What an apply that was killed left in staging goes, before any room is measured. This one's
   # own folder goes however it ends.
   find "$ROOT/staging" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
@@ -442,6 +448,65 @@ install_all() {
   say "open Surogate from your applications, or run surogate"
 }
 
+# An XDG folder: $1 when it is absolute, as the XDG specification reads it, else the default $2.
+xdg() {
+  if [[ "${1:-}" == /* ]]; then echo "$1"; else echo "$2"; fi
+}
+
+# The invoking user's XDG config, data and cache folders, one a line, from their login's own
+# environment: sudo reset this one's.
+login_folders() {
+  local home lines config data cache
+  home="$(getent passwd "$1" | cut -d: -f6)"
+  lines="$(runuser -l "$1" -c 'printf "\n%s\n%s\n%s\n" "${XDG_CONFIG_HOME:-}" "${XDG_DATA_HOME:-}" "${XDG_CACHE_HOME:-}"' 2>/dev/null | tail -n 3)" || lines=
+  { read -r config; read -r data; read -r cache; } <<<"$lines" || true
+  xdg "${config:-}" "$home/.config"
+  xdg "${data:-}" "$home/.local/share"
+  xdg "${cache:-}" "$home/.cache"
+}
+
+# Removes the app for every user of the computer, and the invoking user's autostart entry; asks
+# before deleting that user's data, as that user. Other users' data, every chat's folder and the
+# packages stay. $1-$3: the user's XDG config, data and cache folders, when their session gave them.
+uninstall() {
+  # One at a time with an apply, which would otherwise make the tree again under it. Where no
+  # apply has made staging, none holds a lock to wait for.
+  [ ! -d "$ROOT/staging" ] || lock
+  in_use "$ROOT" && fail "Surogate is running: quit it first, for every user of this computer"
+  if [ -f "$PROFILE" ]; then
+    apparmor_parser -R "$PROFILE" 2>/dev/null || true
+    rm -f -- "$PROFILE"
+  fi
+  rm -rf -- "$ROOT" "$(dirname "$RECORD")"
+  rm -f -- "$LAUNCHER" "$ENTRY" "$POLICY"
+  if command -v update-desktop-database >/dev/null; then update-desktop-database -q /usr/share/applications; fi
+  # The lock is root's alone: nothing that runs as the user below has it open.
+  exec 9<&-
+  say "removed from this computer"
+
+  local user="${SUDO_USER:-}" config data cache answer=
+  [ -n "$user" ] && [ "$user" != root ] || return 0
+  if [ "$#" -eq 3 ]; then
+    config="$1" data="$2" cache="$3"
+  else
+    { read -r config; read -r data; read -r cache; } < <(login_folders "$user")
+  fi
+  # As the user: only what they may change goes.
+  runuser -u "$user" -- rm -f -- "$config/autostart/surogate.desktop"
+  [ -e "$data/surogate" ] || [ -e "$cache/surogate" ] || return 0
+  # Asked on the terminal, as this script's input is itself; with none to ask on, the data stays.
+  if (exec </dev/tty) 2>/dev/null; then
+    read -r -p "Surogate Desktop: also delete $user's sign-in, device token and browser profiles, in $(named "$data/surogate")? Chat folders stay. [y/N] " answer </dev/tty || answer=
+  fi
+  if [[ "$answer" == [Yy]* ]]; then
+    runuser -u "$user" -- rm -rf -- "$data/surogate" "$cache/surogate" 2>/dev/null \
+      || fail "could not delete all of $user's app data: what $user may not change stays, in $(named "$data/surogate") and $(named "$cache/surogate")"
+    say "deleted $user's app data"
+  else
+    say "kept $user's app data, in $(named "$data/surogate")"
+  fi
+}
+
 main() {
   set -Eeuo pipefail
   umask 022
@@ -482,8 +547,23 @@ main() {
       fi
       install_all "$base"
       ;;
+    --uninstall)
+      if [ "$EUID" -ne 0 ]; then
+        say "removing it needs administrator rights: sudo asks for your password once"
+        # The user's own folders go with it, as their session names them: sudo resets the environment.
+        { declare -f; echo 'main "$@"'; } | sudo -- bash -s -- --uninstall \
+          "$(xdg "${XDG_CONFIG_HOME:-}" "$HOME/.config")" "$(xdg "${XDG_DATA_HOME:-}" "$HOME/.local/share")" "$(xdg "${XDG_CACHE_HOME:-}" "$HOME/.cache")" \
+          || exit "$?"
+        return
+      fi
+      # What removes it is the system's own tools, wherever its caller's PATH points.
+      export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+      [ "$#" -eq 1 ] || [ "$#" -eq 4 ] || fail "usage: install.sh --uninstall"
+      shift
+      uninstall "$@"
+      ;;
     *)
-      fail "usage: install.sh [--base <url>]"
+      fail "usage: install.sh [--base <url>] [--uninstall]"
       ;;
   esac
 }

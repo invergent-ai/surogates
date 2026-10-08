@@ -1,9 +1,9 @@
 // The install script (release/install.sh) in Ubuntu containers, never on this computer: its
-// --apply, which each version ships as bin/surogate-apply-update and runs as root; and the install
-// from a server, as a user with sudo. Releases are small stand-ins in the tarball's layout, signed
-// by a key of the test's own. Behind SUROGATE_INSTALL_TESTS=1: it needs Docker, the ubuntu:24.04
-// and ubuntu:26.04 images, and the Ubuntu archive for apt. The script's own list of release keys is
-// read without either.
+// --apply, which each version ships as bin/surogate-apply-update and runs as root; the install from
+// a server, as a user with sudo; and --uninstall. Releases are small stand-ins in the tarball's
+// layout, signed by a key of the test's own. Behind SUROGATE_INSTALL_TESTS=1: it needs Docker, the
+// ubuntu:24.04 and ubuntu:26.04 images, and the Ubuntu archive for apt. The script's own list of
+// release keys is read without either.
 
 import { type ChildProcess, execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, createPublicKey, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
@@ -779,6 +779,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     copyFileSync(join(box.dir, "manifest.json.sig"), join(www(), "desktop", "latest.json.sig"));
   };
   const install = () => as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- --base ${base}`);
+  const uninstall = (env = "") => as("tester", `curl -fsSL ${base}/desktop/install.sh | ${env} bash -s -- --uninstall`);
 
   beforeAll(async () => {
     mkdirSync(join(www(), "desktop"), { recursive: true });
@@ -938,5 +939,100 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(repaired.stdout).not.toContain("downloading");
     expect(current()).toBe("/opt/surogate/versions/1.3.0");
     expect(root("test -x /usr/local/bin/surogate").status).toBe(0);
+  });
+
+  it("uninstalls for every user, and asks before deleting the user's own data, as that user, under the folders their session names", () => {
+    expect(root("/opt/surogate-test/install.sh --remove")).toMatchObject({ status: 1, stderr: "Surogate Desktop: usage: install.sh [--base <url>] [--uninstall]\n" });
+    expect(root("/opt/surogate-test/install.sh --uninstall now")).toMatchObject({ status: 1, stderr: "Surogate Desktop: usage: install.sh --uninstall\n" });
+    const folders = "XDG_CONFIG_HOME=/home/tester/cfg XDG_DATA_HOME=/home/tester/dat XDG_CACHE_HOME=/home/tester/cch";
+    expect(as("tester", "mkdir -p cfg/autostart dat/surogate/electron cch/surogate/updates Surogate/agent/2026-10-08 && touch cfg/autostart/surogate.desktop Surogate/agent/2026-10-08/report.docx").status).toBe(0);
+    expect(as("other", "mkdir -p .config/autostart .local/share/surogate && touch .config/autostart/surogate.desktop").status).toBe(0);
+    // An apply holds the update's lock: the uninstall waits for it, rather than remove a tree being made.
+    expect(root("flock /opt/surogate/staging timeout 3 /opt/surogate-test/install.sh --uninstall").status).toBe(124);
+    expect(root("test -e /opt/surogate/current").status).toBe(0);
+    // A running app is never removed from under it.
+    expect(as("tester", "setsid /usr/local/bin/surogate 600 & sleep 1").status).toBe(0);
+    expect(uninstall()).toMatchObject({ status: 1, stderr: "Surogate Desktop: Surogate is running: quit it first, for every user of this computer\n" });
+    root("pkill -f '^/opt/surogate/current/surogate 600'");
+
+    // Without a terminal to answer on, the data stays, and nothing is said about the terminal.
+    const kept = uninstall(folders);
+    expect(kept).toMatchObject({ status: 0, stderr: "" });
+    expect(kept.stdout).toContain("Surogate Desktop: kept tester's app data, in /home/tester/dat/surogate\n");
+    for (const gone of ["/opt/surogate", "/etc/surogate", "/usr/local/bin/surogate", "/usr/share/applications/surogate.desktop", "/etc/apparmor.d/surogate-desktop",
+      "/usr/share/polkit-1/actions/ai.invergent.surogate.update.policy", "/home/tester/cfg/autostart/surogate.desktop"]) {
+      expect(root(`test ! -e ${gone}`).status, gone).toBe(0);
+    }
+    expect(root("grep -c surogate /usr/share/applications/mimeinfo.cache").stdout).toBe("0\n");
+    for (const stays of ["/home/tester/dat/surogate/electron", "/home/tester/cch/surogate/updates", "/home/tester/Surogate/agent/2026-10-08/report.docx",
+      "/home/other/.config/autostart/surogate.desktop", "/home/other/.local/share/surogate"]) {
+      expect(root(`test -e ${stays}`).status, stays).toBe(0);
+    }
+    expect(root("dpkg-query -W -f='${Status}\\n' qemu-system-x86").stdout).toBe("install ok installed\n");
+
+    // Installed again, then removed with a terminal that answers yes.
+    const answered = () => as("tester", `printf 'y\\n' | script -qec "curl -fsSL ${base}/desktop/install.sh | ${folders} bash -s -- --uninstall" /dev/null`);
+    const again = install();
+    expect(again.status, again.stderr).toBe(0);
+    const deleted = answered();
+    expect(deleted.status, deleted.stderr).toBe(0);
+    expect(deleted.stdout).toContain("Surogate Desktop: deleted tester's app data");
+    expect(root("test ! -e /home/tester/dat/surogate && test ! -e /home/tester/cch/surogate && test -e /home/tester/Surogate/agent/2026-10-08/report.docx && test -e /home/other/.local/share/surogate").status).toBe(0);
+
+    // A yes deletes only what is the user's to change: the deletion runs as the user.
+    expect(install().status).toBe(0);
+    expect(as("tester", "mkdir -p dat/surogate").status).toBe(0);
+    expect(root("mkdir -p /home/tester/cch/surogate && touch /home/tester/cch/surogate/root-only").status).toBe(0);
+    const refused = answered();
+    expect(refused.status, refused.stdout).toBe(1);
+    // The terminal carries both of its streams.
+    expect(refused.stdout).toContain("Surogate Desktop: removed from this computer");
+    expect(refused.stdout).toContain("Surogate Desktop: could not delete all of tester's app data: what tester may not change stays, in /home/tester/dat/surogate and /home/tester/cch/surogate");
+    expect(root("test ! -e /home/tester/dat/surogate && test -e /home/tester/cch/surogate/root-only && test ! -e /opt/surogate").status).toBe(0);
+  });
+
+  it("uninstalls under sudo too, finding the user's own XDG_CONFIG_HOME in their login", () => {
+    const installed = install();
+    expect(installed.status, installed.stderr).toBe(0);
+    expect(as("tester", "echo 'export XDG_CONFIG_HOME=/home/tester/login-cfg' >>.profile && mkdir -p login-cfg/autostart .local/share/surogate && touch login-cfg/autostart/surogate.desktop").status).toBe(0);
+    expect(as("tester", `curl -fsSL ${base}/desktop/install.sh -o install.sh && sudo bash install.sh --uninstall`).status).toBe(0);
+    expect(root("test ! -e /home/tester/login-cfg/autostart/surogate.desktop && test ! -e /opt/surogate && test -e /home/tester/.local/share/surogate").status).toBe(0);
+  });
+
+  it("removes again where nothing of it is left, with the system's own tools, and says the user's folders as one word of one line", () => {
+    // The root half, as the user's half starts it for tester: handed the user's three folders, or none, as under sudo.
+    const none = "/home/tester/none";
+    const half = (folders: string[]) => docker(["exec", "-e", "SUDO_USER=tester", box.container, "/opt/surogate-test/install.sh", "--uninstall", ...folders]);
+    // First on its caller's PATH, an rm that leaves a mark: the script's own rm, and the one it runs as the user, are the system's.
+    expect(root("mkdir -p /tmp/caller && printf '#!/bin/sh\\ntouch /tmp/caller/ran\\n' >/tmp/caller/rm && chmod 755 /tmp/caller/rm").status).toBe(0);
+    expect(root(`PATH=/tmp/caller:$PATH SUDO_USER=tester /opt/surogate-test/install.sh --uninstall ${none} ${none} ${none}`))
+      .toMatchObject({ status: 0, stdout: "Surogate Desktop: removed from this computer\n", stderr: "" });
+    expect(root("test -e /tmp/caller/ran").status).toBe(1);
+    // Under sudo the folders are the login's: tester's data is where XDG's default puts it. The lock
+    // is root's alone, here on a staging folder left by itself: the user's login is not handed it.
+    expect(as("tester", "echo 'ls -l /proc/$$/fd >/home/tester/login-fds' >>.profile").status).toBe(0);
+    expect(root("mkdir -p -m 700 /opt/surogate/staging").status).toBe(0);
+    expect(half([])).toMatchObject({ status: 0, stderr: "", stdout: "Surogate Desktop: removed from this computer\nSurogate Desktop: kept tester's app data, in /home/tester/.local/share/surogate\n" });
+    expect(root("test ! -e /opt/surogate && grep -c /dev/null /home/tester/login-fds && grep -c staging /home/tester/login-fds").stdout).toMatch(/^[1-9]\d*\n0\n$/);
+
+    // A data folder whose name would read as a line of the script's own, and colour what follows it: kept, then asked about.
+    const data = "/home/tester/da ta\nSurogate Desktop: 9.9.9 is installed\u001b[31m";
+    const quoted = "$'/home/tester/da ta\\nSurogate Desktop: 9.9.9 is installed\\E[31m/surogate'";
+    expect(docker(["exec", "-u", "tester", box.container, "mkdir", "-p", `${data}/surogate`]).status).toBe(0);
+    expect(half([none, data, none])).toMatchObject({ status: 0, stderr: "", stdout: `Surogate Desktop: removed from this computer\nSurogate Desktop: kept tester's app data, in ${quoted}\n` });
+    const asked = docker(["exec", "-e", "SUDO_USER=tester", "-e", `DATA=${data}`, box.container, "bash", "-c",
+      `printf 'y\\n' | script -qec '/opt/surogate-test/install.sh --uninstall ${none} "$DATA" ${none}' /dev/null`]);
+    expect(asked.status, asked.stdout).toBe(0);
+    expect(asked.stdout).toContain(`Surogate Desktop: also delete tester's sign-in, device token and browser profiles, in ${quoted}? Chat folders stay. [y/N] `);
+    expect(asked.stdout).not.toMatch(/^Surogate Desktop: 9\.9\.9 is installed/m);
+    expect(asked.stdout).toContain("Surogate Desktop: deleted tester's app data");
+    expect(docker(["exec", box.container, "test", "-e", `${data}/surogate`]).status).toBe(1);
+
+    // A Start at login entry in a folder that is not the user's to change stays: rm's own words, then a line of the script's.
+    expect(root("mkdir -p /home/tester/rooted/autostart && touch /home/tester/rooted/autostart/surogate.desktop").status).toBe(0);
+    const stopped = half(["/home/tester/rooted", none, none]);
+    expect(stopped).toMatchObject({ status: 1, stdout: "Surogate Desktop: removed from this computer\n" });
+    expect(stopped.stderr.trimEnd().split("\n").at(-1)).toBe('Surogate Desktop: stopped, as this step failed: runuser -u "$user" -- rm -f -- "$config/autostart/surogate.desktop"');
+    expect(root("test -e /home/tester/rooted/autostart/surogate.desktop").status).toBe(0);
   });
 });
