@@ -6,14 +6,16 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { type BrowserContext, chromium, type Dialog, type Page } from "playwright-core";
+import { type BrowserContext, chromium, type Dialog, type Download, type Page } from "playwright-core";
 
+import { MAX_WRITE_BYTES } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
 import { destination, reach } from "../vm/egress.js";
 import { CANCELLED, NEW_TAB, PAUSED } from "./client.js";
+import { quoted, type StagedDownload } from "./downloads.js";
 import { letGo, OPERATIONS } from "./operations.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
 
@@ -71,8 +73,10 @@ export const PROXY_BYPASSED =
 const MAX_NOTICES = 20;
 export const FILE_ASKED =
   "The page asked for a file to upload. The agent's browser on this computer has no files to give it, so nothing was chosen.";
-export const downloaded = (name: string): string =>
-  `The page started a download (${JSON.stringify(name.slice(0, 200))}). This computer does not keep the agent's downloads, so it was not saved.`;
+export const tooLarge = (name: string, bytes: number): string =>
+  `The page downloaded ${quoted(name)} (${bytes} bytes), too large to save in the chat's folder at once (at most ${MAX_WRITE_BYTES} bytes), so it was not saved.`;
+export const notFinished = (name: string, why: string): string => `The page's download of ${quoted(name)} did not finish (${why}), so it was not saved.`;
+const unmeasured = (name: string): string => `The page downloaded ${quoted(name)}, but its size could not be measured, so it was not saved.`;
 
 const failed = (message: string): Outcome => ({ error: { type: "browser", message } });
 const DELETED = failed("The chat was deleted, and its tabs closed with it");
@@ -234,8 +238,8 @@ export function launchOptions(executable: string, port: number, extra: readonly 
     ignoreDefaultArgs: WEAKENING,
     args: [FEATURES, `--proxy-server=http://127.0.0.1:${port}`, "--proxy-bypass-list=<-loopback>", ...extra],
     serviceWorkers: "block" as const,
-    // Nothing the agent's pages download is kept: no file reaches this computer that way.
-    acceptDownloads: false,
+    // A download is kept in Playwright's own temporary folder, this host's, until it is saved under the chat's folder.
+    acceptDownloads: true,
     env: browserEnv(),
     // The host decides when the browser ends: with its own end.
     handleSIGINT: false,
@@ -267,6 +271,8 @@ export interface BrowserHostOptions {
   proxy?: BrowserProxyOptions; // what the proxy judges and dials with; the system's by default
   args?: readonly string[]; // switches added to every launch: the tests' own
   boundMs?: number; // BOUND_MS unless told
+  downloaded?: (download: StagedDownload) => void; // where each download a page finished goes, to be saved
+  downloadBytes?: number; // the most a download may be; a write's most unless told
 }
 
 export class BrowserHost {
@@ -526,9 +532,9 @@ export class BrowserHost {
     return this.live !== context;
   }
 
-  // *page* is *session*'s, and so is every popup it opens. A file it asks for opens no dialog,
-  // and a download it starts is not kept; its agent is told of each with its next answer.
-  // No service worker answers it (bypassWorkers).
+  // *page* is *session*'s, and so is every popup it opens. A file it asks for opens no dialog, and
+  // its agent is told with its next answer; a download it finishes is staged, to be saved under the
+  // chat's folder. No service worker answers it (bypassWorkers).
   private adopt(session: string, page: Page): void {
     this.tabs.get(session)?.push(page);
     // Gone from the session's pages once it closes: a long session opens many popups.
@@ -540,7 +546,35 @@ export class BrowserHost {
     page.on("popup", (popup) => this.adopt(session, popup));
     // With a listener, the browser opens no file dialog of its own: no path the agent did not get reaches a page.
     page.on("filechooser", () => this.note(session, FILE_ASKED));
-    page.on("download", (download) => this.note(session, downloaded(download.suggestedFilename())));
+    page.on("download", (download) => void this.stage(session, download));
+  }
+
+  // A download once it has finished, in Playwright's temporary folder: handed on for the chat's folder,
+  // or, when it did not finish, cannot be measured or is too large to save, gone, and its agent told why.
+  // Whose it is goes by when it started, which is when the browser says so. Started while its user holds
+  // the browser, from whichever chat, it is theirs: nothing of it is told to the agent.
+  private async stage(session: string, download: Download): Promise<void> {
+    const name = download.suggestedFilename();
+    const root = this.roots.get(session);
+    const user = this.held !== null;
+    // The agent's own is told whatever came of it, held meanwhile or not: it began before any take-over.
+    const tell = (notice: string) => {
+      if (!user) this.keep(session, notice);
+    };
+    let path: string;
+    try {
+      path = await download.path();
+    } catch (error) {
+      tell(notFinished(name, (await download.failure().catch(() => null)) ?? said(error)));
+      return;
+    }
+    const size = await stat(path).then((found) => found.size, () => null);
+    if (root === undefined || !this.options.downloaded || size === null || size > (this.options.downloadBytes ?? MAX_WRITE_BYTES)) {
+      if (root !== undefined && this.options.downloaded) tell(size === null ? unmeasured(name) : tooLarge(name, size));
+      await download.delete().catch(() => {});
+      return;
+    }
+    this.options.downloaded({ root, session, name, path, user });
   }
 
   // A page's own question (an alert, a confirm, a prompt, a leave-this-page), in any tab of the browser's:
@@ -570,7 +604,11 @@ export class BrowserHost {
   // What a session's page did that its agent could not see happen. While its user holds the browser, what
   // a page asks or starts is their own doing, or the page's under their hand: its agent is told nothing of it.
   private note(session: string, notice: string): void {
-    if (this.held !== null) return;
+    if (this.held === null) this.keep(session, notice);
+  }
+
+  // Kept for *session*'s next answer that says what its pages did.
+  private keep(session: string, notice: string): void {
     const notices = this.unseen.get(session) ?? [];
     if (notices.length < MAX_NOTICES) notices.push(notice);
     this.unseen.set(session, notices);

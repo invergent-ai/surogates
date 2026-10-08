@@ -1,11 +1,14 @@
 // The tool layer under a device's binder once the agent has a browser here (spec, Section 5):
 // the browser's kinds go to the identity's browser host, every other kind to the tools beneath.
 
+import { rm } from "node:fs/promises";
+
 import type { FolderGuards } from "../binding/folder.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { ToolLayer } from "../shell/device-stack.js";
 import { type BrowserClient, PAUSED } from "./client.js";
+import type { StagedDownload } from "./downloads.js";
 import type { Launch } from "./host.js";
 
 export const BROWSER_KINDS = "browser.";
@@ -20,9 +23,12 @@ export const NO_BROWSER: Outcome = {
 
 export const isBrowserKind = (kind: string): boolean => kind.startsWith(BROWSER_KINDS);
 
+// What a session's downloads came to, at most this many to an answer, as the host's own notices.
+const MAX_NOTICES = 20;
+
 export interface BrowsingOptions {
   tools: ToolLayer;
-  browser: Pick<BrowserClient, "perform" | "forget" | "stop" | "end" | "address" | "pause" | "show">;
+  browser: Pick<BrowserClient, "perform" | "forget" | "stop" | "end" | "address" | "pause" | "show" | "onDownload">;
   // A browser operation runs only for a chat this computer bound: its binding, or undefined.
   bindingOf(root: string): unknown;
   // The browser Settings chose and the identity's profile for it, read at each operation; null: none here.
@@ -37,8 +43,14 @@ export class Browsing implements ToolLayer {
   private held: string | null = null;
   // Whether the chat it is held from was deleted since.
   private deleted = false;
+  // What saves each download its browser stages, once the stack has said; and what each calling
+  // session's downloads came to, until its next answer that says what its page did.
+  private save: ((download: StagedDownload) => Promise<string>) | null = null;
+  private readonly told = new Map<string, string[]>();
 
-  constructor(private readonly options: BrowsingOptions) {}
+  constructor(private readonly options: BrowsingOptions) {
+    options.browser.onDownload((download) => void this.saved(download));
+  }
 
   // The browser held by its user, or no browser here: refused before any chat's user is asked anything.
   refusal(operation: Operation): Outcome | null {
@@ -53,7 +65,36 @@ export class Browsing implements ToolLayer {
     // Let through before its user took the browser over, it never reaches the browser after.
     if (this.held !== null) return Promise.resolve(PAUSED);
     const launch = this.options.launch();
-    return launch ? this.options.browser.perform(launch, operation, signal) : Promise.resolve(NO_BROWSER);
+    if (!launch) return Promise.resolve(NO_BROWSER);
+    return this.options.browser.perform(launch, operation, signal).then((outcome) => this.tell(operation.callingSessionId, outcome));
+  }
+
+  /** What saves each download its browser stages: the stack's, which asks the chat's approvals and writes through its file host. */
+  saveDownloadsWith(save: (download: StagedDownload) => Promise<string>): void {
+    this.save = save;
+  }
+
+  private async saved(download: StagedDownload): Promise<void> {
+    if (!this.save) {
+      await rm(download.path, { force: true }).catch(() => {});
+      return;
+    }
+    const notice = await this.save(download);
+    // One its user started while they held the browser is theirs: its agent hears nothing of it.
+    if (download.user) return;
+    const notices = this.told.get(download.session) ?? [];
+    if (notices.length < MAX_NOTICES) notices.push(notice);
+    this.told.set(download.session, notices);
+  }
+
+  // *outcome*, with what the session's downloads came to when it says what the page did (its notices).
+  // One answered paused says nothing of them: they stay for the session's next answer that does.
+  private tell(session: string, outcome: Outcome): Outcome {
+    const told = this.told.get(session);
+    const ok = "ok" in outcome ? outcome.ok : undefined;
+    if (!told || typeof ok !== "object" || ok === null || !Array.isArray((ok as { notices?: unknown }).notices)) return outcome;
+    this.told.delete(session);
+    return { ok: { ...ok, notices: [...(ok as { notices: unknown[] }).notices, ...told] } };
   }
 
   address(session: string): Promise<string> {

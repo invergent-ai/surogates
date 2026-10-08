@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApprovalRequest } from "../src/binding/approvals.js";
 import { BOOT_ID, type FolderGuards } from "../src/binding/folder.js";
+import type { StagedDownload } from "../src/browser/downloads.js";
 import { Browsing } from "../src/browser/executor.js";
 import type { NetworkApprovals } from "../src/hosts/tool-hosts.js";
 import type { Bindings } from "../src/journal/bindings.js";
@@ -37,6 +38,9 @@ class Tools implements ToolLayer {
   address?: (session: string) => Promise<string>;
   // The chat whose user holds the agent's browser: every chat's browser operations are refused meanwhile.
   taken: string | null = null;
+  // What an operation answers, where a test says; and what the stack gave it to save its downloads with.
+  answer: ((operation: Operation) => Outcome) | null = null;
+  save: ((download: StagedDownload) => Promise<string>) | null = null;
 
   constructor(private readonly base: string, private readonly order: string[]) {}
 
@@ -63,8 +67,13 @@ class Tools implements ToolLayer {
     return true;
   }
 
+  saveDownloadsWith(save: (download: StagedDownload) => Promise<string>): void {
+    this.save = save;
+  }
+
   run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
     this.ran.push(operation);
+    if (this.answer) return Promise.resolve(this.answer(operation));
     if (this.hold === "no") return Promise.resolve({ ok: `ran ${operation.kind}` });
     return new Promise((resolve) => {
       if (this.hold === "until-aborted") {
@@ -341,6 +350,37 @@ describe("one agent's device", () => {
     expect(counts).toEqual([1, 0]);
   });
 
+  it("gives its tools what saves a download: through its binder, asked as a write of the chat's that a page downloaded, and made create-only on its tools", async () => {
+    const asked: ApprovalRequest[] = [];
+    const device = await start({
+      prompts: { pickFolder: () => Promise.resolve(folder), confirmFolder: () => Promise.resolve({ mode: "ask" }) },
+      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve("allow")), confirmFreeMode: () => Promise.resolve(false) },
+    });
+    await server.until(() => statuses.includes("connected"));
+    const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
+    server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce }, true));
+    await server.until(() => results("bind-1").length === 1);
+    // The chat's file host, as far as a save asks it: each path its own, nothing at any, and a write that lands.
+    tools.answer = (operation) => ({ ok: operation.kind === "resolve" ? operation.args.path : null });
+    const staged = join(base, "staged");
+    writeFileSync(staged, "report");
+    expect(await tools.save?.({ root: ROOT, session: CHILD, name: "report.txt", path: staged, user: false })).toBe(
+      'The page downloaded "report.txt". It is saved in the chat\'s folder as Downloads/report.txt.',
+    );
+    const key = join(folder, "Downloads", "report.txt");
+    expect(asked).toMatchObject([{ kind: "change", action: "write", path: key, bytes: 6, download: "page", chat: { root: ROOT, calling: CHILD } }]);
+    expect(tools.ran.map(({ kind, args }) => [kind, args.path ?? args.key, args.create])).toEqual([
+      ["resolve", join(folder, "Downloads"), undefined], ["resolve", key, undefined], ["stat", key, undefined], ["write", key, true],
+    ]);
+    expect(tools.ran.at(-1)?.args.data).toBe(Buffer.from("report").toString("base64"));
+    // Counted as the chat's sub-agent's work while it ran, and gone since; the staged file went too.
+    expect([device.working(), existsSync(staged)]).toEqual([0, false]);
+    // Its user's own, made while they held the browser: asked as theirs.
+    writeFileSync(staged, "theirs");
+    await tools.save?.({ root: ROOT, session: CHILD, name: "statement.pdf", path: staged, user: true });
+    expect(asked.at(-1)).toMatchObject({ kind: "change", path: join(folder, "Downloads", "statement.pdf"), download: "user" });
+  });
+
   it("counts a chat whose background process lives beneath the browser's layer, as the app's own stack wires it", async () => {
     const device = await start({
       tools: (bindings, network, changed) => {
@@ -349,7 +389,7 @@ describe("one agent's device", () => {
           tools,
           browser: {
             perform: () => Promise.resolve({ ok: null }), forget: () => {}, stop: () => Promise.resolve(), end: () => Promise.resolve(), address: () => Promise.resolve("about:blank"),
-            pause: () => {}, show: () => Promise.resolve(false),
+            pause: () => {}, show: () => Promise.resolve(false), onDownload: () => {},
           },
           bindingOf: (root) => bindings.get(root),
           launch: () => null,

@@ -16,7 +16,7 @@ import type { Binding, Bindings, Mode } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
 import { report } from "../report.js";
-import { type ApprovalPrompts, Approvals } from "./approvals.js";
+import { type ApprovalPrompts, Approvals, type DownloadBy } from "./approvals.js";
 import { BOOT_ID, checkFolder, confirmedFolder, type FolderGuards } from "./folder.js";
 import { type LinkSummary, scanLinks } from "./links.js";
 
@@ -325,12 +325,13 @@ export class Binder implements Executor {
   // when the server sends the operation again. It touches no file: the host checks
   // the folder against the binding's identity before any work. A bind waits on
   // nothing, so it settles at once, an aborted one too: suspend waits for it. Every
-  // other operation is the approvals', which settle once the signal aborts.
-  async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
+  // other operation is the approvals', which settle once the signal aborts. *download*: a write
+  // the desktop makes itself to save one, and whose it is (browser/downloads.ts).
+  async admit(operation: Operation, signal: AbortSignal, download?: DownloadBy): Promise<Outcome | null> {
     if (operation.kind === "retire") return this.retire(operation);
     // What the tools refuse anyway (no browser on this computer, say) is refused before anyone is
     // asked; in the same tick, so a chat's bind in the same burst cannot slip in before the approvals look.
-    if (operation.kind !== "bind") return this.options.refusal?.(operation) ?? this.approvals.admit(operation, signal);
+    if (operation.kind !== "bind") return this.options.refusal?.(operation) ?? this.approvals.admit(operation, signal, download);
     const root = operation.sessionId;
     const { folder, nonce } = operation.args;
     const own = operation.callingSessionId === root && operation.invocationId === "bind" && operation.ordinal === 0;

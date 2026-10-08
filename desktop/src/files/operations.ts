@@ -322,6 +322,8 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
   if (!isBase64(encoded)) throw valueError("data is not standard padded base64");
   const data = Buffer.from(encoded, "base64");
   if (data.length > MAX_WRITE_BYTES) throw WRITE_EFBIG;
+  // The desktop's own, for what it saves by itself, as a page's download: the server's writes carry none.
+  if (args.create === true) return create(key, data);
   // The revision this call's stat saw: anything else there, or nothing, is a conflict. Before anything is made.
   const expected = args.expected_revision;
   const check = () => {
@@ -367,6 +369,29 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
   } catch (error) {
     try {
       unlinkSync(temporary);
+    } catch {
+      // Already gone.
+    }
+    throw error;
+  }
+  return null;
+}
+
+// A file made only where nothing is: its name is opened create-only, so a file or a folder there
+// already is EEXIST, the look and the making are one act, and no temp file is renamed over what
+// another writer made meanwhile. What it made goes when the data cannot be written whole.
+function create(key: string, data: Buffer): null {
+  makeDirs(dirname(key));
+  const fd = io(key, () => openSync(key, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o666));
+  try {
+    try {
+      for (let written = 0; written < data.length;) written += io(key, () => writeSync(fd, data, written));
+    } finally {
+      io(key, () => closeSync(fd));
+    }
+  } catch (error) {
+    try {
+      unlinkSync(key);
     } catch {
       // Already gone.
     }

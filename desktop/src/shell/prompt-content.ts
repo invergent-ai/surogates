@@ -172,6 +172,21 @@ export function approval(request: ApprovalRequest): PromptContent {
     const content: PromptDetail = preview === null
       ? { label: `New content, ${sizeOf(bytes)}`, value: "Not text.", code: false, keep: "" }
       : code(preview.cut ? `The first ${sizeOf(PREVIEW_BYTES)} of ${sizeOf(bytes)}` : `New content, ${sizeOf(bytes)}`, preview.text, "\n\t");
+    if (request.download) {
+      // A download's save says where the file came from: no tool of the agent's wrote it.
+      const own = request.download === "user";
+      return {
+        ...OPERATION,
+        // Its user's own asks in either mode, so there is no asking to stop.
+        ...(own ? { buttons: [button("deny", "Deny"), button("allow", "Save", true)] } : {}),
+        title: `Save ${named(request.path)}?`,
+        lead: own
+          ? `You downloaded this file in ${chat.agent}'s browser, ${sizeOf(bytes)}. Save it${where}? ${chat.agent} can read what is saved there.`
+          : `A page in ${chat.agent}'s browser downloaded this file, ${sizeOf(bytes)}. Save it${where}?`,
+        details: [file, content],
+        height: 420,
+      };
+    }
     return {
       ...OPERATION, title: `Write ${named(request.path)}?`, lead: `${asker(chat)} wants to write ${sizeOf(bytes)} to this file${where}.`, details: [file, content], height: 420,
     };

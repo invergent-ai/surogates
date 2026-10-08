@@ -94,6 +94,22 @@ describe("an approval prompt", () => {
     expect(content.details).toEqual([{ label: "File", value: "docs/a.md", code: true, keep: "" }, shown]);
   });
 
+  it("says whose download a save is: a page's, or its user's own, which offers no stop asking", () => {
+    const save = { kind: "change", chat: CHAT, action: "write", path: "/home/me/notes/Downloads/report.pdf", bytes: 2048, preview: null } as const;
+    const page = approval({ ...save, download: "page" });
+    expect(page.title).toBe("Save report.pdf?");
+    expect(page.lead).toBe("A page in acme.surogate.ai's browser downloaded this file, 2 KB. Save it in notes?");
+    expect(page.details).toEqual([
+      { label: "File", value: "Downloads/report.pdf", code: true, keep: "" }, { label: "New content, 2 KB", value: "Not text.", code: false, keep: "" },
+    ]);
+    expect([ids(page), page.focus]).toEqual([["deny", "stop_asking", "allow"], "deny"]);
+    // Its user's own, made while they held the browser: asked in either mode, so there is no asking to stop.
+    const own = approval({ ...save, download: "user" });
+    expect(own.title).toBe("Save report.pdf?");
+    expect(own.lead).toBe("You downloaded this file in acme.surogate.ai's browser, 2 KB. Save it in notes? acme.surogate.ai can read what is saved there.");
+    expect([ids(own), allowing(own), own.focus, own.cancel]).toEqual([["deny", "allow"], ["allow"], "deny", "deny"]);
+  });
+
   it("asks about a delete, and names a path outside the folder whole, never as the folder's", () => {
     const content = approval({ kind: "change", chat: CHAT, action: "delete", path: "/tmp/x", bytes: null, preview: null });
     expect([content.title, content.details]).toEqual(["Delete x?", [{ label: "File", value: "/tmp/x", code: true, keep: "" }]]);

@@ -5,7 +5,7 @@
 //   npm run test:browser -- test/browser-host.test.ts
 // With the flag set anywhere else, they fail before any browser is launched.
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { getEventListeners } from "node:events";
 import { readFile } from "node:fs/promises";
@@ -19,7 +19,11 @@ import type { BrowserContext, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { PAUSED } from "../src/browser/client.js";
-import { ASKING, BrowserHost, type BrowserHostOptions, FILE_ASKED, holding, type Launch, PROXY_BYPASSED, WEAKENING } from "../src/browser/host.js";
+import type { StagedDownload } from "../src/browser/downloads.js";
+import {
+  ASKING, BrowserHost, type BrowserHostOptions, FILE_ASKED, holding, type Launch, notFinished, PROXY_BYPASSED, tooLarge, WEAKENING,
+} from "../src/browser/host.js";
+import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
 
 const EXECUTABLE = TEST_BROWSER;
@@ -85,6 +89,20 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<scrip
     }
     if (req.url === "/inner") return void res.writeHead(200, { "content-type": "text/html" }).end(`<a href="/x">Inner link</a>`);
     if (req.url === "/report.txt") return void res.writeHead(200, { "content-type": "text/plain", "content-disposition": "attachment" }).end("report");
+    // A download whose first part comes at once and whose rest a moment later: it is on its way meanwhile. Not
+    // text, and its first part more than the browser reads to tell what a file is: the browser takes a short
+    // text file for a download only once its end has come.
+    if (req.url === "/slow.bin") {
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment" });
+      res.write("s".repeat(4_096));
+      return void setTimeout(() => res.end("report"), 1_500);
+    }
+    // One that breaks off part-way: less than it said it had, and its connection gone.
+    if (req.url === "/broken.txt") {
+      res.writeHead(200, { "content-type": "text/plain", "content-disposition": "attachment", "content-length": "1000" });
+      res.write("part");
+      return void setTimeout(() => res.destroy(), 200);
+    }
     if (req.url === "/second") return void res.writeHead(200, { "content-type": "text/html" }).end("<title>Second</title>");
     // A page that answers a moment late: a navigation to it is in flight meanwhile.
     if (req.url === "/slow") return void setTimeout(() => res.writeHead(200, { "content-type": "text/html" }).end("<title>Slow</title>"), 1_500);
@@ -332,6 +350,90 @@ describe("the browser held, as the host keeps it", () => {
   });
 });
 
+describe("a page's download, as the host stages it", () => {
+  // These run anywhere too: the browser's part is a download as Playwright gives one, ending when the test
+  // says, on a file of the test's own.
+  let staged: StagedDownload[];
+  let did: string[];
+  const SESSION = "session-of-its-own";
+  const state = () => host as unknown as {
+    roots: Map<string, string>; unseen: Map<string, string[]>; stage(session: string, download: unknown): Promise<void>;
+  };
+  // A download named *name*, whose file is *file* once *ends* settles: with its path, or with why it did not finish.
+  const downloadOf = (name: string, file: string, ends: Promise<string>) => ({
+    suggestedFilename: () => name,
+    path: () => ends,
+    failure: () => ends.then(() => null, (error: Error) => error.message),
+    cancel: () => (did.push("cancel"), Promise.resolve()),
+    delete: () => (did.push("delete"), rmSync(file, { force: true }), Promise.resolve()),
+  });
+  const fileOf = (bytes: number) => {
+    const file = join(profile, `staged-${(next += 1)}`);
+    writeFileSync(file, "");
+    // Its size without its bytes: a hole.
+    truncateSync(file, bytes);
+    return file;
+  };
+
+  beforeEach(() => {
+    staged = [];
+    did = [];
+    host = new BrowserHost({ downloaded: (download) => staged.push(download) });
+    // The session's tab, as its chat's: an operation of the session's says whose it is.
+    state().roots.set(SESSION, "chat-1");
+  });
+
+  it("hands on one of exactly what a write may carry, and none a byte over, which it removes and says", async () => {
+    const most = fileOf(MAX_WRITE_BYTES);
+    await state().stage(SESSION, downloadOf("most.bin", most, Promise.resolve(most)));
+    expect(staged).toEqual([{ root: "chat-1", session: SESSION, name: "most.bin", path: most, user: false }]);
+    expect([did, existsSync(most), state().unseen.get(SESSION)]).toEqual([[], true, undefined]);
+    const over = fileOf(MAX_WRITE_BYTES + 1);
+    await state().stage(SESSION, downloadOf("over.bin", over, Promise.resolve(over)));
+    expect([staged.length, did, existsSync(over)]).toEqual([1, ["delete"], false]);
+    expect([MAX_WRITE_BYTES, state().unseen.get(SESSION)]).toEqual([50 * 1024 * 1024, [tooLarge("over.bin", MAX_WRITE_BYTES + 1)]]);
+    expect(tooLarge("over.bin", MAX_WRITE_BYTES + 1)).toBe(
+      'The page downloaded "over.bin" (52428801 bytes), too large to save in the chat\'s folder at once (at most 52428800 bytes), so it was not saved.',
+    );
+  });
+
+  it("hands on none it cannot measure, nor one that did not finish, nor one whose session's tab has closed, and tells the agent of the first two", async () => {
+    const gone = join(profile, "gone");
+    await state().stage(SESSION, downloadOf("gone.txt", gone, Promise.resolve(gone)));
+    await state().stage(SESSION, downloadOf("broken.txt", gone, Promise.reject(new Error("canceled"))));
+    expect(state().unseen.get(SESSION)).toEqual([
+      'The page downloaded "gone.txt", but its size could not be measured, so it was not saved.', notFinished("broken.txt", "canceled"),
+    ]);
+    // A session with no tab left is no chat's: what its page finished after is removed, and nobody is told.
+    const late = fileOf(6);
+    await state().stage("session-closed", downloadOf("late.txt", late, Promise.resolve(late)));
+    expect([staged, existsSync(late), state().unseen.has("session-closed")]).toEqual([[], false, false]);
+    // A name as long as a page likes is quoted at what a name may be.
+    expect(notFinished("x".repeat(300), "canceled")).toBe(`The page's download of "${"x".repeat(200)}" did not finish (canceled), so it was not saved.`);
+  });
+
+  it("takes one that starts while its user holds the browser for theirs, from whichever chat: handed on as theirs, stopped by no take-over, and the agent told nothing of it, saved or not", async () => {
+    host.pause("chat-2", true);
+    const file = fileOf(6);
+    const ends = Promise.withResolvers<string>();
+    const staging = state().stage(SESSION, downloadOf("statement.pdf", file, ends.promise));
+    // Handed back, and taken over again, while it is on its way.
+    host.pause("chat-2", false);
+    host.pause("chat-1", true);
+    ends.resolve(file);
+    await staging;
+    expect(staged).toEqual([{ root: "chat-1", session: SESSION, name: "statement.pdf", path: file, user: true }]);
+    expect(did).toEqual([]);
+    // Too large, not finished, or not measured: gone without a word to the agent.
+    const over = fileOf(MAX_WRITE_BYTES + 1);
+    await state().stage(SESSION, downloadOf("over.bin", over, Promise.resolve(over)));
+    await state().stage(SESSION, downloadOf("broken.txt", over, Promise.reject(new Error("canceled"))));
+    await state().stage(SESSION, downloadOf("gone.txt", join(profile, "gone"), Promise.resolve(join(profile, "gone"))));
+    host.pause("chat-1", false);
+    expect([staged.length, existsSync(over), state().unseen.has(SESSION)]).toEqual([1, false, false]);
+  });
+});
+
 describe.skipIf(!run)("the browser host", () => {
   beforeAll(() => isolated());
 
@@ -506,17 +608,88 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     expect(await script(a, "return document.getElementById('surogates-overlay');")).toBeNull();
   });
 
-  it("opens no file dialog for a file input, keeps no download, and tells the agent of each", async () => {
+  it("opens no file dialog for a file input, and tells the agent", async () => {
     const a = session();
     await op(a, "browser.navigate", { url: "http://fixture.test/" });
     expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 })).ok.notices).toEqual([FILE_ASKED]);
-    const download = await op(a, "browser.mouse", { action: "click", x: 60, y: 255, button: "left", clicks: 1 });
-    await expect.poll(async () => {
-      const said = (await op(a, "browser.mouse", { action: "move", x: 1, y: 1 })).ok.notices as string[];
-      return [...download.ok.notices, ...said].join(" ");
-    }).toContain(`("report.txt")`);
-    expect(readdirSync(profile).some((name) => name.includes("report"))).toBe(false);
   });
+
+  it("stages a download a session's page finished in its own temporary folder, and hands it on for the chat's folder; one its user started while they hold the browser as theirs, the agent told nothing", async () => {
+    const staged: StagedDownload[] = [];
+    host = hostWith({ downloaded: (download) => staged.push(download) });
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    // Its click says nothing of it: the save, after, is what the agent hears of.
+    expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 255, button: "left", clicks: 1 }, "chat-1")).ok.notices).toEqual([]);
+    await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(1);
+    expect(staged[0]).toMatchObject({ root: "chat-1", session: a, name: "report.txt", user: false });
+    expect(await readFile(staged[0]!.path, "utf8")).toBe("report");
+    // Not in the profile, nor anywhere the browser's own downloads go.
+    expect(staged[0]!.path.startsWith(profile)).toBe(false);
+    expect(readdirSync(profile).some((name) => name.includes("report"))).toBe(false);
+    // Its user takes the browser over, and clicks the link themselves.
+    host.pause("chat-1", true);
+    await tabs().get(a)![0]!.click("#dl");
+    await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(2);
+    expect(staged[1]).toMatchObject({ root: "chat-1", session: a, name: "report.txt", user: true });
+    host.pause("chat-1", false);
+    expect((await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")).ok.notices).toEqual([]);
+    // The browser is the agent's one browser: held from another chat, a download in this chat's page is its user's all the same.
+    host.pause("chat-2", true);
+    await tabs().get(a)![0]!.click("#dl");
+    await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(3);
+    expect(staged[2]).toMatchObject({ root: "chat-1", session: a, name: "report.txt", user: true });
+    host.pause("chat-2", false);
+    expect((await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")).ok.notices).toEqual([]);
+  }, 30_000);
+
+  it("stages no download over what a write may carry, and says so", async () => {
+    const staged: StagedDownload[] = [];
+    host = hostWith({ downloaded: (download) => staged.push(download), downloadBytes: 3 });
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    // Told with the click's answer, or with a later one.
+    const told: string[] = (await op(a, "browser.mouse", { action: "click", x: 60, y: 255, button: "left", clicks: 1 })).ok.notices;
+    await expect.poll(async () => {
+      told.push(...(await op(a, "browser.mouse", { action: "move", x: 1, y: 1 })).ok.notices);
+      return told.join(" ");
+    }, { timeout: 8_000 }).toContain('The page downloaded "report.txt" (6 bytes), too large to save in the chat\'s folder at once');
+    expect(staged).toEqual([]);
+  });
+
+  it("stages no download that did not finish, and says so", async () => {
+    const staged: StagedDownload[] = [];
+    host = hostWith({ downloaded: (download) => staged.push(download) });
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    await script(a, "location.href = '/broken.txt'; return 1;");
+    const told: string[] = [];
+    await expect.poll(async () => {
+      told.push(...(await op(a, "browser.mouse", { action: "move", x: 1, y: 1 })).ok.notices);
+      return told;
+    }, { timeout: 8_000 }).toEqual([notFinished("broken.txt", "canceled")]);
+    expect(told[0]).toBe('The page\'s download of "broken.txt" did not finish (canceled), so it was not saved.');
+    expect(staged).toEqual([]);
+  });
+
+  it("keeps a download its user started theirs though it ends after they handed the browser back, and through a later take-over", async () => {
+    const staged: StagedDownload[] = [];
+    host = hostWith({ downloaded: (download) => staged.push(download) });
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    host.pause("chat-1", true);
+    // Their own hand in the page they hold: whose a download is goes by when it started.
+    await Promise.all([page.waitForEvent("download", { timeout: 10_000 }), page.evaluate("void (location.href = '/slow.bin')")]);
+    host.pause("chat-1", false);
+    // Taken over again while it is still on its way, from another chat: theirs still, and not stopped as the agent's is.
+    host.pause("chat-2", true);
+    await expect.poll(() => staged.length, { timeout: 10_000 }).toBe(1);
+    expect(staged[0]).toMatchObject({ root: "chat-1", session: a, name: "slow.bin", user: true });
+    expect(await readFile(staged[0]!.path, "utf8")).toBe(`${"s".repeat(4_096)}report`);
+    host.pause("chat-2", false);
+    expect((await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")).ok.notices).toEqual([]);
+  }, 30_000);
 
   it("takes a popup a session's tab opens as the session's: its operations act there, and its close closes both", async () => {
     const [a, b] = [session(), session()];

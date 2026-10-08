@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { Operation, Outcome } from "../link/protocol.js";
+import type { StagedDownload } from "./downloads.js";
 import type { Launch } from "./host.js";
 
 // The same from src/browser and from dist/browser.
@@ -60,6 +61,8 @@ export type FromBrowser =
   | { type: "tried"; id: string; outcome: Outcome }
   | { type: "address"; id: string; url: string }
   | { type: "shown"; id: string; shown: boolean }
+  // A download a session's page started, finished and staged by the host, for the chat's folder.
+  | ({ type: "download" } & StagedDownload)
   // Its last word at a stop, after every answer: a utility process's postMessage has no callback.
   | { type: "stopped" };
 
@@ -95,6 +98,7 @@ export class BrowserClient {
   private readonly trying = new Map<string, (outcome: Outcome) => void>();
   private readonly addressing = new Map<string, (url: string) => void>();
   private readonly showing = new Map<string, (shown: boolean) => void>();
+  private downloaded: (download: StagedDownload) => void = () => {};
   private stopping: Promise<void> | null = null;
   private tries = 0;
   private addresses = 0;
@@ -135,6 +139,11 @@ export class BrowserClient {
       });
       host.send({ type: "address", id, session });
     });
+  }
+
+  /** Hear each download a host stages, for the chat's folder. */
+  onDownload(listener: (download: StagedDownload) => void): void {
+    this.downloaded = listener;
   }
 
   /** A chat its user took the browser over, or handed back: a running host is told, for an operation waiting there. */
@@ -216,6 +225,9 @@ export class BrowserClient {
       else if (message.type === "tried") this.trying.get(message.id)?.(message.outcome);
       else if (message.type === "address") this.addressing.get(message.id)?.(message.url);
       else if (message.type === "shown") this.showing.get(message.id)?.(message.shown);
+      else if (message.type === "download") {
+        this.downloaded({ root: message.root, session: message.session, name: message.name, path: message.path, user: message.user === true });
+      }
       else if (message.type === "stopped") host.kill();
     });
     host.onExit(() => {

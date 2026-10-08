@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { describe, expect, it, vi } from "vitest";
 
 import { PAUSED } from "../src/browser/client.js";
+import type { StagedDownload } from "../src/browser/downloads.js";
 import { Browsing, NO_BROWSER } from "../src/browser/executor.js";
 import type { Launch } from "../src/browser/host.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
@@ -23,6 +28,9 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
   const forgotten: string[] = [];
   const paused: Array<[string, boolean]> = [];
   const shown: string[] = [];
+  // What the browser's next answer is, and how it tells of a download it staged.
+  const answers: Outcome[] = [];
+  let staged: (download: StagedDownload) => void = () => {};
   // The chats this computer bound, until one is deleted.
   const chats = new Set(bound ? [ROOT, OTHER] : []);
   const tools: ToolLayer = {
@@ -37,18 +45,21 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
   const browsing = new Browsing({
     tools,
     browser: {
-      perform: (chosen, operation) => (browsed.push({ launch: chosen, kind: operation.kind }), Promise.resolve<Outcome>({ ok: "browser" })),
+      perform: (chosen, operation) => (browsed.push({ launch: chosen, kind: operation.kind }), Promise.resolve<Outcome>(answers.shift() ?? { ok: "browser" })),
       forget: (root) => void forgotten.push(`browser ${root}`),
       stop: () => (stopped.push("browser"), Promise.resolve()),
       end: () => (stopped.push("browser ended"), Promise.resolve()),
       address: (session) => Promise.resolve(`https://example.com/${session}`),
       pause: (root, held) => void paused.push([root, held]),
       show: (root) => (shown.push(root), Promise.resolve(true)),
+      onDownload: (listener) => {
+        staged = listener;
+      },
     },
     bindingOf: (root) => (chats.has(root) ? {} : undefined),
     launch: () => launch,
   });
-  return { browsing, ran, browsed, stopped, forgotten, paused, shown, chats };
+  return { browsing, ran, browsed, stopped, forgotten, paused, shown, chats, answers, stage: (download: StagedDownload) => staged(download) };
 }
 
 describe("the browser's kinds beside the tools", () => {
@@ -189,6 +200,69 @@ describe("the browser's kinds beside the tools", () => {
     const { browsing, shown } = rig();
     expect(await browsing.show(ROOT)).toBe(true);
     expect(shown).toEqual([ROOT]);
+  });
+
+  it("saves each download the browser staged with what the stack saves it by, and tells its session at its next answer that says what its page did", async () => {
+    const { browsing, answers, stage } = rig();
+    const saved: StagedDownload[] = [];
+    browsing.saveDownloadsWith((download) => (saved.push(download), Promise.resolve(`saved ${download.name}`)));
+    const download = { root: ROOT, session: "child", name: "report.txt", path: "/data/browser-profiles/x/tmp/a", user: false };
+    // One its user started while they held the browser: saved as theirs, and nothing of it is the agent's to hear.
+    const own = { ...download, name: "statement.pdf", path: "/data/browser-profiles/x/tmp/b", user: true };
+    stage(download);
+    stage(own);
+    await vi.waitFor(() => expect(saved).toEqual([download, own]));
+    const of = (kind: string, calling: string): Operation => ({ ...op(kind), callingSessionId: calling });
+    // A read says nothing of what the page did; another session's answer is not this one's.
+    answers.push({ ok: { frames: [] } }, { ok: { notices: [] } }, { ok: { url: "u", title: "t", opened: false, notices: ["The page asked for a file to upload."] } });
+    expect(await browsing.run(of("browser.observe", "child"), signal)).toEqual({ ok: { frames: [] } });
+    expect(await browsing.run(of("browser.mouse", ROOT), signal)).toEqual({ ok: { notices: [] } });
+    expect(await browsing.run(of("browser.navigate", "child"), signal)).toEqual({
+      ok: { url: "u", title: "t", opened: false, notices: ["The page asked for a file to upload.", "saved report.txt"] },
+    });
+    // Told once.
+    answers.push({ ok: { notices: [] } });
+    expect(await browsing.run(of("browser.keyboard", "child"), signal)).toEqual({ ok: { notices: [] } });
+  });
+
+  it("keeps what a download came to through a take-over: nothing of it rides on an answer that is paused, and its session hears once the browser is its agent's again", async () => {
+    const { browsing, browsed, answers, stage } = rig();
+    browsing.saveDownloadsWith((download) => Promise.resolve(`saved ${download.name}`));
+    const told = (browsing as unknown as { told: Map<string, string[]> }).told;
+    // Staged before its user took the browser over: the agent's, saved as usual while they hold it.
+    stage({ root: ROOT, session: ROOT, name: "report.txt", path: "/data/browser-profiles/x/tmp/a", user: false });
+    await vi.waitFor(() => expect(told.get(ROOT)).toEqual(["saved report.txt"]));
+    browsing.takeOver(OTHER);
+    expect(await browsing.run(op("browser.navigate"), signal)).toEqual(PAUSED);
+    expect(browsed).toEqual([]);
+    browsing.handBack(OTHER);
+    // One the browser itself answers paused, as it answers what was acting when it was taken over.
+    answers.push(PAUSED, { ok: { notices: [] } });
+    expect(await browsing.run(op("browser.mouse"), signal)).toEqual(PAUSED);
+    expect(await browsing.run(op("browser.mouse"), signal)).toEqual({ ok: { notices: ["saved report.txt"] } });
+    expect(told.size).toBe(0);
+  });
+
+  it("tells a session of twenty downloads at most with one answer, and removes a staged file nothing was given to save with", async () => {
+    const { browsing, answers, stage } = rig();
+    const folder = mkdtempSync(join(tmpdir(), "browsing-"));
+    try {
+      // Before the stack has said what saves them: the staged file goes, and nobody is told.
+      const unsaved = join(folder, "staged");
+      writeFileSync(unsaved, "report");
+      stage({ root: ROOT, session: ROOT, name: "report.txt", path: unsaved, user: false });
+      await vi.waitFor(() => expect(existsSync(unsaved)).toBe(false));
+      let saved = 0;
+      browsing.saveDownloadsWith((download) => (saved += 1, Promise.resolve(`saved ${download.name}`)));
+      for (let n = 1; n <= 21; n += 1) stage({ root: ROOT, session: ROOT, name: `${n}.txt`, path: join(folder, String(n)), user: false });
+      await vi.waitFor(() => expect(saved).toBe(21));
+      answers.push({ ok: { notices: [] } }, { ok: { notices: [] } });
+      const first = await browsing.run(op("browser.mouse"), signal) as { ok: { notices: string[] } };
+      expect([first.ok.notices.length, first.ok.notices[0], first.ok.notices.at(-1)]).toEqual([20, "saved 1.txt", "saved 20.txt"]);
+      expect(await browsing.run(op("browser.mouse"), signal)).toEqual({ ok: { notices: [] } });
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
   });
 
   it("asks the browser for the address of the page a session acts in", async () => {

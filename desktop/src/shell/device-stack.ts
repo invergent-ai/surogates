@@ -9,6 +9,7 @@ import { dirname } from "node:path";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import { Binder, type FolderPrompts } from "../binding/binder.js";
 import type { FolderGuards } from "../binding/folder.js";
+import { downloadSaver, type StagedDownload } from "../browser/downloads.js";
 import { connectDevice } from "../device.js";
 import type { NetworkApprovals } from "../hosts/tool-hosts.js";
 import type { Bindings } from "../journal/bindings.js";
@@ -47,6 +48,8 @@ export interface ToolLayer extends Executor {
   handBack?(root: string): boolean;
   takenOver?(root: string): boolean | "orphaned" | "elsewhere";
   show?(root: string): Promise<boolean>;
+  // What saves each download the agent's pages start: the stack's, through the binder.
+  saveDownloadsWith?(save: (download: StagedDownload) => Promise<string>): void;
 }
 
 export interface DeviceStackOptions {
@@ -169,6 +172,9 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     approvalPrompts: options.approvalPrompts,
     onError: options.onError,
   });
+  // A download is saved as any write of the chat's, one at a time for a chat: asked in a chat that asks every
+  // time, and its user's own in either mode, then made on its file host.
+  tools.saveDownloadsWith?.(downloadSaver(journal.bindings, binder));
   const { identity } = options;
   // Settled once the agent ends this device's token: what a revoke waits for.
   const ended = Promise.withResolvers<void>();

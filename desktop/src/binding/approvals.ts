@@ -44,6 +44,10 @@ const BROWSER_READS: ReadonlySet<string> = new Set(["browser.observe", "browser.
 const LOOKING: ReadonlySet<unknown> = new Set(["move", "wheel"]);
 const acts = ({ kind, args }: Operation): boolean => !BROWSER_READS.has(kind) && !(kind === "browser.mouse" && LOOKING.has(args.action));
 
+// Whose download a write saves (browser/downloads.ts): one a page of the agent's browser started, or
+// one the chat's user started while they held the browser, which asks in either mode.
+export type DownloadBy = "page" | "user";
+
 // The chat a prompt is for, and the session asking: a sub-agent of the chat when it is not the root.
 // A network prompt names the root: a connection is known by its root's socket, not by which session's command made it.
 export interface ChatLabel {
@@ -61,8 +65,11 @@ export interface Preview {
 
 export type ApprovalRequest =
   | { kind: "command"; chat: ChatLabel; command: string; workdir: string | null; background: boolean }
-  // preview: null for a delete, and for data that is not text.
-  | { kind: "change"; chat: ChatLabel; action: "write" | "delete"; path: string; bytes: number | null; preview: Preview | null }
+  // preview: null for a delete, and for data that is not text. download: a write that saves one, and whose.
+  | {
+    kind: "change"; chat: ChatLabel; action: "write" | "delete"; path: string; bytes: number | null; preview: Preview | null;
+    download?: DownloadBy;
+  }
   // command: what the process runs, as its start named it; null for a process this run of the app did not start.
   | { kind: "input"; chat: ChatLabel; process: string; command: string | null; data: string }
   | { kind: "network"; chat: ChatLabel; host: string; port: number; privateNetwork: boolean }
@@ -163,14 +170,16 @@ function previewOf(data: string, bytes: number): Preview | null {
 // What the prompt shows. The hosts take only text in these fields and refuse
 // anything else before it runs; here it is shown as String() writes it. A write
 // whose data came in a transfer carries it by now: the runner asks once it is whole.
-function requestFor(operation: Operation, binding: Binding, agent: string, command: (process: string) => string | null): ApprovalRequest {
+function requestFor(
+  operation: Operation, binding: Binding, agent: string, command: (process: string) => string | null, download?: DownloadBy,
+): ApprovalRequest {
   const { kind, args } = operation;
   const chat = { agent, root: binding.root, calling: operation.callingSessionId, folder: binding.folder };
   const text = (name: string) => String(args[name] ?? "");
   if (kind === "delete") return { kind: "change", chat, action: kind, path: text("key"), bytes: null, preview: null };
   if (kind === "write") {
     const bytes = Buffer.byteLength(text("data"), "base64");
-    return { kind: "change", chat, action: kind, path: text("key"), bytes, preview: previewOf(text("data"), bytes) };
+    return { kind: "change", chat, action: kind, path: text("key"), bytes, preview: previewOf(text("data"), bytes), ...(download ? { download } : {}) };
   }
   if (kind === "write_stdin") {
     const process = text("session_id");
@@ -231,20 +240,24 @@ export class Approvals {
   /**
    * Null lets the operation run; an outcome is its denial. Settles once *signal*
    * aborts (a cancel, a suspend), with a denial: an operation waiting its turn
-   * leaves the line, and its open prompt is dismissed.
+   * leaves the line, and its open prompt is dismissed. *download*: the write saves a
+   * download, a page's or its user's own, and its prompt says so; its user's own asks
+   * in a chat that works freely too.
    */
-  async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
+  async admit(operation: Operation, signal: AbortSignal, download?: DownloadBy): Promise<Outcome | null> {
     if (operation.kind.startsWith(BROWSER)) return this.browse(operation, signal);
     if (UNASKED.has(operation.kind)) return null;
-    const checked = this.asking(operation);
+    const checked = this.asking(operation, download);
     if ("answer" in checked) return checked.answer;
     const root = operation.sessionId;
     // Stopped: the runner drops what this answers, and it never lets it run.
     return this.inLine(root, signal, denied(operation.kind), async () => {
       // A "Stop asking" while it waited its turn lets it through unasked.
-      const again = this.asking(operation);
+      const again = this.asking(operation, download);
       if ("answer" in again) return again.answer;
-      const request = requestFor(operation, again.binding, this.options.agent, (process) => this.commands.get(`${root}\0${process}`) ?? null);
+      const request = requestFor(
+        operation, again.binding, this.options.agent, (process) => this.commands.get(`${root}\0${process}`) ?? null, download,
+      );
       let answer: ApprovalAnswer | undefined;
       try {
         // Raced against its signal: a prompt that ignores it cannot hold a cancel or a suspend.
@@ -255,6 +268,8 @@ export class Approvals {
       // A dismissed prompt's answer is not its user's.
       if (signal.aborted) return denied(operation.kind);
       if (answer === "timeout") return denied(operation.kind, UNANSWERED[shapeOf(operation.kind)]);
+      // Its user's own download asks in either mode: its prompt offers no "stop asking", and an answer not offered denies.
+      if (answer === "stop_asking" && download === "user") return denied(operation.kind);
       if (answer === "stop_asking") {
         // The user let this one run either way.
         try {
@@ -508,7 +523,7 @@ export class Approvals {
 
   // The chat's binding, when this operation must be asked about now; otherwise its
   // answer, null letting it run. A journal that cannot be read denies it.
-  private asking(operation: Operation): { binding: Binding } | { answer: Outcome | null } {
+  private asking(operation: Operation, download?: DownloadBy): { binding: Binding } | { answer: Outcome | null } {
     let binding: Binding | undefined;
     try {
       binding = this.options.bindings.get(operation.sessionId);
@@ -518,8 +533,9 @@ export class Approvals {
     // Fail closed: the tool hosts read the binding again only when it runs, so a bind
     // arriving meanwhile must not let it run unasked.
     if (!binding) return { answer: FOLDER_UNAVAILABLE };
-    // A mode it does not know asks.
-    if (binding.mode === "free") return { answer: null };
+    // A mode it does not know asks. So does a download its user made while they held the browser, in either
+    // mode: saved in the chat's folder, it is the agent's to read.
+    if (binding.mode === "free" && download !== "user") return { answer: null };
     // The file helper takes only its own resolved paths as keys, so a link or a ".."
     // cannot carry a write that skips its prompt here out of this folder; a key that
     // is not already normal asks all the same.
@@ -529,7 +545,8 @@ export class Approvals {
         (key === `${binding.folder}/${CANVAS}` && operation.invocationId.startsWith(REQUEST))
         || UNASKED_FOLDERS.some((name) => key.startsWith(`${binding.folder}/${name}/`))
       );
-    if (operation.kind === "write" && unasked) {
+    // A download is no write of the agent's own tools: wherever its Downloads leads, it asks.
+    if (operation.kind === "write" && unasked && download === undefined) {
       return { answer: null };
     }
     return { binding };

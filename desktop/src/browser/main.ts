@@ -25,7 +25,8 @@ const send = (message: FromBrowser): Promise<void> => new Promise((resolve) => {
   }
 });
 
-const host = new BrowserHost();
+// Each download a page finished goes to the parent, which saves it under the chat's folder.
+const host = new BrowserHost({ downloaded: (download) => void send({ type: "download", ...download }) });
 const running = new Map<string, AbortController>();
 const answering = new Set<Promise<void>>();
 

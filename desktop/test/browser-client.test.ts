@@ -8,6 +8,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   BROWSER_HOST, BROWSER_STOPPED, BrowserClient, type BrowserProcess, CANCELLED, DUPLICATE, type FromBrowser, PAUSED, type ToBrowser,
 } from "../src/browser/client.js";
+import type { StagedDownload } from "../src/browser/downloads.js";
 import type { Operation } from "../src/link/protocol.js";
 import { isolated, TEST_BROWSER } from "./isolated.js";
 
@@ -149,6 +150,18 @@ describe("the browser host's client", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("hands each download its host staged to its listener", () => {
+    const host = new FakeHost();
+    const client = new BrowserClient(() => host);
+    const heard: unknown[] = [];
+    client.onDownload((download) => heard.push(download));
+    void client.perform(LAUNCH, operation("op-1"), new AbortController().signal);
+    const download = { root: "root", session: "child", name: "report.txt", path: "/tmp/nowhere/a", user: false };
+    host.say({ type: "download", ...download });
+    host.say({ type: "download", ...download, user: true });
+    expect(heard).toEqual([download, { ...download, user: true }]);
   });
 
   it("asks a running host for the address of a session's page, and says a new tab's where none runs", async () => {
@@ -355,6 +368,31 @@ describe.skipIf(!run)("the browser host's process", () => {
     } finally {
       await client.stop();
     }
+  }, 30_000);
+
+  it("hands a download a page finished to its client's listener through the host's own process, staged in the host's temporary folder until its browser closes", async () => {
+    profile = mkdtempSync(join(tmpdir(), "sb-profile-"));
+    const client = new BrowserClient();
+    const heard: StagedDownload[] = [];
+    client.onDownload((download) => heard.push(download));
+    const launch = { executable: EXECUTABLE!, profile };
+    const signal = new AbortController().signal;
+    try {
+      // This computer's own address: refused by the proxy, but the browser is up, with a tab.
+      await client.perform(launch, operation("op-1", "browser.navigate", { url: "http://127.0.0.1:9/" }), signal);
+      // No site is reached from here: the page makes its file itself, as a page's script can.
+      const code = "const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['report'])); a.download = 'report.txt'; a.click(); return 1;";
+      expect(await client.perform(launch, operation("op-2", "browser.evaluate", { code }), signal)).toEqual({ ok: { value: 1 } });
+      await expect.poll(() => heard.length, { timeout: 10_000 }).toBe(1);
+      expect(heard[0]).toEqual({ root: "root", session: "child", name: "report.txt", path: heard[0]!.path, user: false });
+      expect(readFileSync(heard[0]!.path, "utf8")).toBe("report");
+      // Under the host's own temporary folder, apart from the profile.
+      expect([heard[0]!.path.startsWith(`${tmpdir()}/`), heard[0]!.path.startsWith(profile)]).toEqual([true, false]);
+    } finally {
+      await client.stop();
+    }
+    // What nobody saved goes with the browser.
+    expect(existsSync(heard[0]!.path)).toBe(false);
   }, 30_000);
 
   it("closes its headed browser when it is stopped, as the app's quit stops it", async () => {
