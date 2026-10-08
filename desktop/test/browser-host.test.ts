@@ -1085,6 +1085,40 @@ await navigator.serviceWorker.ready;`);
     expect(await pages()).toBe(1);
   }, 30_000);
 
+  it("leaves a question open for its user in a tab they opened themselves too while they hold the browser, and asks them before such a page is left", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/t/HELD" }, "chat-1");
+    const context = await (host as unknown as { running: Promise<BrowserContext> }).running;
+    host.pause("chat-1", true);
+    // A tab its user opens themselves, as with Ctrl+T, and goes to a site in: no session's, and in front.
+    const own = await context.newPage();
+    await own.goto("http://fixture.test/t/OWN");
+    await expect.poll(front, { timeout: 5_000 }).toBe("OWN");
+    const answered = () => within(500, own.evaluate("window.answered"));
+    await own.evaluate("void setTimeout(() => { window.answered = confirm('Pay?'); }, 300)");
+    // Open still, 2 s on: the page waits on it, and nobody has answered it for them.
+    await new Promise((done) => setTimeout(done, 2_300));
+    expect(await answered()).toBe("late");
+    // It is no session's page: no agent is refused anything for it.
+    expect((host as unknown as { asking: Set<Page> }).asking.size).toBe(0);
+    // Their own accept, at their keyboard, reaches the page.
+    asUser("focus", xwindow()!.id);
+    asUser("press", "Return");
+    await expect.poll(answered, { timeout: 5_000 }).toBe(true);
+    // A page that asks before it is left, once its user has acted in it: they are asked, and it is not left for them.
+    await own.evaluate("addEventListener('beforeunload', (event) => { event.preventDefault(); event.returnValue = 'stay'; })");
+    const [x, y] = await onScreen(own, "go");
+    asUser("click", String(x), String(y));
+    await expect.poll(() => within(500, own.title()), { timeout: 5_000 }).toBe("clicked 1");
+    await own.evaluate("void setTimeout(() => { location.href = '/second'; }, 300)");
+    await new Promise((done) => setTimeout(done, 2_300));
+    expect(own.url()).toBe("http://fixture.test/t/OWN");
+    // Their own answer, to leave, is what leaves it.
+    asUser("focus", xwindow()!.id);
+    asUser("press", "Return");
+    await expect.poll(() => own.url(), { timeout: 5_000 }).toBe("http://fixture.test/second");
+  }, 40_000);
+
   it("leaves a page it was asked to confirm leaving, while the agent drives, as before", async () => {
     const a = session();
     await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");

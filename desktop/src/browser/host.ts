@@ -9,7 +9,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { type BrowserContext, chromium, type Page } from "playwright-core";
+import { type BrowserContext, chromium, type Dialog, type Page } from "playwright-core";
 
 import type { Outcome } from "../link/protocol.js";
 import { destination, reach } from "../vm/egress.js";
@@ -296,8 +296,8 @@ export class BrowserHost {
   // in it says it opened, whether or not that navigation made it. One that failed, or a script that came
   // first, has told nobody.
   private readonly untold = new Set<string>();
-  // The pages whose own question (an alert, a confirm, a prompt, a leave-this-page) opened while their
-  // user held the browser, and was left for them to answer there: until the page is seen to answer again.
+  // The sessions' pages whose own question (an alert, a confirm, a prompt, a leave-this-page) opened while
+  // their user held the browser, and was left for them to answer there: until the page is seen to answer again.
   private readonly asking = new Set<Page>();
   // The chat whose user holds the browser, until that chat hands it back: every chat's operation here is
   // answered paused meanwhile. The browser is the agent's one browser on this computer, every tab a tab of
@@ -535,18 +535,22 @@ export class BrowserHost {
       if (pages?.includes(page)) pages.splice(pages.indexOf(page), 1);
       this.asking.delete(page);
     });
-    // A page's own question. While the agent drives, it is answered at once and unseen, as Playwright
-    // answers one nobody listens for: left open it would hold every operation in its page. While its
-    // user holds the browser it is theirs to answer, in the browser: nobody answers it for them, and
-    // their agent is told nothing of it.
-    page.on("dialog", (dialog) => {
-      if (this.held !== null) return void this.asking.add(page);
-      void (dialog.type() === "beforeunload" ? dialog.accept() : dialog.dismiss()).catch(() => {});
-    });
     page.on("popup", (popup) => this.adopt(session, popup));
     // With a listener, the browser opens no file dialog of its own: no path the agent did not get reaches a page.
     page.on("filechooser", () => this.note(session, FILE_ASKED));
     page.on("download", (download) => this.note(session, downloaded(download.suggestedFilename())));
+  }
+
+  // A page's own question (an alert, a confirm, a prompt, a leave-this-page), in any tab of the browser's:
+  // a session's, or one its user opened themselves. While the agent drives, it is answered at once and
+  // unseen, as Playwright answers one nobody listens for: left open it would hold every operation in its
+  // page. While its user holds the browser it is theirs to answer, in the browser: nobody answers it for
+  // them, and their agent is told nothing of it. A session's page is kept, as one its agent is refused
+  // until they have answered.
+  private asked(dialog: Dialog): void {
+    if (this.held === null) return void (dialog.type() === "beforeunload" ? dialog.accept() : dialog.dismiss()).catch(() => {});
+    const page = dialog.page();
+    if (page && [...this.tabs.values()].some((pages) => pages.includes(page))) this.asking.add(page);
   }
 
   // Whether *page* answers now. One with a question open answers nothing until it is answered: so a page
@@ -672,6 +676,7 @@ export class BrowserHost {
     keepWebRtcProxied(launch.profile);
     const context = await chromium.launchPersistentContext(launch.profile, launchOptions(launch.executable, this.proxy.port, this.options.args));
     context.on("close", () => this.retire(context));
+    context.on("dialog", (dialog) => this.asked(dialog));
     try {
       await this.bypassWorkers(context);
       this.spare = await this.proxied(context, this.proxy.server);
