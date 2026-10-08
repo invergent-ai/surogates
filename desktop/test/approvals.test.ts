@@ -998,6 +998,43 @@ describe("the browser on this computer", () => {
     expect(await approvals.admit(navigate(), never())).toEqual(ACT_DENIED);
   });
 
+  it("names the page each act would act in, as the browser says it just before, wherever the page sent itself", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    let at = "https://evil.example/";
+    const sessions: string[] = [];
+    approvals = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant", address: (session) => (sessions.push(session), Promise.resolve(at)),
+    });
+    expect(await approvals.admit(navigate(ROOT, CHILD), never())).toBeNull();
+    // The page it opened sent itself on to another site, one its user is signed in to.
+    at = "https://bank.example/account";
+    for (const act of [
+      op("browser.evaluate", { code: "return 1;" }, ROOT, CHILD), op("browser.mouse", { action: "click", x: 5, y: 6, button: "left", clicks: 1 }, ROOT, CHILD),
+      op("browser.keyboard", { action: "type", text: "hunter2", at: null, delay: 0 }, ROOT, CHILD), op("browser.keyboard", { action: "press", keys: "Enter", delay: 0 }, ROOT, CHILD),
+      op("browser.mouse", { action: "drag", path: [[1, 2], [3, 4]], button: "left" }, ROOT, CHILD),
+    ]) {
+      expect(await approvals.admit(act, never())).toBeNull();
+    }
+    expect(user.asked.map((request) => request.kind === "browser" && [request.action, request.page])).toEqual([
+      ["open", undefined], ...["script", "click", "type", "press", "drag"].map((action) => [action, "https://bank.example/account"]),
+    ]);
+    // The calling session's page: a sub-agent acts in its own tab.
+    expect(sessions).toEqual([CHILD, CHILD, CHILD, CHILD, CHILD]);
+  });
+
+  it("says the page is not known when the browser does not say within a second, and asks all the same", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant", address: () => new Promise(() => {}) });
+    const started = performance.now();
+    expect(await approvals.admit(op("browser.evaluate", { code: "return 1;" }), never())).toBeNull();
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(user.asked).toMatchObject([{ action: "script", page: null }]);
+  });
+
   it("asks a chat that asks every time its first use and then the act, in its one line, and Stop asking lets it work freely", async () => {
     bind(ROOT, "ask");
     user = new User();

@@ -12,7 +12,7 @@ import { type BrowserContext, chromium, type Page } from "playwright-core";
 
 import type { Outcome } from "../link/protocol.js";
 import { destination, reach } from "../vm/egress.js";
-import { CANCELLED } from "./client.js";
+import { CANCELLED, NEW_TAB } from "./client.js";
 import { OPERATIONS } from "./operations.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
 
@@ -207,6 +207,15 @@ export class BrowserHost {
       if (signal.aborted) resolve(CANCELLED);
       signal.addEventListener("abort", () => resolve(CANCELLED), { once: true });
     })]);
+  }
+
+  /**
+   * The address of the page *session*'s next operation acts in, once those before it in its line
+   * have run: its newest open page's, a popup's or its tab's, or a new tab's. Never rejects.
+   */
+  address(session: string): Promise<string> {
+    return this.inLine(session, async () => (this.tabs.get(session) ?? []).filter((page) => !page.isClosed()).at(-1)?.url() ?? NEW_TAB)
+      .catch(() => NEW_TAB);
   }
 
   /** Whether *executable* launches headless with its sandbox on within LAUNCH_MS, and its version. Never rejects. */

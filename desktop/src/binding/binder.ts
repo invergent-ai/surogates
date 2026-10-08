@@ -82,6 +82,7 @@ export interface BinderOptions {
   hosts: Executor; // runs everything but the binding
   refusal?(operation: Operation): Outcome | null; // what the hosts refuse anyway, before anyone is asked
   retired?(root: string): void; // a deleted chat's root: the hosts let go of what they keep for it
+  address?(session: string): Promise<string>; // the page a session's next browser operation acts in, for its prompt
   // The user is asked about every other operation first in a chat that asks every time,
   // and about a network destination off the package hosts in either mode.
   approvalPrompts: ApprovalPrompts;
@@ -164,7 +165,7 @@ export class Binder implements Executor {
 
   constructor(private readonly options: BinderOptions) {
     this.approvals = new Approvals({
-      bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, onError: options.onError,
+      bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, address: options.address, onError: options.onError,
     });
   }
 

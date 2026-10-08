@@ -36,6 +36,8 @@ export interface ToolLayer extends Executor {
   refusal?(operation: Operation): Outcome | null;
   // A deleted chat's root: what the tools keep for it goes, such as its browser tabs.
   retired?(root: string): void;
+  // The address of the page a calling session's next browser operation acts in, for its prompt.
+  address?(session: string): Promise<string>;
 }
 
 export interface DeviceStackOptions {
@@ -140,6 +142,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     hosts: counted,
     refusal: (operation) => tools.refusal?.(operation) ?? null,
     retired: (root) => tools.retired?.(root),
+    address: tools.address?.bind(tools),
     approvalPrompts: options.approvalPrompts,
     onError: options.onError,
   });

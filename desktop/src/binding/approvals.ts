@@ -68,7 +68,8 @@ export type ApprovalRequest =
   | { kind: "network"; chat: ChatLabel; host: string; port: number; privateNetwork: boolean }
   // The chat's first use of the browser here ("use", with no detail), or what an operation would do
   // in its page: the address it opens, the script it runs, where it clicks, what it types or presses, its drag's path.
-  | { kind: "browser"; chat: ChatLabel; action: BrowserAction; detail: string };
+  // page: an act's, the address of the page it acts in, as the browser said it just before; null when it did not say in time.
+  | { kind: "browser"; chat: ChatLabel; action: BrowserAction; detail: string; page?: string | null };
 
 export type BrowserAction = "use" | "open" | "script" | "click" | "type" | "press" | "drag" | "other";
 
@@ -92,8 +93,13 @@ export interface ApprovalsOptions {
   bindings: Bindings;
   prompts: ApprovalPrompts;
   agent: string; // the agent's name, for the prompts
+  // The address of the page a calling session's next browser operation acts in: a page moves itself, so an act's prompt names it.
+  address?: (session: string) => Promise<string>;
   onError?: (error: unknown) => void; // a choice that could not be recorded, or a network prompt that failed, and why
 }
+
+// How long an act's prompt waits for its page's address before it says the page is not known.
+const ADDRESS_MS = 1_000;
 
 const DENIED = {
   command: "The user denied this command on this computer",
@@ -301,7 +307,11 @@ export class Approvals {
         }
       }
       if (!now.act) return null;
-      const answer = await ask({ kind: "browser", chat, ...browserAct(operation) });
+      const act = browserAct(operation);
+      // An open names where it goes; any other act, the page it acts in now.
+      const answer = await ask(act.action === "open"
+        ? { kind: "browser", chat, ...act }
+        : { kind: "browser", chat, ...act, page: await this.pageOf(operation.callingSessionId, signal) });
       if (typeof answer !== "string") return answer;
       if (answer === "stop_asking") {
         try {
@@ -312,6 +322,20 @@ export class Approvals {
       }
       return answer === "allow" || answer === "stop_asking" ? null : browserDenied(BROWSER_DENIED.act);
     });
+  }
+
+  // The address of the page *session*'s act would act in, as the browser says it; null when it does not in time.
+  private async pageOf(session: string, signal: AbortSignal): Promise<string | null> {
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), ADDRESS_MS);
+    });
+    const said = Promise.resolve().then(() => this.options.address?.(session) ?? null).catch(() => null);
+    try {
+      return (await settled(Promise.race([said, late]), signal)) ?? null;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** A background command has started: a prompt before input to its process names the command. */

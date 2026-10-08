@@ -43,6 +43,8 @@ function received(message: ToBrowser): void {
       .finally(() => running.delete(message.id)));
   } else if (message.type === "try") {
     answer(message.id, host.tryBrowser(message.executable), "tried");
+  } else if (message.type === "address") {
+    void host.address(message.session).then((url) => send({ type: "address", id: message.id, url }));
   } else if (message.type === "cancel") {
     running.get(message.id)?.abort();
   } else if (message.type === "forget") {

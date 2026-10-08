@@ -22,7 +22,7 @@ export const isBrowserKind = (kind: string): boolean => kind.startsWith(BROWSER_
 
 export interface BrowsingOptions {
   tools: ToolLayer;
-  browser: Pick<BrowserClient, "perform" | "forget" | "stop" | "end">;
+  browser: Pick<BrowserClient, "perform" | "forget" | "stop" | "end" | "address">;
   // A browser operation runs only for a chat this computer bound: its binding, or undefined.
   bindingOf(root: string): unknown;
   // The browser Settings chose and the identity's profile for it, read at each operation; null: none here.
@@ -43,6 +43,10 @@ export class Browsing implements ToolLayer {
     if (!this.options.bindingOf(operation.sessionId)) return Promise.resolve(FOLDER_UNAVAILABLE);
     const launch = this.options.launch();
     return launch ? this.options.browser.perform(launch, operation, signal) : Promise.resolve(NO_BROWSER);
+  }
+
+  address(session: string): Promise<string> {
+    return this.options.browser.address(session);
   }
 
   // A deleted chat: its tabs close, with every popup its sessions opened.

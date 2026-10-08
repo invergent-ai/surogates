@@ -34,6 +34,7 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
       forget: (root) => void forgotten.push(`browser ${root}`),
       stop: () => (stopped.push("browser"), Promise.resolve()),
       end: () => (stopped.push("browser ended"), Promise.resolve()),
+      address: (session) => Promise.resolve(`https://example.com/${session}`),
     },
     bindingOf: (root) => (bound && root === ROOT ? {} : undefined),
     launch: () => launch,
@@ -61,6 +62,10 @@ describe("the browser's kinds beside the tools", () => {
     const { browsing, browsed } = rig(LAUNCH, false);
     expect(await browsing.run(op("browser.navigate"), signal)).toEqual(FOLDER_UNAVAILABLE);
     expect(browsed).toEqual([]);
+  });
+
+  it("asks the browser for the address of the page a session acts in", async () => {
+    expect(await rig().browsing.address("child")).toBe("https://example.com/child");
   });
 
   it("closes a deleted chat's tabs, and tells the tools beneath", () => {

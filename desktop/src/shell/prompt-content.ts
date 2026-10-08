@@ -208,14 +208,20 @@ const hostOf = (address: string): string => {
 // The most lines an address's block opens with; a longer one scrolls in it.
 const MAX_ADDRESS_LINES = 12;
 
-// What each browser operation's prompt says it would do in the page, and what its detail is.
+// What each browser operation's prompt says it would do in the page, and what its detail is: its title names where.
 const BROWSER_ACTS: Record<Exclude<BrowserAction, "use" | "open">, { title: string; does: string; label: string }> = {
-  script: { title: "Run a script in the page?", does: "wants to run this script in the page open in its browser. A script can read the page and act on the site as you.", label: "Script" },
-  click: { title: "Click in the page?", does: "wants to click the page open in its browser, at this place.", label: "Where" },
-  type: { title: "Type into the page?", does: "wants to type this into the page open in its browser.", label: "Text" },
-  press: { title: "Press keys in the page?", does: "wants to press these keys in the page open in its browser.", label: "Keys" },
-  drag: { title: "Drag in the page?", does: "wants to drag along these points in the page open in its browser.", label: "Path" },
-  other: { title: "Act in the page?", does: "wants to act in the page open in its browser.", label: "Operation" },
+  script: { title: "Run a script in", does: "wants to run this script in the page open in its browser. A script can read the page and act on the site as you.", label: "Script" },
+  click: { title: "Click in", does: "wants to click the page open in its browser, at this place.", label: "Where" },
+  type: { title: "Type into", does: "wants to type this into the page open in its browser.", label: "Text" },
+  press: { title: "Press keys in", does: "wants to press these keys in the page open in its browser.", label: "Keys" },
+  drag: { title: "Drag in", does: "wants to drag along these points in the page open in its browser.", label: "Path" },
+  other: { title: "Act in", does: "wants to act in the page open in its browser.", label: "Operation" },
+};
+
+// The site an act's page is on, as its title names it, cut at its start as an open's is: "the page" for one on none.
+const siteOf = (page: string | null | undefined): string => {
+  if (!page || !/^https?:/.test(page)) return "the page";
+  return ending(hostOf(page));
 };
 
 /** The browser's prompts (spec, Section 5): its first use in a chat, and each act in a chat that asks every time. */
@@ -250,13 +256,19 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
     };
   }
   const act = BROWSER_ACTS[request.action];
+  // The page it acts in, whole: a page can send itself to another site after it was opened.
+  const page = request.page === undefined
+    ? []
+    : [request.page === null ? { label: "Page", value: "Not known: the browser did not say in time", code: false, keep: "" } : code("Page", request.page)];
+  const title = `${act.title} ${siteOf(request.page)}?`;
   return {
     ...OPERATION,
-    title: act.title,
+    title,
     lead: `${asker(chat)} ${act.does}`,
     // A script's lines are shown as they are, with how many there are: what follows its first can be out of view.
-    details: [request.action === "script" ? code(lined(act.label, request.detail), request.detail, "\n\t") : code(act.label, request.detail)],
-    height: request.action === "script" ? 420 : 340,
+    details: [...page, request.action === "script" ? code(lined(act.label, request.detail), request.detail, "\n\t") : code(act.label, request.detail)],
+    height: (request.action === "script" ? 420 : 340) + (title.length > 30 ? 50 : 0)
+      + (request.page ? 25 + Math.min(Math.ceil(request.page.length / 40), MAX_ADDRESS_LINES) * 19 : request.page === null ? 45 : 0),
   };
 }
 

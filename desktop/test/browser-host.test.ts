@@ -81,6 +81,10 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<scrip
     if (req.url === "/inner") return void res.writeHead(200, { "content-type": "text/html" }).end(`<a href="/x">Inner link</a>`);
     if (req.url === "/report.txt") return void res.writeHead(200, { "content-type": "text/plain", "content-disposition": "attachment" }).end("report");
     if (req.url === "/second") return void res.writeHead(200, { "content-type": "text/html" }).end("<title>Second</title>");
+    // A page that sends itself on to another site once it has loaded.
+    if (req.url === "/moves") {
+      return void res.writeHead(200, { "content-type": "text/html" }).end(`<script>addEventListener("load", () => { location.href = "http://other.test/"; });</script>`);
+    }
     // A service worker that would answer every request of its origin's pages.
     if (req.url === "/sw.js") {
       return void res.writeHead(200, { "content-type": "text/javascript" })
@@ -306,6 +310,16 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     expect(await script(b, "return document.title;")).toBe("Second");
     // A's next operation opens a tab again.
     expect((await op(a, "browser.navigate", { url: "http://fixture.test/" })).ok?.opened).toBe(true);
+  });
+
+  it("says the address of the page a session's next operation acts in, wherever the page sent itself, a popup's once it opened one", async () => {
+    const a = session();
+    expect(await host.address(a)).toBe("about:blank");
+    await op(a, "browser.navigate", { url: "http://fixture.test/moves" });
+    await expect.poll(() => host.address(a)).toBe("http://other.test/");
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    await op(a, "browser.mouse", { action: "click", x: 50, y: 155, button: "left", clicks: 1 });
+    await expect.poll(() => host.address(a)).toBe("http://fixture.test/second");
   });
 
   it("finds the page's elements in every frame with their backend ids, and clicks one where it is now", async () => {

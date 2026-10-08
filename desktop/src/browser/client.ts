@@ -25,6 +25,9 @@ export const BROWSER_STOPPED: Outcome = {
   },
 };
 
+// The address of a tab a session's next operation would open.
+export const NEW_TAB = "about:blank";
+
 export type ToBrowser =
   // *root* is the chat's root session, *session* the calling one: each calling session has a tab.
   | { type: "op"; id: string; launch: Launch; root: string; session: string; kind: string; args: Record<string, unknown> }
@@ -33,12 +36,15 @@ export type ToBrowser =
   | { type: "forget"; root: string }
   // A browser the user picked, launched once to see that it runs: answered {version}, or why not.
   | { type: "try"; id: string; executable: string }
+  // The address of the page the session's next operation acts in.
+  | { type: "address"; id: string; session: string }
   | { type: "stop" };
 
 export type FromBrowser =
   | { type: "result"; id: string; outcome: Outcome }
   // A try's answer: its ids are the client's own, apart from the link's operation ids.
   | { type: "tried"; id: string; outcome: Outcome }
+  | { type: "address"; id: string; url: string }
   // Its last word at a stop, after every answer: a utility process's postMessage has no callback.
   | { type: "stopped" };
 
@@ -72,8 +78,10 @@ export class BrowserClient {
   private host: BrowserProcess | null = null;
   private readonly pending = new Map<string, (outcome: Outcome) => void>();
   private readonly trying = new Map<string, (outcome: Outcome) => void>();
+  private readonly addressing = new Map<string, (url: string) => void>();
   private stopping: Promise<void> | null = null;
   private tries = 0;
+  private addresses = 0;
 
   constructor(private readonly spawn: () => BrowserProcess = forkBrowserHost) {}
 
@@ -94,6 +102,20 @@ export class BrowserClient {
   tryBrowser(executable: string): Promise<Outcome> {
     const id = `try-${(this.tries += 1)}`;
     return this.ask(this.trying, id, { type: "try", id, executable });
+  }
+
+  /** The address of the page *session*'s next operation acts in: a new tab's, about:blank, where no host runs. Never rejects. */
+  address(session: string): Promise<string> {
+    const host = this.host;
+    if (!host || this.stopping) return Promise.resolve(NEW_TAB);
+    const id = `address-${(this.addresses += 1)}`;
+    return new Promise((resolve) => {
+      this.addressing.set(id, (url) => {
+        this.addressing.delete(id);
+        resolve(url);
+      });
+      host.send({ type: "address", id, session });
+    });
   }
 
   // The host closes its browser and exits; one that does not is killed, and its browser goes with it.
@@ -146,11 +168,14 @@ export class BrowserClient {
     host.onMessage((message) => {
       if (message.type === "result") this.pending.get(message.id)?.(message.outcome);
       else if (message.type === "tried") this.trying.get(message.id)?.(message.outcome);
+      else if (message.type === "address") this.addressing.get(message.id)?.(message.url);
       else if (message.type === "stopped") host.kill();
     });
     host.onExit(() => {
       if (this.host === host) this.host = null;
       for (const answer of [...this.pending.values(), ...this.trying.values()]) answer(BROWSER_STOPPED);
+      // The next operation starts another host, and opens a new tab.
+      for (const answer of [...this.addressing.values()]) answer(NEW_TAB);
     });
     return host;
   }

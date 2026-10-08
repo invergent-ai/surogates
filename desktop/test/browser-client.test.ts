@@ -84,6 +84,27 @@ describe("the browser host's client", () => {
     expect(hosts[0]!.sent.at(-1)).toEqual({ type: "forget", root: "root" });
   });
 
+  it("asks a running host for the address of a session's page, and says a new tab's where none runs", async () => {
+    const hosts: FakeHost[] = [];
+    const client = new BrowserClient(() => {
+      hosts.push(new FakeHost());
+      return hosts.at(-1)!;
+    });
+    // No host: the session's next operation opens a new tab, in a browser it starts.
+    expect(await client.address("child")).toBe("about:blank");
+    expect(hosts).toHaveLength(0);
+    void client.perform(LAUNCH, operation("op-1"), new AbortController().signal);
+    const asked = client.address("child");
+    const sent = hosts[0]!.sent.at(-1) as { type: string; id: string; session: string };
+    expect(sent).toMatchObject({ type: "address", session: "child" });
+    hosts[0]!.say({ type: "address", id: sent.id, url: "https://bank.example/" });
+    expect(await asked).toBe("https://bank.example/");
+    // A host that goes with one asked: the next operation opens a new tab.
+    const pending = client.address("child");
+    hosts[0]!.exit();
+    expect(await pending).toBe("about:blank");
+  });
+
   it("answers a cancel at once and tells the host", async () => {
     const host = new FakeHost();
     const client = new BrowserClient(() => host);

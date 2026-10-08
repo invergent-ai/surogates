@@ -154,13 +154,36 @@ describe("the browser's prompts", () => {
   });
 
   it("shows what an act would do in the page, whole, with the operation's buttons", () => {
-    const script = approval({ kind: "browser", chat: { ...CHAT, calling: "child" }, action: "script", detail: "const a = 1;\nreturn a;" });
+    const script = approval({ kind: "browser", chat: { ...CHAT, calling: "child" }, action: "script", detail: "const a = 1;\nreturn a;", page: "about:blank" });
     expect(script.title).toBe("Run a script in the page?");
     expect(script.lead.startsWith("A sub-agent of acme.surogate.ai wants to run this script")).toBe(true);
-    expect(script.details).toEqual([{ label: "Script, 2 lines", value: "const a = 1;\nreturn a;", code: true, keep: "\n\t" }]);
+    expect(script.details).toEqual([
+      { label: "Page", value: "about:blank", code: true, keep: "" },
+      { label: "Script, 2 lines", value: "const a = 1;\nreturn a;", code: true, keep: "\n\t" },
+    ]);
     expect([ids(script), script.focus]).toEqual([["deny", "stop_asking", "allow"], "deny"]);
     const open = approval({ kind: "browser", chat: CHAT, action: "open", detail: "https://example.com/‮gnp.exe" });
     expect(open.details).toEqual([{ label: "Address", value: "https://example.com/‮gnp.exe", code: true, keep: "" }]);
+  });
+
+  it("names the site each act would act in, and its page's whole address, or says it is not known", () => {
+    const page = "https://bank.example/account?id=1";
+    for (const [action, title] of [
+      ["script", "Run a script in bank.example?"], ["click", "Click in bank.example?"], ["type", "Type into bank.example?"],
+      ["press", "Press keys in bank.example?"], ["drag", "Drag in bank.example?"],
+    ] as const) {
+      const content = approval({ kind: "browser", chat: CHAT, action, detail: "x", page });
+      expect(content.title).toBe(title);
+      expect(content.details[0]).toEqual({ label: "Page", value: page, code: true, keep: "" });
+    }
+    const unknown = approval({ kind: "browser", chat: CHAT, action: "type", detail: "hunter2", page: null });
+    expect(unknown.title).toBe("Type into the page?");
+    expect(unknown.details[0]).toEqual({ label: "Page", value: "Not known: the browser did not say in time", code: false, keep: "" });
+    // Its host as the address bar shows it, and cut at its start as an open's is.
+    expect(approval({ kind: "browser", chat: CHAT, action: "click", detail: "1, 2", page: "https://bück.example/" }).title).toBe("Click in xn--bck-hoa.example?");
+    const long = approval({ kind: "browser", chat: CHAT, action: "click", detail: "1, 2", page: `https://bank.example.${"x".repeat(80)}.attacker.net/` });
+    expect(long.title.endsWith(".attacker.net?")).toBe(true);
+    expect(long.height).toBeGreaterThan(approval({ kind: "browser", chat: CHAT, action: "click", detail: "1, 2", page }).height);
   });
 
   it("names the host an open would go to, cut at its start, and opens tall enough for the whole address", () => {
