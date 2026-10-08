@@ -376,8 +376,9 @@ export class BrowserHost {
     let page: Page | undefined;
     try {
       const found = await this.pageFor(launch, session);
-      // Its user took the browser over while it launched, or while its tab opened: it does nothing in the page.
-      if (this.held !== null) return PAUSED;
+      // Its user took the browser over while it launched, or while its tab opened: it has no page, and does
+      // nothing in one. The last look before it acts, and the only one where its session has its tab already.
+      if (found === null || this.held !== null) return PAUSED;
       page = found.page;
       const { opened } = found;
       const value = BOUNDED.has(kind) ? await this.bounded(page, operation(page, args)) : await operation(page, args);
@@ -417,30 +418,39 @@ export class BrowserHost {
     return where.reach === "private" ? `The agent's browser does not reach private networks (${key})` : null;
   }
 
-  // The newest open page of the session's: a popup it opened, or its tab, made if it has none.
-  private async pageFor(launch: Launch, session: string): Promise<{ page: Page; opened: boolean }> {
+  // The newest open page of the session's: a popup it opened, or its tab, made if it has none. Null where
+  // none is made for it: its user took the browser over meanwhile.
+  private async pageFor(launch: Launch, session: string): Promise<{ page: Page; opened: boolean } | null> {
     const open = (this.tabs.get(session) ?? []).filter((page) => !page.isClosed());
     const newest = open.at(-1);
     if (newest) return { page: newest, opened: false };
     const page = await this.tab(launch);
+    if (page === null) return null;
     this.tabs.set(session, []);
     this.adopt(session, page);
     return { page, opened: true };
   }
 
   // A new tab: the new browser's first page, or one opened now. A browser that was closing
-  // refuses one or never answers: then the tab is opened in the next browser, once.
-  private async tab(launch: Launch, again = true): Promise<Page> {
+  // refuses one or never answers: then the tab is opened in the next browser, once. Null once its user
+  // holds the browser: none is taken or opened for an operation that waited for the launch, and one that
+  // opened meanwhile is closed again, no session's.
+  private async tab(launch: Launch, again = true): Promise<Page | null> {
     const context = await this.browser(launch);
+    if (this.held !== null) return null;
     const spare = this.spare !== null && !this.spare.isClosed() ? this.spare : null;
     this.spare = null;
     if (spare) return spare;
+    let page: Page;
     try {
-      return await opened(context);
+      page = await opened(context);
     } catch (error) {
       if (again && (await this.gone(context))) return this.tab(launch, false);
       throw error;
     }
+    if (this.held === null) return page;
+    await page.close().catch(() => {});
+    return null;
   }
 
   // Whether *context* is out of service, or goes within QUIT_MS.
