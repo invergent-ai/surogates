@@ -293,8 +293,13 @@ def _require_service_account_api_route(
 
 async def _get_workspace_session_bucket_and_root(
     request: Request, store: SessionStore, session_id: UUID, tenant: TenantContext,
+    *, path: str | None = None, change: bool = False,
 ) -> tuple[Session, str, str]:
     """Resolve session, bucket, and workspace-root id for storage access.
+
+    A *path* the route reaches (or, with *change*, changes) is refused
+    under the session's reserved prefixes once the session is known, and
+    before its storage is: a cloud chat's are refused as they always were.
 
     For shared-workspace children (delegations, loop iterations created
     after the shared-workspace deploy), the root id comes from the
@@ -316,6 +321,10 @@ async def _get_workspace_session_bucket_and_root(
             detail=f"Session {session_id} not found.",
         )
     await require_session_visible(request, session)
+    if path is not None:
+        _refuse_reserved(path, session)
+        if change:
+            _validate_change(path, session)
 
     bucket = session.config.get("storage_bucket")
     if not bucket:
@@ -605,9 +614,8 @@ async def get_workspace_file(
     _validate_path(path)
     store = _get_session_store(request)
     session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
-        request, store, session_id, tenant,
+        request, store, session_id, tenant, path=path,
     )
-    _refuse_reserved(path, session)
     await require_device_access(request, session, tenant)
 
     is_text = _is_text_key(path)
@@ -785,9 +793,8 @@ async def download_file(
     _validate_path(path)
     store = _get_session_store(request)
     session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
-        request, store, session_id, tenant,
+        request, store, session_id, tenant, path=path,
     )
-    _refuse_reserved(path, session)
     await require_device_access(request, session, tenant)
 
     async with workspace_files(request, session) as files:
@@ -831,10 +838,8 @@ async def delete_file(
     _validate_path(path)
     store = _get_session_store(request)
     session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
-        request, store, session_id, tenant
+        request, store, session_id, tenant, path=path, change=True,
     )
-    _refuse_reserved(path, session)
-    _validate_change(path, session)
     require_user_writable_session(session)
     access = await require_device_access(request, session, tenant)
 

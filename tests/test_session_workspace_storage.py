@@ -623,3 +623,22 @@ async def test_a_cloud_chat_keeps_its_artifacts_folder_hidden_and_closed():
         with pytest.raises(HTTPException) as refused:
             await opening(session_id, request, path="_artifacts/index.json", tenant=tenant)
         assert refused.value.status_code == 403
+
+
+async def test_a_cloud_chat_without_its_bucket_still_refuses_its_reserved_paths_first():
+    org_id, session_id = uuid4(), uuid4()
+    store = _Store(org_id)
+    store.session = SimpleNamespace(
+        id=session_id, org_id=org_id, agent_id="support-bot", status="active", channel="web", config={},
+    )
+    request, tenant = _request(store, _RecordingStorage(), _Redis()), _tenant(org_id, uuid4())
+    # Refused as they always were, before its storage is looked for.
+    for route, path in (
+        (workspace_route.get_workspace_file, "_artifacts/index.json"),
+        (workspace_route.download_file, "_artifacts/index.json"),
+        (workspace_route.delete_file, "_artifacts/index.json"),
+        (workspace_route.delete_file, "_history/x.json"),
+    ):
+        with pytest.raises(HTTPException) as refused:
+            await route(session_id, request, path=path, tenant=tenant)
+        assert refused.value.status_code == 403, (route.__name__, path, refused.value.detail)
