@@ -67,3 +67,7 @@ all of it:
 
     npm run test:browser -- test/browser-host.test.ts test/browser-client.test.ts
     npm run build && sh test/isolated.sh npx vitest run -c vitest.e2e.config.ts test/e2e/browser.e2e.ts
+
+They launch Chrome where it is installed, else Edge; `SUROGATE_TEST_BROWSER` names another:
+
+    SUROGATE_TEST_BROWSER=/opt/microsoft/msedge/msedge npm run test:browser -- test/browser-host.test.ts

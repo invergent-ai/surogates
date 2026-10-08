@@ -1,6 +1,7 @@
 // The browser host with the user's own browser: Chrome or Edge from its .deb, headed on xvfb's
-// display. Behind SUROGATE_BROWSER_TESTS=1, as the VM tests are behind theirs, and skipped where
-// neither browser is installed. Run apart from the user's session (test/isolated.sh), as
+// display, or the one SUROGATE_TEST_BROWSER names. Behind SUROGATE_BROWSER_TESTS=1, as the VM tests
+// are behind theirs, and skipped where neither browser is installed. Run apart from the user's
+// session (test/isolated.sh), as
 //   npm run test:browser -- test/browser-host.test.ts
 // With the flag set anywhere else, they fail before any browser is launched.
 
@@ -14,9 +15,9 @@ import type { BrowserContext } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { BrowserHost, type BrowserHostOptions, FILE_ASKED, type Launch, PROXY_BYPASSED, WEAKENING } from "../src/browser/host.js";
-import { isolated, notIsolated } from "./isolated.js";
+import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
 
-const EXECUTABLE = ["/opt/google/chrome/chrome", "/opt/microsoft/msedge/msedge"].find((path) => existsSync(path));
+const EXECUTABLE = TEST_BROWSER;
 const run = EXECUTABLE !== undefined && process.env.SUROGATE_BROWSER_TESTS === "1";
 const ROOT = "root-1";
 

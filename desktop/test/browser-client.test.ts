@@ -7,7 +7,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { BROWSER_HOST, BROWSER_STOPPED, BrowserClient, type BrowserProcess, CANCELLED, type FromBrowser, type ToBrowser } from "../src/browser/client.js";
 import type { Operation } from "../src/link/protocol.js";
-import { isolated } from "./isolated.js";
+import { isolated, TEST_BROWSER } from "./isolated.js";
 
 const operation = (id: string, kind = "browser.navigate", args: Record<string, unknown> = { url: "https://example.com/" }): Operation => ({
   id, sessionId: "root", callingSessionId: "child", invocationId: "call", ordinal: 1, kind, args, digest: `d-${id}`,
@@ -134,7 +134,7 @@ describe("the browser host's client", () => {
   });
 });
 
-const EXECUTABLE = ["/opt/google/chrome/chrome", "/opt/microsoft/msedge/msedge"].find((path) => existsSync(path));
+const EXECUTABLE = TEST_BROWSER;
 const run = EXECUTABLE !== undefined && process.env.SUROGATE_BROWSER_TESTS === "1";
 
 let profile = "";

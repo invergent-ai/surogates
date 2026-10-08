@@ -3,11 +3,14 @@
 // compositor through XDG_RUNTIME_DIR whatever WAYLAND_DISPLAY says, and the user's keyring
 // through the session bus; so each of these is checked, and nothing launches without all.
 
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { userInfo } from "node:os";
 import { basename, isAbsolute, relative } from "node:path";
 
 const SCRATCH = ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"];
+
+/** The browser the headed tests launch: SUROGATE_TEST_BROWSER's, or Chrome's or Edge's .deb, whichever is here. */
+export const TEST_BROWSER = process.env.SUROGATE_TEST_BROWSER || ["/opt/google/chrome/chrome", "/opt/microsoft/msedge/msedge"].find((path) => existsSync(path));
 
 // Whether *path* is *folder* or inside it.
 const within = (path: string, folder: string): boolean => {
