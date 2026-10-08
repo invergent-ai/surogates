@@ -16,7 +16,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { BrowserContext, FileChooser, Frame, JSHandle, Page } from "playwright-core";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge } from "../src/browser/downloads.js";
@@ -886,6 +886,43 @@ describe("a page's download, as the host stages it", () => {
     const late = fileOf(6);
     await arrives(downloadOf("late.bin", late, Promise.resolve(late)), TAB);
     expect([staged.length, existsSync(own), existsSync(late), state().unseen.size]).toEqual([2, false, false, 0]);
+  });
+
+  it("reads the minute after a hand back, and a failed request's second, on a clock that cannot be set: the computer's clock put on or back changes neither", async () => {
+    // The clock a host told none reads, and the computer's own, which its user or its network can set.
+    let steady = 5_000;
+    let wall = 1_700_000_000_000;
+    const clocks = [vi.spyOn(performance, "now").mockImplementation(() => steady), vi.spyOn(Date, "now").mockImplementation(() => wall)];
+    try {
+      host = new BrowserHost({ downloaded: (download) => staged.push(download) });
+      state().roots.set(SESSION, "chat-1");
+      state().tabs.set(SESSION, [PAGE]);
+      const comes = async (name: string, url?: string) => {
+        const file = fileOf(6);
+        await arrives(downloadOf(name, file, Promise.resolve(file), url));
+        const handed = staged.at(-1);
+        return handed?.name !== name ? "dropped" : handed.user ? "theirs" : "the agent's";
+      };
+      host.pause("chat-2", true);
+      host.pause("chat-2", false);
+      // Five seconds after the hand back, the computer's clock an hour on: the minute is not over.
+      steady += 5_000;
+      wall += 3_600_000;
+      expect(await comes("on.bin")).toBe("theirs");
+      // The minute over, and the computer's clock put two hours back: it does not begin again.
+      steady += AFTER_HAND_BACK_MS;
+      wall -= 2 * 3_600_000;
+      expect(await comes("back.bin")).toBe("the agent's");
+      // A request the browser gave up as a page a second ago, the computer's clock an hour on meanwhile: its download's
+      // beginning still. The agent's own, begun before this take-over: dropped.
+      state().failed(asks(SITE_URL));
+      steady += AFTER_FAILURE_MS;
+      wall += 3_600_000;
+      host.pause("chat-2", true);
+      expect(await comes("export.csv", SITE_URL)).toBe("dropped");
+    } finally {
+      for (const clock of clocks) clock.mockRestore();
+    }
   });
 
   it("keeps of the browser's requests only navigations not yet ended as a page, a failed one no longer than the second it counts for, none of a browser that closed, and no more than a bound of them", async () => {

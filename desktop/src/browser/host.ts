@@ -442,7 +442,7 @@ export interface BrowserHostOptions {
   boundMs?: number; // BOUND_MS unless told
   downloaded?: (download: StagedDownload) => void; // where each download a page finished goes, to be saved
   downloadBytes?: number; // the most a download may be; a write's most unless told
-  now?: () => number; // the clock; Date.now unless told
+  now?: () => number; // the clock, in milliseconds; the process's own steady one unless told
 }
 
 export class BrowserHost {
@@ -859,8 +859,11 @@ export class BrowserHost {
     return undefined;
   }
 
+  // The time the minute after a hand back and a failed request's second are counted by: a clock that cannot be
+  // set, not the computer's, which its user, or its network, puts on and back. It stands still while the
+  // computer sleeps (on Linux), so a minute begun before a sleep lasts that much longer: the safe side.
   private now(): number {
-    return this.options.now?.() ?? Date.now();
+    return this.options.now?.() ?? performance.now();
   }
 
   // A request the browser says has begun, in any page of its. A navigation's is kept with who held the
