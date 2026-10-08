@@ -237,5 +237,24 @@ describe("Settings → Folders and permissions", () => {
     // Nothing left to take back or stop: the section's heading has the keyboard.
     await settings.keyboard.press("Enter");
     await expect.poll(focused).toBe("H2");
+    // Under a search, the keyboard goes only where the search shows: a hidden chat's line never takes it.
+    await shell.evaluate(({ webContents }, folder) => {
+      const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
+      const chats = [
+        { root: "r-2", title: "Alpha", mode: "free", hosts: ["alpha.example"], processes: [] },
+        { root: "r-3", title: "Beta", mode: "free", hosts: ["beta.example"], processes: [] },
+      ];
+      for (const channel of ["settings:folders", "settings:take-back"]) contents.ipc.removeHandler(channel);
+      contents.ipc.handle("settings:folders", () => [{ folder, chats }]);
+      contents.ipc.handle("settings:take-back", (_event, root, host) => {
+        const chat = chats.find((found) => found.root === root)!;
+        chat.hosts = chat.hosts.filter((found) => found !== host);
+      });
+      contents.send("settings:changed");
+    }, folders[0]!);
+    await settings.fill("#settings-search", "Beta");
+    await settings.focus('[aria-label="Take back beta.example"]');
+    await settings.keyboard.press("Enter");
+    await expect.poll(focused).toBe("H2");
   });
 });

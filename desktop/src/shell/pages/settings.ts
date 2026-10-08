@@ -163,9 +163,9 @@ async function renderFolders(): Promise<void> {
       group.append(path, ...folder.chats.map(chatRow));
       return group;
     }));
+    // Rows drawn since the search was typed are searched too, before the keyboard is placed among what shows.
+    search();
   });
-  // Rows drawn since the search was typed are searched too.
-  search();
 }
 
 async function render(): Promise<void> {
