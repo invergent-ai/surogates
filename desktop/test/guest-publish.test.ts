@@ -215,6 +215,21 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
     expect(publish("fetch")).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: releases v1.2.0 and v1.1.0 carry different desktop-vm-${key}.json\n` });
   });
 
+  it("fetches no more of the bucket's than its manifest or each file can be, so what it holds cannot fill the runner's disk", () => {
+    built();
+    const sent = sentFiles();
+    expect(publish("send").status).toBe(0);
+    released(sent["manifest.json"]!);
+    // A file of the key larger than the release's.
+    replace(`desktop/vm/${key}/vmlinuz.zst`, Buffer.concat([sent["vmlinuz.zst"]!, randomBytes(1024 * 1024)]));
+    expect(publish("fetch")).toMatchObject({ status: 1, stdout: "", stderr: expect.stringMatching(`publish.sh: fetching desktop/vm/${key}/vmlinuz.zst stopped: curl exit 63\n$`) });
+    replace(`desktop/vm/${key}/vmlinuz.zst`, sent["vmlinuz.zst"]!);
+    // A manifest past the 64 KiB one can be.
+    replace(`desktop/vm/${key}/manifest.json`, randomBytes(70_000));
+    out = mkdtempSync(join(dir, "out-"));
+    expect(publish("fetch")).toMatchObject({ status: 1, stdout: "", stderr: expect.stringMatching(`publish.sh: looking for desktop/vm/${key}/manifest.json stopped: curl exit 63\n$`) });
+  });
+
   it("keeps the bucket's secret off curl's command line, where any process of the runner's could read it", () => {
     rmSync(join(dir, "curl-argv"), { force: true });
     expect(publish("fetch")).toMatchObject({ status: 0, stdout: "missing\n" });

@@ -44,7 +44,7 @@ s3() {
 # its headers alone (-I). Any other status stops the script, through the assignment it is called in.
 manifest() {
   local status
-  status="$(s3 "$@" "$prefix/manifest.json")"
+  status="$(s3 "$@" "$prefix/manifest.json")" || fail "looking for desktop/vm/$key/manifest.json stopped: curl exit $?"
   case "$status" in
     200 | 404) echo "$status" ;;
     *) fail "looking for desktop/vm/$key/manifest.json got $status" ;;
@@ -76,7 +76,7 @@ check() {
   fi
   rm -f "$OUT/bucket.json"
   while read -r name size sha256 download downloadSize downloadSha256; do
-    status="$(s3 --max-filesize "$downloadSize" -o "$OUT/bucket.zst" "$prefix/$download")"
+    status="$(s3 --max-filesize "$downloadSize" -o "$OUT/bucket.zst" "$prefix/$download")" || fail "fetching desktop/vm/$key/$download stopped: curl exit $?"
     [ "$status" = 200 ] || fail "fetching desktop/vm/$key/$download got $status"
     if [ "$(stat -c %s "$OUT/bucket.zst") $(sha256sum < "$OUT/bucket.zst" | cut -d' ' -f1)" != "$downloadSize $downloadSha256" ] \
       || [ "$(zstd -q -dc "$OUT/bucket.zst" | wc -c) $(zstd -q -dc "$OUT/bucket.zst" | sha256sum | cut -d' ' -f1)" != "$size $sha256" ]; then
