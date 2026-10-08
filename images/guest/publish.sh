@@ -33,10 +33,12 @@ fail() {
   exit 1
 }
 # A request to the bucket, signed; its HTTP status on stdout. A transfer that stalls for a minute
-# stops, and one that takes an hour: the image's 597 MB at a sixth of a megabyte a second.
+# stops, and one that takes an hour: the image's 597 MB at a sixth of a megabyte a second. The
+# secret reaches curl through a pipe from printf, a builtin, never its command line (R2's are hex,
+# so nothing in it needs quoting for curl's config).
 s3() {
   curl -q -sS --connect-timeout 30 --speed-limit 1024 --speed-time 60 --max-time 3600 \
-    --aws-sigv4 "aws:amz:auto:s3" --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" -w '%{http_code}' "$@"
+    -K <(printf 'user = "%s:%s"\n' "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY") --aws-sigv4 "aws:amz:auto:s3" -w '%{http_code}' "$@"
 }
 # The key's manifest's HTTP status, 200 or 404, as curl's options ask for it: into a file, or
 # its headers alone (-I). Any other status stops the script, through the assignment it is called in.

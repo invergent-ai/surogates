@@ -74,6 +74,10 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
       'echo "gh: not as publish.sh calls it: $*" >&2; exit 1',
     ].join("\n"));
     chmodSync(join(dir, "bin", "gh"), 0o755);
+    // curl, as publish.sh calls it, each argument it is given written down first.
+    const curl = spawnSync("sh", ["-c", "command -v curl"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(join(dir, "bin", "curl"), `#!/bin/sh\nprintf '%s\\n' "$@" >> '${join(dir, "curl-argv")}'\nexec '${curl}' "$@"\n`);
+    chmodSync(join(dir, "bin", "curl"), 0o755);
     writeFileSync(join(dir, "s3.json"), JSON.stringify({
       identities: [{ name: "release", credentials: [{ accessKey: CREDENTIALS.AWS_ACCESS_KEY_ID, secretKey: CREDENTIALS.AWS_SECRET_ACCESS_KEY }], actions: ["Admin", "Read", "Write", "List"] }],
     }));
@@ -184,6 +188,14 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
       out = mkdtempSync(join(dir, "out-"));
       expect(publish("fetch")).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: desktop/vm/${key}'s manifest does not name rootfs.img.zst and vmlinuz.zst\n` });
     }
+  });
+
+  it("keeps the bucket's secret off curl's command line, where any process of the runner's could read it", () => {
+    rmSync(join(dir, "curl-argv"), { force: true });
+    expect(publish("fetch")).toMatchObject({ status: 0, stdout: "missing\n" });
+    const argv = readFileSync(join(dir, "curl-argv"), "utf8");
+    expect(argv).toContain("aws:amz:auto:s3");
+    expect(argv).not.toContain(CREDENTIALS.AWS_SECRET_ACCESS_KEY);
   });
 
   it("stops at a bucket that refuses it, rather than taking the image for missing", () => {
