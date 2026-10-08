@@ -518,7 +518,8 @@ uninstall() {
   fi
   # As the user: only what they may change goes.
   runuser -u "$user" -- rm -f -- "$config/autostart/surogate.desktop"
-  [ -e "$data/surogate" ] || [ -e "$cache/surogate" ] || return 0
+  # As the user too, whether they have data: root may not see into a home that another computer serves.
+  runuser -u "$user" -- test -e "$data/surogate" || runuser -u "$user" -- test -e "$cache/surogate" || return 0
   # Asked on the terminal, as this script's input is itself; with none to ask on, the data stays.
   if (exec </dev/tty) 2>/dev/null; then
     read -r -p "Surogate Desktop: also delete $user's sign-in, device token and browser profiles, in $(named "$data/surogate")? Chat folders stay. [y/N] " answer </dev/tty || answer=

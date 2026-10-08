@@ -1229,4 +1229,23 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     installed("1.0.0");
     expect(root("/opt/surogate-test/install.sh --uninstall").status).toBe(0);
   });
+
+  it("finds the user's data, asks about it and deletes it in a home that root cannot read, as the user each time", () => {
+    // Root without its right to pass by a folder's mode, as it is in a home that another computer
+    // serves; and tester's folders, which only tester opens.
+    const folders = "/home/tester/closed/cfg /home/tester/closed/dat /home/tester/closed/cch";
+    const squashed = `setpriv --bounding-set=-dac_override,-dac_read_search env SUDO_USER=tester /opt/surogate-test/install.sh --uninstall ${folders}`;
+    const fresh = "rm -rf /home/tester/closed && runuser -u tester -- sh -c 'umask 077 && mkdir -p /home/tester/closed/cfg/autostart /home/tester/closed/dat/surogate /home/tester/closed/cch"
+      + " && touch /home/tester/closed/cfg/autostart/surogate.desktop /home/tester/closed/dat/surogate/token'";
+    expect(root(`${fresh} && setpriv --bounding-set=-dac_override,-dac_read_search test -e /home/tester/closed/dat/surogate`).status).toBe(1);
+    // Without a terminal the data stays, and the script says where.
+    expect(root(squashed)).toMatchObject({ status: 0, stderr: "", stdout: expect.stringMatching(/\nSurogate Desktop: kept tester's app data, in \/home\/tester\/closed\/dat\/surogate\n$/) });
+    expect(root("test ! -e /home/tester/closed/cfg/autostart/surogate.desktop && test -e /home/tester/closed/dat/surogate/token").status).toBe(0);
+    // With one that answers yes, it goes.
+    const asked = root(`${fresh} && printf 'y\\n' | script -qec '${squashed}' /dev/null`);
+    expect(asked.status, asked.stdout).toBe(0);
+    expect(asked.stdout).toContain("Surogate Desktop: also delete tester's sign-in, device token and browser profiles, in /home/tester/closed/dat/surogate? Chat folders stay. [y/N] ");
+    expect(asked.stdout).toContain("Surogate Desktop: deleted tester's app data");
+    expect(root("test ! -e /home/tester/closed/dat/surogate && test -d /home/tester/closed/dat").status).toBe(0);
+  });
 });
