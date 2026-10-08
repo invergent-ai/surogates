@@ -178,6 +178,18 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
     expect(readFileSync(join(out, "manifest.json")).equals(sent["manifest.json"]!)).toBe(true);
   });
 
+  it("fails on a release's manifest of another key, and on a file of the key that the bucket does not serve", () => {
+    built();
+    const sent = sentFiles();
+    expect(publish("send").status).toBe(0);
+    released(Buffer.from(sent["manifest.json"]!.toString().replace(key, "0".repeat(64))));
+    expect(publish("fetch")).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: desktop-vm-${key}.json is not the manifest of desktop/vm/${key}\n` });
+    released(sent["manifest.json"]!);
+    expect(signed("-X", "DELETE", `${endpoint}/${bucket}/desktop/vm/${key}/vmlinuz.zst`).status).toBe(0);
+    out = mkdtempSync(join(dir, "out-"));
+    expect(publish("fetch")).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: fetching desktop/vm/${key}/vmlinuz.zst got 404\n` });
+  });
+
   it("refuses a release's manifest that names no files, which would leave the bucket's files unchecked", () => {
     built();
     expect(publish("send").status).toBe(0);

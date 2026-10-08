@@ -127,7 +127,7 @@ class ReleaseWorkflowTest < Minitest::Test
       elsif run.include?("images/guest/publish.sh send")
         assert_equal r2, step.fetch("env")
       else
-        refute step.fetch("env", {}).values.any? { |value| value.to_s.include?("secrets.") }, "#{step["name"] || step["uses"]} reads a secret"
+        refute step.to_s.include?("secrets."), "#{step["name"] || step["uses"]} reads a secret"
       end
     end
   end
