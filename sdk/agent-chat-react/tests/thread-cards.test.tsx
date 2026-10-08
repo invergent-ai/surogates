@@ -439,6 +439,24 @@ describe("the cards in the conversation", () => {
     expect(card.textContent).toContain("Started");
   });
 
+  it("says only the button pressed is starting, and lets neither start the thread again meanwhile", async () => {
+    const pending = () => new Promise<AgentChatThreadRow>(() => {});
+    for (const [pressed, other] of [["Run in the cloud instead", "Allow"], ["Allow", "Run in the cloud instead"]] as const) {
+      const dom = mount(thread(applied(proposed), "simple"), adapterStub({
+        startProposedThread: vi.fn(pending), startLocalThread: vi.fn(pending),
+      }), { projectId: "project-1" });
+      const card = [...dom.querySelectorAll('[data-testid="proposed-thread"]')][2]!;
+      await act(async () => button(dom, pressed, card).click());
+      const starting = button(dom, "Starting…", card);
+      expect(starting.getAttribute("aria-label")).toBe("Starting Check the totals");
+      expect(starting.disabled).toBe(true);
+      // The other way keeps its words, and waits.
+      expect(button(dom, other, card).disabled).toBe(true);
+      act(() => root?.unmount());
+      dom.remove();
+    }
+  });
+
   it("says why a thread did not start on this computer, and lets the user allow it again", async () => {
     const startLocalThread = vi.fn()
       .mockRejectedValueOnce(new Error("No folder was chosen for this thread"))
