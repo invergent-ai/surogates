@@ -1031,8 +1031,12 @@ class History:
         this pod's own depth-1 boundary when a pruning has cut below it since,
         joins the history's ``shallow`` file.  The rewrite of ``packed-refs``
         is the moment a push counts.  Only the project's lock holder pushes.
+        A lock can be lost unseen, so the refs are read again right before
+        they are written: a push that finds them moved while its pack went
+        up writes none of its own over them.
         """
         refs = self._take()
+        seen = dict(refs)
         moved = sorted(ref for ref, want in expect.items() if refs.get(ref) != want)
         if moved:
             raise HistoryConflict(f"{', '.join(moved)} moved in the project's history")
@@ -1076,6 +1080,8 @@ class History:
         if cut:
             self._put_durable("shallow", "".join(f"{c}\n" for c in sorted({*self._durable_shallow(), *cut})).encode())
         refs.update(updates)
+        if self._durable_refs() != seen:
+            raise HistoryConflict("the project's history moved while it was pushed")
         self._put_durable("packed-refs", _packed(refs))
 
     def _in_durable(self, commit: str) -> bool:

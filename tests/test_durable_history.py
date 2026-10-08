@@ -717,6 +717,36 @@ def test_a_pruning_whose_lock_was_lost_leaves_the_landing_made_meanwhile(tmp_pat
     assert git(durable, "fsck", "--no-dangling") == ""
 
 
+def test_a_keep_whose_history_moved_while_its_pack_went_up_writes_over_no_landing(tmp_path, project, monkeypatch):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first, "saga:1")
+    keeper, other = a_pod(tmp_path, project, "t2"), a_pod(tmp_path, project, "t3")
+    (keeper.copy / "kept.md").write_text("kept")
+    (other.copy / "b.md").write_text("b")
+    put, landed = History._put_durable, []
+
+    def another_lands_meanwhile(self, name, source):
+        put(self, name, source)
+        if self.thread == "t2" and name.endswith(".idx") and not landed:
+            # A lock lost unseen, or a keep that did not wait out a landing still at work: it records now,
+            # between this push's first look at the refs and its write of them.
+            landed.append(land(other, "saga:2", author={"name": "Draft C", "email": "thread:t3@surogate"})["commit"])
+
+    monkeypatch.setattr(History, "_put_durable", another_lands_meanwhile)
+    with pytest.raises(HistoryConflict, match="moved while it was pushed"):
+        keeper.keep(author=A, trailers=KEPT, base=True)
+    durable = project / "_history"
+    # The landing's refs stand: the keep wrote none of its own over them.
+    assert git(durable, "rev-parse", "refs/heads/main") == git(durable, "rev-parse", "refs/heads/threads/t3") == landed[0]
+    assert (project / "b.md").read_text() == "b"
+    # Tried again, it goes in beside the landing.
+    keeper.keep(author=A, trailers=KEPT, base=True)
+    assert git(durable, "rev-parse", "refs/heads/main") == landed[0]
+    assert git(durable, "show", "refs/heads/threads/t2:kept.md") == "kept"
+    assert git(durable, "fsck", "--no-dangling") == ""
+
+
 def a_main_whose_parent_the_history_lacks(durable: Path) -> str:
     """``main`` made a commit whose parent the history lacks, as after a pruning or as a command can make it; in a pack."""
     main = git(durable, "rev-parse", "refs/heads/main")
