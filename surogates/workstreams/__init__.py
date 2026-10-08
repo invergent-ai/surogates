@@ -14,8 +14,9 @@ from uuid import UUID
 
 from surogates.channels.memory_boundary import PROJECT_BOUNDARY_PREFIX
 
-#: Config keys only the server may write.
-SERVER_OWNED_KEYS = ("workstream_id", "workstream_role", "workstream_tier")
+#: Config keys only the server may write.  ``workstream_card`` names the
+#: proposal's card a thread on the user's computer begins with once bound.
+SERVER_OWNED_KEYS = ("workstream_id", "workstream_role", "workstream_tier", "workstream_card")
 
 #: ``workstream_role`` of a project's master session.
 COORDINATOR = "coordinator"

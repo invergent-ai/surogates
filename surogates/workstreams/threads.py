@@ -9,6 +9,7 @@ from uuid import UUID
 
 from surogates.board.groups import ensure_group_and_inherit
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from surogates.devices.store import DeviceRecord
 from surogates.session.events import EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_thread_session
@@ -37,23 +38,75 @@ async def start_thread(
     not wake the master, whose next turn comes with the thread's first
     report at the latest.
     """
-    projects = WorkstreamStore(session_factory)
-    project = await projects.get(
+    thread = await make_thread(
+        session_store=session_store, session_factory=session_factory, master=master,
+        live_config=live_config, title=title,
+    )
+    if thread is None:
+        return None
+    return await begin_thread(
+        session_store=session_store, session_factory=session_factory, redis=redis, master=master,
+        thread=thread, title=title, goal=goal, context=context, proposal=proposal,
+    )
+
+
+async def make_thread(
+    *,
+    session_store: Any,
+    session_factory: Any,
+    master: Session,
+    live_config: dict[str, Any] | None,
+    title: str,
+    device: DeviceRecord | None = None,
+    folder: str | None = None,
+    card: dict[str, str] | None = None,
+) -> Session | None:
+    """A new thread of *master*'s project, not begun: no row, no goal, not
+    queued.  None when the project is archived.
+
+    With *device*, a computer of the user's, it works in *folder* there, and
+    *card*, the proposal's ``proposal_id`` and ``key``, names what it begins
+    with once that computer has bound it.
+    """
+    project = await WorkstreamStore(session_factory).get(
         UUID(master.config["workstream_id"]),
         org_id=master.org_id, agent_id=master.agent_id, user_id=master.user_id,
     )
     if project is None:
         return None
     config = thread_config(project, title=title)
+    if card is not None:
+        config["workstream_card"] = card
     # The master's board group, so verified notes reach sibling threads.
     await ensure_group_and_inherit(
         parent_session=master, session_store=session_store,
         child_config=config, live_parent_config=live_config,
     )
-    thread = await create_thread_session(store=session_store, master=master, config=config)
+    return await create_thread_session(
+        store=session_store, master=master, config=config,
+        device_id=device.id if device is not None else None,
+        device_name=device.name if device is not None else None,
+        folder=folder,
+    )
+
+
+async def begin_thread(
+    *,
+    session_store: Any,
+    session_factory: Any,
+    redis: Any,
+    master: Session,
+    thread: Session,
+    title: str,
+    goal: str,
+    context: str,
+    proposal: dict[str, str] | None = None,
+) -> Session | None:
+    """Give *thread* its row and its goal, tell the master, and queue it;
+    None, the thread archived, when its project was archived meanwhile."""
     content = f"{goal}\n\n## Context\n{context}" if context else goal
     try:
-        if not await projects.add_thread(thread.id, project.id, title):
+        if not await WorkstreamStore(session_factory).add_thread(thread.id, UUID(master.config["workstream_id"]), title):
             # Archived since it was read: the thread goes with the project.
             await session_store.update_session_status(thread.id, "archived")
             return None

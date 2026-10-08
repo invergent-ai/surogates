@@ -239,6 +239,9 @@ async def create_thread_session(
     store: SessionStore,
     master: Session,
     config: dict,
+    device_id: UUID | None = None,
+    device_name: str | None = None,
+    folder: str | None = None,
 ) -> Session:
     """Create a project's thread: a child of *master* in a sandbox of its own.
 
@@ -247,8 +250,10 @@ async def create_thread_session(
     sandbox root instead: ``sandbox_root_session_id`` is its own id, and the
     children it delegates to share its pod.  It keeps the master's workspace
     fields and boundaries, so every pod mounts the project's one workspace,
-    the master's identity and the user's package.  It takes no
-    ``execution``: a cloud thread runs in the cloud whatever the master does.
+    the master's identity and the user's package.  It runs in the cloud
+    whatever the master does, unless *device_id* names the user's computer:
+    then it works in *folder* there, as its own root, so that computer binds
+    it as it binds a new chat.
     """
     session_id = uuid4()
     merged_config = dict(config)
@@ -264,6 +269,12 @@ async def create_thread_session(
     if "entitlements" in parent_config:
         merged_config["entitlements"] = parent_config["entitlements"]
     merged_config["sandbox_root_session_id"] = str(session_id)
+    if device_id is not None:
+        # After the master's fields, so the folder on the computer is the
+        # workspace.  The storage fields stay for create_child_session;
+        # nothing may read or write them for a session on a device.
+        merged_config["execution"] = {"kind": "device", "device_id": str(device_id), "device_name": device_name}
+        merged_config["workspace_path"] = folder
     return await store.create_session(
         session_id=session_id,
         user_id=master.user_id,
