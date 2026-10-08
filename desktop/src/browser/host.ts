@@ -286,6 +286,10 @@ export class BrowserHost {
   private readonly lines = new Map<string, Promise<unknown>>();
   // What each session's pages did that its agent could not see happen, until its next answer.
   private readonly unseen = new Map<string, string[]>();
+  // The sessions whose tab was made and whose agent has not been told: the first navigation to answer
+  // in it says it opened, whether or not that navigation made it. One that failed, or a script that came
+  // first, has told nobody.
+  private readonly untold = new Set<string>();
   // The chat whose user holds the browser, until that chat hands it back: every chat's operation here is
   // answered paused meanwhile. The browser is the agent's one browser on this computer, every tab a tab of
   // one window, on one profile.
@@ -409,15 +413,14 @@ export class BrowserHost {
       // Its user took the browser over while it launched, or while its tab opened: it has no page, and does
       // nothing in one. The last look before it acts, and the only one where its session has its tab already.
       if (found === null || stop.aborted) return PAUSED;
-      page = found.page;
-      const { opened } = found;
+      page = found;
       const value = BOUNDED.has(kind) ? await this.bounded(page, operation(page, args, stop), stop) : await operation(page, args, stop);
       // Taken over while it acted: what its pages did meanwhile stays for its session's next answer.
       if (stop.aborted) return PAUSED;
       if (!isRecord(value) || kind === "browser.observe" || kind === "browser.evaluate") return { ok: value ?? null };
       const notices = this.unseen.get(session) ?? [];
       this.unseen.delete(session);
-      return { ok: { ...value, ...(kind === "browser.navigate" ? { opened } : {}), notices } };
+      return { ok: { ...value, ...(kind === "browser.navigate" ? { opened: this.untold.delete(session) } : {}), notices } };
     } catch (error) {
       // Taken over: a navigation stopped for it is no failure to wait an error page for.
       if (stop.aborted) return PAUSED;
@@ -454,15 +457,16 @@ export class BrowserHost {
 
   // The newest open page of the session's: a popup it opened, or its tab, made if it has none. Null where
   // none is made for it: its user took the browser over meanwhile.
-  private async pageFor(launch: Launch, session: string, stop: AbortSignal): Promise<{ page: Page; opened: boolean } | null> {
+  private async pageFor(launch: Launch, session: string, stop: AbortSignal): Promise<Page | null> {
     const open = (this.tabs.get(session) ?? []).filter((page) => !page.isClosed());
     const newest = open.at(-1);
-    if (newest) return { page: newest, opened: false };
+    if (newest) return newest;
     const page = await this.tab(launch, stop);
     if (page === null) return null;
     this.tabs.set(session, []);
     this.adopt(session, page);
-    return { page, opened: true };
+    this.untold.add(session);
+    return page;
   }
 
   // A new tab: the new browser's first page, or one opened now. A browser that was closing
@@ -555,6 +559,7 @@ export class BrowserHost {
     const pages = this.tabs.get(session) ?? [];
     this.tabs.delete(session);
     this.unseen.delete(session);
+    this.untold.delete(session);
     this.roots.delete(session);
     return pages.filter((page) => !page.isClosed());
   }
@@ -609,6 +614,7 @@ export class BrowserHost {
     this.running = null;
     this.spare = null;
     this.tabs.clear();
+    this.untold.clear();
   }
 
   private async launch(launch: Launch): Promise<BrowserContext> {

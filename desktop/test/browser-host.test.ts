@@ -418,6 +418,33 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     expect((await op(a, "browser.navigate", { url: "http://fixture.test/" })).ok?.opened).toBe(true);
   });
 
+  it("says a session's tab opened at the first navigation to answer in it, whatever the session did there before", async () => {
+    const [a, b] = [session(), session()];
+    // A first navigation that fails, to a name nobody answers for: the tab is made, and its agent not told.
+    expect((await op(a, "browser.navigate", { url: "http://nowhere.test/" })).error?.type).toBe("browser");
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/" })).ok).toMatchObject({ title: "Fixture", opened: true });
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/second" })).ok?.opened).toBe(false);
+    // A session whose first operation is a script: its tab is made for it, and its first navigation says so.
+    expect(await script(b, "return 1;")).toBe(1);
+    expect((await op(b, "browser.navigate", { url: "http://fixture.test/" })).ok).toMatchObject({ title: "Fixture", opened: true });
+    expect((await op(b, "browser.navigate", { url: "http://fixture.test/second" })).ok?.opened).toBe(false);
+    // Closed and opened again: told again.
+    await op(b, "browser.close");
+    expect(await script(b, "return 2;")).toBe(2);
+    expect((await op(b, "browser.navigate", { url: "http://fixture.test/" })).ok?.opened).toBe(true);
+    // Nothing is kept of a tab closed, or gone with its browser, before any navigation answered in it.
+    const untold = (host as unknown as { untold: Set<string> }).untold;
+    const [c, d] = [session(), session()];
+    expect(await script(c, "return 3;")).toBe(3);
+    expect(await script(d, "return 4;")).toBe(4);
+    expect([...untold]).toEqual([c, d]);
+    await op(c, "browser.close");
+    expect([...untold]).toEqual([d]);
+    for (const { pid } of processes().filter(({ args }) => !args.some((arg) => arg.startsWith("--type=")))) process.kill(Number(pid), "SIGTERM");
+    await expect.poll(() => processes().length, { timeout: 10_000 }).toBe(0);
+    await expect.poll(() => [...untold], { timeout: 5_000 }).toEqual([]);
+  }, 30_000);
+
   it("says the address of the page a session's next operation acts in, wherever the page sent itself, a popup's once it opened one", async () => {
     const a = session();
     expect(await host.address(a)).toBe("about:blank");

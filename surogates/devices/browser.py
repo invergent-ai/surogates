@@ -33,8 +33,9 @@ The scripts browser.observe takes, each a page function shipped with the app:
                                         or {covered: "<tag#id.class>"}
 
 notices are what the page did that the agent could not see happen, such as a
-file it asked for.  opened is whether the navigation opened the
-session's tab: its first, or one after its last closed.  The session's browser pane
+file it asked for.  opened is whether the navigation is the first to
+answer in the session's tab: its first tab, or one after its last closed, whether
+this navigation made the tab or an earlier operation did.  The session's browser pane
 hears of it (browser.provisioned), of a close that closed one (browser.destroyed) and
 of a computer with no supported browser (browser.unavailable), each with
 ``computer: true``.  Errors:
