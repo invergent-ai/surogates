@@ -1304,6 +1304,34 @@ describe("AgentChat", () => {
     }
   });
 
+  it("rates an expert's response only in a chat the host writes to", async () => {
+    const stream = new FakeEventStream();
+    const adapter = { ...createAdapter(stream), async submitExpertFeedback() { return {}; } };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+    act(() => {
+      stream.emit("tool.call", 1, {
+        tool_call_id: "expert-1",
+        name: "consult_expert",
+        arguments: { expert: "Architecture reviewer", question: "Review the example app architecture." },
+      });
+      stream.emit("tool.result", 2, { tool_call_id: "expert-1", content: "Appropriate." });
+      stream.emit("expert.result", 3, { summary: "Appropriate." });
+    });
+    expect(container.textContent).toContain("Rate this expert's response:");
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" disabled />);
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Consulted expert");
+    expect(container.textContent).not.toContain("Rate this expert's response:");
+  });
+
   it("renders consult_expert as a dedicated expert block instead of raw JSON", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);
