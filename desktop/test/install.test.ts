@@ -419,6 +419,17 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       .toMatchObject({ status: 1, stderr: "Surogate Desktop: PKEXEC_UID is not a user's number\n" });
     expect(root(`SUDO_UID=4242 /opt/surogate-test/install.sh --apply ${files()}`))
       .toMatchObject({ status: 1, stderr: "Surogate Desktop: SUDO_UID names no user of this computer\n" });
+    // Who reads is the user that number names, and no other. A number past the last one counts
+    // from 0 again, where root is, and then the user.
+    for (const past of ["4294967296", `$(( 4294967296 + ${user} ))`]) {
+      expect(root(`PKEXEC_UID=${past} /opt/surogate-test/install.sh --apply ${files()}`), past)
+        .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: PKEXEC_UID names no user of this computer\n" });
+    }
+    // And digits are a user's name first, where a user is so named, as a company's directory may name one.
+    expect(root(`echo "${user}:x:1600:1600::/nonexistent:/bin/sh" >>/etc/passwd && mkdir -m 700 /srv/numbered && cp ${files()} /srv/numbered/ && chown -R 1600 /srv/numbered`).status).toBe(0);
+    const numbered = root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/numbered/manifest.json /srv/numbered/manifest.json.sig /srv/numbered/release.tar.gz; said=$?; sed -i '$d' /etc/passwd; exit $said`);
+    expect(numbered).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: PKEXEC_UID names no user of this computer\n" });
+    expect(root("test -e /opt/surogate/current").status).toBe(1);
     // The user's own files, in a folder only they open, are read as theirs.
     expect(root(fresh).status).toBe(0);
     const theirs = "/home/tester/updates/manifest.json /home/tester/updates/manifest.json.sig /home/tester/updates/release.tar.gz";

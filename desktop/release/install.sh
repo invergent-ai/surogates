@@ -155,6 +155,9 @@ asker() {
     [ "$uid" != 0 ] || continue
     gid="$(getent passwd "$uid" | cut -d: -f4)" && [[ "$gid" =~ ^[0-9]+$ ]] || fail "$name names no user of this computer"
     READER=("$uid" "$gid")
+    # The reader is that user, and no other: setpriv takes digits for a user's name where one is so
+    # named, and counts a number past the last one from 0 again.
+    [ "$(as_reader id -u 2>/dev/null):$(as_reader id -g 2>/dev/null)" = "$uid:$gid" ] || fail "$name names no user of this computer"
     return 0
   done
 }
