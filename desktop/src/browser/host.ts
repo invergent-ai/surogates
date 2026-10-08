@@ -74,6 +74,7 @@ export const downloaded = (name: string): string =>
 
 const failed = (message: string): Outcome => ({ error: { type: "browser", message } });
 const DELETED = failed("The chat was deleted, and its tabs closed with it");
+const ANOTHER_CHATS = failed("This session's tab in the agent's browser on this computer is another chat's");
 
 // A browser's error, its first line: Playwright's call log follows it.
 export const said = (error: unknown): string => (error instanceof Error ? error.message : String(error)).split("\n")[0] ?? "";
@@ -304,6 +305,10 @@ export class BrowserHost {
 
   /** One operation of *session*'s, of the chat *root*, in its tab, launching the browser first if none runs. Never rejects. */
   perform(launch: Launch, root: string, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
+    // A session's tab is its chat's: an operation that names the session under another chat acts in no page
+    // of that chat's, and closes none. Only the server could send one.
+    const of = this.roots.get(session);
+    if (of !== undefined && of !== root && (this.tabs.get(session) ?? []).some((page) => !page.isClosed())) return Promise.resolve(ANOTHER_CHATS);
     this.roots.set(session, root);
     const forgets = this.forgets.get(root);
     // A close does not wait in the session's line: a page stuck in a script closes with the rest.

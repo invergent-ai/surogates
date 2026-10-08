@@ -162,7 +162,7 @@ afterEach(async () => {
 
 const op = (session: string, kind: string, args: Record<string, unknown> = {}, root = ROOT) =>
   host.perform(launch, root, session, kind, args, new AbortController().signal) as Promise<{ ok?: any; error?: { type: string; message: string } }>;
-const script = async (session: string, code: string) => (await op(session, "browser.evaluate", { code })).ok?.value;
+const script = async (session: string, code: string, root = ROOT) => (await op(session, "browser.evaluate", { code }, root)).ok?.value;
 const session = () => `session-${(next += 1)}`;
 // What *work* answers within *ms*, or "late".
 const within = <T>(ms: number, work: Promise<T>) => Promise.race([work, new Promise<"late">((done) => setTimeout(() => done("late"), ms))]);
@@ -688,7 +688,7 @@ await navigator.serviceWorker.ready;`);
     expect((await queued).error?.type).toBe("browser");
     // Only the other chat's tab is left, without forgetting the chat again.
     expect(await pages()).toBe(1);
-    expect(await script(b, "return document.title;")).toBe("Second");
+    expect(await script(b, "return document.title;", "chat-2")).toBe("Second");
   });
 
   it("keeps a chat's tab opened after its browser closed under it the chat's, for the chat's deletion to close", async () => {
@@ -705,7 +705,7 @@ await navigator.serviceWorker.ready;`);
     expect(await pages()).toBe(2);
     await host.forget("chat-1");
     expect(await pages()).toBe(1);
-    expect(await script(b, "return document.title;")).toBe("Second");
+    expect(await script(b, "return document.title;", "chat-2")).toBe("Second");
   }, 30_000);
 
   it("tries a picked browser with its socket in the user's runtime folder, however deep the try's temp folder, and leaves nothing of it there", async () => {
@@ -827,8 +827,8 @@ await navigator.serviceWorker.ready;`);
     await expect.poll(front, { timeout: 5_000 }).toBe("FIRST");
     // It is the agent's all the same: its own keys reach it.
     await op(b, "browser.keyboard", { action: "type", text: "typed behind", at: { x: 60, y: 110 }, delay: 0 }, "chat-2");
-    expect(await script(b, "return document.getElementById('name').value;")).toBe("typed behind");
-    expect(await script(a, "return document.getElementById('name').value;")).toBe("");
+    expect(await script(b, "return document.getElementById('name').value;", "chat-2")).toBe("typed behind");
+    expect(await script(a, "return document.getElementById('name').value;", "chat-1")).toBe("");
   }, 30_000);
 
   it("runs nothing in the page, and takes no tab, for an operation whose browser was still launching when its user took the browser over", async () => {
@@ -898,7 +898,7 @@ await navigator.serviceWorker.ready;`);
     expect(await held).toEqual(PAUSED);
     expect(await queued).toEqual(PAUSED);
     host.pause("chat-1", false);
-    expect(await script(a, "return document.title;")).toBe("Fixture");
+    expect(await script(a, "return document.title;", "chat-1")).toBe("Fixture");
   }, 30_000);
 
   it("types not one more character once its user took the browser over", async () => {
@@ -994,7 +994,7 @@ await navigator.serviceWorker.ready;`);
     await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
     // One signal for every operation until the browser is next taken over, which may be never in a run of the app.
     const stops = () => getEventListeners((host as unknown as { interrupt: AbortController }).interrupt.signal, "abort");
-    for (let n = 0; n < 20; n += 1) expect(await script(a, `return ${n};`)).toBe(n);
+    for (let n = 0; n < 20; n += 1) expect(await script(a, `return ${n};`, "chat-1")).toBe(n);
     await op(a, "browser.navigate", { url: "http://fixture.test/second" }, "chat-1");
     expect(stops()).toHaveLength(0);
   }, 30_000);
@@ -1052,6 +1052,25 @@ await navigator.serviceWorker.ready;`);
     await expect.poll(front, { timeout: 5_000 }).toBe("POPUP");
   }, 30_000);
 
+  it("refuses an operation that names a session's tab under another chat than its own", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const ANOTHER_CHATS = { error: { type: "browser", message: "This session's tab in the agent's browser on this computer is another chat's" } };
+    // A session is one chat's: named under another, it acts in no page, and closes none.
+    expect(await op(a, "browser.evaluate", { code: "document.title = 'acted under another chat'; return 1;" }, "chat-2")).toEqual(ANOTHER_CHATS);
+    expect(await op(a, "browser.close", {}, "chat-2")).toEqual(ANOTHER_CHATS);
+    expect(await pages()).toBe(1);
+    // It is its own chat's still: held from that chat's side, shown for it, and its own operations run.
+    expect(await host.show("chat-1")).toBe(true);
+    expect(await host.show("chat-2")).toBe(false);
+    expect((await op(a, "browser.evaluate", { code: "return document.title;" }, "chat-1")).ok?.value).toBe("Fixture");
+    // Once it has no page left, here closed by its user, there is nothing of its chat's to act in: the name is free.
+    await op(session(), "browser.navigate", { url: "http://fixture.test/" }, "chat-3");
+    await tabs().get(a)![0]!.close();
+    expect((await op(a, "browser.navigate", { url: "http://fixture.test/second" }, "chat-2")).ok).toMatchObject({ title: "Second", opened: true });
+    expect(await host.show("chat-2")).toBe(true);
+  }, 30_000);
+
   it("closes every tab of a deleted chat's sessions, and no other chat's", async () => {
     const [a, child, b] = [session(), session(), session()];
     await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
@@ -1060,7 +1079,7 @@ await navigator.serviceWorker.ready;`);
     expect(await pages()).toBe(3);
     await host.forget("chat-1");
     expect(await pages()).toBe(1);
-    expect(await script(b, "return document.title;")).toBe("Second");
+    expect(await script(b, "return document.title;", "chat-2")).toBe("Second");
     expect((await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1")).ok?.opened).toBe(true);
   });
 });
