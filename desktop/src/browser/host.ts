@@ -129,6 +129,11 @@ async function released(profile: string): Promise<void> {
   }
 }
 
+// The browser's own temp folder holds its singleton's socket, whose path a Unix socket keeps
+// under 108 bytes: a profile's folder is too deep for it, so it goes in the user's runtime
+// folder (this host's own temp files, Playwright's, go under the profiles: main.ts). A try's too.
+const browserEnv = () => ({ ...process.env, TMPDIR: process.env.XDG_RUNTIME_DIR || "/tmp" });
+
 /** How the browser is launched: headed, its sandbox on, over the pipe, and every request through the proxy on *port*. */
 export function launchOptions(executable: string, port: number, extra: readonly string[] = []) {
   return {
@@ -142,10 +147,7 @@ export function launchOptions(executable: string, port: number, extra: readonly 
     serviceWorkers: "block" as const,
     // Nothing the agent's pages download is kept: no file reaches this computer that way.
     acceptDownloads: false,
-    // The browser's own temp folder holds its singleton's socket, whose path a Unix socket keeps
-    // under 108 bytes: a profile's folder is too deep for it, so it goes in the user's runtime
-    // folder (this host's own temp files, Playwright's, go under the profiles: main.ts).
-    env: { ...process.env, TMPDIR: process.env.XDG_RUNTIME_DIR || "/tmp" },
+    env: browserEnv(),
     // The host decides when the browser ends: with its own end.
     handleSIGINT: false,
     handleSIGTERM: false,
@@ -231,7 +233,7 @@ export class BrowserHost {
   /** Whether *executable* launches headless with its sandbox on within LAUNCH_MS, and its version. Never rejects. */
   async tryBrowser(executable: string): Promise<Outcome> {
     try {
-      const browser = await chromium.launch({ executablePath: executable, headless: true, chromiumSandbox: true, timeout: LAUNCH_MS });
+      const browser = await chromium.launch({ executablePath: executable, headless: true, chromiumSandbox: true, env: browserEnv(), timeout: LAUNCH_MS });
       const version = browser.version();
       await browser.close();
       return { ok: { version } };

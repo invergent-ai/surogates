@@ -593,6 +593,27 @@ await navigator.serviceWorker.ready;`);
     expect(await script(b, "return document.title;")).toBe("Second");
   }, 30_000);
 
+  it("tries a picked browser with its socket in the user's runtime folder, however deep the try's temp folder, and leaves nothing of it there", async () => {
+    // As the app gives a try's host its temp folder: <data>/surogate/browser-profiles/tmp, under a home of 40 characters.
+    const home = join(tmpdir(), "a-home-of-forty-characters-for-a-long-na");
+    const deep = join(home, ".local", "share", "surogate", "browser-profiles", "tmp");
+    mkdirSync(deep, { recursive: true });
+    const runtime = process.env.XDG_RUNTIME_DIR!;
+    const there = readdirSync(runtime);
+    const before = process.env.TMPDIR;
+    process.env.TMPDIR = deep;
+    try {
+      expect(await host.tryBrowser(EXECUTABLE!)).toMatchObject({ ok: { version: expect.stringMatching(/^\d+\./) } });
+      expect(await host.tryBrowser("/bin/true")).toMatchObject({ error: { type: "browser" } });
+    } finally {
+      process.env.TMPDIR = before;
+    }
+    // Neither try leaves its browser's folder behind, in the temp folder or the runtime one.
+    expect(readdirSync(deep).filter((name) => /com\./.test(name))).toEqual([]);
+    expect(readdirSync(runtime).filter((name) => !there.includes(name) && /com\./.test(name))).toEqual([]);
+    rmSync(home, { recursive: true, force: true });
+  }, 60_000);
+
   it("closes every tab of a deleted chat's sessions, and no other chat's", async () => {
     const [a, child, b] = [session(), session(), session()];
     await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
