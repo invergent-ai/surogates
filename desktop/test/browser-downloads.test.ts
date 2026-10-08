@@ -112,6 +112,18 @@ describe("a download the agent's page started", () => {
     expect(asked.map((request) => request.kind === "change" && request.path)).toEqual([join(downloads, "report.txt"), join(downloads, "report (2).txt")]);
   });
 
+  it("goes on to a chat's next download after one whose save failed outright, which it says was not saved", async () => {
+    bind("free");
+    const save = downloadSaver(journal.bindings, saver);
+    // As a browser host gone wrong would stage one: with no name, and no path.
+    const broken = save({ root: ROOT, session: CHILD, user: false } as unknown as StagedDownload);
+    const next = save(stage("report.txt"));
+    expect(await broken).toBe("The page downloaded a file, but it was not saved: this computer could not save it.");
+    expect(await next).toBe('The page downloaded "report.txt". It is saved in the chat\'s folder as Downloads/report.txt.');
+    // And to the one after: the line is the chat's for as long as the device runs.
+    expect(await save(stage("report.txt"))).toContain("as Downloads/report (2).txt.");
+  });
+
   it("never replaces a file made at its name while its prompt was open: the next name is taken, and nobody is asked again", async () => {
     bind("ask");
     // The agent's own write, allowed before this one, lands while the download's prompt is open.

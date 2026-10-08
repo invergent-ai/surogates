@@ -166,8 +166,10 @@ export function downloadSaver(bindings: Pick<Bindings, "get">, saver: Saver): (d
   // Each chat's last save in line.
   const lines = new Map<string, Promise<string>>();
   return (download) => {
-    // A save never rejects: it says why it saved nothing.
-    const mine = (lines.get(download.root) ?? Promise.resolve("")).then(() => saveDownload(download, bindings, saver));
+    // A save never rejects: it says why it saved nothing. One that fails outright all the same, as on what a
+    // browser host gone wrong staged, has saved nothing either, and the chat's line goes on to the next.
+    const mine = (lines.get(download.root) ?? Promise.resolve("")).then(() => saveDownload(download, bindings, saver))
+      .catch(() => `The page downloaded a file, but it was not saved: ${COULD_NOT}.`);
     lines.set(download.root, mine);
     void mine.then(() => {
       if (lines.get(download.root) === mine) lines.delete(download.root);

@@ -243,6 +243,18 @@ describe("the browser's kinds beside the tools", () => {
     expect(told.size).toBe(0);
   });
 
+  it("goes on to the next download after one that what saves it failed on, and tells nothing of that one", async () => {
+    const { browsing, answers, stage } = rig();
+    let saves = 0;
+    browsing.saveDownloadsWith((download) => ((saves += 1) === 1 ? Promise.reject(new Error("the journal is closed")) : Promise.resolve(`saved ${download.name}`)));
+    const told = (browsing as unknown as { told: Map<string, unknown> }).told;
+    stage({ root: ROOT, session: ROOT, name: "first.txt", path: "/data/browser-profiles/x/tmp/a", user: false });
+    stage({ root: ROOT, session: ROOT, name: "second.txt", path: "/data/browser-profiles/x/tmp/b", user: false });
+    await vi.waitFor(() => expect(told.size).toBe(1));
+    answers.push({ ok: { notices: [] } });
+    expect(await browsing.run(op("browser.mouse"), signal)).toEqual({ ok: { notices: ["saved second.txt"] } });
+  });
+
   it("tells a session of twenty downloads at most with one answer, and removes a staged file nothing was given to save with", async () => {
     const { browsing, answers, stage } = rig();
     const folder = mkdtempSync(join(tmpdir(), "browsing-"));

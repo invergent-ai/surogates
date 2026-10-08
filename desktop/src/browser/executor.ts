@@ -79,7 +79,13 @@ export class Browsing implements ToolLayer {
       await rm(download.path, { force: true }).catch(() => {});
       return;
     }
-    const notice = await this.save(download);
+    let notice: string;
+    try {
+      notice = await this.save(download);
+    } catch {
+      // What saves them says itself what came of each: of one it failed on outright there is nothing to tell.
+      return;
+    }
     // One its user started while they held the browser is theirs: its agent hears nothing of it.
     if (download.user) return;
     const notices = this.told.get(download.session) ?? [];
