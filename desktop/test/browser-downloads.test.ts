@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -230,6 +230,41 @@ describe("a download the agent's page started", () => {
     expect([Buffer.byteLength(japanese), japanese]).toEqual([199, `${"報告書".repeat(21)}報告.pdf`]);
     expect(savedName("😀".repeat(60))).toBe("😀".repeat(50));
     expect(quoted(`${"x".repeat(197)}😀😀`)).toBe(JSON.stringify("x".repeat(197)));
+  });
+
+  it("leaves in a name no character that does not show, or that a file's name does not hold as it is: every other space is a plain one", () => {
+    // Separators of lines and of paragraphs.
+    expect(savedName("re\u2028po\u2029rt.pdf")).toBe("report.pdf");
+    // Half a character, which the file system would write as another: a whole one stays.
+    expect(savedName("re\ud800port\udfff 😀.pdf")).toBe("report 😀.pdf");
+    // Private-use and unassigned characters, in any plane.
+    expect(savedName("re\ue000po\u{f0000}r\u0378t\uffff.pdf")).toBe("report.pdf");
+    // The letters that draw nothing.
+    expect(savedName("r\u115fe\u1160p\u2800o\u3164r\uffa0t.pdf")).toBe("report.pdf");
+    // A no-break, an ideographic, an em and a narrow space.
+    expect(savedName("my\u00a0annual\u3000report\u2003final\u202f2.pdf")).toBe("my annual report final 2.pdf");
+    // What a script joins a letter with, or picks its shape by, shows: it stays.
+    expect(savedName("re\u0301sume\ufe0f.pdf")).toBe("re\u0301sume\ufe0f.pdf");
+    // Once they went: nothing left is "download", a space left at an end goes, and a dot that leads hides nothing.
+    expect(savedName("\u3164\u2800\u2028")).toBe("download");
+    expect(savedName("\u3164.env\u00a0")).toBe("_env");
+  });
+
+  it("writes the name it asked about, byte for byte", async () => {
+    bind("ask");
+    const names = [
+      "re\ud800port.pdf", "re\u2028port\u3164.pdf", "my\u00a0annual\u3000report.pdf", "re\u0301sume\ufe0f.pdf", `${"報告書".repeat(31)}.pdf`,
+      `${"x".repeat(199)}\ud83d.txt`, "in\u202egnp.exe", "\ue000.envrc",
+    ];
+    const said: string[] = [];
+    for (const name of names) said.push(await saveDownload(stage(name), journal.bindings, saver));
+    const about = asked.map((request) => (request.kind === "change" ? basename(request.path) : ""));
+    // Each is text a file's name holds as it is, and is the name on disk, read back as bytes.
+    expect(about.map((name) => name.isWellFormed())).toEqual(names.map(() => true));
+    expect(readdirSync(downloads, { encoding: "buffer" }).map((name) => name.toString("hex")).sort())
+      .toEqual(about.map((name) => Buffer.from(name).toString("hex")).sort());
+    // And the name its agent is told.
+    expect(said).toEqual(about.map((name, n) => `The page downloaded ${quoted(names[n]!)}. It is saved in the chat's folder as Downloads/${name}.`));
   });
 
   it("saves one whose name is as long as a name may be, in another script too", async () => {

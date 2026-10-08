@@ -48,15 +48,26 @@ function cut(text: string, bytes: number): string {
   return kept;
 }
 
+// What goes from a name, which is shown in the prompts and the file manager: control and format characters,
+// bidi among them; the separators of lines and of paragraphs; half a character (a lone surrogate), which
+// the file system would write as another; private-use and unassigned characters; and the letters that
+// draw nothing. What a script joins a letter with, or picks its shape by, shows, and stays.
+const UNSEEN = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}\p{Co}\p{Cn}\u115F\u1160\u2800\u3164\uFFA0]/gu;
+// Every space but the plain one, which each becomes.
+const SPACES = /\p{Zs}/gu;
+
 /** The name a page gave a download, as a notice quotes it. */
 export const quoted = (name: string): string => JSON.stringify(cut(name, NAME_BYTES));
 
-/** The page's name for a download as one file name of the chat's folder: never a path, a hidden file or an invisible character. */
+/**
+ * The page's name for a download as one file name of the chat's folder: never a path, a hidden file
+ * or a character that does not show, and text a file's name holds as it is, so the name asked about
+ * is the name written.
+ */
 export function savedName(suggested: string): string {
   // The browser makes it one name already ("../a" is "_.._a"): a separator left is cut all the same.
   const last = suggested.split(/[/\\]/).at(-1) ?? "";
-  // Control, bidi and invisible characters go: the name is shown in the prompts and the file manager.
-  const shown = last.replace(/[\p{Cc}\p{Cf}]/gu, "").trim();
+  const shown = last.replace(UNSEEN, "").replace(SPACES, " ").trim();
   // Never hidden: programs in the folder act on some (.envrc, .npmrc).
   const named = shown.startsWith(".") ? `_${shown.slice(1)}` : shown;
   if (named.replace(/[._]/g, "") === "") return "download";
