@@ -903,9 +903,13 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const lines = stops(files(), SIGNALS);
     expect(lines.length).toBeGreaterThan(100);
     for (const line of lines) expect(line).toMatch(/^\d+: \d+ 1\.1\.0 (whole|gone), staging 0$/);
-    // A second signal, to all of the helper's processes, as it removes what it staged: here of an apply it refused.
+    // An apply it refuses ends with its own folder still to clear: a signal that comes as it starts to, as wherever else.
     manifestOf("1.1.0", rebuilt, {}, other.privateKey);
     stage(rebuilt);
+    const refused = stops(files(), SIGNALS);
+    expect(refused.length).toBeGreaterThan(50);
+    for (const line of refused) expect(line).toMatch(/^\d+: (143|1) 1\.1\.0 whole, staging 0$/);
+    // A second signal, to all of the helper's processes, as it removes what it staged.
     writeFileSync(join(box.dir, "signalling"), SIGNALLING, { mode: 0o755 });
     expect(docker(["cp", join(box.dir, "signalling"), `${box.container}:/opt/surogate-test/signalling`]).status).toBe(0);
     const twice = root("mkdir -p /opt/hold && cp -L /usr/bin/rm /opt/hold/rm && mv /usr/bin/rm /usr/bin/rm.away && cp /opt/surogate-test/signalling /usr/bin/rm"

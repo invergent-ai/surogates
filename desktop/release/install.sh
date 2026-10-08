@@ -558,11 +558,13 @@ main() {
   settings
   trap cleanup EXIT
   # Stopped by a signal, it ends as it would by itself, once the command it runs has ended: a
-  # hangup, as from a terminal that is closed, would otherwise end it with its folders left.
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 141' PIPE
-  trap 'exit 143' TERM
+  # hangup, as from a terminal that is closed, would otherwise end it with its folders left. It
+  # clears up before it ends: where the signal comes as the script is ending already, to end again
+  # would leave out the clearing up that had just begun.
+  trap 'cleanup; exit 129' HUP
+  trap 'cleanup; exit 130' INT
+  trap 'cleanup; exit 141' PIPE
+  trap 'cleanup; exit 143' TERM
   # Where a failure ends the script (-e), and not inside a $( ): there, its caller decides.
   trap '[ "$BASH_SUBSHELL" -gt 0 ] || unexpected "$BASH_COMMAND"' ERR
   case "${1:-}" in
