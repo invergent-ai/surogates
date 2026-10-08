@@ -198,6 +198,8 @@ export function WorkspacePanel({
 	const [entries, setEntries] = useState<AgentChatWorkspaceEntry[]>([]);
 	const [treeLoading, setTreeLoading] = useState(false);
 	const [treeError, setTreeError] = useState<string | null>(null);
+	// What the tree waits for while it does, as its computer being back online: the host says it.
+	const [treeWaiting, setTreeWaiting] = useState<string | null>(null);
 	// The tree stopped short of the whole folder: at its caps, or a computer out of handles.
 	const [treeTruncated, setTreeTruncated] = useState(false);
 	const [notice, setNotice] = useState<string | null>(null);
@@ -208,16 +210,24 @@ export function WorkspacePanel({
 	// Aborted on unmount: an upload or a delete still waiting for the computer
 	// a local-folder chat's folder is on stops being sent again.
 	const changesRef = useRef<AbortController | null>(null);
+	// The tree's read under way: one waiting for its computer stops when another starts, or the panel goes.
+	const readingRef = useRef<AbortController | null>(null);
 
 	sessionIdRef.current = sessionId;
 
 	useEffect(() => {
 		const changes = new AbortController();
 		changesRef.current = changes;
-		return () => changes.abort();
+		return () => {
+			changes.abort();
+			readingRef.current?.abort();
+		};
 	}, []);
 
 	const fetchTree = useCallback(async () => {
+		// Made for a chat the panel has left, as a change that ends there calls it: it reads nothing,
+		// and stops nothing of the chat the panel shows now.
+		if (sessionIdRef.current !== sessionId) return;
 		if (!sessionId) {
 			setEntries([]);
 			setExpandedPaths(new Set());
@@ -226,24 +236,37 @@ export function WorkspacePanel({
 			return;
 		}
 		const requestedSessionId = sessionId;
+		readingRef.current?.abort();
+		const reading = new AbortController();
+		readingRef.current = reading;
+		// The read the panel still wants: neither replaced by a later one nor for another session.
+		const current = () =>
+			readingRef.current === reading && sessionIdRef.current === requestedSessionId;
 		setTreeLoading(true);
 		setTreeError(null);
 		try {
 			const tree = await adapter.getWorkspaceTree({
 				sessionId: requestedSessionId,
+				signal: reading.signal,
+				onWaiting: (said) => {
+					if (current()) setTreeWaiting(said);
+				},
 			});
-			if (sessionIdRef.current !== requestedSessionId) return;
+			if (!current()) return;
 			setEntries(tree.entries);
 			setTreeTruncated(tree.truncated);
 			setExpandedPaths(new Set(collectExpandedPaths(tree.entries)));
 		} catch (error) {
-			if (sessionIdRef.current !== requestedSessionId) return;
+			if (!current()) return;
 			setEntries([]);
 			setTreeError((error as Error).message);
 		} finally {
-			if (sessionIdRef.current === requestedSessionId) {
+			if (current()) {
 				setTreeLoading(false);
+				setTreeWaiting(null);
 			}
+			// Ended: a wait told after the tree came is not said over it.
+			if (readingRef.current === reading) readingRef.current = null;
 		}
 	}, [adapter, sessionId]);
 
@@ -302,6 +325,10 @@ export function WorkspacePanel({
 						sessionId,
 						file: uploadedFile,
 						signal: changesRef.current?.signal,
+						// Said only over the chat it waits in.
+						onWaiting: (said) => {
+							if (sessionIdRef.current === sessionId) setNotice(said);
+						},
 					});
 				}
 				setNotice(
@@ -328,6 +355,10 @@ export function WorkspacePanel({
 					sessionId,
 					path,
 					signal: changesRef.current?.signal,
+					// Said only over the chat it waits in.
+					onWaiting: (said) => {
+						if (sessionIdRef.current === sessionId) setNotice(said);
+					},
 				});
 				if (selectedPath === path) {
 					onSelectedPathChange(null);
@@ -410,7 +441,10 @@ export function WorkspacePanel({
 			</div>
 
 			{notice && (
-				<div className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
+				<div
+					data-testid="workspace-notice"
+					className="border-b border-line px-3 py-2 text-xs text-muted-foreground"
+				>
 					{notice}
 				</div>
 			)}
@@ -423,7 +457,17 @@ export function WorkspacePanel({
 
 			<ScrollArea className="min-h-0 flex-1">
 				<div className="px-1 py-1">
-					{treeLoading && entries.length === 0 && (
+					{treeWaiting && (
+						<div
+							role="status"
+							data-testid="tree-waiting"
+							className="px-3 py-2 text-sm text-muted-foreground"
+						>
+							{treeWaiting}
+						</div>
+					)}
+
+					{treeLoading && !treeWaiting && entries.length === 0 && (
 						<div className="space-y-1 p-2">
 							{Array.from({ length: 8 }).map((_, index) => (
 								<Skeleton

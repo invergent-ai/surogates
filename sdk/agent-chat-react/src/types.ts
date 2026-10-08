@@ -1035,8 +1035,15 @@ export interface AgentChatAdapter {
     reason?: string;
   }): Promise<{ eventId?: number; eventType?: string }>;
   listSlashCommands?(): Promise<AgentChatSlashCommand[]>;
+  /**
+   * A local-folder chat's tree, while its computer is offline, may wait for it: *onWaiting* is told
+   * what to say meanwhile, as "Waiting for <computer>", and *signal* stops waiting for it. A host
+   * that does not wait answers as before.
+   */
   getWorkspaceTree(input: {
     sessionId: string;
+    signal?: AbortSignal;
+    onWaiting?: (said: string) => void;
   }): Promise<AgentChatWorkspaceTree>;
   getWorkspaceFile(input: {
     sessionId: string;
@@ -1044,18 +1051,21 @@ export interface AgentChatAdapter {
   }): Promise<AgentChatWorkspaceFile>;
   /**
    * A local-folder chat's change may wait for its user on the computer its
-   * folder is on; *signal* stops waiting for it.
+   * folder is on; *signal* stops waiting for it, and *onWaiting* is told what to
+   * say meanwhile, as "Waiting for you to allow this on <computer>".
    */
   uploadWorkspaceFile(input: {
     sessionId: string;
     file: File;
     directory?: string;
     signal?: AbortSignal;
+    onWaiting?: (said: string) => void;
   }): Promise<AgentChatWorkspaceUpload>;
   deleteWorkspaceFile(input: {
     sessionId: string;
     path: string;
     signal?: AbortSignal;
+    onWaiting?: (said: string) => void;
   }): Promise<void>;
   /**
    * Build a same-origin URL the browser can navigate to (or anchor at via
