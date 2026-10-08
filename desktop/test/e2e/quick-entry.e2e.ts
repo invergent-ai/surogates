@@ -205,7 +205,7 @@ describe("quick entry's shortcut", () => {
 });
 
 describe("quick entry", () => {
-  it("opens from the tray as a frameless 606 by 470 window over every other, which Escape hides, its text kept", async () => {
+  it("opens from the tray as a frameless 606 by 470 window over every other, which Escape hides, or another window taking the focus, its text kept", async () => {
     await signedIn();
     await expect.poll(() => trayLabels(app!)).toContain("Quick entry");
     await pickInTray(app!, "Quick entry");
@@ -217,6 +217,69 @@ describe("quick entry", () => {
     await pickInTray(app!, "Quick entry");
     await expect.poll(async () => (await quickWindow(app!))?.shown).toBe(true);
     expect(await quick.inputValue("#text")).toBe("Draft the March invoices");
+    // The app's own window takes the focus: the box goes, as Claude's does.
+    await expect.poll(() => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getFocusedWindow()?.webContents.getURL().endsWith("/quick.html") ?? false)).toBe(true);
+    await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.focus());
+    await expect.poll(async () => (await quickWindow(app!))?.shown).toBe(false);
+    expect(await quick.inputValue("#text")).toBe("Draft the March invoices");
+  });
+
+  it("refuses a text of over 100,000 characters in its box, and hands nothing", async () => {
+    const { client } = await signedIn();
+    await watchHanded(app!);
+    const before = client.url();
+    await pickInTray(app!, "Quick entry");
+    const quick = await quickPage(app!);
+    await quick.fill("#text", "a".repeat(100_001));
+    await quick.press("#text", "Enter");
+    await expect.poll(() => quick.textContent("#refused")).toBe("Surogate sends a message of up to 100,000 characters.");
+    expect((await quickWindow(app!))?.shown).toBe(true);
+    expect(await quick.evaluate(() => (document.getElementById("text") as HTMLTextAreaElement).value.length)).toBe(100_001);
+    expect(client.url()).toBe(before);
+    expect(await handed(app!)).toEqual([]);
+    // One character fewer is a message.
+    await quick.fill("#text", "a".repeat(100_000));
+    await quick.press("#text", "Enter");
+    await expect.poll(() => handed(app!)).toHaveLength(1);
+    expect(await quick.textContent("#refused")).toBe("");
+  });
+
+  it("says only its newest text's answer, tells an older one still on its way that a newer took its place, and keeps what was typed since", async () => {
+    const { client } = await signedIn();
+    await watchHanded(app!);
+    await pickInTray(app!, "Quick entry");
+    const quick = await quickPage(app!);
+    // Each thing the box says, from now on.
+    await quick.evaluate(() => {
+      const said: string[] = [];
+      Object.assign(window, { said });
+      const refused = document.getElementById("refused")!;
+      new MutationObserver(() => said.push(refused.textContent ?? "")).observe(refused, { childList: true, characterData: true, subtree: true });
+    });
+    const send = async (text: string) => {
+      if (!(await quickWindow(app!))?.shown) await pickInTray(app!, "Quick entry");
+      await expect.poll(async () => (await quickWindow(app!))?.shown).toBe(true);
+      await quick.fill("#text", text);
+      await quick.press("#text", "Enter");
+    };
+    // The first as the page itself may ask, which shows the main process's own answer to it.
+    const first = quick.evaluate(() => (window as unknown as { surogateQuick: { send(text: string): Promise<string | null> } }).surogateQuick.send("Draft the March invoices"));
+    await expect.poll(() => handed(app!)).toHaveLength(1);
+    await send("Draft the April invoices");
+    expect(await first).toBe("A newer message took its place.");
+    await expect.poll(() => handed(app!)).toHaveLength(2);
+    // A third before the second is answered: the second's answer is the main process's, and the box does not say it.
+    await send("Draft the May invoices");
+    await expect.poll(() => handed(app!)).toHaveLength(3);
+    await client.waitForLoadState();
+    await listen(client);
+    await expect.poll(() => heard(client)).toEqual([{ id: expect.any(String), text: "Draft the May invoices" }]);
+    // Sent, once the user has typed the next: that stays.
+    await quick.fill("#text", "Draft the June invoices");
+    await answer(client, null);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await quick.inputValue("#text")).toBe("Draft the June invoices");
+    expect(await quick.evaluate(() => (window as unknown as { said: string[] }).said.filter((word) => word !== ""))).toEqual([]);
   });
 
   it("starts the chat New starts with its text, which the chat's page hears once it has loaded and listens, and keeps it until the page sent it", async () => {
