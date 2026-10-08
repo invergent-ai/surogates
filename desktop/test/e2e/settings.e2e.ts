@@ -99,9 +99,11 @@ describe("the user menu", () => {
     await page.keyboard.press("Enter");
     expect(await page.isVisible("#user-menu")).toBe(true);
     expect(await focused()).toBe("SettingsCtrl+Shift+,");
-    // Language comes later, and is passed over; Usage is hidden off surogate.ai.
-    await page.keyboard.press("ArrowDown");
-    expect(await focused()).toBe("Get help");
+    // Account settings and Devices come next; Usage is hidden off surogate.ai, and Language comes later, so is passed over.
+    for (const row of ["Account settings", "Devices", "Get help"]) {
+      await page.keyboard.press("ArrowDown");
+      expect(await focused()).toBe(row);
+    }
     await page.keyboard.press("End");
     expect(await focused()).toBe("Remove this agent…");
     await page.keyboard.press("ArrowDown");
