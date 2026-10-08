@@ -253,6 +253,57 @@ describe("the Projects page", () => {
     expect(await page.getAttribute("#open-projects", "aria-current")).toBe(null);
   });
 
+  it("gives each project a mark of its own, the same in the sidebar, on its card and over its conversation", async () => {
+    const { page, client } = await signedIn();
+    // A mark: its hue and its icon's drawing.
+    const mark = (selector: string) => page.$eval(selector, (found) => `${(found as HTMLElement).dataset.hue} ${found.querySelector("svg")!.innerHTML}`);
+    const sidebar = await Promise.all([REPORT, BUDGET, HIRING].map((id) => mark(`#projects [data-project="${id}"] .pmark`)));
+    expect(new Set(sidebar).size).toBeGreaterThan(1);
+    // The dot that says a thread waits sits on the mark, whole: what is drawn past the mark's edge is the dot's too.
+    await expect.poll(() => page.$eval(`#projects [data-project="${REPORT}"] .pmark .waiting`, (dot) => {
+      const { right, top, height } = dot.getBoundingClientRect();
+      return document.elementFromPoint(right - 1.5, top + height / 2) === dot;
+    }), { timeout: 5_000 }).toBe(true);
+    await page.click("#open-projects");
+    await expect.poll(() => Promise.all([REPORT, BUDGET, HIRING].map((id) => mark(`#cards [data-project="${id}"] .pmark`))), { timeout: 5_000 })
+      .toEqual(sidebar);
+    await page.click(`#cards [data-project="${BUDGET}"]`);
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${MASTERS[BUDGET]}`);
+    await expect.poll(() => mark("#project-icon .pmark"), { timeout: 5_000 }).toBe(sidebar[1]);
+  });
+
+  it("ages its cards as time goes on, with nothing drawn again", async () => {
+    const { page } = await signedIn();
+    // The window's page starts again on the test's clock.
+    await page.clock.install();
+    await page.reload();
+    await page.waitForSelector("#projects .project");
+    await page.click("#open-projects");
+    await expect.poll(() => texts(page, "#cards .card .age"), { timeout: 5_000 }).toEqual(["17 minutes ago", "9 hours ago", "2 days ago"]);
+    await page.clock.fastForward("01:00:00");
+    await expect.poll(() => texts(page, "#cards .card .age"), { timeout: 5_000 }).toEqual(["1 hour ago", "10 hours ago", "2 days ago"]);
+  });
+
+  it("draws as the references do: three columns of cards at most, the first project's ring in sight, and nothing through Couldn't connect", async () => {
+    const { shell, page, client } = await signedIn();
+    await shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setBounds({ x: 0, y: 0, width: 1600, height: 1000 }));
+    await page.click("#open-projects");
+    await expect.poll(() => page.$eval("#cards", (found) => getComputedStyle(found).gridTemplateColumns.split(" ").length), { timeout: 5_000 }).toBe(3);
+    // The ring the first project's row draws with the keyboard on it, inside the list that scrolls.
+    await page.focus(row(REPORT));
+    const [ring, list] = await page.evaluate((chosen) => {
+      const button = document.querySelector(chosen)!;
+      const width = Number.parseFloat(getComputedStyle(button).outlineWidth) + Number.parseFloat(getComputedStyle(button).outlineOffset);
+      return [button.getBoundingClientRect().top - width, document.querySelector("#projects")!.getBoundingClientRect().top];
+    }, row(REPORT));
+    expect(ring).toBeGreaterThanOrEqual(list);
+    agent.pagesRedirect = "https://sso.example.com/login";
+    await client.reload().catch(() => {});
+    await expect.poll(() => page.isVisible("#unreachable"), { timeout: 5_000 }).toBe(true);
+    expect(await page.$eval("#unreachable", (found) => getComputedStyle(found).backgroundColor))
+      .toBe(await page.$eval("#centre", (found) => getComputedStyle(found).backgroundColor));
+  });
+
   it("is left by Back for the thread that was open, with its project as the way back", async () => {
     const { page, client } = await signedIn();
     await opened(page, client, REPORT);

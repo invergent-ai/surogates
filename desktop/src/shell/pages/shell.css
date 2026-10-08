@@ -349,16 +349,17 @@ body.main.first {
 }
 
 .group-head {
-  margin: 18px 8px 4px 18px;
+  margin: 18px 8px 1px 18px;
   color: var(--dim);
   font-size: 13px;
 }
 
+/* Its top padding keeps the first row's focus ring inside what scrolls. */
 .projects {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 0 8px 8px;
+  padding: 3px 8px 8px;
 }
 
 .projects ul {
@@ -367,19 +368,56 @@ body.main.first {
   padding: 0;
 }
 
-.projects .item span,
+.projects .item .name,
 .card .name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* A project with a thread waiting on its user. */
+/* A project's mark: its icon in its hue. */
+.pmark {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--hue);
+}
+
+.pmark[data-hue="0"] {
+  --hue: #d9534f;
+}
+
+.pmark[data-hue="1"] {
+  --hue: #2f9e6e;
+}
+
+.pmark[data-hue="2"] {
+  --hue: #3b82c4;
+}
+
+.pmark[data-hue="3"] {
+  --hue: #9b6bd1;
+}
+
+.pmark[data-hue="4"] {
+  --hue: #d49a22;
+}
+
+.pmark[data-hue="5"] {
+  --hue: #8c8a83;
+}
+
+.item .pmark svg {
+  color: inherit;
+}
+
+/* A project with a thread waiting on its user: a dot on its mark. */
 .projects .waiting {
+  position: absolute;
+  top: -2px;
+  right: -3px;
   width: 6px;
   height: 6px;
-  margin-left: auto;
-  flex-shrink: 0;
   border-radius: 50%;
   background: var(--accent);
 }
@@ -574,9 +612,11 @@ body.main.first {
   min-height: 0;
 }
 
+/* Opaque: it covers what the centre showed, as the Projects page. */
 .empty {
   position: absolute;
   inset: 0;
+  background: var(--centre);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -639,9 +679,10 @@ body.main.first {
   height: 40px;
 }
 
+/* Three columns at most, as Claude Desktop's Projects page, and fewer where they would be under 240 px. */
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(max(240px, calc((100% - 24px) / 3)), 1fr));
   gap: 12px;
 }
 
@@ -663,12 +704,10 @@ body.main.first {
   background: var(--hover);
 }
 
-.card .badge {
-  display: inline-flex;
+.card .pmark {
   padding: 5px;
   border-radius: 6px;
-  background: var(--row);
-  color: var(--accent);
+  background: color-mix(in srgb, var(--hue) 16%, transparent);
 }
 
 .card .name {

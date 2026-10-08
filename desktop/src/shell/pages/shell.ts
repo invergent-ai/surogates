@@ -2,7 +2,7 @@
 // Overview pane. The agent's web client is drawn over the centre's hole, in a view of
 // its own. All text comes from the main process and is set with textContent only.
 
-import { ago, byId, fillIcons, icon, keepFocus, markTheme } from "./ui.js";
+import { aged, ago, byId, fillIcons, freshen, icon, keepFocus, markTheme, projectMark } from "./ui.js";
 
 // A project, as Section 12's ProjectSummary has it.
 interface ProjectRow {
@@ -103,9 +103,11 @@ function group(project: ProjectRow, selected: boolean): HTMLElement {
   wrapper.dataset.project = project.id;
   const open = button(selected ? "item project selected" : "item project", "", () => void shell.project(project.id));
   open.dataset.focus = `project:${project.id}`;
-  open.append(icon("folder"), element("span", "name", project.name));
+  const mark = projectMark(project.id);
+  open.append(mark, element("span", "name", project.name));
   if (project.waiting > 0) {
-    open.append(element("span", "waiting"));
+    // On the mark, as Claude Desktop puts it.
+    mark.append(element("span", "waiting"));
     open.setAttribute("aria-label", `${project.name}, waiting on you`);
   }
   if (selected) open.setAttribute("aria-current", "page");
@@ -117,9 +119,7 @@ function card(project: ProjectRow): HTMLElement {
   const made = button("card", "", () => void shell.project(project.id));
   made.dataset.project = project.id;
   made.dataset.focus = `card:${project.id}`;
-  const badge = element("span", "badge");
-  badge.append(icon("folder"));
-  made.append(badge, element("span", "name", project.name), element("span", "age", ago(project.updatedAt, Date.now(), "long")));
+  made.append(projectMark(project.id, 18), element("span", "name", project.name), aged(element("span", "age"), project.updatedAt, "long"));
   return made;
 }
 
@@ -175,7 +175,7 @@ function threadRow(thread: ThreadRow): HTMLElement {
   const words = thread.reason ? REASONS[thread.reason] : GROUPS[thread.group];
   const side = element("span", "side");
   if (thread.progress) side.append(element("span", "progress", `${thread.progress.done}/${thread.progress.total}`));
-  side.append(element("span", "age", ago(thread.updatedAt)));
+  side.append(aged(element("span", "age"), thread.updatedAt));
   row.append(element("span", "mark"), title, element("span", "status", thread.statusLine ? `${words} · ${thread.statusLine}` : words), side);
   if (thread.files.length > 0) {
     const chips = element("span", "chips");
@@ -265,6 +265,7 @@ function draw(state: State): void {
   const name = state.projects.find((project) => project.id === open?.id)?.name ?? open?.name;
   const thread = open?.thread ? (state.overview?.threads.find((found) => found.id === open.thread?.id)?.title ?? open.thread.title) : undefined;
   byId("title").textContent = thread ?? name ?? (state.view.kind === "projects" ? "Projects" : state.agent?.name ?? "");
+  byId("project-icon").replaceChildren(open ? projectMark(open.id) : icon("folder"));
   // A thread open in the centre: its project, as the way back.
   byId("to-project").hidden = !open?.thread;
   byId("to-project").textContent = open?.thread ? (name ?? "") : "";
@@ -430,6 +431,9 @@ new ResizeObserver(() => {
   const { x, y, width, height } = byId("hole").getBoundingClientRect();
   void shell.place({ x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) });
 }).observe(byId("hole"));
+
+// Ages tell the time gone by, between redraws too.
+setInterval(freshen, 60_000);
 
 shell.onChanged(() => void render());
 void render();
