@@ -244,6 +244,8 @@ let lacking: string[] | null = null;
 let lackingFound: Promise<string[]> = Promise.resolve([]);
 const VM_RESOURCES = app.isPackaged ? join(process.resourcesPath, "vm") : null;
 let delivery: ImageDelivery | null = null;
+// Aborted at the quit: a download or an unpack under way stops with the app, never writing on after it.
+const stopDelivery = new AbortController();
 let undeliverable: string | null = null;
 let boot: Boot | null = null;
 const deliveryState = (): Delivery | null => delivery?.state ?? (undeliverable === null ? null : { state: "failed", why: undeliverable });
@@ -264,6 +266,7 @@ function imageDelivery(): ImageDelivery | null {
     images: join(root, "vm", "images"),
     // No cookie of the app's own session goes with it.
     fetch: (url, init) => net.fetch(url, { ...init, credentials: "omit" }),
+    signal: stopDelivery.signal,
   }, changed);
 }
 
@@ -1966,6 +1969,7 @@ async function quit(): Promise<void> {
   // A log out under way finishes first: it keeps the revocation owed, and forgets the folders.
   await signingOut;
   await Promise.all([...revocations.values()].map((revoking) => revoking.stop()));
+  stopDelivery.abort(new Error("Surogate quit"));
   // The device, then the VM, which stops even when the device's stop fails. A stop that
   // fails still quits: the next launch answers what it cut off.
   try {

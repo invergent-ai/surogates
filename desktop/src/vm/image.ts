@@ -171,7 +171,7 @@ export async function deliver(options: DeliverOptions): Promise<string> {
       settle(`${downloaded}.partial`, downloaded);
     }
     signal?.throwIfAborted();
-    await unpack(downloaded, unpacked, file);
+    await unpack(downloaded, unpacked, file, signal);
     rmSync(downloaded);
   }
   settle(work, folder);
@@ -266,11 +266,12 @@ async function download(options: DeliverOptions, file: ImageFile, partial: strin
   }
 }
 
-// The downloaded *from*, unpacked by zstd into *to*, sparse, and checked by its hash.
-async function unpack(from: string, to: string, file: ImageFile): Promise<void> {
+// The downloaded *from*, unpacked by zstd into *to*, sparse, and checked by its hash. zstd, run by
+// its path, is given nothing of the app's environment, and ends at *signal*, as at the app's quit.
+async function unpack(from: string, to: string, file: ImageFile, signal?: AbortSignal): Promise<void> {
   const partial = `${to}.partial`;
   const said = await new Promise<string | null>((resolve) => {
-    const zstd = spawn("/usr/bin/zstd", ["-q", "-d", "-f", "--sparse", from, "-o", partial], { stdio: ["ignore", "ignore", "pipe"] });
+    const zstd = spawn("/usr/bin/zstd", ["-q", "-d", "-f", "--sparse", from, "-o", partial], { stdio: ["ignore", "ignore", "pipe"], env: {}, signal });
     let stderr = "";
     zstd.stderr.on("data", (chunk: Buffer) => {
       stderr = (stderr + chunk.toString()).slice(-2000);
@@ -280,6 +281,7 @@ async function unpack(from: string, to: string, file: ImageFile): Promise<void> 
   });
   if (said !== null) {
     rmSync(partial, { force: true });
+    signal?.throwIfAborted();
     // Kept while it is the download, as when the disk is full or zstd is missing; one that no longer
     // is, as after bit rot, goes, so the next try downloads it again.
     if (sizeOf(from) !== file.downloadSize || (await hashOf(from)).digest("hex") !== file.downloadSha256) rmSync(from, { force: true });

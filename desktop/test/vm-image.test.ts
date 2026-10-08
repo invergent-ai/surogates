@@ -222,6 +222,31 @@ describe("the guest image's delivery", () => {
     expect(readFileSync(join(await deliver(options()), "rootfs.img")).equals(rootfs)).toBe(true);
   });
 
+  it("unpacks with nothing of the app's environment, and stops its unpack at its signal", { timeout: 30_000 }, async () => {
+    // A disk whose unpack runs a while: 4 GB, all of it a hole.
+    const raw = join(dir, "src", "large.img");
+    writeFileSync(raw, "");
+    truncateSync(raw, 4 * 1024 ** 3);
+    expect(spawnSync("zstd", ["-q", "-f", "--rm", raw, "-o", `${raw}.zst`]).status).toBe(0);
+    const download = readFileSync(`${raw}.zst`);
+    served.set(`/desktop/vm/${KEY}/rootfs.img.zst`, download);
+    manifest = { ...manifest, files: [
+      { name: "rootfs.img", size: 4 * 1024 ** 3, sha256: "0".repeat(64), download: "rootfs.img.zst", downloadSize: download.length, downloadSha256: sha256(download) },
+      manifest.files[1]!,
+    ] };
+    const stop = new AbortController();
+    const delivered = deliver({ ...options(), signal: stop.signal });
+    delivered.catch(() => {});
+    const unpacking = () => Number(spawnSync("pgrep", ["-f", `^/usr/bin/zstd .*${join(images(), `${KEY}.partial`, "rootfs.img.zst")}`], { encoding: "utf8" }).stdout.trim() || 0);
+    await expect.poll(unpacking, { timeout: 10_000, interval: 20 }).toBeGreaterThan(0);
+    const zstd = unpacking();
+    // Its variables' names alone, so a failure prints none of their values.
+    expect(readFileSync(`/proc/${zstd}/environ`, "utf8").split("\0").filter(Boolean).map((entry) => entry.split("=")[0])).toEqual([]);
+    stop.abort(new Error("the app quit"));
+    await expect(delivered).rejects.toThrow("the app quit");
+    await expect.poll(unpacking, { timeout: 2_000 }).toBe(0);
+  });
+
   it("checks the free space before it fetches anything", async () => {
     manifest = { ...manifest, files: manifest.files.map((file) => ({ ...file, size: 2 ** 52 })) };
     await expect(deliver(options())).rejects.toThrow(/^there is not enough free disk space: it needs \d+\.\d GB, and \d+\.\d GB is free$/);

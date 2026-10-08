@@ -679,6 +679,22 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     expect(await operation("run", { command: "echo resumed", workdir: null, timeout: 30 })).toEqual({ ok: { output: "resumed\n", returncode: 0, timed_out: false } });
   });
 
+  it("stops its image's unpack with the app's quit, leaving no zstd behind", { timeout: 180_000 }, async () => {
+    const served = await installedFrom({ held: false, missing: false });
+    await launched({ SUROGATE_VM_IMAGE: "", SUROGATE_INSTALL_JSON: served.record });
+    const unpacking = () => Number(spawnSync("pgrep", ["-f", `^/usr/bin/zstd .*${join(home, "surogate", "vm", "images", `${served.key}.partial`)}/`], {
+      encoding: "utf8",
+    }).stdout.trim().split("\n")[0] || 0);
+    await expect.poll(unpacking, { timeout: 60_000, interval: 50 }).toBeGreaterThan(0);
+    const zstd = unpacking();
+    const closed = app!.waitForEvent("close");
+    await app!.evaluate(({ app: electron }) => electron.quit());
+    // It goes with the quit, not seconds later once it has written the image out.
+    await expect.poll(() => existsSync(`/proc/${zstd}`), { timeout: 1_000, interval: 20 }).toBe(false);
+    await closed;
+    app = undefined;
+  });
+
   it("says its sandbox did not start on the image it delivered, with Show log and Retry, and at Retry checks the image and downloads it again", { timeout: 240_000 }, async () => {
     const served = await installedFrom({ held: false, missing: false });
     // An image's folder whole by its sizes and its last step, and nothing but zeros: no kernel to boot.
