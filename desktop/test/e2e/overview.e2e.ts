@@ -417,6 +417,25 @@ describe("a thread read in the Overview pane", () => {
   });
 });
 
+describe("a thread read in the Overview pane, as the agent answers", () => {
+  it("follows a redirect of its load only to its own transcript", async () => {
+    const { shell, page } = await opened();
+    const shown = () => shell.evaluate(({ BrowserWindow }) =>
+      (BrowserWindow.getAllWindows()[0]!.contentView.children as Electron.WebContentsView[]).map((view) => view.webContents.getURL()));
+    // To another page of the agent's: refused, and that page is drawn nowhere.
+    agent.pagesRedirect = `${origin}/settings`;
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await pause(1_000);
+    expect(await shown()).not.toContain(`${origin}/settings`);
+    await page.click("#reading-back");
+    await expect.poll(() => page.isVisible("#threads")).toBe(true);
+    // To its own transcript, in other settings: followed.
+    agent.pagesRedirect = transcript(QUESTION, "textSize=large&transcriptWidth=medium&motion=system");
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(agent.pagesRedirect);
+  });
+});
+
 describe("the Overview pane, at its edges", () => {
   it("forgets a project's threads when another account signs in, or the user signs out", async () => {
     const { page, client } = await opened();

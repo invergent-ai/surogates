@@ -350,8 +350,15 @@ export class MainWindow {
       if (!sameOrigin(web.agent.origin, event.url)) openOutside(event.url);
     };
     contents.on("will-navigate", stay);
+    // Its page, wherever its address says: the agent's origin and the transcript's path.
+    const own = new URL(url);
+    const onTranscript = (to: string) => {
+      const at = URL.parse(to);
+      return at?.origin === own.origin && at.pathname === own.pathname;
+    };
+    // A redirect of its load goes nowhere but its own transcript: the agent's other pages are refused too.
     contents.on("will-redirect", (event) => {
-      if (event.isMainFrame && !sameOrigin(web.agent.origin, event.url)) event.preventDefault();
+      if (event.isMainFrame && !onTranscript(event.url)) event.preventDefault();
     });
     // A footnote or an anchor scrolls the transcript; any other page the web client routes to loads it again.
     contents.on("did-navigate-in-page", (_event, to, isMainFrame) => {
