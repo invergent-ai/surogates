@@ -411,7 +411,8 @@ body.main.first {
   color: inherit;
 }
 
-/* A project with a thread waiting on its user: a dot on its mark. */
+/* A project with a thread waiting on its user: a dot on its mark, with a ring in its row's colour,
+   which parts it from a mark of any hue. */
 .projects .waiting {
   position: absolute;
   top: -2px;
@@ -420,6 +421,16 @@ body.main.first {
   height: 6px;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 0 2px var(--under, var(--sidebar));
+}
+
+/* The row's colour under the ring: --hover over the sidebar's, as the one colour it shows, and the selected row's. */
+.projects .item:hover {
+  --under: light-dark(#e8e7e1, #1f1f1e);
+}
+
+.projects .item.selected {
+  --under: var(--row);
 }
 
 .warn {

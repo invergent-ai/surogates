@@ -284,16 +284,54 @@ describe("the Projects page", () => {
     const sidebar = await Promise.all([REPORT, BUDGET, HIRING].map((id) => mark(`#projects [data-project="${id}"] .pmark`)));
     expect(new Set(sidebar).size).toBeGreaterThan(1);
     // The dot that says a thread waits sits on the mark, whole: what is drawn past the mark's edge is the dot's too.
-    await expect.poll(() => page.$eval(`#projects [data-project="${REPORT}"] .pmark .waiting`, (dot) => {
-      const { right, top, height } = dot.getBoundingClientRect();
-      return document.elementFromPoint(right - 1.5, top + height / 2) === dot;
+    const dot = `#projects [data-project="${REPORT}"] .pmark .waiting`;
+    await expect.poll(() => page.$eval(dot, (found) => {
+      const { right, top, height } = found.getBoundingClientRect();
+      return document.elementFromPoint(right - 1.5, top + height / 2) === found;
     }), { timeout: 5_000 }).toBe(true);
+    // On the mark: over its icon, not beside it.
+    expect(await page.$eval(dot, (found) => {
+      const [own, drawn] = [found, found.parentElement!.querySelector("svg")!].map((each) => each.getBoundingClientRect());
+      return own!.left < drawn!.right && drawn!.left < own!.right && own!.top < drawn!.bottom && drawn!.top < own!.bottom;
+    })).toBe(true);
+    // A ring of 2 px in its row's colour parts it from the mark, whatever the mark's hue: the dot's
+    // ring, and the row's colour as it is seen, over the sidebar's.
+    const ringed = () => page.$eval(dot, (found) => {
+      const numbers = (value: string) => (value.match(/[\d.]+/g) ?? []).map(Number);
+      const [shadow, sidebar, row] = [found, document.getElementById("sidebar")!, found.closest(".item")!]
+        .map((each, at) => numbers(at === 0 ? getComputedStyle(each).boxShadow : getComputedStyle(each).backgroundColor));
+      const alpha = row![3] ?? 1;
+      return {
+        ring: shadow!.slice(0, 3),
+        spread: shadow!.slice(3),
+        row: sidebar!.slice(0, 3).map((under, channel) => Math.round(row![channel]! * alpha + under * (1 - alpha))),
+      };
+    });
+    const ringIsItsRows = async () => {
+      const { ring, spread, row: seen } = await ringed();
+      expect(spread).toEqual([0, 0, 0, 2]);
+      expect(seen.map((channel, at) => Math.abs(channel - ring[at]!) <= 1)).toEqual([true, true, true]);
+      return ring;
+    };
+    const plain = await ringIsItsRows();
+    // The pointer over its row, whose colour is another.
+    await page.hover(row(REPORT));
+    await expect.poll(async () => (await ringed()).ring).not.toEqual(plain);
+    const hovered = await ringIsItsRows();
+    await page.mouse.move(0, 0);
+    await expect.poll(async () => (await ringed()).ring).toEqual(plain);
     await page.click("#open-projects");
     await expect.poll(() => Promise.all([REPORT, BUDGET, HIRING].map((id) => mark(`#cards [data-project="${id}"] .pmark`))), { timeout: 5_000 })
       .toEqual(sidebar);
     await page.click(`#cards [data-project="${BUDGET}"]`);
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${MASTERS[BUDGET]}`);
     await expect.poll(() => mark("#project-icon .pmark"), { timeout: 5_000 }).toBe(sidebar[1]);
+    // Its project open, its row is the selected one, in a third colour.
+    await page.click(row(REPORT));
+    await expect.poll(() => page.getAttribute(row(REPORT), "aria-current")).toBe("page");
+    const selected = await ringIsItsRows();
+    expect(selected).not.toEqual(plain);
+    expect(selected).not.toEqual(hovered);
   });
 
   it("ages its cards as time goes on, with nothing drawn again", async () => {
