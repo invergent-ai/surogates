@@ -17,9 +17,12 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from surogates.devices.binding import device_of, device_owners
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
+
+_LOCAL_FOLDER_REFUSAL = "Skills can't be changed from a chat on a local folder. Change them in the web client."
 
 # ---------------------------------------------------------------------------
 # Shared validation (canonical source: skill_validation.py)
@@ -153,6 +156,11 @@ async def _skill_manage_handler(
     **kwargs: Any,
 ) -> str:
     """Dispatch to the appropriate action handler."""
+    if device_owners.get() or device_of(kwargs.get("session_config")) is not None:
+        # skill_view puts a skill's files into a local folder unasked, and its
+        # scripts are run from there: the model may not change what it puts
+        # there.  Every action here changes a skill.
+        return json.dumps({"success": False, "error": _LOCAL_FOLDER_REFUSAL})
     # API-mediated mode: delegate all CRUD to the API server.
     api_client = kwargs.get("api_client")
     if api_client is not None:
