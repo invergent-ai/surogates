@@ -744,6 +744,20 @@ describe("the project dialog", () => {
     await expect.poll(() => dialogOpen(shell)).toBe(false);
   });
 
+  it("stays open, with what was typed, on an Escape that cancels an input method's composition", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    await dialog.fill("#name", "Hiring brief");
+    await dialog.evaluate(() => {
+      document.getElementById("name")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", isComposing: true, bubbles: true }));
+    });
+    await pause(500);
+    expect(await dialogOpen(shell)).toBe(true);
+    expect(await dialog.inputValue("#name")).toBe("Hiring brief");
+  });
+
   it("asks for a name, says what the agent refused, and keeps a project when the archive is cancelled", async () => {
     const { shell, page, client } = await signedIn();
     await page.click("#open-projects");
