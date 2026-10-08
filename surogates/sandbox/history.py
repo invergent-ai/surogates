@@ -41,7 +41,7 @@ import shutil
 import stat
 import subprocess
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -111,6 +111,8 @@ _HERMETIC = {
 #: A file's bytes are history's as they are: no project, home or system
 #: ``.gitattributes`` converts line endings or runs a filter on them.
 _ATTRIBUTES = "* -text -filter -ident -working-tree-encoding\n"
+#: The bucket's history's config, as the platform writes it: git never reads it there.
+_CONFIG = b"[core]\n\trepositoryformatversion = 0\n\tbare = true\n"
 #: Who commits what is the copy's own: a snapshot, a take-up.
 _CHECKPOINT = {"name": "Surogates Checkpoint", "email": "surogates@local"}
 
@@ -287,7 +289,9 @@ class History:
                 # another pod's landing would hide that landing's files.
                 for folder in {"", *self._main("ls-tree", "-r", "-d", "-z", "--name-only", MAIN).split("\0")}:
                     _invalidate(self.project / folder)
-                if (fd := _opened(self.durable / "index", "index")) is not None:
+                with self._folder() as history:
+                    fd = _opened("index", "index", dir_fd=history) if history is not None else None
+                if fd is not None:
                     with open(fd, "rb") as kept, open(self.repo / "index", "wb") as out:
                         shutil.copyfileobj(kept, out, 1 << 20)
                         dated = os.fstat(fd)
@@ -698,16 +702,16 @@ class History:
             _TIMEOUT.reset(budget)
 
     def _prune(self, *, keep: list[str], now: float) -> dict:
+        # The first look refuses a history whose folder is a link, before anything is written.
         refs = self._durable_refs()
-        marker = self.durable / "pruned"
-        _invalidate(marker if os.path.lexists(marker) else self.durable)
-        marked = os.lstat(marker) if os.path.lexists(marker) else None
+        with self._folder() as history:
+            marked = _looked(history, "pruned", self.durable) if history is not None else None
         if MAIN not in refs or marked and stat.S_ISREG(marked.st_mode) and now - marked.st_mtime < _PRUNE_EVERY:
             return {"pruned": False}
         self._put_durable("pruned", b"")
         self._sweep()
         refs = self._take()
-        packs = [self.durable / "objects" / "pack" / p.name for p in (self._taken / "objects" / "pack").iterdir()]
+        packs = [p.name for p in (self._taken / "objects" / "pack").iterdir()]
         work = self.repo / "pruning.git"
         shutil.rmtree(work, ignore_errors=True)
         try:
@@ -739,10 +743,12 @@ class History:
                 raise HistoryConflict("the project's history moved while it was pruned")
             self._put_durable("packed-refs", work / "packed-refs")
             # Only now: until packed-refs names the new pack's commits, the old packs hold them.
-            for old in packs:
-                if old.name not in (f"{name}.pack", f"{name}.idx"):
-                    old.unlink(missing_ok=True)
-            _sync(self.durable / "objects" / "pack")
+            with self._folder("objects", "pack") as folder:
+                for old in packs:
+                    if old not in (f"{name}.pack", f"{name}.idx"):
+                        with contextlib.suppress(FileNotFoundError):
+                            os.unlink(old, dir_fd=folder)
+                os.fsync(folder)
             return {"pruned": True, "commits": min(kept, len(mains)), "size": packed, "files": size}
         finally:
             shutil.rmtree(work, ignore_errors=True)
@@ -882,9 +888,36 @@ class History:
 
     def _sweep(self) -> None:
         """Delete what a write killed part way left, staged beside its file: only the lock holder writes here."""
-        for folder in (self.durable, self.durable / "objects" / "pack"):
-            for staged in folder.glob(".~*.landing~"):
-                staged.unlink(missing_ok=True)
+        for inside in ((), ("objects", "pack")):
+            with self._folder(*inside) as folder:
+                for staged in os.listdir(folder) if folder is not None else ():
+                    if staged.startswith(".~") and staged.endswith(".landing~"):
+                        with contextlib.suppress(FileNotFoundError):
+                            os.unlink(staged, dir_fd=folder)
+
+    @contextlib.contextmanager
+    def _folder(self, *inside: str, make: bool = False) -> Iterator[int | None]:
+        """A folder of the bucket's history, opened to read and write in by its handle; None when there is none.
+
+        A thread's commands can write the history's files, and can make a
+        folder of it a link to a folder of the pod's.  So each step of the
+        path is opened as a folder and never through a link, and what is
+        read or written in it goes by the handle: nothing can be put in a
+        folder's place between the look and the use.  With *make*, a folder
+        not there yet is made.
+        """
+        opened: list[int] = []
+        try:
+            at: int | None = None
+            for name in (str(self.durable), *inside):
+                at = _opened_folder(name, at, make)
+                if at is None:
+                    break
+                opened.append(at)
+            yield at
+        finally:
+            for fd in opened:
+                os.close(fd)
 
     # ------------------------------------------------------------------
     # The durable history
@@ -909,26 +942,23 @@ class History:
         taken = self._taken
         if not (taken / "HEAD").exists():
             self._git(["init", "-q", "--bare", "-b", "main", str(taken)], env={}, cwd=self.repo)
-        folder, packs = self.durable / "objects" / "pack", taken / "objects" / "pack"
-        if any(f.is_symlink() for f in (self.durable, folder.parent, folder)):
-            raise HistoryError("refused the project's history: a folder of it is a link")
+        packs = taken / "objects" / "pack"
         refs, shallow = self._durable_refs(), self._durable_shallow()
-        _invalidate(folder)
-        try:
-            names = {n for n in os.listdir(folder) if n.endswith((".pack", ".idx"))}
-        except (FileNotFoundError, NotADirectoryError):
-            names = set()
-        here = set(os.listdir(packs))
-        for gone in here - names:
-            (packs / gone).unlink()
-        # Each pack before its index: git reads a pack only through it.
-        for name in sorted(names - here, key=lambda n: n.endswith(".idx")):
-            if (fd := _opened(folder / name, "a pack")) is None:
-                continue  # gone since the listing: a pruning's
-            staged = packs / f".~{name}"
-            with open(fd, "rb") as pack, open(staged, "wb") as out:
-                shutil.copyfileobj(pack, out, 1 << 20)
-            os.replace(staged, packs / name)
+        with self._folder("objects", "pack") as folder:
+            if folder is not None:
+                _invalidate(self.durable / "objects" / "pack")
+            names = {n for n in os.listdir(folder) if n.endswith((".pack", ".idx"))} if folder is not None else set()
+            here = set(os.listdir(packs))
+            for gone in here - names:
+                (packs / gone).unlink()
+            # Each pack before its index: git reads a pack only through it.
+            for name in sorted(names - here, key=lambda n: n.endswith(".idx")):
+                if (fd := _opened(name, "a pack", dir_fd=folder)) is None:
+                    continue  # gone since the listing: a pruning's
+                staged = packs / f".~{name}"
+                with open(fd, "rb") as pack, open(staged, "wb") as out:
+                    shutil.copyfileobj(pack, out, 1 << 20)
+                os.replace(staged, packs / name)
         _replace(taken / "packed-refs", _packed(refs))
         if shallow:
             _replace(taken / "shallow", "".join(f"{c}\n" for c in shallow).encode())
@@ -938,9 +968,12 @@ class History:
 
     def _durable_refs(self) -> dict[str, str]:
         """The durable history's refs as the bucket has them now, every one in ``packed-refs``."""
-        target = self.durable / "packed-refs"
-        _invalidate(target if os.path.lexists(target) else self.durable)
-        if (data := _read(target, "packed-refs")) is None:
+        with self._folder() as history:
+            if history is None:
+                return {}
+            _looked(history, "packed-refs", self.durable)
+            data = _read("packed-refs", "packed-refs", dir_fd=history)
+        if data is None:
             return {}
         text = data.decode(errors="replace")
         refs = {}
@@ -955,17 +988,29 @@ class History:
         return refs
 
     def _check_durable(self) -> None:
-        """Refuse a history whose ``HEAD`` or ``shallow`` is not one the platform writes, as every reader of it should."""
-        if (head := _read(self.durable / "HEAD", "HEAD")) is not None:
+        """Refuse a history whose ``HEAD``, config or ``shallow`` is not one the platform writes, as every reader of it should.
+
+        Git never reads the bucket's config: the pod's copy has its own.
+        One that is not the platform's is still refused, at a pod's open: it
+        was written by a thread's commands, and says the history is not as
+        the platform left it.
+        """
+        with self._folder() as history:
+            head = _read("HEAD", "HEAD", dir_fd=history) if history is not None else None
+            config = _read("config", "config", dir_fd=history) if history is not None else None
+        if head is not None:
             text = head.decode(errors="replace")
             if not (text.startswith("ref: ") and text.endswith("\n")):
                 raise HistoryError("refused the project's history: its HEAD is not one the platform writes")
             _checked_ref(text[5:-1], "its HEAD")
+            if config != _CONFIG:
+                raise HistoryError("refused the project's history: its config is not the platform's own")
         self._durable_shallow()
 
     def _durable_shallow(self) -> list[str]:
         """The commits the durable history's ``shallow`` file names."""
-        data = _read(self.durable / "shallow", "shallow") or b""
+        with self._folder() as history:
+            data = (_read("shallow", "shallow", dir_fd=history) if history is not None else None) or b""
         return [_checked_id(c, "its shallow") for c in data.decode(errors="replace").split()]
 
     def _fetch(self, *commits: str | None) -> None:
@@ -991,13 +1036,17 @@ class History:
         moved = sorted(ref for ref, want in expect.items() if refs.get(ref) != want)
         if moved:
             raise HistoryConflict(f"{', '.join(moved)} moved in the project's history")
-        if os.path.lexists(self.durable / "HEAD"):
+        with self._folder() as history:
+            made = history is not None and _looked(history, "HEAD") is not None
+        if made:
             self._sweep()
         else:
-            for folder in ("refs", "objects/pack"):
-                (self.durable / folder).mkdir(parents=True, exist_ok=True)
-            _sync(self.durable / "objects")
-            self._put_durable("config", b"[core]\n\trepositoryformatversion = 0\n\tbare = true\n")
+            for inside in (("refs",), ("objects", "pack")):
+                with self._folder(*inside, make=True):
+                    pass
+            with self._folder("objects") as objects:
+                os.fsync(objects)
+            self._put_durable("config", _CONFIG)
             # Last: its presence is what makes the folder a repository.
             self._put_durable("HEAD", b"ref: refs/heads/main\n")
         tips = [c for c in updates.values() if c]
@@ -1043,21 +1092,27 @@ class History:
         return [_checked_id(line[7:], "a commit") for line in takewhile(lambda line: line.startswith("parent "), lines)]
 
     def _put_durable(self, name: str, source: bytes | Path) -> None:
-        """Write *name* in the durable history whole, beside it then renamed over it; durable before it returns."""
-        target = self.durable / name
-        staged = target.with_name(f".~{os.urandom(4).hex()}.landing~")
-        try:
-            with open(staged, "wb") as out:
-                if isinstance(source, Path):
-                    with open(source, "rb") as src:
-                        shutil.copyfileobj(src, out, 1 << 20)
-                else:
-                    out.write(source)
-                os.fsync(out.fileno())
-            os.replace(staged, target)
-            _sync(target.parent)
-        finally:
-            staged.unlink(missing_ok=True)
+        """Write *name* in the durable history whole, beside it then renamed over it; durable before it returns.
+
+        In its folder by the folder's handle: never through a link put in a folder's place.
+        """
+        *inside, leaf = name.split("/")
+        staged = f".~{os.urandom(4).hex()}.landing~"
+        with self._folder(*inside, make=True) as folder:
+            try:
+                fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644, dir_fd=folder)
+                with open(fd, "wb") as out:
+                    if isinstance(source, Path):
+                        with open(source, "rb") as src:
+                            shutil.copyfileobj(src, out, 1 << 20)
+                    else:
+                        out.write(source)
+                    os.fsync(out.fileno())
+                os.replace(staged, leaf, src_dir_fd=folder, dst_dir_fd=folder)
+                os.fsync(folder)
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(staged, dir_fd=folder)
 
     def _keep_index(self, landing: str) -> None:
         """main's index of the real files, made the landing's, into the durable history.
@@ -1400,15 +1455,48 @@ def _sync(folder: Path) -> None:
         os.close(fd)
 
 
-def _opened(path: Path, what: str) -> int | None:
+def _opened_folder(name: str, inside: int | None, make: bool) -> int | None:
+    """The folder *name*, in the folder open as *inside*, opened as a folder and never through a link; None when there is none."""
+    for again in (False, True):
+        try:
+            return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=inside)
+        except FileNotFoundError:
+            if not make or again:
+                return None
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(name, dir_fd=inside)
+        except OSError as exc:
+            # A link, or a file, where the folder is: the first is ELOOP or, with a folder asked for, ENOTDIR.
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise HistoryError("refused the project's history: a folder of it is a link") from None
+            raise
+    return None
+
+
+def _looked(folder: int, name: str, path: Path | None = None) -> os.stat_result | None:
+    """What *name* in the folder open as *folder* is, as the bucket has it now, never through a link; None when it is not there.
+
+    With the folder's *path*, geesefs is told to check with the bucket again, past its cache.
+    """
+    try:
+        found = os.stat(name, dir_fd=folder, follow_symlinks=False)
+    except FileNotFoundError:
+        found = None
+    if path is not None:
+        _invalidate(path / name if found is not None else path)
+    return found
+
+
+def _opened(path: Path | str, what: str, *, dir_fd: int | None = None) -> int | None:
     """*path* of the durable history opened to read as data, past the page cache; None when there is none.
 
     Never through a link, and only a file: a thread's commands can make a
-    link to a file of the pod's.  A refusal names *what*, never the path or
+    link to a file of the pod's.  With *dir_fd*, *path* is a name in the
+    folder open as it.  A refusal names *what*, never the path or
     anything read: it reaches the pod's logs.
     """
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except (FileNotFoundError, NotADirectoryError):
         return None
     except OSError as exc:
@@ -1423,9 +1511,9 @@ def _opened(path: Path, what: str) -> int | None:
     return fd
 
 
-def _read(path: Path, what: str) -> bytes | None:
+def _read(path: Path | str, what: str, *, dir_fd: int | None = None) -> bytes | None:
     """The bytes of *path* of the durable history, read as :func:`_opened` opens it; None when there is none."""
-    if (fd := _opened(path, what)) is None:
+    if (fd := _opened(path, what, dir_fd=dir_fd)) is None:
         return None
     with open(fd, "rb") as file:
         return file.read()

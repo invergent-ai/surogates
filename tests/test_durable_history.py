@@ -403,6 +403,8 @@ CRAFTED = {
     "short": ("shallow", lambda main, option: f"{main[:39]}\n"),
     "upper": ("shallow", lambda main, option: f"{main.upper()}\n"),
     "HEAD": ("HEAD", lambda main, option: f"ref: {option}\n"),
+    "HEAD-shape": ("HEAD", lambda main, option: f"{option}\n"),
+    "config": ("config", lambda main, option: f"[core]\n\tbare = true\n\tfsmonitor = {option}\n"),
 }
 
 
@@ -421,7 +423,7 @@ def test_a_history_a_command_wrote_runs_nothing_in_a_pod_and_refuses_its_open(tm
     with pytest.raises(HistoryError, match="refused the project's history") as refused:
         a_pod(tmp_path, project, "t2")
     assert "upload-pack" not in str(refused.value)
-    if name != "HEAD":
+    if name not in ("HEAD", "config"):
         # Nor at a landing's first look, in a pod opened before.
         with pytest.raises(HistoryError, match="refused the project's history"):
             holder.fetch()
@@ -727,13 +729,13 @@ def a_main_whose_parent_the_history_lacks(durable: Path) -> str:
     return crafted
 
 
-def test_a_history_whose_config_a_command_wrote_runs_nothing_at_an_open_a_push_or_a_pruning(tmp_path, project):
+def test_a_history_whose_config_a_command_wrote_runs_nothing_at_a_push_or_a_pruning_and_refuses_an_open(tmp_path, project):
     first = a_pod(tmp_path, project, "early")
     (first.copy / "start.md").write_text("x")
     land(first, "saga:start")
     durable, ran = project / "_history", tmp_path / "ran"
     a_main_whose_parent_the_history_lacks(durable)
-    slow = a_pod(tmp_path, project, "slow")
+    slow, pruner = a_pod(tmp_path, project, "slow"), a_pod(tmp_path, project, "t2")
     other = a_pod(tmp_path, project, "o1")
     (other.copy / "o.md").write_text("o")
     land(other, "saga:o1", author={"name": "O", "email": "thread:o1@surogate"})
@@ -742,28 +744,41 @@ def test_a_history_whose_config_a_command_wrote_runs_nothing_at_an_open_a_push_o
         "[core]\n\trepositoryformatversion = 1\n\tbare = true\n[extensions]\n\tpartialClone = evil\n"
         f"[remote \"evil\"]\n\turl = {durable}\n\tpromisor = true\n\tuploadpack = touch {ran}; false\n"
     )
-    # A push whose boundary's parent the history lacks looks for it there.
+    # A push whose boundary's parent the history lacks looks for it there.  A pod opened before
+    # the config was written never reads it: its landing and its pruning go on, and run nothing.
     (slow.copy / "slow.md").write_text("the slow thread's work")
     land(slow, "saga:slow")
-    a_pod(tmp_path, project, "t2").prune(keep=[], now=time.time())
-    assert (a_pod(tmp_path, project, "t3").copy / "slow.md").read_text() == "the slow thread's work"
+    assert pruner.prune(keep=[], now=time.time())["pruned"] is True
+    assert (project / "slow.md").read_text() == "the slow thread's work"
+    # A pod opened after it is refused: the config is not the platform's own, whatever git would make of it.
+    with pytest.raises(HistoryError, match="refused the project's history: its config is not the platform's own"):
+        a_pod(tmp_path, project, "t3")
     assert not ran.exists()
 
 
 def test_git_never_runs_in_the_buckets_history(tmp_path, project, monkeypatch):
-    first = a_pod(tmp_path, project)
+    first = a_pod(tmp_path, project, "early")
     (first.copy / "a.md").write_text("a")
     land(first, "saga:1")
     durable, ran = project / "_history", tmp_path / "ran"
-    # What a thread's commands can write there: hooks, and a config that runs commands.
+    # A main whose parent the history lacks, and a landing after a pod opened on it: that pod's
+    # push then has to ask whether the history holds its boundary's parent.
+    a_main_whose_parent_the_history_lacks(durable)
+    slow = a_pod(tmp_path, project, "slow")
+    other = a_pod(tmp_path, project, "o1")
+    (other.copy / "o.md").write_text("o")
+    land(other, "saga:o1", author={"name": "O", "email": "thread:o1@surogate"})
+    # What a thread's commands can write there: hooks, other object stores for git to read, marks beside a pack.
     for hook in ("reference-transaction", "post-checkout", "pre-auto-gc", "post-index-change"):
         (durable / "hooks").mkdir(exist_ok=True)
         (durable / "hooks" / hook).write_text(f"#!/bin/sh\ntouch {ran}-{hook}\n")
         (durable / "hooks" / hook).chmod(0o755)
-    (durable / "config").write_text(
-        f"[core]\n\tbare = true\n\tfsmonitor = touch {ran}-fsmonitor\n\talternateRefsCommand = touch {ran}-refs\n"
-        f"[uploadpack]\n\tpackObjectsHook = touch {ran}-pack;\n"
-    )
+    (durable / "objects" / "info").mkdir(exist_ok=True)
+    (durable / "objects" / "info" / "alternates").write_text(f"{tmp_path / 'another' / 'objects'}\n")
+    for pack in list((durable / "objects" / "pack").glob("*.pack")):
+        pack.with_suffix(".promisor").write_text("")
+        pack.with_suffix(".keep").write_text("")
+    (durable / "objects" / "pack" / "multi-pack-index").write_bytes(b"MIDX not one")
     run, gits = subprocess.run, []
 
     def recorded(args, **kwargs):
@@ -774,11 +789,22 @@ def test_git_never_runs_in_the_buckets_history(tmp_path, project, monkeypatch):
     pod = a_pod(tmp_path, project, "t2")
     (pod.copy / "b.md").write_text("b")
     land(pod, "saga:2")
+    (slow.copy / "slow.md").write_text("slow")
+    land(slow, "saga:slow")  # across the missing parent
     a_pod(tmp_path, project, "t3").prune(keep=[], now=time.time())
     # Neither its repository, nor its folder, nor a remote: the pod copies the history's files and reads them as data.
     there = [args for args, repo, cwd in gits if any(str(durable) in str(v) for v in (*args, repo, cwd))]
     assert there == [] and not list(tmp_path.glob("ran*"))
-    assert (project / "b.md").read_text() == "b"
+    assert (project / "b.md").read_text() == "b" and (project / "slow.md").read_text() == "slow"
+    # And only its packs, its refs and its cut: the copy's HEAD and config are the pod's own, and nothing
+    # else of the bucket's comes with them, to lead git to another store or have it run a command.
+    taken = pod.repo / "durable.git"
+    files = sorted(str(f.relative_to(taken)) for f in taken.rglob("*") if f.is_file() and "hooks" not in f.parts)
+    assert [f for f in files if not f.startswith("objects/pack/pack-")] == [
+        "HEAD", "config", "description", "info/exclude", "packed-refs", "shallow",
+    ]
+    assert {Path(f).suffix for f in files if f.startswith("objects/pack/")} == {".pack", ".idx"}
+    assert not [hook for hook in ("reference-transaction", "post-checkout", "pre-auto-gc", "post-index-change") if (taken / "hooks" / hook).exists()]
 
 
 @pytest.mark.parametrize("name", ["packed-refs", "HEAD", "shallow", "index", "a pack"])
@@ -796,6 +822,69 @@ def test_a_history_file_made_a_link_is_refused_and_the_refusal_quotes_nothing(tm
     with pytest.raises(HistoryError, match="refused the project's history") as refused:
         a_pod(tmp_path, project, "t2")
     assert "eyJ" not in str(refused.value) and "token" not in str(refused.value)
+
+
+@pytest.mark.parametrize("folder", ["_history", "_history/objects", "_history/objects/pack"])
+def test_a_history_folder_made_a_link_is_refused_at_every_step_and_nothing_is_written_through_it(tmp_path, project, folder):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first, "saga:1")
+    holder = a_pod(tmp_path, project, "t3")  # a pod already open, as the next lock holder's is
+    (holder.copy / "h.md").write_text("h")
+    # A thread's commands can make the folder a link: here to a copy of itself, a history as good as the real one.
+    elsewhere = tmp_path / "elsewhere"
+    shutil.copytree(project / folder, elsewhere)
+    shutil.rmtree(project / folder)
+    (project / folder).symlink_to(elsewhere)
+    there = sorted(str(f.relative_to(elsewhere)) for f in elsewhere.rglob("*"))
+    steps = {
+        "an open": lambda: a_pod(tmp_path, project, "t2"),
+        "a landing's first look": holder.fetch,
+        "a commit step": lambda: holder.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:2"], ["Surogate-Kind", "turn"]]),
+        "a keep": lambda: holder.keep(author=A, trailers=KEPT, base=True),
+        "a hand-off": lambda: holder.hand_off(author=A, trailers=KEPT),
+        "a pruning": lambda: holder.prune(keep=[], now=time.time() + 2 * 86_400),
+    }
+    for name, step in steps.items():
+        with pytest.raises(HistoryError, match="refused the project's history: a folder of it is a link"):
+            step()
+        # Refused before anything went through the link: no mark of a pruning, no pack, no file half written.
+        assert sorted(str(f.relative_to(elsewhere)) for f in elsewhere.rglob("*")) == there, name
+
+
+@pytest.mark.parametrize("made", ["a pipe", "a folder"])
+def test_a_history_file_that_is_no_file_is_refused_and_never_read(tmp_path, project, made):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first, "saga:1")
+    refs = project / "_history" / "packed-refs"
+    refs.unlink()
+    os.mkfifo(refs) if made == "a pipe" else refs.mkdir()  # a pipe would hold a read for ever; a folder is no history
+    with pytest.raises(HistoryError, match="refused the project's history: its packed-refs is not a file"):
+        a_pod(tmp_path, project, "t2")
+
+
+def test_a_commit_whose_parent_is_no_commit_id_is_refused_before_git_sees_it(tmp_path, project):
+    first = a_pod(tmp_path, project, "early")
+    (first.copy / "start.md").write_text("x")
+    land(first, "saga:start")
+    durable = project / "_history"
+    main = git(durable, "rev-parse", "refs/heads/main")
+    # An id in capitals: git reads it as a parent, and it is not one the platform writes.
+    body = (
+        f"tree {git(durable, 'rev-parse', f'{main}^{{tree}}')}\nparent {main.upper()}\n"
+        "author X <x@x> 1700000000 +0000\ncommitter X <x@x> 1700000000 +0000\n\nc\n"
+    )
+    crafted = git(durable, "hash-object", "-t", "commit", "--literally", "-w", "--stdin", input=body)
+    (durable / "packed-refs").write_text(f"# pack-refs with: peeled fully-peeled sorted \n{crafted} refs/heads/main\n")
+    git(durable, "repack", "-q", "-d")
+    slow = a_pod(tmp_path, project, "slow")  # opens on the crafted main, its depth-1 boundary
+    other = a_pod(tmp_path, project, "o1")
+    (other.copy / "o.md").write_text("o")
+    land(other, "saga:o1", author={"name": "O", "email": "thread:o1@surogate"})
+    (slow.copy / "slow.md").write_text("slow")
+    with pytest.raises(HistoryError, match="refused the project's history: a commit holds what is not a commit id"):
+        slow.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:slow"], ["Surogate-Kind", "turn"]])
 
 
 def test_a_crafted_commit_puts_nothing_of_its_own_on_gits_command_line(tmp_path, project, monkeypatch):
