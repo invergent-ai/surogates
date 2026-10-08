@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -56,5 +56,13 @@ describe("start at login", () => {
     // Off when it is off already.
     setStartAtLogin(file, false, [LAUNCHER]);
     expect(startsAtLogin(file)).toBe(false);
+  });
+
+  it("leaves no temporary file in the user's autostart folder when its entry cannot be written", () => {
+    const file = autostartFile(config);
+    // A folder where the entry goes: its rename fails, as its write fails on a full disk.
+    mkdirSync(join(file, "taken"), { recursive: true });
+    expect(() => setStartAtLogin(file, true, [LAUNCHER])).toThrow();
+    expect(readdirSync(join(config, "autostart"))).toEqual(["surogate.desktop"]);
   });
 });

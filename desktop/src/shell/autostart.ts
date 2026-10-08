@@ -55,6 +55,12 @@ export function setStartAtLogin(file: string, on: boolean, command: readonly str
   const entry = autostartEntry(command);
   mkdirSync(dirname(file), { recursive: true });
   const next = `${file}.${process.pid}.tmp`;
-  writeFileSync(next, entry);
-  renameSync(next, file);
+  try {
+    writeFileSync(next, entry);
+    renameSync(next, file);
+  } catch (error) {
+    // Half written, as on a full disk: nothing else would ever remove it.
+    rmSync(next, { force: true });
+    throw error;
+  }
 }
