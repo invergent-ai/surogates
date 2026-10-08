@@ -173,6 +173,10 @@ apply() {
   if [ -n "$previous" ] && dpkg --compare-versions "$version" lt "$previous"; then
     fail "$version is older than the installed $previous"
   fi
+  # The system's bwrap, which the app gives srt: a copy in the version's folder takes the app's
+  # AppArmor profile, not one Ubuntu attaches to /usr/bin/bwrap. Made again at each apply, as apt
+  # may have updated it.
+  [ -x /usr/bin/bwrap ] || fail "bubblewrap is missing: run Surogate Desktop's install script again"
   # Room for the tarball's copy and the tree it unpacks to, which is about two and a half times
   # its size. No more of the tarball is copied than the size that room was found for.
   local size need room
@@ -212,16 +216,16 @@ apply() {
     # Its mark and its bwrap are made here: whatever the archive has under their names goes, a link
     # or a folder too, and is never written through or into.
     rm -rf -- "$top/release.json" "$top/bin/bwrap"
-    # Last: a version folder with its manifest is whole.
+    install -m 0755 /usr/bin/bwrap "$top/bin/bwrap"
+    # Last: a version folder with its manifest is whole, and one rename gives it its name. Where
+    # that name is the installed version's, its old folder leaves it first.
     cp "$work/manifest.json" "$top/release.json"
     [ ! -e "$folder" ] || mv -T "$folder" "$work/replaced"
     mv -T "$top" "$folder"
+  else
+    install -m 0755 /usr/bin/bwrap "$work/bwrap"
+    mv -T "$work/bwrap" "$folder/bin/bwrap"
   fi
-  # The system's bwrap, which the app gives srt: a copy here takes the app's AppArmor profile,
-  # not one Ubuntu attaches to /usr/bin/bwrap. Made again at each apply, as apt may have updated it.
-  [ -x /usr/bin/bwrap ] || fail "bubblewrap is missing: run Surogate Desktop's install script again"
-  install -m 0755 /usr/bin/bwrap "$work/bwrap"
-  mv -T "$work/bwrap" "$folder/bin/bwrap"
   ln -s "$folder" "$work/current"
   mv -T "$work/current" "$ROOT/current"
   # The helper pkexec runs, at a path with no link in it: polkit 127 (Ubuntu 26.04) matches an

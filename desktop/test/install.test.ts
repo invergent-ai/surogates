@@ -481,6 +481,26 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(seen).toEqual(new Set(["1.0.0 whole", "1.1.0 whole"]));
   }, 300_000);
 
+  it("has the installed version whole again by one rename, when a release of it built again replaces its folder", () => {
+    for (const version of ["1.0.0", "1.1.0"]) {
+      const tarball = releaseOf(version);
+      manifestOf(version, tarball);
+      expect(apply(tarball).status).toBe(0);
+    }
+    const rebuilt = releaseOf("1.1.0", (top) => writeFileSync(join(top, "resources", "app", "rebuilt"), ""));
+    manifestOf("1.1.0", rebuilt);
+    stage(rebuilt);
+    const gone: string[] = [];
+    for (const stop of stops()) {
+      const [, stopped] = /^\d+: 1\.1\.0 (whole|gone); again 0: 1\.1\.0 whole, versions 1\.0\.0 1\.1\.0 , staging 0$/.exec(stop) ?? [];
+      expect(stopped, stop).toBeDefined();
+      if (stopped === "gone") gone.push(stop);
+    }
+    // Between the old folder's rename out of its name and the new one's into it, and at no other stop.
+    expect(gone).toHaveLength(1);
+    expect(root("test -e /opt/surogate/current/resources/app/rebuilt").status).toBe(0);
+  }, 300_000);
+
   it("leaves current naming a whole version, whenever an update is cut short", () => {
     const first = releaseOf("1.0.0");
     manifestOf("1.0.0", first);
