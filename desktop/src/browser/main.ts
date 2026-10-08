@@ -47,6 +47,10 @@ function received(message: ToBrowser): void {
     answer(message.id, host.tryBrowser(message.executable), "tried");
   } else if (message.type === "address") {
     void host.address(message.session).then((url) => send({ type: "address", id: message.id, url }));
+  } else if (message.type === "pause") {
+    host.pause(message.root, message.paused);
+  } else if (message.type === "show") {
+    void host.show(message.root).then((shown) => send({ type: "shown", id: message.id, shown }));
   } else if (message.type === "cancel") {
     running.get(message.id)?.abort();
   } else if (message.type === "forget") {

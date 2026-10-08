@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { PAUSED } from "../src/browser/client.js";
 import { Browsing, NO_BROWSER } from "../src/browser/executor.js";
 import type { Launch } from "../src/browser/host.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
@@ -18,6 +19,8 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
   const browsed: Array<{ launch: Launch; kind: string }> = [];
   const stopped: string[] = [];
   const forgotten: string[] = [];
+  const paused: Array<[string, boolean]> = [];
+  const shown: string[] = [];
   const tools: ToolLayer = {
     run: (operation) => (ran.push(operation.kind), Promise.resolve({ ok: "tools" })),
     refusal: () => ({ error: { type: "other", message: "from the tools" } }),
@@ -35,11 +38,13 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
       stop: () => (stopped.push("browser"), Promise.resolve()),
       end: () => (stopped.push("browser ended"), Promise.resolve()),
       address: (session) => Promise.resolve(`https://example.com/${session}`),
+      pause: (root, held) => void paused.push([root, held]),
+      show: (root) => (shown.push(root), Promise.resolve(true)),
     },
     bindingOf: (root) => (bound && root === ROOT ? {} : undefined),
     launch: () => launch,
   });
-  return { browsing, ran, browsed, stopped, forgotten };
+  return { browsing, ran, browsed, stopped, forgotten, paused, shown };
 }
 
 describe("the browser's kinds beside the tools", () => {
@@ -62,6 +67,41 @@ describe("the browser's kinds beside the tools", () => {
     const { browsing, browsed } = rig(LAUNCH, false);
     expect(await browsing.run(op("browser.navigate"), signal)).toEqual(FOLDER_UNAVAILABLE);
     expect(browsed).toEqual([]);
+  });
+
+  it("answers a chat its user took the browser over paused_by_user, before anyone is asked, until it is handed back", async () => {
+    const { browsing, browsed, paused, ran } = rig();
+    browsing.takeOver(ROOT);
+    expect(browsing.takenOver(ROOT)).toBe(true);
+    for (const kind of ["browser.navigate", "browser.observe", "browser.close"]) {
+      expect(browsing.refusal(op(kind))).toEqual(PAUSED);
+      // One the binder let through before the take-over is answered so too, and never reaches the browser.
+      expect(await browsing.run(op(kind), signal)).toEqual(PAUSED);
+    }
+    expect(browsed).toEqual([]);
+    // The chat's other tools are not the browser's: they run as before.
+    expect(browsing.refusal(op("read"))).toEqual({ error: { type: "other", message: "from the tools" } });
+    expect(await browsing.run(op("read"), signal)).toEqual({ ok: "tools" });
+    expect(ran).toEqual(["read"]);
+    browsing.handBack(ROOT);
+    expect(browsing.takenOver(ROOT)).toBe(false);
+    expect(browsing.refusal(op("browser.navigate"))).toBeNull();
+    expect(await browsing.run(op("browser.navigate"), signal)).toEqual({ ok: "browser" });
+    // The browser host is told each, for an operation already waiting there.
+    expect(paused).toEqual([[ROOT, true], [ROOT, false]]);
+  });
+
+  it("forgets a deleted chat's take-over with its tabs", () => {
+    const { browsing } = rig();
+    browsing.takeOver(ROOT);
+    browsing.retired(ROOT);
+    expect(browsing.takenOver(ROOT)).toBe(false);
+  });
+
+  it("asks the browser to show a chat's page", async () => {
+    const { browsing, shown } = rig();
+    expect(await browsing.show(ROOT)).toBe(true);
+    expect(shown).toEqual([ROOT]);
   });
 
   it("asks the browser for the address of the page a session acts in", async () => {

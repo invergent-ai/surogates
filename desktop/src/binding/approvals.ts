@@ -96,6 +96,8 @@ export interface ApprovalsOptions {
   agent: string; // the agent's name, for the prompts
   // The address of the page a calling session's next browser operation acts in: a page moves itself, so an act's prompt names it.
   address?: (session: string) => Promise<string>;
+  // What the tools refuse anyway, asked again when a browser operation's turn comes: its user may have taken the browser over meanwhile.
+  refusal?: (operation: Operation) => Outcome | null;
   onError?: (error: unknown) => void; // a choice that could not be recorded, or a network prompt that failed, and why
 }
 
@@ -220,6 +222,9 @@ export class Approvals {
   // ponytail: the pages whose user kept a chat asking, by page and chat, for the app's life, one per
   // refusal: a page is asked no more for that chat, and a page once replaced never asks again.
   private readonly kept = new Set<string>();
+  // Each chat's browser operations waiting their turn or asking, by a controller each: dismissed together when its
+  // user takes the browser over, each gone once it settles.
+  private readonly browsing = new Map<string, Set<AbortController>>();
 
   constructor(private readonly options: ApprovalsOptions) {}
 
@@ -283,49 +288,77 @@ export class Approvals {
     };
     const first = needed();
     if ("answer" in first) return first.answer;
-    return this.inLine(root, signal, browserDenied(BROWSER_DENIED.act), async () => {
-      // Allowed, or freed, while it waited its turn: asked no more than it still needs.
-      const now = needed();
-      if ("answer" in now) return now.answer;
-      const chat = { agent: this.options.agent, root, calling: operation.callingSessionId, folder: now.binding.folder };
-      const ask = async (request: ApprovalRequest): Promise<ApprovalAnswer | Outcome> => {
-        try {
-          // Raced against its signal: a prompt that ignores it cannot hold a cancel or a suspend.
-          const answer = await settled(this.options.prompts.approve(request, signal), signal);
-          // A dismissed prompt's answer is not its user's.
-          if (signal.aborted) return browserDenied(BROWSER_DENIED.act);
-          return answer === "timeout" ? browserDenied(BROWSER_DENIED.unanswered) : (answer ?? "deny");
-        } catch (error) {
-          return browserDenied(couldNotAsk(error));
+    // Its prompt goes at a cancel, a suspend, or once its user takes the browser over: by a controller of its own,
+    // never a signal combined with one that lives on, which AbortSignal.any keeps each it made for.
+    const own = new AbortController();
+    const asking = own.signal;
+    const cancel = () => own.abort();
+    if (signal.aborted) own.abort();
+    else signal.addEventListener("abort", cancel, { once: true });
+    const open = this.browsing.get(root) ?? new Set<AbortController>();
+    this.browsing.set(root, open.add(own));
+    let answer: Outcome | null;
+    try {
+      answer = await this.inLine(root, asking, browserDenied(BROWSER_DENIED.act), async () => {
+        // Allowed, or freed, while it waited its turn: asked no more than it still needs. Refused meanwhile, as for a
+        // chat its user took the browser over: asked nothing.
+        const refused = this.options.refusal?.(operation) ?? null;
+        if (refused) return refused;
+        const now = needed();
+        if ("answer" in now) return now.answer;
+        const chat = { agent: this.options.agent, root, calling: operation.callingSessionId, folder: now.binding.folder };
+        const ask = async (request: ApprovalRequest): Promise<ApprovalAnswer | Outcome> => {
+          try {
+            // Raced against its signal: a prompt that ignores it cannot hold a cancel or a suspend.
+            const answer = await settled(this.options.prompts.approve(request, asking), asking);
+            // A dismissed prompt's answer is not its user's.
+            if (asking.aborted) return browserDenied(BROWSER_DENIED.act);
+            return answer === "timeout" ? browserDenied(BROWSER_DENIED.unanswered) : (answer ?? "deny");
+          } catch (error) {
+            return browserDenied(couldNotAsk(error));
+          }
+        };
+        if (now.use) {
+          const answer = await ask({ kind: "browser", chat, action: "use", detail: "" });
+          if (typeof answer !== "string") return answer;
+          if (answer !== "allow_session") return browserDenied(BROWSER_DENIED.use);
+          try {
+            this.options.bindings.allowBrowser(root);
+          } catch (error) {
+            // The user let this one through either way.
+            report(this.options.onError, error);
+          }
         }
-      };
-      if (now.use) {
-        const answer = await ask({ kind: "browser", chat, action: "use", detail: "" });
+        if (!now.act) return null;
+        const act = browserAct(operation);
+        // An open names where it goes; any other act, the page it acts in now.
+        const answer = await ask(act.action === "open"
+          ? { kind: "browser", chat, ...act }
+          : { kind: "browser", chat, ...act, page: await this.pageOf(operation.callingSessionId, asking) });
         if (typeof answer !== "string") return answer;
-        if (answer !== "allow_session") return browserDenied(BROWSER_DENIED.use);
-        try {
-          this.options.bindings.allowBrowser(root);
-        } catch (error) {
-          // The user let this one through either way.
-          report(this.options.onError, error);
+        if (answer === "stop_asking") {
+          try {
+            this.options.bindings.setMode(root, "free");
+          } catch (error) {
+            report(this.options.onError, error);
+          }
         }
-      }
-      if (!now.act) return null;
-      const act = browserAct(operation);
-      // An open names where it goes; any other act, the page it acts in now.
-      const answer = await ask(act.action === "open"
-        ? { kind: "browser", chat, ...act }
-        : { kind: "browser", chat, ...act, page: await this.pageOf(operation.callingSessionId, signal) });
-      if (typeof answer !== "string") return answer;
-      if (answer === "stop_asking") {
-        try {
-          this.options.bindings.setMode(root, "free");
-        } catch (error) {
-          report(this.options.onError, error);
-        }
-      }
-      return answer === "allow" || answer === "stop_asking" ? null : browserDenied(BROWSER_DENIED.act);
-    });
+        return answer === "allow" || answer === "stop_asking" ? null : browserDenied(BROWSER_DENIED.act);
+      });
+    } finally {
+      signal.removeEventListener("abort", cancel);
+      open.delete(own);
+      if (open.size === 0 && this.browsing.get(root) === open) this.browsing.delete(root);
+    }
+    // Dismissed when its user took the browser over: what its prompt settled with is not the user's answer.
+    if (asking.aborted && !signal.aborted) return this.options.refusal?.(operation) ?? browserDenied(BROWSER_DENIED.act);
+    return answer;
+  }
+
+  /** The chat's user takes its browser over: its browser prompts, open or waiting their turn, go. */
+  dismissBrowser(root: string): void {
+    for (const own of this.browsing.get(root) ?? []) own.abort();
+    this.browsing.delete(root);
   }
 
   // The address of the page *session*'s act would act in, as the browser says it; null when it does not in time.

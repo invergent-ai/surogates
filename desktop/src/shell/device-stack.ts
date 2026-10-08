@@ -38,6 +38,11 @@ export interface ToolLayer extends Executor {
   retired?(root: string): void;
   // The address of the page a calling session's next browser operation acts in, for its prompt.
   address?(session: string): Promise<string>;
+  // A chat's user takes its browser over, or hands it back; whether they hold it; its newest page shown.
+  takeOver?(root: string): void;
+  handBack?(root: string): void;
+  takenOver?(root: string): boolean;
+  show?(root: string): Promise<boolean>;
 }
 
 export interface DeviceStackOptions {
@@ -66,6 +71,11 @@ const ENDED: readonly LinkStatus[] = ["revoked", "unauthenticated"];
 export interface DeviceStack {
   readonly binder: Binder;
   readonly bindings: Bindings; // the journal's: each chat's folder, mode and grants
+  readonly tools: ToolLayer;
+  /** Its user takes the chat's browser over: its tools refuse the chat's browser operations, and its browser prompts go. */
+  takeOver(root: string): void;
+  /** Its user hands the chat's browser back: its agent's browser operations run again. */
+  handBack(root: string): void;
   working(): number;
   stop(): Promise<void>;
   /** Revoke this device on its own link, then stop: true once the agent confirmed, false when it could not hear it in time. */
@@ -206,6 +216,13 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
   return {
     binder,
     bindings: journal.bindings,
+    tools,
+    takeOver: (root) => {
+      // Refused first, so that each prompt dismissed is answered as the tools answer the chat now.
+      tools.takeOver?.(root);
+      binder.approvals.dismissBrowser(root);
+    },
+    handBack: (root) => tools.handBack?.(root),
     working,
     stop,
     retire: () => {

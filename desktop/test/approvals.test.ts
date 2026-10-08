@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1081,6 +1082,56 @@ describe("the browser on this computer", () => {
     // The chat works freely now: the command waiting is let through unasked.
     expect(await command).toBeNull();
     expect(journal.bindings.get(ROOT)?.mode).toBe("free");
+  });
+
+  it("dismisses a chat's open and waiting browser prompts once its user takes the browser over, answering them as its tools answer the chat now", async () => {
+    for (const root of [ROOT, OTHER]) {
+      bind(root, "ask");
+      journal.bindings.allowBrowser(root);
+    }
+    const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+    let taken = false;
+    user = new User();
+    approvals = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant",
+      refusal: (operation) => (taken && operation.sessionId === ROOT && operation.kind.startsWith("browser.") ? PAUSED : null),
+    });
+    const open = approvals.admit(navigate(), never());
+    const waiting = approvals.admit(op("browser.evaluate", { code: "return 1;" }), never());
+    const command = approvals.admit(op("run", RUN), never());
+    const other = approvals.admit(navigate(OTHER), never());
+    await vi.waitFor(() => expect(user.open.map(({ request }) => request.chat.root)).toEqual([ROOT, OTHER]));
+    taken = true;
+    approvals.dismissBrowser(ROOT);
+    // Dismissed, the prompt settles with the answer that would do most: it is not the user's.
+    expect(await open).toEqual(PAUSED);
+    expect(await waiting).toEqual(PAUSED);
+    expect(user.dismissed).toBe(1);
+    // The chat's command asks as before, and another chat's browser prompt stays open.
+    await vi.waitFor(() => expect(user.open.map(({ request }) => [request.kind, request.chat.root])).toEqual([["browser", OTHER], ["command", ROOT]]));
+    user.answer("allow");
+    user.answer("allow");
+    expect(await other).toBeNull();
+    expect(await command).toBeNull();
+    // Handed back: the chat's next act asks again.
+    taken = false;
+    const again = approvals.admit(navigate(), never());
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    user.answer("allow");
+    expect(await again).toBeNull();
+  });
+
+  it("keeps nothing of a chat's browser prompts once they settle, and leaves no listener on the signal they came with", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant" });
+    // One signal for many operations, as a link's that lives as long as the app.
+    const lasting = never();
+    for (let n = 0; n < 50; n += 1) expect(await approvals.admit(navigate(), lasting)).toBeNull();
+    expect(user.asked).toHaveLength(50);
+    expect(getEventListeners(lasting, "abort")).toHaveLength(0);
+    expect((approvals as unknown as { browsing: Map<string, unknown> }).browsing.size).toBe(0);
   });
 
   it("tells whoever watches of a chat's first use allowed once, and of nothing for a chat this computer did not bind", () => {

@@ -172,7 +172,8 @@ export class Binder implements Executor {
 
   constructor(private readonly options: BinderOptions) {
     this.approvals = new Approvals({
-      bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, address: options.address, onError: options.onError,
+      bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, address: options.address,
+      refusal: options.refusal, onError: options.onError,
     });
   }
 

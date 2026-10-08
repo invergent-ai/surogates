@@ -22,6 +22,10 @@ export const CANCELLED: Outcome = {
 export const DUPLICATE: Outcome = {
   error: { type: "browser", message: "The computer's browser is already running an operation under this id" },
 };
+// A browser operation of a chat its user took the browser over (surogates/devices/browser.py).
+export const PAUSED: Outcome = {
+  error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" },
+};
 export const BROWSER_STOPPED: Outcome = {
   error: {
     type: "interrupted",
@@ -42,6 +46,10 @@ export type ToBrowser =
   | { type: "try"; id: string; executable: string }
   // The address of the page the session's next operation acts in.
   | { type: "address"; id: string; session: string }
+  // A chat its user took the browser over, or handed back: an operation of it waiting its turn is answered paused.
+  | { type: "pause"; root: string; paused: boolean }
+  // The chat's newest page brought to the front: answered whether there was one.
+  | { type: "show"; id: string; root: string }
   | { type: "stop" };
 
 export type FromBrowser =
@@ -49,6 +57,7 @@ export type FromBrowser =
   // A try's answer: its ids are the client's own, apart from the link's operation ids.
   | { type: "tried"; id: string; outcome: Outcome }
   | { type: "address"; id: string; url: string }
+  | { type: "shown"; id: string; shown: boolean }
   // Its last word at a stop, after every answer: a utility process's postMessage has no callback.
   | { type: "stopped" };
 
@@ -83,9 +92,11 @@ export class BrowserClient {
   private readonly pending = new Map<string, (outcome: Outcome) => void>();
   private readonly trying = new Map<string, (outcome: Outcome) => void>();
   private readonly addressing = new Map<string, (url: string) => void>();
+  private readonly showing = new Map<string, (shown: boolean) => void>();
   private stopping: Promise<void> | null = null;
   private tries = 0;
   private addresses = 0;
+  private shows = 0;
 
   constructor(private readonly spawn: () => BrowserProcess = forkBrowserHost) {}
 
@@ -121,6 +132,25 @@ export class BrowserClient {
         resolve(url);
       });
       host.send({ type: "address", id, session });
+    });
+  }
+
+  /** A chat its user took the browser over, or handed back: a running host is told, for an operation waiting there. */
+  pause(root: string, paused: boolean): void {
+    this.host?.send({ type: "pause", root, paused });
+  }
+
+  /** Bring the chat's newest page to the front: whether there was one. None where no host runs. Never rejects. */
+  show(root: string): Promise<boolean> {
+    const host = this.host;
+    if (!host || this.stopping) return Promise.resolve(false);
+    const id = `show-${(this.shows += 1)}`;
+    return new Promise((resolve) => {
+      this.showing.set(id, (shown) => {
+        this.showing.delete(id);
+        resolve(shown);
+      });
+      host.send({ type: "show", id, root });
     });
   }
 
@@ -176,6 +206,7 @@ export class BrowserClient {
       if (message.type === "result") this.pending.get(message.id)?.(message.outcome);
       else if (message.type === "tried") this.trying.get(message.id)?.(message.outcome);
       else if (message.type === "address") this.addressing.get(message.id)?.(message.url);
+      else if (message.type === "shown") this.showing.get(message.id)?.(message.shown);
       else if (message.type === "stopped") host.kill();
     });
     host.onExit(() => {
@@ -183,6 +214,7 @@ export class BrowserClient {
       for (const answer of [...this.pending.values(), ...this.trying.values()]) answer(BROWSER_STOPPED);
       // The next operation starts another host, and opens a new tab.
       for (const answer of [...this.addressing.values()]) answer(NEW_TAB);
+      for (const answer of [...this.showing.values()]) answer(false);
     });
     return host;
   }

@@ -20,6 +20,7 @@ const ROOT = "66666666-6666-4666-8666-666666666666";
 // A sub-agent of the chat: its operations run in the chat's folder, as sessions of their own.
 const CHILD = "77777777-7777-4777-8777-777777777777";
 const IDENTITY = { deviceId: "d", orgId: "o", agentId: "a", userId: "u" };
+const TAKEN: Outcome = { error: { type: "paused_by_user", message: "taken over" } };
 
 // The tool layer under the binder, as far as the stack sees it.
 class Tools implements ToolLayer {
@@ -32,6 +33,8 @@ class Tools implements ToolLayer {
   changed: () => void = () => {};
   // The page each session's next browser operation acts in, as a browser here would say it.
   address?: (session: string) => Promise<string>;
+  // The chats whose user took the browser over: their browser operations are refused.
+  readonly taken = new Set<string>();
 
   constructor(private readonly base: string, private readonly order: string[]) {}
 
@@ -41,6 +44,18 @@ class Tools implements ToolLayer {
 
   live(): string[] {
     return this.liveRoots;
+  }
+
+  refusal(operation: Operation): Outcome | null {
+    return operation.kind.startsWith("browser.") && this.taken.has(operation.sessionId) ? TAKEN : null;
+  }
+
+  takeOver(root: string): void {
+    this.taken.add(root);
+  }
+
+  handBack(root: string): void {
+    this.taken.delete(root);
   }
 
   run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
@@ -160,6 +175,30 @@ describe("one agent's device", () => {
     server.send(op("script-1", "browser.evaluate", { code: "return 1;" }, false, CHILD));
     await server.until(() => results("script-1").length === 1);
     expect(asked).toMatchObject([{ kind: "browser", action: "script", page: `https://bank.example/${CHILD}` }]);
+  });
+
+  it("takes a chat's browser over through its tools, its open browser prompt dismissed and answered as its tools answer now", async () => {
+    const asked: ApprovalRequest[] = [];
+    const device = await start({
+      approvalPrompts: {
+        // Open until dismissed, when it settles with the answer that would let it through.
+        approve: (request, signal) => (asked.push(request), new Promise((resolve) => signal.addEventListener("abort", () => resolve("allow_session")))),
+        confirmFreeMode: () => Promise.resolve(false),
+      },
+    });
+    await server.until(() => statuses.includes("connected"));
+    const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
+    server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce }, true));
+    await server.until(() => results("bind-1").length === 1);
+    server.send(op("nav-1", "browser.navigate", { url: "https://example.com/", wait_until: "load" }));
+    await vi.waitFor(() => expect(asked).toHaveLength(1));
+    device.takeOver(ROOT);
+    await server.until(() => results("nav-1").length === 1);
+    expect(results("nav-1")[0]?.outcome).toEqual(TAKEN);
+    expect(tools.ran).toEqual([]);
+    expect(tools.bindings?.browsing(ROOT)).toBe(false);
+    device.handBack(ROOT);
+    expect(tools.taken.size).toBe(0);
   });
 
   it("stops its link when the welcome names another identity, and says why", async () => {
@@ -297,6 +336,7 @@ describe("one agent's device", () => {
           tools,
           browser: {
             perform: () => Promise.resolve({ ok: null }), forget: () => {}, stop: () => Promise.resolve(), end: () => Promise.resolve(), address: () => Promise.resolve("about:blank"),
+            pause: () => {}, show: () => Promise.resolve(false),
           },
           bindingOf: (root) => bindings.get(root),
           launch: () => null,

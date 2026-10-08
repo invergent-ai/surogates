@@ -13,9 +13,10 @@ import { connect as connectTcp } from "node:net";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
-import type { BrowserContext } from "playwright-core";
+import type { BrowserContext, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { PAUSED } from "../src/browser/client.js";
 import { BrowserHost, type BrowserHostOptions, FILE_ASKED, holding, type Launch, PROXY_BYPASSED, WEAKENING } from "../src/browser/host.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
 
@@ -672,6 +673,45 @@ await navigator.serviceWorker.ready;`);
     } finally {
       lingering.kill("SIGKILL");
     }
+  }, 30_000);
+
+  it("answers a chat its user took the browser over paused, one waiting in its line too, and another chat's as before; handed back, it runs", async () => {
+    const [a, b] = [session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    await op(b, "browser.navigate", { url: "http://fixture.test/second" }, "chat-2");
+    // One that holds its page a moment, and one waiting behind it in the session's line.
+    const holding = op(a, "browser.evaluate", { code: "await new Promise((done) => setTimeout(done, 1000)); return 1;" }, "chat-1");
+    const waiting = op(a, "browser.evaluate", { code: "return document.title;" }, "chat-1");
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", true);
+    // What ran already ends as it would; what waited does nothing.
+    expect((await holding).ok?.value).toBe(1);
+    expect(await waiting).toEqual(PAUSED);
+    expect(await op(a, "browser.close", {}, "chat-1")).toEqual(PAUSED);
+    expect((await op(b, "browser.evaluate", { code: "return document.title;" }, "chat-2")).ok?.value).toBe("Second");
+    host.pause("chat-1", false);
+    expect((await op(a, "browser.evaluate", { code: "return document.title;" }, "chat-1")).ok?.value).toBe("Fixture");
+  }, 30_000);
+
+  it("brings a chat's own newest page to the front before a sub-agent's, and shows none for a chat with no page", async () => {
+    const child = session();
+    expect(await host.show("chat-1")).toBe(false);
+    await op(child, "browser.navigate", { url: "http://fixture.test/second" }, "chat-1");
+    // Each page is a window of its own here, visible and focused alike on xvfb's display, which has no window
+    // manager: which page is brought to the front is seen at the page itself.
+    const fronted: string[] = [];
+    const tabs = (host as unknown as { tabs: Map<string, Page[]> }).tabs;
+    const watch = (name: string, page: Page) => {
+      const bring = page.bringToFront.bind(page);
+      page.bringToFront = () => (fronted.push(name), bring());
+    };
+    watch("child", tabs.get(child)![0]!);
+    expect(await host.show("chat-1")).toBe(true);
+    await op("chat-1", "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    watch("chat", tabs.get("chat-1")![0]!);
+    expect(await host.show("chat-1")).toBe(true);
+    expect(fronted).toEqual(["child", "chat"]);
+    expect(await host.show("chat-2")).toBe(false);
   }, 30_000);
 
   it("closes every tab of a deleted chat's sessions, and no other chat's", async () => {

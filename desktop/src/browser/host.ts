@@ -13,7 +13,7 @@ import { type BrowserContext, chromium, type Page } from "playwright-core";
 
 import type { Outcome } from "../link/protocol.js";
 import { destination, reach } from "../vm/egress.js";
-import { CANCELLED, NEW_TAB } from "./client.js";
+import { CANCELLED, NEW_TAB, PAUSED } from "./client.js";
 import { OPERATIONS } from "./operations.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
 
@@ -57,6 +57,8 @@ const CHECK_MS = 15_000;
 // How long a new tab may take; and how long a browser that refused one may take to quit, as it does after its last tab.
 const TAB_MS = 10_000;
 const QUIT_MS = 2_000;
+// How long bringing a page to the front may take.
+const SHOW_MS = 2_000;
 // How long a closing browser's processes may take to exit (Edge's take about 5 s on xvfb), below the client's STOP_MS.
 const RELEASE_MS = 6_000;
 export const PROXY_BYPASSED =
@@ -220,6 +222,8 @@ export class BrowserHost {
   private readonly lines = new Map<string, Promise<unknown>>();
   // What each session's pages did that its agent could not see happen, until its next answer.
   private readonly unseen = new Map<string, string[]>();
+  // The chats whose user took the browser over: an operation of theirs that waited its turn is answered paused.
+  private readonly paused = new Set<string>();
   private closing = false;
 
   constructor(private readonly options: BrowserHostOptions = {}) {}
@@ -230,8 +234,12 @@ export class BrowserHost {
     const forgets = this.forgets.get(root);
     // A close does not wait in the session's line: a page stuck in a script closes with the rest.
     const work = kind === "browser.close"
-      ? this.closeTab(session).then((closed): Outcome => ({ ok: { closed } }))
-      : this.inLine(session, () => (this.forgets.get(root) !== forgets ? Promise.resolve(DELETED) : this.run(launch, session, kind, args, signal)));
+      ? (this.paused.has(root) ? Promise.resolve(PAUSED) : this.closeTab(session).then((closed): Outcome => ({ ok: { closed } })))
+      : this.inLine(session, () => {
+        if (this.forgets.get(root) !== forgets) return Promise.resolve(DELETED);
+        // Its user took the browser over while it waited: it does nothing there.
+        return this.paused.has(root) ? Promise.resolve(PAUSED) : this.run(launch, session, kind, args, signal);
+      });
     return Promise.race([work, new Promise<Outcome>((resolve) => {
       if (signal.aborted) resolve(CANCELLED);
       signal.addEventListener("abort", () => resolve(CANCELLED), { once: true });
@@ -245,6 +253,29 @@ export class BrowserHost {
   address(session: string): Promise<string> {
     return this.inLine(session, async () => (this.tabs.get(session) ?? []).filter((page) => !page.isClosed()).at(-1)?.url() ?? NEW_TAB)
       .catch(() => NEW_TAB);
+  }
+
+  /** A chat its user took the browser over (*paused*), or handed back. */
+  pause(root: string, paused: boolean): void {
+    if (paused) this.paused.add(root);
+    else this.paused.delete(root);
+  }
+
+  /**
+   * The newest open page of the chat's own tab, else of its first sub-agent with one, brought to the
+   * front of its window. Whether there was one. Never rejects.
+   */
+  async show(root: string): Promise<boolean> {
+    const sessions = [...this.roots].filter(([, of]) => of === root).map(([session]) => session)
+      .sort((a, b) => Number(b === root) - Number(a === root));
+    const page = sessions.map((session) => (this.tabs.get(session) ?? []).filter((open) => !open.isClosed()).at(-1)).find((open) => open);
+    if (!page) return false;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([page.bringToFront().catch(() => {}), new Promise((resolve) => {
+      timer = setTimeout(resolve, SHOW_MS);
+    })]);
+    clearTimeout(timer);
+    return true;
   }
 
   /** Whether *executable* launches headless with its sandbox on within LAUNCH_MS, and its version. Never rejects. */
@@ -264,6 +295,7 @@ export class BrowserHost {
   /** A deleted chat: every tab of its sessions closes, with the popups they opened. */
   async forget(root: string): Promise<void> {
     this.forgets.set(root, (this.forgets.get(root) ?? 0) + 1);
+    this.paused.delete(root);
     const sessions = [...this.roots].filter(([, of]) => of === root).map(([session]) => session);
     // Together, so that closing the browser's last tabs closes it whole.
     await this.closePages(sessions.flatMap((session) => this.untab(session)));

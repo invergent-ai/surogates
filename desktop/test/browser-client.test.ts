@@ -86,6 +86,40 @@ describe("the browser host's client", () => {
     expect(hosts[0]!.sent.at(-1)).toEqual({ type: "forget", root: "root" });
   });
 
+  it("tells a running host of a chat taken over and handed back, and starts none to do it", () => {
+    const hosts: FakeHost[] = [];
+    const client = new BrowserClient(() => {
+      hosts.push(new FakeHost());
+      return hosts.at(-1)!;
+    });
+    client.pause("root", true);
+    expect(hosts).toEqual([]);
+    void client.perform(LAUNCH, operation("op-1"), new AbortController().signal);
+    client.pause("root", true);
+    client.pause("root", false);
+    expect(hosts[0]!.sent.slice(1)).toEqual([{ type: "pause", root: "root", paused: true }, { type: "pause", root: "root", paused: false }]);
+  });
+
+  it("asks a running host to show a chat's page, and says none is shown where no host runs", async () => {
+    const hosts: FakeHost[] = [];
+    const client = new BrowserClient(() => {
+      hosts.push(new FakeHost());
+      return hosts.at(-1)!;
+    });
+    expect(await client.show("root")).toBe(false);
+    expect(hosts).toEqual([]);
+    void client.perform(LAUNCH, operation("op-1"), new AbortController().signal);
+    const showing = client.show("root");
+    const asked = hosts[0]!.sent.at(-1) as Extract<ToBrowser, { type: "show" }>;
+    expect(asked).toEqual({ type: "show", id: asked.id, root: "root" });
+    hosts[0]!.say({ type: "shown", id: asked.id, shown: true });
+    expect(await showing).toBe(true);
+    // A host that goes shows nothing.
+    const again = client.show("root");
+    hosts[0]!.exit();
+    expect(await again).toBe(false);
+  });
+
   it("asks a running host for the address of a session's page, and says a new tab's where none runs", async () => {
     const hosts: FakeHost[] = [];
     const client = new BrowserClient(() => {
