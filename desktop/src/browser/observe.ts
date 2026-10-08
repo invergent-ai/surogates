@@ -66,9 +66,11 @@ return json.length > ${MAX_FRAME_CHARS - size} ? json.length : json;
     } catch {
       continue;
     }
-    if (typeof sent === "number" || (size += String(sent).length) > MAX_FRAME_CHARS) {
-      throw new Error(`The page's outline is too large to send: ${size + (typeof sent === "number" ? sent : 0)} characters, at most ${MAX_FRAME_CHARS}. Read a part of it with a selector.`);
+    // Measured in the page, beside what the frames before it took: no outline too large leaves it.
+    if (typeof sent === "number") {
+      throw new Error(`The page's outline is too large to send: ${size + sent} characters, at most ${MAX_FRAME_CHARS}. Read a part of it with a selector.`);
     }
+    size += String(sent).length;
     const collected = JSON.parse(String(sent)) as Collected;
     if (frame === main) viewport = collected.viewport;
     base += collected.nodes.length;
