@@ -64,6 +64,15 @@ const hole = (page: Page) => page.$eval("#pane-hole", (found) => {
   const { x, y, width, height } = found.getBoundingClientRect();
   return [Math.round(x), Math.round(y), Math.round(width), Math.round(height)];
 });
+// The page of the pane's transcript, once Playwright has it too: the app's own process has its address first.
+async function paneReader(shell: ElectronApplication): Promise<Page> {
+  let found: Page | undefined;
+  await expect.poll(() => {
+    found = shell.windows().find((each) => each.url().includes("/transcript/"));
+    return found !== undefined;
+  }).toBe(true);
+  return found!;
+}
 // *thread* in the centre, as its row's transcript in the pane opens it there.
 async function viewThread(page: Page, thread: string): Promise<void> {
   await page.click(`[data-thread="${thread}"]`);
@@ -302,13 +311,13 @@ describe("a thread read in the Overview pane", () => {
     const { shell, page, client } = await opened();
     await page.click(`[data-thread="${QUESTION}"]`);
     await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
-    expect(await page.textContent("#reading-title")).toBe("Check the revenue figures");
+    await expect.poll(() => page.textContent("#reading-title")).toBe("Check the revenue figures");
     expect(await page.isVisible("#threads")).toBe(false);
     expect(await page.isVisible(".tabs")).toBe(false);
     expect(client.url()).toBe(`${origin}/chat/${REPORT}`);
     expect(await page.textContent("#title")).toBe("Quarterly report");
     await expect.poll(async () => (await pane(shell))?.bounds).toEqual(await hole(page));
-    const reader = shell.windows().find((found) => found.url().includes("/transcript/"))!;
+    const reader = await paneReader(shell);
     expect(await reader.evaluate(() => "surogateDesktop" in window)).toBe(false);
     // Folded away, the pane's transcript goes with it.
     await page.click("#overview");
@@ -319,6 +328,8 @@ describe("a thread read in the Overview pane", () => {
     const { shell, page } = await opened();
     await page.click(`[data-thread="${QUESTION}"]`);
     await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    // The page draws the pane's head and hole from its next state: until then the hole measures nothing.
+    await expect.poll(() => page.isVisible("#pane-hole")).toBe(true);
     for (const width of [2400, 2200]) {
       await shell.evaluate(({ BrowserWindow }, wide) => BrowserWindow.getAllWindows()[0]!.setBounds({ width: wide, height: 900 }), width);
       await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(width);
@@ -332,7 +343,7 @@ describe("a thread read in the Overview pane", () => {
     await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
     await page.click("#reading-back");
     await expect.poll(() => pane(shell)).toBeNull();
-    expect(await page.isVisible("#threads")).toBe(true);
+    await expect.poll(() => page.isVisible("#threads")).toBe(true);
     await page.click(`[data-thread="${QUESTION}"]`);
     await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
     await page.click(`#projects [data-project="${BUDGET}"] .project`);
@@ -379,7 +390,7 @@ describe("a thread read in the Overview pane", () => {
     await page.focus(`[data-thread="${QUESTION}"]`);
     await page.keyboard.press("Enter");
     await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
-    const reader = shell.windows().find((found) => found.url().includes("/transcript/"))!;
+    const reader = await paneReader(shell);
     await reader.waitForLoadState();
     // Two controls of its own, and room to scroll.
     await reader.evaluate(() => {
@@ -399,6 +410,16 @@ describe("a thread read in the Overview pane", () => {
       for (const type of ["keyDown", "keyUp"] as const) reading.webContents.sendInputEvent({ type, keyCode: code as string, modifiers: held as Array<"shift"> });
     }, [keyCode, modifiers] as const);
     const focused = () => reader.evaluate(() => document.activeElement?.id ?? "");
+    // Where the transcript's scroll rests: a key's scroll is animated, and has ended once it is read the same twice.
+    const rested = async () => {
+      let at = -1;
+      await expect.poll(async () => {
+        const was = at;
+        at = await reader.evaluate(() => window.scrollY);
+        return at === was;
+      }, { interval: 250 }).toBe(true);
+      return at;
+    };
     const inShell = () => page.evaluate(() => document.activeElement?.id);
     await expect.poll(inShell).toBe("reading-back");
     await page.keyboard.press("Tab");
@@ -407,7 +428,8 @@ describe("a thread read in the Overview pane", () => {
     await expect.poll(keyboardIn).toEqual([false, true]);
     await reader.keyboard.press("PageDown");
     await expect.poll(() => reader.evaluate(() => window.scrollY)).toBeGreaterThan(0);
-    const paged = await reader.evaluate(() => window.scrollY);
+    // Read at rest: while Page Down's scroll still moves, the arrow's could not be told from it.
+    const paged = await rested();
     await reader.keyboard.press("ArrowDown");
     await expect.poll(() => reader.evaluate(() => window.scrollY)).toBeGreaterThan(paged);
     // Shift+Tab from a later control steps back inside the page; from its first, out to the head's Open.
@@ -442,7 +464,7 @@ describe("a thread read in the Overview pane", () => {
     // With nothing open, Escape gives the keyboard back to Back.
     await pressed("Escape");
     await expect.poll(keyboardIn).toEqual([true, false]);
-    expect(await inShell()).toBe("reading-back");
+    await expect.poll(inShell).toBe("reading-back");
   });
 
   it("is read again as Settings shapes the transcript", async () => {
@@ -455,6 +477,8 @@ describe("a thread read in the Overview pane", () => {
       settings = shell.windows().find((found) => found.url().endsWith("/settings.html"));
       return settings !== undefined;
     }).toBe(true);
+    // Its script adds the controls' handlers: the page has loaded by then.
+    await settings!.waitForLoadState();
     await settings!.waitForSelector('[data-setting="textSize"] [data-value="large"]');
     await settings!.click('[data-setting="textSize"] [data-value="large"]');
     await expect.poll(async () => (await pane(shell))?.url)
@@ -469,6 +493,7 @@ describe("a thread read in the Overview pane", () => {
       settings = shell.windows().find((found) => found.url().endsWith("/settings.html"));
       return settings !== undefined;
     }).toBe(true);
+    await settings!.waitForLoadState();
     await settings!.waitForSelector('[data-setting="theme"] [data-value="dark"]');
     await settings!.click('[data-setting="theme"] [data-value="dark"]');
     await expect.poll(() => client.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches)).toBe(true);
@@ -482,7 +507,7 @@ describe("a thread read in the Overview pane", () => {
       .replace("<body>", "<body><script>window.firstFrame = document.documentElement.className</script>");
     await page.click(`[data-thread="${QUESTION}"]`);
     await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
-    const reader = shell.windows().find((found) => found.url().includes("/transcript/"))!;
+    const reader = await paneReader(shell);
     await reader.waitForLoadState();
     expect(await reader.evaluate(() => "surogateDesktop" in window)).toBe(false);
     expect(await reader.evaluate(() => (window as unknown as { firstFrame: string }).firstFrame)).toBe("dark");
@@ -492,7 +517,7 @@ describe("a thread read in the Overview pane", () => {
     const { shell, page } = await opened();
     await page.click(`[data-thread="${QUESTION}"]`);
     await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
-    const reader = shell.windows().find((found) => found.url().includes("/transcript/"))!;
+    const reader = await paneReader(shell);
     await reader.waitForLoadState();
     const where = () => reader.evaluate(() => location.href + String((window as unknown as { kept?: boolean }).kept ?? false))
       .catch(() => "");
@@ -583,7 +608,8 @@ describe("the Overview pane, at its edges", () => {
     agent.projects!.projects = agent.projects!.projects.filter((project) => project.id !== REPORT);
     await client.reload();
     await page.waitForSelector(`#projects [data-project="${BUDGET}"]`);
-    expect(await page.$$eval("#projects .project", (found) => found.length)).toBe(1);
+    // The sidebar may still show the first page's list, which has Budget too.
+    await expect.poll(() => page.$$eval("#projects .project", (found) => found.length)).toBe(1);
     expect(await rows(page)).toBe(0);
   });
 
