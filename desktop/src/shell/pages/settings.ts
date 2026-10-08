@@ -251,9 +251,13 @@ for (const control of document.querySelectorAll<HTMLElement>("[data-setting]")) 
     // Drawn again either way: the control shows the setting as it is, whatever of the choice was kept before it failed.
     option.addEventListener("click", () => void settings.set(control.dataset.setting ?? "", option.dataset.value ?? "").then(() => {
       refused.textContent = "";
-    }, (error: unknown) => {
-      showText(refused, `Surogate did not change ${label}: ${said(error)}.`);
-    }).finally(render));
+      return render();
+    }, async (error: unknown) => {
+      await render();
+      // Said of the setting as its control now shows it: only a choice that is not in place did not change.
+      const kept = option.getAttribute("aria-pressed") === "true";
+      showText(refused, kept ? `${label} is as you chose, but something failed: ${said(error)}.` : `Surogate did not change ${label}: ${said(error)}.`);
+    }));
   }
 }
 // The main process acts only on a button its line shows.

@@ -537,7 +537,7 @@ describe("Settings → General", () => {
     expect(existsSync(join(home, "c", "autostart"))).toBe(false);
   });
 
-  it("draws each setting as it is after a choice that failed, and says why in its row until one goes through", async () => {
+  it("draws each setting as it is after a choice that failed, and says why in its row, as unchanged only where the choice is not in place, until one goes through", async () => {
     const { shell, page } = await signedIn();
     await page.click("#open-settings");
     const settings = await settingsPage(shell);
@@ -549,7 +549,9 @@ describe("Settings → General", () => {
     // What a row says of its last choice: null where it has no place to say it.
     const refused = (label: string) =>
       settings.evaluate((row) => document.querySelector(`.row[data-label="${row}"] .label [role="alert"]`)?.textContent ?? null, label);
-    // The text size is kept, and then telling the agent's page of it fails: the control shows the size kept.
+    // The text size is kept, and then telling the agent's page of it fails: the control shows the size kept,
+    // and its row says what failed, not that the size did not change.
+    const kept = "Transcript text size is as you chose, but something failed: The agent's page is gone.";
     await shell.evaluate(({ webContents }, at) => {
       const view = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(at))!;
       const send = view.send.bind(view);
@@ -561,19 +563,21 @@ describe("Settings → General", () => {
     await expect.poll(() => pressed(settings, "textSize")).toBe("medium");
     await settings.click('[data-setting="textSize"] [data-value="large"]');
     await expect.poll(() => pressed(settings, "textSize")).toBe("large");
-    await expect.poll(() => refused("Transcript text size")).toBe("Surogate did not change Transcript text size: The agent's page is gone.");
-    // The autostart folder cannot be made, as a file has its name: refused, with nothing changed.
+    await expect.poll(() => refused("Transcript text size"), { timeout: 5_000 }).toBe(kept);
+    expect(await pressed(settings, "textSize")).toBe("large");
+    // The autostart folder cannot be made, as a file has its name: refused, with nothing changed, and its row says so.
     const blocked = join(home, "c", "autostart");
     writeFileSync(blocked, "");
     await settings.click('[data-setting="startAtLogin"] [data-value="on"]');
-    await expect.poll(() => refused("Start at login")).toBe(`Surogate did not change Start at login: EEXIST: file already exists, mkdir '${blocked}'.`);
+    await expect.poll(() => refused("Start at login"), { timeout: 5_000 })
+      .toBe(`Surogate did not change Start at login: EEXIST: file already exists, mkdir '${blocked}'.`);
     expect(await pressed(settings, "startAtLogin")).toBe("off");
     // One that goes through takes its row's words away, and no other row's.
     rmSync(blocked);
     await settings.click('[data-setting="startAtLogin"] [data-value="on"]');
     await expect.poll(() => pressed(settings, "startAtLogin")).toBe("on");
     expect(await refused("Start at login")).toBe("");
-    expect(await refused("Transcript text size")).toBe("Surogate did not change Transcript text size: The agent's page is gone.");
+    expect(await refused("Transcript text size")).toBe(kept);
     expect(await settings.evaluate(() => (window as unknown as { rejections: string[] }).rejections)).toEqual([]);
   });
 
