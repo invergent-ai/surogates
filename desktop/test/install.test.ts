@@ -700,6 +700,23 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(apply(linked)).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: the release's archive links outside itself: $'resources/out${quoted}'\n` });
   });
 
+  it("leaves nothing in staging when a signal stops it: a terminal closed, Ctrl+C, a kill", () => {
+    const first = releaseOf("1.0.0");
+    manifestOf("1.0.0", first);
+    expect(apply(first).status).toBe(0);
+    // Large enough that its copy and unpacking take a second.
+    const second = releaseOf("1.1.0", (top) => writeFileSync(join(top, "resources", "app", "large"), randomBytes(48 * 1024 * 1024)));
+    manifestOf("1.1.0", second);
+    stage(second);
+    for (const [signal, ms] of [["HUP", 150], ["HUP", 300], ["HUP", 450], ["HUP", 600], ["HUP", 750], ["INT", 300], ["INT", 600], ["TERM", 300], ["TERM", 600]] as const) {
+      root("rm -rf /opt/surogate/versions/1.1.0 && ln -sfn /opt/surogate/versions/1.0.0 /opt/surogate/current");
+      // Stopped (124), or done before the signal came (0): staging is empty as the helper ends.
+      const stopped = root(`timeout -s ${signal} ${ms / 1000} /opt/surogate-test/install.sh --apply ${files()} >/dev/null 2>&1; echo "$? $(ls -A /opt/surogate/staging | wc -l)"`);
+      expect(stopped.stdout.trim(), `${signal} at ${ms} ms`).toMatch(/^(124|0) 0$/);
+    }
+    expect(apply(second)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.1.0 is installed\n" });
+  });
+
   it("says what stops it: its arguments, a user who is not root, too little room, and bubblewrap missing", () => {
     const usage = "Surogate Desktop: usage: surogate-apply-update --apply <manifest> <signature> <tarball>\n";
     expect(root("/opt/surogate-test/install.sh --apply /home/tester/manifest.json")).toMatchObject({ status: 1, stderr: usage });
