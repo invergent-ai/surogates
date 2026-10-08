@@ -63,7 +63,6 @@ from typing import Any, Self
 from surogates.browser.client import BrowserClientBase
 from surogates.devices.workspace import (
     MAX_MESSAGE_CHARS,
-    TOO_LARGE,
     DeviceOperationError,
     OperationRunner,
 )
@@ -76,6 +75,8 @@ NO_BROWSER = (
     "Vivaldi, or pick one in Settings → Browser. The Snap build of Chromium is not supported."
 )
 OLD_APP = "The Surogate app on this computer cannot drive a browser yet. Update it, then try again."
+# As surogates.devices.workspace.TOO_LARGE says it of a folder's.
+TOO_LARGE = "Too large for one operation in the browser on this computer (over 1.5 MiB)"
 
 
 class BrowserRefusal(Exception):

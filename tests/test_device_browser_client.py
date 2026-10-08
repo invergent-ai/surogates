@@ -149,6 +149,14 @@ async def test_an_answer_of_the_wrong_shape_is_said_as_the_computers_failure(act
         await act(client)
 
 
+async def test_an_operation_too_large_for_the_link_says_it_is_the_browsers_and_asks_nothing() -> None:
+    runner = ScriptedRunner()
+    with pytest.raises(DeviceOperationError) as large:
+        await DeviceBrowserClient(runner).evaluate("x" * (2 * 1024 * 1024))
+    assert str(large.value) == "Too large for one operation in the browser on this computer (over 1.5 MiB)"
+    assert runner.asked == []
+
+
 async def test_a_scripts_value_comes_back_whatever_its_shape() -> None:
     # A page's own data, shaped as the link's framing: a value all the same.
     returned = {"transfer": {"size": 5, "sha256": "a" * 64}}

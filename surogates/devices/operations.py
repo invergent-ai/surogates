@@ -153,7 +153,7 @@ class OperationConflict(RuntimeError):
 
 
 class TransferGone(DeviceOperationError):
-    """A read's recorded result names a transfer whose data is no longer kept."""
+    """A read's or a screenshot's recorded result names a transfer whose data is no longer kept."""
 
 
 async def _check_session(db: AsyncSession, request: OperationRequest, device: Any) -> bool:
@@ -1264,7 +1264,10 @@ class JournalRunner:
             # Up to 50 MiB: joined and hashed off the event loop the worker's other sessions share.
             data = await asyncio.to_thread(_whole, chunks, transfer)
             if data is None:
-                raise TransferGone("The computer's answer to this read is no longer kept: read the file again")
+                raise TransferGone(
+                    "The computer's screenshot is no longer kept: take it again" if kind == "browser.screenshot"
+                    else "The computer's answer to this read is no longer kept: read the file again"
+                )
             return {"ok": data}
         except (OperationConflict, TransferGone):
             # A resumed call that cannot get what its first run got is reported interrupted.
