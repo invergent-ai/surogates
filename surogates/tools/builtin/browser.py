@@ -32,6 +32,7 @@ from surogates.devices.browser import (
 from surogates.devices.browser import snapshot_cache as device_snapshot_cache
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.sandbox.copy_files import write_copy, writes_to_copy
+from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR
 
 from surogates.storage.tenant import (
     boundary_workspace_key,
@@ -1030,7 +1031,7 @@ async def _save_screenshot_to_storage(
 
 # A session on the user's computer keeps its screenshots in its folder, among the
 # harness's own files, so a chat that asks every time is not asked about each one.
-_DEVICE_SCREENSHOT_DIR = ".surogates-results"
+_DEVICE_SCREENSHOT_DIR = WORKSPACE_STORAGE_DIR
 # Not read_file's to show yet: vision reads the cloud's storage, and this shot is on the computer.
 _DEVICE_SCREENSHOT_HINT = (
     "This screenshot is not displayed to you. It is saved in the chat's folder on the user's "
