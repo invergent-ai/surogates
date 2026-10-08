@@ -1201,7 +1201,7 @@ class ArtifactCompletionMixin:
                 session.id,
             )
 
-    async def _kept_apart(self, session: Session) -> dict[str, Any]:
+    async def _kept_apart(self, session: Any) -> dict[str, Any]:
         """A helper's copy whose hand-back failed, kept apart before its pod goes; what its completion says of it.
 
         Nothing when the helper changed no file.  Else ``kept`` false, and
@@ -1270,10 +1270,15 @@ class ArtifactCompletionMixin:
             except Exception:
                 logger.exception("Could not keep the copy of %s", session.id)
                 saved = False
-            sandbox_id = await self._sandbox_pool.release_for_session(owner)
-            self._spawn_background(
-                self._destroy_sandbox_quietly(sandbox_id, str(session.id)), name=f"sandbox-teardown-{session.id}",
-            )
+            try:
+                sandbox_id = await self._sandbox_pool.release_for_session(owner)
+            except Exception:
+                # The turn's end is still written: a pod left behind goes at its deadline.
+                logger.warning("Could not let the pod of %s go", session.id, exc_info=True)
+            else:
+                self._spawn_background(
+                    self._destroy_sandbox_quietly(sandbox_id, str(session.id)), name=f"sandbox-teardown-{session.id}",
+                )
 
         fail_data: dict[str, Any] = {
             "reason": reason, "worker_id": self._worker_id, **data,
