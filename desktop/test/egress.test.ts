@@ -7,6 +7,8 @@ import { destination, judge, LOOKUP_MS, PACKAGE_HOSTS, packageHost, reach } from
 
 // This computer's own addresses, as its interfaces would give them.
 const local = () => ["127.0.0.1", "::1", "192.168.100.139", "fe80::2d6:c59:8d66:3938"];
+// The networks this computer is on: none here, so no test reads the machine's own.
+const subnets = () => [];
 const names: Record<string, string[]> = {
   "printer.lan": ["192.168.1.20"],
   "example.com": ["93.184.215.14", "2606:2800:21f:cb07:6820:80da:af6b:8b2c"],
@@ -68,7 +70,7 @@ describe("a destination", () => {
 });
 
 describe("where a destination leads", () => {
-  const where = async (host: string) => (await reach(host, { local, resolve }))?.reach ?? null;
+  const where = async (host: string) => (await reach(host, { local, subnets, resolve }))?.reach ?? null;
 
   it.each([
     "127.0.0.1", "127.8.9.10", "[::1]", "0.0.0.0", "[::]", "[::ffff:7f00:1]", "192.168.100.139", "[fe80::2d6:c59:8d66:3938]",
@@ -92,16 +94,27 @@ describe("where a destination leads", () => {
     expect(await where(host)).toBe("public");
   });
 
+  it("is a private network for an address on a network this computer is on, a public IPv4 range or a global IPv6 prefix", async () => {
+    // As its interfaces give them: each address with its prefix.
+    const on = async (host: string) => (await reach(host, {
+      local: () => ["198.51.100.5", "2001:db8:1::5"], subnets: () => ["198.51.100.5/24", "2001:db8:1::5/64"], resolve,
+    }))?.reach;
+    expect(await on("198.51.100.7")).toBe("private");
+    expect(await on("[2001:db8:1::1234]")).toBe("private");
+    expect(await on("198.51.101.7")).toBe("public");
+    expect(await on("[2001:db8:2::1]")).toBe("public");
+  });
+
   it("gives the addresses it judged, each without brackets, from one lookup", async () => {
     let lookups = 0;
     const counted = (name: string) => {
       lookups += 1;
       return resolve(name);
     };
-    expect(await reach("example.com", { local, resolve: counted })).toEqual({
+    expect(await reach("example.com", { local, subnets, resolve: counted })).toEqual({
       reach: "public", addresses: ["93.184.215.14", "2606:2800:21f:cb07:6820:80da:af6b:8b2c"],
     });
-    expect(await reach("[2001:db8::1]", { local, resolve: counted })).toEqual({ reach: "public", addresses: ["2001:db8::1"] });
+    expect(await reach("[2001:db8::1]", { local, subnets, resolve: counted })).toEqual({ reach: "public", addresses: ["2001:db8::1"] });
     expect(lookups).toBe(1);
   });
 
@@ -110,10 +123,10 @@ describe("where a destination leads", () => {
     // A lookup that fails: the resolver rejects.
     expect(await where("nowhere.example")).toBeNull();
     // RFC 6761: decided without a lookup, so a resolver that answers for it changes nothing.
-    expect(await reach("surogate-test.invalid", { local, resolve: () => Promise.resolve(["93.184.215.14"]) })).toBeNull();
+    expect(await reach("surogate-test.invalid", { local, subnets, resolve: () => Promise.resolve(["93.184.215.14"]) })).toBeNull();
     expect(await where("odd.example")).toBeNull();
     const started = performance.now();
-    expect(await reach("slow.example", { local, resolve: () => new Promise(() => {}), timeoutMs: 50 })).toBeNull();
+    expect(await reach("slow.example", { local, subnets, resolve: () => new Promise(() => {}), timeoutMs: 50 })).toBeNull();
     expect(performance.now() - started).toBeLessThan(1_000);
     // Unless told otherwise, as the host proxy is not.
     expect(LOOKUP_MS).toBe(2_000);
@@ -128,7 +141,7 @@ describe("where a destination leads", () => {
 });
 
 describe("a connection, judged", () => {
-  const judged = (host: string, port: number) => judge(host, port, { local, resolve });
+  const judged = (host: string, port: number) => judge(host, port, { local, subnets, resolve });
 
   it("lets a package host through without asking, to the addresses it judged", async () => {
     expect(await judged("pypi.org", 443)).toEqual({ key: "pypi.org:443", dial: ["151.101.0.223"], ask: null });
@@ -159,6 +172,6 @@ describe("a connection, judged", () => {
     expect(await judged("nowhere.example", 443)).toEqual({ refused: "unknown", key: "nowhere.example:443" });
     expect(await judged("*.example.com", 443)).toEqual({ refused: "invalid" });
     expect(await judged("example.com", 0)).toEqual({ refused: "invalid" });
-    expect(await judge("example.com", 443, { local: () => { throw new Error("no interfaces"); }, resolve })).toEqual({ refused: "unknown", key: "example.com:443" });
+    expect(await judge("example.com", 443, { local: () => { throw new Error("no interfaces"); }, subnets, resolve })).toEqual({ refused: "unknown", key: "example.com:443" });
   });
 });

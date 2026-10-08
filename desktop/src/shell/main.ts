@@ -4,7 +4,7 @@
 // Readiness is awaited with then(), never a top-level await: an ES module main that
 // awaits app.whenReady() deadlocks.
 
-import { readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -15,6 +15,9 @@ import {
 
 import type { DesktopAccount } from "../../../web/src/lib/desktop-bridge-contract.js";
 import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow, Tier } from "../../../web/src/lib/projects-contract.js";
+import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
+import { type BrowserChoice, BrowserSetting, browserVersion, choiceRows, chosenBrowser, findBrowsers, KNOWN, profileOf, profilesOf, unsupportedAt } from "../browser/choose.js";
+import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
@@ -75,6 +78,8 @@ const configHome = process.env.XDG_CONFIG_HOME?.startsWith("/") ? process.env.XD
 const autostart = autostartFile(configHome);
 const loginCommand = (): string[] => (app.isPackaged ? [LAUNCHER] : [process.execPath, import.meta.filename]);
 const agents = new AgentStore(join(root, "agent.json"));
+// Settings → Browser: the browser the agent drives on this computer, for every agent.
+const browserSetting = new BrowserSetting(join(root, "browser.json"));
 let main: MainWindow | null = null;
 let theme: Theme;
 // After ready: safeStorage answers only then.
@@ -204,11 +209,19 @@ const trying = (write: () => void): void => {
   }
 };
 
-// The VM manager in an Electron utility process (spec, Section 11): a hang or a crash
-// there leaves the windows and the device link alone. What is sent before it has spawned waits.
-function utilityManager(): ManagerProcess {
-  const child = utilityProcess.fork(MANAGER, [], { serviceName: "Surogate VM", stdio: "inherit" });
-  const waiting: ToManager[] = [];
+// A process of the app's own in an Electron utility process: the VM manager (spec, Section 11)
+// and each device's browser host (Section 1). A hang or a crash there leaves the windows and the
+// device link alone. What is sent before it has spawned waits. *temp*: its temp folder, made now; the app's by default.
+function utility<To, From>(script: string, serviceName: string, temp?: string): {
+  send(message: To): void;
+  onMessage(listener: (message: From) => void): void;
+  onExit(listener: () => void): void;
+  kill(): void;
+} {
+  if (temp) mkdirSync(temp, { recursive: true, mode: 0o700 });
+  const env = temp ? { env: { ...process.env, TMPDIR: temp } } : {};
+  const child = utilityProcess.fork(script, [], { serviceName, stdio: "inherit", ...env });
+  const waiting: To[] = [];
   let spawned = false;
   let exited = false;
   child.once("spawn", () => {
@@ -224,7 +237,7 @@ function utilityManager(): ManagerProcess {
       if (spawned) child.postMessage(message);
       else waiting.push(message);
     },
-    onMessage: (listener) => void child.on("message", (message) => listener(message as FromManager)),
+    onMessage: (listener) => void child.on("message", (message) => listener(message as From)),
     onExit: (listener) => {
       if (exited) listener();
       else child.once("exit", () => listener());
@@ -232,6 +245,11 @@ function utilityManager(): ManagerProcess {
     kill: () => void child.kill(),
   };
 }
+
+const utilityManager = (): ManagerProcess => utility<ToManager, FromManager>(MANAGER, "Surogate VM");
+// A browser host keeps its own temp files, the browser's and Playwright's, under *profiles*: they go
+// with the profiles, and a host that is killed leaves none in the system's temp folder.
+const utilityBrowser = (profiles: string) => () => utility<ToBrowser, FromBrowser>(BROWSER_HOST, "Surogate browser", join(profiles, "tmp"));
 
 // The app's one VM, shared by every device, for this computer's user, and the background processes
 // alive in it, which Settings shows with Stop as they change.
@@ -501,8 +519,17 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     token: credential.token,
     agent: agent.name,
     identity: { deviceId: credential.deviceId, orgId: credential.orgId, agentId: credential.agentId, userId: credential.userId },
-    // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the VM.
-    tools: (bindings, network, changed) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(), changed }),
+    // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the
+    // VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
+    tools: (bindings, network, changed) => new Browsing({
+      tools: new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(), changed }),
+      browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
+      bindingOf: (bound) => bindings.get(bound),
+      launch: () => {
+        const browser = chosenBrowser(browserSetting.get(), findBrowsers());
+        return browser && { executable: browser.executable, profile: profileOf(root, credential, browser) };
+      },
+    }),
     prompts,
     approvalPrompts: prompts,
     // The page hears which of this account's chats changed on this computer, while it is this account's page.
@@ -722,10 +749,14 @@ let linkWaiting: OpenLink | null = null;
 
 /** A native message box, over *parent* when there is one: the button pressed. */
 async function messageBox(options: Electron.MessageBoxOptions, parent: BrowserWindow | undefined = main?.window): Promise<number> {
+  return (await messageBoxResult(options, parent)).response;
+}
+
+/** A native message box, over *parent* when there is one: the button pressed, and whether its checkbox was ticked. */
+async function messageBoxResult(options: Electron.MessageBoxOptions, parent: BrowserWindow | undefined = main?.window): Promise<Electron.MessageBoxReturnValue> {
   boxes += 1;
   try {
-    const { response } = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
-    return response;
+    return parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
   } finally {
     boxes -= 1;
     const link = boxes === 0 ? linkWaiting : null;
@@ -754,7 +785,7 @@ function cutOff(): string {
  */
 async function signOut(agent: Agent, removing: boolean): Promise<void> {
   if (signingOut) return;
-  const confirmed = await ask(removing
+  const options: Electron.MessageBoxOptions = removing
     ? {
       type: "warning", message: `Remove ${agent.name} from Surogate?`,
       detail: `You are logged out, this computer's access to ${agent.name} ends, and the folders it was given here are forgotten. Surogate then asks for an agent again.${cutOff()}`,
@@ -764,7 +795,17 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
       type: "warning", message: `Log out of ${agent.name}?`,
       detail: `This computer's access to ${agent.name} ends, and the folders it was given here are forgotten.${cutOff()}`,
       buttons: ["Log out", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
-    });
+    };
+  // Whose browser profiles they are, before the log out forgets the computer's credential: none
+  // when this computer keeps no access to the agent, or its browser never ran here.
+  const profiles = kept && existsSync(profilesOf(root, kept)) ? profilesOf(root, kept) : null;
+  // What the agent's browser here is signed in to is the user's to keep or not (spec, Section 7), with a window or without,
+  // asked only where there is something to forget.
+  const asked = profiles
+    ? { ...options, checkboxLabel: `Also forget the sites ${agent.name}'s browser on this computer is signed in to`, checkboxChecked: removing }
+    : options;
+  const { response, checkboxChecked: forgetBrowser } = await messageBoxResult(asked);
+  const confirmed = response === 0;
   if (!confirmed || signingOut) return;
   const { promise, resolve: done } = Promise.withResolvers<void>();
   signingOut = promise;
@@ -779,6 +820,8 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
     signInAgain = false;
     sessionStore.clear();
     if (kept) await endDevice(kept);
+    // The browser closed with the device: its profiles can go now.
+    if (forgetBrowser && profiles) trying(() => rmSync(profiles, { recursive: true, force: true, maxRetries: 3 }));
     // Ended at the agent too, best effort: offline, the refresh token stays valid there until it expires.
     void ending?.end().catch(report);
     account = null;
@@ -1404,6 +1447,62 @@ const menuActions = {
   },
 };
 
+// Why the last browser picked with Custom… was not kept, until the next choice.
+let browserFailure: string | null = null;
+
+// Settings → Browser's rows: what is found here, each named with the version it says.
+async function browserState() {
+  const found = findBrowsers();
+  const choice = browserSetting.get();
+  const versions = new Map<string, string>();
+  await Promise.all(found.filter((browser) => browser.unsupported === null).map(async (browser) => {
+    const version = await browserVersion(browser.executable);
+    if (version) versions.set(browser.executable, version);
+  }));
+  return { choice: choice.choice, rows: choiceRows(choice, found, versions), none: chosenBrowser(choice, found) === null, failure: browserFailure };
+}
+
+/**
+ * A choice in Settings → Browser: Automatic or a browser found here, kept as it is; or Custom…, a
+ * program the user picks in the system's dialog, kept only once it has launched as the agent's
+ * browser does. The next launch of the agent's browser uses it.
+ */
+async function chooseBrowser(value: unknown): Promise<void> {
+  browserFailure = null;
+  try {
+    if (value === "custom") return;
+    if (value !== "pick") {
+      if (value !== "auto" && !KNOWN.some(({ id }) => id === value)) throw new Error(`No browser ${String(value)}`);
+      browserSetting.set({ choice: value } as BrowserChoice);
+      return;
+    }
+    const options = { title: "Choose the agent's browser", buttonLabel: "Choose", properties: ["openFile" as const] };
+    const picked = main ? await dialog.showOpenDialog(main.window, options) : await dialog.showOpenDialog(options);
+    const path = picked.canceled ? undefined : picked.filePaths[0];
+    if (!path) return;
+    let real: string;
+    try {
+      real = realpathSync(path);
+    } catch {
+      // Gone since it was picked, or a link that leads nowhere.
+      browserFailure = `Surogate cannot use ${path}: it cannot be read here.`;
+      return;
+    }
+    const why = unsupportedAt(real);
+    if (why) {
+      browserFailure = `Surogate cannot use ${real}: ${why}.`;
+      return;
+    }
+    // A try's own profile is a passing one, in the folder of every identity's profiles.
+    const once = new BrowserClient(utilityBrowser(join(root, "browser-profiles")));
+    const tried = await once.tryBrowser(real).finally(() => once.stop());
+    if ("error" in tried) browserFailure = `${real} did not start as a browser Surogate can drive: ${tried.error.message}`;
+    else browserSetting.set({ choice: "custom", executable: real, version: String((tried.ok as { version?: unknown } | null)?.version ?? "") });
+  } finally {
+    changed();
+  }
+}
+
 // The app's menu, with Developer in developer mode only: its tools read and change everything on the agent's page.
 function setMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(appMenu(menuActions, preferences.get().developer)));
@@ -1481,10 +1580,14 @@ async function folderRows(): Promise<FolderRow[]> {
   return stack ? listFolders(stack.bindings, chatTitle, alive) : [];
 }
 
-function settingsState() {
+// What Settings shows, read once the browsers have said their versions: a state asked for
+// before a change, and answered after it, still shows the change.
+async function settingsState() {
+  const browser = await browserState();
   const agent = agents.get();
   const { keepRunning, developer } = preferences.get();
   return {
+    browser,
     appearance: appearance.get(),
     preferences: { startAtLogin: onOff(startsAtLogin(autostart)), keepRunning: onOff(keepRunning), developer: onOff(developer) },
     // Why this build cannot start at login, or null.
@@ -1669,6 +1772,7 @@ function showSettings(): void {
     });
     // A theme in effect that changes reaches the web client through the theme's own paint.
     handle("settings:set", async (key, value) => {
+      if (key === "browser") return chooseBrowser(value);
       if (key === "keepRunning" || key === "developer") return setPreference(key, value);
       if (key === "startAtLogin") {
         if (value !== "on" && value !== "off") throw new Error(`No setting startAtLogin = ${String(value)}`);

@@ -302,6 +302,16 @@ describe("an outcome that is not an answer", () => {
     expect(results("a")[0]?.outcome).toEqual(sent ?? outcome);
   });
 
+  it("refuses a result that names a transfer from a kind that sends none: the server would read it as one", async () => {
+    const shaped = { ok: { transfer: { size: 5, sha256: "a".repeat(64) } } };
+    await start({ run: () => Promise.resolve(shaped) });
+    server.send(opFrame("a", "browser.evaluate"));
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual({
+      error: { type: "other", message: "The operation ran, but its result could not be sent: it names a transfer, which only a read or a screenshot sends" },
+    });
+  });
+
   it.each([
     ["throws", () => { throw new Error("boom"); }],
     ["rejects", () => Promise.reject(new Error("boom"))],

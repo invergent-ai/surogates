@@ -80,6 +80,9 @@ export interface BinderOptions {
   guards: FolderGuards;
   agent: string;
   hosts: Executor; // runs everything but the binding
+  refusal?(operation: Operation): Outcome | null; // what the hosts refuse anyway, before anyone is asked
+  retired?(root: string): void; // a deleted chat's root: the hosts let go of what they keep for it
+  address?(session: string): Promise<string>; // the page a session's next browser operation acts in, for its prompt
   // The user is asked about every other operation first in a chat that asks every time,
   // and about a network destination off the package hosts in either mode.
   approvalPrompts: ApprovalPrompts;
@@ -162,7 +165,7 @@ export class Binder implements Executor {
 
   constructor(private readonly options: BinderOptions) {
     this.approvals = new Approvals({
-      bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, onError: options.onError,
+      bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, address: options.address, onError: options.onError,
     });
   }
 
@@ -312,7 +315,9 @@ export class Binder implements Executor {
   // other operation is the approvals', which settle once the signal aborts.
   async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
     if (operation.kind === "retire") return this.retire(operation);
-    if (operation.kind !== "bind") return this.approvals.admit(operation, signal);
+    // What the tools refuse anyway (no browser on this computer, say) is refused before anyone is
+    // asked; in the same tick, so a chat's bind in the same burst cannot slip in before the approvals look.
+    if (operation.kind !== "bind") return this.options.refusal?.(operation) ?? this.approvals.admit(operation, signal);
     const root = operation.sessionId;
     const { folder, nonce } = operation.args;
     const own = operation.callingSessionId === root && operation.invocationId === "bind" && operation.ordinal === 0;
@@ -344,6 +349,8 @@ export class Binder implements Executor {
   private retire(operation: Operation): Outcome {
     const own = operation.callingSessionId === operation.sessionId && operation.invocationId === "retire" && operation.ordinal === 0;
     if (!own) return NOT_BOUND;
+    // Its tabs close whether or not its binding can be forgotten: the chat is gone.
+    this.options.retired?.(operation.sessionId);
     try {
       this.options.bindings.retire(operation.sessionId);
     } catch (error) {

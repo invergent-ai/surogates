@@ -158,6 +158,16 @@ describe("a read too large for one frame", () => {
 });
 
 describe("a read's result", () => {
+  it("is a screenshot's too: it goes as a header naming it, then its chunks", async () => {
+    await start(reading(DATA));
+    server.send({ ...readOp("s"), kind: "browser.screenshot", args: { clip: null, labels: [] } });
+    await server.until(() => chunks("s").length === TRANSFER_WINDOW);
+    expect(headers("s").map((f) => f.outcome)).toEqual([NAMED]);
+    for (let seq = 0; seq < 6; seq++) server.send({ type: "chunk_ack", id: "s", seq });
+    await server.until(() => chunks("s").length === 7);
+    expect(joined(chunks("s")).equals(DATA)).toBe(true);
+  });
+
   it("of at most 1 MiB goes inline, in one frame", async () => {
     const data = randomBytes(MAX_PAYLOAD_BYTES);
     await start(reading(data));

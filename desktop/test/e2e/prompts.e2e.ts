@@ -496,6 +496,32 @@ describe("an approval prompt", () => {
     expect(await answered).toEqual({ button: "deny", choice: null });
   });
 
+  it("shows the browser's first use, and each act with the page it acts in, whole as it opens", async () => {
+    await signedIn();
+    const chat = { agent: "acme.surogate.ai", root: CHAT, calling: CHAT, folder };
+    const use = approved({ kind: "browser", chat, action: "use", detail: "" });
+    const asked = await prompt(app!);
+    const notes = await inView(asked, ".lead, .note");
+    expect(notes.titleWhole).toBe(true);
+    for (const [at, { seen, height }] of notes.details.entries()) expect(seen, `the first use's line ${at}`).toBeCloseTo(height, 0);
+    await press(asked, "deny");
+    await use;
+    // A page with the longest of names, on a long address: its site's end in the title, and the page and what the act does in view.
+    const page = `https://bank.example.${"x".repeat(63)}.${"y".repeat(63)}.attacker.net/account/settings?session=${"z".repeat(120)}`;
+    for (const [action, detail, at] of [
+      ["script", "document.forms[0].submit();", page], ["type", "hunter2", page], ["down", "5, 6", page], ["press", "Enter", null],
+    ] as const) {
+      const answered = approved({ kind: "browser", chat, action, detail, page: at });
+      const act = await prompt(app!);
+      expect(await text(act, "#prompt-title")).toMatch(at ? /attacker\.net\?$/ : /the page\?$/);
+      const opened = await inView(act, ".detail");
+      expect([opened.titleWhole, opened.details.length]).toEqual([true, 2]);
+      for (const [at, { seen, height }] of opened.details.entries()) expect(seen, `${action}'s detail ${at}`).toBeCloseTo(height, 0);
+      await press(act, "deny");
+      await answered;
+    }
+  });
+
   it("names a long host in its title by its end and its port, and shows its whole address and its warning as it opens", async () => {
     await signedIn();
     // A name that leads with another site's: what it reaches is attacker.net.
