@@ -159,6 +159,33 @@ describe("a download the agent's page started", () => {
     expect(readFileSync(downloads, "utf8")).toBe("a file of the user's");
   });
 
+  it("answers at once where Downloads is no folder, asking nobody and trying no write; and tries one write, and no other name, where it stopped being one meanwhile", async () => {
+    bind("ask");
+    writeFileSync(downloads, "a file of the user's");
+    const ran: string[] = [];
+    const counting: Saver = { admit: saver.admit, run: (operation, signal) => (ran.push(operation.kind), saver.run(operation, signal)) };
+    const refused = `The page downloaded "report.txt", but it was not saved: File exists: '${downloads}'.`;
+    expect(await saveDownload(stage("report.txt"), journal.bindings, counting)).toBe(refused);
+    expect([asked, ran]).toEqual([[], ["resolve", "stat"]]);
+    // Not there at the look, and a file once its user has allowed the save: the write's refusal is not a name taken.
+    rmSync(downloads);
+    ran.length = 0;
+    meanwhile = async () => writeFileSync(downloads, "made meanwhile");
+    expect(await saveDownload(stage("report.txt"), journal.bindings, counting)).toBe(refused);
+    expect([asked.length, ran]).toEqual([1, ["resolve", "stat", "resolve", "stat", "write", "stat"]]);
+    expect(readFileSync(downloads, "utf8")).toBe("made meanwhile");
+    // A file host that refuses the look at Downloads says why, in its own words.
+    const failing: Saver = {
+      admit: saver.admit,
+      run: (operation, signal) => (operation.kind === "stat"
+        ? Promise.resolve({ error: { type: "sandbox", message: "This chat's folder was replaced since it was bound" } })
+        : saver.run(operation, signal)),
+    };
+    expect(await saveDownload(stage("report.txt"), journal.bindings, failing)).toBe(
+      'The page downloaded "report.txt", but it was not saved: This chat\'s folder was replaced since it was bound.',
+    );
+  });
+
   it("says why when the file host resolves no name of it, as for a folder replaced since it was bound", async () => {
     bind("free");
     const refusing: Saver = {

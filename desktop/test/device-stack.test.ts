@@ -370,7 +370,8 @@ describe("one agent's device", () => {
     const key = join(folder, "Downloads", "report.txt");
     expect(asked).toMatchObject([{ kind: "change", action: "write", path: key, bytes: 6, download: "page", chat: { root: ROOT, calling: CHILD } }]);
     expect(tools.ran.map(({ kind, args }) => [kind, args.path ?? args.key, args.create])).toEqual([
-      ["resolve", join(folder, "Downloads"), undefined], ["resolve", key, undefined], ["stat", key, undefined], ["write", key, true],
+      ["resolve", join(folder, "Downloads"), undefined], ["stat", join(folder, "Downloads"), undefined],
+      ["resolve", key, undefined], ["stat", key, undefined], ["write", key, true],
     ]);
     expect(tools.ran.at(-1)?.args.data).toBe(Buffer.from("report").toString("base64"));
     // Counted as the chat's sub-agent's work while it ran, and gone since; the staged file went too.

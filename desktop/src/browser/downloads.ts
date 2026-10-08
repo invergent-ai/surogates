@@ -8,7 +8,7 @@ import { readFile, rm } from "node:fs/promises";
 import { extname, posix } from "node:path";
 
 import type { DownloadBy } from "../binding/approvals.js";
-import { strerror } from "../files/answers.js";
+import { osError, strerror } from "../files/answers.js";
 import type { Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 
@@ -116,6 +116,10 @@ export async function saveDownload(download: StagedDownload, bindings: Pick<Bind
     // Where the chat's downloads go, as its file host resolves it: a link there that leads out of the folder is refused.
     const into = await saver.run(op("resolve", { path: posix.join(binding.folder, DOWNLOADS) }), signal);
     if ("error" in into) return notSaved(into.error.message);
+    // Something there that is no folder holds no download: said before anyone is asked, and before any write is tried.
+    const there = await saver.run(op("stat", { key: into.ok }), signal);
+    if ("error" in there) return notSaved(there.error.message);
+    if (there.ok !== null && (there.ok as { is_dir?: unknown }).is_dir !== true) return notSaved(osError("EEXIST", String(into.ok)).refusal.message);
     const name = savedName(download.name);
     let asked = false;
     // Why the file host refused the last name it would not take.
@@ -135,7 +139,10 @@ export async function saveDownload(download: StagedDownload, bindings: Pick<Bind
       const outcome = (asked ? null : await saver.admit(write, signal, download.user ? "user" : "page")) ?? (await saver.run(write, signal));
       asked = true;
       if ("error" in outcome && outcome.error.code === "EEXIST") {
-        // Made there since the look, by another writer: left as it is, and the next name is tried.
+        // Made there since the look, by another writer: left as it is, and the next name is tried. Where nothing
+        // is at the name, it is not the name that is taken, as when its folder became a file: no other is tried.
+        const taken = await saver.run(op("stat", { key }), signal);
+        if ("error" in taken || taken.ok === null) return notSaved(outcome.error.message);
         refused = outcome.error.message;
         continue;
       }
