@@ -1,7 +1,7 @@
 """Projects, kept as ``workstreams``: what the master session's config says.
 
 A project is a master web session, the coordinator, and the threads it
-starts.  The server stamps three keys into their config, so the hot paths
+starts.  The server stamps four keys into their config, so the hot paths
 (tool gates, the prompt, turn ends) decide without a join.  They are
 server-owned: the session create route strips them from client config.
 """
