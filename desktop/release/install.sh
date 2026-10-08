@@ -159,6 +159,14 @@ whole() {
     && [ -f "$2/bin/surogate-apply-update" ] && [ ! -L "$2/bin/surogate-apply-update" ] && [ -x "$2/bin/surogate-apply-update" ]
 }
 
+# /opt/surogate is a folder of the computer's own, or a disk mounted there, and never a link: through
+# one, root would make another folder its own and work in it, would find no app running from the
+# tree, and at a removal would take the link away and leave all that it names, or say of a disk
+# behind it that it was emptied. Refused before anything follows it; $1 is what to do then.
+unlinked() {
+  [ ! -L "$ROOT" ] || fail "$ROOT is a link, where Surogate Desktop keeps a folder of its own or a disk mounted there: ${1:-remove the link, and run this again}"
+}
+
 # One install, update or removal at a time, by a lock on a file in a folder only root can open: any
 # user may open what all may read, hold a lock on it, and so stop every update. The folder is under
 # /run and not in /opt/surogate: a removal takes the tree away, and an apply that waited for it
@@ -257,6 +265,7 @@ apply() {
   done
   # Before the tree is touched: a removal that runs now takes it away, and this apply makes it again.
   lock
+  unlinked
   # Its folders are root's own, whoever made them. The tree's first: from then on no one else puts
   # anything in it. Then the three in it, each a folder of the tree's own and never a link, which
   # would have root make another folder its own, and work there. Each loses the set-id bits a
@@ -659,6 +668,7 @@ main() {
         base="${2%/}"
       fi
       supported
+      unlinked
       if [ "$EUID" -ne 0 ]; then
         say "installing needs administrator rights: sudo asks for your password once"
         # Again as root, from this script's own functions: a script piped to bash has no file to name.
@@ -670,6 +680,7 @@ main() {
       install_all "$base"
       ;;
     --uninstall)
+      unlinked "nothing was removed. Remove the link, and run this again: what it names is then yours to remove"
       if [ "$EUID" -ne 0 ]; then
         # Nothing may stand after it: an argument this script does not know is refused before
         # sudo is asked, never dropped and the app removed all the same.

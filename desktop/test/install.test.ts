@@ -144,6 +144,10 @@ const NOT_ROOTS_OWN: Array<[string, string]> = [
   ["a file of root's own that no one else opens", `touch ${LOCKS} && chmod 700 ${LOCKS}`],
 ];
 const NOT_ROOTS_OWN_SAID = `Surogate Desktop: ${LOCKS} must be a folder of root's own that no one else opens (mode 700), and no link: remove what is there, and run this again\n`;
+// What the script says of an /opt/surogate that is a link, before it follows it; *then* is what it asks for.
+const linked = (then = "remove the link, and run this again") =>
+  `Surogate Desktop: /opt/surogate is a link, where Surogate Desktop keeps a folder of its own or a disk mounted there: ${then}\n`;
+const LINKED_NOTHING_REMOVED = linked("nothing was removed. Remove the link, and run this again: what it names is then yours to remove");
 // What --apply needs, on a desktop's baseline: openssl, jq and bubblewrap, which the install
 // script installs, and nothing of Surogate's; strace, for the tests that read the helper's system
 // calls; and a locale as a desktop's user has one, en_US.UTF-8.
@@ -1243,6 +1247,21 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(root("cp /root/os-release /etc/os-release && test ! -e /opt/surogate && test ! -e /etc/surogate").status).toBe(0);
   });
 
+  it("refuses an /opt/surogate that is a link before it changes anything, or asks for sudo, whatever the link names", () => {
+    // A link to another user's folder, and one to nothing.
+    for (const target of ["/home/other/elsewhere", "/nowhere"]) {
+      expect(root(`rm -rf /home/other/elsewhere && mkdir -m 755 /home/other/elsewhere && chown other: /home/other/elsewhere && ln -sfn ${target} /opt/surogate`).status, target).toBe(0);
+      // As a user, and as root's part by itself, as under sudo bash install.sh.
+      expect(install(), target).toMatchObject({ status: 1, stdout: "", stderr: linked() });
+      expect(root(`/opt/surogate-test/install.sh --base ${base}`), target).toMatchObject({ status: 1, stdout: "", stderr: linked() });
+      expect(uninstall(), target).toMatchObject({ status: 1, stdout: "", stderr: LINKED_NOTHING_REMOVED });
+      expect(root("/opt/surogate-test/install.sh --uninstall"), target).toMatchObject({ status: 1, stdout: "", stderr: LINKED_NOTHING_REMOVED });
+      // Nothing is behind the link, which is whose it was; and the link is there still.
+      expect(root("ls -A /home/other/elsewhere; stat -c '%U %a' /home/other/elsewhere; readlink /opt/surogate").stdout, target).toBe(`other 755\n${target}\n`);
+    }
+    expect(root("rm /opt/surogate && test ! -e /etc/surogate && test ! -e /usr/local/bin/surogate").status).toBe(0);
+  });
+
   it("installs from its base, as a user who has sudo, all that the app needs, for every user of the computer", () => {
     publish("1.0.0");
     // A package source of the computer's own that apt cannot update from: the install goes on.
@@ -1642,7 +1661,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
 
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --uninstall as root, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
   // The --apply tests' computer, with /opt/surogate a disk of its own (a mount point), as some keep it.
-  const { it: box, docker, root, releaseOf, manifestOf } = lab(release, APPLY_LAB, OWN_DISK);
+  const { it: box, docker, root, releaseOf, manifestOf, elsewhere } = lab(release, APPLY_LAB, OWN_DISK);
   const files = "/home/tester/manifest.json /home/tester/manifest.json.sig /home/tester/release.tar.gz";
   const installed = (version: string) => {
     const tarball = releaseOf(version);
@@ -1678,6 +1697,26 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     // The install after it finds the disk as a first install does.
     installed("1.0.0");
     expect(root("/opt/surogate-test/install.sh --uninstall").status).toBe(0);
+  });
+
+  it("refuses an /opt/surogate that is a link to a disk of its own before it follows it: a removal removes nothing and says why, and an apply makes nothing there its own", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    const files = `/srv/manifest.json /srv/manifest.json.sig /srv/${tarball.split("/").pop()}`;
+    // A computer with a disk of its own beside /opt, in memory.
+    elsewhere(["--tmpfs", "/mnt/disk:exec,mode=755,size=256m"], [join(box.dir, "manifest.json"), join(box.dir, "manifest.json.sig"), tarball], (root) => {
+      // Installed in a folder, then moved to the disk by hand, with a link left in the folder's place; and what an install puts around the tree.
+      const around = ["/etc/surogate/install.json", "/usr/local/bin/surogate", "/usr/share/applications/surogate.desktop", "/usr/share/polkit-1/actions/ai.invergent.surogate.update.policy"];
+      expect(root(`/srv/install.sh --apply ${files} && cp -a /opt/surogate/. /mnt/disk/ && rm -rf /opt/surogate && ln -s /mnt/disk /opt/surogate && chown tester: /mnt/disk`
+        + ` && mkdir -p /etc/surogate /usr/share/applications /usr/share/polkit-1/actions && touch ${around.join(" ")} && mountpoint -q /opt/surogate/ && test -x /opt/surogate/current/surogate`).status).toBe(0);
+      const there = () => root(`find /mnt/disk | sort; stat -c '%U %a' /mnt/disk; ls -d /opt/surogate ${around.join(" ")}`).stdout;
+      const before = there();
+      expect(root("/srv/install.sh --uninstall")).toMatchObject({ status: 1, stdout: "", stderr: LINKED_NOTHING_REMOVED });
+      expect(root(`/srv/install.sh --apply ${files}`)).toMatchObject({ status: 1, stdout: "", stderr: linked() });
+      // The disk, its owner, the link and the rest of the install are as they were.
+      expect(there()).toBe(before);
+      expect(before).toContain("/mnt/disk/versions/1.0.0/release.json\n");
+    });
   });
 
   it("finds the user's data, asks about it and deletes it in a home that root cannot read, as the user each time", () => {
