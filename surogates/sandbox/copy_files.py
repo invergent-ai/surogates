@@ -31,10 +31,13 @@ def writes_to_copy(sandbox_pool: Any, owner: Any, session_config: dict[str, Any]
     It does over a pod that holds a copy, a thread's delegate child's
     included, and for a thread that works on one, whose pod may be gone:
     a project's thread with a storage bucket.  A thread with none has the
-    real files for its workspace, as any other session.
+    real files for its workspace, as any other session.  So has a thread
+    of a project too large for history: it works on the real files, and
+    what a tool makes for it is saved there.
     """
     config = session_config or {}
-    return has_copy(sandbox_pool, owner) or (bool(config.get("storage_bucket")) and is_project_thread(config))
+    works_on_a_copy = bool(config.get("storage_bucket")) and is_project_thread(config) and not config.get("history_off")
+    return has_copy(sandbox_pool, owner) or works_on_a_copy
 
 
 async def _file(sandbox_pool: SandboxPool, owner: Any, request: dict[str, Any], done: str) -> dict[str, Any]:

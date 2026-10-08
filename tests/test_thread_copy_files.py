@@ -13,7 +13,7 @@ import pytest
 
 from surogates.harness.loop import AgentHarness
 from surogates.sandbox.base import SandboxSpec, SandboxUnavailableError
-from surogates.sandbox.copy_files import read_copy, write_copy
+from surogates.sandbox.copy_files import read_copy, write_copy, writes_to_copy
 from surogates.sandbox.pool import SandboxPool
 from surogates.tools.builtin.browser import _browser_screenshot_handler
 from surogates.tools.builtin.media_gen import _save_media_bytes
@@ -72,6 +72,22 @@ async def test_a_threads_image_with_no_copy_to_go_to_is_not_saved(thread):
     )
     # With its pod gone, the image would go around the landing, into the real files.
     assert saved is False and storage.writes == []
+
+
+async def test_a_thread_of_a_project_too_large_for_history_saves_its_image_through_storage(tmp_path):
+    pods = ThreadPods(tmp_path)
+    pool, owner, storage = SandboxPool(pods), str(uuid4()), FakeStorage()
+    await pool.ensure(owner, SandboxSpec())  # the plain layout, as a project over the cap gets: the real files at /workspace
+    config = {**CONFIG, "workstream_role": "thread", "history_off": True}
+    saved = await _save_media_bytes(
+        PNG, relative_path="images/cover.png", workspace_path=None, storage=storage,
+        session_id=owner, session_config=config, sandbox_pool=pool, owner=owner,
+    )
+    # It has no copy to write into and no landing to wait for: its files are the project's, as any other session's.
+    assert saved is True and [w[2] for w in storage.writes] == [PNG]
+    # And so with its pod gone, or not made yet.
+    assert writes_to_copy(SandboxPool(pods), owner, config) is False
+    assert writes_to_copy(SandboxPool(pods), owner, {**config, "history_off": False}) is True
 
 
 async def test_any_other_sessions_generated_image_goes_to_storage_as_before():
