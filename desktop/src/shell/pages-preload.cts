@@ -38,7 +38,12 @@ if (location.protocol === "file:") {
     quitNow: () => ipcRenderer.invoke("shell:quit-now"),
     link: (which: string) => ipcRenderer.invoke("shell:link", which),
     onChanged: listen("shell:changed"),
-    onPaneLeft: listen("shell:pane-left"),
+    // Where the keyboard comes back to from the pane's transcript: its head's Open or Back.
+    onPaneLeft: (listener: (to: string) => void) => {
+      const relay = (_event: unknown, to: unknown) => listener(String(to));
+      ipcRenderer.on("shell:pane-left", relay);
+      return () => ipcRenderer.off("shell:pane-left", relay);
+    },
   });
   contextBridge.exposeInMainWorld("surogateProject", {
     state: () => ipcRenderer.invoke("project:state"),

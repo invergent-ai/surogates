@@ -76,7 +76,7 @@ interface Shell {
   link(which: string): Promise<void>;
   onChanged(listener: () => void): () => void;
   focusPane(): Promise<void>;
-  onPaneLeft(listener: () => void): () => void;
+  onPaneLeft(listener: (to: string) => void): () => void;
 }
 
 const shell = (globalThis as unknown as { surogateShell: Shell }).surogateShell;
@@ -355,13 +355,14 @@ byId("new-project").addEventListener("click", () => void shell.newProject());
 byId("project-settings").addEventListener("click", () => void shell.projectSettings());
 byId("open-projects").addEventListener("click", () => void shell.projects());
 byId("reading-back").addEventListener("click", () => void shell.read(null));
-// Tab after the head's last control takes the keyboard into the transcript; Shift+Tab or Escape there brings it back to Back.
+// Tab after the head's last control takes the keyboard into the transcript; it comes back from the transcript's
+// edges: Shift+Tab from its first control to Open, Escape to Back.
 byId("reading-open").addEventListener("keydown", (event) => {
   if (event.key !== "Tab" || event.shiftKey) return;
   event.preventDefault();
   void shell.focusPane();
 });
-shell.onPaneLeft(() => byId("reading-back").focus());
+shell.onPaneLeft((to) => byId(to === "open" ? "reading-open" : "reading-back").focus());
 byId("reading-open").addEventListener("click", () => {
   if (last?.reading) void shell.thread(last.reading.id);
 });

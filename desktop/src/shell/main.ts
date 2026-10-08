@@ -56,6 +56,7 @@ delete process.env.ELECTRON_RUN_AS_NODE;
 const PAGES = join(import.meta.dirname, "pages");
 const PAGES_PRELOAD = join(import.meta.dirname, "pages-preload.cjs");
 const BRIDGE_PRELOAD = join(import.meta.dirname, "preload.cjs");
+const PANE_PRELOAD = join(import.meta.dirname, "pane-preload.cjs");
 const ASSETS = join(import.meta.dirname, "..", "..", "assets");
 // The app's version, as its package names it.
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf8")) as { version: string }).version;
@@ -2096,7 +2097,7 @@ if (!app.requestSingleInstanceLock()) {
     powerMonitor.on("resume", () => vm?.resume());
     const page = join(PAGES, "shell.html");
     main = new MainWindow({
-      states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed,
+      states, page, preload: PAGES_PRELOAD, panePreload: PANE_PRELOAD, dark: theme.dark, onChange: changed,
       // A quit already waiting for the threads asks nothing more: the window hides meanwhile, as with Keep running on.
       quitsOnClose: () => !preferences.get().keepRunning && !waiting,
       // Started at login: the window waits for the user, in the tray or at the next launch.

@@ -102,6 +102,7 @@ export interface MainWindowOptions {
   states: WindowStates;
   page: string;
   preload: string; // the page's
+  panePreload: string; // the pane's transcript's: it tells where the keyboard leaves it, and exposes nothing
   dark: boolean;
   onChange(): void; // what the centre shows changed
   quitsOnClose(): boolean; // asked as the window closes: true quits the app, through its quit's questions, where it would hide
@@ -341,7 +342,13 @@ export class MainWindow {
     }
     if (url === null || !web) return;
     const view = new WebContentsView({
-      webPreferences: { partition: partitionFor(web.agent.origin, web.agent.agentId), sandbox: true, contextIsolation: true, nodeIntegration: false },
+      webPreferences: {
+        partition: partitionFor(web.agent.origin, web.agent.agentId),
+        preload: this.options.panePreload,
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
     });
     view.setBackgroundColor(chrome(this.dark).overlay.color);
     view.setBounds(this.paneHole);
@@ -369,12 +376,12 @@ export class MainWindow {
       if (isMainFrame && !onTranscript(to)) void contents.loadURL(url).catch(() => {});
     });
     contents.on("will-attach-webview", (event) => event.preventDefault());
-    // Shift+Tab or Escape gives the keyboard back to the window's page, which puts it on the pane's Back.
-    contents.on("before-input-event", (event, input) => {
-      if (input.type !== "keyDown" || !(input.key === "Escape" || (input.key === "Tab" && input.shift))) return;
-      event.preventDefault();
+    // The keyboard left the transcript at one of its edges, as its preload heard it: back to the window's
+    // page, which puts it on the pane's Open or Back. Only the transcript's own top frame says so.
+    contents.ipc.on("pane:leave", (event, to) => {
+      if (event.senderFrame !== contents.mainFrame || !onTranscript(event.senderFrame.url)) return;
       this.window.webContents.focus();
-      this.window.webContents.send("shell:pane-left");
+      this.window.webContents.send("shell:pane-left", to === "open" ? "open" : "back");
     });
     contents.setWindowOpenHandler(({ url: opening }) => {
       openOutside(opening);
