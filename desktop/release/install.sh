@@ -477,6 +477,9 @@ uninstall() {
     apparmor_parser -R "$PROFILE" 2>/dev/null || true
     rm -f -- "$PROFILE"
   fi
+  # A version is whole by its mark, so each loses its mark first: stopped while it removes the
+  # tree, this leaves no version that a later install would take as whole, with files of it gone.
+  rm -rf -- "$ROOT"/versions/*/release.json
   rm -rf -- "$ROOT" "$(dirname "$RECORD")"
   rm -f -- "$LAUNCHER" "$ENTRY" "$POLICY"
   if command -v update-desktop-database >/dev/null; then update-desktop-database -q /usr/share/applications; fi

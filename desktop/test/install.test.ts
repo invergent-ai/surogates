@@ -59,6 +59,20 @@ for stop in $(seq 1000); do
 done
 `;
 
+// The system's rm, kept as /opt/cut/rm, until it is asked to remove /opt/surogate itself: there it
+// takes one file of each version and ends the script that runs it, as a kill does, with the rest of
+// the tree in place.
+const CUT = String.raw`#!/bin/sh
+for operand in "$@"; do
+  if [ "$operand" = /opt/surogate ]; then
+    /opt/cut/rm -f /opt/surogate/versions/*/resources/app/package.json
+    kill -KILL "$PPID"
+    exit 137
+  fi
+done
+exec /opt/cut/rm "$@"
+`;
+
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 
 // The program that holds Electron's place in a test's release: this computer's sleep, GNU's. Where
@@ -1044,5 +1058,24 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(stopped).toMatchObject({ status: 1, stdout: "Surogate Desktop: removed from this computer\n" });
     expect(stopped.stderr.trimEnd().split("\n").at(-1)).toBe('Surogate Desktop: stopped, as this step failed: runuser -u "$user" -- rm -f -- "$config/autostart/surogate.desktop"');
     expect(root("test -e /home/tester/rooted/autostart/surogate.desktop").status).toBe(0);
+  });
+
+  it("leaves no version that an install would take as whole, when it is stopped as it removes them", () => {
+    const installed = install();
+    expect(installed.status, installed.stderr).toBe(0);
+    writeFileSync(join(box.dir, "rm"), CUT, { mode: 0o755 });
+    expect(docker(["cp", join(box.dir, "rm"), `${box.container}:/opt/surogate-test/rm`]).status).toBe(0);
+    // Killed as its rm starts on the tree, a file of the version gone: a kill, Ctrl+C or a power cut part-way.
+    const cut = root("mkdir -p /opt/cut && cp -L /usr/bin/rm /opt/cut/rm && mv /usr/bin/rm /usr/bin/rm.away && cp /opt/surogate-test/rm /usr/bin/rm"
+      + "; /opt/surogate-test/install.sh --uninstall; said=$?; mv -f /usr/bin/rm.away /usr/bin/rm; exit $said");
+    expect(cut.status, cut.stderr).toBe(137);
+    expect(root("test -x /opt/surogate/versions/1.1.0/surogate && test ! -e /opt/surogate/versions/1.1.0/resources/app/package.json").status).toBe(0);
+    // The install after it unpacks the release again: found whole, the version would have stayed as it was left.
+    const again = install();
+    expect(again.status, again.stderr).toBe(0);
+    expect(again.stdout).toContain("Surogate Desktop: downloading Surogate Desktop 1.1.0\n");
+    expect(root("test -e /opt/surogate/current/resources/app/package.json").status).toBe(0);
+    expect(uninstall().status).toBe(0);
+    expect(root("test ! -e /opt/surogate").status).toBe(0);
   });
 });
