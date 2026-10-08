@@ -53,8 +53,10 @@ cp "$VM_MANIFEST" "$top/resources/vm/manifest.json"
 cp ../web/public/favicon.svg "$top/resources/surogate.svg"
 cp release/install.sh "$top/bin/surogate-apply-update"
 
-# Root installs it: nothing in it is writable but by its owner, whatever umask built it.
-chmod -R u+w,go-w,a+rX "$top"
+# Root installs it: nothing in it is writable but by its owner, whatever umask built it, and
+# nothing has a set-id or sticky bit, whatever folder it was built in: every folder made under one
+# that hands its group on has the bit, and the root helper refuses a release that lists one.
+chmod -R u+w,go-w,a+rX,a-st "$top"
 mkdir -p "$OUT"
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@${SOURCE_DATE_EPOCH:-$(git -C "$DESKTOP" log -1 --format=%ct)}" \
   -C "$stage" -czf "$OUT/$name.tar.gz" "$name"

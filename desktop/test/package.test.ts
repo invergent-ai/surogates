@@ -3,7 +3,7 @@
 // it needs npm run build first, the npm cache npm ci left, xvfb-run, and about 1 GB of /tmp.
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,9 +60,22 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarba
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), "package-test-"));
     writeFileSync(join(dir, "vm-manifest.json"), vmManifest);
-    const packed = spawnSync(join(DESKTOP, "scripts", "package.sh"), [VERSION, join(dir, "vm-manifest.json"), join(dir, "out")], {
-      encoding: "utf8", env: { ...process.env, SOURCE_DATE_EPOCH: "1790000000" }, maxBuffer: 16 * 1024 * 1024,
-    });
+    // Built as in a checkout under a folder that hands its group on: every folder made there
+    // has the set-gid bit, here the build's own dist, and so has the folder for temporary files.
+    const dist = join(DESKTOP, "dist");
+    const mode = statSync(dist).mode & 0o7777;
+    mkdirSync(join(dir, "tmp"));
+    chmodSync(join(dir, "tmp"), 0o2775);
+    chmodSync(dist, mode | 0o2000);
+    const packed = (() => {
+      try {
+        return spawnSync(join(DESKTOP, "scripts", "package.sh"), [VERSION, join(dir, "vm-manifest.json"), join(dir, "out")], {
+          encoding: "utf8", env: { ...process.env, SOURCE_DATE_EPOCH: "1790000000", TMPDIR: join(dir, "tmp") }, maxBuffer: 16 * 1024 * 1024,
+        });
+      } finally {
+        chmodSync(dist, mode);
+      }
+    })();
     expect(packed.status, packed.stderr).toBe(0);
     expect(packed.stdout.trim().split("\n").at(-1)).toBe(join(dir, "out", `${NAME}.tar.gz`));
     mkdirSync(join(dir, "x"));
@@ -98,6 +111,10 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarba
     expect(spawnSync("find", [top, "!", "-type", "l", "-perm", "/022"], { encoding: "utf8" }).stdout).toBe("");
     const listing = spawnSync("tar", ["-tvzf", join(dir, "out", `${NAME}.tar.gz`)], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout;
     expect(listing.split("\n").filter((line) => line && !line.includes(" 0/0 "))).toEqual([]);
+    // What the root helper refuses is not in it, whatever the build's folders hand on: no set-id
+    // bit, and no member that is not a file, a folder or a link, each with the one mode of its kind.
+    expect(listing.split("\n").filter((line) => /^(.{3}|.{6}|.{9})[sStT]/.test(line))).toEqual([]);
+    expect(listing.split("\n").filter((line) => line && !/^(-rw-r--r--|-rwxr-xr-x|drwxr-xr-x|lrwxrwxrwx) /.test(line))).toEqual([]);
   });
 
   it("gives Electron the app's fuses: never Node, no NODE_OPTIONS, no inspector, and its cookies encrypted", async () => {
