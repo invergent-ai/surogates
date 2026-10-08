@@ -120,12 +120,12 @@ describe("the Overview pane", () => {
     const { shell, page, client } = await opened();
     await page.click(`[data-thread="${QUESTION}"]`);
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${QUESTION}`);
-    expect(await page.textContent("#title")).toBe("Check the revenue figures");
+    await expect.poll(() => page.textContent("#title")).toBe("Check the revenue figures");
     expect(await page.textContent("#to-project")).toBe("Quarterly report");
     expect(await views(shell)).toBe(1);
     await page.click("#to-project");
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${REPORT}`);
-    expect(await page.isVisible("#to-project")).toBe(false);
+    await expect.poll(() => page.isVisible("#to-project")).toBe(false);
     expect(await page.textContent("#title")).toBe("Quarterly report");
   });
 
@@ -147,7 +147,7 @@ describe("the Overview pane", () => {
       }, [REPORT, QUESTION]).catch(() => {});
       return client.url();
     }).toBe(`${origin}/chat/${REPORT}`);
-    expect(await page.isVisible("#to-project")).toBe(false);
+    await expect.poll(() => page.isVisible("#to-project")).toBe(false);
     await expect.poll(() => page.textContent('[data-group="waiting"] .count')).toBe("2");
   });
 
@@ -386,10 +386,11 @@ describe("the Overview pane, at its edges", () => {
       fake.lists = 0;
       for (let count = 0; count < 5; count++) fake.changed(project, null);
     }, REPORT);
+    const lists = () => client.evaluate(() => (window as unknown as { fakeProjects: Served }).fakeProjects.lists);
+    await expect.poll(lists).toBeGreaterThanOrEqual(1);
+    // Then a while for any more the changes would ask for.
     await pause(1_000);
-    const lists = await client.evaluate(() => (window as unknown as { fakeProjects: Served }).fakeProjects.lists);
-    expect(lists).toBeGreaterThanOrEqual(1);
-    expect(lists).toBeLessThanOrEqual(2);
+    expect(await lists()).toBeLessThanOrEqual(2);
   });
 
   it("keeps a long file name in the pane, and draws only the groups that have threads", async () => {
@@ -497,7 +498,7 @@ describe("an account's projects", () => {
     expect(await page.textContent("#title")).toBe(new URL(origin).host);
     expect(await page.isVisible(`#projects [data-project="${REPORT}"]`)).toBe(false);
     expect(await rows(page)).toBe(0);
-    expect(await page.textContent("#user-name")).toBe(OTHER.name);
+    await expect.poll(() => page.textContent("#user-name")).toBe(OTHER.name);
   });
 
   it("leave the next account no failure line of theirs", async () => {
