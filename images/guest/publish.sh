@@ -92,25 +92,39 @@ case "$VERB" in
     mkdir -p "$OUT"
     : "${GITHUB_REPOSITORY:?}"
     status="$(manifest -o /dev/null -I)"
-    # The manifest the release that published the key attached to itself, from the API's list. A
-    # key in the bucket may be one whose release run has yet to attach it, as when a second
-    # release is pushed while the first runs: waited for, at most for about a release's run.
+    # The manifest the release that published the key attached to itself, from the API's list: each
+    # release that carries it, "<tag> <asset's url>", newest first. A key in the bucket may be one
+    # whose release run has yet to attach it, as when a second release is pushed while the first
+    # runs: waited for, at most for about a release's run.
     lookup() {
-      gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq ".[].assets[] | select(.name == \"desktop-vm-$key.json\") | .url" | sed -n 1p
+      gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+        --jq ".[] | .tag_name as \$tag | .assets[] | select(.name == \"desktop-vm-$key.json\") | \"\(\$tag) \(.url)\""
     }
-    asset="$(lookup)"
+    assets="$(lookup)"
     for ((poll = 0; poll < ${PUBLISH_POLLS:-15}; poll++)); do
-      [ -z "$asset" ] && [ "$status" = 200 ] || break
+      [ -z "$assets" ] && [ "$status" = 200 ] || break
       sleep "${PUBLISH_POLL_S:-60}"
-      asset="$(lookup)"
+      assets="$(lookup)"
     done
-    if [ -z "$asset" ]; then
+    if [ -z "$assets" ]; then
       [ "$status" = 404 ] \
         || fail "desktop/vm/$key is in the bucket, but no release of ours carries its manifest (desktop-vm-$key.json): re-run this job once the release run that sent it has attached it, or attach that run's desktop-vm-manifest artifact to its release as desktop-vm-$key.json"
       echo missing
       exit 0
     fi
-    gh api -H "Accept: application/octet-stream" "$asset" > "$OUT/manifest.json"
+    # Every release's copy the same bytes: one that differs names an image another release's users never download.
+    first=""
+    while read -r tag url; do
+      gh api -H "Accept: application/octet-stream" "$url" > "$OUT/release.json"
+      if [ -z "$first" ]; then
+        first="$tag"
+        mv "$OUT/release.json" "$OUT/manifest.json"
+      elif ! cmp -s "$OUT/release.json" "$OUT/manifest.json"; then
+        rm -f "$OUT/release.json"
+        fail "releases $first and $tag carry different desktop-vm-$key.json"
+      fi
+    done <<< "$assets"
+    rm -f "$OUT/release.json"
     [ "$(keyOf "$OUT/manifest.json")" = "$key" ] || fail "desktop-vm-$key.json is not the manifest of desktop/vm/$key"
     check
     echo published

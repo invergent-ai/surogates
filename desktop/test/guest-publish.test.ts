@@ -49,16 +49,17 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
     writeFileSync(file, bytes);
     expect(signed("-o", "/dev/null", "-T", file, "-H", `x-amz-content-sha256: ${sha256(bytes)}`, `${endpoint}/${bucket}/${path}`).status).toBe(0);
   };
-  // The repository's releases, as GitHub's API lists them: one, which carries *manifest* as
-  // desktop-vm-<key>.json when given, as the release that published the key attaches it.
-  const released = (manifest?: Buffer) => {
-    const assets = [{ name: "surogates-1.0.0.tar.gz", url: "file:///nowhere" }];
-    if (manifest) {
-      writeFileSync(join(dir, "released.json"), manifest);
-      assets.push({ name: `desktop-vm-${key}.json`, url: `file://${join(dir, "released.json")}` });
-    }
+  // The repository's releases, as GitHub's API lists them, newest first: one that carries no
+  // manifest, and one more for each of *manifests*, which carries it as desktop-vm-<key>.json, as
+  // a release that ships the key attaches it.
+  const released = (...manifests: Buffer[]) => {
+    const releases = manifests.map((manifest, n) => {
+      writeFileSync(join(dir, `released-${n}.json`), manifest);
+      return { tag_name: `v1.${manifests.length - n}.0`, assets: [{ name: `desktop-vm-${key}.json`, url: `file://${join(dir, `released-${n}.json`)}` }] };
+    });
+    releases.push({ tag_name: "v1.0.0", assets: [{ name: "surogates-1.0.0.tar.gz", url: "file:///nowhere" }] });
     // Whole at each read, as the API's list is.
-    writeFileSync(join(dir, "releases.json.new"), JSON.stringify([{ tag_name: "v1.0.0", assets }]));
+    writeFileSync(join(dir, "releases.json.new"), JSON.stringify(releases));
     renameSync(join(dir, "releases.json.new"), join(dir, "releases.json"));
   };
 
@@ -188,6 +189,18 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
       out = mkdtempSync(join(dir, "out-"));
       expect(publish("fetch")).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: desktop/vm/${key}'s manifest does not name rootfs.img.zst and vmlinuz.zst\n` });
     }
+  });
+
+  it("takes a key's manifest only when every release that carries it carries the same bytes, and names two that differ", () => {
+    built();
+    const sent = sentFiles();
+    expect(publish("send").status).toBe(0);
+    released(sent["manifest.json"]!, sent["manifest.json"]!);
+    expect(publish("fetch")).toMatchObject({ status: 0, stdout: "published\n" });
+    // Another build's manifest of the key, as a key sent twice leaves: one release's users download bytes the other's never named.
+    released(sent["manifest.json"]!, Buffer.from(sent["manifest.json"]!.toString().replace(/"downloadSha256":"[0-9a-f]+"/, `"downloadSha256":"${"0".repeat(64)}"`)));
+    out = mkdtempSync(join(dir, "out-"));
+    expect(publish("fetch")).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: releases v1.2.0 and v1.1.0 carry different desktop-vm-${key}.json\n` });
   });
 
   it("keeps the bucket's secret off curl's command line, where any process of the runner's could read it", () => {
