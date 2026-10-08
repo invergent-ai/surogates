@@ -467,10 +467,12 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       + " && chmod 600 /home/tester/updates/* && chown -R tester: /home/tester/updates && cp /home/tester/manifest.json /root/updates/";
     const swap = "mv /home/tester/updates /home/tester/updates.real && ln -s /root/updates /home/tester/updates";
     const user = "$(id -u tester)";
+    // What that user cannot read is said as not theirs to read, and never as what root would find it to be.
+    const theirs = "cannot be read by tester: name it by its whole path, in a folder of that user's own\n";
     for (const asked of [`PKEXEC_UID=${user}`, `SUDO_UID=${user}`, `PKEXEC_UID=0 SUDO_UID=${user}`]) {
       expect(root(fresh).status).toBe(0);
       expect(held(swap, "/home/tester/updates/manifest.json", undefined, asked), asked)
-        .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: /home/tester/updates/manifest.json is not a downloaded release's file\n" });
+        .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /home/tester/updates/manifest.json ${theirs}` });
     }
     expect(root("test -e /opt/surogate/current").status).toBe(1);
     // What names the user is a number, of a user of this computer.
@@ -489,10 +491,27 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const numbered = root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/numbered/manifest.json /srv/numbered/manifest.json.sig /srv/numbered/release.tar.gz; said=$?; sed -i '$d' /etc/passwd; exit $said`);
     expect(numbered).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: PKEXEC_UID names no user of this computer\n" });
     expect(root("test -e /opt/surogate/current").status).toBe(1);
+    // So it is with a release kept in root's home, as a root shell that sudo started would name one;
+    // with a name that is no whole path, which under pkexec is looked for in root's home; with a
+    // file that is there for root and missing for the user; and with one the user reads only as a
+    // member of another group.
+    expect(root(`rm -rf /root/kept /srv/shared && mkdir -m 700 /root/kept && cp ${files()} /root/kept/ && (getent group shared >/dev/null || groupadd shared) && gpasswd -a tester shared >/dev/null`
+      + ` && mkdir -m 750 /srv/shared && cp ${files()} /srv/shared/ && chgrp -R shared /srv/shared`).status).toBe(0);
+    expect(root(`SUDO_UID=${user} /opt/surogate-test/install.sh --apply /root/kept/manifest.json /root/kept/manifest.json.sig /root/kept/release.tar.gz`))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /root/kept/manifest.json ${theirs}` });
+    expect(root(`cd /root/kept && PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply manifest.json manifest.json.sig release.tar.gz`))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: manifest.json ${theirs}` });
+    expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /home/tester/manifest.json /root/kept/manifest.json.sig /home/tester/release.tar.gz`))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /root/kept/manifest.json.sig ${theirs}` });
+    expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/shared/manifest.json /srv/shared/manifest.json.sig /srv/shared/release.tar.gz`))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /srv/shared/manifest.json ${theirs}` });
+    // Root, asked for no one, is told what it was before: the file is its own to read.
+    expect(root("/opt/surogate-test/install.sh --apply /root/kept/none.json /root/kept/manifest.json.sig /root/kept/release.tar.gz"))
+      .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: /root/kept/none.json is not a downloaded release's file\n" });
     // The user's own files, in a folder only they open, are read as theirs.
     expect(root(fresh).status).toBe(0);
-    const theirs = "/home/tester/updates/manifest.json /home/tester/updates/manifest.json.sig /home/tester/updates/release.tar.gz";
-    expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply ${theirs}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    const own = "/home/tester/updates/manifest.json /home/tester/updates/manifest.json.sig /home/tester/updates/release.tar.gz";
+    expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply ${own}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
   });
 
   it("copies no more than a release's own bytes, whatever its files become once it has started, and leaves nothing of an apply it refused", () => {
@@ -1152,7 +1171,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(root(`mkdir -m 700 /root/updates && cp ${updates}/manifest.json /root/updates/ && ln -s /root/updates /home/tester/linked`).status).toBe(0);
     for (const run of ["pkexec", "sudo"]) {
       const through = as("tester", `PKEXEC_UID=0 SUDO_UID=0 ${run} /opt/surogate/bin/surogate-apply-update --apply /home/tester/linked/manifest.json ${updates}/manifest.json.sig ${updates}/release.tar.gz; exit $?`);
-      expect(through, run).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: /home/tester/linked/manifest.json is not a downloaded release's file\n" });
+      expect(through, run).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: /home/tester/linked/manifest.json cannot be read by tester: name it by its whole path, in a folder of that user's own\n" });
     }
     expect(current()).toBe("/opt/surogate/versions/1.1.0");
     // Not exec'd by bash, as the app spawns it: polkit reads its caller's start, and docker exec's has none.

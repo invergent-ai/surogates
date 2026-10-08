@@ -27,9 +27,9 @@ settings() {
   # How long an apply waits for another's lock, and for each read of a file it is handed, in seconds.
   LOCK_WAIT=300
   READ_WAIT=300
-  # Who reads the files an apply is handed, by user and group number: root, unless the helper was
-  # run for another user (asker).
-  READER=(0 0)
+  # Who reads the files an apply is handed, by user and group number, and by name: root, unless the
+  # helper was run for another user (asker).
+  READER=(0 0 root)
   # Folders of this run's own, which go however it ends.
   OWN=()
   # The release keys' public halves: a release's manifest is signed by the private half of one of
@@ -170,15 +170,15 @@ lock() {
 # caller's environment held. Nothing else is asked who it was. Naming a user only ever lowers the
 # helper's rights to read, from root's to that user's.
 asker() {
-  local name uid gid
+  local name uid gid entry
   for name in PKEXEC_UID SUDO_UID; do
     uid="${!name:-}"
     [ -n "$uid" ] || continue
     [[ "$uid" =~ ^(0|[1-9][0-9]{0,9})$ ]] || fail "$name is not a user's number"
     # Compared as it is written: what is no number is then never taken for root's.
     [ "$uid" != 0 ] || continue
-    gid="$(getent passwd "$uid" | cut -d: -f4)" && [[ "$gid" =~ ^[0-9]+$ ]] || fail "$name names no user of this computer"
-    READER=("$uid" "$gid")
+    entry="$(getent passwd "$uid")" && gid="$(cut -d: -f4 <<<"$entry")" && [[ "$gid" =~ ^[0-9]+$ ]] || fail "$name names no user of this computer"
+    READER=("$uid" "$gid" "${entry%%:*}")
     # The reader is that user, and no other: setpriv takes digits for a user's name where one is so
     # named, and counts a number past the last one from 0 again.
     [ "$(as_reader id -u 2>/dev/null):$(as_reader id -g 2>/dev/null)" = "$uid:$gid" ] || fail "$name names no user of this computer"
@@ -194,6 +194,15 @@ as_reader() {
   timeout --foreground -s KILL "$READ_WAIT" setpriv --reuid "${READER[0]}" --regid "${READER[1]}" --clear-groups "$@" 9<&- </dev/null
 }
 
+# Refuses file $1, which the reader could not read as a file. Root never looks at a file it is
+# handed, so nothing is said of what the file is: where the reader is another user, only that it
+# is not theirs to read, and what makes one so. A name that is no whole path is looked for where
+# the helper was started, which under pkexec is root's home.
+unread() {
+  [ "${READER[0]}" -ne 0 ] || fail "$(named "$1") is not a downloaded release's file"
+  fail "$(named "$1") cannot be read by $(named "${READER[2]}"): name it by its whole path, in a folder of that user's own"
+}
+
 # Copies file $1, which an apply was handed, to $2 in root's staging: read once, as the user who
 # asked, never through a link and never waiting on a pipe, whatever it has become since it was
 # named. A pipe gives an empty copy at once. No more than $3 bytes and one are copied, whatever the
@@ -207,7 +216,7 @@ taken() {
   [ "${ends[1]}" -eq 0 ] || fail "$ROOT/staging could not be written: is its disk full?"
   # More than its own bytes: the pipe then closed on the reader, and how it ended says nothing.
   [ "$(stat -c %s "$copy")" -le "$most" ] || return 1
-  [ "${ends[0]}" -eq 0 ] || fail "$(named "$file") is not a downloaded release's file"
+  [ "${ends[0]}" -eq 0 ] || unread "$file"
 }
 
 # Applies a release as root: its manifest $1, signature $2 and tarball $3, which the user who
@@ -222,7 +231,7 @@ apply() {
   local manifest="$1" signature="$2" tarball="$3" file
   # A folder or a missing file is refused here; a link, as each is copied, below.
   for file in "$manifest" "$signature" ${tarball:+"$tarball"}; do
-    as_reader test -f "$file" || fail "$(named "$file") is not a downloaded release's file"
+    as_reader test -f "$file" || unread "$file"
   done
   # Before the tree is touched: a removal that runs now takes it away, and this apply makes it again.
   lock
