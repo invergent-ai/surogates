@@ -196,6 +196,10 @@ export class BrowserProxy {
       },
       (answer) => {
         response.writeHead(answer.statusCode ?? 502, passed(answer.headers));
+        // A site that hangs up partway through its answer: the browser's is cut short too, not left open.
+        answer.once("close", () => {
+          if (!answer.complete) response.destroy();
+        });
         answer.pipe(response);
       },
     );

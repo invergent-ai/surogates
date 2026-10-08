@@ -68,6 +68,11 @@ beforeEach(async () => {
       return void res.once("close", () => clearInterval(streaming)).writeHead(200);
     }
     if (req.url === "/never") return;
+    // A site that hangs up partway through its answer.
+    if (req.url === "/cut") {
+      res.writeHead(200, { "content-length": "100000" }).write("x".repeat(1000));
+      return void setTimeout(() => res.socket?.destroy(), 50);
+    }
     // A site that asks for a proxy's sign-in, as only a proxy may.
     if (req.url === "/sign-in") return void res.writeHead(407, { "proxy-authenticate": 'Basic realm="site"' }).end();
     res.writeHead(201, { "content-type": "text/plain" }).end("hello from the site");
@@ -261,6 +266,21 @@ describe("the browser's proxy", () => {
       asked.on("error", () => {});
       asked.end();
     });
+    expect(await stillOpen()).toBe(0);
+  });
+
+  it("ends the browser's plain answer when its site hangs up partway through it", async () => {
+    const ended = await new Promise<string>((done) => {
+      const asked = request({ host: "127.0.0.1", port, path: "http://example.com/cut", headers: { host: "example.com" } }, (answer) => {
+        answer.resume();
+        answer.once("end", () => done("ended whole"));
+        answer.once("close", () => done(answer.complete ? "ended whole" : "cut short"));
+      });
+      asked.on("error", () => done("cut short"));
+      asked.end();
+      setTimeout(() => done("still open"), 2_000);
+    });
+    expect(ended).toBe("cut short");
     expect(await stillOpen()).toBe(0);
   });
 
