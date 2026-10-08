@@ -1364,7 +1364,62 @@ describe("AgentChat", () => {
     // A chat that could not be made: the host hears why.
     refuse = true;
     await draw({ firstMessage: { id: "q-4", text: "Nowhere to work" } });
-    expect(told).toEqual([["q-1", null], ["q-3", null], ["q-4", "No folder was chosen for this chat"]]);
+    // The one a chat already open would not take was said too, once.
+    expect(told).toEqual([
+      ["q-1", null],
+      ["q-2", "Another chat opened before this one was made, so nothing was sent."],
+      ["q-3", null],
+      ["q-4", "No folder was chosen for this chat"],
+    ]);
+  });
+
+  it.each([false, true])("tells the host's callback of now how its first message went, and of one still to send as the chat goes (StrictMode: %s)", async (strict) => {
+    const stream = new FakeEventStream();
+    // The chat is made only once the test says so.
+    let make: (made: AgentChatSession) => void = () => {};
+    const made = new Promise<AgentChatSession>((resolve) => {
+      make = resolve;
+    });
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(stream),
+      createSession: () => made,
+      async sendMessage() {
+        return { eventId: 1, status: "accepted" };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const told: Array<[string, string, string | null]> = [];
+    const heardBy = (name: string) => (id: string, error: string | null) => told.push([name, id, error]);
+    const draw = async (props: Partial<Parameters<typeof AgentChat>[0]>) => {
+      const chat = <AgentChat adapter={adapter} sessionId={null} {...props} />;
+      await act(async () => {
+        root?.render(strict ? <StrictMode>{chat}</StrictMode> : chat);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    };
+
+    // The host's callback is another by the time the chat is made: that one hears.
+    await draw({ firstMessage: { id: "q-1", text: "Draft the March invoices" }, onFirstMessageSent: heardBy("first") });
+    await draw({ firstMessage: { id: "q-1", text: "Draft the March invoices" }, onFirstMessageSent: heardBy("second") });
+    await act(async () => {
+      make(session("created"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(told).toEqual([["second", "q-1", null]]);
+    // One the chat may not send yet, and then the chat is gone: the host hears it never went.
+    await draw({ disabled: true, firstMessage: { id: "q-2", text: "Never sent" }, onFirstMessageSent: heardBy("second") });
+    expect(told).toHaveLength(1);
+    await act(async () => {
+      root?.unmount();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    root = null;
+    expect(told.slice(1)).toEqual([["second", "q-2", "The page left the new chat before it was made, so nothing was sent."]]);
   });
 
   it("disables the composer and workspace upload when chat is disabled", async () => {
