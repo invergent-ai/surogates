@@ -121,11 +121,12 @@ function lab(release: string, setup: string[], run: string[] = []) {
 
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --apply, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
   // What --apply needs, on a desktop's baseline: openssl, jq and bubblewrap, which the install
-  // script installs, and nothing of Surogate's.
+  // script installs, and nothing of Surogate's. /opt/surogate is a small disk of the container's
+  // own, in memory: a copy with no bound fills that, and never this computer's disk.
   const { it: box, docker, root, as, releaseOf, manifestOf, current, versions } = lab(release, [
     "RUN apt-get update && apt-get install -y --no-install-recommends openssl jq bubblewrap && rm -rf /var/lib/apt/lists/*",
     "RUN useradd -m tester",
-  ]);
+  ], ["--tmpfs", "/opt/surogate:exec,mode=755,size=512m"]);
   // The files as the app leaves them for the helper: in the user's cache, copied into the container.
   const files = (manifest = "/home/tester/manifest.json", tarball = "/home/tester/release.tar.gz") => `${manifest} /home/tester/manifest.json.sig ${tarball}`;
   const stage = (tarball: string) => {
@@ -137,8 +138,21 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     return root(`/opt/surogate-test/${script} --apply ${files()}`);
   };
 
+  // The helper stopped where it waits for the update's lock, after every check it makes of a name,
+  // while the user runs *swap*; then let go on. *asked* is how pkexec or sudo names the user it
+  // runs the helper for.
+  const held = (swap: string, manifest?: string, tarball?: string, asked = "") => root([
+    "mkdir -p /opt/surogate/staging && exec 8</opt/surogate/staging && flock 8",
+    `${asked} timeout 60 /opt/surogate-test/install.sh --apply ${files(manifest, tarball)} 8<&- &`,
+    "for try in $(seq 200); do pgrep -x flock >/dev/null && break; sleep 0.05; done",
+    "pgrep -x flock >/dev/null || exit 9",
+    `runuser -u tester -- bash -c '${swap}'`,
+    "flock -u 8",
+    "wait $!",
+  ].join("\n"));
+
   beforeEach(() => {
-    expect(root("rm -rf /opt/surogate").status).toBe(0);
+    expect(root("find /opt/surogate -mindepth 1 -delete").status).toBe(0);
   });
 
   it("applies a signed release into its version folder, root's alone, with the system's bwrap, and switches current to it", () => {
@@ -211,6 +225,78 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(docker(["cp", join(box.dir, "impatient.sh"), `${box.container}:/opt/surogate-test/impatient.sh`]).status).toBe(0);
     expect(root(`exec 8</opt/surogate/staging && flock 8 && /opt/surogate-test/impatient.sh --apply ${files()} 8<&-`))
       .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: another install or update of Surogate Desktop is still running: try again once it has finished\n" });
+  });
+
+  it("reads each file as the user who asked, so that a folder swapped for a link gets them nothing they could not read themselves", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    // Where the app downloads an update, a folder of the user's own; and the signed manifest where only root reads it.
+    const fresh = "rm -rf /home/tester/updates /home/tester/updates.real /root/updates && mkdir -m 700 /home/tester/updates /root/updates"
+      + " && cp /home/tester/manifest.json /home/tester/manifest.json.sig /home/tester/release.tar.gz /home/tester/updates/"
+      + " && chmod 600 /home/tester/updates/* && chown -R tester: /home/tester/updates && cp /home/tester/manifest.json /root/updates/";
+    const swap = "mv /home/tester/updates /home/tester/updates.real && ln -s /root/updates /home/tester/updates";
+    const user = "$(id -u tester)";
+    for (const asked of [`PKEXEC_UID=${user}`, `SUDO_UID=${user}`, `PKEXEC_UID=0 SUDO_UID=${user}`]) {
+      expect(root(fresh).status).toBe(0);
+      expect(held(swap, "/home/tester/updates/manifest.json", undefined, asked), asked)
+        .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: /home/tester/updates/manifest.json is not a downloaded release's file\n" });
+    }
+    expect(root("test -e /opt/surogate/current").status).toBe(1);
+    // What names the user is a number, of a user of this computer.
+    expect(root(`PKEXEC_UID=tester /opt/surogate-test/install.sh --apply ${files()}`))
+      .toMatchObject({ status: 1, stderr: "Surogate Desktop: PKEXEC_UID is not a user's number\n" });
+    expect(root(`SUDO_UID=4242 /opt/surogate-test/install.sh --apply ${files()}`))
+      .toMatchObject({ status: 1, stderr: "Surogate Desktop: SUDO_UID names no user of this computer\n" });
+    // The user's own files, in a folder only they open, are read as theirs.
+    expect(root(fresh).status).toBe(0);
+    const theirs = "/home/tester/updates/manifest.json /home/tester/updates/manifest.json.sig /home/tester/updates/release.tar.gz";
+    expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply ${theirs}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+  });
+
+  it("copies no more than a release's own bytes, whatever its files become once it has started, and leaves nothing of an apply it refused", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    expect(root("mkdir -p /opt/surogate/staging /opt/surogate/versions").status).toBe(0);
+    const room = () => Number(root("df --output=avail -k /opt/surogate | tail -n 1").stdout);
+    const free = room();
+    // Refused, for *file* or with *said*, with nothing left in staging and the disk's room as it was.
+    const nothing = (refused: ReturnType<typeof root>, file: string, said = `${file} is not a downloaded release's file`) => {
+      expect(refused, file).toMatchObject({ status: 1, stdout: "", stderr: expect.stringMatching(new RegExp(`^Surogate Desktop: ${said}\n$`)) });
+      expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
+      expect(free - room()).toBeLessThan(64);
+    };
+    // The tarball swapped for one of 10 GiB while the helper waited: the disk has no room for it, and none of it is copied.
+    stage(tarball);
+    nothing(held("rm /home/tester/release.tar.gz && truncate -s 10G /home/tester/release.tar.gz"), "/home/tester/release.tar.gz",
+      "/opt/surogate needs 40960 MB free to apply this release, and has \\d+ MB");
+    // A file that holds more than its size says, as /proc's do: no more than that size is its copy.
+    stage(tarball);
+    nothing(root(`/opt/surogate-test/install.sh --apply ${files(undefined, "/proc/cpuinfo")}`), "/proc/cpuinfo");
+    // Its folder swapped for a link to /dev: the name's last part, zero, is no link, and has no end.
+    stage(tarball);
+    expect(root("rm -rf /home/tester/dl /home/tester/dl.real && mkdir /home/tester/dl && cp /home/tester/release.tar.gz /home/tester/dl/zero && chown -R tester: /home/tester/dl").status).toBe(0);
+    nothing(held("mv /home/tester/dl /home/tester/dl.real && ln -s /dev /home/tester/dl", undefined, "/home/tester/dl/zero"), "/home/tester/dl/zero");
+    // A manifest and a signature have sizes of their own.
+    expect(root("truncate -s 150M /home/tester/big.sig && truncate -s 1M /home/tester/big.json").status).toBe(0);
+    nothing(root(`/opt/surogate-test/install.sh --apply /home/tester/manifest.json /home/tester/big.sig /home/tester/release.tar.gz`), "/home/tester/big.sig");
+    nothing(root(`/opt/surogate-test/install.sh --apply ${files("/home/tester/big.json")}`), "/home/tester/big.json");
+    // The room a tarball needs is counted without overflow: four times 2^62 bytes is not 0.
+    expect(root(`truncate -s 4611686018427387904 /dev/shm/huge.tar.gz && /opt/surogate-test/install.sh --apply ${files(undefined, "/dev/shm/huge.tar.gz")}; said=$?; rm -f /dev/shm/huge.tar.gz; exit $said`))
+      .toMatchObject({ status: 1, stderr: expect.stringMatching(/^Surogate Desktop: \/opt\/surogate needs 17592186044416 MB free to apply this release, and has \d+ MB\n$/) });
+    expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
+    // The honest release after them is applied.
+    expect(apply(tarball)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
+  });
+
+  it("clears what a killed apply left in staging before it measures the room", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    // As an apply killed while it copied leaves it, here with all the room the disk had.
+    expect(root("mkdir -p /opt/surogate/staging/apply.killed && head -c 1G /dev/zero >/opt/surogate/staging/apply.killed/release.tar.gz; df --output=avail -k /opt/surogate | tail -n 1").stdout.trim()).toBe("0");
+    expect(apply(tarball)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
   });
 
   it("applies a release signed by either key it lists, as a rotation needs, and refuses one signed by neither", () => {
@@ -471,6 +557,14 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       expect(docker(["cp", from, `${box.container}:${updates}/${to}`]).status).toBe(0);
     }
     expect(root("chown -R tester /home/tester/.cache").status).toBe(0);
+    // The helper reads as the user pkexec or sudo ran it for, whatever that user's own environment
+    // says of who asked: a signed manifest only root reads, behind a link of the user's, is not read.
+    expect(root(`mkdir -m 700 /root/updates && cp ${updates}/manifest.json /root/updates/ && ln -s /root/updates /home/tester/linked`).status).toBe(0);
+    for (const run of ["pkexec", "sudo"]) {
+      const through = as("tester", `PKEXEC_UID=0 SUDO_UID=0 ${run} /opt/surogate/bin/surogate-apply-update --apply /home/tester/linked/manifest.json ${updates}/manifest.json.sig ${updates}/release.tar.gz; exit $?`);
+      expect(through, run).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: /home/tester/linked/manifest.json is not a downloaded release's file\n" });
+    }
+    expect(current()).toBe("/opt/surogate/versions/1.1.0");
     // Not exec'd by bash, as the app spawns it: polkit reads its caller's start, and docker exec's has none.
     const applied = as("tester", `pkexec /opt/surogate/bin/surogate-apply-update --apply ${updates}/manifest.json ${updates}/manifest.json.sig ${updates}/release.tar.gz; exit $?`);
     expect(applied, applied.stderr).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.3.0 is installed\n" });

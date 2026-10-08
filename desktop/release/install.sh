@@ -19,8 +19,14 @@ settings() {
   ENTRY=/usr/share/applications/surogate.desktop
   PROFILE=/etc/apparmor.d/surogate-desktop
   POLICY=/usr/share/polkit-1/actions/ai.invergent.surogate.update.policy
-  # How long an apply waits for another's lock, in seconds.
+  # How long an apply waits for another's lock, and for each read of a file it is handed, in seconds.
   LOCK_WAIT=300
+  READ_WAIT=300
+  # Who reads the files an apply is handed, by user and group number: root, unless the helper was
+  # run for another user (asker).
+  READER=(0 0)
+  # Folders of this run's own, which go however it ends.
+  OWN=()
   # The release keys' public halves: a release's manifest is signed by the private half of one of
   # them (Ed25519). A rotation lists the old key and the new for one release, which the old signs.
   RELEASE_KEYS=(
@@ -37,6 +43,11 @@ fail() {
 
 say() {
   echo "Surogate Desktop: $*"
+}
+
+# Run as main ends, however it ends.
+cleanup() {
+  [ "${#OWN[@]}" -eq 0 ] || rm -rf -- "${OWN[@]}"
 }
 
 # Ubuntu 24.04 LTS or a later LTS release, on x64. Nothing is changed before this passes.
@@ -86,53 +97,91 @@ in_use() {
   return 1
 }
 
+# The user the helper was run for, who reads the files it is handed: pkexec's caller, or sudo's.
+# Each names that user by number in the helper's environment, and sets it itself, whatever its own
+# caller's environment held. Nothing else is asked who it was. Naming a user only ever lowers the
+# helper's rights to read, from root's to that user's.
+asker() {
+  local name uid gid
+  for name in PKEXEC_UID SUDO_UID; do
+    uid="${!name:-}"
+    [ -n "$uid" ] || continue
+    [[ "$uid" =~ ^(0|[1-9][0-9]{0,9})$ ]] || fail "$name is not a user's number"
+    [ "$uid" -ne 0 ] || continue
+    gid="$(getent passwd "$uid" | cut -d: -f4)" && [[ "$gid" =~ ^[0-9]+$ ]] || fail "$name names no user of this computer"
+    READER=("$uid" "$gid")
+    return 0
+  done
+}
+
+# Runs "$@" as the user who reads an apply's files, in that user's own group and no other, with
+# none of the helper's open files, and for READ_WAIT at most: a filesystem of the user's own may
+# never answer.
+as_reader() {
+  timeout -s KILL "$READ_WAIT" setpriv --reuid "${READER[0]}" --regid "${READER[1]}" --clear-groups "$@" 9<&- </dev/null
+}
+
+# Copies file $1, which an apply was handed, to $2 in root's staging: read once, as the user who
+# asked, never through a link and never waiting on a pipe, whatever it has become since it was
+# named. A pipe gives an empty copy at once. No more than $3 bytes are its own: root's end of the
+# pipe counts them, and a file that has more is refused.
+taken() {
+  local file="$1" copy="$2" most="$3"
+  as_reader dd if="$file" iflag=nofollow,nonblock,count_bytes count="$(( most + 1 ))" bs=64K status=none 2>/dev/null \
+    | head -c "$(( most + 1 ))" >"$copy" 2>/dev/null \
+    && [ "$(stat -c %s "$copy")" -le "$most" ] || fail "$file is not a downloaded release's file"
+}
+
 # Applies a release as root: its manifest $1, signature $2 and tarball $3, which the user who
-# downloaded them can still change, so each is read once, into root's staging, and only the copies
-# are checked and used. The tree is extracted in staging, refused when anything in it is not a
-# plain file, folder or link inside it, moved into versions/<version> with its own copy of bwrap,
-# and /opt/surogate/current is switched to it by one rename; its helper is then the one pkexec
-# runs. An older version than the installed one is refused. The previous version is kept, and
-# older ones not running are removed.
+# downloaded them can still change, so each is read once, as that user, into root's staging, and
+# only the copies are checked and used. The tree is extracted in staging, refused when anything in
+# it is not a plain file, folder or link inside it, moved into versions/<version> with its own copy
+# of bwrap, and /opt/surogate/current is switched to it by one rename; its helper is then the one
+# pkexec runs. An older version than the installed one is refused. The previous version is kept,
+# and older ones not running are removed.
 apply() {
   local manifest="$1" signature="$2" tarball="$3" file
-  # A device such as /dev/zero would never end. A link is refused as each is copied, below.
+  # A folder or a missing file is refused here; a link, as each is copied, below.
   for file in "$manifest" "$signature" "$tarball"; do
-    [ -f "$file" ] || fail "$file is not a downloaded release's file"
+    as_reader test -f "$file" || fail "$file is not a downloaded release's file"
   done
   mkdir -p "$ROOT/versions"
   # Root's alone from its first moment: the update's lock is on it.
   ( umask 077 && mkdir -p "$ROOT/staging" )
   chmod 0755 "$ROOT" "$ROOT/versions"
   chmod 0700 "$ROOT/staging"
-  # Room for the tarball's copy and the tree it unpacks to, which is about two and a half times its size.
-  local need room
-  need=$(( $(stat -c %s -- "$tarball") * 4 / 1024 ))
-  room="$(df --output=avail -k "$ROOT" | tail -n 1)"
-  [ "$room" -ge "$need" ] || fail "$ROOT needs $(( need / 1024 )) MB free to apply this release, and has $(( room / 1024 )) MB"
   # One at a time, by a lock on a folder only root can open: any user may open one that all may
-  # read, hold a lock on it, and so stop every update. What an apply that stopped part way left in
-  # staging goes.
+  # read, hold a lock on it, and so stop every update.
   exec 9<"$ROOT/staging"
   flock -w "$LOCK_WAIT" 9 || fail "another install or update of Surogate Desktop is still running: try again once it has finished"
+  # What an apply that was killed left in staging goes, before any room is measured. This one's
+  # own folder goes however it ends.
   find "$ROOT/staging" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
   local work
   work="$(mktemp -d "$ROOT/staging/apply.XXXXXX")"
-  # Each read once, never through a link and never waiting on a pipe, whatever it has become since
-  # it was named: a pipe gives an empty copy at once.
-  dd if="$manifest" of="$work/manifest.json" iflag=nofollow,nonblock bs=1M status=none 2>/dev/null || fail "$manifest is not a downloaded release's file"
-  dd if="$signature" of="$work/manifest.json.sig" iflag=nofollow,nonblock bs=1M status=none 2>/dev/null || fail "$signature is not a downloaded release's file"
-  dd if="$tarball" of="$work/release.tar.gz" iflag=nofollow,nonblock bs=1M status=none 2>/dev/null || fail "$tarball is not a downloaded release's file"
+  OWN+=("$work")
+  # A manifest is a line, and its signature Ed25519's 64 bytes.
+  taken "$manifest" "$work/manifest.json" 4096
+  taken "$signature" "$work/manifest.json.sig" 64
 
   signed "$work/manifest.json" "$work/manifest.json.sig" || fail "the release's manifest is not signed by Surogate's release key"
   local release version sha256
   release="$(release_of "$work/manifest.json")" || fail "the release's manifest is not a release of Surogate Desktop for this computer"
   read -r version sha256 <<<"$release"
-  [ "$(sha256sum <"$work/release.tar.gz" | cut -d' ' -f1)" = "$sha256" ] || fail "the downloaded release is not the one its manifest names"
   local previous
   previous="$(installed_version)"
   if [ -n "$previous" ] && dpkg --compare-versions "$version" lt "$previous"; then
     fail "$version is older than the installed $previous"
   fi
+  # Room for the tarball's copy and the tree it unpacks to, which is about two and a half times
+  # its size. No more of the tarball is copied than the size that room was found for.
+  local size need room
+  size="$(as_reader stat -c %s -- "$tarball" 2>/dev/null)" && [[ "$size" =~ ^[0-9]+$ ]] || fail "$tarball is not a downloaded release's file"
+  need=$(( size / 256 ))
+  room="$(df --output=avail -k "$ROOT" | tail -n 1)"
+  [ "$room" -ge "$need" ] || fail "$ROOT needs $(( need / 1024 )) MB free to apply this release, and has $(( room / 1024 )) MB"
+  taken "$tarball" "$work/release.tar.gz" "$size"
+  [ "$(sha256sum <"$work/release.tar.gz" | cut -d' ' -f1)" = "$sha256" ] || fail "the downloaded release is not the one its manifest names"
 
   local folder="$ROOT/versions/$version" name="surogate-desktop-$version-linux-x64"
   if ! cmp -s "$work/manifest.json" "$folder/release.json"; then
@@ -224,7 +273,7 @@ kvm_group() {
 install_latest() {
   local base="$1" download release version installed
   download="$(mktemp -d)"
-  trap "rm -rf -- '$download'" EXIT
+  OWN+=("$download")
   curl -q -fsSL --proto '=https,http' -o "$download/manifest.json" "$base/desktop/latest.json" \
     || fail "could not download $base/desktop/latest.json"
   curl -q -fsSL --proto '=https,http' -o "$download/manifest.json.sig" "$base/desktop/latest.json.sig" \
@@ -326,11 +375,13 @@ main() {
   set -euo pipefail
   umask 022
   settings
+  trap cleanup EXIT
   case "${1:-}" in
     --apply)
       [ "$#" -eq 4 ] || fail "usage: surogate-apply-update --apply <manifest> <signature> <tarball>"
       [ "$EUID" -eq 0 ] || fail "applying a release needs administrator rights"
       supported
+      asker
       apply "$2" "$3" "$4"
       ;;
     --base | "")
