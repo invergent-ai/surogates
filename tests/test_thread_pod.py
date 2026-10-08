@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import subprocess
 
 import httpx
 import pytest
 
+from surogates.governance.saga.compensator import compensate_history
+from surogates.governance.saga.state_machine import SagaStep
+from surogates.harness import landing
 from surogates.sandbox import executor_server
 from surogates.sandbox.base import SandboxSpec
 from surogates.sandbox.pool import SandboxPool
@@ -319,3 +323,59 @@ async def test_a_slow_put_back_that_found_no_pod_lets_go_of_none(pods, monkeypat
         await asyncio.sleep(0.05)
     # The pod mapped since is a later turn's: it stays.
     assert set(pods.pods) == later and pool.holds_copy("t1")
+
+
+#: What a pod answers when it did not run a step to its end, and what no step answers.
+NO_RESULT = {
+    "its error": json.dumps({"error": "a.md changed after the landing wrote it"}),
+    "cut off at the pod's own timeout": executor_server._timed_out_result(),
+    "a daemon error": json.dumps({
+        "exit_code": -1, "stdout": "", "stderr": "Executor daemon error (HTTP 500)", "truncated": False, "timed_out": False,
+    }),
+    "a child that died": json.dumps({"exit_code": 1, "output": "", "error": "Tool process died unexpectedly (exit code -9)"}),
+    "no object": "null",
+    "no JSON": "<html>502 Bad Gateway</html>",
+}
+
+
+class Answers:
+    """A pool whose pod answers every call with *answer*."""
+
+    def __init__(self, answer: str) -> None:
+        self.answer = answer
+
+    async def execute(self, session_id, name, input, **_) -> str:
+        return self.answer
+
+
+@pytest.mark.parametrize("answer", list(NO_RESULT))
+async def test_a_put_back_the_pod_did_not_finish_is_never_read_as_done(answer):
+    step = SagaStep(
+        step_id="s", tool_name="history.apply", tool_call_id="",
+        arguments={"path": "a.md", "before": None, "after": "b" * 40},
+    )
+    # Read as done, its landing's row would say the files are as they were.
+    with pytest.raises(landing.LandingStepError):
+        await compensate_history(step, Answers(NO_RESULT[answer]), "t1")
+
+
+@pytest.mark.parametrize("answer", list(NO_RESULT))
+async def test_a_step_the_pod_did_not_finish_is_never_read_as_its_result(answer):
+    with pytest.raises(landing.LandingStepError):
+        await landing._call(Answers(NO_RESULT[answer]), "t1", "apply", path="a.md", before=None, after="b" * 40)
+
+
+async def test_a_steps_own_result_is_read_as_it_is():
+    result = {"path": "a.md", "before": None, "after": "b" * 40, "made": []}
+    assert await landing._call(Answers(json.dumps(result)), "t1", "apply", path="a.md", before=None, after="b" * 40) == result
+
+
+@pytest.mark.parametrize("answer", list(NO_RESULT))
+async def test_a_pruning_the_pod_did_not_finish_is_logged_and_the_landing_stands(answer, monkeypatch, caplog):
+    async def kept(*_):
+        return []
+
+    monkeypatch.setattr(landing, "kept_refs", kept)
+    with caplog.at_level(logging.WARNING, logger=landing.__name__):
+        await landing._prune(None, Answers(NO_RESULT[answer]), "t1", "w1", 0)
+    assert "Could not prune the history of project w1" in caplog.text

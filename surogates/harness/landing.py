@@ -37,6 +37,10 @@ from surogates.governance.saga.orchestrator import (
     SAGA_DEFAULT_RETRY_DELAY_SECONDS,
     SAGA_DEFAULT_STEP_TIMEOUT_SECONDS,
 )
+from surogates.sandbox.history import (
+    LandingStepError,  # noqa: F401  (what _call raises, named here for its callers)
+    step_result,
+)
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.events import EventType
 from surogates.workstreams.history import (
@@ -80,16 +84,9 @@ async def put_back_settled(owner: str) -> bool:
     return True
 
 
-class LandingStepError(RuntimeError):
-    """A ``_history`` step answered with an error."""
-
-
 async def _call(sandbox_pool: Any, owner: str, action: str, **arguments: Any) -> dict:
-    """One ``_history`` action in *owner*'s pod; an error answer raises."""
-    result = json.loads(await sandbox_pool.execute(owner, "_history", json.dumps({**arguments, "action": action})))
-    if "error" in result or result.get("timed_out"):
-        raise LandingStepError(result.get("error") or "the pod's step timed out")
-    return result
+    """One ``_history`` action in *owner*'s pod; LandingStepError unless it answers with the step's result."""
+    return step_result(await sandbox_pool.execute(owner, "_history", json.dumps({**arguments, "action": action})))
 
 
 async def land_turn(
@@ -200,11 +197,9 @@ async def _prune(session_factory: Any, sandbox_pool: Any, owner: str, workstream
     """Prune the project's history after a landing, under its lock: the pod prunes at most once a day."""
     request = {"action": "prune", "keep": await kept_refs(session_factory, workstream), "now": time.time()}
     try:
-        result = json.loads(await sandbox_pool.execute(
+        step_result(await sandbox_pool.execute(
             owner, "_history", json.dumps(request), timeout=_PRUNE_BOUND + _PRUNE_PER_GIB * packs / 2**30,
         ))
-        if "error" in result or result.get("timed_out"):
-            raise LandingStepError(result.get("error") or "the pruning ran out of time")
     except Exception:
         # The landing stands; the history is pruned on a later day.
         logger.warning("Could not prune the history of project %s", workstream, exc_info=True)

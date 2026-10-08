@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -132,6 +133,34 @@ class HistoryError(RuntimeError):
 
 class HistoryConflict(HistoryError):
     """A real file is not the version a landing expected."""
+
+
+class LandingStepError(RuntimeError):
+    """A pod's answer to a ``_history`` call is not its step's result."""
+
+
+def step_result(answer: str) -> dict:
+    """A pod's *answer* to a ``_history`` call, read as its step's result; LandingStepError when it is none.
+
+    A step that ran to its end answers with its result alone.  Every other
+    answer is no result: the step's own ``error``; a call the pod cut off
+    at its own timeout, ``timed_out``; and the daemon's own failure, which
+    has an ``exit_code`` and may name no error.  Read by the worker, on
+    every such answer: a put-back taken for done from one of these would be
+    recorded as done.
+    """
+    try:
+        result = json.loads(answer)
+    except ValueError:
+        raise LandingStepError("the pod's answer is not a step's result") from None
+    if not isinstance(result, dict):
+        raise LandingStepError("the pod's answer is not a step's result")
+    if "error" in result or "timed_out" in result or "exit_code" in result:
+        raise LandingStepError(str(
+            result.get("error") or ("the pod's step timed out" if result.get("timed_out") else None)
+            or result.get("stderr") or "the pod did not run the step"
+        ))
+    return result
 
 
 @dataclass(frozen=True)

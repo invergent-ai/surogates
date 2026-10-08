@@ -600,6 +600,40 @@ async def test_each_put_back_is_in_the_row_before_it_runs(api, monkeypatch, pods
     assert seen == [("b.md", "compensating"), ("a.md", "compensating")]
 
 
+async def test_a_put_back_the_pod_cut_off_at_its_own_timeout_is_not_recorded_as_done(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md && echo b > b.md")
+    call, unapply, execute = landing_module._call, History.unapply, pods.execute
+
+    async def b_fails(sandbox_pool, owner, action, **arguments):
+        if action == "apply" and arguments["path"] == "b.md":
+            raise landing_module.LandingStepError("the pod's step timed out")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    def stalls(self, path, before, after, **kwargs):
+        if path == "a.md":
+            time.sleep(5)  # a stalled mount: past the pod's own call timeout
+        return unapply(self, path, before, after, **kwargs)
+
+    async def a_pod_with_a_short_call_timeout(sandbox_id, name, input, *, timeout=None):
+        # A sandbox timeout below the saga's step timeout: the pod kills its child first.
+        short = 1 if name == "_history" and json.loads(input).get("action") == "unapply" else timeout
+        return await execute(sandbox_id, name, input, timeout=short)
+
+    monkeypatch.setattr(landing_module, "_call", b_fails)
+    monkeypatch.setattr(History, "unapply", stalls)
+    monkeypatch.setattr(pods, "execute", a_pod_with_a_short_call_timeout)
+    await ends(api, pool, thread, settings=SimpleNamespace(default_step_timeout=30, default_max_retries=0, retry_delay=0))
+    # a.md was never put back, and neither its row nor its report says it was.
+    assert "a.md" in pods.real_names()
+    [row] = await rows(api, thread)
+    [report] = await reports(api, master)
+    assert (row.saga_state, report["landing"]) == ("escalated", "escalated")
+    assert [s["state"] for s in row.steps if s["arguments"].get("path") == "a.md"] == ["compensation_failed"]
+
+
 @pytest.mark.parametrize("fails", ["the lock's connection", "the row's write"])
 async def test_a_cancel_the_database_fails_under_stays_a_cancel_and_its_files_go_back(api, monkeypatch, pods, fails):
     master = await master_of(api, await create(api))
