@@ -132,7 +132,7 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
 
     // The next release with the same key: the manifest its first release attached, for its tarball,
     // the bucket checked against it, and no second send.
-    released(sent["manifest.json"]);
+    released(sent["manifest.json"]!);
     out = mkdtempSync(join(dir, "out-"));
     expect(publish("fetch")).toMatchObject({ status: 0, stdout: "published\n" });
     expect(readFileSync(join(out, "manifest.json")).equals(sent["manifest.json"]!)).toBe(true);
@@ -152,7 +152,7 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
       stderr: `publish.sh: desktop/vm/${key} is in the bucket, but no release of ours carries its manifest (desktop-vm-${key}.json): `
         + `re-run this job once the release run that sent it has attached it, or attach that run's desktop-vm-manifest artifact to its release as desktop-vm-${key}.json\n`,
     });
-    released(sent["manifest.json"]);
+    released(sent["manifest.json"]!);
     // The bucket's image swapped for another, compressed as the build compresses: its hashes are not the release's.
     const other = spawnSync("zstd", ["-q", "-c"], { input: randomBytes(3 * 1024 * 1024), maxBuffer: 8 * 1024 * 1024 }).stdout;
     replace(`desktop/vm/${key}/rootfs.img.zst`, other);
@@ -173,7 +173,7 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
     out = mkdtempSync(join(dir, "out-"));
     // The run that sent it attaches its manifest a moment later, once its release exists.
     const waiting = publishing("fetch", { PUBLISH_POLLS: "30", PUBLISH_POLL_S: "0.2" });
-    setTimeout(() => released(sent["manifest.json"]), 1_000);
+    setTimeout(() => released(sent["manifest.json"]!), 1_000);
     expect(await waiting).toMatchObject({ status: 0, stdout: "published\n" });
     expect(readFileSync(join(out, "manifest.json")).equals(sent["manifest.json"]!)).toBe(true);
   });
