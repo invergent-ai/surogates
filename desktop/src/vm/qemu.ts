@@ -31,17 +31,22 @@ export function guestCpus(threads = availableParallelism()): number {
 }
 
 // *run* holds the control, net and QMP sockets and QEMU's pidfile; *console* is the guest's console log.
-export function qemuArgs(disks: Disks, run: string, console: string, cpus = guestCpus()): string[] {
+// *emulated*: QEMU's TCG in place of KVM, a host thread a vCPU and a 256 MiB translation cache on
+// top of the guest's memory, the CPU TCG can give, and the agent told on the kernel's command line.
+export function qemuArgs(disks: Disks, run: string, console: string, cpus = guestCpus(), emulated = false): string[] {
   const ports: string[] = [];
   for (let n = 1; n <= ROOT_PORTS; n += 1) ports.push("-device", `pcie-root-port,id=rp${n},chassis=${n}`);
+  const machine = emulated
+    ? ["-machine", "q35,memory-backend=mem", "-accel", "tcg,thread=multi,tb-size=256", "-cpu", "max"]
+    : ["-machine", "q35,accel=kvm,memory-backend=mem", "-cpu", "host"];
   return [
     "-nodefaults", "-no-user-config", "-display", "none", "-no-reboot",
-    "-machine", "q35,accel=kvm,memory-backend=mem", "-cpu", "host", "-smp", String(cpus), "-m", MEMORY,
+    ...machine, "-smp", String(cpus), "-m", MEMORY,
     // vhost-user-fs needs the guest's memory shared with virtiofsd.
     "-object", `memory-backend-memfd,id=mem,size=${MEMORY},share=on`,
     "-kernel", disks.kernel,
     // lsm=: the kernel's own list, and bpf, which it lacks, for the rule vm/init loads.
-    "-append", "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf",
+    "-append", `root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf${emulated ? " surogate.emulated=1" : ""}`,
     "-drive", `if=none,id=root,file=${option(disks.rootfs)},format=raw,readonly=on`, "-device", "virtio-blk-pci,drive=root",
     "-drive", `if=none,id=agent,file=${option(disks.agentDisk)},format=raw,readonly=on`, "-device", "virtio-blk-pci,drive=agent",
     "-drive", `if=none,id=sessions,file=${option(disks.sessions)},format=raw,discard=unmap`, "-device", "virtio-blk-pci,drive=sessions",

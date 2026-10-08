@@ -11,7 +11,7 @@ import { Control } from "./control.js";
 import { Network } from "./network.js";
 import { findPort, openPort } from "./port.js";
 import type { FromAgent } from "./protocol.js";
-import { CGROUPS, contain, enter, flushRoot, killRoot, powerOff, Roots, setClock, uidOf, unmountShare } from "./root.js";
+import { BOUNDS, CGROUPS, contain, enter, flushRoot, killRoot, powerOff, Roots, setClock, uidOf, unmountShare } from "./root.js";
 
 // Anything the agent does not catch ends it at once, and with it tini and the guest
 // (vm/init). An exit would wait for each read of its ports in flight, which never returns,
@@ -25,9 +25,9 @@ process.on("uncaughtException", die);
 
 // The guest-kernel rule's outcome, which vm/init writes once it has loaded beside the boot:
 // "attached: …" or "failed: …". A load that never ends is a failure too, inside the host's
-// 15 s for the hello.
+// 15 s for the hello, or 120 s emulated.
 const RULE = "/run/surogate/rule";
-const RULE_MS = 12_000;
+const RULE_MS = BOUNDS.ruleMs;
 async function rule(): Promise<string> {
   for (const deadline = performance.now() + RULE_MS; ;) {
     try {

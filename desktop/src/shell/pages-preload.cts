@@ -37,6 +37,7 @@ if (location.protocol === "file:") {
     projectSettings: () => ipcRenderer.invoke("shell:project-settings"),
     quitNow: () => ipcRenderer.invoke("shell:quit-now"),
     link: (which: string) => ipcRenderer.invoke("shell:link", which),
+    sandbox: (action: string) => ipcRenderer.invoke("shell:sandbox", action),
     onChanged: listen("shell:changed"),
     // Where the keyboard comes back to from the pane's transcript: its head's Open or Back.
     onPaneLeft: (listener: (to: string) => void) => {
@@ -58,6 +59,7 @@ if (location.protocol === "file:") {
     stop: (root: string, id: string) => ipcRenderer.invoke("settings:stop", root, id),
     set: (key: string, value: string) => ipcRenderer.invoke("settings:set", key, value),
     link: (which: string) => ipcRenderer.invoke("settings:link", which),
+    sandbox: (action: string) => ipcRenderer.invoke("settings:sandbox", action),
     close: () => ipcRenderer.invoke("settings:close"),
     onChanged: listen("settings:changed"),
   });
