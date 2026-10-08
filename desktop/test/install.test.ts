@@ -73,6 +73,45 @@ done
 exec /opt/cut/rm "$@"
 `;
 
+// The system's own tool, kept as /opt/hold/<its name>, which waits where it is told to: the first
+// time *operand* is among its operands, it says so in /tmp/held, and goes on once /tmp/go is
+// there, or after 20 s.
+const holding = (operand: string) => String.raw`#!/bin/sh
+for operand in "$@"; do
+  if [ "$operand" = ${operand} ] && [ ! -e /tmp/held ]; then
+    touch /tmp/held
+    for try in $(seq 400); do [ -e /tmp/go ] && break; sleep 0.05; done
+  fi
+done
+exec "/opt/hold/$(basename "$0")" "$@"
+`;
+
+// The lock that one install, update or removal at a time holds, in root's own folder under /run;
+// and a shell of the test's own that holds it, on its descriptor 8.
+const LOCKS = "/run/surogate-desktop";
+const HOLD = `mkdir -p -m 700 ${LOCKS} && exec 8>>${LOCKS}/lock && flock 8`;
+// What stands in the folder's place and is not as root makes it, each with how it came there.
+const NOT_ROOTS_OWN: Array<[string, string]> = [
+  ["another user's folder", `mkdir -m 700 ${LOCKS} && chown tester: ${LOCKS}`],
+  ["a folder its group opens", `mkdir -m 750 ${LOCKS}`],
+  ["a folder all open", `mkdir -m 755 ${LOCKS}`],
+  ["a link to a folder of root's own", `mkdir -m 700 /root/locks && ln -s /root/locks ${LOCKS}`],
+  ["a link to another user's folder", `mkdir -m 700 /home/tester/locks && chown tester: /home/tester/locks && ln -s /home/tester/locks ${LOCKS}`],
+  ["a file of root's own that no one else opens", `touch ${LOCKS} && chmod 700 ${LOCKS}`],
+];
+const NOT_ROOTS_OWN_SAID = `Surogate Desktop: ${LOCKS} must be a folder of root's own that no one else opens (mode 700), and no link: remove what is there, and run this again\n`;
+// What --apply needs, on a desktop's baseline: openssl, jq and bubblewrap, which the install
+// script installs, and nothing of Surogate's; and strace, for the tests that read the helper's
+// system calls.
+const APPLY_LAB = [
+  "RUN apt-get update && apt-get install -y --no-install-recommends openssl jq bubblewrap && rm -rf /var/lib/apt/lists/*",
+  "RUN useradd -m tester",
+  "RUN apt-get update && apt-get install -y --no-install-recommends strace && rm -rf /var/lib/apt/lists/*",
+];
+// /opt/surogate as a small disk of the container's own, in memory: a copy with no bound fills
+// that, and never this computer's disk.
+const OWN_DISK = ["--tmpfs", "/opt/surogate:exec,mode=755,size=512m"];
+
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 
 // The program that holds Electron's place in a test's release: this computer's sleep, GNU's. Where
@@ -174,15 +213,7 @@ describe("the install script's release keys", () => {
 });
 
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --apply, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
-  // What --apply needs, on a desktop's baseline: openssl, jq and bubblewrap, which the install
-  // script installs, and nothing of Surogate's; and strace, for the tests that read the helper's
-  // system calls. /opt/surogate is a small disk of the container's own, in memory: a copy with no
-  // bound fills that, and never this computer's disk.
-  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions } = lab(release, [
-    "RUN apt-get update && apt-get install -y --no-install-recommends openssl jq bubblewrap && rm -rf /var/lib/apt/lists/*",
-    "RUN useradd -m tester",
-    "RUN apt-get update && apt-get install -y --no-install-recommends strace && rm -rf /var/lib/apt/lists/*",
-  ], ["--tmpfs", "/opt/surogate:exec,mode=755,size=512m"]);
+  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions } = lab(release, APPLY_LAB, OWN_DISK);
   // The files as the app leaves them for the helper: in the user's cache, copied into the container.
   const files = (manifest = "/home/tester/manifest.json", tarball = "/home/tester/release.tar.gz") => `${manifest} /home/tester/manifest.json.sig ${tarball}`;
   const stage = (tarball: string) => {
@@ -198,7 +229,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
   // while the user runs *swap*; then let go on. *asked* is how pkexec or sudo names the user it
   // runs the helper for.
   const held = (swap: string, manifest?: string, tarball?: string, asked = "") => root([
-    "mkdir -p /opt/surogate/staging && exec 8</opt/surogate/staging && flock 8",
+    HOLD,
     `${asked} timeout 60 /opt/surogate-test/install.sh --apply ${files(manifest, tarball)} 8<&- &`,
     "for try in $(seq 200); do pgrep -x flock >/dev/null && break; sleep 0.05; done",
     "pgrep -x flock >/dev/null || exit 9",
@@ -265,7 +296,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     // Nor one the user swaps once the helper has started: here while it waits for the update's lock,
     // after any check of the name. A link is refused, and a pipe gives an empty copy at once.
     const swapped = (swap: string) => root([
-      "mkdir -p /opt/surogate/staging && exec 8</opt/surogate/staging && flock 8",
+      HOLD,
       "cp /home/tester/manifest.json /home/tester/swapped.json",
       `/opt/surogate-test/install.sh --apply ${files("/home/tester/swapped.json")} 8<&- &`,
       // A helper that ended before it reached the lock would never be seen waiting for it.
@@ -304,14 +335,35 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const stalled = root(`timeout 20 /opt/surogate-test/install.sh --apply ${files()}`);
     root("pkill -u tester -x sleep; rm -f /tmp/held");
     expect(stalled).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
-    // The folder the lock is on is root's alone.
-    expect(as("tester", "exec 7</opt/surogate/staging")).toMatchObject({ status: 1, stderr: expect.stringContaining("Permission denied") });
+    // The lock is in a folder that is root's alone.
+    expect(as("tester", `exec 7<${LOCKS}/lock`)).toMatchObject({ status: 1, stderr: expect.stringContaining("Permission denied") });
     // Held by another apply for longer than this one waits, here a second: it says so.
     const impatient = withKeys(readFileSync(SCRIPT, "utf8")).replace("LOCK_WAIT=300", "LOCK_WAIT=1");
     writeFileSync(join(box.dir, "impatient.sh"), impatient, { mode: 0o755 });
     expect(docker(["cp", join(box.dir, "impatient.sh"), `${box.container}:/opt/surogate-test/impatient.sh`]).status).toBe(0);
-    expect(root(`exec 8</opt/surogate/staging && flock 8 && /opt/surogate-test/impatient.sh --apply ${files()} 8<&-`))
+    expect(root(`${HOLD} && /opt/surogate-test/impatient.sh --apply ${files()} 8<&-`))
       .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: another install or update of Surogate Desktop is still running: try again once it has finished\n" });
+  });
+
+  it("makes the folder of its lock itself, closed to everyone else from its first moment, and refuses what stands in its place and is not root's own", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    expect(root(`rm -rf ${LOCKS}`).status).toBe(0);
+    const made = root(`strace -f -qq -o /tmp/trace -e trace=mkdir,mkdirat /opt/surogate-test/install.sh --apply ${files()} >/dev/null && grep -F '${LOCKS}"' /tmp/trace`);
+    expect(made.stdout).toMatch(/^\d+ +mkdir\("\/run\/surogate-desktop", 0700\) += 0\n$/);
+    expect(root(`stat -c '%F %U %a' ${LOCKS} ${LOCKS}/lock`).stdout).toBe("directory root 700\nregular empty file root 644\n");
+    expect(as("tester", `ls ${LOCKS}`)).toMatchObject({ status: 2, stderr: expect.stringContaining("Permission denied") });
+    for (const [what, how] of NOT_ROOTS_OWN) {
+      expect(root(`find /opt/surogate -mindepth 1 -delete; rm -rf ${LOCKS} /root/locks /home/tester/locks; ${how}`).status, what).toBe(0);
+      const before = root(`stat -c '%F %U %a' ${LOCKS}`).stdout;
+      expect(root(`/opt/surogate-test/install.sh --apply ${files()}`), what).toMatchObject({ status: 1, stdout: "", stderr: NOT_ROOTS_OWN_SAID });
+      // Refused as it is, and never taken over; nothing was put in it, behind it or in the tree.
+      expect(root(`stat -c '%F %U %a' ${LOCKS}`).stdout, what).toBe(before);
+      expect(root(`ls -A /opt/surogate; [ ! -d ${LOCKS} ] || ls -A ${LOCKS}/`).stdout, what).toBe("");
+    }
+    expect(root(`rm -rf ${LOCKS} /root/locks /home/tester/locks`).status).toBe(0);
+    expect(root(`/opt/surogate-test/install.sh --apply ${files()}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
   });
 
   it("reads each file as the user who asked, so that a folder swapped for a link gets them nothing they could not read themselves", () => {
@@ -962,7 +1014,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(as("tester", "mkdir -p cfg/autostart dat/surogate/electron cch/surogate/updates Surogate/agent/2026-10-08 && touch cfg/autostart/surogate.desktop Surogate/agent/2026-10-08/report.docx").status).toBe(0);
     expect(as("other", "mkdir -p .config/autostart .local/share/surogate && touch .config/autostart/surogate.desktop").status).toBe(0);
     // An apply holds the update's lock: the uninstall waits for it, rather than remove a tree being made.
-    expect(root("flock /opt/surogate/staging timeout 3 /opt/surogate-test/install.sh --uninstall").status).toBe(124);
+    expect(root(`flock ${LOCKS}/lock timeout 3 /opt/surogate-test/install.sh --uninstall`).status).toBe(124);
     expect(root("test -e /opt/surogate/current").status).toBe(0);
     // A running app is never removed from under it.
     expect(as("tester", "setsid /usr/local/bin/surogate 600 & sleep 1").status).toBe(0);
@@ -1033,11 +1085,10 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       .toMatchObject({ status: 0, stdout: "Surogate Desktop: removed from this computer\n", stderr: "" });
     expect(root("test -e /tmp/caller/ran").status).toBe(1);
     // Under sudo the folders are the login's: tester's data is where XDG's default puts it. The lock
-    // is root's alone, here on a staging folder left by itself: the user's login is not handed it.
+    // is root's alone: the user's login is not handed it.
     expect(as("tester", "echo 'ls -l /proc/$$/fd >/home/tester/login-fds' >>.profile").status).toBe(0);
-    expect(root("mkdir -p -m 700 /opt/surogate/staging").status).toBe(0);
     expect(half([])).toMatchObject({ status: 0, stderr: "", stdout: "Surogate Desktop: removed from this computer\nSurogate Desktop: kept tester's app data, in /home/tester/.local/share/surogate\n" });
-    expect(root("test ! -e /opt/surogate && grep -c /dev/null /home/tester/login-fds && grep -c staging /home/tester/login-fds").stdout).toMatch(/^[1-9]\d*\n0\n$/);
+    expect(root(`test ! -e /opt/surogate && grep -c /dev/null /home/tester/login-fds && grep -c ${LOCKS} /home/tester/login-fds`).stdout).toMatch(/^[1-9]\d*\n0\n$/);
 
     // A data folder whose name would read as a line of the script's own, and colour what follows it: kept, then asked about.
     const data = "/home/tester/da ta\nSurogate Desktop: 9.9.9 is installed\u001b[31m";
@@ -1077,5 +1128,88 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(root("test -e /opt/surogate/current/resources/app/package.json").status).toBe(0);
     expect(uninstall().status).toBe(0);
     expect(root("test ! -e /opt/surogate").status).toBe(0);
+  });
+
+  // A release's files in a folder of their own in the container, and their names as --apply takes them.
+  const staged = (version: string) => {
+    const tarball = releaseOf(version);
+    manifestOf(version, tarball);
+    const folder = `/home/tester/staged-${version}`;
+    expect(root(`mkdir -p ${folder}`).status).toBe(0);
+    for (const [from, to] of [[join(box.dir, "manifest.json"), "manifest.json"], [join(box.dir, "manifest.json.sig"), "manifest.json.sig"], [tarball, "release.tar.gz"]] as const) {
+      expect(docker(["cp", from, `${box.container}:${folder}/${to}`]).status).toBe(0);
+    }
+    return `${folder}/manifest.json ${folder}/manifest.json.sig ${folder}/release.tar.gz`;
+  };
+  // The system's *tool* made to wait at *operand*, for the one docker call that runs *lines*.
+  const withHeld = (tool: string, operand: string, lines: string[]) => {
+    writeFileSync(join(box.dir, "holding"), holding(operand), { mode: 0o755 });
+    expect(docker(["cp", join(box.dir, "holding"), `${box.container}:/opt/surogate-test/holding`]).status).toBe(0);
+    return root([
+      `mkdir -p /opt/hold && cp -L /usr/bin/${tool} /opt/hold/${tool} && rm -f /tmp/held /tmp/go`,
+      `mv /usr/bin/${tool} /usr/bin/${tool}.away && cp /opt/surogate-test/holding /usr/bin/${tool}`,
+      ...lines,
+      `mv -f /usr/bin/${tool}.away /usr/bin/${tool}`,
+      'echo "$said"; cat /tmp/first.out; echo --; cat /tmp/second.out',
+    ].join("\n"));
+  };
+  // Run in the background until /tmp/held is there, then until one more waits for the lock.
+  const untilHeld = "for try in $(seq 200); do [ -e /tmp/held ] && break; sleep 0.05; done";
+  const untilWaiting = "for try in $(seq 200); do pgrep -x flock >/dev/null && break; sleep 0.05; done; pgrep -x flock >/dev/null; waiting=$?";
+
+  it("makes the tree again when it waited for a removal that took it away, and never finds its own folders gone", () => {
+    const files = staged("1.0.0");
+    expect(root(`/opt/surogate-test/install.sh --apply ${files}`).status).toBe(0);
+    // The removal stopped as it starts on the tree, the lock taken; the apply starts then.
+    const both = withHeld("rm", "/opt/surogate", [
+      "/opt/surogate-test/install.sh --uninstall >/tmp/first.out 2>&1 & removal=$!",
+      untilHeld,
+      `/opt/surogate-test/install.sh --apply ${files} >/tmp/second.out 2>&1 & apply=$!`,
+      untilWaiting,
+      "touch /tmp/go; wait $removal; removed=$?; wait $apply; applied=$?",
+      'said="waiting $waiting, removed $removed, applied $applied"',
+    ]);
+    expect(both.stdout).toBe("waiting 0, removed 0, applied 0\nSurogate Desktop: removed from this computer\n--\nSurogate Desktop: 1.0.0 is installed\n");
+    expect(root("test -x /opt/surogate/current/surogate && test -x /opt/surogate/current/bin/bwrap && cmp /opt/surogate/current/bin/surogate-apply-update /opt/surogate/bin/surogate-apply-update").status).toBe(0);
+  });
+
+  it("removes nothing while an apply runs: the removal waits for it, and then takes away what it made", () => {
+    const files = staged("1.1.0");
+    // The apply stopped where it flushes what it staged, before any rename; the removal starts then.
+    const both = withHeld("sync", "-f", [
+      `/opt/surogate-test/install.sh --apply ${files} >/tmp/first.out 2>&1 & apply=$!`,
+      untilHeld,
+      "/opt/surogate-test/install.sh --uninstall >/tmp/second.out 2>&1 & removal=$!",
+      untilWaiting,
+      'staged="$(ls -A /opt/surogate/staging | wc -l)"',
+      "touch /tmp/go; wait $apply; applied=$?; wait $removal; removed=$?",
+      'said="waiting $waiting, staged $staged, applied $applied, removed $removed"',
+    ]);
+    expect(both.stdout).toBe("waiting 0, staged 1, applied 0, removed 0\nSurogate Desktop: 1.1.0 is installed\n--\nSurogate Desktop: removed from this computer\n");
+    expect(root("test ! -e /opt/surogate && test ! -e /usr/local/bin/surogate").status).toBe(0);
+  });
+});
+
+for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --uninstall as root, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
+  // The --apply tests' computer, with /opt/surogate a disk of its own (a mount point), as some keep it.
+  const { it: box, docker, root, releaseOf, manifestOf } = lab(release, APPLY_LAB, OWN_DISK);
+  const files = "/home/tester/manifest.json /home/tester/manifest.json.sig /home/tester/release.tar.gz";
+  const installed = (version: string) => {
+    const tarball = releaseOf(version);
+    manifestOf(version, tarball);
+    for (const [from, to] of [[join(box.dir, "manifest.json"), "manifest.json"], [join(box.dir, "manifest.json.sig"), "manifest.json.sig"], [tarball, "release.tar.gz"]] as const) {
+      expect(docker(["cp", from, `${box.container}:/home/tester/${to}`]).status).toBe(0);
+    }
+    expect(root(`/opt/surogate-test/install.sh --apply ${files}`)).toMatchObject({ status: 0, stdout: `Surogate Desktop: ${version} is installed\n` });
+  };
+
+  it("refuses what stands in its lock's folder's place and is not root's own, and removes nothing", () => {
+    installed("1.0.0");
+    for (const [what, how] of NOT_ROOTS_OWN) {
+      expect(root(`rm -rf ${LOCKS} /root/locks /home/tester/locks; ${how}`).status, what).toBe(0);
+      expect(root("/opt/surogate-test/install.sh --uninstall"), what).toMatchObject({ status: 1, stdout: "", stderr: NOT_ROOTS_OWN_SAID });
+      expect(root("test -x /opt/surogate/current/surogate && test -f /opt/surogate/current/release.json").status, what).toBe(0);
+    }
+    expect(root(`rm -rf ${LOCKS} /root/locks /home/tester/locks`).status).toBe(0);
   });
 });

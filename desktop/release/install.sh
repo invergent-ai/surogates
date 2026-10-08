@@ -21,6 +21,9 @@ settings() {
   ENTRY=/usr/share/applications/surogate.desktop
   PROFILE=/etc/apparmor.d/surogate-desktop
   POLICY=/usr/share/polkit-1/actions/ai.invergent.surogate.update.policy
+  # The folder of the lock that one install, update or removal at a time holds: root's alone, and
+  # outside /opt/surogate, so that it is there before the tree is made and after it is removed.
+  LOCKS=/run/surogate-desktop
   # How long an apply waits for another's lock, and for each read of a file it is handed, in seconds.
   LOCK_WAIT=300
   READ_WAIT=300
@@ -120,11 +123,19 @@ whole() {
     && [ -f "$2/bin/surogate-apply-update" ] && [ -x "$2/bin/surogate-apply-update" ]
 }
 
-# One install, update or removal at a time, by a lock on staging, a folder only root can open: any
-# user may open one that all may read, hold a lock on it, and so stop every update. It is waited
-# for LOCK_WAIT at most, and held until this script ends or closes it.
+# One install, update or removal at a time, by a lock on a file in a folder only root can open: any
+# user may open what all may read, hold a lock on it, and so stop every update. The folder is under
+# /run and not in /opt/surogate: a removal takes the tree away, and an apply that waited for it
+# would hold a lock on a folder that is gone. Root makes the folder itself, closed to everyone else
+# from its first moment. One that is there already is used only when it is as root makes it: a
+# folder, root's, with nothing for anyone else, and no link. Any other is refused and never taken
+# over: what someone else could have put in it would still be there. The lock is waited for
+# LOCK_WAIT at most, and held until this script ends or closes it.
 lock() {
-  exec 9<"$ROOT/staging"
+  mkdir -m 0700 "$LOCKS" 2>/dev/null || true
+  [ "$(stat -c '%F %u %a' -- "$LOCKS" 2>/dev/null)" = "directory 0 700" ] \
+    || fail "$LOCKS must be a folder of root's own that no one else opens (mode 700), and no link: remove what is there, and run this again"
+  exec 9>>"$LOCKS/lock"
   flock -w "$LOCK_WAIT" 9 || fail "another install or update of Surogate Desktop is still running: try again once it has finished"
 }
 
@@ -180,12 +191,13 @@ apply() {
   for file in "$manifest" "$signature" ${tarball:+"$tarball"}; do
     as_reader test -f "$file" || fail "$(named "$file") is not a downloaded release's file"
   done
+  # Before the tree is touched: a removal that runs now takes it away, and this apply makes it again.
+  lock
   mkdir -p "$ROOT/versions" "$ROOT/bin"
-  # Root's alone from its first moment: the update's lock is on it.
+  # Root's alone from its first moment: what an apply copies and unpacks is in it.
   ( umask 077 && mkdir -p "$ROOT/staging" )
   chmod 0755 "$ROOT" "$ROOT/versions" "$ROOT/bin"
   chmod 0700 "$ROOT/staging"
-  lock
   # What an apply that was killed left in staging goes, before any room is measured. This one's
   # own folder goes however it ends.
   find "$ROOT/staging" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
@@ -469,9 +481,9 @@ login_folders() {
 # before deleting that user's data, as that user. Other users' data, every chat's folder and the
 # packages stay. $1-$3: the user's XDG config, data and cache folders, when their session gave them.
 uninstall() {
-  # One at a time with an apply, which would otherwise make the tree again under it. Where no
-  # apply has made staging, none holds a lock to wait for.
-  [ ! -d "$ROOT/staging" ] || lock
+  # One at a time with an apply: one that runs now finishes before the tree goes, and one that
+  # starts now waits, and makes the tree again once this has ended.
+  lock
   in_use "$ROOT" && fail "Surogate is running: quit it first, for every user of this computer"
   if [ -f "$PROFILE" ]; then
     apparmor_parser -R "$PROFILE" 2>/dev/null || true
