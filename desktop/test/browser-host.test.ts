@@ -6,6 +6,7 @@
 // With the flag set anywhere else, they fail before any browser is launched.
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { connect as connectTcp } from "node:net";
 import { tmpdir, userInfo } from "node:os";
@@ -633,6 +634,20 @@ await navigator.serviceWorker.ready;`);
         }
       }
       rmSync(folder, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("closes its browser only once nothing holds its profile, a process that would not go killed", async () => {
+    await op(session(), "browser.navigate", { url: "http://fixture.test/" });
+    // As a process of the browser's that outlives it, still writing the profile.
+    const lingering = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", join(profile, "lingering")], { stdio: "ignore" });
+    const gone = new Promise<string | null>((done) => lingering.once("exit", (_code, signal) => done(signal)));
+    try {
+      await host.close();
+      expect(await within(500, gone)).toBe("SIGKILL");
+      expect(processes()).toEqual([]);
+    } finally {
+      lingering.kill("SIGKILL");
     }
   }, 30_000);
 
