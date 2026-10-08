@@ -148,7 +148,9 @@ describe("the browser's prompts", () => {
   it("asks a chat's first use with Deny focused, and Allow for this chat held back", () => {
     const content = approval({ kind: "browser", chat: CHAT, action: "use", detail: "" });
     expect(content.title).toBe("Let acme.surogate.ai use a browser on this computer?");
-    expect(content.lead).toContain("signed in to nothing of yours");
+    // The profile is the agent's: what the user signed in to there from another chat stays signed in.
+    expect(content.lead).not.toContain("nothing of yours");
+    expect(content.lead).toContain("It has a profile of its own, apart from your own browser; what you sign in to there stays signed in for acme.surogate.ai, in its other chats too.");
     expect(content.notes).toContain("It cannot reach this computer's own services or your private networks.");
     expect([ids(content), allowing(content), content.focus, content.cancel]).toEqual([["deny", "allow_session"], ["allow_session"], "deny", "deny"]);
   });

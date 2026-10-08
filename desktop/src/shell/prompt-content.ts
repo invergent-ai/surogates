@@ -232,7 +232,7 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
   if (request.action === "use") {
     return {
       title: `Let ${chat.agent} use a browser on this computer?`,
-      lead: `${asker(chat)} wants to open web pages in a browser on this computer, for this chat. It has a profile of its own, signed in to nothing of yours; what you sign in to there stays signed in for ${chat.agent}.`,
+      lead: `${asker(chat)} wants to open web pages in a browser on this computer, for this chat. It has a profile of its own, apart from your own browser; what you sign in to there stays signed in for ${chat.agent}, in its other chats too.`,
       details: [],
       notes: [
         "What its pages show is sent to the agent, and can stay in the conversation.",
