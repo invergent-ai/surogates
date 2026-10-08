@@ -74,7 +74,7 @@ export async function startLocalThread(desktop: LocalDesktop, api: LocalThreadAp
     await desktop.bindSession(threadId, prepared.token);
   } catch (error) {
     // Made: a binding recorded here before the link went is finished at its next connection.
-    throw new Error(`Surogate made this thread but could not set up its folder on this computer: ${saidBy(error)}. Allow it again.`);
+    throw new Error(`Surogate could not set up this thread's folder on this computer: ${saidBy(error)}. Allow it again.`);
   }
   return api.begin(card.projectId, threadId);
 }

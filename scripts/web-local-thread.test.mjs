@@ -123,7 +123,7 @@ test("says the desktop's refusals in its own words, without the name of the call
   const agent = routes();
   const desktop = bridge({ bind: refused("This folder's confirmation expired before its chat was created") });
   await assert.rejects(startLocalThread(desktop, agent, CARD), {
-    message: "Surogate made this thread but could not set up its folder on this computer: This folder's confirmation expired before its chat was created. Allow it again.",
+    message: "Surogate could not set up this thread's folder on this computer: This folder's confirmation expired before its chat was created. Allow it again.",
   });
   assert.equal(agent.asked.some(([name]) => name === "begin"), false);
   assert.equal(desktop.calls.some(([name]) => name === "cancelPrepared"), false);
