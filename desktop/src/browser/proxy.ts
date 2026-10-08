@@ -19,9 +19,6 @@ export interface BrowserProxyOptions extends ReachOptions {
 // prove its browser's requests come here. No resolver answers them (RFC 6761), so a browser
 // that goes around the proxy reaches nothing with one.
 export const CHECK_DOMAIN = ".proxy-check.invalid";
-// How many of the checks asked for it keeps, the latest: a launch waits on one at a time, and a
-// page can ask for any number.
-export const CHECKS_KEPT = 16;
 const checkOf = (host: string): string | null => (host.endsWith(CHECK_DOMAIN) ? host.slice(0, -CHECK_DOMAIN.length) : null);
 
 const subnets = (ranges: Array<[string, number]>) => {
@@ -84,8 +81,9 @@ export class BrowserProxy {
   private readonly server: Server;
   // Every connection it carries, so a close ends them all.
   private readonly carried = new Set<Duplex>();
-  // The latest checks asked for through it, by token, oldest first.
-  private readonly checks = new Set<string>();
+  // The checks a launch waits on, by token, and whether each has come through. Only these are
+  // kept: a page can ask for any number of others, and none of them can push a launch's out.
+  private readonly checks = new Map<string, boolean>();
 
   constructor(private readonly options: BrowserProxyOptions = {}) {
     this.server = createServer((request, response) => void this.forward(request, response));
@@ -101,17 +99,23 @@ export class BrowserProxy {
     });
   }
 
-  /** Whether a request for *token*'s check name came through this proxy; asking forgets it. */
-  checked(token: string): boolean {
-    return this.checks.delete(token);
+  /** A launch's check, waited on from now on: checked() says whether its request came through. */
+  expect(token: string): void {
+    this.checks.set(token, false);
   }
 
-  // A check's name, recorded and answered here: nothing is dialed for it.
+  /** Whether a request for *token*'s check name came through this proxy since it was expected; asking forgets it. */
+  checked(token: string): boolean {
+    const came = this.checks.get(token) === true;
+    this.checks.delete(token);
+    return came;
+  }
+
+  // A check's name, answered here, and recorded when a launch waits on it: nothing is dialed for it.
   private answered(host: string): boolean {
     const token = checkOf(host);
     if (token === null) return false;
-    const [oldest] = this.checks.add(token);
-    if (this.checks.size > CHECKS_KEPT && oldest !== undefined) this.checks.delete(oldest);
+    if (this.checks.has(token)) this.checks.set(token, true);
     return true;
   }
 

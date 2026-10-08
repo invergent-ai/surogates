@@ -3,7 +3,7 @@ import { connect as connectTcp, createServer, type Server, type Socket } from "n
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { BrowserProxy, CHECKS_KEPT } from "../src/browser/proxy.js";
+import { BrowserProxy } from "../src/browser/proxy.js";
 
 // What a name leads to, and how often it was looked up: rebinding.example leads elsewhere, then here.
 let lookups: Record<string, number>;
@@ -242,7 +242,10 @@ describe("the browser's proxy", () => {
   });
 
   it("answers a launch's check itself, at its own name and over the https upgrade's tunnel, and dials nothing for it", async () => {
+    proxy.expect("0123abcd");
+    proxy.expect("4567ef00");
     expect(proxy.checked("0123abcd")).toBe(false);
+    proxy.expect("0123abcd");
     expect(await get("http://0123abcd.proxy-check.invalid/", "0123abcd.proxy-check.invalid")).toEqual({ status: 204, body: "" });
     expect(proxy.checked("0123abcd")).toBe(true);
     expect((await connect("4567ef00.proxy-check.invalid:443")).status).toBe(403);
@@ -295,14 +298,21 @@ describe("the browser's proxy", () => {
     expect(await stillOpen()).toBe(0);
   });
 
-  it("forgets a check once asked about it, and keeps only the latest CHECKS_KEPT, however many a page asks for", async () => {
+  it("forgets a check once asked about it, and keeps none a launch does not wait on, however many a page asks for", async () => {
+    proxy.expect("0123abcd");
     await get("http://0123abcd.proxy-check.invalid/", "0123abcd.proxy-check.invalid");
     expect(proxy.checked("0123abcd")).toBe(true);
     expect(proxy.checked("0123abcd")).toBe(false);
-    for (let at = 0; at <= CHECKS_KEPT; at += 1) await get(`http://page${at}.proxy-check.invalid/`, `page${at}.proxy-check.invalid`);
+    for (let at = 0; at < 40; at += 1) await get(`http://page${at}.proxy-check.invalid/`, `page${at}.proxy-check.invalid`);
+    expect((proxy as unknown as { checks: Map<string, boolean> }).checks.size).toBe(0);
     expect(proxy.checked("page0")).toBe(false);
-    expect(proxy.checked("page1")).toBe(true);
-    expect(proxy.checked(`page${CHECKS_KEPT}`)).toBe(true);
+  });
+
+  it("keeps a launch's own check however many a page asks for meanwhile", async () => {
+    proxy.expect("launch1");
+    await get("http://launch1.proxy-check.invalid/", "launch1.proxy-check.invalid");
+    for (let at = 0; at < 40; at += 1) await get(`http://page${at}.proxy-check.invalid/`, `page${at}.proxy-check.invalid`);
+    expect(proxy.checked("launch1")).toBe(true);
   });
 
   it("closes at once, with a browser's connection kept alive and a plain request still waiting on its site", async () => {

@@ -532,6 +532,7 @@ export class BrowserHost {
   private async proxied(context: BrowserContext, proxy: BrowserProxy): Promise<Page> {
     const page = context.pages()[0] ?? (await context.newPage());
     const token = randomBytes(8).toString("hex");
+    proxy.expect(token);
     await page.goto(`http://${token}${CHECK_DOMAIN}/`, { timeout: CHECK_MS }).catch(() => {});
     if (!proxy.checked(token)) throw new Error(PROXY_BYPASSED);
     await page.goto("about:blank").catch(() => {});
