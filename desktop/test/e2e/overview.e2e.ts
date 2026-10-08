@@ -641,6 +641,35 @@ describe("a thread read in the Overview pane, as the agent answers", () => {
     await expect.poll(() => inPane("[document.title, window.kept === true]"), { timeout: 10_000 }).toEqual(["Fake agent", false]);
   });
 
+  it("is loaded again ever more slowly while its page crashes after each load, and at once after it has stayed up", async () => {
+    const { shell, page } = await opened();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    // Each load of the pane's page, as the app's process sees it end: the next three crash as they end.
+    await shell.evaluate(async ({ BrowserWindow }) => {
+      const contents = (BrowserWindow.getAllWindows()[0]!.contentView.children as Electron.WebContentsView[])
+        .find((view) => view.webContents.getURL().includes("/transcript/"))!.webContents;
+      if (contents.isLoading()) await new Promise<void>((resolve) => contents.once("did-finish-load", () => resolve()));
+      const kept = globalThis as unknown as { loads: number[]; crash: () => void };
+      kept.loads = [];
+      kept.crash = () => process.kill(contents.getOSProcessId(), "SIGKILL");
+      contents.on("did-finish-load", () => {
+        kept.loads.push(Date.now());
+        if (kept.loads.length < 4) kept.crash();
+      });
+      kept.crash();
+    });
+    const loads = () => shell.evaluate(() => (globalThis as unknown as { loads: number[] }).loads);
+    await expect.poll(async () => (await loads()).length, { timeout: 30_000 }).toBe(4);
+    const [, , third, fourth] = await loads();
+    // The link's backoff waits 4 s at least before its fourth try; a page loaded again at once each time is back within about one.
+    expect(fourth! - third!).toBeGreaterThanOrEqual(3_000);
+    // Up for 10 s, its page that crashes is loaded again at once.
+    await pause(10_500);
+    await shell.evaluate(() => (globalThis as unknown as { crash: () => void }).crash());
+    await expect.poll(async () => (await loads()).length, { timeout: 3_000 }).toBe(5);
+  });
+
   it("follows a redirect of its load only to its own transcript", async () => {
     const { shell, page } = await opened();
     const shown = () => shell.evaluate(({ BrowserWindow }) =>

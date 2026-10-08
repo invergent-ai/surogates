@@ -87,7 +87,13 @@ interface PaneView {
   url: string;
   attempt: number;
   retry?: NodeJS.Timeout;
+  // When its page last loaded, while it is up.
+  upSince?: number;
 }
+
+// How long the pane's page stays up before its backoff starts over: one that crashes after each load
+// is loaded again ever more slowly.
+const PANE_STAYS_UP_MS = 10_000;
 
 interface WebView {
   agent: Agent;
@@ -392,6 +398,8 @@ export class MainWindow {
     // A load that failed, or a page that crashed, is loaded again, with the link's backoff, while the pane reads it.
     const again = () => {
       clearTimeout(pane.retry);
+      if (pane.upSince !== undefined && Date.now() - pane.upSince >= PANE_STAYS_UP_MS) pane.attempt = 0;
+      pane.upSince = undefined;
       pane.retry = setTimeout(() => {
         if (this.pane === pane) void contents.loadURL(url).catch(() => {});
       }, reconnectDelayMs(pane.attempt++));
@@ -401,8 +409,9 @@ export class MainWindow {
       if (isMainFrame && code !== -3) again();
     });
     contents.on("render-process-gone", again);
+    // A page committed, never the error page of a load that failed.
     contents.on("did-navigate", () => {
-      pane.attempt = 0;
+      pane.upSince = Date.now();
     });
     this.pane = pane;
     void contents.loadURL(url).catch(() => {});
