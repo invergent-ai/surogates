@@ -105,10 +105,11 @@ const atLeast = (version: [number, number] | null, [major, minor]: [number, numb
 /**
  * What this computer lacks of what the VM runs on (spec, Section 11, Requirements), each
  * named as the install script installs it: QEMU 8.2 or later; Ubuntu's virtiofsd 1.10 or
- * later; newuidmap and newgidmap, which virtiofsd runs for its id maps; and zstd, which
- * unpacks the image's download. Checked at the app's start.
+ * later; newuidmap and newgidmap, which virtiofsd runs for its id maps; and, while the image
+ * has something left to unpack (*unpacking*), zstd, which unpacks its download. Checked at
+ * the app's start, and at the status line's Check again.
  */
-export async function missingTools(paths: { virtiofsd?: string; zstd?: string } = {}): Promise<string[]> {
+export async function missingTools(paths: { virtiofsd?: string; zstd?: string } = {}, unpacking = true): Promise<string[]> {
   const [qemu, virtiofsd] = await Promise.all([
     versionOf("qemu-system-x86_64", ["--version"]),
     versionOf(paths.virtiofsd ?? VIRTIOFSD, ["--version"]),
@@ -123,7 +124,7 @@ export async function missingTools(paths: { virtiofsd?: string; zstd?: string } 
     ...(atLeast(qemu, [8, 2]) ? [] : ["QEMU 8.2 or later"]),
     ...(atLeast(virtiofsd, [1, 10]) ? [] : ["virtiofsd 1.10 or later"]),
     ...(onPath("newuidmap") && onPath("newgidmap") ? [] : ["newuidmap and newgidmap"]),
-    ...(zstd ? [] : ["zstd"]),
+    ...(zstd || !unpacking ? [] : ["zstd"]),
   ];
 }
 

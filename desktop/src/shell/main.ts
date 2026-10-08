@@ -284,8 +284,9 @@ function startDelivery(check = false): void {
 }
 
 // What the VM lacks of this computer, looked for: at the app's start, and at the line's Check again.
+// zstd counts only while the image's delivery has something left to unpack.
 function lookForTools(): void {
-  lackingFound = missingTools().then((found) => {
+  lackingFound = missingTools({}, delivery !== null && delivery.state.state !== "ready").then((found) => {
     lacking = found;
     changed();
     return found;
@@ -2036,9 +2037,9 @@ if (!app.requestSingleInstanceLock()) {
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
     // The VM slept with the computer: at its wake its clock is set, and its keepalive starts afresh.
     powerMonitor.on("resume", () => vm?.resume());
-    // What the VM needs of this computer, looked for; its image downloaded in the background.
-    lookForTools();
+    // Its image downloaded in the background, and what the VM needs of this computer looked for.
     startDelivery();
+    lookForTools();
     const page = join(PAGES, "shell.html");
     main = new MainWindow({
       states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed,

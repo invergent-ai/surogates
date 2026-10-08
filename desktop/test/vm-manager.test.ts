@@ -321,6 +321,8 @@ describe("the VM manager on the host", () => {
       const virtiofsd = tool("virtiofsd", "echo 'virtiofsd 1.9.0'");
       const zstd = join(bin, "zstd");
       expect(await missingTools({ virtiofsd, zstd })).toEqual(["QEMU 8.2 or later", "virtiofsd 1.10 or later", "newuidmap and newgidmap", "zstd"]);
+      // zstd only unpacks the image's download: not needed once the image is here, or with none to deliver.
+      expect(await missingTools({ virtiofsd, zstd }, false)).toEqual(["QEMU 8.2 or later", "virtiofsd 1.10 or later", "newuidmap and newgidmap"]);
       tool("qemu-system-x86_64", "echo 'QEMU emulator version 10.1.0 (Debian 1:10.1.0+ds-5ubuntu2)'");
       tool("virtiofsd", "echo 'virtiofsd 1.13.2'");
       for (const name of ["newuidmap", "newgidmap", "zstd"]) tool(name, "true");
