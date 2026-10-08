@@ -272,7 +272,7 @@ function tellAppearance(): void {
   main?.webContents()?.send("desktop:appearance", appearanceNow());
 }
 
-const links = () => linksFor(agents.get()?.origin ?? null);
+const links = () => linksFor(agents.get());
 
 function openLink(which: unknown): void {
   const known = links();
@@ -649,7 +649,8 @@ async function bindToComputer(agent: Agent, signal: AbortSignal): Promise<void> 
 
 /**
  * The agent's capabilities, read again: a server that gained local folders since it was added now
- * offers them. Kept while the agent is the one added; anything else is said and changes nothing.
+ * offers them, and the console it names now is the one the links open. Kept while the agent is the
+ * one added; anything else is said and changes nothing.
  */
 async function refreshAgent(agent: Agent): Promise<void> {
   try {
@@ -658,12 +659,13 @@ async function refreshAgent(agent: Agent): Promise<void> {
       report(new Error(`${agent.origin} now answers as agent ${fresh.agentId} at ${fresh.origin}: Surogate keeps the agent it added`));
       return;
     }
-    if (fresh.desktopSessions === agent.desktopSessions && fresh.multiSession === agent.multiSession) return;
+    const { desktopSessions, multiSession, consoleUrl } = fresh;
+    if (desktopSessions === agent.desktopSessions && multiSession === agent.multiSession && consoleUrl === agent.consoleUrl) return;
     // Removed while it was asked: it is not kept again.
     const now = agents.get();
     if (now?.origin !== agent.origin || now.agentId !== agent.agentId) return;
     // In place: the bridge and the device hold this agent.
-    Object.assign(agent, { desktopSessions: fresh.desktopSessions, multiSession: fresh.multiSession });
+    Object.assign(agent, { desktopSessions, multiSession, consoleUrl });
     agents.set(agent);
     changed();
     void registerComputer(agent);

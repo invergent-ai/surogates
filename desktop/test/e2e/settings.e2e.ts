@@ -76,7 +76,7 @@ describe("the user menu", () => {
     expect(await page.isVisible("#user-menu")).toBe(true);
     expect(await page.getAttribute("#user", "aria-expanded")).toBe("true");
     expect(await page.textContent("#user-email")).toBe("flavius@example.com");
-    // An agent off surogate.ai has no console the app knows: no usage or billing.
+    // An agent that names no console: no usage or billing.
     expect(await texts(page, "#user-menu .menu-item")).toEqual(["SettingsCtrl+Shift+,", "Language", "Get help", "Log out", "Remove this agent…"]);
     // One divider above Log out: none is doubled where the console's rows are hidden.
     expect(await page.$$eval("#user-menu hr", (found) => found.filter((hr) => (hr as HTMLElement).offsetParent !== null).length)).toBe(1);
@@ -109,7 +109,7 @@ describe("the user menu", () => {
     await page.click('[data-action="help"]');
     // After the sign-in's own address, which the system browser opened first.
     await expect.poll(() => shell.evaluate(() => (globalThis as unknown as { opened: string[] }).opened.slice(1))).toEqual(["https://docs.surogate.ai/work/"]);
-    // Off surogate.ai there is no console; and a name that is no link, a prototype's included, opens nothing.
+    // The agent names no console; and a name that is no link, a prototype's included, opens nothing.
     for (const which of ["usage", "billing", "constructor", "__proto__"]) {
       await expect(page.evaluate((name) => (window as unknown as { surogateShell: { link(which: string): Promise<void> } })
         .surogateShell.link(name), which)).rejects.toThrow("No such link");
@@ -210,7 +210,7 @@ describe("Settings", () => {
     expect(await texts(settings, ".settings-nav .item")).toEqual(["This computer"]);
     expect(await texts(settings, ".row:not([hidden]) .label > span:first-child")).toEqual(["Added"]);
     await settings.fill("#settings-search", "");
-    // Off surogate.ai Usage stays gone, the search cleared too.
+    // With no console named, Usage stays gone, the search cleared too.
     expect(await texts(settings, ".settings-nav .item")).toEqual([
       "General", "Account", "This computer", "Folders and permissions", "SkillsLater", "ConnectorsLater",
     ]);

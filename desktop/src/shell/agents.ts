@@ -20,6 +20,7 @@ export interface Agent {
   name: string; // the server names no agent: its host does
   desktopSessions: boolean; // the server can bind a chat to a folder of this computer
   multiSession: boolean; // false: one conversation, which stays in the cloud
+  consoleUrl: string | null; // the console the agent names for its users' usage and billing: an origin
 }
 
 // Plain http only for this computer's own servers, as in development: localhost and loopback
@@ -47,17 +48,31 @@ export const linkUrl = (origin: string): string => `${origin.replace(/^http/, "w
 export const partitionFor = (origin: string, agentId: string): string =>
   `persist:agent-${createHash("sha256").update(`${origin}\n${agentId}`).digest("hex").slice(0, 32)}`;
 
-// An agent as connectAgent keeps one: its origin canonical, so the bridge's exact-origin check holds.
+// *value* as an origin of its own, canonical; null for anything else.
+function originOf(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    return canonicalOrigin(value);
+  } catch {
+    return null;
+  }
+}
+
+// The console an agent at *origin* names in *value*, as the links open it: an origin of its own, and plain
+// http only where the agent is on this computer too, as its development servers are; null for anything else.
+function consoleOf(value: unknown, origin: string): string | null {
+  const console = originOf(value);
+  return console?.startsWith("http:") && !loopback(new URL(origin).hostname) ? null : console;
+}
+
+// An agent as connectAgent keeps one: its origin canonical, so the bridge's exact-origin check holds, and
+// its console one too, as the links open it.
 function isAgent(value: unknown): value is Agent {
-  const { origin, agentId, name, desktopSessions, multiSession } =
+  const { origin, agentId, name, desktopSessions, multiSession, consoleUrl } =
     (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
   if (typeof origin !== "string" || typeof agentId !== "string" || agentId === "" || typeof name !== "string") return false;
   if (typeof desktopSessions !== "boolean" || typeof multiSession !== "boolean") return false;
-  try {
-    return canonicalOrigin(origin) === origin;
-  } catch {
-    return false;
-  }
+  return originOf(origin) === origin && (consoleUrl === null || consoleOf(consoleUrl, origin) === consoleUrl);
 }
 
 export class AgentStore {
@@ -146,6 +161,10 @@ export async function readAgent(origin: string, get: Get, timeoutMs = CONFIG_TIM
     // An older server says nothing, and has no local folders.
     desktopSessions: config?.desktop_sessions === true,
     multiSession: config?.multi_session !== false,
+    // Opened in the system browser, so only an https origin, or plain http on this computer for an agent
+    // on it too: never a path, a file or a script. An older server, or one whose operator named none, has
+    // no console.
+    consoleUrl: consoleOf(config?.console_url, final),
   };
 }
 
@@ -174,14 +193,12 @@ export function describeAgent(agent: Agent, device: { status: LinkStatus; comput
   }
 }
 
-// Where an agent's user finds usage and billing: the Surogate console, for an agent surogate.ai
-// hosts. An install of its own has no console the app knows, and its menu shows no link.
-export const consoleFor = (origin: string): string | null =>
-  new URL(origin).hostname.endsWith(".surogate.ai") ? "https://ops.surogate.ai" : null;
-
-/** The links the user menu and Settings open for the agent at *origin*: only these, never a page's own address. */
-export function linksFor(origin: string | null): Record<string, string> {
-  const console = origin === null ? null : consoleFor(origin);
+/**
+ * The links the user menu and Settings open for *agent*: only these, never a page's own address. Usage
+ * and billing are in the console the agent names; an agent that names none shows neither.
+ */
+export function linksFor(agent: Agent | null): Record<string, string> {
+  const console = agent?.consoleUrl ?? null;
   return {
     help: "https://docs.surogate.ai/work/",
     ...(console ? { usage: `${console}/work/settings/usage`, billing: `${console}/work/settings/billing` } : {}),
