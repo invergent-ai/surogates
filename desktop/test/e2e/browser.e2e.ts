@@ -245,12 +245,18 @@ describe("Settings → Browser", () => {
     }
   });
 
-  it("leaves its list as drawn across a redraw while its rows are the same, with its choice and the keyboard, and draws it anew once they change", async () => {
+  it("leaves its list as drawn across a redraw while its rows are the same, on the choice kept and with the keyboard, and draws it anew once they change", async () => {
     const settings = await browserSettings();
     await expect.poll(() => settings.$$eval("#browser option", (options) => options.length)).toBeGreaterThan(1);
     await settings.focus("#browser");
     await settings.$eval("#browser option", (option) => Object.assign(option, { drawnBefore: true }));
     const asDrawn = () => settings.$eval("#browser option", (option) => "drawnBefore" in option);
+    // Custom…, and the system's dialog cancelled: nothing is kept and the rows are the same, so the redraw
+    // puts the list back on the choice kept, in the options it had.
+    await settings.selectOption("#browser", "pick");
+    await expect.poll(() => settings.inputValue("#browser"), { timeout: 5_000 }).toBe("auto");
+    expect(await asDrawn()).toBe(true);
+    expect(kept()).not.toContain("custom");
     // Settings drawn again, as each change of the app's state draws it: a text size chosen meanwhile shows that it was.
     const redrawn = async (size: string) => {
       await settings.evaluate((chosen) => (window as unknown as { surogateSettings: { set(key: string, value: string): Promise<void> } })
