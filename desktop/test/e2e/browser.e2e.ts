@@ -7,7 +7,7 @@
 
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -15,7 +15,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { chosenBrowser, findBrowsers } from "../../src/browser/choose.js";
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
 import { isolated } from "../isolated.js";
-import { dataHome, launch, press, prompt, promptsShown, quit, shellEnv, shellPage, stubNative } from "./launch.js";
+import { dataHome, launch, MAIN, press, prompt, promptsShown, quit, shellEnv, shellPage, stubNative } from "./launch.js";
 
 const CHAT = "4e5f6a7b-8c9d-4e0f-a1b2-c3d4e5f6a7b8";
 // The browser Settings would choose, or the one SUROGATE_TEST_BROWSER names, chosen in Settings before each launch.
@@ -69,8 +69,9 @@ async function operation(kind: string, args: Record<string, unknown>, invocation
   return result?.outcome;
 }
 
-// The app launched and signed in, and *folder* bound to the chat in the desktop's own sheet.
-async function bound(folder: string): Promise<Page> {
+// The app launched and signed in, and *folder* bound to the chat in the desktop's own sheet. Each of
+// *requires*, a script of the test's, runs in the app before its own code.
+async function bound(folder: string, requires: string[] = []): Promise<Page> {
   origin = await agent.start();
   // The app's own environment is the browser's: apart from the user's session, or no launch.
   isolated(shellEnv(home));
@@ -78,7 +79,7 @@ async function bound(folder: string): Promise<Page> {
     mkdirSync(join(home, "surogate"), { recursive: true });
     writeFileSync(join(home, "surogate", "browser.json"), JSON.stringify({ choice: BROWSER.id }));
   }
-  app = await launch(home);
+  app = await launch(home, {}, [], requires);
   await stubNative(app);
   const page = await shellPage(app);
   await connect(page, origin);
@@ -118,6 +119,23 @@ async function atClick(client: Page, call: "show" | "takeOver" | "handBack" | "o
 
 // Whether Settings, or the project's dialog, is open over the window.
 const over = (file: string) => app!.windows().some((window) => window.url().includes(file));
+
+// A page of the chat's to bring to the front, stood in for where no browser runs: a script the app runs
+// first. With it the app's tools say a chat's page was shown, and keep each chat they were asked to show,
+// as globalThis.shown, once globalThis.paged says the stand-in is in place.
+function paged(): string {
+  const script = join(home, "paged.cjs");
+  writeFileSync(script, [
+    'const { pathToFileURL } = require("node:url");',
+    "const shown = [];",
+    "Object.assign(globalThis, { shown, paged: false });",
+    `void import(pathToFileURL(${JSON.stringify(join(dirname(MAIN), "..", "browser", "executor.js"))}).href).then(({ Browsing }) => {`,
+    "  Browsing.prototype.show = function (root) { shown.push(root); return Promise.resolve(true); };",
+    "  Object.assign(globalThis, { paged: true });",
+    "});",
+  ].join("\n"));
+  return script;
+}
 
 // The browser's processes with a profile under the app's state.
 const profiles = () => join(home, "surogate", "browser-profiles");
@@ -299,13 +317,17 @@ describe("a chat's browser taken over, and handed back", () => {
     // Kept: the page's own code asks no more, however often, and no box opens for it.
     for (let n = 0; n < 3; n += 1) await expect(handBack()).rejects.toThrow("The user chose to keep the browser");
     expect(await boxes()).toHaveLength(before + 1);
+    // Nor after a take-over the page's own code makes again: the chat was its user's already, so it is no new one.
+    await takeOver();
+    await expect(handBack()).rejects.toThrow("The user chose to keep the browser");
+    expect(await boxes()).toHaveLength(before + 1);
     // Its user's own click still asks, and can still keep it.
     expect(await atClick(client, "handBack")).toBe(false);
     expect(await boxes()).toHaveLength(before + 2);
     await app!.evaluate(() => Object.assign(globalThis, { answer: 0 }));
     expect(await atClick(client, "handBack")).toBe(true);
     expect(await binding()).toMatchObject({ takenOver: false });
-    await expect.poll(heard, { timeout: 10_000 }).toEqual([CHAT, CHAT]);
+    await expect.poll(heard, { timeout: 10_000 }).toEqual([CHAT, CHAT, CHAT]);
     // Handed back, the chat's browser asks its first use, as before.
     const navigating = operation("browser.navigate", { url: "https://example.com/", wait_until: "load" });
     await press(await prompt(app!), "deny");
@@ -373,6 +395,22 @@ describe("a chat's browser taken over, and handed back", () => {
       expect.stringContaining("The agent's browser has no page open for this chat"), SETTINGS_AT_A_CLICK,
     ]);
     expect(over("/settings.html")).toBe(false);
+  });
+
+  it("brings the chat's page to the front at a take-over only at its user's click: one the page's own code makes raises nothing", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder, [paged()]);
+    const client = await webClient(app!, origin);
+    await expect.poll(() => app!.evaluate(() => (globalThis as unknown as { paged: boolean }).paged), { timeout: 10_000 }).toBe(true);
+    const shown = () => app!.evaluate(() => (globalThis as unknown as { shown: string[] }).shown);
+    // The page's own code, again and again: the chat is taken over, and its page stays where it is.
+    for (let n = 0; n < 3; n += 1) await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
+    expect(await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT)).toMatchObject({ takenOver: true });
+    expect(await shown()).toEqual([]);
+    // At its user's click its page comes to the front too.
+    expect(await atClick(client, "takeOver")).toBeNull();
+    expect(await shown()).toEqual([CHAT]);
   });
 
   it("opens Settings on Browser at a click in the agent's page, shows Browser in a Settings open already, and opens none over a project's dialog", async () => {
