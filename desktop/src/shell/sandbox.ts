@@ -13,9 +13,12 @@ export type SandboxAction = "retry" | "log" | "check";
 
 export interface SandboxLine {
   text: string;
+  said: string; // what a screen reader is told: its state, without the percent, which changes too often to hear
   actions: SandboxAction[];
   ready: boolean; // nothing to say in the sidebar: Settings says Ready
 }
+
+const DOWNLOADING = "Downloading the sandbox for the agent's commands";
 
 // Why the guest runs emulated, as the user is told it for as long as it does.
 const EMULATED: Record<Emulated, string> = {
@@ -32,16 +35,17 @@ const EMULATED: Record<Emulated, string> = {
  * and *boot*, the last boot (null before any). The first that stops commands wins.
  */
 export function sandboxLine(lacking: string[] | null, delivery: Delivery | null, boot: Boot | null): SandboxLine {
-  if (lacking && lacking.length > 0) return { text: toolsMissing(lacking), actions: ["check"], ready: false };
-  if (delivery?.state === "failed") return { text: `Surogate could not download its sandbox: ${delivery.why}`, actions: ["retry"], ready: false };
+  const line = (text: string, actions: SandboxAction[] = [], said = text) => ({ text, said, actions, ready: false });
+  if (lacking && lacking.length > 0) return line(toolsMissing(lacking), ["check"]);
+  if (delivery?.state === "failed") return line(`Surogate could not download its sandbox: ${delivery.why}`, ["retry"]);
   if (delivery?.state === "downloading") {
     const percent = delivery.total > 0 ? Math.floor((delivery.done * 100) / delivery.total) : 0;
-    return { text: `Downloading the sandbox for the agent's commands: ${percent}%`, actions: [], ready: false };
+    return line(`${DOWNLOADING}: ${percent}%`, [], DOWNLOADING);
   }
-  if (delivery?.state === "unpacking") return { text: "Unpacking the sandbox for the agent's commands", actions: [], ready: false };
-  if (delivery?.state === "checking") return { text: "Checking the sandbox for the agent's commands", actions: [], ready: false };
+  if (delivery?.state === "unpacking") return line("Unpacking the sandbox for the agent's commands");
+  if (delivery?.state === "checking") return line("Checking the sandbox for the agent's commands");
   // A delivered image may be what did not start: its Retry checks it by its hashes before the next boot.
-  if (boot && "failed" in boot) return { text: `This computer's sandbox did not start: ${boot.failed}`, actions: delivery ? ["log", "retry"] : ["log"], ready: false };
-  if (boot?.emulated) return { text: EMULATED[boot.emulated], actions: [], ready: false };
-  return { text: "Ready", actions: [], ready: true };
+  if (boot && "failed" in boot) return line(`This computer's sandbox did not start: ${boot.failed}`, delivery ? ["log", "retry"] : ["log"]);
+  if (boot?.emulated) return line(EMULATED[boot.emulated]);
+  return { text: "Ready", said: "Ready", actions: [], ready: true };
 }

@@ -625,6 +625,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     const client = await launched({ SUROGATE_VM_IMAGE: "", SUROGATE_INSTALL_JSON: served.record });
     const page = await shellPage(app!);
     await expect.poll(() => page.textContent("#sandbox-text"), { timeout: 30_000 }).toMatch(/^Downloading the sandbox for the agent's commands: (\d|1\d)%$/);
+    // A screen reader hears the state, never each percent: the percent is outside the live region.
+    expect([await page.textContent("#sandbox-said"), await page.getAttribute("#sandbox-said", "role"), await page.getAttribute("#sandbox-text", "role")])
+      .toEqual(["Downloading the sandbox for the agent's commands", "status", null]);
     await bind(client, folder);
     // The command waits for the image; the rest of it comes a moment later.
     const ran = operation("run", { command: "echo delivered", workdir: null, timeout: 30 });

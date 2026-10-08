@@ -47,7 +47,7 @@ interface State {
   signIn: { needed: boolean; pending: boolean; failure: string | null }; // the app's own sign-in, in the system browser
   deviceAction: { text: string; button: string; action: "sign-in" | "restore" } | null; // what the user can do about this computer
   quitting: number | null; // while a quit waits for the threads working on this computer: how many
-  sandbox: { text: string; actions: Array<"retry" | "log" | "check">; ready: boolean }; // what stops the agent's commands, or slows them
+  sandbox: { text: string; said: string; actions: Array<"retry" | "log" | "check">; ready: boolean }; // what stops the agent's commands, or slows them
 }
 
 interface Shell {
@@ -297,6 +297,9 @@ async function render(): Promise<void> {
   // Its words may hold QEMU's, which name the user's paths.
   byId("sandbox").hidden = state.sandbox.ready;
   showText(byId("sandbox-text"), state.sandbox.ready ? "" : state.sandbox.text);
+  // Set only when it changes, so the live region speaks once a state.
+  const said = state.sandbox.ready ? "" : state.sandbox.said;
+  if (byId("sandbox-said").textContent !== said) showText(byId("sandbox-said"), said);
   byId("sandbox-log").hidden = !state.sandbox.actions.includes("log");
   byId("sandbox-retry").hidden = !state.sandbox.actions.includes("retry");
   byId("sandbox-check").hidden = !state.sandbox.actions.includes("check");
