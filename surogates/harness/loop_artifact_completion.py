@@ -32,7 +32,7 @@ from surogates.harness.loop_messages import (
 from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
 from surogates.session.inbox_payload import raises_completion_inbox_item
-from surogates.harness.landing import keep_copy, land_turn
+from surogates.harness.landing import _fence, keep_copy, land_turn, prune_after
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams.history import waits_to_land
 from surogates.workstreams import is_project_master, is_project_thread
@@ -979,6 +979,9 @@ class ArtifactCompletionMixin:
         # Detaching stays synchronous because it is in-memory and it carries
         # the ordering that matters: once the mapping is gone, no later turn
         # can resolve this session to a pod that is about to disappear.
+        # A landing that recorded a commit leaves its pod the day's pruning
+        # of the project's history: run at the very end, once the report is out.
+        prunes: str | None = None
         if self._sandbox_pool is not None:
             try:
                 sandbox_id = await self._sandbox_pool.release_for_session(
@@ -989,10 +992,13 @@ class ArtifactCompletionMixin:
                     "Sandbox detach failed for %s", session.id, exc_info=True,
                 )
             else:
-                self._spawn_background(
-                    self._destroy_sandbox_quietly(sandbox_id, str(session.id)),
-                    name=f"sandbox-teardown-{session.id}",
-                )
+                if sandbox_id is not None and landing is not None and landing["state"] == "completed" and landing.get("commit"):
+                    prunes = sandbox_id
+                else:
+                    self._spawn_background(
+                        self._destroy_sandbox_quietly(sandbox_id, str(session.id)),
+                        name=f"sandbox-teardown-{session.id}",
+                    )
 
         # The browser is intentionally NOT torn down here. A turn end is
         # not a session end: an agent driving a multi-step browser flow
@@ -1201,6 +1207,19 @@ class ArtifactCompletionMixin:
                 session.id,
             )
 
+        if prunes is not None:
+            # Last, with the turn ended and reported: nothing a person waits for is behind it.
+            try:
+                await prune_after(
+                    session_factory=self._session_factory, sandbox_pool=self._sandbox_pool, sandbox_id=prunes,
+                    workstream=session.config["workstream_id"], packs=landing.get("packs", 0),
+                )
+            finally:
+                # Also when the wake is cancelled under it: its pod goes all the same.
+                self._spawn_background(
+                    self._destroy_sandbox_quietly(prunes, str(session.id)), name=f"sandbox-teardown-{session.id}",
+                )
+
     async def _kept_apart(self, session: Any) -> dict[str, Any]:
         """A helper's copy whose hand-back failed, kept apart before its pod goes; what its completion says of it.
 
@@ -1224,7 +1243,7 @@ class ArtifactCompletionMixin:
         owner = sandbox_session_key(session)
         if self._sandbox_pool.holds_copy(owner) or self._storage is None or session.config.get("history_off"):
             return
-        if await waits_to_land(self._session_factory, self._storage, session):
+        if await waits_to_land(self._session_factory, self._storage, session, fence=_fence(self._saga_settings)):
             from surogates.harness.tool_exec import _build_session_sandbox_spec
 
             spec = await _build_session_sandbox_spec(session, self._tenant, owner, credential_vault=self._credential_vault)

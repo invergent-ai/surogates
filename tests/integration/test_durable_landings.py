@@ -661,6 +661,131 @@ async def test_a_turn_with_no_tool_settles_a_landing_another_thread_left_running
     assert pods.real_names() == ["Report.docx", "notes.txt"]
 
 
+async def test_a_turn_with_no_tool_opens_no_pod_for_a_landing_that_is_still_at_work(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pods = stored(api, first, tmp_path)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo a > a.md && echo b > b.md")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")  # its row was written a moment ago
+    provision, made = pods.provision, []
+
+    async def counted(spec):
+        made.append(spec)
+        return await provision(spec)
+
+    monkeypatch.setattr(pods, "provision", counted)
+    # B answers its master and stops while that row is younger than the fence: its landing may be alive.
+    await ends(api, SandboxPool(pods), second)
+    # No pod, no wait for the project's lock, no row of its own: the landing is its own worker's, or a later holder's.
+    assert made == [] and await rows(api, second) == []
+    assert [r.saga_state for r in await rows(api, first)] == ["running"]
+
+
+async def test_a_landing_that_changed_no_file_leaves_no_row(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "cat notes.txt > /dev/null")  # a turn that only read
+    await ends(api, pool, thread)
+    assert await rows(api, thread) == []
+    [report] = await reports(api, master)
+    assert "landing" not in report and not (pods.project / "_history").exists()
+    # One that changed a file has its row, as before.
+    await edited(pool, thread, "echo a > a.md")
+    await ends(api, pool, thread)
+    assert [r.saga_state for r in await rows(api, thread)] == ["completed"]
+
+
+async def test_a_turn_retried_after_its_landing_was_killed_is_not_told_work_its_copy_has_is_gone(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Write two notes."})
+    call, killed = landing_module._call, []
+
+    async def dies(sandbox_pool, owner, action, **arguments):
+        result = await call(sandbox_pool, owner, action, **arguments)
+        if action == "apply" and not killed:
+            killed.append(True)
+            raise asyncio.CancelledError  # the worker is killed after the turn's file was written
+        return result
+
+    async def never(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "_call", dies)
+        patch.setattr(landing_module, "_settle", never)
+        patch.setattr(landing_module, "_PUT_BACK_BOUND", 0.1)
+        with pytest.raises(asyncio.CancelledError):
+            await a_turn(api, monkeypatch, thread, [
+                calling(("write_file", {"path": "a.md", "content": "a"})), _final_response("Done."),
+            ], pool=pool, saga_settings=FENCED)
+    landing_module._PUTTING_BACK.pop(str(thread.id)).cancel()
+    async with asyncio.timeout(10):
+        while pool.holds_copy(str(thread.id)):
+            await asyncio.sleep(0.05)
+    async with api.app.state.session_factory() as db:
+        await db.execute(text("DELETE FROM session_leases WHERE session_id = :id"), {"id": thread.id})
+        await db.commit()
+    # The turn is retried on another worker: its copy is made from the branch its commit step pushed.
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "b.md", "content": "b"})), _final_response("Done."),
+    ], pool=SandboxPool(pods), saga_settings=FENCED)
+    first = (await last_writes(store, thread))[-1]
+    assert not first.startswith("[This thread's copy"), first
+    assert pods.real_names() == ["Report.docx", "a.md", "b.md", "notes.txt"]
+
+
+async def test_a_turns_end_reads_the_historys_refs_only_while_they_are_a_size_a_history_has(api, monkeypatch, tmp_path):
+    thread = await a_thread(api)
+    pods = stored(api, thread, tmp_path)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo half > half.md")
+    await ends(api, pool, thread, failed=True)  # its branch holds work
+    storage, factory = api.app.state.storage, api.app.state.session_factory
+    assert await rows_module.waits_to_land(factory, storage, thread) is True
+    read, reads = storage.read, []
+
+    async def counted(bucket, key):
+        reads.append(key)
+        return await read(bucket, key)
+
+    monkeypatch.setattr(storage, "read", counted)
+    # A thread's commands can write that file at any size: past the bound it is never read into the worker.
+    monkeypatch.setattr(rows_module, "REFS_BOUND", 64)
+    assert await rows_module.waits_to_land(factory, storage, thread) is True and reads == []
+
+
+async def test_a_turns_report_does_not_wait_for_the_days_pruning(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md")
+    prune, pruning, release = History.prune, pods.root / "pruning", pods.root / "release"
+
+    def slow(self, **kwargs):
+        pruning.touch()
+        while not release.exists():
+            time.sleep(0.05)
+        return prune(self, **kwargs)
+
+    monkeypatch.setattr(History, "prune", slow)
+    turn = asyncio.create_task(ends(api, pool, thread))
+    async with asyncio.timeout(30):
+        while not pruning.exists():
+            await asyncio.sleep(0.05)
+    # The pruning is at work, in the turn's pod, and the master already has the turn's report.
+    [report] = await reports(api, master)
+    assert [(f["ref"], f["landing"]) for f in report["files"]] == [("a.md", "landed")]
+    assert len(await turn_ends(api, thread)) == 1 and not turn.done()
+    release.touch()
+    await asyncio.wait_for(turn, 30)
+    assert (pods.project / "_history" / "pruned").exists() and pods.pods == {}
+
+
 async def test_a_failed_turn_whose_keep_fails_reads_as_not_saved(api, monkeypatch, pods):
     thread = await a_thread(api)
     pool = SandboxPool(pods)
@@ -1085,9 +1210,10 @@ async def turn_ends(api, thread) -> list[dict]:
     return [e.data for e in await api.app.state.session_store.get_events(thread.id, types=[EventType.SESSION_COMPLETE])]
 
 
-async def test_a_landing_that_could_not_settle_another_threads_is_kept_and_lands_with_its_next_turn(api, monkeypatch, pods):
+async def test_a_landing_that_could_not_settle_another_threads_is_kept_and_lands_with_its_next_turn(api, monkeypatch, tmp_path):
     master = await master_of(api, await create(api))
     first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pods = stored(api, first, tmp_path)
     pool = SandboxPool(pods)
     await edited(pool, first, "echo a > a.md && echo b > b.md")
     await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")
@@ -1334,14 +1460,14 @@ async def test_a_landing_prunes_the_history_at_most_once_a_day_keeping_live_thre
         ), {"g": gone.id})
         await db.commit()
     bounds = []
-    execute = pool.execute
+    execute = pool.execute_released
 
-    async def watched(session_id, name, input, **kwargs):
+    async def watched(sandbox_id, name, input, **kwargs):
         if name == "_history" and json.loads(input)["action"] == "prune":
             bounds.append(kwargs.get("timeout"))
-        return await execute(session_id, name, input, **kwargs)
+        return await execute(sandbox_id, name, input, **kwargs)
 
-    monkeypatch.setattr(pool, "execute", watched)
+    monkeypatch.setattr(pool, "execute_released", watched)
     lander = await a_thread(api, "Lander", master)
     await edited(pool, lander, "echo landed > landed.md")
     await ends(api, pool, lander)

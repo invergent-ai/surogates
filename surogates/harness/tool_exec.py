@@ -191,24 +191,32 @@ COPY_REMADE = (
 )
 
 
-async def _copy_lost_work(store: Any, session_id: Any, before: int) -> bool:
+async def _copy_lost_work(store: Any, session_id: Any, before: int, session_factory: Any = None) -> bool:
     """Whether the thread's copy, made again, lacks work it did before event *before*.
 
     It does when its last turn end did not save its work, or when a step
     that could change the copy ran since one that did.  A turn end saved
     it when its landing's commit step put the turn in the history and held
     no file, or when a failed turn's keep did; one that never used its pod
-    is no turn end here.  A step that could change the copy is a
-    ``tool.call`` taken after a snapshot: reads, plans and refused calls
-    take none, and change nothing.
+    is no turn end here.  So did a landing whose worker was killed after
+    its commit step, with no turn end written: its row says how far.  A
+    step that could change the copy is a ``tool.call`` taken after a
+    snapshot: reads, plans and refused calls take none, and change nothing.
     """
     end = await store.last_event(session_id, EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, with_key="saved")
-    if end is not None and not end.data["saved"]:
+    saved = None
+    if session_factory is not None:
+        from surogates.workstreams.history import saved_through
+
+        saved = await saved_through(session_factory, session_id)
+    if saved is not None and (end is None or saved > end.id):
+        # A later landing than the last turn end written: its turn is on the branch.
+        after: int | None = saved
+    elif end is not None and not end.data["saved"]:
         return True
-    return await store.has_event(
-        session_id, EventType.TOOL_CALL,
-        after=end.id if end else None, before=before, with_key="checkpoint_hash",
-    )
+    else:
+        after = end.id if end else None
+    return await store.has_event(session_id, EventType.TOOL_CALL, after=after, before=before, with_key="checkpoint_hash")
 
 
 async def _snapshot_copy(
@@ -1872,7 +1880,7 @@ async def _run_single_tool(
     if sandbox_pool is not None and is_project_thread(session.config):
         from surogates.sandbox.pool import sandbox_session_key
         if sandbox_pool.copy_fresh(sandbox_session_key(session)) and await _copy_lost_work(
-            store, session.id, _call_event_id,
+            store, session.id, _call_event_id, session_factory,
         ):
             result_content = f"{COPY_REMADE}\n\n{result_content}"
 

@@ -44,6 +44,7 @@ from surogates.sandbox.history import (
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.events import EventType
 from surogates.workstreams.history import (
+    drop_landing,
     kept_refs,
     project_lock,
     running_landings,
@@ -119,6 +120,10 @@ class _Row:
         done = time.monotonic()
         self._due = done + max(_ROW_EVERY, _ROW_SHARE * (done - began))
 
+    async def drop(self) -> None:
+        """Take the row away: its landing changed no file."""
+        await drop_landing(self._session_factory, self._row)
+
     async def alive(self) -> None:
         """Mark the row alive, with its steps when they were last written long enough ago."""
         if time.monotonic() >= self._due:
@@ -160,6 +165,10 @@ async def land_turn(
     state is ``compensated``, the project's files being as they were, or
     ``failed`` when the copy could not be kept either.
 
+    A landing that completed with a commit leaves the day's pruning to
+    its caller (:func:`prune_after`), which runs it once the turn's report
+    is out: ``packs`` is the history's size, for the pruning's bound.
+
     The whole saga runs under the project's lock: one landing at a time per
     project, so a landing that starts after another sees its files as
     changed rather than rolling back over them.  The lock frees itself if
@@ -182,8 +191,6 @@ async def land_turn(
             settled = await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
             began = True
             outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
-            if outcome["state"] == "completed":
-                await _prune(session_factory, sandbox_pool, owner, workstream, outcome["packs"])
     except Exception as exc:
         if _cancelling():
             # The lock's dead connection failed the block's exit: the cancel goes on.
@@ -284,15 +291,23 @@ async def take_up(sandbox_pool: Any, owner: str) -> list[str]:
         return []
 
 
-async def _prune(session_factory: Any, sandbox_pool: Any, owner: str, workstream: Any, packs: int) -> None:
-    """Prune the project's history after a landing, under its lock: the pod prunes at most once a day."""
-    request = {"action": "prune", "keep": await kept_refs(session_factory, workstream), "now": time.time()}
+async def prune_after(*, session_factory: Any, sandbox_pool: Any, sandbox_id: str, workstream: Any, packs: int) -> None:
+    """Prune the project's history after a landing, in the landing's pod, under the project's lock again.
+
+    The pod, *sandbox_id*, is the turn's, already let go of by its session
+    and not yet destroyed: the turn's report is out, and nothing waits on
+    this but the pod's end.  The pod prunes at most once a day, and
+    refuses when the history's refs moved under it.  It never fails its
+    caller: the landing stands, and the history is pruned on a later day.
+    """
     try:
-        step_result(await sandbox_pool.execute(
-            owner, "_history", json.dumps(request), timeout=_PRUNE_BOUND + _PRUNE_PER_GIB * packs / 2**30,
-        ))
+        async with project_lock(session_factory, workstream) as held:
+            request = {"action": "prune", "keep": await kept_refs(session_factory, workstream), "now": time.time()}
+            await held()
+            step_result(await sandbox_pool.execute_released(
+                sandbox_id, "_history", json.dumps(request), timeout=_PRUNE_BOUND + _PRUNE_PER_GIB * packs / 2**30,
+            ))
     except Exception:
-        # The landing stands; the history is pruned on a later day.
         logger.warning("Could not prune the history of project %s", workstream, exc_info=True)
 
 
@@ -401,7 +416,11 @@ async def _land(
             recorded = await execute(record)
             outcome.update(commit=recorded["commit"], landed=landed)
         saga.transition(SagaState.COMPLETED)
-        await row.write(state="completed", commit=outcome["commit"], files=_row_files(saga, "completed"))
+        if turn["commit"] is None:
+            # Nothing changed, nothing landed: no change to the project's files to record.
+            await _written(row.drop)
+        else:
+            await row.write(state="completed", commit=outcome["commit"], files=_row_files(saga, "completed"))
     except BaseException as exc:
         logger.warning("Landing of session %s did not finish", session.id, exc_info=True)
         # Kept, and shielded: a cancel never cuts a put-back short.

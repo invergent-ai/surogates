@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import subprocess
@@ -347,6 +348,8 @@ class Answers:
     async def execute(self, session_id, name, input, **_) -> str:
         return self.answer
 
+    execute_released = execute
+
 
 @pytest.mark.parametrize("answer", list(NO_RESULT))
 async def test_a_put_back_the_pod_did_not_finish_is_never_read_as_done(answer):
@@ -375,7 +378,15 @@ async def test_a_pruning_the_pod_did_not_finish_is_logged_and_the_landing_stands
     async def kept(*_):
         return []
 
+    @contextlib.asynccontextmanager
+    async def the_lock(*_):
+        async def held():
+            return None
+
+        yield held
+
     monkeypatch.setattr(landing, "kept_refs", kept)
+    monkeypatch.setattr(landing, "project_lock", the_lock)
     with caplog.at_level(logging.WARNING, logger=landing.__name__):
-        await landing._prune(None, Answers(NO_RESULT[answer]), "t1", "w1", 0)
+        await landing.prune_after(session_factory=None, sandbox_pool=Answers(NO_RESULT[answer]), sandbox_id="pod-1", workstream="w1", packs=0)
     assert "Could not prune the history of project w1" in caplog.text

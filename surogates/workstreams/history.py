@@ -21,7 +21,7 @@ from itertools import islice
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, insert, or_, select, update
+from sqlalchemy import delete, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import Range
 
 from surogates.db.models import WorkstreamHistory, WorkstreamThread
@@ -36,6 +36,10 @@ LOCK_POLL = 0.5
 #: How long a project's count against the cap is taken again, and each one's
 #: answer with when it was counted.
 COUNT_TTL = 60
+#: The most of a history's ``packed-refs`` a turn's end reads into the worker.  A
+#: thread's commands can write that file at any size; a project's own is a
+#: few lines a thread.
+REFS_BOUND = 4 * 2**20
 # Per worker, an entry a project, never pruned: the projects a worker serves are few.
 _COUNTED: dict[tuple[str, str], tuple[float, bool]] = {}
 
@@ -94,6 +98,35 @@ async def save_landing(
         await db.execute(update(WorkstreamHistory).where(WorkstreamHistory.id == row).values(**values))
 
 
+async def drop_landing(session_factory: Any, row: int) -> None:
+    """Take away the row of a landing that changed no file: it is no change to the project's files."""
+    async with session_factory() as db, db.begin():
+        await db.execute(delete(WorkstreamHistory).where(WorkstreamHistory.id == row))
+
+
+async def saved_through(session_factory: Any, thread_id: UUID) -> int | None:
+    """The last tool call, by its event's id, of the thread's latest landing whose turn is in the history; None when it has none.
+
+    A landing's commit step puts its turn on the thread's branch before
+    any file lands.  The thread's next copy then has that work, though the
+    worker died before the turn's end was written.  A landing that
+    completed leaving a file out moved the branch on without the thread's
+    version of it, so that one does not count.
+    """
+    async with session_factory() as db:
+        row = (await db.execute(
+            select(WorkstreamHistory)
+            .where(WorkstreamHistory.thread_id == thread_id, WorkstreamHistory.kind == "landing")
+            .order_by(WorkstreamHistory.id.desc()).limit(1)
+        )).scalars().first()
+    if row is None or row.events is None:
+        return None
+    commit = next((s for s in row.steps if s["tool_name"] == "history.commit" and s["state"] == "committed"), None)
+    if commit is None or (row.saga_state == "completed" and commit["result"].get("overlapped")):
+        return None
+    return row.events.upper - (0 if row.events.upper_inc else 1)
+
+
 async def touch_landing(session_factory: Any, row: int) -> None:
     """Mark the row alive, its steps as they were: a try of a step is starting."""
     async with session_factory() as db, db.begin():
@@ -128,19 +161,26 @@ def saga_of(row: WorkstreamHistory) -> Saga:
     })
 
 
-async def waits_to_land(session_factory: Any, storage: Any, session: Any) -> bool:
+async def waits_to_land(session_factory: Any, storage: Any, session: Any, *, fence: float | None = None) -> bool:
     """Whether a thread's turn that never used its pod lands at its end all the same.
 
     It does while its branch in the project's history holds work its base
     lacks, such as a failed turn's, while its helpers kept work on its
     hand-off it has not taken up, or while a landing of the project is left
-    running for a lock holder to settle.
+    running for a lock holder to settle.  With *fence*, only a landing
+    whose row has been quiet for longer than it: one written since may be
+    another thread's, alive, and a pod opened for it would only wait.
     """
-    if await running_landings(session_factory, session.config["workstream_id"]):
+    running = await running_landings(session_factory, session.config["workstream_id"])
+    if any(fence is None or quiet >= fence for _, quiet in running):
         return True
     prefix = boundary_workspace_prefix(session.config, session, session.id)
+    bucket, key = session.config["storage_bucket"], f"{prefix}_history/packed-refs"
     try:
-        text = (await storage.read(session.config["storage_bucket"], f"{prefix}_history/packed-refs")).decode()
+        if (await storage.stat(bucket, key))["size"] > REFS_BOUND:
+            # Not a size a history's refs have: left unread here.  The pod's open reads them, each line checked.
+            return True
+        text = (await storage.read(bucket, key)).decode(errors="replace")
     except KeyError:
         return False
     refs = {ref: sha for sha, _, ref in (line.partition(" ") for line in text.splitlines())}

@@ -192,6 +192,15 @@ class SandboxPool:
             self._fresh.discard(session_id)
             return self._mapping.pop(session_id, None)
 
+    async def execute_released(self, sandbox_id: str, name: str, input: str, *, timeout: float | None = None) -> str:
+        """Execute a command in a sandbox :meth:`release_for_session` detached, before it is destroyed.
+
+        No session resolves to it any more, so no turn's step runs beside
+        this one: its last work, such as the day's pruning of a project's
+        history, done after its turn has reported.
+        """
+        return await self._backend.execute(sandbox_id, name, input, timeout=timeout)
+
     async def destroy_released(
         self, sandbox_id: str | None, session_id: str,
     ) -> None:
