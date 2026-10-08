@@ -46,7 +46,7 @@ from surogates.devices.operations import (
     operation_channel,
 )
 from surogates.devices.presence import DevicePresence, PRESENCE_TTL_S, presence_key
-from surogates.devices.sandbox import INTERRUPTED
+from surogates.devices.sandbox import INTERRUPTED, INTERRUPTED_IN_BROWSER
 from surogates.devices.store import REVOKED_OUTCOME, DeviceStore
 from surogates.devices.waits import DeviceWaitNotice
 from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
@@ -2116,8 +2116,10 @@ async def test_a_resumed_browser_call_is_reported_interrupted_without_acting_aga
 
     resumed = await resume_call(rig, store, tools, "call_1", "browser_click", {"x": 5, "y": 6}, **io)
 
-    # A click on the user's own browser is not clicked again: what it did is for the user to see.
-    assert resumed["content"] == INTERRUPTED
+    # A click on the user's own browser is not clicked again: what it did is for the user to see,
+    # and for the agent to read on the page, not in the folder.
+    assert resumed["content"] == INTERRUPTED_IN_BROWSER
+    assert "browser_get_state" in resumed["content"] and "folder" not in resumed["content"]
     assert acted == ["browser.mouse"]
 
 

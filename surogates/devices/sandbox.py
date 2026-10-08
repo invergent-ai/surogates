@@ -47,6 +47,17 @@ INTERRUPTED = json.dumps({"error": (
     "resumed safely. Some of its effects may have happened. Check the folder before "
     "repeating it."
 )})
+# A browser tool's: its effects are on the page in the user's browser, not in the folder.
+INTERRUPTED_IN_BROWSER = json.dumps({"error": (
+    "interrupted: this call was resumed after its worker stopped, and could not be "
+    "resumed safely. Some of its effects may have happened on the page. Read it with "
+    "browser_get_state before repeating it."
+)})
+
+
+def interrupted(tool_name: str) -> str:
+    """The result of *tool_name*'s call that could not be resumed safely, in its own words."""
+    return INTERRUPTED_IN_BROWSER if tool_name.startswith("browser_") else INTERRUPTED
 
 
 def refusal(name: str) -> str:
