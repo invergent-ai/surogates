@@ -634,6 +634,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     setTimeout(served.release, 1_000);
     expect(await ran).toEqual({ ok: { output: "delivered\n", returncode: 0, timed_out: false } });
     expect(readdirSync(images)).toEqual([served.key]);
+    // None of it in the app's HTTP cache: a second copy of 17 MB, and cached ranges in a resume.
+    const cached = Number(spawnSync("du", ["-sb", join(home, "surogate", "electron", "Cache")], { encoding: "utf8" }).stdout.split("\t")[0] || 0);
+    expect(cached).toBeLessThan(1024 * 1024);
     await expect.poll(() => page.isHidden("#sandbox")).toBe(true);
     await page.click("#open-settings");
     expect(await (await thisComputer(app!)).textContent("#sandbox")).toBe("Ready");

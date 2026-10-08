@@ -268,8 +268,9 @@ function imageDelivery(): ImageDelivery | null {
     // An installed app's record is root's alone to write, as the install script leaves it.
     base: () => installBase(record, app.isPackaged),
     images: join(root, "vm", "images"),
-    // No cookie of the app's own session goes with it.
-    fetch: (url, init) => net.fetch(url, { ...init, credentials: "omit" }),
+    // No cookie of the app's own session goes with it, and none of it through the HTTP cache: a second
+    // copy of what is downloaded, and cached ranges in a resume.
+    fetch: (url, init) => net.fetch(url, { ...init, credentials: "omit", cache: "no-store" }),
     signal: stopDelivery.signal,
   }, changed);
 }
