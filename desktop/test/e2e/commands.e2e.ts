@@ -86,6 +86,20 @@ async function bind(client: Page, folder: string, chat = CHAT): Promise<void> {
   expect(await operation("bind", { folder, nonce: prepared.nonce }, "bind", 0, chat)).toEqual({ ok: null });
 }
 
+// Settings, open over the window on Folders and permissions, once it shows a chat.
+async function foldersSettings(): Promise<Page> {
+  await (await shellPage(app!)).click("#open-settings");
+  let found: Page | undefined;
+  await expect.poll(() => {
+    found = app!.windows().find((page) => page.url().endsWith("/settings.html"));
+    return found !== undefined;
+  }).toBe(true);
+  await found!.waitForSelector(".settings-nav .item");
+  await found!.click('[data-section="folders"]');
+  await found!.waitForSelector("#folders .row");
+  return found!;
+}
+
 // A curl to *url* in the guest: its response's status, then its proxy's answer to CONNECT (000 for none).
 const status = (url: string, flags = "") => `curl -sS --max-time 20 ${flags} -o /dev/null -w '%{http_code} %{http_connect}\\n' ${url} 2>/dev/null`;
 
@@ -329,6 +343,110 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     // Its other ports too, for the rest of the chat, unasked, whatever the site answers: a refusal would come with a notice.
     expect(await run(status("http://example.com/"))).toEqual({ ok: { output: expect.stringMatching(/^\d{3} 000\n$/), returncode: 0, timed_out: false } });
     expect(await promptsShown(app!)).toBe(0);
+  });
+
+  it("takes a site allowed for the chat back in Settings, after which the chat's next connection to it asks again", async () => {
+    const folder = join(home, "site");
+    mkdirSync(folder);
+    await bound(folder);
+    const run = (command: string) => operation("run", { command, workdir: null, timeout: 60 });
+    // Open while the chat is allowed the site: it shows at once.
+    const settings = await foldersSettings();
+    const reached = run(status("https://example.com/"));
+    await expect.poll(() => promptsShown(app!), { timeout: 30_000 }).toBe(1);
+    await press(await prompt(app!), "allow_session");
+    expect(await reached).toMatchObject({ ok: { returncode: 0 } });
+    await expect.poll(() => settings.textContent("#folders .row .line")).toBe("Reaches example.com, on every portTake back");
+    expect(await settings.getAttribute("#folders .row .line button", "aria-label")).toBe("Take back example.com");
+    await settings.click("#folders .row .line button");
+    await expect.poll(() => settings.$$("#folders .row .line").then((lines) => lines.length)).toBe(0);
+    const again = run(status("https://example.com/"));
+    await expect.poll(() => promptsShown(app!), { timeout: 30_000 }).toBe(1);
+    await press(await prompt(app!), "deny");
+    expect(await again).toEqual({
+      // curl's own exit for a tunnel its proxy refused.
+      ok: { output: "000 403\n\nThis computer did not allow network access to example.com:443.", returncode: 56, timed_out: false },
+    });
+  });
+
+  it("refuses a Take back for any host Settings does not show as the chat's own, and says so in the page: one never allowed, one of a chat not bound here, and one taken back", async () => {
+    const folder = join(home, "site");
+    mkdirSync(folder);
+    await bound(folder);
+    const reached = operation("run", { command: status("https://example.com/"), workdir: null, timeout: 60 });
+    await expect.poll(() => promptsShown(app!), { timeout: 30_000 }).toBe(1);
+    await press(await prompt(app!), "allow_session");
+    expect(await reached).toMatchObject({ ok: { returncode: 0 } });
+    const settings = await foldersSettings();
+    // Settings' own call, as a page talked into it would make it: what it was told.
+    const takeBack = (root: unknown, host: unknown) => settings.evaluate(([at, from]) =>
+      (window as unknown as { surogateSettings: { takeBack(root: unknown, host: unknown): Promise<void> } }).surogateSettings.takeBack(at, from)
+        .then(() => "taken back", (error: Error) => error.message), [root, host]);
+    const refused = "Error invoking remote method 'settings:take-back': Error: This chat cannot reach that host";
+    expect(await takeBack(CHAT, "example.org")).toBe(refused);
+    expect(await takeBack(OTHER, "example.com")).toBe(refused);
+    expect(await takeBack(42, "example.com")).toBe(refused);
+    expect(await takeBack(CHAT, ["example.com"])).toBe(refused);
+    expect(await takeBack(CHAT, "example.com")).toBe("taken back");
+    expect(await takeBack(CHAT, "example.com")).toBe(refused);
+    // Its button, drawn before the host was taken back: the page catches the refusal, says so, and draws the list again.
+    await settings.evaluate(() => {
+      const rejections: string[] = [];
+      Object.assign(window, { rejections });
+      window.addEventListener("unhandledrejection", (event) => rejections.push(String(event.reason)));
+    });
+    await settings.click("#folders .row .line button");
+    await expect.poll(() => settings.textContent("#folders-failed")).toBe("Surogate did not take back example.com: This chat cannot reach that host.");
+    expect(await settings.isVisible("#folders-failed")).toBe(true);
+    await expect.poll(() => settings.$$("#folders .row .line").then((lines) => lines.length)).toBe(0);
+    expect(await settings.evaluate(() => (window as unknown as { rejections: string[] }).rejections)).toEqual([]);
+  });
+
+  it("stops a chat's background process from Settings, as the agent's own kill would, and no longer shows it", async () => {
+    const folder = join(home, "watch");
+    mkdirSync(folder);
+    await bound(folder);
+    // A command the agent wrote with a right-to-left override in it: shown as text.
+    const started = await operation("start", {
+      command: "sleep 600 #‮txt", workdir: null, task_id: null, pty: false, notify_on_complete: false, watcher_interval: null,
+    }) as { ok: { session_id: string } };
+    const settings = await foldersSettings();
+    await expect.poll(() => settings.textContent("#folders .row .line")).toBe("Runs sleep 600 #U+202EtxtStop");
+    // Named as it is shown.
+    expect(await settings.getAttribute("#folders .row .line button", "aria-label")).toBe("Stop sleep 600 #U+202Etxt");
+    await settings.click("#folders .row .line button");
+    await expect.poll(() => settings.$$("#folders .row .line").then((lines) => lines.length)).toBe(0);
+    // The agent finds it ended at its next look, as after its own kill.
+    expect(await operation("poll", { session_id: started.ok.session_id })).toMatchObject({ ok: { status: "exited" } });
+  });
+
+  it("refuses a Stop for any process Settings does not show as the chat's own: another chat's, one it never ran, and one of a chat no longer bound here", async () => {
+    const [first, second] = [join(home, "first"), join(home, "second")];
+    for (const folder of [first, second]) mkdirSync(folder);
+    const client = await launched();
+    await bind(client, first);
+    await bind(client, second, OTHER);
+    const start = async (chat: string) => (await operation("start", {
+      command: "sleep 600", workdir: null, task_id: null, pty: false, notify_on_complete: false, watcher_interval: null,
+    }, "call", 1, chat) as { ok: { session_id: string } }).ok.session_id;
+    const [mine, theirs] = [await start(CHAT), await start(OTHER)];
+    const settings = await foldersSettings();
+    await expect.poll(() => settings.$$("#folders .row .line").then((lines) => lines.length)).toBe(2);
+    // Settings' own call, as a page talked into it would make it: what it was told.
+    const stop = (root: unknown, id: unknown) => settings.evaluate(([at, process]) =>
+      (window as unknown as { surogateSettings: { stop(root: unknown, id: unknown): Promise<void> } }).surogateSettings.stop(at, process)
+        .then(() => "stopped", (error: Error) => error.message), [root, id]);
+    const refused = "Error invoking remote method 'settings:stop': Error: This chat runs no such process";
+    expect(await stop(CHAT, theirs)).toBe(refused);
+    expect(await stop(CHAT, "proc_000000000000")).toBe(refused);
+    expect(await stop(42, mine)).toBe(refused);
+    expect(await stop(CHAT, [mine])).toBe(refused);
+    for (const [chat, id] of [[CHAT, mine], [OTHER, theirs]] as const) {
+      expect(await operation("poll", { session_id: id }, "call", 1, chat)).toMatchObject({ ok: { status: "running" } });
+    }
+    // A chat deleted meanwhile: its binding goes, while its process is still alive in the VM.
+    expect(await operation("retire", {}, "retire", 0, OTHER)).toEqual({ ok: null });
+    expect(await stop(OTHER, theirs)).toBe(refused);
   });
 
   it("runs a background server in the folder, which the agent's next command reaches, and stops it with the app", async () => {

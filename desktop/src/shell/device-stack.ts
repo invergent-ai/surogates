@@ -59,6 +59,7 @@ const ENDED: readonly LinkStatus[] = ["revoked", "unauthenticated"];
 
 export interface DeviceStack {
   readonly binder: Binder;
+  readonly bindings: Bindings; // the journal's: each chat's folder, mode and grants
   working(): number;
   stop(): Promise<void>;
   /** Revoke this device on its own link, then stop: true once the agent confirmed, false when it could not hear it in time. */
@@ -195,6 +196,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
   };
   return {
     binder,
+    bindings: journal.bindings,
     working,
     stop,
     retire: () => {

@@ -161,6 +161,9 @@ function marked(text: string, keep: string, runs: Run[]): void {
   if (last < text.length) runs.push({ text: text.slice(last), special: false });
 }
 
+/** *text* as showText shows it, in one string: what names it for a screen reader, or in a native box. */
+export const asShown = (text: string, keep = ""): string => segments(text, keep).map((run) => run.text).join("");
+
 /** Set *element*'s text to *text*, whole, with each special character marked as its code point: never markup. */
 export function showText(element: HTMLElement, text: string, keep = ""): void {
   // Built apart and set at once: a text of any number of runs, where one argument per run would overflow the stack.

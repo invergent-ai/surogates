@@ -116,6 +116,13 @@ export function followInbox(options: FollowOptions & { onItem(item: InboxItem): 
   });
 }
 
+/** Chat *sessionId*'s title, as the agent names it; "A chat" for one it names not. */
+export async function titleOf(api: Api, agentId: string, sessionId: string): Promise<string> {
+  const response = await api(`/api/v1/sessions/${sessionId}?agent_id=${encodeURIComponent(agentId)}`);
+  const { title } = response.ok ? (parsed(await response.text()) ?? {}) : {};
+  return typeof title === "string" && title !== "" ? title : "A chat";
+}
+
 // What ends a chat's follow: the chat archived, or gone. Any other close is followed by a reconnection.
 const GONE: ReadonlySet<unknown> = new Set(["archived", "session_not_found"]);
 
@@ -129,9 +136,7 @@ export function followChat(options: FollowOptions & { sessionId: string; onTurnE
   let after = -1;
   const told = async (): Promise<void> => {
     try {
-      const response = await options.api(`/api/v1/sessions/${options.sessionId}?agent_id=${encodeURIComponent(options.agentId)}`);
-      const { title } = response.ok ? (parsed(await response.text()) ?? {}) : {};
-      options.onTurnEnd(typeof title === "string" && title !== "" ? title : "A chat");
+      options.onTurnEnd(await titleOf(options.api, options.agentId, options.sessionId));
     } catch (error) {
       options.onError(error);
     }

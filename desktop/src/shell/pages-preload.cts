@@ -44,6 +44,9 @@ if (location.protocol === "file:") {
   });
   contextBridge.exposeInMainWorld("surogateSettings", {
     state: () => ipcRenderer.invoke("settings:state"),
+    folders: () => ipcRenderer.invoke("settings:folders"),
+    takeBack: (root: string, host: string) => ipcRenderer.invoke("settings:take-back", root, host),
+    stop: (root: string, id: string) => ipcRenderer.invoke("settings:stop", root, id),
     set: (key: string, value: string) => ipcRenderer.invoke("settings:set", key, value),
     link: (which: string) => ipcRenderer.invoke("settings:link", which),
     close: () => ipcRenderer.invoke("settings:close"),
