@@ -91,9 +91,10 @@ function onPath(name: string): boolean {
 // Section 9's words for a computer that lacks what the VM runs on, and what it lacks.
 export const toolsMissing = (lacking: string[]) => `Surogate's sandbox tools are missing. Run the install script again. It lacks ${lacking.join(", ")}`;
 
-// The major and minor version *program* says it is, as `--version` prints it, or null.
+// The major and minor version *program* says it is, as `--version` prints it, or null: one that has
+// not answered in 5 s is killed, as a SIGTERM may be ignored.
 const versionOf = (program: string, args: string[]) => new Promise<[number, number] | null>((resolve) => {
-  execFile(program, args, { timeout: 5_000, env: toolEnv() }, (error, stdout) => {
+  execFile(program, args, { timeout: 5_000, killSignal: "SIGKILL", env: toolEnv() }, (error, stdout) => {
     const found = error ? null : /(\d+)\.(\d+)/.exec(stdout);
     resolve(found ? [Number(found[1]), Number(found[2])] : null);
   });

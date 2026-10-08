@@ -334,6 +334,15 @@ describe("the VM manager on the host", () => {
     }
   });
 
+  it("gives up on a tool whose --version has not ended in 5 s, though it ignores the timeout's SIGTERM", { timeout: 20_000 }, async () => {
+    const virtiofsd = join(dir, "virtiofsd");
+    writeFileSync(virtiofsd, "#!/bin/sh\ntrap '' TERM\nexec sleep 30\n");
+    chmodSync(virtiofsd, 0o755);
+    const begun = performance.now();
+    expect(await missingTools({ virtiofsd })).toContain("virtiofsd 1.10 or later");
+    expect(performance.now() - begun).toBeLessThan(8_000);
+  });
+
   it("ends a QEMU that opens no sockets by the boot's deadline", async () => {
     await withQemu(`echo $$ > '${join(dir, "qemu-pid")}'\nexec sleep 30`, async () => {
       await expect(bootLinux(options(), undefined, performance.now() + 500)).rejects.toThrow("QEMU did not open its sockets");
