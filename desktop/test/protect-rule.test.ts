@@ -112,8 +112,16 @@ describe("the guest rule mirrors protect.ts", () => {
     if (dir) rmSync(dir, { recursive: true, force: true });
   });
   let bin: string | undefined;
+  // Without a compiler every test here fails, on a developer's machine as on CI: skipped, they would
+  // show nothing, and a name protect.ts gained that the rule lacks would pass unseen.
   function harness(): string {
-    if (!cc) throw new Error("no C compiler (cc, clang or gcc) to build the guest rule's harness");
+    if (!cc) {
+      throw new Error(
+        "The guest rule's drift test needs a C compiler, and none of cc, clang or gcc runs on this PATH. It builds vm/rule-match.h " +
+        "to compare the names the rule protects with those of files/protect.ts, which go uncompared without one. Install one " +
+        "(build-essential has cc) and run this test again.",
+      );
+    }
     if (!bin) {
       dir = mkdtempSync(join(tmpdir(), "rule-"));
       bin = join(dir, "rule");
@@ -122,11 +130,8 @@ describe("the guest rule mirrors protect.ts", () => {
     }
     return bin;
   }
-  // Without a compiler these are skipped on a developer's machine, and fail on CI: CI set to anything but false or 0.
-  const onCi = !["", "false", "0"].includes(process.env.CI ?? "");
-  const withCc = it.skipIf(!cc && !onCi);
 
-  withCc("agrees on every path but git's transient state", () => {
+  it("agrees on every path but git's transient state", () => {
     const paths = [...CORPUS, ...probes, ...GIT_STATE_ONLY];
     const kernel = verdicts(harness(), paths);
     const bad: string[] = [];
@@ -143,7 +148,7 @@ describe("the guest rule mirrors protect.ts", () => {
     expect([onHost(DEP_WITHIN), onHost(DEP_BEYOND)]).toEqual([false, false]);
   });
 
-  withCc("refuses moving a directory to or from a key folder's place", () => {
+  it("refuses moving a directory to or from a key folder's place", () => {
     const paths = [...CORPUS, ...MOVED_REFUSED, ...MOVED_ALLOWED];
     const moved = verdicts(harness(), paths, ["dir"]);
     const bad = paths.flatMap((p, i) => (moved[i] === movedRefuses(p) ? [] : [`${p}: rule=${moved[i]} expected=${movedRefuses(p)}`]));
@@ -152,7 +157,7 @@ describe("the guest rule mirrors protect.ts", () => {
       .toEqual([...MOVED_REFUSED.map(() => true), ...MOVED_ALLOWED.map(() => false)]);
   });
 
-  withCc("refuses a directory moved out of a dependency folder, or exchanged with one in one", () => {
+  it("refuses a directory moved out of a dependency folder, or exchanged with one in one", () => {
     for (const exchange of [false, true]) {
       const kernel = verdicts(harness(), PAIRS.map(([from, to]) => `${from}\t${to}`), [exchange ? "exchange" : "rename"]);
       const bad = PAIRS.flatMap(([from, to], i) => {
