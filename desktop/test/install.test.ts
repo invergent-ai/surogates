@@ -146,7 +146,7 @@ function lab(release: string, setup: string[], run: string[] = []) {
 describe("the install script's release keys", () => {
   it("are Ed25519 public keys, each written as OpenSSL writes one: an entry that does not load is skipped without a word, and every release refused", () => {
     const list = /RELEASE_KEYS=\(\n([^)]*)\)/.exec(readFileSync(SCRIPT, "utf8"))?.[1] ?? "";
-    const entries = [...list.matchAll(/'([^']*)'/g)].map(([, entry]) => entry);
+    const entries = [...list.matchAll(/'([^']*)'/g)].map((match) => match[1] ?? "");
     expect(entries.length).toBeGreaterThan(0);
     // The list holds its entries and nothing between them.
     expect(list.replace(/'[^']*'/g, "").trim()).toBe("");
