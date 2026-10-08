@@ -183,6 +183,11 @@ class DeviceOperationError(RuntimeError):
     """The laptop failed an operation for a reason with no closer Python type."""
 
 
+def said(exc: Exception) -> str:
+    """What the computer said, as a tool tells the model: an OSError's own words, without Python's errno prefix."""
+    return (exc.strerror if isinstance(exc, OSError) else None) or str(exc)
+
+
 class OperationRunner(Protocol):
     async def run(self, kind: str, args: dict[str, Any], payload: bytes | None = None) -> dict[str, Any]:
         """Run one operation on the laptop and return its outcome.

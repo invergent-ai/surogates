@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
 from surogates.api.routes._shared import (
@@ -36,7 +36,8 @@ from surogates.api.routes._shared import (
     resolve_agent_bundle as _resolve_agent_bundle,
     resolve_system_bundle as _resolve_system_bundle,
 )
-from surogates.storage.skill_staging import SkillStager, has_stageable_assets
+from surogates.devices.binding import device_of
+from surogates.storage.skill_staging import SkillStager, has_stageable_assets, staging_preamble
 from surogates.storage.tenant import (
     TenantStorage,
     agent_session_bucket,
@@ -201,29 +202,6 @@ def _resource_loader(request: Request):
     from surogates.tools.loader import ResourceLoader
 
     return ResourceLoader.from_settings(request.app.state.settings)
-
-
-def _staging_preamble(skill_name: str, staged_at: str) -> str:
-    """Return a directive preamble that tells the LLM how to address staged files.
-
-    Prepending this to the SKILL.md body lets authors write relative paths
-    (``scripts/foo.py``) without knowing about staging.  The preamble is
-    phrased as a direct instruction (not a passive statement) because the
-    sandbox CWD is ``/workspace``, not the skill directory -- the LLM must
-    actively prepend ``staged_at`` to every relative path the skill body
-    mentions or the command will fail with "No such file or directory".
-    """
-    base = staged_at.rstrip("/")
-    return (
-        f"> **Skill staging.** This skill's files live at `{base}/` "
-        f"inside the sandbox.  The sandbox working directory is "
-        f"`/workspace`, NOT the skill directory, so every relative path "
-        f"that appears below MUST be prefixed with `{base}/` when you "
-        f"invoke it.  For example, `scripts/foo.py` in this document "
-        f"means `{base}/scripts/foo.py` on the command line; "
-        f"`assets/template.pptx` means `{base}/assets/template.pptx`. "
-        f"Do not `cd` into the skill directory -- prefix the paths.\n\n"
-    )
 
 
 def _skill_bundle(
@@ -630,9 +608,11 @@ async def view_skill(
 
     # Auto-stage the skill tree when a session is specified and there are
     # files beyond SKILL.md itself.  Authorize first: the session must
-    # belong to this tenant before we write into its bucket.
-    if session_id is not None:
-        session = await _authorize_session_for_staging(request, tenant, session_id)
+    # belong to this tenant before we write into its bucket.  A chat on a
+    # local folder has them put in its folder by the tool call that views
+    # the skill (``surogates.tools.builtin.skills``), never in the cloud.
+    session = None if session_id is None else await _authorize_session_for_staging(request, tenant, session_id)
+    if session is not None and device_of(session.config) is None:
         staged_at = await _stage_skill_for_session(
             request=request,
             tenant=tenant,
@@ -645,7 +625,7 @@ async def view_skill(
         )
         if staged_at is not None:
             detail.staged_at = staged_at
-            detail.content = _staging_preamble(name, staged_at) + detail.content
+            detail.content = staging_preamble(name, staged_at) + detail.content
 
     return detail
 
@@ -657,13 +637,17 @@ async def read_skill_file(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
     session_id: UUID | None = None,
-) -> dict[str, Any]:
+    raw: bool = False,
+) -> Any:
     """Read a linked file from a skill directory.
 
     When ``session_id`` is provided and the file is binary, the skill tree
     is auto-staged and the response points the caller at the staged
-    workspace path instead of returning a placeholder.  Text files are
-    always returned inline regardless of ``session_id``.
+    workspace path instead of returning a placeholder, unless the session
+    is on a local folder.  Text files are always returned inline
+    regardless of ``session_id``.  With ``raw``, the answer is the file's
+    bytes as the skill stores them: what a local folder's tool call puts
+    in the folder.
 
     Platform skills (bundle-backed) are supported in addition to
     tenant-bucket-backed user/org skills.
@@ -720,9 +704,16 @@ async def read_skill_file(
     if not _skill_entitled(skill_def, entitled):
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
 
+    def _placeholder() -> dict[str, Any]:
+        """A binary file's answer when it is not staged; a local folder's says how to have it there."""
+        answer: dict[str, Any] = {"file_path": path, "content": "[Binary file]", "binary": True}
+        if session_for_staging is not None and device_of(session_for_staging.config) is not None:
+            answer["hint"] = f'Call skill_view("{name}") to put this skill\'s files in the folder.'
+        return answer
+
     async def _redirect_to_staged(skill_def_to_stage: Any) -> dict[str, Any] | None:
         """Stage the skill and return a redirect response, or ``None``."""
-        if session_id is None or session_for_staging is None:
+        if session_id is None or session_for_staging is None or device_of(session_for_staging.config) is not None:
             return None
         key_prefix = _session_storage_key_prefix(session_for_staging)
         staged_at = await _stage_skill_for_session(
@@ -759,6 +750,8 @@ async def read_skill_file(
                 detail=f"Skill '{name}' source not found (no bundle).",
             )
         try:
+            if raw:
+                return Response(await source_bundle.read_bytes(f"{prefix}{path}"), media_type="application/octet-stream")
             content = await source_bundle.read_text(f"{prefix}{path}")
         except LookupError:
             raise HTTPException(
@@ -769,7 +762,7 @@ async def read_skill_file(
             redirect = await _redirect_to_staged(skill_def)
             if redirect is not None:
                 return redirect
-            return {"file_path": path, "content": "[Binary file]", "binary": True}
+            return _placeholder()
         return {"file_path": path, "content": content, "binary": False}
 
     # Tenant-bucket-backed skills (user / org-shared).
@@ -780,6 +773,8 @@ async def read_skill_file(
 
     if not await ts.skill_file_exists(existing["key_prefix"], path):
         raise HTTPException(status_code=404, detail=f"File '{path}' not found in skill '{name}'.")
+    if raw:
+        return Response(await ts.read_skill_bytes(existing["key_prefix"], path), media_type="application/octet-stream")
 
     try:
         content = await ts.read_skill_file(existing["key_prefix"], path)
@@ -788,7 +783,7 @@ async def read_skill_file(
         redirect = await _redirect_to_staged(skill_def)
         if redirect is not None:
             return redirect
-        return {"file_path": path, "content": "[Binary file]", "binary": True}
+        return _placeholder()
 
 
 @write_router.post("/skills", response_model=SkillActionResponse, status_code=status.HTTP_201_CREATED)

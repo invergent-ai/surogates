@@ -27,7 +27,12 @@ import json
 import logging
 import os
 import uuid
-from typing import Any, Awaitable, Callable
+import weakref
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+if TYPE_CHECKING:
+    from surogates.devices.workspace import DeviceWorkspaceIO
 
 from surogates.tools.utils.budget_config import (
     DEFAULT_PREVIEW_SIZE_CHARS,
@@ -49,7 +54,45 @@ STORAGE_DIR = "/tmp/surogates-results"
 # sandbox, or the model is handed a path it cannot open.
 WORKSPACE_STORAGE_DIR = ".surogates-results"
 
+# On a local folder the model's own writes there are refused: Ask every time
+# never asks about a write under it, and the harness runs a staged skill's
+# scripts from it.  The harness's own writes there never come that way.
+HARNESS_FOLDER_REFUSAL = "That folder is Surogate's own; write somewhere else in the chat's folder."
+
+
+def in_harness_folder(key: str) -> bool:
+    """Whether *key*, as a local folder's computer resolved it, lies in a WORKSPACE_STORAGE_DIR."""
+    return WORKSPACE_STORAGE_DIR in PurePosixPath(key).parts
+
 _BUDGET_TOOL_NAME = "__budget_enforcement__"
+
+# What keeps the harness's own files in a folder of the user's computer out
+# of its git: the folder is often a repository, whose .gitignore does not
+# know this folder, as pytest's cache keeps itself out.
+_GITIGNORE = b"*\n"
+
+# The WorkspaceIOs that already have it: one tool call's, or one request's.
+_KEPT_OUT: "weakref.WeakSet[DeviceWorkspaceIO]" = weakref.WeakSet()
+
+
+async def keep_out_of_git(files: Any) -> None:
+    """Before the harness writes under WORKSPACE_STORAGE_DIR in a local folder: its ``.gitignore`` of ``*``, when absent.
+
+    So a ``git add -A`` in the folder adds no spill, artifact, staged skill
+    or screenshot.  Asked once per *files*, so a call or a request asks for
+    the same operations on a fresh worker.  A cloud workspace gets nothing,
+    as before.
+    """
+    # Here, not at the top: the device stack imports this package.
+    from surogates.devices.workspace import DeviceWorkspaceIO
+
+    if not isinstance(files, DeviceWorkspaceIO) or files in _KEPT_OUT:
+        return
+    key = await files.resolve(f"{WORKSPACE_STORAGE_DIR}/.gitignore")
+    if await files.stat(key) is None:
+        await files.write(key, _GITIGNORE)
+    _KEPT_OUT.add(files)
+
 
 # (path, content) -> wrote successfully
 ResultWriter = Callable[[str, str], Awaitable[bool]]
@@ -60,11 +103,20 @@ def make_sandbox_writer(sandbox_pool: Any, sandbox_owner: str) -> ResultWriter:
 
     async def _write(file_path: str, content: str) -> bool:
         try:
-            output = await sandbox_pool.execute(
-                sandbox_owner,
-                "write_file",
-                json.dumps({"path": file_path, "content": content}),
-            )
+            # Here, not at the top: the device stack imports this module.
+            from surogates.devices.sandbox import DeviceCall
+
+            # A local folder's tool call writes through its DeviceCall, whose
+            # folder it is, as the harness: the model's writes there are refused.
+            await keep_out_of_git(getattr(sandbox_pool, "workspace_io", None))
+            if isinstance(sandbox_pool, DeviceCall):
+                output = await sandbox_pool.spill(file_path, content)
+            else:
+                output = await sandbox_pool.execute(
+                    sandbox_owner,
+                    "write_file",
+                    json.dumps({"path": file_path, "content": content}),
+                )
         except Exception as exc:
             logger.warning("Sandbox spill write failed for %s: %s", file_path, exc)
             return False

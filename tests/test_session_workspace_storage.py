@@ -20,6 +20,7 @@ from surogates.artifacts.store import ArtifactStore
 from surogates.config import Settings
 from surogates.devices.operations import DeviceOperations
 from surogates.tenant.context import TenantContext
+from surogates.tools.workspace_io import StorageWorkspaceIO
 
 pytestmark = pytest.mark.asyncio
 
@@ -492,12 +493,7 @@ async def test_workspace_pdf_files_are_read_as_base64_previews():
 async def test_artifact_store_writes_under_session_prefix():
     storage = _RecordingStorage()
     session_id = uuid4()
-    store = ArtifactStore(
-        storage,
-        session_id=session_id,
-        bucket="ops-agent-bucket",
-        key_prefix=f"{session_id}/",
-    )
+    store = ArtifactStore(StorageWorkspaceIO(storage, bucket="ops-agent-bucket", prefix=f"{session_id}/"), session_id=session_id)
 
     meta = await store.create(
         name="notes",
@@ -615,3 +611,34 @@ async def test_an_uploads_change_is_named_off_the_event_loop(monkeypatch):
     # Each part length-prefixed, as before.
     framed = b"".join(len(part).to_bytes(8, "big") + part for part in (b"upload", b"a.txt", b"data"))
     assert real("upload", "a.txt", b"data") == hashlib.sha256(framed).hexdigest()
+
+
+async def test_a_cloud_chat_keeps_its_artifacts_folder_hidden_and_closed():
+    session_id, storage, request, tenant = _slow_chat()
+    storage.objects[("ops-agent-bucket", f"{session_id}/_artifacts/index.json")] = b"[]"
+    storage.objects[("ops-agent-bucket", f"{session_id}/notes.md")] = b"n"
+    tree = await workspace_route.get_workspace_tree(session_id, request, tenant=tenant)
+    assert [entry.name for entry in tree.entries] == ["notes.md"]
+    for opening in (workspace_route.get_workspace_file, workspace_route.download_file):
+        with pytest.raises(HTTPException) as refused:
+            await opening(session_id, request, path="_artifacts/index.json", tenant=tenant)
+        assert refused.value.status_code == 403
+
+
+async def test_a_cloud_chat_without_its_bucket_still_refuses_its_reserved_paths_first():
+    org_id, session_id = uuid4(), uuid4()
+    store = _Store(org_id)
+    store.session = SimpleNamespace(
+        id=session_id, org_id=org_id, agent_id="support-bot", status="active", channel="web", config={},
+    )
+    request, tenant = _request(store, _RecordingStorage(), _Redis()), _tenant(org_id, uuid4())
+    # Refused as they always were, before its storage is looked for.
+    for route, path in (
+        (workspace_route.get_workspace_file, "_artifacts/index.json"),
+        (workspace_route.download_file, "_artifacts/index.json"),
+        (workspace_route.delete_file, "_artifacts/index.json"),
+        (workspace_route.delete_file, "_history/x.json"),
+    ):
+        with pytest.raises(HTTPException) as refused:
+            await route(session_id, request, path=path, tenant=tenant)
+        assert refused.value.status_code == 403, (route.__name__, path, refused.value.detail)

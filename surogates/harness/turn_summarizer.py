@@ -386,9 +386,12 @@ def _duplicates_prior_caption(text: str, priors: list[str]) -> bool:
 #: Jekyll site's ``_posts/`` and ``_config.yml`` are real deliverables,
 #: and hiding a user's work is a worse failure than showing one extra row.
 _INTERNAL_WORKSPACE_PREFIXES: tuple[str, ...] = ("_artifacts", "_whiteboard")
+#: A local folder's: the harness keeps its artifacts under
+#: ``.surogates-results/`` there, so an ``_artifacts/`` in it is the user's.
+_FOLDER_INTERNAL_PREFIXES: tuple[str, ...] = ("_whiteboard",)
 
 
-def is_platform_path(path: str) -> bool:
+def is_platform_path(path: str, *, on_folder: bool = False) -> bool:
     """True for workspace paths that hold the platform's own state, never a
     file of the user's or a deliverable.
 
@@ -406,10 +409,10 @@ def is_platform_path(path: str) -> bool:
         return False
     if segments[-1].lower().endswith((".pyc", ".pyo")):
         return True
-    return segments[0] in _INTERNAL_WORKSPACE_PREFIXES
+    return segments[0] in (_FOLDER_INTERNAL_PREFIXES if on_folder else _INTERNAL_WORKSPACE_PREFIXES)
 
 
-def _is_internal_workspace_path(path: str) -> bool:
+def _is_internal_workspace_path(path: str, *, on_folder: bool = False) -> bool:
     """True for workspace paths that are never user deliverables: the
     platform's own, and ``uploads/``, which holds user-provided
     attachments, inputs rather than outputs. Filtered deterministically so
@@ -417,7 +420,7 @@ def _is_internal_workspace_path(path: str) -> bool:
     download card.
     """
     segments = [s for s in path.split("/") if s]
-    return is_platform_path(path) or (bool(segments) and segments[0] == "uploads")
+    return is_platform_path(path, on_folder=on_folder) or (bool(segments) and segments[0] == "uploads")
 
 
 class TurnSummarizer:

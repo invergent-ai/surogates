@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from surogates.artifacts.store import FolderArtifacts
 from surogates.channels.constants import DIRECT_UI_CHANNELS, REALTIME_CHANNELS
+from surogates.devices.binding import device_of
 from surogates.harness.loop_artifacts import (
     _FENCE_RE,
     _PROMOTABLE_FENCES,
@@ -31,8 +33,12 @@ from surogates.harness.loop_messages import (
 )
 from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
+from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_files
+from surogates.devices.workspace import WALK_MARGIN_NS
+from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 from surogates.session.inbox_payload import raises_completion_inbox_item
 from surogates.harness.landing import land_turn
+from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams import is_project_master, is_project_thread
 from surogates.workstreams.spend import admitted_at_wake
 
@@ -54,6 +60,17 @@ def _should_take_reservations(session: Any, config_key: str) -> bool:
     return bool((session.config or {}).get(config_key)) or admitted_at_wake(session)
 
 
+def summary_ruled_out(session: Any) -> bool:
+    """Whether the session's config or channel rules every turn's recap out, whatever the turn does (see wants_turn_summary)."""
+    config = getattr(session, "config", None) or {}
+    return bool(
+        config.get("active_mission_id")
+        or config.get("active_research_run_id")
+        or is_project_master(config)
+        or getattr(session, "channel", None) in REALTIME_CHANNELS
+    )
+
+
 def wants_turn_summary(session: Any, *, turn_id: str | None, reason: str) -> bool:
     """Whether a finished turn gets its recap and deliverables scan.
 
@@ -65,14 +82,7 @@ def wants_turn_summary(session: Any, *, turn_id: str | None, reason: str) -> boo
     the answer, nothing renders a recap card on a call, and the drain (up to 10 s of summary calls)
     holds the session while the caller's next words wait for it.
     """
-    config = getattr(session, "config", None) or {}
-    if (
-        config.get("active_mission_id")
-        or config.get("active_research_run_id")
-        or is_project_master(config)
-    ):
-        return False
-    if getattr(session, "channel", None) in REALTIME_CHANNELS:
+    if summary_ruled_out(session):
         return False
     return turn_id is not None and reason in {"stop", "done", "complete", "completed"}
 
@@ -149,9 +159,21 @@ async def announce_failure(store: Any, session: Any, *, error: str, summary: str
         )
 
 
+# The file whose stamp is where a local folder's turn begins: written by the
+# folder's own filesystem, so its clock is the one that stamps the turn's
+# files, a network share's or a FAT stick's included.
+_TURN_MARK = f"{WORKSPACE_STORAGE_DIR}/.turn"
+
+
 class ArtifactCompletionMixin:
     #: The turn's tool sagas, set when its loop starts; its end completes them.
     _turn_saga: Any = None
+    #: Where a local folder's turn began by its folder's clock, a walk's
+    #: cursor; None in the cloud, or when the computer could not say.
+    _turn_cursor: str | None = None
+    #: Whether the turn asked its folder where it began: at its first tool
+    #: call.  One that made none changed nothing there, and walks nothing.
+    _turn_marked: bool = False
     #: The last event before the turn's loop started: the turn's own come after it.
     _turn_after_event_id: int = 0
 
@@ -172,7 +194,9 @@ class ArtifactCompletionMixin:
         fences and promote the first one into an artifact via the API.
 
         Only fires when:
-        - an API client is wired (``self._api_client``),
+        - an API client is wired (``self._api_client``), or the session
+          is on a local folder, where it is made in the folder, within
+          ``HARNESS_WITHIN_S``,
         - the content contains at least one promotable fence (svg/html),
         - the fence body parses as non-empty.
 
@@ -181,7 +205,8 @@ class ArtifactCompletionMixin:
         but swallowed — a failed auto-promotion must not derail the
         turn.
         """
-        if self._api_client is None or not assistant_content:
+        on_device = device_of(session.config) is not None
+        if (self._api_client is None and not on_device) or not assistant_content:
             return
 
         match = _FENCE_RE.search(assistant_content)
@@ -198,9 +223,17 @@ class ArtifactCompletionMixin:
             kind, spec_key = mapping
             name = _derive_artifact_name(kind, messages)
             try:
-                await self._api_client.create_artifact(
-                    name=name, kind=kind, spec={spec_key: body},
-                )
+                if on_device:
+                    async with asyncio.timeout(HARNESS_WITHIN_S), session_files(
+                        session, storage=self._storage, session_factory=self._session_factory, redis=self._redis,
+                    ) as files:
+                        await FolderArtifacts(files, self._store, session.id, sandbox_session_key(session)).create_artifact(
+                            name=name, kind=kind, spec={spec_key: body},
+                        )
+                else:
+                    await self._api_client.create_artifact(
+                        name=name, kind=kind, spec={spec_key: body},
+                    )
                 logger.info(
                     "Session %s: promoted ```%s fence to %s artifact",
                     session.id, lang, kind,
@@ -388,10 +421,13 @@ class ArtifactCompletionMixin:
         # is not a delivery, however convincing it looks in a prompt.
         manifest = reconcile(
             candidate_artifacts,
-            entries_by_path=entries_by_path,
+            entries_by_path=entries_by_path or {},
             turn_start=self._turn_started_at,
         )
-        manifest = check_terminal_claim(manifest, final_message)
+        if entries_by_path is not None:
+            # A folder that could not be listed is unseen, not empty: a claim
+            # of a file its commands made is no false claim.
+            manifest = check_terminal_claim(manifest, final_message)
         if manifest.rejected:
             logger.info(
                 "Turn %s: dropped %d candidate(s) the workspace does not "
@@ -493,7 +529,7 @@ class ArtifactCompletionMixin:
         *,
         session_id: UUID,
         turn_id: str,
-    ) -> tuple[list[Any], dict[str, dict[str, Any]]]:
+    ) -> tuple[list[Any], dict[str, dict[str, Any]] | None]:
         """Pull downloadable artifact candidates emitted during this turn.
 
         Returns the candidates and the workspace listing they were
@@ -691,13 +727,18 @@ class ArtifactCompletionMixin:
         )
         from surogates.storage.tenant import boundary_workspace_prefix
 
-        storage = self._storage
-        if storage is None or self._turn_started_at is None:
+        if self._turn_started_at is None:
             return [], {}
-
         try:
             session = await self._store.get_session(session_id)
         except Exception:
+            return [], {}
+        if device_of(session.config) is not None:
+            # A local folder's files are its computer's to list; its cloud
+            # prefix is metadata, never permission to read one.
+            return await self._scan_folder_for_new_files(session, already_seen_paths)
+        storage = self._storage
+        if storage is None:
             return [], {}
         bucket = (session.config or {}).get("storage_bucket")
         if not bucket:
@@ -746,6 +787,103 @@ class ArtifactCompletionMixin:
             out.append(
                 TurnArtifact(kind="file", label=rel, ref=rel),
             )
+        return out, entries_by_path
+
+    async def _walk_folder(self, session: Any, *, since: str) -> Any | None:
+        """The files of *session*'s local folder changed since the cursor *since*, as the file panel's tree sees them.
+
+        None when its computer cannot say within ``HARNESS_WITHIN_S``: the
+        turn's files are best effort.
+        """
+        from surogates.api.routes.workspace import _FOLDER_TOP_HIDDEN, _SKIP_DIRS
+
+        try:
+            async with asyncio.timeout(HARNESS_WITHIN_S), session_files(
+                session, storage=self._storage, session_factory=self._session_factory, redis=self._redis,
+            ) as files:
+                return await files.walk(
+                    await files.resolve(""), skip=_SKIP_DIRS, skip_top=_FOLDER_TOP_HIDDEN, skip_hidden=True, since=since,
+                )
+        except Exception as exc:
+            logger.log(
+                gave_up_level(exc), "Session %s: its folder's files could not be listed", session.id, exc_info=True,
+            )
+            return None
+
+    async def _folder_cursor(self, session: Any) -> str | None:
+        """Where a local folder's turn begins, by the folder's own clock: the stamp of a mark written there, less the walk's margin.
+
+        A few small operations, never a walk.  None when its computer cannot
+        say within ``HARNESS_WITHIN_S``.
+        """
+        try:
+            async with asyncio.timeout(HARNESS_WITHIN_S), session_files(
+                session, storage=self._storage, session_factory=self._session_factory, redis=self._redis,
+            ) as files:
+                await keep_out_of_git(files)
+                mark = await files.resolve(_TURN_MARK)
+                await files.write(mark, b"")
+                stamped = await files.stat(mark)
+        except Exception as exc:
+            logger.log(
+                gave_up_level(exc), "Session %s: its folder's clock could not be read", session.id, exc_info=True,
+            )
+            return None
+        if stamped is None:
+            return None
+        return str(max(0, int(stamped.mtime * 1_000_000_000) - WALK_MARGIN_NS))
+
+    async def _mark_turn_start(self, session: Any) -> None:
+        """Before a local folder's turn's first tool call: where the turn begins there (see _folder_cursor).
+
+        Awaited before the call runs, never in the background: a mark that
+        landed after a tool's first write would miss its file.  Not taken for
+        a turn whose recap is ruled out, which lists no files.
+        """
+        if self._turn_marked or device_of(session.config) is None or summary_ruled_out(session):
+            return
+        self._turn_marked = True
+        self._turn_cursor = await self._folder_cursor(session)
+
+    async def _scan_folder_for_new_files(
+        self, session: Any, already_seen_paths: set[str],
+    ) -> tuple[list[Any], dict[str, dict[str, Any]] | None]:
+        """A local folder's turn's files: what changed there since the turn began, by the folder's own clock.
+
+        Each is listed by its path from the folder's top, and by the folder's
+        own path, as the agent may have named it.  No ``modified``: the
+        folder's clock chose them, and the "stale" rule would compare the
+        server's.  A turn that made no tool call lists none, and walks
+        nothing.  A turn that began while its computer was away lists none,
+        and neither does one whose folder its computer did not list: their
+        entries are None, as nothing was seen.
+        """
+        from surogates.harness.turn_summarizer import (
+            TurnArtifact,
+            _is_internal_workspace_path,
+        )
+
+        if not self._turn_marked:
+            # No tool call: the turn changed nothing in the folder.
+            return [], {}
+        if self._turn_cursor is None:
+            logger.info(
+                "Session %s: its computer did not say where this turn began, so the turn lists none of its folder's files",
+                session.id,
+            )
+            return [], None
+        walked = await self._walk_folder(session, since=self._turn_cursor)
+        if walked is None:
+            return [], None
+        root = session.config["workspace_path"].rstrip("/")
+        out: list[TurnArtifact] = []
+        entries_by_path: dict[str, dict[str, Any]] = {}
+        for rel, size in walked.files:
+            if _is_internal_workspace_path(rel, on_folder=True):
+                continue
+            entries_by_path[rel] = entries_by_path[f"{root}/{rel}"] = {"size": size, "modified": None}
+            if rel not in already_seen_paths and f"{root}/{rel}" not in already_seen_paths:
+                out.append(TurnArtifact(kind="file", label=rel, ref=rel))
         return out, entries_by_path
 
     async def _settle_commerce_reservation(
