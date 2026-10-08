@@ -156,6 +156,8 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
   Object.assign(started, proposal.started);
   const starting = (key: string) => startOf(key)?.state === "starting";
   const canStart = !!projectId && !!adapter.startProposedThread;
+  // Only Surogate Desktop starts a thread in a folder of the user's computer.
+  const canStartHere = !!projectId && !!adapter.startLocalThread;
   // A card started here gives its View thread the focus its Start took away with it,
   // unless the user has put the focus elsewhere meanwhile; a card drawn anew owes it still,
   // when one was drawn as the start finished.
@@ -177,10 +179,14 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
     }
   });
 
-  const start = async (key: string) => {
+  // In the cloud, or with *title*, in a folder of this computer.
+  const start = async (key: string, title?: string) => {
     told(key, { state: "starting" });
     try {
-      const row = await adapter.startProposedThread!({ projectId: projectId!, proposalId: proposal.proposalId, key });
+      const card = { projectId: projectId!, proposalId: proposal.proposalId, key };
+      const row = title === undefined
+        ? await adapter.startProposedThread!(card)
+        : await adapter.startLocalThread!({ ...card, title });
       told(key, { state: "started", threadId: row.id, focus: drawnCards.has(proposal.proposalId) });
     } catch (error) {
       told(key, { state: "failed", error: error instanceof Error ? error.message : "The thread could not be started." });
@@ -237,7 +243,35 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
                     </Button>
                   )
                 ) : thread.where === "device" ? (
-                  <span>Works in a folder on your computer</span>
+                  <>
+                    <span>
+                      {canStartHere
+                        ? "Allow Surogate to work in a folder on your device"
+                        : "This works in a folder on your device, which needs Surogate Desktop"}
+                    </span>
+                    {canStartHere && (
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        disabled={starting(thread.key)}
+                        aria-label={`${starting(thread.key) ? "Starting" : "Allow"} ${thread.title}`}
+                        onClick={() => void start(thread.key, thread.title)}
+                      >
+                        {starting(thread.key) ? "Starting…" : "Allow"}
+                      </Button>
+                    )}
+                    {canStart && (
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        disabled={starting(thread.key)}
+                        aria-label={`Run ${thread.title} in the cloud instead`}
+                        onClick={() => void start(thread.key)}
+                      >
+                        Run in the cloud instead
+                      </Button>
+                    )}
+                  </>
                 ) : canStart ? (
                   <Button
                     size="xs"
