@@ -498,6 +498,44 @@ describe("a thread read in the Overview pane", () => {
       .toBe(transcript(QUESTION, "textSize=large&transcriptWidth=medium&motion=system"));
   });
 
+  it("keeps its own colour behind its page while Settings dims the system's controls over the window", async () => {
+    const { shell, page } = await opened();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    // Each colour the pane's view and the controls' strip are painted from now on, in a dark theme.
+    await shell.evaluate(({ BrowserWindow, nativeTheme }) => {
+      const window = BrowserWindow.getAllWindows()[0]!;
+      const view = (window.contentView.children as Electron.WebContentsView[])
+        .find((found) => new URL(found.webContents.getURL() || "about:blank").pathname.startsWith("/transcript/"))!;
+      const painted = { pane: [] as string[], strip: [] as string[] };
+      Object.assign(globalThis, { painted });
+      const paint = view.setBackgroundColor.bind(view);
+      view.setBackgroundColor = (colour) => {
+        painted.pane.push(colour);
+        paint(colour);
+      };
+      const set = window.setTitleBarOverlay.bind(window);
+      window.setTitleBarOverlay = (overlay) => {
+        painted.strip.push(overlay.color!);
+        set(overlay);
+      };
+      nativeTheme.themeSource = "dark";
+    });
+    const painted = () => shell.evaluate(() => (globalThis as unknown as { painted: { pane: string[]; strip: string[] } }).painted);
+    await expect.poll(painted).toEqual({ pane: ["#1a1a19"], strip: ["#1a1a19"] });
+    await page.click("#open-settings");
+    let settings: Page | undefined;
+    await expect.poll(() => {
+      settings = shell.windows().find((found) => found.url().endsWith("/settings.html"));
+      return settings !== undefined;
+    }).toBe(true);
+    // The strip dims under Settings, whose own backdrop dims the pane: the pane's view is painted as before.
+    await expect.poll(painted).toEqual({ pane: ["#1a1a19", "#1a1a19"], strip: ["#1a1a19", "#0c0c0b"] });
+    await settings!.waitForSelector("#close");
+    await settings!.click("#close");
+    await expect.poll(painted).toEqual({ pane: ["#1a1a19", "#1a1a19", "#1a1a19"], strip: ["#1a1a19", "#0c0c0b", "#1a1a19"] });
+  });
+
   it("paints its first frame in a dark desktop's theme, with no bridge, before any script of its own", async () => {
     const { shell, page, client } = await opened();
     await page.click("#open-settings");
