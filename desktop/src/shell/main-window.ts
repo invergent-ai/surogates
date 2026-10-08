@@ -326,9 +326,10 @@ export class MainWindow {
 
   /**
    * The web client's page at *path*, a thread's transcript, in the Overview pane's hole; null takes it
-   * away. It has the agent's partition, so its session, and no preload, so no bridge. It stays on
-   * its page: a page the web client routes to in place is its transcript again, an address off the
-   * agent's, and any popup, opens in the system browser, and nothing else of the agent's loads there.
+   * away. It has the agent's partition, so its session, and a preload that only hears its keys and
+   * exposes nothing, so no bridge. It stays on its page: a page the web client routes to in place is
+   * its transcript again, an address off the agent's, and any popup, opens in the system browser, and
+   * nothing else of the agent's loads there.
    */
   read(path: string | null): void {
     const web = this.web;
