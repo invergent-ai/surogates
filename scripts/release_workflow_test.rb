@@ -8,6 +8,14 @@ class ReleaseWorkflowTest < Minitest::Test
     @workflow = YAML.load_file(".github/workflows/release.yml")
   end
 
+  def test_the_release_runs_for_a_pushed_version_tag_and_for_nothing_else
+    # Ruby's YAML reads the key "on" as true. A pull request, a fork's among them, a push of a
+    # branch and a run started by hand run none of the release's jobs: neither the one that holds
+    # the desktop's release key, nor those that write to R2, GHCR or npm.
+    refute @workflow.key?("on")
+    assert_equal({ "push" => { "tags" => ["v*"] } }, @workflow.fetch(true))
+  end
+
   def test_docker_images_wait_for_npm_package_publication
     images_needs = Array(@workflow.fetch("jobs").fetch("images").fetch("needs", []))
 
