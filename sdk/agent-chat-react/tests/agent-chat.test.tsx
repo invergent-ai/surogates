@@ -547,6 +547,43 @@ describe("AgentChat", () => {
     expect(hostPane()).toBe("none there, only watched");
   });
 
+  it("says where a local-folder chat's browser is on its card, and in the pane of a host that draws none", async () => {
+    const stream = new FakeEventStream();
+    let there: "live" | "unavailable" = "live";
+    const adapter = {
+      ...createAdapter(stream),
+      async getBrowserState() {
+        return { status: there, controlOwner: null, liveViewPath: "", computer: true };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      stream.emit("browser.provisioned", 10, { session_id: "s-1", computer: true });
+      await Promise.resolve();
+    });
+    const card = () => container?.querySelector('[data-testid="session-pane-card-browser"]')?.textContent ?? "";
+    const pane = () => container?.querySelector('[data-testid="browser-pane"]')?.textContent;
+    expect(card()).toContain("On the chat's computer");
+    await openPane(container, "browser");
+    expect(pane()).toBe("The browser is open on the chat's computer.");
+
+    there = "unavailable";
+    await act(async () => {
+      stream.emit("browser.unavailable", 11, { session_id: "s-1", computer: true });
+      await Promise.resolve();
+    });
+    expect(card()).toContain("No supported browser on its computer");
+    expect(card()).not.toContain("On the chat's computer");
+    expect(pane()).toBe("The chat's computer has no supported browser.");
+  });
+
   it("toggles the browser pane from its card", async () => {
     const stream = new FakeEventStream();
     const adapter = {
