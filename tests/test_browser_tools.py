@@ -962,6 +962,24 @@ class TestNavigateSnapshot:
         assert "browser_get_state" in body["snapshot_error"]
 
 
+# The computer's browser, as a local-folder chat's screenshot reaches it: one button on its page, and its shot.
+LOCAL_PAGE = {
+    "url": "https://example.com/", "title": "Example", "viewport": {"width": 1280, "height": 800},
+    "frames": [{"x": 0, "y": 0, "nodes": [
+        {"role": "button", "name": "Go", "x": 10, "y": 30, "width": 80, "height": 20, "depth": 4,
+         "children_count": 0, "idx": 0, "text_block": "", "backend_node_id": 12},
+    ]}],
+}
+
+
+def _local_browser(kind: str, args: dict[str, Any]) -> dict[str, Any]:
+    import base64
+
+    if kind == "browser.observe":
+        return {"ok": LOCAL_PAGE}
+    return {"ok": base64.b64encode(b"\x89PNG\r\n\x1a\nimg").decode("ascii")}
+
+
 async def test_a_local_folder_chats_screenshot_goes_to_its_folder_not_the_cloud(tenant, tmp_path) -> None:
     from surogates.devices.workspace import DeviceWorkspaceIO
     from surogates.tools.builtin.browser import _browser_screenshot_handler
@@ -970,7 +988,9 @@ async def test_a_local_folder_chats_screenshot_goes_to_its_folder_not_the_cloud(
 
     folder = tmp_path.resolve()
     storage = FakeStorage()
-    files = DeviceWorkspaceIO(InProcessRunner(LocalWorkspaceIO(workspace_path=str(folder))), root=str(folder))
+    computer = InProcessRunner(LocalWorkspaceIO(workspace_path=str(folder)))
+    computer.browser = _local_browser
+    files = DeviceWorkspaceIO(computer, root=str(folder))
 
     body = json.loads(await _browser_screenshot_handler(
         {"annotate": True},
@@ -1006,6 +1026,8 @@ async def test_a_local_folder_chats_screenshot_its_computer_refuses_is_said_in_i
             return await super().run(kind, args, payload)
 
     folder = tmp_path.resolve()
+    computer = Refusing(LocalWorkspaceIO(workspace_path=str(folder)))
+    computer.browser = _local_browser
     body = json.loads(await _browser_screenshot_handler(
         {},
         tenant=tenant,
@@ -1013,7 +1035,7 @@ async def test_a_local_folder_chats_screenshot_its_computer_refuses_is_said_in_i
         browser_pool=FakePool(),
         browser_control=FakeControlStore(),
         session_config={"storage_bucket": "agent-bucket", "workspace_path": str(folder)},
-        workspace_io=DeviceWorkspaceIO(Refusing(LocalWorkspaceIO(workspace_path=str(folder))), root=str(folder)),
+        workspace_io=DeviceWorkspaceIO(computer, root=str(folder)),
         _client_factory=lambda endpoint: FakeScreenshotClient(),
     ))
 

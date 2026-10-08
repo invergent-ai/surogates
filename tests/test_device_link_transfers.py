@@ -125,7 +125,7 @@ async def test_a_transfer_that_completes_is_logged_once_with_its_device_size_and
 
 
 @pytest.mark.parametrize(("start", "key", "ending"), [
-    ("rejected", "holder", r"closed 4400 \(transfer for an operation this device was not given, or not a read\)"),
+    ("rejected", "holder", r"closed 4400 \(transfer for an operation this device was not given, or whose result is never one\)"),
     ("stale", "holder", r"closed 4403 \(credentials rotated\)"),
     ("started", "another", r"closed 4409 \(superseded\)"),
     ("busy", "holder", "busy"),

@@ -7,14 +7,14 @@
 // that root's next run.
 
 import { performServerHandshake, type ServerHttp2Session, type ServerHttp2Stream } from "node:http2";
-import { connect as connectTcp, isIPv6, type Socket } from "node:net";
+import type { Socket } from "node:net";
 import type { Duplex } from "node:stream";
 
 import { MAX_TUNNELS } from "../guest/network.js";
 import { MAX_SHARES, ROOT_ID } from "../guest/protocol.js";
 import type { NetworkAsk } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
-import { judge, type ReachOptions } from "./egress.js";
+import { dialFirst, judge, type ReachOptions } from "./egress.js";
 
 // How many destinations of a kind a notice names.
 const NOTICE_NAMES = 20;
@@ -77,20 +77,6 @@ interface Met {
   refused: Set<string>;
   unknown: Set<string>;
   waiting: Map<string, boolean>;
-}
-
-const tcp = (address: string, port: number) => connectTcp({ host: address, port, allowHalfOpen: true });
-// How long an attempt has to connect before the next judged address is tried beside it, the
-// earlier one still running (RFC 8305), so an address that never answers holds no other back.
-// Node's autoSelectFamily waits as long, then drops the earlier one.
-const STAGGER_MS = 250;
-
-// The judged addresses, IPv6 and IPv4 by turns, always IPv6 first, whatever order the lookup
-// gave them. Node's autoSelectFamily leads with the family of the lookup's first address.
-function inTurn(addresses: readonly string[]): string[] {
-  const six = addresses.filter((address) => isIPv6(address));
-  const four = addresses.filter((address) => !isIPv6(address));
-  return Array.from({ length: Math.max(six.length, four.length) }, (_, at) => [six[at], four[at]]).flat().filter((address) => address !== undefined);
 }
 
 export class NetProxy {
@@ -185,47 +171,20 @@ export class NetProxy {
     return decided;
   }
 
-  // The addresses judged, and no others, in turn (inTurn): the next at once when one fails, or
-  // beside it once it has had STAGGER_MS; the first to connect carries the stream, and the rest go.
+  // The addresses judged, and no others, in turn (egress.ts's dialFirst); the first to connect
+  // carries the stream, and the stream's end ends it.
   private dial(stream: ServerHttp2Stream, addresses: readonly string[], port: number): void {
     if (stream.destroyed) return;
-    const order = inTurn(addresses);
-    const trying = new Set<Socket>();
-    let next = 0;
-    let failed = "EHOSTUNREACH";
-    let carried: Socket | null = null;
-    let stagger: NodeJS.Timeout | undefined;
-    stream.once("close", () => {
-      clearTimeout(stagger);
-      for (const socket of trying) socket.destroy();
-    });
-    const attempt = (): void => {
-      clearTimeout(stagger);
-      const address = order[next];
-      if (stream.destroyed || carried || address === undefined) return;
-      next += 1;
-      const socket = (this.options.connect ?? tcp)(address, port);
-      trying.add(socket);
-      if (next < order.length) stagger = setTimeout(attempt, STAGGER_MS);
-      socket.once("connect", () => {
-        clearTimeout(stagger);
-        carried = socket;
-        for (const other of trying) if (other !== socket) other.destroy();
-        if (stream.destroyed) return void socket.destroy();
-        stream.respond({ ":status": 200 });
-        socket.pipe(stream);
-        stream.pipe(socket);
-      });
-      socket.once("error", (error: NodeJS.ErrnoException) => {
-        socket.destroy();
-        if (socket === carried) return void stream.destroy();
-        trying.delete(socket);
-        failed = error.code ?? failed;
-        if (next < order.length) attempt();
-        else if (trying.size === 0) refuse(stream, 502, failed);
-      });
-    };
-    attempt();
+    const gone = new AbortController();
+    stream.once("close", () => gone.abort());
+    dialFirst(addresses, port, gone.signal, this.options.connect).then((socket) => {
+      if (stream.destroyed) return void socket.destroy();
+      stream.once("close", () => socket.destroy());
+      socket.once("error", () => stream.destroy());
+      stream.respond({ ":status": 200 });
+      socket.pipe(stream);
+      stream.pipe(socket);
+    }, (error: Error) => refuse(stream, 502, error.message));
   }
 }
 

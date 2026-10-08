@@ -20,7 +20,7 @@ export default defineConfig({
     env: GIT,
     environment: "node",
     testTimeout: 10_000,
-    globalSetup: ["test/srt-tmp.ts"],
+    globalSetup: ["test/srt-tmp.ts", "test/isolated.ts"],
     projects: [
       { extends: true, test: { name: "unit", include: ["test/**/*.test.ts"], exclude: [...configDefaults.exclude, ...MOUNTING] } },
       { extends: true, test: { name: "mounting", include: MOUNTING, sequence: { groupOrder: 1 } } },
