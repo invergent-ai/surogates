@@ -16,7 +16,9 @@
 #                                         # there; then checks what the bucket holds
 # Environment: S3_ENDPOINT (R2's https://<account>.r2.cloudflarestorage.com), S3_BUCKET,
 # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; for fetch, GITHUB_REPOSITORY and GH_TOKEN,
-# with which gh lists the repository's releases.
+# with which gh lists the repository's releases. A key in the bucket that no release carries
+# yet is looked for again PUBLISH_POLLS times, PUBLISH_POLL_S seconds apart (15 and 60): the
+# release run that sent it attaches its manifest only once its release exists.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -80,12 +82,22 @@ case "$VERB" in
   fetch)
     mkdir -p "$OUT"
     : "${GITHUB_REPOSITORY:?}"
-    # The manifest the release that published the key attached to itself, from the API's list.
-    asset="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq ".[].assets[] | select(.name == \"desktop-vm-$key.json\") | .url" | sed -n 1p)"
     status="$(manifest -o /dev/null -I)"
+    # The manifest the release that published the key attached to itself, from the API's list. A
+    # key in the bucket may be one whose release run has yet to attach it, as when a second
+    # release is pushed while the first runs: waited for, at most for about a release's run.
+    lookup() {
+      gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq ".[].assets[] | select(.name == \"desktop-vm-$key.json\") | .url" | sed -n 1p
+    }
+    asset="$(lookup)"
+    for ((poll = 0; poll < ${PUBLISH_POLLS:-15}; poll++)); do
+      [ -z "$asset" ] && [ "$status" = 200 ] || break
+      sleep "${PUBLISH_POLL_S:-60}"
+      asset="$(lookup)"
+    done
     if [ -z "$asset" ]; then
       [ "$status" = 404 ] \
-        || fail "desktop/vm/$key is in the bucket, but no release of ours carries its manifest (desktop-vm-$key.json): remove desktop/vm/$key/ from the bucket to publish it again"
+        || fail "desktop/vm/$key is in the bucket, but no release of ours carries its manifest (desktop-vm-$key.json): re-run this job once the release run that sent it has attached it, or attach that run's desktop-vm-manifest artifact to its release as desktop-vm-$key.json"
       echo missing
       exit 0
     fi

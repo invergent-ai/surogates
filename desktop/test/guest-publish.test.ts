@@ -3,9 +3,9 @@
 // releases as GitHub's API does. Behind SUROGATE_S3_TESTS=1: it needs Docker, the
 // chrislusf/seaweedfs image, zstd and jq.
 
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,12 +27,16 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
   const key = spawnSync(join(REPO, "images/guest/inputs.sh"), { encoding: "utf8" }).stdout.trim();
   // No credentials of this user's reach the container's start.
   const docker = (...args: string[]) => spawnSync("docker", args, { encoding: "utf8", env: { ...process.env, DOCKER_CONFIG: join(dir, "docker") } });
-  const publish = (verb: string, env: Record<string, string> = {}) => spawnSync(PUBLISH, [verb, out], {
-    encoding: "utf8",
-    env: {
-      ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}`, RELEASES: join(dir, "releases.json"), GITHUB_REPOSITORY: REPOSITORY, GH_TOKEN: "unused",
-      S3_ENDPOINT: endpoint, S3_BUCKET: bucket, ...CREDENTIALS, ...env,
-    },
+  const publishEnv = (env: Record<string, string>) => ({
+    ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}`, RELEASES: join(dir, "releases.json"), GITHUB_REPOSITORY: REPOSITORY, GH_TOKEN: "unused",
+    S3_ENDPOINT: endpoint, S3_BUCKET: bucket, ...CREDENTIALS, ...env,
+  });
+  const publish = (verb: string, env: Record<string, string> = {}) => spawnSync(PUBLISH, [verb, out], { encoding: "utf8", env: publishEnv(env) });
+  // The same, while this process goes on: what it waits for can change meanwhile.
+  const publishing = (verb: string, env: Record<string, string> = {}) => new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
+    execFile(PUBLISH, [verb, out], { env: publishEnv(env) }, (error, stdout, stderr) => {
+      resolve({ status: error ? (typeof error.code === "number" ? error.code : null) : 0, stdout, stderr });
+    });
   });
   // A request to the bucket, signed as the job signs it.
   const signed = (...args: string[]) => spawnSync("curl", [
@@ -53,7 +57,9 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
       writeFileSync(join(dir, "released.json"), manifest);
       assets.push({ name: `desktop-vm-${key}.json`, url: `file://${join(dir, "released.json")}` });
     }
-    writeFileSync(join(dir, "releases.json"), JSON.stringify([{ tag_name: "v1.0.0", assets }]));
+    // Whole at each read, as the API's list is.
+    writeFileSync(join(dir, "releases.json.new"), JSON.stringify([{ tag_name: "v1.0.0", assets }]));
+    renameSync(join(dir, "releases.json.new"), join(dir, "releases.json"));
   };
 
   beforeAll(async () => {
@@ -135,10 +141,11 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
     const sent = sentFiles();
     expect(publish("send").status).toBe(0);
     out = mkdtempSync(join(dir, "out-"));
-    expect(publish("fetch")).toMatchObject({
+    // No release carries it while the job waits: the job fails, and says how to recover without deleting the key.
+    expect(publish("fetch", { PUBLISH_POLLS: "2", PUBLISH_POLL_S: "0" })).toMatchObject({
       status: 1, stdout: "",
       stderr: `publish.sh: desktop/vm/${key} is in the bucket, but no release of ours carries its manifest (desktop-vm-${key}.json): `
-        + `remove desktop/vm/${key}/ from the bucket to publish it again\n`,
+        + `re-run this job once the release run that sent it has attached it, or attach that run's desktop-vm-manifest artifact to its release as desktop-vm-${key}.json\n`,
     });
     released(sent["manifest.json"]);
     // The bucket's image swapped for another, compressed as the build compresses: its hashes are not the release's.
@@ -152,6 +159,18 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
     manifest.files[0]!.downloadSha256 = sha256(other);
     replace(`desktop/vm/${key}/manifest.json`, Buffer.from(`${JSON.stringify(manifest)}\n`));
     expect(publish("fetch")).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: the bucket's desktop/vm/${key}/manifest.json is not the release's\n` });
+  });
+
+  it("waits for the release run that sent a key to attach its manifest, as a second release pushed meanwhile does, and takes it once it is there", async () => {
+    built();
+    const sent = sentFiles();
+    expect(publish("send").status).toBe(0);
+    out = mkdtempSync(join(dir, "out-"));
+    // The run that sent it attaches its manifest a moment later, once its release exists.
+    const waiting = publishing("fetch", { PUBLISH_POLLS: "30", PUBLISH_POLL_S: "0.2" });
+    setTimeout(() => released(sent["manifest.json"]), 1_000);
+    expect(await waiting).toMatchObject({ status: 0, stdout: "published\n" });
+    expect(readFileSync(join(out, "manifest.json")).equals(sent["manifest.json"]!)).toBe(true);
   });
 
   it("stops at a bucket that refuses it, rather than taking the image for missing", () => {
