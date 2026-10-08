@@ -14,7 +14,10 @@
          there it is the system's. -->
     <script>
       if (window.surogateDesktop || location.pathname.startsWith("/transcript/")) {
-        document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches);
+        const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.classList.toggle("dark", dark);
+        // Native scrollbars and form controls with it, as next-themes sets them once the app runs.
+        document.documentElement.style.colorScheme = dark ? "dark" : "light";
       }
     </script>
     <!-- `interactive-widget=resizes-content` makes Chrome on Android shrink

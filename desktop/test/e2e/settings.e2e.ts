@@ -201,19 +201,19 @@ describe("Settings", () => {
     expect(saved().theme).toBe("light");
   });
 
-  it("paints the web client's first frame in a dark desktop's theme, before any script of its own", async () => {
+  it("paints the web client's first frame in a dark desktop's theme, its native controls too, before any script of its own", async () => {
     // The web client's own HTML, its bundle and the fonts' sheet not served: only its head can theme the
     // first frame, and the body's first script reads the root that frame paints from.
     agent.page = readFileSync(join(import.meta.dirname, "..", "..", "..", "web", "index.html"), "utf8")
       .replace(/<link [^>]*https:[^>]*>/g, "")
-      .replace("<body>", "<body><script>window.firstFrame = document.documentElement.className</script>");
+      .replace("<body>", "<body><script>window.firstFrame = [document.documentElement.className, document.documentElement.style.colorScheme]</script>");
     const { shell, page, client } = await signedIn();
     await page.click("#open-settings");
     const settings = await settingsPage(shell);
     await settings.click('[data-setting="theme"] [data-value="dark"]');
     await expect.poll(() => client.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches)).toBe(true);
     await client.reload();
-    expect(await client.evaluate(() => (window as unknown as { firstFrame: string }).firstFrame)).toBe("dark");
+    expect(await client.evaluate(() => (window as unknown as { firstFrame: string[] }).firstFrame)).toEqual(["dark", "dark"]);
   });
 
   it("filters its nav and its rows by what is typed in its search", async () => {
