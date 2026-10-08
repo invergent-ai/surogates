@@ -1178,6 +1178,27 @@ describe("a page's download, as the host stages it", () => {
       }
     });
 
+    it("names no input for an upload's prompt where the browser was taken over while its page was still saying where the input is, though it was handed back before the page said: the upload that prompt is about is given to nothing", async () => {
+      const tab = taken();
+      const asked = tab.input({ evaluate: () => Promise.resolve("given"), dispose: () => Promise.resolve() });
+      // The page is slow to say where its input is, as a busy one is.
+      const slow: { says?: (place: unknown) => void } = {};
+      Object.assign(asked.element(), { evaluate: () => new Promise((resolve) => {
+        slow.says = resolve;
+      }) });
+      const naming = host.address(SESSION, true, "upload-1");
+      await vi.waitFor(() => expect(slow.says).toBeDefined());
+      // Taken over and handed back meanwhile: the input asked before its user held the browser.
+      host.pause("chat-2", true);
+      host.pause("chat-2", false);
+      slow.says!({ here: true, href: FORM_URL, origin: new URL(FORM_URL).origin });
+      await naming;
+      expect(state().named.get(SESSION)?.input ?? null).toBeNull();
+      // Its user allows the prompt: the files go to nothing, asked about or not.
+      expect(await uploads("upload-1")).toEqual({ error: { type: "browser", message: NOT_AS_ASKED } });
+      expect(await uploads()).toEqual({ error: { type: "browser", message: NOT_ASKED } });
+    });
+
     it("reads each bound on the clock it can be read on: the minute after a hand back on the one that cannot be set, the five seconds after a take-over on a timer, which the computer's clock moves no more, and the quarter second of an upload's step on the computer's own, the one its page reads too", async () => {
       // The clock a host told none reads, and the computer's own, which its user or its network can set.
       let steady = 5_000;

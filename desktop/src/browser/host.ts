@@ -559,9 +559,12 @@ export class BrowserHost {
       // Asked about from here on, whatever is named for it.
       if (of !== undefined) this.prompted.add(of);
       const chooser = this.choosers.get(session);
+      // What a take-over from here on stops: the page can be slow to say where its input is.
+      const taken = this.interrupt.signal;
       const at = chooser ? await this.placed(chooser) : null;
-      // Its user holds the browser, or took it over meanwhile: no input is named, or kept, for any upload.
-      if (this.held !== null) return tab;
+      // Its user holds the browser, or took it over since this began, handed back or not: no input is named,
+      // or kept, for any upload. The one that had asked did so before they held it.
+      if (this.held !== null || taken.aborted) return tab;
       if (!chooser || !at?.here) {
         // Nothing has asked: its user is asked by the tab's page, and the upload is given to nothing, though an input asks after.
         this.named.set(session, { input: null, why: NOT_ASKED, of });
