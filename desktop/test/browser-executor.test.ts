@@ -245,10 +245,10 @@ describe("the browser's kinds beside the tools", () => {
   it("keeps what a download came to through a take-over: nothing of it rides on an answer that is paused, and its session hears once the browser is its agent's again", async () => {
     const { browsing, browsed, answers, stage } = rig();
     browsing.saveDownloadsWith((download) => Promise.resolve(`saved ${download.name}`));
-    const told = (browsing as unknown as { told: Map<string, string[]> }).told;
+    const told = (browsing as unknown as { told: Map<string, { notices: string[] }> }).told;
     // Staged before its user took the browser over: the agent's, saved as usual while they hold it.
     stage({ root: ROOT, session: ROOT, name: "report.txt", path: kept("a"), user: false });
-    await vi.waitFor(() => expect(told.get(ROOT)).toEqual(["saved report.txt"]));
+    await vi.waitFor(() => expect(told.get(ROOT)?.notices).toEqual(["saved report.txt"]));
     browsing.takeOver(OTHER);
     expect(await browsing.run(op("browser.navigate"), signal)).toEqual(PAUSED);
     expect(browsed).toEqual([]);
@@ -309,10 +309,10 @@ describe("the browser's kinds beside the tools", () => {
       undefined as unknown as string,
     ];
     const staged = (path: string, user = false): StagedDownload => ({ root: ROOT, session: ROOT, name: "report.txt", path, user });
-    const told = (browsing as unknown as { told: Map<string, string[]> }).told;
+    const told = (browsing as unknown as { told: Map<string, { notices: string[] }> }).told;
     // With nothing to save with yet, a staged file is removed: none of these is one.
     for (const path of others) stage(staged(path));
-    await vi.waitFor(() => expect(told.get(ROOT)).toHaveLength(others.length));
+    await vi.waitFor(() => expect(told.get(ROOT)?.notices).toHaveLength(others.length));
     expect([readFileSync(elsewhere, "utf8"), existsSync(join(staging, "link")), existsSync(staging)]).toEqual(["a file of the user's", true, true]);
     const saved: StagedDownload[] = [];
     browsing.saveDownloadsWith((download) => (saved.push(download), Promise.resolve(`saved ${download.name}`)));
@@ -324,12 +324,36 @@ describe("the browser's kinds beside the tools", () => {
     symlinkSync(join(staging, "playwright-artifacts-x"), join(staging, "artifacts"));
     stage(staged(join(staging, "artifacts", kept("playwright-artifacts-x/guid").slice(-4))));
     await vi.waitFor(() => expect(saved).toEqual([staged(join(staging, "playwright-artifacts-x", "guid"))]));
-    await vi.waitFor(() => expect(told.get(ROOT)).toHaveLength(2 * others.length + 1));
+    await vi.waitFor(() => expect(told.get(ROOT)?.notices).toHaveLength(2 * others.length + 1));
     answers.push({ ok: { notices: [] } });
     const heard = (await browsing.run(op("browser.mouse"), signal) as { ok: { notices: string[] } }).ok.notices;
     expect([heard.filter((notice) => notice === UNSAVED).length, heard.filter((notice) => notice !== UNSAVED)]).toEqual([2 * others.length, ["saved report.txt"]]);
     expect(UNSAVED).toBe("The page downloaded a file, but it was not saved: this computer could not save it.");
     expect(readFileSync(elsewhere, "utf8")).toBe("a file of the user's");
+  });
+
+  it("drops what a deleted chat's downloads came to, untold: its own and its sub-agents', and of a save that ends after it", async () => {
+    const { browsing, chats, stage } = rig();
+    let ended = (): void => {};
+    browsing.saveDownloadsWith((download) => (download.name === "late.txt"
+      ? new Promise((resolve) => {
+        ended = () => resolve("saved late.txt");
+      })
+      : Promise.resolve(`saved ${download.name}`)));
+    const told = (browsing as unknown as { told: Map<string, unknown> }).told;
+    stage({ root: ROOT, session: ROOT, name: "report.txt", path: kept("a"), user: false });
+    stage({ root: ROOT, session: "child", name: "notes.txt", path: kept("b"), user: false });
+    stage({ root: OTHER, session: OTHER, name: "other.txt", path: kept("c"), user: false });
+    stage({ root: ROOT, session: "child", name: "late.txt", path: kept("d"), user: false });
+    await vi.waitFor(() => expect([...told.keys()]).toEqual([ROOT, "child", OTHER]));
+    // Deleted, as the server retires a chat: its sessions get no answer more to carry them.
+    browsing.retired(ROOT);
+    chats.delete(ROOT);
+    expect([...told.keys()]).toEqual([OTHER]);
+    // One of its saves that ends only now is kept for nobody.
+    ended();
+    await new Promise((done) => setTimeout(done, 50));
+    expect([...told.keys()]).toEqual([OTHER]);
   });
 
   it("asks the browser for the address of the page a session acts in", async () => {

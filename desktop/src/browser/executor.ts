@@ -48,9 +48,9 @@ export class Browsing implements ToolLayer {
   // Whether the chat it is held from was deleted since.
   private deleted = false;
   // What saves each download its browser stages, once the stack has said; and what each calling
-  // session's downloads came to, until its next answer that says what its page did.
+  // session's downloads came to, with the chat it is of, until its next answer that says what its page did.
   private save: ((download: StagedDownload) => Promise<string>) | null = null;
-  private readonly told = new Map<string, string[]>();
+  private readonly told = new Map<string, { root: string; notices: string[] }>();
   // The look at where each staged file is, one after another: downloads are saved in the order they were staged.
   private looking: Promise<unknown> = Promise.resolve();
 
@@ -115,17 +115,18 @@ export class Browsing implements ToolLayer {
 
   // What came of *download*, for its session's next answer that says what its page did.
   private hear(download: StagedDownload, notice: string): void {
-    // One its user started while they held the browser is theirs: its agent hears nothing of it.
-    if (download.user) return;
-    const notices = this.told.get(download.session) ?? [];
-    if (notices.length < MAX_NOTICES) notices.push(notice);
-    this.told.set(download.session, notices);
+    // One its user started while they held the browser is theirs: its agent hears nothing of it. Nor does a
+    // chat that is gone: no answer of its sessions is left to carry it.
+    if (download.user || !this.options.bindingOf(download.root)) return;
+    const kept = this.told.get(download.session) ?? { root: download.root, notices: [] };
+    if (kept.notices.length < MAX_NOTICES) kept.notices.push(notice);
+    this.told.set(download.session, kept);
   }
 
   // *outcome*, with what the session's downloads came to when it says what the page did (its notices).
   // One answered paused says nothing of them: they stay for the session's next answer that does.
   private tell(session: string, outcome: Outcome): Outcome {
-    const told = this.told.get(session);
+    const told = this.told.get(session)?.notices;
     const ok = "ok" in outcome ? outcome.ok : undefined;
     if (!told || typeof ok !== "object" || ok === null || !Array.isArray((ok as { notices?: unknown }).notices)) return outcome;
     this.told.delete(session);
@@ -189,6 +190,10 @@ export class Browsing implements ToolLayer {
   // held: a page can have a chat deleted, and only the desktop's own confirmation hands the browser back.
   retired(root: string): void {
     if (this.held === root) this.deleted = true;
+    // What its sessions' downloads came to is told to nobody now.
+    for (const [session, kept] of this.told) {
+      if (kept.root === root) this.told.delete(session);
+    }
     this.options.browser.forget(root);
     this.options.tools.retired?.(root);
   }
