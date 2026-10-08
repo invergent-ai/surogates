@@ -175,7 +175,7 @@ const withKeys = (script: string, trusted = [PUBLIC]) =>
 
 // A container of *release*, built from *setup*'s lines, and what the tests do with it.
 function lab(release: string, setup: string[], run: string[] = []) {
-  const it = { dir: "", container: "" };
+  const it = { dir: "", container: "", image: "" };
   // No credentials of this user's reach the image's pull or the container.
   const env = () => ({ ...process.env, DOCKER_CONFIG: join(it.dir, "docker") });
   // No call outlives CALL_MS: it is synchronous, so a command that never ended would hold the worker for good.
@@ -230,11 +230,11 @@ function lab(release: string, setup: string[], run: string[] = []) {
     mkdirSync(join(it.dir, "docker"));
     mkdirSync(join(it.dir, "image"));
     writeFileSync(join(it.dir, "image", "Dockerfile"), [`FROM ubuntu:${release}`, ...setup].join("\n"));
-    const image = `surogate-install-test:${release}-${sha256(Buffer.from(setup.join("\n"))).slice(0, 12)}`;
+    it.image = `surogate-install-test:${release}-${sha256(Buffer.from(setup.join("\n"))).slice(0, 12)}`;
     // Off the event loop: a first build takes minutes, and vitest's RPC answers must still get in.
-    await promisify(execFile)("docker", ["build", "-q", "-t", image, join(it.dir, "image")], { env: env() });
+    await promisify(execFile)("docker", ["build", "-q", "-t", it.image, join(it.dir, "image")], { env: env() });
     // Root's own ptrace right, which Docker leaves out: root reads every process's program, as on a computer.
-    it.container = docker(["run", "-d", "--rm", "--cap-add", "SYS_PTRACE", ...run, image, "sleep", "infinity"]).stdout.trim();
+    it.container = docker(["run", "-d", "--rm", "--cap-add", "SYS_PTRACE", ...run, it.image, "sleep", "infinity"]).stdout.trim();
     expect(it.container).not.toBe("");
     writeFileSync(join(it.dir, "install.sh"), withKeys(readFileSync(SCRIPT, "utf8")), { mode: 0o755 });
     expect(root("mkdir -p /opt/surogate-test").status).toBe(0);
@@ -250,7 +250,20 @@ function lab(release: string, setup: string[], run: string[] = []) {
     rmSync(it.dir, { recursive: true, force: true });
   });
 
-  return { it, docker, root, as, releaseOf, manifestOf, current, versions, swapped };
+  // Another computer of the same image, started with *run*, for what the tests' own cannot be made
+  // into: handed the script and *files*, in /srv, used by *use*, then removed.
+  const elsewhere = (run: string[], files: string[], use: (root: (command: string) => ReturnType<typeof docker>) => void) => {
+    const container = docker(["run", "-d", "--rm", "--cap-add", "SYS_PTRACE", ...run, it.image, "sleep", "infinity"]).stdout.trim();
+    expect(container).not.toBe("");
+    try {
+      for (const file of [join(it.dir, "install.sh"), ...files]) expect(docker(["cp", file, `${container}:/srv/`]).status, file).toBe(0);
+      use((command) => docker(["exec", container, "bash", "-c", command]));
+    } finally {
+      docker(["rm", "-f", container]);
+    }
+  };
+
+  return { it, docker, root, as, releaseOf, manifestOf, current, versions, swapped, elsewhere };
 }
 
 describe("the install script's release keys", () => {
@@ -279,7 +292,7 @@ describe("the install script's waits", () => {
 });
 
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --apply, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
-  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions, swapped } = lab(release, APPLY_LAB, OWN_DISK);
+  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions, swapped, elsewhere } = lab(release, APPLY_LAB, OWN_DISK);
   // The files as the app leaves them for the helper: in the user's cache, copied into the container.
   const files = (manifest = "/home/tester/manifest.json", tarball = "/home/tester/release.tar.gz") => `${manifest} /home/tester/manifest.json.sig ${tarball}`;
   const stage = (tarball: string) => {
@@ -463,6 +476,29 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     }
     expect(root(`rm -rf ${LOCKS} /root/locks /home/tester/locks`).status).toBe(0);
     expect(root(`/opt/surogate-test/install.sh --apply ${files()}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+  });
+
+  it("says what is wrong with /run itself, where the folder of its lock is not there and cannot be made: missing, no folder, read-only, or full", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    const release = [join(box.dir, "manifest.json"), join(box.dir, "manifest.json.sig"), tarball];
+    const files = `/srv/manifest.json /srv/manifest.json.sig /srv/${tarball.split("/").pop()}`;
+    // Each on a computer of its own: /run taken away, a file in its place, mounted read-only, and with room for nothing more.
+    const states: Array<[string, string[], string]> = [
+      ["/run is missing", [], "rm -rf /run"],
+      ["/run is no folder", [], "rm -rf /run && touch /run"],
+      ["/run is read-only", ["--tmpfs", "/run:ro"], "! touch /run/any 2>/dev/null"],
+      ["is /run full?", ["--tmpfs", "/run:nr_inodes=1"], "! touch /run/any 2>/dev/null"],
+    ];
+    for (const [why, run, how] of states) elsewhere(run, release, (root) => {
+      // What an install left there, for a removal to take away.
+      expect(root(`${how} && mkdir -p /opt/surogate/versions/1.0.0 && touch /opt/surogate/versions/1.0.0/release.json`).status, why).toBe(0);
+      const refusal = { status: 1, stdout: "", stderr: `Surogate Desktop: ${LOCKS}, the folder of its lock, could not be made: ${why}\n` };
+      expect(root(`/srv/install.sh --apply ${files}`), why).toMatchObject(refusal);
+      expect(root("/srv/install.sh --uninstall"), why).toMatchObject(refusal);
+      // Nothing was made in the tree, and nothing of it removed.
+      expect(root("find /opt/surogate -mindepth 1 | sort").stdout, why).toBe("/opt/surogate/versions\n/opt/surogate/versions/1.0.0\n/opt/surogate/versions/1.0.0/release.json\n");
+    });
   });
 
   it("makes its folders root's own, whoever's they were, and takes none of them that is a link", () => {

@@ -167,10 +167,18 @@ whole() {
 # folder, root's, with nothing for anyone else, and no link. Any other is refused and never taken
 # over: what someone else could have put in it would still be there. Its kind, its mode and its
 # owner are read as numbers alone (41c0: a folder, at 0700; and 0, root's): a tool's word for a
-# folder is another word in another language. The lock is waited for LOCK_WAIT at most, and held
-# until this script ends or closes it.
+# folder is another word in another language. Where nothing is there and no folder can be made,
+# what is wrong is the folder it would be in, and that is what is said. The lock is waited for
+# LOCK_WAIT at most, and held until this script ends or closes it.
 lock() {
-  mkdir -m 0700 "$LOCKS" 2>/dev/null || true
+  if ! mkdir -m 0700 "$LOCKS" 2>/dev/null && [ ! -e "$LOCKS" ] && [ ! -L "$LOCKS" ]; then
+    local within="${LOCKS%/*}" why
+    why="is $within full?"
+    [ -w "$within" ] || why="$within is read-only"
+    [ -d "$within" ] || why="$within is no folder"
+    [ -e "$within" ] || [ -L "$within" ] || why="$within is missing"
+    fail "$LOCKS, the folder of its lock, could not be made: $why"
+  fi
   [ "$(stat -c '%f %u' -- "$LOCKS" 2>/dev/null)" = "41c0 0" ] \
     || fail "$LOCKS must be a folder of root's own that no one else opens (mode 700), and no link: remove what is there, and run this again"
   exec 9>>"$LOCKS/lock"
