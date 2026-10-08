@@ -217,14 +217,21 @@ apply() {
       || fail "the release's archive could not be unpacked"
     [ "$(ls -A "$work/tree")" = "$name" ] && [ -d "$work/tree/$name" ] && [ ! -L "$work/tree/$name" ] \
       || fail "the release's archive holds more than $name/"
-    top="$work/tree/$name"
-    local link
+    # The tree's checks are made under a name no archive can know. A link that climbs out of the
+    # tree cannot then name its way back in, so one that resolves inside the tree never left it,
+    # and resolves the same wherever the tree is put.
+    top="$(mktemp -u "$work/tree.XXXXXXXXXX")"
+    mv -T "$work/tree/$name" "$top"
+    local link target
     # tar keeps no name with .. and nothing outside the tree, and no set-id bit; one that did
     # reach the tree is refused here too.
     [ -z "$(find "$top" \( -type b -o -type c -o -type p -o -type s -o -perm /6000 -o \( -type f -links +1 \) \) -print -quit)" ] \
       || fail "the release's archive holds a special file, a set-id file or a hard link"
+    # No link names a whole path, climbs out of the tree as it is written, or leaves it as it resolves.
     while IFS= read -r -d '' link; do
-      [[ "$(realpath -m "$link" 2>/dev/null)" == "$top"/* ]] || fail "the release's archive links outside itself: ${link#"$top"/}"
+      target="$(readlink "$link")"
+      [[ "$target" != /* ]] && [[ "$(realpath -ms "${link%/*}/$target")" == "$top"/* ]] && [[ "$(realpath -m "$link" 2>/dev/null)" == "$top"/* ]] \
+        || fail "the release's archive links outside itself: ${link#"$top"/}"
     done < <(find "$top" -type l -print0)
     # The app and its helper are programs, no folders, and bin a folder of the tree's own, where
     # this version's bwrap goes.

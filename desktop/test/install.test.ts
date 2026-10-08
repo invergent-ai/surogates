@@ -402,6 +402,41 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
   });
 
+  it("refuses a link that would leave its version once the tree has its place, whatever it names where the tree is unpacked", () => {
+    const refusals: Array<[(top: string) => void, string]> = [
+      // Out of the tree and back in by the folder's name in the archive, which is not its name in versions.
+      [(top) => symlinkSync("../surogate-desktop-1.0.0-linux-x64/surogate", join(top, "back")), "back"],
+      [(top) => symlinkSync("../../surogate-desktop-1.0.0-linux-x64/surogate", join(top, "resources", "back")), "resources/back"],
+      // The same through a link of the tree's own, where the path as written never leaves the tree.
+      [(top) => {
+        symlinkSync("..", join(top, "resources", "app", "short"));
+        symlinkSync("resources/app/short/../../surogate-desktop-1.0.0-linux-x64/surogate", join(top, "through"));
+      }, "through"],
+      // By the name it will have, and by its whole path.
+      [(top) => symlinkSync("../1.0.0/surogate", join(top, "there")), "there"],
+      [(top) => symlinkSync("/opt/surogate/versions/1.0.0/surogate", join(top, "whole")), "whole"],
+      [(top) => symlinkSync("/opt/surogate/current/surogate", join(top, "whole")), "whole"],
+    ];
+    // The installed version's own files are there to be named.
+    const installed = releaseOf("1.0.0");
+    manifestOf("1.0.0", installed);
+    expect(apply(installed).status).toBe(0);
+    for (const [change, link] of refusals) {
+      const tarball = releaseOf("1.0.0", change);
+      manifestOf("1.0.0", tarball);
+      expect(apply(tarball), link).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: the release's archive links outside itself: ${link}\n` });
+    }
+    // Links that stay in the tree are links like any other: to a folder above them, and to nothing.
+    const tarball = releaseOf("1.0.0", (top) => {
+      symlinkSync("..", join(top, "resources", "app", "short"));
+      symlinkSync("app/short/app/package.json", join(top, "resources", "round"));
+      symlinkSync("nothing/there", join(top, "resources", "dangling"));
+    });
+    manifestOf("1.0.0", tarball);
+    expect(apply(tarball)).toMatchObject({ status: 0, stderr: "" });
+    expect(root("cat /opt/surogate/current/resources/round").stdout).toBe('{"version":"1.0.0"}');
+  });
+
   it("refuses an archive that lists a set-id file or folder, which tar unpacks without the bit", () => {
     for (const [member, mode] of [["surogate", 0o4755], ["bin/surogate-apply-update", 0o2755], ["resources", 0o2755]] as const) {
       const tarball = releaseOf("1.0.0", (top) => {
