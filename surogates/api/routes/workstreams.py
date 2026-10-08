@@ -25,6 +25,7 @@ from surogates.api.routes.workspace import _should_skip_dir
 from surogates.api.session_guards import require_device_access
 from surogates.db.models import Workstream
 from surogates.devices.operations import DeviceOperations
+from surogates.devices.presence import DevicePresence
 from surogates.harness.loop_artifacts import _coerce_modified_to_datetime
 from surogates.harness.turn_summarizer import is_platform_path
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep, rate_limit_dep
@@ -36,7 +37,7 @@ from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.workstreams import master_config
 from surogates.workstreams import stream as project_stream
-from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread, units, utc
+from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread, place_of, units, utc
 from surogates.workstreams.store import WorkstreamStore
 from surogates.workstreams.threads import begin_thread, make_thread, start_thread, stop_thread
 
@@ -261,6 +262,23 @@ async def archive_project(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+async def _say_online(request: Request, places: list[dict[str, Any]]) -> None:
+    """Say of each computer *places* name whether it is connected to the agent now."""
+    devices = {UUID(place["device_id"]) for place in places if place["kind"] == "device"}
+    redis = getattr(request.app.state, "redis", None)
+    if not devices or redis is None:
+        return
+    try:
+        online = await DevicePresence(redis).online(list(devices))
+    except Exception:
+        # A nicety: Redis down leaves every computer offline, and the rows still answer.
+        logger.warning("Could not tell which computers are online", exc_info=True)
+        return
+    for place in places:
+        if place["kind"] == "device":
+            place["online"] = UUID(place["device_id"]) in online
+
+
 @router.get("/{workstream_id}/threads")
 async def list_threads(
     workstream_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant, thread_id: UUID | None = None,
@@ -271,7 +289,9 @@ async def list_threads(
     project = await _project(request, workstream_id, tenant, ctx)
     now = datetime.now(timezone.utc)
     found = await _store(request).thread_facts(project.id, thread_id=thread_id)
-    return [derive_thread(facts, now=now) for facts in found[: SHELL_LIMITS["rows"]]]
+    rows = [derive_thread(facts, now=now) for facts in found[: SHELL_LIMITS["rows"]]]
+    await _say_online(request, [row["place"] for row in rows])
+    return rows
 
 
 @router.get("/{workstream_id}/library")
@@ -279,18 +299,22 @@ async def project_library(
     workstream_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant,
 ) -> list[dict[str, Any]]:
     """The project's files, newest first and as many as the shell takes:
-    the one workspace its master and threads share.  A file a thread's turn
-    summary named is that thread's, the last one to name it; every other
-    file the user added.  The platform's own files are left out, and so is
-    every folder the file panel skips (dependencies, builds, checkouts):
-    an install's thousands of files would push the user's out."""
+    the one workspace its master and threads share.  A file a cloud
+    thread's turn summary named is that thread's, the last one to name it;
+    every other file the user added.  The platform's own files are left
+    out, and so is every folder the file panel skips (dependencies, builds,
+    checkouts): an install's thousands of files would push the user's out.
+    A thread on the user's computer made its files there: they are listed
+    from its summaries, with that computer as their place."""
     project = await _project(request, workstream_id, tenant, ctx)
     master = await request.app.state.session_store.get_session(project.master_session_id)
     prefix = boundary_workspace_prefix(master.config, master, master.id)
-    produced, listed = await asyncio.gather(
+    named, listed = await asyncio.gather(
         _store(request).produced(project.id),
         request.app.state.storage.list_entries(master.config["storage_bucket"], prefix=prefix),
     )
+    produced = {path: thread_id for thread_id, path, execution, _ in named if execution is None}
+    on_computers = {(thread_id, path): (execution, at) for thread_id, path, execution, at in named if execution is not None}
     entries: list[tuple[datetime, dict[str, Any]]] = []
     for found in listed:
         path = found["key"][len(prefix):]
@@ -310,12 +334,20 @@ async def project_library(
             "thread_id": None if thread_id is None else str(thread_id),
             "size": found.get("size"),
             "updated_at": utc(modified),
-            # Every thread works in the cloud until local-folder threads.
             "place": {"kind": "cloud"},
+        }))
+    for (thread_id, path), (execution, at) in on_computers.items():
+        if is_platform_path(path, on_folder=True) or units(path) > SHELL_LIMITS["ref"]:
+            continue
+        entries.append((aware(at), {
+            "path": path, "origin": "produced", "thread_id": str(thread_id),
+            "size": None, "updated_at": utc(at), "place": place_of(execution),
         }))
     # By the moment, not its text: "…:56Z" would sort after "…:56.5Z".
     entries.sort(key=lambda entry: entry[0], reverse=True)
-    return [entry for _, entry in entries[: SHELL_LIMITS["library"]]]
+    shown = [entry for _, entry in entries[: SHELL_LIMITS["library"]]]
+    await _say_online(request, [entry["place"] for entry in shown])
+    return shown
 
 
 @router.get("/{workstream_id}/stream")
@@ -378,7 +410,9 @@ async def _row(request: Request, project: Workstream, thread_id: UUID) -> dict[s
     found = await _store(request).thread_facts(project.id, thread_id=thread_id)
     if not found:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such thread.")
-    return derive_thread(found[0], now=datetime.now(timezone.utc))
+    row = derive_thread(found[0], now=datetime.now(timezone.utc))
+    await _say_online(request, [row["place"]])
+    return row
 
 
 @router.post("/{workstream_id}/threads/{thread_id}/resolve")

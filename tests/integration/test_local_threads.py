@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
 
+import surogates.devices.operations as operations_module
 from surogates.devices.binding import Binding
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.store import DeviceStore
+from surogates.harness.tool_exec import execute_single_tool
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 from surogates.tools.workspace_io import LocalWorkspaceIO
@@ -25,11 +29,14 @@ from .test_devices import (  # noqa: F401  (api and link_url are fixtures)
     add_user,
     api,
     binding,
+    builtin_tools,
     eventually,
     link_url,
     register,
 )
-from .test_workstream_threads import PROPOSED, call_tool, children_of, events_of, queued, start
+from .test_workstream_library import library, upload
+from .test_workstream_overview import rows
+from .test_workstream_threads import PROPOSED, call_tool, children_of, events_of, queued, start, turn_ends
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -291,3 +298,76 @@ async def test_a_thread_proposed_for_the_users_computer_runs_in_the_cloud_when_t
     again = await make_local(api, project, proposal_id, confirmed(laptop.device_id))
     assert (again.status_code, again.json()["detail"]) == (409, "This thread was already started.")
     assert await journal(api).pending(UUID(laptop.device_id), 1) == []
+
+
+PLACE = {"kind": "device", "device_name": "Flavius's ThinkPad"}
+
+
+async def test_a_threads_row_names_its_computer_and_says_when_its_work_waits_for_it(api, laptop, monkeypatch):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    project, _, thread = await begun_local(api, laptop)
+    here = {**PLACE, "device_id": laptop.device_id}
+    [row] = await rows(api, project)
+    assert row["place"] == {**here, "online": True}
+    [one] = await rows(api, project, thread_id=str(thread.id))
+    assert one["place"] == {**here, "online": True}
+
+    # The network goes while the thread works: its step waits for the computer, and its row says so.
+    await laptop.app.disconnect()
+
+    async def offline() -> bool:
+        return (await rows(api, project))[0]["place"] == {**here, "online": False}
+
+    await eventually(offline)
+    store = api.app.state.session_store
+    step = asyncio.create_task(execute_single_tool(
+        {"id": "call_1", "function": {"name": "write_file", "arguments": json.dumps({"path": "Totals.md", "content": "42\n"})}},
+        session=thread, lease=await store.try_acquire_lease(thread.id, "worker-local", ttl_seconds=60), store=store,
+        tools=builtin_tools(), tenant=MagicMock(asset_root="/tmp/test"),
+        redis=api.app.state.redis, session_factory=api.app.state.session_factory,
+    ))
+
+    async def waiting() -> bool:
+        [row] = await rows(api, project)
+        return (row["group"], row["reason"], row["status_line"]) == ("working", "computer", "Waiting for Flavius's ThinkPad")
+
+    await eventually(waiting)
+    await laptop.app.connect()
+    await asyncio.wait_for(step, 10.0)
+    [row] = await rows(api, project)
+    assert (row["reason"], row["place"]["online"]) == (None, True)
+    assert (laptop.folder / "Totals.md").read_text() == "42\n"
+
+
+async def test_the_library_lists_a_local_threads_files_on_its_computer_and_the_clouds_as_they_are(api, laptop):
+    project, master, thread = await begun_local(api, laptop)
+    await upload(api, master, "Budget.xlsx", b"PK the cloud's")
+    # A ref as the model gave it: from the folder's top, or the whole path there. One outside the folder is none of its files.
+    await turn_ends(api, thread, files=[
+        "Budget.xlsx", f"{FOLDER}/Totals.md", "_artifacts/Report.pdf", "../Elsewhere/secret.txt", "/etc/hosts",
+    ])
+    response = await library(api, project)
+    assert response.status_code == 200, response.text
+    here = {**PLACE, "device_id": laptop.device_id, "online": True}
+    listed = [(e["path"], e["origin"], e["thread_id"], e["size"], e["place"]) for e in response.json()]
+    assert sorted(listed, key=repr) == sorted([
+        # The cloud's file of that name is the user's: the thread made its own on the computer.
+        ("Budget.xlsx", "added", None, 14, {"kind": "cloud"}),
+        ("Budget.xlsx", "produced", str(thread.id), None, here),
+        ("Totals.md", "produced", str(thread.id), None, here),
+        # A folder's own _artifacts/ is the user's: the harness keeps its own out of it.
+        ("_artifacts/Report.pdf", "produced", str(thread.id), None, here),
+    ], key=repr)
+    assert all(e["updated_at"].endswith("Z") for e in response.json())
+
+
+async def answered_by_the_journal(api, project: dict, master) -> object:
+    """A thread begun from a new card of *master* on a new computer of the user's, its binding answered as its app answers."""
+    device = await register(api)
+    proposal_id = (await call_tool(api, master, "propose_threads", threads=PROPOSED))["proposal_id"]
+    thread_id = (await make_local(api, project, proposal_id, confirmed(device["id"]))).json()["thread_id"]
+    ops = journal(api)
+    [bind] = await ops.pending(UUID(device["id"]), 1)
+    assert await ops.complete(UUID(device["id"]), 1, bind.id, bind.digest, {"ok": None}) == "completed"
+    assert (await begin(api, project, thread_id)).status_code == 201
+    return await api.app.state.session_store.get_session(UUID(thread_id))
