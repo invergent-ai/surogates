@@ -134,6 +134,14 @@ describe("the desktop's release manifest", () => {
     expect(spawnSync("grep", ["-rlF", body, dir], { encoding: "utf8" }).stdout).toBe("");
   });
 
+  it("unpacks the tarball, which is the build's, without the release key in what unpacks it", () => {
+    // tar as publish.sh calls it, which first writes down how many of its environment's variables are the key.
+    recording(dir, "tar", (real) => [`env | grep -c '^DESKTOP_RELEASE_KEY=' > '${join(dir, "tar-key")}'`, `exec '${real}' "$@"`]);
+    expect(sign().status).toBe(0);
+    expect(readFileSync(join(dir, "tar-argv"), "utf8")).toContain(`${tarball()}\n`);
+    expect(readFileSync(join(dir, "tar-key"), "utf8")).toBe("0\n");
+  });
+
   it("signs with either key a rotating install.sh lists, and refuses a key whose public half it does not list", () => {
     const next = generateKeyPairSync("ed25519");
     writeFileSync(join(dir, "release", "install.sh"), trusting([PUBLIC, pem(next.publicKey)]));
