@@ -312,5 +312,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          # The wheel and the sdist alone: never another file the build left in dist/.
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
           body_path: release-notes.md

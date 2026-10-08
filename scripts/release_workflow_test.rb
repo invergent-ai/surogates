@@ -66,6 +66,13 @@ class ReleaseWorkflowTest < Minitest::Test
     refute release_step.fetch("with").key?("generate_release_notes")
   end
 
+  def test_the_release_uploads_the_wheel_and_the_sdist_alone
+    release_step = @workflow.fetch("jobs").fetch("release").fetch("steps").find { |step| step["uses"] == "softprops/action-gh-release@v2" }
+
+    # Not whatever the build left in dist/: a desktop-vm-<key>.json there would be an anchor.
+    assert_equal %w[dist/*.whl dist/*.tar.gz], release_step.fetch("with").fetch("files").split("\n")
+  end
+
   def test_desktop_vm_image_is_published_once_per_key_after_the_kernel_check
     job = @workflow.fetch("jobs").fetch("desktop-vm-image")
     steps = job.fetch("steps")
