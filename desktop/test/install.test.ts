@@ -641,9 +641,13 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const second = releaseOf("1.1.0", (top) => writeFileSync(join(top, "resources", "app", "large"), randomBytes(48 * 1024 * 1024)));
     manifestOf("1.1.0", second);
     stage(second);
-    // Killed at 20 points along its way; each time current is whole, and the next apply finishes.
+    // Killed at 20 points along its way, spread over the time it takes here and half as much
+    // again; each time current is whole, and the next apply finishes.
+    const took = Number(root(`start=$(date +%s%N); /opt/surogate-test/install.sh --apply ${files()} >/dev/null && echo $(( ($(date +%s%N) - start) / 1000000 ))`).stdout);
+    expect(took).toBeGreaterThan(0);
     const seen = new Set<string>();
-    for (let ms = 50; ms <= 2000; ms += 100) {
+    for (let cut = 1; cut <= 20; cut++) {
+      const ms = Math.round((took * 1.5 * cut) / 20);
       root(`rm -rf /opt/surogate/versions/1.1.0 && ln -sfn /opt/surogate/versions/1.0.0 /opt/surogate/current && timeout -s KILL ${ms / 1000} /opt/surogate-test/install.sh --apply ${files()}`);
       const now = current();
       seen.add(now);
