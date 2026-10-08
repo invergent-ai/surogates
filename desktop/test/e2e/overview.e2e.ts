@@ -482,6 +482,21 @@ describe("a thread read in the Overview pane", () => {
     expect(await inShell()).toBe("reading-back");
   });
 
+  it("leaves Escape in a field of its transcript's own to the field while the field holds anything", async () => {
+    const { shell, reader } = await inTranscript();
+    // A search field of the page's own, as the PDF viewer's Find: its Escape clears it.
+    await reader.evaluate(() => {
+      document.body.insertAdjacentHTML("afterbegin", '<input id="find" type="search" value="revenue">');
+      document.getElementById("find")!.focus();
+    });
+    await pressed(shell, "Escape");
+    await expect.poll(() => reader.evaluate(() => (document.getElementById("find") as HTMLInputElement).value)).toBe("");
+    // Empty, its Escape takes the keyboard to Back, the one way out the app's process heard of.
+    await pressed(shell, "Escape");
+    await expect.poll(() => left(shell)).toEqual(["back"]);
+    expect(await keyboardIn(shell)).toEqual([true, false]);
+  });
+
   it("takes the keyboard out of its transcript for no key its page makes up", async () => {
     const { shell, reader } = await inTranscript();
     // Escape, and Shift+Tab from no control, as the page dispatches them itself: on its window, its document and its body.
