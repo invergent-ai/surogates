@@ -316,6 +316,9 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
   // holds the home folder's credentials is refused at host start, and the system paths on the cloud's list are
   // left to the operating system's own permissions.
   if (protectedInFolder(folder, key)) throw sandboxError(inFolderRefusal(key));
+  // Whether it may only make a file: said as true or false, or not at all. Any other word is refused, not
+  // taken for a write that may replace what is there.
+  if (args.create !== undefined && typeof args.create !== "boolean") throw valueError("'create' must be true or false");
   const encoded = text(args, "data");
   // Up to 50 MiB: a write's data that came in a transfer reaches the helper inline, once whole.
   if (encoded.length > Math.ceil(MAX_WRITE_BYTES / 3) * 4) throw WRITE_EFBIG;

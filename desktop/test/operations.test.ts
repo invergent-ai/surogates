@@ -440,6 +440,17 @@ describe("write", () => {
       .toEqual(["alpha\n", "outside\n", false]);
     // A protected name, as for any write.
     expect(await run("write", { key: `${folder}/.git/config`, data: b64("x"), create: true })).toMatchObject({ error: { type: "sandbox" } });
+    // Told in any word but true or false, it is refused: none is taken for a write that may replace what is there.
+    for (const word of [1, 0, "true", "yes", "", {}, [], null]) {
+      expect(await run("write", { key, data: b64("replaced"), create: word }), JSON.stringify(word)).toEqual({
+        error: { type: "value", message: "'create' must be true or false" },
+      });
+    }
+    expect(readFileSync(key, "utf8")).toBe("first");
+    // Told false, it is the write any tool makes.
+    expect(await run("write", { key: `${folder}/plain.txt`, data: b64("one"), create: false })).toEqual({ ok: null });
+    expect(await run("write", { key: `${folder}/plain.txt`, data: b64("two"), create: false })).toEqual({ ok: null });
+    expect(readFileSync(join(folder, "plain.txt"), "utf8")).toBe("two");
     // Out of room part-way: what it made goes, and the name is free again.
     meanwhile.run = () => {
       throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC", errno: -28, syscall: "write" });
