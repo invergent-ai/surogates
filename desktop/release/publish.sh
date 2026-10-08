@@ -61,14 +61,34 @@ case "$VERB" in
     # none. The helper is read from the tarball unpacked whole, as the helper that installs it
     # unpacks it: a member under the helper's own name may be replaced by a later one, or through
     # a link to its folder. The tarball is the build's, and is unpacked without the key.
+    # What is unpacked is gone however the signing ends, whatever the modes of its folders, which
+    # are the build's too. A signal ends the signing once the command it runs has ended, as the
+    # script would end by itself: removed beside a tar that still writes, the folder would keep
+    # what tar writes after. No signal comes between the folder's making and its name being kept,
+    # nor stops mktemp then; and none stops the removal, where a second one would end its rm.
+    trap '' HUP INT PIPE TERM
     unpacked="$(mktemp -d --tmpdir release-unpacked-XXXXXXXXXX)"
-    trap 'rm -rf "$unpacked"' EXIT
+    cleanup() {
+      trap '' HUP INT PIPE TERM
+      chmod -R u+rwX "$unpacked" 2>/dev/null || :
+      rm -rf "$unpacked"
+    }
+    # A removal that fails as the signing ends leaves its status as it was.
+    trap 'cleanup || :' EXIT
+    trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 141' PIPE; trap 'exit 143' TERM
     env -u DESKTOP_RELEASE_KEY tar -xzf "$OUT/$TARBALL" -C "$unpacked" --no-same-owner --no-same-permissions 2>/dev/null || fail "$OUT/$TARBALL could not be unpacked"
     helper="surogate-desktop-$VERSION-linux-x64/bin/surogate-apply-update"
-    # A file of the tree's own: no link, and under no folder that is one.
-    [ -f "$unpacked/$helper" ] && [ "$(realpath "$unpacked/$helper")" = "$(realpath "$unpacked")/$helper" ] || fail "the tarball has no root helper of its own at $helper"
+    # A file of the tree's own: no link, and under no folder that is one. Asked in two commands: a
+    # signal that comes while the first of two $( ) of one command is answered ends Ubuntu 24.04's
+    # bash with an error of its own, before this script's handler has run.
+    tree="$(realpath "$unpacked")"
+    [ -f "$unpacked/$helper" ] && [ "$(realpath "$unpacked/$helper")" = "$tree/$helper" ] || fail "the tarball has no root helper of its own at $helper"
     cmp -s "$unpacked/$helper" "$HERE/install.sh" \
       || fail "the tarball's root helper, $helper, is not the install.sh beside this script, byte for byte: every later update is checked by the release keys it lists"
+    # All that is read of the unpacked tarball is read by here. It is removed before anything is
+    # signed, and from its removal on no signal ends the signing: one would leave a manifest
+    # without its signature, or end a signing that has just said it signed.
+    cleanup || fail "the unpacked tarball could not be removed from $unpacked: nothing is signed"
     # The tarball by its hash and its size in bytes, a number: the root helper takes no manifest
     # without either, and copies no more of a tarball than the size its manifest names.
     jq -cn --arg version "$VERSION" --arg sha256 "$sha256" --argjson size "$(stat -c %s "$OUT/$TARBALL")" \

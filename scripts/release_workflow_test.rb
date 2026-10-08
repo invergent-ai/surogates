@@ -191,7 +191,11 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal ["rm -rf bin", "npm ci", "node node_modules/electron/install.js", "npm run build"], commands
     vm = steps.index { |step| step["uses"] == "actions/download-artifact@v4" }
     assert_equal "desktop-vm-manifest", steps[vm].fetch("with").fetch("name")
-    package = runs.index { |run| run.include?('desktop/scripts/package.sh "${GITHUB_REF_NAME#v}" out/vm/manifest.json out/desktop') }
+    # The job packages once, and its command is this, whole: a fourth argument would name the
+    # install script packed as the root helper, which only a test names.
+    packagings = runs.each_index.select { |index| runs[index].include?("package.sh") }
+    assert_equal ['desktop/scripts/package.sh "${GITHUB_REF_NAME#v}" out/vm/manifest.json out/desktop'], packagings.map { |index| runs[index].strip }
+    package = packagings.first
     keep = steps.index { |step| step["uses"] == "actions/upload-artifact@v4" }
     refute_nil package
     assert_operator vm, :<, package
