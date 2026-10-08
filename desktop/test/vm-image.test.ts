@@ -178,6 +178,21 @@ describe("the guest image's delivery", () => {
     expect(heard.filter(({ url }) => url.endsWith("rootfs.img.zst")).map(({ range }) => range)).toEqual(["bytes=500-", "bytes=500-"]);
   });
 
+  it("starts a download again from its start when its resume is answered from another offset", async () => {
+    const partial = join(images(), `${KEY}.partial`, "rootfs.img.zst.partial");
+    mkdirSync(join(images(), `${KEY}.partial`), { recursive: true });
+    writeFileSync(partial, served.get(`/desktop/vm/${KEY}/rootfs.img.zst`)!.subarray(0, 500));
+    answer = (request, response, body) => {
+      if (!request.headers.range) return ranged(request, response, body);
+      // A range, but not the one asked for: the file from its start.
+      response.writeHead(206, { "content-range": `bytes 0-${body.length - 1}/${body.length}`, "content-length": body.length }).end(body);
+    };
+    await expect(deliver(options())).rejects.toThrow("the download of rootfs.img.zst did not resume where it stopped");
+    expect(existsSync(partial)).toBe(false);
+    expect(readFileSync(join(await deliver(options()), "rootfs.img")).equals(rootfs)).toBe(true);
+    expect(heard.filter(({ url }) => url.endsWith("rootfs.img.zst")).map(({ range }) => range)).toEqual(["bytes=500-", undefined]);
+  });
+
   it("refuses an unpacked file that is not the one the manifest names, and keeps neither it nor its download", async () => {
     manifest = { ...manifest, files: manifest.files.map((file) => (file.name === "vmlinuz" ? { ...file, sha256: "0".repeat(64) } : file)) };
     await expect(deliver(options())).rejects.toThrow("vmlinuz was not the file the app expects");

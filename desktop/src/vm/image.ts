@@ -226,7 +226,12 @@ async function download(options: DeliverOptions, file: ImageFile, partial: strin
         have = 0;
         hash = createHash("sha256");
         got(have);
-      } else if (response.status === 206 ? !response.headers.get("content-range")?.startsWith(`bytes ${have}-`) : response.status !== 200) {
+      } else if (response.status === 206 && !response.headers.get("content-range")?.startsWith(`bytes ${have}-`)) {
+        // A range, but not from where it stopped: asked again, it would be the same, so the next try starts it afresh.
+        void response.body?.cancel().catch(() => {});
+        rmSync(partial, { force: true });
+        throw new Error(`the download of ${file.download} did not resume where it stopped`);
+      } else if (response.status !== 200 && response.status !== 206) {
         throw new Error(`${new URL(url).host} answered ${response.status} for ${file.download}`);
       }
       const out = await open(partial, have > 0 ? "a" : "w", 0o600);
