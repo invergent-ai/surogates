@@ -160,4 +160,100 @@ class ReleaseWorkflowTest < Minitest::Test
     refute_includes release_needs, "desktop-vm-image"
     refute_includes release_needs, "desktop-vm-manifest"
   end
+
+  def test_every_job_needs_only_jobs_of_the_workflow
+    jobs = @workflow.fetch("jobs")
+
+    jobs.each do |name, job|
+      Array(job.fetch("needs", [])).each { |need| assert jobs.key?(need), "#{name} needs #{need}, which is no job of the release" }
+    end
+  end
+
+  def test_desktop_build_makes_the_tarball_from_the_tag_with_the_vm_image_and_keeps_it
+    job = @workflow.fetch("jobs").fetch("desktop-build")
+    steps = job.fetch("steps")
+    runs = steps.map { |step| step["run"].to_s }
+
+    assert_equal ["desktop-vm-image"], Array(job.fetch("needs"))
+    assert_equal({ "contents" => "read" }, job.fetch("permissions"))
+    build = steps.find { |step| step["name"] == "Build the app" }
+    assert_equal "desktop", build.fetch("working-directory")
+    assert_equal "/dev/null", build.fetch("env").fetch("NPM_CONFIG_USERCONFIG")
+    commands = build.fetch("run").lines.map(&:strip).reject { |line| line.empty? || line.start_with?("#") }
+    assert_equal ["rm -rf bin", "npm ci", "node node_modules/electron/install.js", "npm run build"], commands
+    vm = steps.index { |step| step["uses"] == "actions/download-artifact@v4" }
+    assert_equal "desktop-vm-manifest", steps[vm].fetch("with").fetch("name")
+    package = runs.index { |run| run.include?('desktop/scripts/package.sh "${GITHUB_REF_NAME#v}" out/vm/manifest.json out/desktop') }
+    keep = steps.index { |step| step["uses"] == "actions/upload-artifact@v4" }
+    refute_nil package
+    assert_operator vm, :<, package
+    assert_operator package, :<, keep
+    assert_equal "desktop-tarball", steps[keep].fetch("with").fetch("name")
+    assert_equal "out/desktop/surogate-desktop-*-linux-x64.tar.gz", steps[keep].fetch("with").fetch("path")
+  end
+
+  def test_desktop_publish_signs_and_sends_the_built_tarball_one_release_at_a_time_in_its_environment
+    job = @workflow.fetch("jobs").fetch("desktop-publish")
+    steps = job.fetch("steps")
+    runs = steps.map { |step| step["run"].to_s }
+
+    assert_equal ["desktop-build"], Array(job.fetch("needs"))
+    assert_equal "desktop-release", job.fetch("environment")
+    assert_equal({ "contents" => "read" }, job.fetch("permissions"))
+    assert_equal({ "group" => "desktop-release", "cancel-in-progress" => false }, job.fetch("concurrency"))
+    tarball = steps.index { |step| step["uses"] == "actions/download-artifact@v4" }
+    assert_equal({ "name" => "desktop-tarball", "path" => "out/desktop" }, steps[tarball].fetch("with"))
+    sign = runs.index { |run| run.include?('desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop') }
+    send = runs.index { |run| run.include?('desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop') }
+    refute_nil sign
+    assert_operator tarball, :<, sign
+    assert_operator sign, :<, send
+    %w[desktop/scripts/package.sh desktop/release/publish.sh desktop/release/install.sh].each do |script|
+      assert File.executable?(script), "#{script} is not executable"
+    end
+  end
+
+  def test_only_the_desktop_s_publish_job_holds_its_secrets_and_it_runs_no_npm
+    jobs = @workflow.fetch("jobs")
+    r2 = {
+      "S3_ENDPOINT" => "${{ secrets.R2_ENDPOINT }}",
+      "S3_BUCKET" => "${{ secrets.R2_BUCKET }}",
+      "AWS_ACCESS_KEY_ID" => "${{ secrets.R2_ACCESS_KEY_ID }}",
+      "AWS_SECRET_ACCESS_KEY" => "${{ secrets.R2_SECRET_ACCESS_KEY }}",
+    }
+
+    # npm ci runs the dependency tree's install scripts, and a job's steps share its runner: the
+    # build holds no secret, and the job that holds them installs and runs nothing of npm's.
+    %w[desktop-build desktop-publish].each { |name| refute jobs.fetch(name).key?("env"), "#{name}'s env reaches every step" }
+    jobs.fetch("desktop-build").fetch("steps").each do |step|
+      refute step.to_s.include?("secrets."), "desktop-build's #{step["name"] || step["uses"]} reads a secret"
+    end
+    jobs.fetch("desktop-publish").fetch("steps").each do |step|
+      run = step["run"].to_s
+      refute_match(/\b(npm|npx|node)\b/, run, "#{step["name"] || step["uses"]} runs npm or node")
+      refute_includes step["uses"].to_s, "setup-node"
+      if run.include?("publish.sh sign")
+        assert_equal({ "DESKTOP_RELEASE_KEY" => "${{ secrets.DESKTOP_RELEASE_KEY }}" }, step.fetch("env"))
+      elsif run.include?("publish.sh send")
+        assert_equal r2, step.fetch("env")
+      else
+        refute step.to_s.include?("secrets."), "#{step["name"] || step["uses"]} reads a secret"
+      end
+    end
+    jobs.except("desktop-publish").each { |name, job| refute job.to_s.include?("DESKTOP_RELEASE_KEY"), "#{name} reads the release key" }
+  end
+
+  def test_desktop_jobs_are_bounded
+    jobs = @workflow.fetch("jobs")
+
+    assert jobs.fetch("desktop-build").key?("timeout-minutes")
+    assert jobs.fetch("desktop-publish").key?("timeout-minutes")
+  end
+
+  def test_the_cloud_release_does_not_wait_for_the_desktop
+    release_needs = Array(@workflow.fetch("jobs").fetch("release").fetch("needs", []))
+
+    refute_includes release_needs, "desktop-build"
+    refute_includes release_needs, "desktop-publish"
+  end
 end

@@ -279,6 +279,88 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" "desktop-vm-${key}.json" --repo "$GITHUB_REPOSITORY"
           fi
 
+  # Surogate Desktop's release (desktop/release/), in two jobs, as every step of a job shares its
+  # runner. desktop-build makes the tarball from this tag with the VM image's manifest the
+  # desktop-vm-image job checked R2 against, and holds no secret: its npm ci runs the install
+  # scripts of the whole dependency tree. desktop-publish runs no npm and no script of a
+  # dependency's: in the desktop-release Environment, whose reviewer approves each run, it signs the
+  # tarball's manifest with the release key, then puts the release, the install script and
+  # latest.json on R2 under desktop/. The cloud's release waits for neither.
+  desktop-build:
+    needs: desktop-vm-image
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build the app
+        working-directory: desktop
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: |
+          # The app's node is fetched and checked against its pin, never one a runner kept.
+          rm -rf bin
+          npm ci
+          node node_modules/electron/install.js
+          npm run build
+
+      - name: Take the VM image's manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-vm-manifest
+          path: out/vm
+
+      - name: Package the app
+        run: desktop/scripts/package.sh "${GITHUB_REF_NAME#v}" out/vm/manifest.json out/desktop
+
+      - name: Keep the tarball for the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-tarball
+          path: out/desktop/surogate-desktop-*-linux-x64.tar.gz
+          if-no-files-found: error
+
+  desktop-publish:
+    needs: desktop-build
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    environment: desktop-release
+    permissions:
+      contents: read
+    # One release at a time, so latest.json names the newest of tags pushed close together.
+    concurrency:
+      group: desktop-release
+      cancel-in-progress: false
+    steps:
+      # publish.sh, and the install script it trusts and sends, from the tag; the tarball from the build.
+      - uses: actions/checkout@v4
+
+      - name: Take the tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-tarball
+          path: out/desktop
+
+      - name: Sign its manifest
+        env:
+          DESKTOP_RELEASE_KEY: ${{ secrets.DESKTOP_RELEASE_KEY }}
+        run: desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop
+
+      - name: Publish the release
+        env:
+          S3_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop
+
   release:
     needs:
       - wheel
