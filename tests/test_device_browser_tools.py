@@ -350,6 +350,36 @@ async def test_a_path_the_computer_cannot_resolve_is_said_in_its_own_words_witho
     assert rig.laptop.asked == []
 
 
+@pytest.mark.parametrize(("paths", "wrong"), [
+    ("report.pdf", "'paths' must be a list of 1 to 10 files of the chat's folder"),
+    ([], "An upload names 1 to 10 files of the chat's folder: 'paths' holds 0"),
+    ([f"page-{n}.png" for n in range(11)], "An upload names 1 to 10 files of the chat's folder: 'paths' holds 11"),
+    (["report.pdf", 7], "Each of 'paths' must name a file of the chat's folder: item 2 is not text"),
+    (["report.pdf", ""], "Each of 'paths' must name a file of the chat's folder: item 2 is empty"),
+], ids=["a string", "no file", "eleven files", "a number among them", "an empty name among them"])
+async def test_an_upload_that_does_not_name_one_to_ten_files_is_refused_before_the_computer_is_asked_anything(
+    computer, paths, wrong,
+) -> None:
+    rig = computer()
+
+    body = json.loads(await browser._browser_upload_file_handler({"paths": paths}, **rig.kwargs))
+
+    assert body == {"error": "upload_failed", "detail": wrong}
+    # Not its folder, to resolve a name, nor its browser.
+    assert rig.laptop.files.kinds == []
+    assert rig.laptop.asked == []
+
+
+async def test_ten_files_are_one_upload(computer) -> None:
+    rig = computer({"ok": {"files": 10, "notices": []}})
+    names = [f"page-{n}.png" for n in range(10)]
+
+    body = json.loads(await browser._browser_upload_file_handler({"paths": names}, **rig.kwargs))
+
+    assert body == {"uploaded": 10}
+    assert rig.laptop.asked == [("browser.set_input_files", {"paths": [str(rig.folder / name) for name in names]})]
+
+
 async def test_a_page_that_asked_for_no_file_is_said_so(computer) -> None:
     said = "The page has not asked for a file: click its upload button or its file input first"
     rig = computer({"error": {"type": "browser", "message": said}})

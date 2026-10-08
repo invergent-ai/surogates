@@ -1190,6 +1190,9 @@ async def _browser_screenshot_handler(
     return json.dumps(body)
 
 
+# The most files one upload gives a page.
+_MAX_UPLOAD_FILES = 10
+
 UPLOAD_FILE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1197,7 +1200,7 @@ UPLOAD_FILE_SCHEMA = {
             "type": "array",
             "items": {"type": "string"},
             "minItems": 1,
-            "maxItems": 10,
+            "maxItems": _MAX_UPLOAD_FILES,
             "description": "Files of the chat's folder, as read_file names them.",
         },
     },
@@ -1207,6 +1210,24 @@ UPLOAD_FILE_SCHEMA = {
 
 # What resolving a path of the folder on the user's computer can raise for one it refuses.
 _UNRESOLVED = (WorkspaceSandboxError, DeviceOperationError, OSError, ValueError)
+
+
+def _wrong_upload_paths(paths: Any) -> str | None:
+    """What is wrong with an upload's *paths*, or None for 1 to 10 names of files.
+
+    The schema tells the model the same, but the registry checks no call against a schema: a string
+    would be resolved letter by letter.
+    """
+    if not isinstance(paths, list):
+        return f"'paths' must be a list of 1 to {_MAX_UPLOAD_FILES} files of the chat's folder"
+    if not 1 <= len(paths) <= _MAX_UPLOAD_FILES:
+        return f"An upload names 1 to {_MAX_UPLOAD_FILES} files of the chat's folder: 'paths' holds {len(paths)}"
+    for at, path in enumerate(paths, start=1):
+        if not isinstance(path, str):
+            return f"Each of 'paths' must name a file of the chat's folder: item {at} is not text"
+        if not path:
+            return f"Each of 'paths' must name a file of the chat's folder: item {at} is empty"
+    return None
 
 
 @answering_refusals
@@ -1225,9 +1246,13 @@ async def _browser_upload_file_handler(
             "error": "unsupported",
             "detail": "Files can be given to a page only in a chat on a folder of the user's computer.",
         })
+    paths = arguments.get("paths")
+    wrong = _wrong_upload_paths(paths)
+    if wrong is not None:
+        return json.dumps({"error": "upload_failed", "detail": wrong})
     # Each a file of the chat's folder, as the folder names it: one outside it is refused here, before the browser.
     try:
-        keys = [await workspace_io.resolve(path) for path in arguments["paths"]]
+        keys = [await workspace_io.resolve(path) for path in paths]
     except _UNRESOLVED as exc:
         return json.dumps({"error": "upload_failed", "detail": said(exc)})
     client = DeviceBrowserClient(workspace_io.runner, snapshot_cache=device_snapshot_cache(str(session_id)))
