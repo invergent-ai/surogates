@@ -397,7 +397,8 @@ for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-actio
   row.addEventListener("click", () => {
     menu(false);
     if (action === "settings") void shell.settings();
-    // The user's computers and desktop sign-ins are the agent's: its web client's Settings lists them.
+    // The account, the user's computers and desktop sign-ins are the agent's: its web client's Settings has them.
+    else if (action === "account") void shell.go("/settings");
     else if (action === "devices") void shell.go("/settings?tab=devices");
     else if (action === "logout") void shell.signOut();
     else if (action === "remove") void shell.remove();

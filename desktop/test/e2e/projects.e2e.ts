@@ -227,6 +227,16 @@ describe("the sidebar's pages", () => {
     await expect.poll(() => client.url()).toBe(`${origin}/settings?tab=devices`);
     expect(await page.isVisible("#user-menu")).toBe(false);
   });
+
+  it.each([["with", true], ["without", false]])("open the web client's own Settings from the user menu, for an agent %s local folders, and Devices only with them", async (_, localFolders) => {
+    agent.config = { ...agent.config, desktop_sessions: localFolders };
+    const { page, client } = await signedIn();
+    await page.click("#user");
+    expect(await page.isVisible('#user-menu [data-action="devices"]')).toBe(localFolders);
+    await page.click('#user-menu [data-action="account"]');
+    await expect.poll(() => client.url()).toBe(`${origin}/settings`);
+    expect(await page.isVisible("#user-menu")).toBe(false);
+  });
 });
 
 describe("the Projects page", () => {
