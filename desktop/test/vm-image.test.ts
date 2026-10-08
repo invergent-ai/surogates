@@ -436,6 +436,9 @@ describe("the image's manifest and the install record", () => {
     expect(() => installBase(path, true)).toThrow(`${path} is not the install script's: only root may write it`);
     // Root's own, as /etc/passwd is: taken, and read for its base.
     expect(() => installBase("/etc/passwd", true)).toThrow("/etc/passwd names no web address to download the sandbox from");
+    // Not through a link, though it leads to a file of root's own.
+    symlinkSync("/etc/passwd", join(dir, "linked.json"));
+    expect(() => installBase(join(dir, "linked.json"), true)).toThrow(`${join(dir, "linked.json")} is not the install script's: it is a link`);
     expect(() => installBase(join(dir, "missing.json"), true)).toThrow("Surogate was not installed by its install script");
   });
 });

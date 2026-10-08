@@ -81,11 +81,13 @@ export function newer(a: string, b: string): boolean {
  * The release keys *helper* lists, the ones this computer trusts when it is the helper pkexec
  * runs: each Ed25519 public key in its RELEASE_KEYS list, as release/install.sh writes it, and
  * none from anywhere else in the script. An entry that is no such key is skipped, as the helper
- * skips it. With *rootOwned*, a helper that another than root may write is not read.
+ * skips it. With *rootOwned*, a helper that is a link, wherever it leads, or that another than root
+ * may write, is not read: the install script refuses such a helper too.
  */
 export function releaseKeys(helper: string, rootOwned = false): KeyObject[] {
-  const { uid, mode } = statSync(helper);
-  if (rootOwned && (uid !== 0 || (mode & 0o022) !== 0)) throw new Error(`${helper} is not the install script's: only root may write it`);
+  const found = rootOwned ? lstatSync(helper) : statSync(helper);
+  if (rootOwned && found.isSymbolicLink()) throw new Error(`${helper} is not the install script's: it is a link`);
+  if (rootOwned && (found.uid !== 0 || (found.mode & 0o022) !== 0)) throw new Error(`${helper} is not the install script's: only root may write it`);
   const list = /^[ \t]*RELEASE_KEYS=\(\n([^)]*)\)/m.exec(readFileSync(helper, "utf8"))?.[1] ?? "";
   const keys = (list.match(/-----BEGIN PUBLIC KEY-----\n[A-Za-z0-9+/=\n]+-----END PUBLIC KEY-----/g) ?? []).flatMap((pem) => {
     try {
@@ -108,7 +110,9 @@ export function signedRelease(url: string, manifest: Buffer, signature: Buffer, 
   if (!keys.some((key) => verify(null, manifest, key, signature))) throw new Error(`${url} is not signed by Surogate's release key`);
   let release: Partial<Release> = {};
   try {
-    release = JSON.parse(manifest.toString("utf8")) as Partial<Release>;
+    // JSON that is no object, as null is, names nothing.
+    const named: unknown = JSON.parse(manifest.toString("utf8"));
+    if (named !== null && typeof named === "object") release = named as Partial<Release>;
   } catch {
     // Not JSON: no release.
   }
@@ -195,6 +199,7 @@ export interface UpdatesOptions {
   rootOwned: boolean; // as an installed app's record must be
   helper: string; // the root helper that installs an update: its release keys are trusted, and its channel is the one taken
   installed: string | null; // the installed version's release.json (current/release.json); none in a development build
+  askMs?: number; // how long the base may take to answer for the manifest, and for its signature: ASK_MS
   cache: string; // <cache>/surogate/updates
   fetch: Fetch;
   signal: AbortSignal; // the quit: a check or a download under way stops with the app
@@ -291,7 +296,7 @@ export class Updates {
 
   // A small file of the base's, whole, within *max* bytes: a page in its place is refused unread.
   private async small(url: string, max: number): Promise<Buffer> {
-    const response = await this.options.fetch(url, { headers: {}, signal: AbortSignal.any([this.options.signal, AbortSignal.timeout(ASK_MS)]) });
+    const response = await this.options.fetch(url, { headers: {}, signal: AbortSignal.any([this.options.signal, AbortSignal.timeout(this.options.askMs ?? ASK_MS)]) });
     if (response.status !== 200) {
       void response.body?.cancel().catch(() => {});
       throw new Error(`${new URL(url).host} answered ${response.status} for ${url}`);

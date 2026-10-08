@@ -54,14 +54,16 @@ export function readManifest(path: string): ImageManifest {
 /**
  * The base URL in the install record at *path*, which the install script writes:
  * {"base": "https://surogate.ai"}. Throws when there is none to read. *rootOwned*, as an
- * installed app's /etc/surogate/install.json is: a record that another than root may write is
- * not taken, as it would say where each of this computer's users downloads from.
+ * installed app's /etc/surogate/install.json is: a record that is a link, wherever it leads, or
+ * that another than root may write is not taken, as it would say where each of this computer's
+ * users downloads from.
  */
 export function installBase(path: string, rootOwned = false): string {
   let text: string;
   try {
-    const { uid, mode } = statSync(path);
-    if (rootOwned && (uid !== 0 || (mode & 0o022) !== 0)) throw new Error(`${path} is not the install script's: only root may write it`);
+    const found = rootOwned ? lstatSync(path) : statSync(path);
+    if (rootOwned && found.isSymbolicLink()) throw new Error(`${path} is not the install script's: it is a link`);
+    if (rootOwned && (found.uid !== 0 || (found.mode & 0o022) !== 0)) throw new Error(`${path} is not the install script's: only root may write it`);
     text = readFileSync(path, "utf8");
   } catch (error) {
     const { code } = error as NodeJS.ErrnoException;
