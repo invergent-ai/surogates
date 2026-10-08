@@ -295,8 +295,12 @@ describe("the processes on a profile", () => {
 });
 
 describe("the browser held, as the host keeps it", () => {
-  // No browser is launched for it: a close with no tab closes nothing, and launches none.
-  const closes = () => op("session-of-another", "browser.close", {}, "chat-3");
+  // These run anywhere, apart from the user's session or not: so with a browser that is not there, which
+  // an operation that came to launch one would fail for, launching nothing.
+  const sent = (session: string, kind: string, args: Record<string, unknown>, root: string) =>
+    host.perform({ executable: join(profile, "no-browser-here"), profile }, root, session, kind, args, new AbortController().signal);
+  // A close with no tab closes nothing, and launches none.
+  const closes = () => sent("session-of-another", "browser.close", {}, "chat-3");
 
   it("keeps the browser held when the chat that took it over is deleted, or another is: only a hand back by the chat that holds it ends it", async () => {
     host.pause("chat-1", true);
@@ -310,6 +314,15 @@ describe("the browser held, as the host keeps it", () => {
     expect(await closes()).toEqual(PAUSED);
     host.pause("chat-2", false);
     expect(await closes()).toEqual({ ok: { closed: false } });
+  });
+
+  it("launches no browser for an operation whose turn comes while its user holds the browser", async () => {
+    const state = host as unknown as { running: Promise<BrowserContext> | null };
+    host.pause("chat-1", true);
+    // Sent past whatever refuses it sooner, as one that was on its way when the browser was taken over.
+    expect(await sent("session-of-its-own", "browser.navigate", { url: "http://fixture.test/" }, "chat-1")).toEqual(PAUSED);
+    expect(await sent("session-of-another", "browser.evaluate", { code: "return 1;" }, "chat-2")).toEqual(PAUSED);
+    expect(state.running).toBeNull();
   });
 });
 
@@ -828,6 +841,23 @@ await navigator.serviceWorker.ready;`);
     host.pause("chat-1", false);
     expect((await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1")).ok).toMatchObject({ title: "Fixture", opened: true });
     expect(await pages()).toBe(2);
+  }, 30_000);
+
+  it("opens no tab, not for a moment, for an operation whose turn comes while its user holds the browser, though its session's tab is gone", async () => {
+    const [other, a] = [session(), session()];
+    await op(other, "browser.navigate", { url: "http://fixture.test/second" }, "chat-2");
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const context = await (host as unknown as { running: Promise<BrowserContext> }).running;
+    host.pause("chat-1", true);
+    // Its user, holding the browser, closes the session's tab.
+    await tabs().get(a)![0]!.close();
+    const made: Page[] = [];
+    context.on("page", (page) => made.push(page));
+    expect(await op(a, "browser.evaluate", { code: "return 1;" }, "chat-1")).toEqual(PAUSED);
+    expect(await op(session(), "browser.navigate", { url: "http://fixture.test/" }, "chat-2")).toEqual(PAUSED);
+    expect(made).toEqual([]);
+    expect(await pages()).toBe(1);
+    expect(tabs().get(a) ?? []).toEqual([]);
   }, 30_000);
 
   it("runs nothing in the page for an operation still waiting behind another when its user took the browser over", async () => {
