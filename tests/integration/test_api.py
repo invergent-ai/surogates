@@ -221,6 +221,22 @@ async def test_auth_me(client: AsyncClient, session_factory):
     assert data["id"] == str(user_id)
     assert data["org_id"] == str(org_id)
     assert data["email"] == email
+    # The organisation by its name, as Surogate Desktop's Settings shows it.
+    assert data["org_name"] == f"test-org-{org_id}"
+
+
+async def test_auth_me_update_names_the_organisation(client: AsyncClient, session_factory):
+    """PATCH /v1/auth/me answers as GET does, the organisation's name included."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+
+    resp = await client.patch(
+        "/v1/auth/me",
+        json={"display_name": "Flavius"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["display_name"] == "Flavius"
+    assert resp.json()["org_name"] == f"test-org-{org_id}"
 
 
 # ---------------------------------------------------------------------------

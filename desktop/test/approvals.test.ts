@@ -470,6 +470,23 @@ describe("a command's connection to a destination off the package hosts", () => 
     expect(approvals.granted(OTHER)).toEqual([]);
   });
 
+  it("asks again about a host its user took back, and keeps the chat's other hosts and another chat's", async () => {
+    bind(ROOT, "free");
+    bind(OTHER, "free");
+    journal.bindings.allowDomain(ROOT, "example.com");
+    journal.bindings.allowDomain(ROOT, "[::1]");
+    journal.bindings.allowDomain(OTHER, "example.com");
+    journal.bindings.disallowDomain(ROOT, "example.com");
+    expect([approvals.granted(ROOT), approvals.granted(OTHER)]).toEqual([["[::1]"], ["example.com"]]);
+    user.auto = "deny";
+    expect(await approvals.askNetwork(ROOT, SITE, never())).toBe("deny");
+    expect(user.asked.map(({ kind }) => kind)).toEqual(["network"]);
+    // A host never allowed, or a chat not bound here, changes nothing.
+    journal.bindings.disallowDomain(ROOT, "pypi.example.org");
+    journal.bindings.disallowDomain(CHILD, "example.com");
+    expect(approvals.granted(OTHER)).toEqual(["example.com"]);
+  });
+
   it("lets through unasked another port of a host allowed for the session while it waited its turn", async () => {
     bind(ROOT, "free");
     const first = approvals.askNetwork(ROOT, SITE, never());

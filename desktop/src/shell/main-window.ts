@@ -1,12 +1,12 @@
 // The app's one window, shaped as Claude Desktop shapes its main window (index.js):
 // frameless, with the system's own minimise, maximise and close drawn over its top
 // right corner in the theme's colours (titleBarStyle "hidden" with titleBarOverlay);
-// placed as the user left it; hidden, not closed, when the user closes it. Its own
+// placed as the user left it; hidden when the user closes it, unless Keep running is off. Its own
 // page draws the sidebar, the centre's header and the Overview pane. The agent's web
 // client fills the centre's hole, in a WebContentsView of the agent's own partition
 // that stays on the agent's origin, as claude.ai fills Claude Desktop's window.
 
-import { BrowserWindow, net, screen, shell, type WebContents, WebContentsView, webContents } from "electron";
+import { app, BrowserWindow, net, screen, shell, type WebContents, WebContentsView, webContents } from "electron";
 
 import { reconnectDelayMs } from "../link/backoff.js";
 import { type Agent, partitionFor } from "./agents.js";
@@ -94,6 +94,8 @@ export interface MainWindowOptions {
   preload: string; // the page's
   dark: boolean;
   onChange(): void; // what the centre shows changed
+  quitsOnClose(): boolean; // asked as the window closes: true quits the app, through its quit's questions, where it would hide
+  hidden: boolean; // not shown once its page has loaded
 }
 
 export class MainWindow {
@@ -128,19 +130,29 @@ export class MainWindow {
       backgroundColor: background,
       webPreferences: { preload: options.preload, sandbox: true, contextIsolation: true, nodeIntegration: false },
     });
-    if (maximized) this.window.maximize();
+    // A window started hidden and never shown has no place of its own to keep: the one it was left in stays.
+    let shown = !options.hidden;
+    this.window.once("show", () => {
+      shown = true;
+    });
+    if (maximized) {
+      // Maximising shows a window: one started hidden is maximised once it is first shown.
+      if (options.hidden) this.window.once("show", () => this.window.maximize());
+      else this.window.maximize();
+    }
     lockPage(this.window.webContents);
-    this.window.webContents.once("did-finish-load", () => this.show());
+    if (!options.hidden) this.window.webContents.once("did-finish-load", () => this.show());
     this.window.on("close", (event) => {
-      // A place that cannot be kept, as on a full disk, is said, and the window still only hides.
+      // A place that cannot be kept, as on a full disk, is said, and the window still hides, or quits.
       try {
-        options.states.save("main", this.window.getNormalBounds(), this.window.isMaximized());
+        if (shown) options.states.save("main", this.window.getNormalBounds(), this.window.isMaximized());
       } catch (error) {
         console.error(error);
       }
       if (closing) return;
       event.preventDefault();
-      this.window.hide();
+      if (options.quitsOnClose()) app.quit();
+      else this.window.hide();
     });
     void this.window.loadFile(options.page);
   }

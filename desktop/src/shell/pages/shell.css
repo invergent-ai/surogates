@@ -1097,6 +1097,48 @@ body.settings-page {
   font-weight: 600;
 }
 
+.settings-content .row + h2 {
+  margin-top: 36px;
+}
+
+/* What a chat holds, under its mode, each with the button that ends it. */
+.row .line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+  color: var(--fg-2);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+/* A long command shows its first two lines. */
+.row .line > span {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.row .line button {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: none;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+/* A folder's path, as a heading over its chats: written left to right, whole, and wrapped anywhere. */
+.folder-path {
+  margin: 24px 0 4px;
+  font: 13px/1.5 ui-monospace, "Noto Sans Mono", monospace;
+  direction: ltr;
+  unicode-bidi: isolate;
+  overflow-wrap: anywhere;
+}
+
 .row {
   display: flex;
   align-items: center;
@@ -1161,6 +1203,11 @@ body.settings-page {
 .segmented.icons button {
   min-width: 34px;
   padding: 0;
+}
+
+.segmented button:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .segmented button[aria-pressed="true"] {
@@ -1252,7 +1299,8 @@ body.prompt-page {
   overflow-wrap: anywhere;
 }
 
-.prompt .special {
+.prompt .special,
+.settings-content .special {
   padding: 0 3px;
   border-radius: 4px;
   background: var(--accent);
