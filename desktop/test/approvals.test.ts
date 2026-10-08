@@ -1158,6 +1158,60 @@ describe("the browser on this computer", () => {
     expect(user.asked).toHaveLength(1);
   });
 
+  it("asks nothing about a browser operation that comes already stopped", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    // Whatever it would be asked, it would be let through.
+    user = new User("allow");
+    approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant" });
+    const stopped = new AbortController();
+    stopped.abort();
+    expect(await approvals.admit(navigate(), stopped.signal)).toEqual(ACT_DENIED);
+    expect(user.asked).toEqual([]);
+  });
+
+  it("answers a browser operation waiting behind the chat's open command prompt at the take-over, not once the command is answered", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+    let taken = false;
+    user = new User();
+    approvals = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant",
+      refusal: (operation) => (taken && operation.kind.startsWith("browser.") ? PAUSED : null),
+    });
+    const command = approvals.admit(op("run", RUN), never());
+    const waiting = approvals.admit(navigate(), never());
+    await vi.waitFor(() => expect(user.open.map(({ request }) => request.kind)).toEqual(["command"]));
+    taken = true;
+    approvals.dismissBrowser();
+    // Answered now, the command's prompt still open before it in the chat's line.
+    expect(await Promise.race([waiting, new Promise((done) => setTimeout(() => done("still waiting its turn"), 1_000))])).toEqual(PAUSED);
+    expect(user.open.map(({ request }) => request.kind)).toEqual(["command"]);
+    expect(user.dismissed).toBe(0);
+    user.answer("allow");
+    expect(await command).toBeNull();
+  });
+
+  it("answers a dismissed browser operation though its prompt never settles", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+    let taken = false;
+    const asked: ApprovalRequest[] = [];
+    approvals = new Approvals({
+      bindings: journal.bindings, agent: "Research assistant",
+      // A prompt that takes no notice of its signal, and never answers.
+      prompts: { approve: (request) => (asked.push(request), new Promise<ApprovalAnswer>(() => {})), confirmFreeMode: () => Promise.resolve(false) },
+      refusal: (operation) => (taken && operation.kind.startsWith("browser.") ? PAUSED : null),
+    });
+    const open = approvals.admit(navigate(), never());
+    await vi.waitFor(() => expect(asked).toHaveLength(1));
+    taken = true;
+    approvals.dismissBrowser();
+    expect(await Promise.race([open, new Promise((done) => setTimeout(() => done("held by its prompt"), 1_000))])).toEqual(PAUSED);
+  });
+
   it("tells whoever watches of a chat's first use allowed once, and of nothing for a chat this computer did not bind", () => {
     bind(ROOT, "free");
     const heard: string[] = [];
