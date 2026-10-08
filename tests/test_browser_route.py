@@ -107,7 +107,9 @@ def app_factory():
     resolver = StubResolver()
     control = StubControl()
 
-    def build(*, org_id: UUID = ORG_1, user_id: UUID | None = USER_1) -> FastAPI:
+    def build(
+        *, org_id: UUID = ORG_1, user_id: UUID | None = USER_1, session_scope_id: UUID | None = None,
+    ) -> FastAPI:
         app = FastAPI()
         app.include_router(browser_routes.router, prefix="/v1")
         app.state.browser_resolver = resolver
@@ -121,6 +123,7 @@ def app_factory():
                 user_preferences={},
                 permissions=frozenset(),
                 asset_root="/tmp/surogates-test",
+                session_scope_id=session_scope_id,
             )
 
         app.dependency_overrides[get_current_tenant] = fake_tenant
@@ -233,6 +236,30 @@ class TestStateEndpoint:
         other.state.session_store = store
         async with AsyncClient(transport=ASGITransport(app=other), base_url="http://test") as client:
             assert (await client.get(f"/v1/sessions/{sid}/browser/state")).status_code == 404
+
+    async def test_a_token_for_another_session_does_not_read_a_local_folder_chats_browser(self, app_factory) -> None:
+        build, _resolver, _control = app_factory
+        sid = uuid4()
+        store = StubSessions()
+        store.sessions[sid] = SimpleNamespace(
+            org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
+        )
+        store.events[sid] = ["browser.provisioned"]
+
+        async def statuses(scope: UUID) -> list[int]:
+            # As a worker's token for one session has it: no user, and that session alone.
+            app = build(user_id=None, session_scope_id=scope)
+            app.state.session_store = store
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                return [
+                    (await client.get(f"{prefix}/sessions/{sid}/browser/state")).status_code
+                    for prefix in ("/v1", "/v1/api")
+                ]
+
+        # Of the same organisation, and still not this chat's: as every route of a session answers it.
+        assert await statuses(uuid4()) == [404, 404]
+        # The chat's own token reads it.
+        assert await statuses(sid) == [200, 200]
 
     async def test_a_chat_in_the_cloud_is_answered_from_its_browser_as_before(self, app_factory) -> None:
         build, resolver, _control = app_factory
@@ -453,6 +480,37 @@ class TestControlEndpoint:
             response = await client.post(f"/v1/sessions/{sid}/browser/control", json={"action": "release"})
         assert response.status_code == 404
         assert len(events) == 2
+
+    async def test_a_token_for_another_session_tells_a_local_folder_chat_nothing(self, app_factory) -> None:
+        build, _resolver, _control = app_factory
+        sid = uuid4()
+        store = StubSessions()
+        store.sessions[sid] = SimpleNamespace(
+            org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
+        )
+        events: list[tuple[str, str, dict]] = []
+        wakes: list[str] = []
+        # As a worker's token for another session of the same organisation has it: no user, and that
+        # session alone. On the service path it names the user it speaks for.
+        app = build(user_id=None, session_scope_id=uuid4())
+        app.state.session_store = store
+        app.state.session_event_emitter = _event_recorder(events)
+        app.state.session_wake = _wake_recorder(wakes)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            answered = {
+                (action, prefix): (await client.post(
+                    f"{prefix}/sessions/{sid}/browser/control",
+                    json={"action": action, "owner_user_id": str(USER_1)},
+                )).status_code
+                for action in ("acquire", "release")
+                for prefix in ("/v1/api", "/v1")
+            }
+
+        # As every route of a session answers it.
+        assert set(answered.values()) == {404}, answered
+        assert events == []
+        assert wakes == []
 
 
 class _StubBrowserPool:

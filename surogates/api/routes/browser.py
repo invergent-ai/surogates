@@ -171,9 +171,11 @@ _COMPUTER_BROWSER = [EventType.BROWSER_PROVISIONED, EventType.BROWSER_DESTROYED,
 
 
 async def _on_computer(app_state: Any, session_id: UUID, tenant: TenantContext) -> bool:
-    """Whether the session is a local-folder chat, whose browser is on the user's computer; 404 for another org's.
+    """Whether the session is a local-folder chat, whose browser is on the user's computer.
 
-    The server keeps no browser, no live view and no lease for it: the desktop holds it.
+    404 for another organisation's, and for a token that is another session's own, as every route
+    of a session answers them.  The server keeps no browser, no live view and no lease for it: the
+    desktop holds it.
     """
     store = getattr(app_state, "session_store", None)
     if store is None:
@@ -184,7 +186,7 @@ async def _on_computer(app_state: Any, session_id: UUID, tenant: TenantContext) 
         return False
     if device_of(session.config) is None:
         return False
-    if session.org_id != tenant.org_id:
+    if not tenant.owns_session(session.org_id, session_id):
         raise HTTPException(status_code=404, detail="No browser for session")
     return True
 
