@@ -35,6 +35,29 @@ createServer((request, response) => {
 }).listen(0, "127.0.0.1", function () { console.log(this.address().port); });
 `;
 
+// The helper stopped (SIGKILL) before each command it runs, in turn, each time from the install
+// kept in /opt/pristine. A line for each stop: what current names and whether that folder is
+// whole, then how the same apply, run again to its end, exits and what it leaves.
+const STOPS = String.raw`
+state() {
+  local now
+  now="$(readlink /opt/surogate/current)"
+  if [ ! -e "$now" ]; then echo "$(basename "$now") gone"
+  elif [ -f "$now/release.json" ] && [ -x "$now/surogate" ] && [ -x "$now/bin/bwrap" ] && [ -x "$now/bin/surogate-apply-update" ]; then echo "$(basename "$now") whole"
+  else echo "$(basename "$now") broken"
+  fi
+}
+for stop in $(seq 1000); do
+  find /opt/surogate -mindepth 1 -delete
+  cp -a /opt/pristine/. /opt/surogate/
+  STOP="$stop" bash -T -c 'n=0; trap "(( ++n == STOP )) && kill -KILL \$\$" DEBUG; . /opt/surogate-test/install.sh "$@"' stopped --apply "$@" >/dev/null 2>&1
+  [ "$?" -eq 137 ] || { echo "end $stop"; exit 0; }
+  stopped="$(state)"
+  /opt/surogate-test/install.sh --apply "$@" >/dev/null 2>&1
+  echo "$stop: $stopped; again $?: $(state), versions $(ls /opt/surogate/versions | tr '\n' ' '), staging $(ls -A /opt/surogate/staging | wc -l)"
+done
+`;
+
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 
 // The program that holds Electron's place in a test's release: this computer's sleep, GNU's. Where
@@ -150,6 +173,16 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     "flock -u 8",
     "wait $!",
   ].join("\n"));
+
+  // Every stop of the apply of *these*, from the install as it is now.
+  const stops = (these = files()) => {
+    writeFileSync(join(box.dir, "stops.sh"), STOPS);
+    expect(docker(["cp", join(box.dir, "stops.sh"), `${box.container}:/opt/surogate-test/stops.sh`]).status).toBe(0);
+    expect(root("rm -rf /opt/pristine && cp -a /opt/surogate /opt/pristine").status).toBe(0);
+    const lines = root(`bash /opt/surogate-test/stops.sh ${these}`).stdout.trim().split("\n");
+    expect(lines.pop()).toMatch(/^end \d{2,}$/);
+    return lines;
+  };
 
   beforeEach(() => {
     expect(root("find /opt/surogate -mindepth 1 -delete").status).toBe(0);
@@ -384,6 +417,33 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(current()).toBe("/opt/surogate/versions/1.1.0");
   });
 
+  it("keeps the version before the installed one, when the installed one is applied again", () => {
+    const first = releaseOf("1.0.0");
+    manifestOf("1.0.0", first);
+    expect(apply(first).status).toBe(0);
+    const second = releaseOf("1.1.0");
+    manifestOf("1.1.0", second);
+    expect(apply(second).status).toBe(0);
+    expect(apply(second)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.1.0 is installed\n" });
+    expect(versions()).toEqual(["1.0.0", "1.1.0"]);
+  });
+
+  it("leaves current naming a whole version wherever an update stops, and the same apply, run again, keeps the version before it", () => {
+    const first = releaseOf("1.0.0");
+    manifestOf("1.0.0", first);
+    expect(apply(first).status).toBe(0);
+    const second = releaseOf("1.1.0");
+    manifestOf("1.1.0", second);
+    stage(second);
+    const seen = new Set<string>();
+    for (const stop of stops()) {
+      const [, stopped] = /^\d+: (1\.[01]\.0 whole); again 0: 1\.1\.0 whole, versions 1\.0\.0 1\.1\.0 , staging 0$/.exec(stop) ?? [];
+      expect(stopped, stop).toBeDefined();
+      seen.add(stopped!);
+    }
+    expect(seen).toEqual(new Set(["1.0.0 whole", "1.1.0 whole"]));
+  }, 300_000);
+
   it("leaves current naming a whole version, whenever an update is cut short", () => {
     const first = releaseOf("1.0.0");
     manifestOf("1.0.0", first);
@@ -542,6 +602,17 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     // Its download's folder goes, whether it finished or not.
     expect(root("find /tmp -mindepth 1 -maxdepth 1 -name 'tmp.*'").stdout).toBe("");
     publish("1.1.0");
+  });
+
+  it("installs the same release again, and keeps the version before it", () => {
+    // The server's 1.1.0 is a build of its own since the last install: the installed one is replaced by it.
+    const replaced = install();
+    expect(replaced.status, replaced.stderr).toBe(0);
+    expect(versions()).toEqual(["1.0.0", "1.1.0"]);
+    const repaired = install();
+    expect(repaired.status, repaired.stderr).toBe(0);
+    expect(repaired.stdout).toContain("Surogate Desktop: 1.1.0 is installed\n");
+    expect(versions()).toEqual(["1.0.0", "1.1.0"]);
   });
 
   it("lets an administrator approve through polkit the update a user downloaded, and nothing else of the helper", () => {

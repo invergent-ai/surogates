@@ -138,7 +138,7 @@ taken() {
 # it is not a plain file, folder or link inside it, moved into versions/<version> with its own copy
 # of bwrap, and /opt/surogate/current is switched to it by one rename; its helper is then the one
 # pkexec runs. An older version than the installed one is refused. The previous version is kept,
-# and older ones not running are removed.
+# and older ones not running are removed, by an update; a repair removes none.
 apply() {
   local manifest="$1" signature="$2" tarball="$3" file
   # A folder or a missing file is refused here; a link, as each is copied, below.
@@ -219,11 +219,15 @@ apply() {
   install -m 0755 "$folder/bin/surogate-apply-update" "$work/helper"
   mv -T "$work/helper" "$ROOT/bin/surogate-apply-update"
 
-  # Kept: this version and the one before it. Removed: the rest, once nothing runs from them.
-  local kept
-  for kept in "$ROOT"/versions/*; do
-    [ "$kept" = "$folder" ] || [ "$kept" = "$ROOT/versions/$previous" ] || in_use "$kept" || rm -rf -- "$kept"
-  done
+  # Kept: this version and the one before it. Removed: the rest, once nothing runs from them. An
+  # apply of the installed version removes none: it is a repair, or the run after an update that
+  # stopped late, and the version before this one is no longer known to it.
+  if [ "$previous" != "$version" ]; then
+    local kept
+    for kept in "$ROOT"/versions/*; do
+      [ "$kept" = "$folder" ] || [ "$kept" = "$ROOT/versions/$previous" ] || in_use "$kept" || rm -rf -- "$kept"
+    done
+  fi
   rm -rf -- "$work"
   say "$version is installed"
 }
