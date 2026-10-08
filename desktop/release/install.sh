@@ -197,15 +197,17 @@ as_reader() {
 # Copies file $1, which an apply was handed, to $2 in root's staging: read once, as the user who
 # asked, never through a link and never waiting on a pipe, whatever it has become since it was
 # named. A pipe gives an empty copy at once. No more than $3 bytes and one are copied, whatever the
-# file holds: root's end of the pipe counts them. Whether the file held no more than $3.
+# file holds: root's end of the pipe counts them, and closes it. The reader counts nothing: a
+# count of its own would bound only a reader that kept to it. Whether the file held no more than $3.
 taken() {
   local file="$1" copy="$2" most="$3" ends
-  as_reader dd if="$file" iflag=nofollow,nonblock,count_bytes count="$(( most + 1 ))" bs=64K status=none 2>/dev/null \
+  as_reader dd if="$file" iflag=nofollow,nonblock bs=64K status=none 2>/dev/null \
     | head -c "$(( most + 1 ))" 2>/dev/null >"$copy" && ends=(0 0) || ends=("${PIPESTATUS[@]}")
   # Root's own end of the pipe failed: the disk's fault, and not the file's.
   [ "${ends[1]}" -eq 0 ] || fail "$ROOT/staging could not be written: is its disk full?"
+  # More than its own bytes: the pipe then closed on the reader, and how it ended says nothing.
+  [ "$(stat -c %s "$copy")" -le "$most" ] || return 1
   [ "${ends[0]}" -eq 0 ] || fail "$(named "$file") is not a downloaded release's file"
-  [ "$(stat -c %s "$copy")" -le "$most" ]
 }
 
 # Applies a release as root: its manifest $1, signature $2 and tarball $3, which the user who

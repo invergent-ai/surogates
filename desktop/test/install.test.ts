@@ -523,6 +523,10 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("truncate -s 150M /home/tester/big.sig && truncate -s 1M /home/tester/big.json").status).toBe(0);
     nothing(root(`/opt/surogate-test/install.sh --apply /home/tester/manifest.json /home/tester/big.sig /home/tester/release.tar.gz`), "/home/tester/big.sig");
     nothing(root(`/opt/surogate-test/install.sh --apply ${files("/home/tester/big.json")}`), "/home/tester/big.json");
+    // To the byte: one more than a signature's 64, and than the 4096 of a manifest.
+    expect(root("head -c 65 /dev/zero >/home/tester/big.sig && head -c 4097 /dev/zero >/home/tester/big.json").status).toBe(0);
+    nothing(root(`/opt/surogate-test/install.sh --apply /home/tester/manifest.json /home/tester/big.sig /home/tester/release.tar.gz`), "/home/tester/big.sig");
+    nothing(root(`/opt/surogate-test/install.sh --apply ${files("/home/tester/big.json")}`), "/home/tester/big.json");
     // A file of 2^62 bytes is copied no further than the others, and counted without overflow.
     nothing(root(`truncate -s 4611686018427387904 /dev/shm/huge.tar.gz && /opt/surogate-test/install.sh --apply ${files(undefined, "/dev/shm/huge.tar.gz")}; said=$?; rm -f /dev/shm/huge.tar.gz; exit $said`),
       "/dev/shm/huge.tar.gz", other);
