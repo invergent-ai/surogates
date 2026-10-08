@@ -640,6 +640,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     const cached = Number(spawnSync("du", ["-sb", join(home, "surogate", "electron", "Cache")], { encoding: "utf8" }).stdout.split("\t")[0] || 0);
     expect(cached).toBeLessThan(1024 * 1024);
     await expect.poll(() => page.isHidden("#sandbox")).toBe(true);
+    // The live region tells it is ready, once, as the line goes.
+    expect(await page.textContent("#sandbox-said")).toBe("The sandbox for the agent's commands is ready");
     await page.click("#open-settings");
     expect(await (await thisComputer(app!)).textContent("#sandbox")).toBe("Ready");
   });

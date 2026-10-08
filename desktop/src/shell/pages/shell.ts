@@ -297,9 +297,11 @@ async function render(): Promise<void> {
   // Its words may hold QEMU's, which name the user's paths.
   byId("sandbox").hidden = state.sandbox.ready;
   showText(byId("sandbox-text"), state.sandbox.ready ? "" : state.sandbox.text);
-  // Set only when it changes, so the live region speaks once a state.
-  const said = state.sandbox.ready ? "" : state.sandbox.said;
-  if (byId("sandbox-said").textContent !== said) showText(byId("sandbox-said"), said);
+  // Set only when it changes, so the live region speaks once a state: Ready too, once it follows
+  // another, and nothing for a sandbox ready from the start.
+  const live = byId("sandbox-said");
+  const said = state.sandbox.ready && !live.textContent ? "" : state.sandbox.said;
+  if (live.textContent !== said) showText(live, said);
   byId("sandbox-log").hidden = !state.sandbox.actions.includes("log");
   byId("sandbox-retry").hidden = !state.sandbox.actions.includes("retry");
   byId("sandbox-check").hidden = !state.sandbox.actions.includes("check");

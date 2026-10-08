@@ -47,5 +47,5 @@ export function sandboxLine(lacking: string[] | null, delivery: Delivery | null,
   // A delivered image may be what did not start: its Retry checks it by its hashes before the next boot.
   if (boot && "failed" in boot) return line(`This computer's sandbox did not start: ${boot.failed}`, delivery ? ["log", "retry"] : ["log"]);
   if (boot?.emulated) return line(EMULATED[boot.emulated]);
-  return { text: "Ready", said: "Ready", actions: [], ready: true };
+  return { text: "Ready", said: "The sandbox for the agent's commands is ready", actions: [], ready: true };
 }

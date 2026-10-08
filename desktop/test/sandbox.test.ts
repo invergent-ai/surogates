@@ -43,6 +43,9 @@ it("stays while the guest runs emulated, saying why and what makes the commands 
 
 it("is ready with KVM, before any boot, and in a build that boots the repository's image", () => {
   for (const [lacking, delivery, boot] of [[[], ready, { emulated: null }], [null, ready, null], [[], null, null]] as const) {
-    expect(sandboxLine(lacking as string[] | null, delivery, boot)).toEqual({ text: "Ready", said: "Ready", actions: [], ready: true });
+    // Told once it follows another state, as a screen reader hears it.
+    expect(sandboxLine(lacking as string[] | null, delivery, boot)).toEqual({
+      text: "Ready", said: "The sandbox for the agent's commands is ready", actions: [], ready: true,
+    });
   }
 });
