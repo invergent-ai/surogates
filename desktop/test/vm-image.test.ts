@@ -444,6 +444,20 @@ describe("ImageDelivery", () => {
     expect(readdirSync(images())).toEqual([KEY]);
   });
 
+  it("keeps going past an older image it cannot remove, and throws nothing into the boot that let them go", () => {
+    const stuck = join(images(), "b".repeat(64), "held");
+    mkdirSync(stuck, { recursive: true });
+    writeFileSync(join(stuck, "file"), "");
+    chmodSync(stuck, 0o500);
+    for (const name of [KEY, "c".repeat(64)]) mkdirSync(join(images(), name), { recursive: true });
+    try {
+      expect(() => new ImageDelivery(delivering()).prune()).not.toThrow();
+      expect(readdirSync(images()).sort()).toEqual([KEY, "b".repeat(64)]);
+    } finally {
+      chmodSync(stuck, 0o700);
+    }
+  });
+
   it("fails at once without an install record to download from, and reads it again at the next start", async () => {
     let record = (): string => {
       throw new Error("Surogate was not installed by its install script, so it does not know where to download its sandbox from");

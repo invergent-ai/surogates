@@ -405,7 +405,14 @@ export class ImageDelivery {
     } catch {
       return;
     }
-    for (const name of names) if (name !== this.options.manifest.key) rmSync(join(this.options.images, name), { recursive: true, force: true });
+    for (const name of names) {
+      if (name === this.options.manifest.key) continue;
+      try {
+        rmSync(join(this.options.images, name), { recursive: true, force: true });
+      } catch {
+        // Not this app's to remove now: tried again at the next boot.
+      }
+    }
   }
 
   /** Resolves once the image is here; rejects with why not once the delivery fails, or at *signal*. */
