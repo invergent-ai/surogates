@@ -299,9 +299,14 @@ describe("quick entry", () => {
     await said("The agent's page left the new chat before it heard the message, so nothing was sent.", "Draft the April invoices");
     await listen(client);
     expect(await heard(client)).toEqual([]);
+    // Handed, and another page takes the chat's place before it answers: the desktop answers for the page that went.
+    await send("Draft the April invoices again");
+    await expect.poll(() => handed(app!)).toHaveLength(2);
+    await loadInView(app!, "/inbox");
+    await said("Surogate's window left the new chat before it was made, so nothing was sent.", "Draft the April invoices again");
     // Heard, and refused by the page, in its own words.
     await send("Draft the May invoices");
-    await expect.poll(() => handed(app!)).toHaveLength(2);
+    await expect.poll(() => handed(app!)).toHaveLength(3);
     await client.waitForLoadState();
     await listen(client);
     await expect.poll(() => heard(client)).toHaveLength(1);
@@ -311,7 +316,7 @@ describe("quick entry", () => {
     await client.evaluate(() => window.surogateDesktop!.setAccount(null));
     await send("Draft the June invoices");
     await said("Sign in to your agent in Surogate's window first.", "Draft the June invoices");
-    expect(await handed(app!)).toHaveLength(2);
+    expect(await handed(app!)).toHaveLength(3);
   });
 
   it("hands nothing to a page that says nobody is signed in to it while the new chat loads", async () => {
