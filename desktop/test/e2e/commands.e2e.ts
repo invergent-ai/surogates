@@ -128,6 +128,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     expect(await operation("run", { command: "echo made > made.txt", workdir: null, timeout: 30 })).toMatchObject({ ok: { returncode: 0 } });
     expect(await operation("read", { key: join(folder, "made.txt"), max_bytes: null })).toEqual({ ok: Buffer.from("made\n").toString("base64") });
     expect(statSync(join(folder, "made.txt")).uid).toBe(process.getuid?.());
+    // A sandbox ready from the start: its live region has told a screen reader nothing.
+    expect(await (await shellPage(app!)).textContent("#sandbox-said")).toBe("");
     // The app's quit stops the VM itself, which takes its sockets with it; a VM that only died with the app would leave them.
     expect(existsSync(join(vmRun(), "control.sock"))).toBe(true);
     await quit(app);
