@@ -59,9 +59,10 @@ function originOf(value: unknown): string | null {
 }
 
 // The console an agent at *origin* names in *value*, as the links open it: an origin of its own, and plain
-// http only where the agent is on this computer too, as its development servers are; null for anything else.
+// http only where the agent is on this computer too, as its development servers are; null for anything else,
+// a path or a bare host included: a bare host is the user's to type, not the agent's to serve.
 function consoleOf(value: unknown, origin: string): string | null {
-  const console = originOf(value);
+  const console = typeof value === "string" && value.includes("://") ? originOf(value) : null;
   return console?.startsWith("http:") && !loopback(new URL(origin).hostname) ? null : console;
 }
 

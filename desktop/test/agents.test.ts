@@ -212,6 +212,8 @@ describe("the console an agent's user is sent to", () => {
     ["javascript:alert(1)", null],
     ["file:///etc/passwd", null],
     ["https://user:secret@ops.acme.com", null],
+    ["/console", null],
+    ["ops.acme.com", null],
   ])("is %s's origin, %s", async (named, console) => {
     const { get } = answering({ ...CONFIG, console_url: named });
     expect((await readAgent("https://agent.example.com", get)).consoleUrl).toBe(console);
