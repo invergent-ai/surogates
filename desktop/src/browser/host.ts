@@ -80,8 +80,56 @@ export const said = (error: unknown): string => (error instanceof Error ? error.
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+// The browser's own name for *page*: its target's.
+async function targetOf(page: Page): Promise<string> {
+  const session = await page.context().newCDPSession(page);
+  try {
+    return (await session.send("Target.getTargetInfo")).targetInfo.targetId;
+  } finally {
+    await session.detach().catch(() => {});
+  }
+}
+
+// A new tab of *context*'s, made behind the tab in front: every tab of the agent's is a tab of one
+// window, and one that came to the front would take its user's keys from the page they are in.
+// Playwright's own newPage makes it in front. The page is found by its target among the pages the
+// context reports: a popup, or a tab its user opened, may be reported at the same moment. Once
+// *given* aborts it is looked for no more, and its tab is closed where it was made.
+async function behind(context: BrowserContext, given: AbortSignal): Promise<Page> {
+  const browser = context.browser();
+  if (!browser) throw new Error("The computer's browser has no browser session");
+  const cdp = await browser.newBrowserCDPSession();
+  const reported: Page[] = [];
+  let heard = (): void => {};
+  const report = (page: Page) => {
+    reported.push(page);
+    heard();
+  };
+  context.on("page", report);
+  try {
+    const { targetId } = await cdp.send("Target.createTarget", { url: NEW_TAB, background: true });
+    const dropped = new Promise<void>((resolve) => given.addEventListener("abort", () => resolve(), { once: true }));
+    while (!given.aborted) {
+      for (const page of reported.splice(0)) {
+        if ((await targetOf(page).catch(() => null)) === targetId) return page;
+      }
+      if (reported.length === 0) {
+        await Promise.race([dropped, new Promise<void>((resolve) => {
+          heard = resolve;
+        })]);
+      }
+    }
+    await cdp.send("Target.closeTarget", { targetId }).catch(() => {});
+    throw new Error("The computer's browser did not open a tab");
+  } finally {
+    context.off("page", report);
+    await cdp.detach().catch(() => {});
+  }
+}
+
 // A new tab of *context*'s, or why not: a browser that is closing may never answer for one.
 function opened(context: BrowserContext): Promise<Page> {
+  const given = new AbortController();
   let settle = (): void => {};
   const refused = new Promise<never>((_, reject) => {
     const timer = setTimeout(() => reject(new Error(`The computer's browser did not open a tab within ${TAB_MS / 1_000} s`)), TAB_MS);
@@ -92,9 +140,10 @@ function opened(context: BrowserContext): Promise<Page> {
       context.off("close", closed);
     };
   });
-  const page = context.newPage();
+  const page = behind(context, given.signal);
   return Promise.race([page, refused]).catch((error: unknown) => {
     // One that comes after all is no session's.
+    given.abort();
     void page.then((late) => late.close(), () => {}).catch(() => {});
     throw error;
   }).finally(settle);
@@ -222,8 +271,10 @@ export class BrowserHost {
   private readonly lines = new Map<string, Promise<unknown>>();
   // What each session's pages did that its agent could not see happen, until its next answer.
   private readonly unseen = new Map<string, string[]>();
-  // The chats whose user took the browser over: an operation of theirs that waited its turn is answered paused.
-  private readonly paused = new Set<string>();
+  // The chat whose user holds the browser, until that chat hands it back: every chat's operation here is
+  // answered paused meanwhile. The browser is the agent's one browser on this computer, every tab a tab of
+  // one window, on one profile.
+  private held: string | null = null;
   private closing = false;
 
   constructor(private readonly options: BrowserHostOptions = {}) {}
@@ -234,11 +285,11 @@ export class BrowserHost {
     const forgets = this.forgets.get(root);
     // A close does not wait in the session's line: a page stuck in a script closes with the rest.
     const work = kind === "browser.close"
-      ? (this.paused.has(root) ? Promise.resolve(PAUSED) : this.closeTab(session).then((closed): Outcome => ({ ok: { closed } })))
+      ? (this.held !== null ? Promise.resolve(PAUSED) : this.closeTab(session).then((closed): Outcome => ({ ok: { closed } })))
       : this.inLine(session, () => {
         if (this.forgets.get(root) !== forgets) return Promise.resolve(DELETED);
         // Its user took the browser over while it waited: it does nothing there.
-        return this.paused.has(root) ? Promise.resolve(PAUSED) : this.run(launch, root, session, kind, args, signal);
+        return this.held !== null ? Promise.resolve(PAUSED) : this.run(launch, session, kind, args, signal);
       });
     return Promise.race([work, new Promise<Outcome>((resolve) => {
       if (signal.aborted) resolve(CANCELLED);
@@ -255,10 +306,13 @@ export class BrowserHost {
       .catch(() => NEW_TAB);
   }
 
-  /** A chat its user took the browser over (*paused*), or handed back. */
+  /**
+   * The browser taken over by the user of the chat *root* (*paused*), for every chat, or handed back by
+   * the chat that holds it. Which chat may take it is its client's to say: the last one told holds it.
+   */
   pause(root: string, paused: boolean): void {
-    if (paused) this.paused.add(root);
-    else this.paused.delete(root);
+    if (paused) this.held = root;
+    else if (this.held === root) this.held = null;
   }
 
   /**
@@ -292,10 +346,12 @@ export class BrowserHost {
     }
   }
 
-  /** A deleted chat: every tab of its sessions closes, with the popups they opened. */
+  /**
+   * A deleted chat: every tab of its sessions closes, with the popups they opened. A browser it held
+   * stays held: deleting a chat hands nothing back.
+   */
   async forget(root: string): Promise<void> {
     this.forgets.set(root, (this.forgets.get(root) ?? 0) + 1);
-    this.paused.delete(root);
     const sessions = [...this.roots].filter(([, of]) => of === root).map(([session]) => session);
     // Together, so that closing the browser's last tabs closes it whole.
     await this.closePages(sessions.flatMap((session) => this.untab(session)));
@@ -313,7 +369,7 @@ export class BrowserHost {
     this.proxy = null;
   }
 
-  private async run(launch: Launch, root: string, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
+  private async run(launch: Launch, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
     if (signal.aborted) return CANCELLED;
     const operation = OPERATIONS[kind];
     if (!operation) return { error: { type: "unsupported", message: `This computer's browser does not handle ${kind}` } };
@@ -321,7 +377,7 @@ export class BrowserHost {
     try {
       const found = await this.pageFor(launch, session);
       // Its user took the browser over while it launched, or while its tab opened: it does nothing in the page.
-      if (this.paused.has(root)) return PAUSED;
+      if (this.held !== null) return PAUSED;
       page = found.page;
       const { opened } = found;
       const value = BOUNDED.has(kind) ? await this.bounded(page, operation(page, args)) : await operation(page, args);

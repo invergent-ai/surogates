@@ -30,16 +30,18 @@ export interface BrowsingOptions {
 }
 
 export class Browsing implements ToolLayer {
-  // ponytail: the chats whose user took the browser over, until handed back, in this run of the app only: the browser
-  // ends with the app too, and its next launch is a new one.
-  private readonly paused = new Set<string>();
+  // ponytail: the chat whose user holds the agent's browser, until that chat hands it back, in this run of the
+  // app only: the browser ends with the app too, and its next launch is a new one. The browser is one for
+  // every chat of the agent's here, every tab a tab of one window on one profile: so while it is held,
+  // every chat's browser operations are answered paused, not only that chat's.
+  private held: string | null = null;
 
   constructor(private readonly options: BrowsingOptions) {}
 
-  // A chat its user took the browser over, or no browser here: refused before the chat's user is asked anything.
+  // The browser held by its user, or no browser here: refused before any chat's user is asked anything.
   refusal(operation: Operation): Outcome | null {
     if (!isBrowserKind(operation.kind)) return this.options.tools.refusal?.(operation) ?? null;
-    if (this.paused.has(operation.sessionId)) return PAUSED;
+    if (this.held !== null) return PAUSED;
     return this.options.launch() === null ? NO_BROWSER : null;
   }
 
@@ -47,7 +49,7 @@ export class Browsing implements ToolLayer {
     if (!isBrowserKind(operation.kind)) return this.options.tools.run(operation, signal);
     if (!this.options.bindingOf(operation.sessionId)) return Promise.resolve(FOLDER_UNAVAILABLE);
     // Let through before its user took the browser over, it never reaches the browser after.
-    if (this.paused.has(operation.sessionId)) return Promise.resolve(PAUSED);
+    if (this.held !== null) return Promise.resolve(PAUSED);
     const launch = this.options.launch();
     return launch ? this.options.browser.perform(launch, operation, signal) : Promise.resolve(NO_BROWSER);
   }
@@ -56,20 +58,35 @@ export class Browsing implements ToolLayer {
     return this.options.browser.address(session);
   }
 
-  /** The chat's user takes its browser over: its agent's browser operations are answered paused_by_user until handed back. */
-  takeOver(root: string): void {
-    this.paused.add(root);
-    this.options.browser.pause(root, true);
+  /**
+   * The chat's user takes the agent's browser over: every chat's browser operations are answered
+   * paused_by_user until this chat hands it back. Whether the chat holds it now: another chat's
+   * take-over does not take it from the chat that holds it. A holder that is no longer a chat of this
+   * computer's can hand nothing back, so the next chat to take the browser over holds it.
+   */
+  takeOver(root: string): boolean {
+    if (this.held === null || (this.held !== root && !this.options.bindingOf(this.held))) {
+      this.held = root;
+      this.options.browser.pause(root, true);
+    }
+    return this.held === root;
   }
 
-  /** The chat's user handed its browser back, through the desktop's own confirmation. */
+  /** The chat that holds the browser handed it back, through the desktop's own confirmation. Another chat hands nothing back. */
   handBack(root: string): void {
-    this.paused.delete(root);
+    if (this.held !== root) return;
+    this.held = null;
     this.options.browser.pause(root, false);
   }
 
+  /** Whether the chat's user holds the browser from this chat. */
   takenOver(root: string): boolean {
-    return this.paused.has(root);
+    return this.held === root;
+  }
+
+  /** The chat the browser is held from, or null: the agent drives it. */
+  holder(): string | null {
+    return this.held;
   }
 
   /** The chat's newest page brought to the front: whether there was one. */
@@ -77,9 +94,9 @@ export class Browsing implements ToolLayer {
     return this.options.browser.show(root);
   }
 
-  // A deleted chat: its tabs close, with every popup its sessions opened.
+  // A deleted chat: its tabs close, with every popup its sessions opened. A browser held from it stays
+  // held: a page can have a chat deleted, and only the desktop's own confirmation hands the browser back.
   retired(root: string): void {
-    this.paused.delete(root);
     this.options.browser.forget(root);
     this.options.tools.retired?.(root);
   }

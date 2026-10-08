@@ -1191,6 +1191,8 @@ function bridge(contents: WebContents, agent: Agent): void {
     if (!device) throw new Error("This computer is not registered with the agent");
     return device.stack ?? device.started;
   };
+  // The browser is one for every chat of the agent's here, held from the chat that took it over until that chat hands it back.
+  const HELD_FROM_ANOTHER_CHAT = "The agent's browser on this computer is taken over from another chat, and is handed back there";
   // The device, for a call about a chat's browser: refused for a chat with no folder here.
   const browsing = async (sessionId: string): Promise<DeviceStack> => {
     const stack = await registered();
@@ -1237,17 +1239,21 @@ function bridge(contents: WebContents, agent: Agent): void {
       const stack = await browsing(sessionId);
       if (!(await stack.tools.show?.(sessionId))) throw new Error("The agent's browser has no page open for this chat");
     },
-    // The user drives the chat's browser from now on, and the page hears the change.
+    // The user drives the agent's browser from now on, held from this chat, and the page hears the change.
+    // Another chat's take-over stands: this one does not end it.
     takeOver: async (sessionId) => {
       const stack = await browsing(sessionId);
-      stack.takeOver(sessionId);
+      if (!stack.takeOver(sessionId)) throw new Error(HELD_FROM_ANOTHER_CHAT);
       contents.send("desktop:binding-changed", sessionId);
     },
     // Only at the desktop's own confirmation: the user answers in a native box. The page's preload asks for
     // it only at its user's click, before they kept the browser and after: a page cannot wear its user down.
     handBack: async (sessionId) => {
       const stack = await browsing(sessionId);
-      if (!stack.tools.takenOver?.(sessionId)) return true;
+      // Nobody holds it: the agent drives it already. Held from another chat: handed back there, never from this one.
+      const holder = stack.tools.holder?.() ?? null;
+      if (holder === null) return true;
+      if (holder !== sessionId) throw new Error(HELD_FROM_ANOTHER_CHAT);
       // The chat by its title, as text: the page names only an id, and its user may hold more than one chat's browser.
       const title = await titleSoon(sessionId);
       // The window first, where it was hidden since the click: the box opens over it.

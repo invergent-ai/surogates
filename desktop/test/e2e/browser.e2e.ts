@@ -18,6 +18,8 @@ import { isolated } from "../isolated.js";
 import { dataHome, launch, MAIN, press, prompt, promptsShown, quit, shellEnv, shellPage, stubNative } from "./launch.js";
 
 const CHAT = "4e5f6a7b-8c9d-4e0f-a1b2-c3d4e5f6a7b8";
+// Another chat of the agent's, where a test binds one.
+const OTHER = "6f7a8b9c-0d1e-4f2a-b3c4-d5e6f7a8b9c0";
 // The browser Settings would choose, or the one SUROGATE_TEST_BROWSER names, chosen in Settings before each launch.
 const NAMED = process.env.SUROGATE_TEST_BROWSER;
 const BROWSER = NAMED ? findBrowsers().find((browser) => browser.executable === NAMED) ?? null : chosenBrowser({ choice: "auto" }, findBrowsers());
@@ -54,11 +56,11 @@ afterEach(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-// The chat's operation, as the server sends it, and the app's result for it.
-async function operation(kind: string, args: Record<string, unknown>, invocation = `call-${next + 1}`, ordinal = 1): Promise<any> {
+// A chat's operation, as the server sends it, and the app's result for it.
+async function operation(kind: string, args: Record<string, unknown>, invocation = `call-${next + 1}`, ordinal = 1, chat = CHAT): Promise<any> {
   const id = `op-${(next += 1)}`;
   agent.link.send({
-    type: "op", id, session_id: CHAT, calling_session_id: CHAT, invocation_id: invocation, ordinal, kind, args, digest: `d-${id}`,
+    type: "op", id, session_id: chat, calling_session_id: chat, invocation_id: invocation, ordinal, kind, args, digest: `d-${id}`,
   });
   let result: Record<string, unknown> | undefined;
   await expect.poll(() => {
@@ -349,6 +351,48 @@ describe("a chat's browser taken over, and handed back", () => {
     expect(await boxes()).toHaveLength(before + 3);
     expect(await atClick(client, "handBack")).toBe(true);
     expect(await boxes()).toHaveLength(before + 4);
+  });
+
+  it("holds the agent's browser for every chat from the chat that took it over: another chat's browser calls wait, and it can neither take the browser nor hand it back", async () => {
+    const HELD_FROM_ANOTHER_CHAT = "The agent's browser on this computer is taken over from another chat, and is handed back there";
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    // Another chat of the agent's, bound on this computer too.
+    const second = join(home, "second");
+    mkdirSync(second);
+    await app!.evaluate((_electron, picked) => Object.assign(globalThis, { folder: picked }), second);
+    const preparing = client.evaluate(() => window.surogateDesktop!.prepareFolder("pick")) as Promise<{ folder: string; nonce: string }>;
+    await press(await prompt(app!), "accept");
+    expect(await operation("bind", { folder: second, nonce: (await preparing).nonce }, "bind", 0, OTHER)).toEqual({ ok: null });
+    const binding = (chat: string) => client.evaluate((id) => window.surogateDesktop!.getBinding!(id), chat);
+    await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
+    expect(await binding(CHAT)).toMatchObject({ takenOver: true });
+    // The other chat does not hold the browser, and its agent's browser calls wait all the same: answered at
+    // once, its user asked nothing.
+    expect(await binding(OTHER)).toMatchObject({ folder: second, takenOver: false });
+    expect(await operation("browser.navigate", { url: "https://example.com/", wait_until: "load" }, undefined, 1, OTHER)).toEqual(PAUSED);
+    expect(await promptsShown(app!)).toBe(0);
+    // Its take-over does not steal the browser, and it hands nothing back: each says where it is held, at its
+    // user's click too, and no box opens. One that opened would be answered Hand back.
+    await app!.evaluate(() => Object.assign(globalThis, { answer: 0 }));
+    const before = (await boxes()).length;
+    expect(await atClick(client, "takeOver", OTHER)).toContain(HELD_FROM_ANOTHER_CHAT);
+    expect(await atClick(client, "handBack", OTHER)).toContain(HELD_FROM_ANOTHER_CHAT);
+    expect(await boxes()).toHaveLength(before);
+    expect(await binding(OTHER)).toMatchObject({ takenOver: false });
+    expect(await binding(CHAT)).toMatchObject({ takenOver: true });
+    expect(await operation("browser.close", {}, undefined, 1, OTHER)).toEqual(PAUSED);
+    // Handed back from the chat that holds it: the other chat's browser asks its first use, as any chat's.
+    expect(await atClick(client, "handBack")).toBe(true);
+    expect(await boxes()).toHaveLength(before + 1);
+    const navigating = operation("browser.navigate", { url: "https://example.com/", wait_until: "load" }, undefined, 1, OTHER);
+    await press(await prompt(app!), "deny");
+    expect((await navigating).error.type).toBe("denied");
+    // Nothing is held now: a hand back has nothing to ask.
+    expect(await atClick(client, "handBack", OTHER)).toBe(true);
+    expect(await boxes()).toHaveLength(before + 1);
   });
 
   it("opens no box for a page that loads itself again and asks to hand the browser back, before its user kept it or after", async () => {

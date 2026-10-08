@@ -222,8 +222,8 @@ export class Approvals {
   // ponytail: the pages whose user kept a chat asking, by page and chat, for the app's life, one per
   // refusal: a page is asked no more for that chat, and a page once replaced never asks again.
   private readonly kept = new Set<string>();
-  // Each chat's browser operations waiting their turn or asking, by a controller each: dismissed together when its
-  // user takes the browser over, each gone once it settles.
+  // Each chat's browser operations waiting their turn or asking, by a controller each: every chat's dismissed
+  // together when the browser is taken over, each gone once it settles.
   private readonly browsing = new Map<string, Set<AbortController>>();
 
   constructor(private readonly options: ApprovalsOptions) {}
@@ -288,7 +288,7 @@ export class Approvals {
     };
     const first = needed();
     if ("answer" in first) return first.answer;
-    // Its prompt goes at a cancel, a suspend, or once its user takes the browser over: by a controller of its own,
+    // Its prompt goes at a cancel, a suspend, or once the browser is taken over: by a controller of its own,
     // never a signal combined with one that lives on, which AbortSignal.any keeps each it made for.
     const own = new AbortController();
     const asking = own.signal;
@@ -350,15 +350,20 @@ export class Approvals {
       open.delete(own);
       if (open.size === 0 && this.browsing.get(root) === open) this.browsing.delete(root);
     }
-    // Dismissed when its user took the browser over: what its prompt settled with is not the user's answer.
+    // Dismissed when the browser was taken over: what its prompt settled with is not the user's answer.
     if (asking.aborted && !signal.aborted) return this.options.refusal?.(operation) ?? browserDenied(BROWSER_DENIED.act);
     return answer;
   }
 
-  /** The chat's user takes its browser over: its browser prompts, open or waiting their turn, go. */
-  dismissBrowser(root: string): void {
-    for (const own of this.browsing.get(root) ?? []) own.abort();
-    this.browsing.delete(root);
+  /**
+   * The agent's browser is taken over: every chat's browser prompts, open or waiting their turn, go.
+   * The browser is one for every chat of the agent's, so none of them is asked about it while it is held.
+   */
+  dismissBrowser(): void {
+    for (const open of this.browsing.values()) {
+      for (const own of open) own.abort();
+    }
+    this.browsing.clear();
   }
 
   // The address of the page *session*'s act would act in, as the browser says it; null when it does not in time.

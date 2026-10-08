@@ -38,10 +38,13 @@ export interface ToolLayer extends Executor {
   retired?(root: string): void;
   // The address of the page a calling session's next browser operation acts in, for its prompt.
   address?(session: string): Promise<string>;
-  // A chat's user takes its browser over, or hands it back; whether they hold it; its newest page shown.
-  takeOver?(root: string): void;
+  // A chat's user takes the agent's browser over, for every chat, until that chat hands it back: whether the
+  // chat holds it now, which it does not while another chat's take-over stands. The chat it is held from, or
+  // null. A chat's newest page shown.
+  takeOver?(root: string): boolean;
   handBack?(root: string): void;
   takenOver?(root: string): boolean;
+  holder?(): string | null;
   show?(root: string): Promise<boolean>;
 }
 
@@ -72,9 +75,13 @@ export interface DeviceStack {
   readonly binder: Binder;
   readonly bindings: Bindings; // the journal's: each chat's folder, mode and grants
   readonly tools: ToolLayer;
-  /** Its user takes the chat's browser over: its tools refuse the chat's browser operations, and its browser prompts go. */
-  takeOver(root: string): void;
-  /** Its user hands the chat's browser back: its agent's browser operations run again. */
+  /**
+   * Its user takes the agent's browser over, from the chat: its tools refuse every chat's browser operations,
+   * and every chat's browser prompts go. Whether the chat holds the browser now: false while another chat's
+   * take-over stands, which this one does not end.
+   */
+  takeOver(root: string): boolean;
+  /** Its user hands the browser back, from the chat that holds it: the agent's browser operations run again. */
   handBack(root: string): void;
   working(): number;
   stop(): Promise<void>;
@@ -218,9 +225,10 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     bindings: journal.bindings,
     tools,
     takeOver: (root) => {
-      // Refused first, so that each prompt dismissed is answered as the tools answer the chat now.
-      tools.takeOver?.(root);
-      binder.approvals.dismissBrowser(root);
+      const held = tools.takeOver?.(root) === true;
+      // Each prompt dismissed is answered as the tools answer by then: paused.
+      if (held) binder.approvals.dismissBrowser();
+      return held;
     },
     handBack: (root) => tools.handBack?.(root),
     working,

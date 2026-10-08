@@ -6,12 +6,13 @@
 // With the flag set anywhere else, they fail before any browser is launched.
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { connect as connectTcp } from "node:net";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { BrowserContext, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -84,6 +85,8 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<scrip
     if (req.url === "/inner") return void res.writeHead(200, { "content-type": "text/html" }).end(`<a href="/x">Inner link</a>`);
     if (req.url === "/report.txt") return void res.writeHead(200, { "content-type": "text/plain", "content-disposition": "attachment" }).end("report");
     if (req.url === "/second") return void res.writeHead(200, { "content-type": "text/html" }).end("<title>Second</title>");
+    // The fixture's page under a title of the test's own: the browser's window is named after the tab in front.
+    if (req.url?.startsWith("/t/")) return void res.writeHead(200, { "content-type": "text/html" }).end(PAGE.replace("<title>Fixture</title>", `<title>${req.url.slice(3)}</title>`));
     // A page whose outline is larger than the link carries: ten thousand buttons with long names.
     if (req.url === "/huge") {
       const button = `<button>${"a long name ".repeat(20)}</button>`;
@@ -163,6 +166,31 @@ const within = <T>(ms: number, work: Promise<T>) => Promise.race([work, new Prom
 
 // How many pages the running browser has.
 const pages = async () => (await (host as unknown as { running: Promise<BrowserContext> }).running).pages().length;
+// Each session's pages, as the host keeps them.
+const tabs = () => (host as unknown as { tabs: Map<string, Page[]> }).tabs;
+
+// The browser's window on this run's own Xvfb, as xwininfo lists it: its id, and the title of the tab in
+// front, which its name begins with. Every tab of the agent's is a tab of that one window, and under
+// Playwright each page says it is visible and has the focus, in front or not: so which tab is in front
+// is read here, never at a page.
+function xwindow(): { id: string; front: string } | undefined {
+  return execFileSync("xwininfo", ["-root", "-tree"], { encoding: "utf8" }).split("\n").flatMap((line) => {
+    const found = /^\s+(0x[0-9a-f]+) "(.*?) - [^"]*": \(/.exec(line);
+    return found ? [{ id: found[1]!, front: found[2]! }] : [];
+  })[0];
+}
+const front = () => xwindow()?.front;
+// The user's own hand on that display, as X events (x-user.py): the window given the keyboard, a click, keys typed.
+const X_USER = fileURLToPath(new URL("./x-user.py", import.meta.url));
+const asUser = (...args: string[]) => void execFileSync("python3", [X_USER, ...args]);
+// Where the middle of *page*'s element is on the screen, for a click of its user's.
+const onScreen = (page: Page, id: string) => page.evaluate((of) => {
+  const box = document.getElementById(of)!.getBoundingClientRect();
+  return [
+    window.screenX + Math.round((window.outerWidth - window.innerWidth) / 2 + box.x + box.width / 2),
+    window.screenY + (window.outerHeight - window.innerHeight) + Math.round(box.y + box.height / 2),
+  ] as const;
+}, id);
 
 // The browser's processes for this profile, each as its command line: Chrome rewrites its title, so split on spaces too.
 function processes(): Array<{ pid: string; args: string[] }> {
@@ -263,13 +291,22 @@ describe("the processes on a profile", () => {
   });
 });
 
-describe("the chats taken over, as the host keeps them", () => {
-  // No browser is launched for it: the host is told of each before any operation comes.
-  it("keeps nothing of a deleted chat's take-over, and keeps another chat's", async () => {
+describe("the browser held, as the host keeps it", () => {
+  // No browser is launched for it: a close with no tab closes nothing, and launches none.
+  const closes = () => op("session-of-another", "browser.close", {}, "chat-3");
+
+  it("keeps the browser held when the chat that took it over is deleted, or another is: only a hand back by the chat that holds it ends it", async () => {
     host.pause("chat-1", true);
-    host.pause("chat-2", true);
+    expect(await closes()).toEqual(PAUSED);
+    await host.forget("chat-2");
     await host.forget("chat-1");
-    expect([...(host as unknown as { paused: Set<string> }).paused]).toEqual(["chat-2"]);
+    expect(await closes()).toEqual(PAUSED);
+    // The next chat to take it over, the first one deleted, holds it: the first's hand back ends nothing.
+    host.pause("chat-2", true);
+    host.pause("chat-1", false);
+    expect(await closes()).toEqual(PAUSED);
+    host.pause("chat-2", false);
+    expect(await closes()).toEqual({ ok: { closed: false } });
   });
 });
 
@@ -685,7 +722,7 @@ await navigator.serviceWorker.ready;`);
     }
   }, 30_000);
 
-  it("answers a chat its user took the browser over paused, one waiting in its line too, and another chat's as before; handed back, it runs", async () => {
+  it("answers every chat's operations paused while a chat's user holds the browser, one waiting in its line too; handed back by that chat, they run", async () => {
     const [a, b] = [session(), session()];
     await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
     await op(b, "browser.navigate", { url: "http://fixture.test/second" }, "chat-2");
@@ -698,9 +735,57 @@ await navigator.serviceWorker.ready;`);
     expect((await holding).ok?.value).toBe(1);
     expect(await waiting).toEqual(PAUSED);
     expect(await op(a, "browser.close", {}, "chat-1")).toEqual(PAUSED);
-    expect((await op(b, "browser.evaluate", { code: "return document.title;" }, "chat-2")).ok?.value).toBe("Second");
+    // Another chat's, which never asked for the take-over: the browser its user holds is the agent's one browser.
+    expect(await op(b, "browser.evaluate", { code: "return document.title;" }, "chat-2")).toEqual(PAUSED);
+    expect(await op(b, "browser.close", {}, "chat-2")).toEqual(PAUSED);
+    expect(await pages()).toBe(2);
+    // Only the chat that took it over hands it back.
+    host.pause("chat-2", false);
+    expect(await op(b, "browser.evaluate", { code: "return document.title;" }, "chat-2")).toEqual(PAUSED);
     host.pause("chat-1", false);
     expect((await op(a, "browser.evaluate", { code: "return document.title;" }, "chat-1")).ok?.value).toBe("Fixture");
+    expect((await op(b, "browser.evaluate", { code: "return document.title;" }, "chat-2")).ok?.value).toBe("Second");
+  }, 30_000);
+
+  it("opens nothing and brings nothing to the front for another chat while its user holds the browser, and their keys go on landing in the page they hold", async () => {
+    const [a, b, c] = [session(), session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/t/HELD" }, "chat-1");
+    await op(b, "browser.navigate", { url: "http://fixture.test/t/OTHER" }, "chat-2");
+    const held = tabs().get(a)![0]!;
+    host.pause("chat-1", true);
+    expect(await host.show("chat-1")).toBe(true);
+    await expect.poll(front, { timeout: 5_000 }).toBe("HELD");
+    // Another chat's navigation, a script of its that would open a window, and the first operation of a
+    // session of its that has no tab yet.
+    expect(await op(b, "browser.navigate", { url: "http://fixture.test/t/MOVED" }, "chat-2")).toEqual(PAUSED);
+    expect(await op(b, "browser.evaluate", { code: "window.open('http://fixture.test/t/POPUP'); return 1;" }, "chat-2")).toEqual(PAUSED);
+    expect(await op(c, "browser.navigate", { url: "http://fixture.test/t/THIRD" }, "chat-2")).toEqual(PAUSED);
+    expect(await pages()).toBe(2);
+    expect(tabs().get(b)![0]!.url()).toBe("http://fixture.test/t/OTHER");
+    expect(tabs().has(c)).toBe(false);
+    // The user, at the page they hold: a click into its field, then keys.
+    const at = await onScreen(held, "name");
+    asUser("focus", xwindow()!.id);
+    asUser("click", String(at[0]), String(at[1]));
+    asUser("type", "abc");
+    await expect.poll(() => held.evaluate(() => (document.getElementById("name") as HTMLInputElement).value), { timeout: 5_000 }).toBe("abc");
+    await expect.poll(front, { timeout: 5_000 }).toBe("HELD");
+  }, 30_000);
+
+  it("opens a session's tab behind the page in front", async () => {
+    const [a, b] = [session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/t/FIRST" }, "chat-1");
+    await expect.poll(front, { timeout: 5_000 }).toBe("FIRST");
+    // Another session's first operation opens its tab and loads its page: neither takes the front.
+    expect((await op(b, "browser.navigate", { url: "http://fixture.test/t/SECOND" }, "chat-2")).ok).toMatchObject({ title: "SECOND", opened: true });
+    expect(await pages()).toBe(2);
+    // A tab that took the front has renamed the window by now.
+    await new Promise((done) => setTimeout(done, 500));
+    await expect.poll(front, { timeout: 5_000 }).toBe("FIRST");
+    // It is the agent's all the same: its own keys reach it.
+    await op(b, "browser.keyboard", { action: "type", text: "typed behind", at: { x: 60, y: 110 }, delay: 0 }, "chat-2");
+    expect(await script(b, "return document.getElementById('name').value;")).toBe("typed behind");
+    expect(await script(a, "return document.getElementById('name').value;")).toBe("");
   }, 30_000);
 
   it("runs nothing in the page for an operation whose browser was still launching when its user took the browser over", async () => {

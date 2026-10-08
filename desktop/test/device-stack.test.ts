@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApprovalRequest } from "../src/binding/approvals.js";
-import type { FolderGuards } from "../src/binding/folder.js";
+import { BOOT_ID, type FolderGuards } from "../src/binding/folder.js";
 import { Browsing } from "../src/browser/executor.js";
 import type { NetworkApprovals } from "../src/hosts/tool-hosts.js";
 import type { Bindings } from "../src/journal/bindings.js";
@@ -19,6 +19,8 @@ import { FakeLinkServer } from "./fake-server.js";
 const ROOT = "66666666-6666-4666-8666-666666666666";
 // A sub-agent of the chat: its operations run in the chat's folder, as sessions of their own.
 const CHILD = "77777777-7777-4777-8777-777777777777";
+// Another chat of the agent's on this computer.
+const OTHER = "88888888-8888-4888-8888-888888888888";
 const IDENTITY = { deviceId: "d", orgId: "o", agentId: "a", userId: "u" };
 const TAKEN: Outcome = { error: { type: "paused_by_user", message: "taken over" } };
 
@@ -33,8 +35,8 @@ class Tools implements ToolLayer {
   changed: () => void = () => {};
   // The page each session's next browser operation acts in, as a browser here would say it.
   address?: (session: string) => Promise<string>;
-  // The chats whose user took the browser over: their browser operations are refused.
-  readonly taken = new Set<string>();
+  // The chat whose user holds the agent's browser: every chat's browser operations are refused meanwhile.
+  taken: string | null = null;
 
   constructor(private readonly base: string, private readonly order: string[]) {}
 
@@ -47,15 +49,16 @@ class Tools implements ToolLayer {
   }
 
   refusal(operation: Operation): Outcome | null {
-    return operation.kind.startsWith("browser.") && this.taken.has(operation.sessionId) ? TAKEN : null;
+    return operation.kind.startsWith("browser.") && this.taken !== null ? TAKEN : null;
   }
 
-  takeOver(root: string): void {
-    this.taken.add(root);
+  takeOver(root: string): boolean {
+    this.taken ??= root;
+    return this.taken === root;
   }
 
   handBack(root: string): void {
-    this.taken.delete(root);
+    if (this.taken === root) this.taken = null;
   }
 
   run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
@@ -132,9 +135,9 @@ async function start(overrides: Partial<DeviceStackOptions> = {}) {
   return device;
 }
 
-function op(id: string, kind: string, args: Record<string, unknown>, own = false, calling = ROOT): Record<string, unknown> {
+function op(id: string, kind: string, args: Record<string, unknown>, own = false, calling = ROOT, root = ROOT): Record<string, unknown> {
   return {
-    type: "op", id, session_id: ROOT, calling_session_id: calling, invocation_id: own ? "bind" : "1:c",
+    type: "op", id, session_id: root, calling_session_id: calling, invocation_id: own ? "bind" : "1:c",
     ordinal: own ? 0 : 1, kind, args, digest: `digest-${id}`,
   };
 }
@@ -177,7 +180,7 @@ describe("one agent's device", () => {
     expect(asked).toMatchObject([{ kind: "browser", action: "script", page: `https://bank.example/${CHILD}` }]);
   });
 
-  it("takes a chat's browser over through its tools, its open browser prompt dismissed and answered as its tools answer now", async () => {
+  it("takes the agent's browser over through its tools, from the chat that asks first: every chat's open browser prompt dismissed and answered as its tools answer now", async () => {
     const asked: ApprovalRequest[] = [];
     const device = await start({
       approvalPrompts: {
@@ -190,15 +193,21 @@ describe("one agent's device", () => {
     const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
     server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce }, true));
     await server.until(() => results("bind-1").length === 1);
-    server.send(op("nav-1", "browser.navigate", { url: "https://example.com/", wait_until: "load" }));
-    await vi.waitFor(() => expect(asked).toHaveLength(1));
-    device.takeOver(ROOT);
+    // Another chat bound here, whose browser prompt is the one open: the browser is the same one.
+    tools.bindings?.add({ root: OTHER, nonce: "nonce-other", folder, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
+    server.send(op("nav-1", "browser.navigate", { url: "https://example.com/", wait_until: "load" }, false, OTHER, OTHER));
+    await vi.waitFor(() => expect(asked).toMatchObject([{ kind: "browser", action: "use", chat: { root: OTHER } }]));
+    expect(device.takeOver(ROOT)).toBe(true);
     await server.until(() => results("nav-1").length === 1);
     expect(results("nav-1")[0]?.outcome).toEqual(TAKEN);
     expect(tools.ran).toEqual([]);
-    expect(tools.bindings?.browsing(ROOT)).toBe(false);
+    expect(tools.bindings?.browsing(OTHER)).toBe(false);
+    // Another chat's take-over does not steal it, and its hand back ends nothing.
+    expect(device.takeOver(OTHER)).toBe(false);
+    device.handBack(OTHER);
+    expect(tools.taken).toBe(ROOT);
     device.handBack(ROOT);
-    expect(tools.taken.size).toBe(0);
+    expect(tools.taken).toBeNull();
   });
 
   it("stops its link when the welcome names another identity, and says why", async () => {

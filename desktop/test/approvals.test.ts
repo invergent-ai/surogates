@@ -1084,7 +1084,7 @@ describe("the browser on this computer", () => {
     expect(journal.bindings.get(ROOT)?.mode).toBe("free");
   });
 
-  it("dismisses a chat's open and waiting browser prompts once its user takes the browser over, answering them as its tools answer the chat now", async () => {
+  it("dismisses every chat's open and waiting browser prompts once the browser is taken over, answering them as the tools answer now", async () => {
     for (const root of [ROOT, OTHER]) {
       bind(root, "ask");
       journal.bindings.allowBrowser(root);
@@ -1094,7 +1094,8 @@ describe("the browser on this computer", () => {
     user = new User();
     approvals = new Approvals({
       bindings: journal.bindings, prompts: user, agent: "Research assistant",
-      refusal: (operation) => (taken && operation.sessionId === ROOT && operation.kind.startsWith("browser.") ? PAUSED : null),
+      // The browser is the agent's one browser here: held from one chat, it is refused to every chat.
+      refusal: (operation) => (taken && operation.kind.startsWith("browser.") ? PAUSED : null),
     });
     const open = approvals.admit(navigate(), never());
     const waiting = approvals.admit(op("browser.evaluate", { code: "return 1;" }), never());
@@ -1102,18 +1103,18 @@ describe("the browser on this computer", () => {
     const other = approvals.admit(navigate(OTHER), never());
     await vi.waitFor(() => expect(user.open.map(({ request }) => request.chat.root)).toEqual([ROOT, OTHER]));
     taken = true;
-    approvals.dismissBrowser(ROOT);
-    // Dismissed, the prompt settles with the answer that would do most: it is not the user's.
+    approvals.dismissBrowser();
+    // Dismissed, each prompt settles with the answer that would do most: it is not the user's.
     expect(await open).toEqual(PAUSED);
     expect(await waiting).toEqual(PAUSED);
-    expect(user.dismissed).toBe(1);
-    // The chat's command asks as before, and another chat's browser prompt stays open.
-    await vi.waitFor(() => expect(user.open.map(({ request }) => [request.kind, request.chat.root])).toEqual([["browser", OTHER], ["command", ROOT]]));
+    // Another chat's too, which never asked for the take-over.
+    expect(await other).toEqual(PAUSED);
+    expect(user.dismissed).toBe(2);
+    // A chat's command asks as before.
+    await vi.waitFor(() => expect(user.open.map(({ request }) => [request.kind, request.chat.root])).toEqual([["command", ROOT]]));
     user.answer("allow");
-    user.answer("allow");
-    expect(await other).toBeNull();
     expect(await command).toBeNull();
-    // Handed back: the chat's next act asks again.
+    // Handed back: a chat's next act asks again.
     taken = false;
     const again = approvals.admit(navigate(), never());
     await vi.waitFor(() => expect(user.open).toHaveLength(1));

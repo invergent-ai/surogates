@@ -30,27 +30,37 @@ export interface DesktopPreparedFolder {
 export interface DesktopBinding {
   folder: string; // as the folder sheet showed it, and the agent was told
   mode: "free" | "ask";
-  takenOver: boolean; // its user took its browser over: its agent's browser calls wait until it is handed back
+  // Its user holds the agent's browser, taken over from this chat: the agent's browser calls wait, in every
+  // chat on this computer, until this chat hands it back. False in a chat the browser is not held from,
+  // though its agent's browser calls wait too while another chat holds it.
+  takenOver: boolean;
 }
 
 // The agent's browser on this computer, for a chat bound here (Section 5): each call takes the chat's
 // id as getBinding does (a sub-agent's chat is its root's), and rejects as getBinding does, and for a
-// chat with no folder on this computer. A take-over and a hand back are told by onBindingChanged.
+// chat with no folder on this computer. A take-over and a hand back are told by onBindingChanged, for
+// the chat the browser is held from. The browser is one for every chat of the agent's on this computer:
+// held from one chat, it is held for all, and only that chat hands it back.
 export interface DesktopBrowser {
   // The chat's newest page, brought to the front. Rejects with "Surogate shows the agent's browser
   // only when its user asks, with a click" but at a click of its user's, once for each, within 5 s
   // of it, as revealFolder does; and when the chat has no page open.
   show(sessionId: string): Promise<void>;
-  // The user drives the browser from now on: the agent's browser calls in this chat answer that the
-  // user has taken control, and its browser questions waiting on this computer go. It needs no
-  // click, since it only makes the chat safer; its page comes to the front only at a click of its
-  // user's, as show's does.
+  // The user drives the browser from now on, held from this chat: the agent's browser calls in every
+  // chat on this computer answer that the user has taken control, and their browser questions waiting
+  // here go. It needs no click, since it only makes the chats safer; the chat's page comes to the
+  // front only at a click of its user's, as show's does. Rejects with "The agent's browser on this
+  // computer is taken over from another chat, and is handed back there" while another chat's
+  // take-over stands, which this one does not end.
   takeOver(sessionId: string): Promise<void>;
   // The desktop asks its user, in its own window; true once the agent drives the browser again, false
   // when the user keeps it. A page cannot hand it back on its own, nor ask to: rejects with "Surogate
   // hands the agent's browser back only when its user asks, with a click" but at a click of its
   // user's, once for each, within 5 s of it, as show does, whatever its user chose before; and with
-  // "Surogate is already asking" while this window's last one is still open.
+  // "Surogate is already asking" while this window's last one is still open. Only the chat the browser
+  // is held from hands it back: from another chat it rejects with "The agent's browser on this computer
+  // is taken over from another chat, and is handed back there", and no box opens. True, with no box,
+  // where nobody holds the browser.
   handBack(sessionId: string): Promise<boolean>;
 }
 

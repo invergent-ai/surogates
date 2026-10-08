@@ -8,8 +8,10 @@ import type { Operation, Outcome } from "../src/link/protocol.js";
 import type { ToolLayer } from "../src/shell/device-stack.js";
 
 const ROOT = "4e5f6a7b-8c9d-4e0f-a1b2-c3d4e5f6a7b8";
-const op = (kind: string): Operation => ({
-  id: `op-${kind}`, sessionId: ROOT, callingSessionId: ROOT, invocationId: "call", ordinal: 1, kind, args: {}, digest: "d",
+// Another chat of the agent's on this computer: its browser is the same one.
+const OTHER = "5f6a7b8c-9d0e-4f1a-b2c3-d4e5f6a7b8c9";
+const op = (kind: string, root = ROOT): Operation => ({
+  id: `op-${kind}`, sessionId: root, callingSessionId: root, invocationId: "call", ordinal: 1, kind, args: {}, digest: "d",
 });
 const LAUNCH: Launch = { executable: "/opt/google/chrome/chrome", profile: "/data/browser-profiles/x/chrome" };
 const signal = new AbortController().signal;
@@ -21,6 +23,8 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
   const forgotten: string[] = [];
   const paused: Array<[string, boolean]> = [];
   const shown: string[] = [];
+  // The chats this computer bound, until one is deleted.
+  const chats = new Set(bound ? [ROOT, OTHER] : []);
   const tools: ToolLayer = {
     run: (operation) => (ran.push(operation.kind), Promise.resolve({ ok: "tools" })),
     refusal: () => ({ error: { type: "other", message: "from the tools" } }),
@@ -41,10 +45,10 @@ function rig(launch: Launch | null = LAUNCH, bound = true) {
       pause: (root, held) => void paused.push([root, held]),
       show: (root) => (shown.push(root), Promise.resolve(true)),
     },
-    bindingOf: (root) => (bound && root === ROOT ? {} : undefined),
+    bindingOf: (root) => (chats.has(root) ? {} : undefined),
     launch: () => launch,
   });
-  return { browsing, ran, browsed, stopped, forgotten, paused, shown };
+  return { browsing, ran, browsed, stopped, forgotten, paused, shown, chats };
 }
 
 describe("the browser's kinds beside the tools", () => {
@@ -69,33 +73,68 @@ describe("the browser's kinds beside the tools", () => {
     expect(browsed).toEqual([]);
   });
 
-  it("answers a chat its user took the browser over paused_by_user, before anyone is asked, until it is handed back", async () => {
+  it("answers every chat's browser operations paused_by_user while a chat's user holds the browser, before anyone is asked, until that chat hands it back", async () => {
     const { browsing, browsed, paused, ran } = rig();
-    browsing.takeOver(ROOT);
+    expect(browsing.takeOver(ROOT)).toBe(true);
     expect(browsing.takenOver(ROOT)).toBe(true);
-    for (const kind of ["browser.navigate", "browser.observe", "browser.close"]) {
-      expect(browsing.refusal(op(kind))).toEqual(PAUSED);
-      // One the binder let through before the take-over is answered so too, and never reaches the browser.
-      expect(await browsing.run(op(kind), signal)).toEqual(PAUSED);
+    expect(browsing.holder()).toBe(ROOT);
+    // The browser is the agent's one browser here: a chat that never asked for the take-over is answered so too.
+    for (const root of [ROOT, OTHER]) {
+      for (const kind of ["browser.navigate", "browser.observe", "browser.close"]) {
+        expect(browsing.refusal(op(kind, root))).toEqual(PAUSED);
+        // One the binder let through before the take-over is answered so too, and never reaches the browser.
+        expect(await browsing.run(op(kind, root), signal)).toEqual(PAUSED);
+      }
     }
     expect(browsed).toEqual([]);
-    // The chat's other tools are not the browser's: they run as before.
+    // A chat's other tools are not the browser's: they run as before.
     expect(browsing.refusal(op("read"))).toEqual({ error: { type: "other", message: "from the tools" } });
     expect(await browsing.run(op("read"), signal)).toEqual({ ok: "tools" });
     expect(ran).toEqual(["read"]);
     browsing.handBack(ROOT);
     expect(browsing.takenOver(ROOT)).toBe(false);
-    expect(browsing.refusal(op("browser.navigate"))).toBeNull();
-    expect(await browsing.run(op("browser.navigate"), signal)).toEqual({ ok: "browser" });
-    // The browser host is told each, for an operation already waiting there.
+    expect(browsing.holder()).toBeNull();
+    for (const root of [ROOT, OTHER]) {
+      expect(browsing.refusal(op("browser.navigate", root))).toBeNull();
+      expect(await browsing.run(op("browser.navigate", root), signal)).toEqual({ ok: "browser" });
+    }
+    // The browser host is told each, for an operation already waiting or acting there.
     expect(paused).toEqual([[ROOT, true], [ROOT, false]]);
   });
 
-  it("forgets a deleted chat's take-over with its tabs", () => {
-    const { browsing } = rig();
+  it("lets no other chat take the browser from the chat that holds it, nor hand it back", async () => {
+    const { browsing, paused } = rig();
+    expect(browsing.takeOver(ROOT)).toBe(true);
+    // Another chat's take-over does not steal it: that chat does not hold it, and the first still does.
+    expect(browsing.takeOver(OTHER)).toBe(false);
+    expect(browsing.takenOver(OTHER)).toBe(false);
+    expect(browsing.takenOver(ROOT)).toBe(true);
+    // Nor does its hand back end it.
+    browsing.handBack(OTHER);
+    expect(browsing.holder()).toBe(ROOT);
+    expect(browsing.refusal(op("browser.navigate", OTHER))).toEqual(PAUSED);
+    // Taken over again by the chat that holds it: held as before, and the host is told nothing more.
+    expect(browsing.takeOver(ROOT)).toBe(true);
+    expect(paused).toEqual([[ROOT, true]]);
+  });
+
+  it("keeps the browser held when the chat that took it over is deleted, until another chat takes it over and hands it back", async () => {
+    const { browsing, browsed, chats, paused } = rig();
     browsing.takeOver(ROOT);
+    chats.delete(ROOT);
     browsing.retired(ROOT);
-    expect(browsing.takenOver(ROOT)).toBe(false);
+    // Deleting a chat is no hand back: the agent's other chats are answered paused still.
+    expect(browsing.holder()).toBe(ROOT);
+    expect(browsing.refusal(op("browser.navigate", OTHER))).toEqual(PAUSED);
+    expect(await browsing.run(op("browser.navigate", OTHER), signal)).toEqual(PAUSED);
+    expect(browsed).toEqual([]);
+    // The chat that held it can hand nothing back now: the next chat to take the browser over holds it, and hands it back.
+    expect(browsing.takeOver(OTHER)).toBe(true);
+    expect(browsing.takenOver(OTHER)).toBe(true);
+    expect(browsing.refusal(op("browser.navigate", OTHER))).toEqual(PAUSED);
+    browsing.handBack(OTHER);
+    expect(browsing.refusal(op("browser.navigate", OTHER))).toBeNull();
+    expect(paused).toEqual([[ROOT, true], [OTHER, true], [OTHER, false]]);
   });
 
   it("asks the browser to show a chat's page", async () => {
