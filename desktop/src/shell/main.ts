@@ -4,7 +4,7 @@
 // Readiness is awaited with then(), never a top-level await: an ES module main that
 // awaits app.whenReady() deadlocks.
 
-import { mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -766,12 +766,16 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
       detail: `This computer's access to ${agent.name} ends, and the folders it was given here are forgotten.${cutOff()}`,
       buttons: ["Log out", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
     };
-  // What the agent's browser here is signed in to is the user's to keep or not (spec, Section 7), with a window or without.
-  const asked = { ...options, checkboxLabel: `Also forget the sites ${agent.name}'s browser on this computer is signed in to`, checkboxChecked: removing };
+  // Whose browser profiles they are, before the log out forgets the computer's credential: none
+  // when this computer keeps no access to the agent, or its browser never ran here.
+  const profiles = kept && existsSync(profilesOf(root, kept)) ? profilesOf(root, kept) : null;
+  // What the agent's browser here is signed in to is the user's to keep or not (spec, Section 7), with a window or without,
+  // asked only where there is something to forget.
+  const asked = profiles
+    ? { ...options, checkboxLabel: `Also forget the sites ${agent.name}'s browser on this computer is signed in to`, checkboxChecked: removing }
+    : options;
   const { response, checkboxChecked: forgetBrowser } = await messageBoxResult(asked);
   const confirmed = response === 0;
-  // Whose browser profiles they are, before the log out forgets the computer's credential.
-  const profiles = kept ? profilesOf(root, kept) : null;
   if (!confirmed || signingOut) return;
   const { promise, resolve: done } = Promise.withResolvers<void>();
   signingOut = promise;
