@@ -13,7 +13,7 @@ import { BOOT_ID } from "../src/binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
-import { bootLinux, emulation, sweep } from "../src/vm/linux.js";
+import { bootLinux, emulation, missingTools, sweep } from "../src/vm/linux.js";
 import {
   type Boot, type BootVm, bootFor, EMULATED_NOTICE, type Emulated, type Folder, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions, WAITS,
 } from "../src/vm/manager.js";
@@ -303,6 +303,35 @@ describe("the VM manager on the host", () => {
         await vm.kill();
       }
     });
+  });
+
+  it("names each tool the VM lacks, a QEMU or virtiofsd older than it needs among them", async () => {
+    const bin = join(dir, "tools");
+    mkdirSync(bin);
+    const tool = (name: string, script: string) => {
+      writeFileSync(join(bin, name), `#!/bin/sh\n${script}\n`);
+      chmodSync(join(bin, name), 0o755);
+      return join(bin, name);
+    };
+    const path = process.env.PATH;
+    // The stand-ins alone: no newuidmap or newgidmap on the PATH, and no zstd.
+    process.env.PATH = bin;
+    try {
+      tool("qemu-system-x86_64", "echo 'QEMU emulator version 8.1.5 (Debian 1:8.1.5+ds-1ubuntu2)'");
+      const virtiofsd = tool("virtiofsd", "echo 'virtiofsd 1.9.0'");
+      const zstd = join(bin, "zstd");
+      expect(await missingTools({ virtiofsd, zstd })).toEqual(["QEMU 8.2 or later", "virtiofsd 1.10 or later", "newuidmap and newgidmap", "zstd"]);
+      tool("qemu-system-x86_64", "echo 'QEMU emulator version 10.1.0 (Debian 1:10.1.0+ds-5ubuntu2)'");
+      tool("virtiofsd", "echo 'virtiofsd 1.13.2'");
+      for (const name of ["newuidmap", "newgidmap", "zstd"]) tool(name, "true");
+      expect(await missingTools({ virtiofsd, zstd })).toEqual([]);
+      // One that says no version, or is not there, is missing too.
+      tool("qemu-system-x86_64", "exit 1");
+      rmSync(virtiofsd);
+      expect(await missingTools({ virtiofsd, zstd })).toEqual(["QEMU 8.2 or later", "virtiofsd 1.10 or later"]);
+    } finally {
+      process.env.PATH = path;
+    }
   });
 
   it("ends a QEMU that opens no sockets by the boot's deadline", async () => {

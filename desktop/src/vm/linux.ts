@@ -4,7 +4,7 @@
 // setpriv --pdeathsig, so they die with the manager however it dies, and each
 // leaves a pidfile in the runtime folder, so a later manager can end one that did not.
 
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import {
   accessSync, closeSync, constants, existsSync, ftruncateSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync,
 } from "node:fs";
@@ -85,6 +85,44 @@ function onPath(name: string): boolean {
       return false;
     }
   });
+}
+
+// Section 9's words for a computer that lacks what the VM runs on, and what it lacks.
+export const toolsMissing = (lacking: string[]) => `Surogate's sandbox tools are missing. Run the install script again. It lacks ${lacking.join(", ")}`;
+
+// The major and minor version *program* says it is, as `--version` prints it, or null.
+const versionOf = (program: string, args: string[]) => new Promise<[number, number] | null>((resolve) => {
+  execFile(program, args, { timeout: 5_000, env: toolEnv() }, (error, stdout) => {
+    const found = error ? null : /(\d+)\.(\d+)/.exec(stdout);
+    resolve(found ? [Number(found[1]), Number(found[2])] : null);
+  });
+});
+const atLeast = (version: [number, number] | null, [major, minor]: [number, number]) =>
+  version !== null && (version[0] > major || (version[0] === major && version[1] >= minor));
+
+/**
+ * What this computer lacks of what the VM runs on (spec, Section 11, Requirements), each
+ * named as the install script installs it: QEMU 8.2 or later; Ubuntu's virtiofsd 1.10 or
+ * later; newuidmap and newgidmap, which virtiofsd runs for its id maps; and zstd, which
+ * unpacks the image's download. Checked at the app's start.
+ */
+export async function missingTools(paths: { virtiofsd?: string; zstd?: string } = {}): Promise<string[]> {
+  const [qemu, virtiofsd] = await Promise.all([
+    versionOf("qemu-system-x86_64", ["--version"]),
+    versionOf(paths.virtiofsd ?? VIRTIOFSD, ["--version"]),
+  ]);
+  let zstd = true;
+  try {
+    accessSync(paths.zstd ?? "/usr/bin/zstd", constants.X_OK);
+  } catch {
+    zstd = false;
+  }
+  return [
+    ...(atLeast(qemu, [8, 2]) ? [] : ["QEMU 8.2 or later"]),
+    ...(atLeast(virtiofsd, [1, 10]) ? [] : ["virtiofsd 1.10 or later"]),
+    ...(onPath("newuidmap") && onPath("newgidmap") ? [] : ["newuidmap and newgidmap"]),
+    ...(zstd ? [] : ["zstd"]),
+  ];
 }
 
 const ended = (child: ChildProcess) => child.exitCode !== null || child.signalCode !== null;
