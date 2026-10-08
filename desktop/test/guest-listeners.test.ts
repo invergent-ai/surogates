@@ -261,6 +261,7 @@ describe("a root's proxies", () => {
       egress: { ask: (_root, request) => (asked.push(`${request.host}:${request.port}`), new Promise(() => {})) },
       resolve: async (name) => (name === "pypi.org" ? ["151.101.0.223"] : ["192.0.2.10"]),
       local: () => [],
+      subnets: () => [],
       connect: () => connect({ host: "127.0.0.1", port: echoPort, allowHalfOpen: true }),
     });
     const network = new Network(guest, join(dir, "net"));
@@ -321,6 +322,7 @@ describe("a root's proxies", () => {
       egress: { ask: async () => true },
       resolve: async () => ["192.0.2.10"],
       local: () => [],
+      subnets: () => [],
       connect: () => connect({ host: "127.0.0.1", port: (endless.address() as { port: number }).port, allowHalfOpen: true }),
     });
     const network = new Network(guest, join(dir, "net"));

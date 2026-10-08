@@ -4,7 +4,9 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { ApprovalRequest } from "../src/binding/approvals.js";
 import type { FolderGuards } from "../src/binding/folder.js";
+import { Browsing } from "../src/browser/executor.js";
 import type { NetworkApprovals } from "../src/hosts/tool-hosts.js";
 import type { Bindings } from "../src/journal/bindings.js";
 import { OperationJournal } from "../src/journal/journal.js";
@@ -28,6 +30,8 @@ class Tools implements ToolLayer {
   // The sessions it says have a background process alive, and how it tells the stack they changed.
   liveRoots: string[] = [];
   changed: () => void = () => {};
+  // The page each session's next browser operation acts in, as a browser here would say it.
+  address?: (session: string) => Promise<string>;
 
   constructor(private readonly base: string, private readonly order: string[]) {}
 
@@ -139,6 +143,23 @@ describe("one agent's device", () => {
     // The tools' network questions go to the binder's approvals: a chat this computer did not bind is denied.
     expect(await tools.network?.askNetwork("77777777-7777-4777-8777-777777777777",
       { host: "example.com", port: 443, privateNetwork: false }, new AbortController().signal)).toBe("deny");
+  });
+
+  it("names in an act's prompt the page its tools say the calling session acts in", async () => {
+    const asked: ApprovalRequest[] = [];
+    tools.address = (session) => Promise.resolve(`https://bank.example/${session}`);
+    const device = await start({
+      prompts: { pickFolder: () => Promise.resolve(folder), confirmFolder: () => Promise.resolve({ mode: "ask" }) },
+      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve("allow")), confirmFreeMode: () => Promise.resolve(false) },
+    });
+    await server.until(() => statuses.includes("connected"));
+    const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
+    server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce }, true));
+    await server.until(() => results("bind-1").length === 1);
+    tools.bindings?.allowBrowser(ROOT);
+    server.send(op("script-1", "browser.evaluate", { code: "return 1;" }, false, CHILD));
+    await server.until(() => results("script-1").length === 1);
+    expect(asked).toMatchObject([{ kind: "browser", action: "script", page: `https://bank.example/${CHILD}` }]);
   });
 
   it("stops its link when the welcome names another identity, and says why", async () => {
@@ -266,6 +287,29 @@ describe("one agent's device", () => {
     tools.changed();
     expect(device.working()).toBe(0);
     expect(counts).toEqual([1, 0]);
+  });
+
+  it("counts a chat whose background process lives beneath the browser's layer, as the app's own stack wires it", async () => {
+    const device = await start({
+      tools: (bindings, network, changed) => {
+        tools.changed = changed;
+        return new Browsing({
+          tools,
+          browser: {
+            perform: () => Promise.resolve({ ok: null }), forget: () => {}, stop: () => Promise.resolve(), end: () => Promise.resolve(), address: () => Promise.resolve("about:blank"),
+          },
+          bindingOf: (root) => bindings.get(root),
+          launch: () => null,
+        });
+      },
+    });
+    await server.until(() => statuses.includes("connected"));
+    tools.liveRoots = [ROOT];
+    tools.changed();
+    expect(device.working()).toBe(1);
+    tools.liveRoots = [];
+    tools.changed();
+    expect(device.working()).toBe(0);
   });
 
   it("counts a chat's sub-agent apart from the chat, as a session of its own", async () => {

@@ -1165,6 +1165,22 @@ body.settings-page {
   user-select: text;
 }
 
+.row select.choice {
+  max-width: 280px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--fg);
+  font: inherit;
+}
+
+.row-note {
+  padding: 10px 0;
+  color: var(--dim);
+  font-size: 13px;
+}
+
 .segmented {
   display: inline-flex;
   flex-shrink: 0;

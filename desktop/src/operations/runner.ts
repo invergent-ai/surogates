@@ -99,13 +99,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// The kinds whose data in a result may be a transfer (surogates/devices/workspace.py's RESULT_TRANSFERS).
+const RESULT_TRANSFERS: ReadonlySet<string> = new Set(["read", "browser.screenshot"]);
+
 // What goes in the journal and on the wire: an outcome the server records, and
 // nothing it would refuse. A refused result closes the link with 4400, and the
 // journal would send it again at every welcome, forever. So the outcome is
 // round-tripped through JSON (what JSON drops or cannot hold is found here, not
 // by the server), then needs exactly one of ok and error, an error that names
-// its type and message, and a frame that fits (surogates/devices/link.py). *ran*
-// says whether the operation ran, so the agent knows whether to check what it did.
+// its type and message, a transfer only from a kind that sends one (the server
+// reads any ok.transfer as one), and a frame that fits (surogates/devices/link.py).
+// *ran* says whether the operation ran, so the agent knows whether to check what it did.
 function sendable(operation: Operation, outcome: unknown, ran: boolean): Outcome {
   let value: unknown;
   try {
@@ -124,15 +128,18 @@ function sendable(operation: Operation, outcome: unknown, ran: boolean): Outcome
       return unsendable("its error has no type and message", ran);
     }
   }
+  if (isRecord(value.ok) && value.ok.transfer != null && !RESULT_TRANSFERS.has(operation.kind)) {
+    return unsendable("it names a transfer, which only a read or a screenshot sends", ran);
+  }
   // String length counts UTF-16 units, never fewer than the server counts.
   if (JSON.stringify(opResult(operation, value as Outcome)).length <= MAX_FRAME_CHARS) return value as Outcome;
   return ran ? TOO_LARGE : ANSWER_TOO_LARGE;
 }
 
-// A read's data over MAX_PAYLOAD_BYTES leaves its outcome: the outcome names it by
-// size and SHA-256 (surogates/devices/link.py), and its chunks are journaled beside it.
+// A read's or a screenshot's data over MAX_PAYLOAD_BYTES leaves its outcome: the outcome names it
+// by size and SHA-256 (surogates/devices/link.py), and its chunks are journaled beside it.
 function carried(operation: Operation, outcome: Outcome): { outcome: Outcome; chunks: Buffer[] } {
-  const encoded = operation.kind === "read" && isRecord(outcome) && "ok" in outcome ? outcome.ok : undefined;
+  const encoded = RESULT_TRANSFERS.has(operation.kind) && isRecord(outcome) && "ok" in outcome ? outcome.ok : undefined;
   if (typeof encoded !== "string") return { outcome, chunks: [] };
   const size = Buffer.byteLength(encoded, "base64");
   if (size <= MAX_PAYLOAD_BYTES) return { outcome, chunks: [] };

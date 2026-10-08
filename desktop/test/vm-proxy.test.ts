@@ -70,7 +70,9 @@ beforeEach(async () => {
   proxy = new NetProxy(host, {
     egress: { ask: (root, request) => (asked.push({ root, asked: request }), answer(root, request)) },
     resolve,
-    local: () => ["127.0.0.1", "::1"],
+    local: () => ["127.0.0.1", "::1", "198.51.100.5"],
+    // This computer's own network, a public range as a campus's is.
+    subnets: () => ["198.51.100.5/24"],
     // Every address judged reaches the echo server here, but 192.0.2.1 and 2001:db8::1, which
     // refuse, and 2001:db8::dead, which never answers.
     connect: (address, port) => {
@@ -181,6 +183,11 @@ describe("the host proxy", () => {
     answer = () => Promise.resolve(true);
     expect(await tunnel("example.com:443")).toMatchObject({ status: 200 });
     expect(asked).toHaveLength(4);
+  });
+
+  it("asks about an address on a network this computer is on as a private network, whatever its range", async () => {
+    expect(await tunnel("198.51.100.7:80")).toMatchObject({ status: 200 });
+    expect(asked).toEqual([{ root: ROOT, asked: { host: "198.51.100.7", port: 80, privateNetwork: true } }]);
   });
 
   it("asks apart about a connection judged a private network, never on a prompt that did not say so", async () => {

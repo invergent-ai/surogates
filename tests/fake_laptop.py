@@ -16,7 +16,7 @@ import json
 import os
 import re
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -35,6 +35,7 @@ from surogates.devices.workspace import (
     MAX_WRITE_BYTES,
     OUTPUT_CAP_CHARS,
     READ_TOO_LARGE,
+    RESULT_TRANSFERS,
     SHOWN_DOT_FOLDERS,
     WALK_BUDGET_S,
     WALK_MARGIN_NS,
@@ -385,10 +386,16 @@ class InProcessRunner:
     def __init__(self, folder: WorkspaceIO) -> None:
         self.folder = folder
         self.kinds: list[str] = []
+        # The browser's kinds, answered by this as FakeLaptop's are: kind, args -> outcome.
+        self.browser: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
 
     async def run(self, kind: str, args: dict[str, Any], payload: bytes | None = None) -> dict[str, Any]:
         self.kinds.append(kind)
         sent = json.loads(json.dumps(args))
+        if kind.startswith("browser."):
+            if self.browser is None:
+                return {"error": {"type": "unsupported", "message": f"This computer does not handle {kind} yet"}}
+            return json.loads(json.dumps(self.browser(kind, sent)))
         if payload is not None:
             # A write's data that crossed as a transfer: whole, as its args name it, then written as one that carried it.
             named = sent.pop("transfer")
@@ -439,6 +446,9 @@ class FakeLaptop:
         self.hold = False
         # Only those the app asks its user about in Ask every time are held: a prompt left open.
         self.hold_asked = False
+        # The browser's kinds (surogates.devices.browser), answered by this: kind, args -> outcome.
+        # None answers them as an app without a browser does.
+        self.browser: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
         # What it holds asked about, by id: answered once release() allows it.
         self._asked: dict[str, dict[str, Any]] = {}
         self.cancelled: set[str] = set()
@@ -615,6 +625,8 @@ class FakeLaptop:
                 # A deleted chat: its folder is forgotten, never touched.
                 self.bindings.pop(frame["session_id"], None)
                 outcome = {"ok": None}
+            elif frame["kind"].startswith("browser."):
+                outcome = self._browse(frame["kind"], frame["args"])
             else:
                 outcome = await perform(self.folder, frame["kind"], frame["args"])
             self.outcomes[operation_id] = self._carried(operation_id, frame["kind"], outcome)
@@ -634,14 +646,19 @@ class FakeLaptop:
             await ws.send(json.dumps(result))
         # A transfer whose data is gone was acknowledged: the server has its result.
 
+    def _browse(self, kind: str, args: dict[str, Any]) -> dict[str, Any]:
+        if self.browser is None:
+            return {"error": {"type": "unsupported", "message": f"This computer does not handle {kind} yet"}}
+        return self.browser(kind, args)
+
     def _end(self, operation_id: str) -> None:
         """The server recorded this result, or does not want it: its data is not sent again."""
         self._ended.add(operation_id)
         self.payloads.pop(operation_id, None)
 
     def _carried(self, operation_id: str, kind: str, outcome: dict[str, Any]) -> dict[str, Any]:
-        """A read's data over MAX_PAYLOAD_BYTES leaves its outcome, which names it by size and SHA-256."""
-        encoded = outcome.get("ok") if kind == "read" else None
+        """A read's or a screenshot's data over MAX_PAYLOAD_BYTES leaves its outcome, which names it by size and SHA-256."""
+        encoded = outcome.get("ok") if kind in RESULT_TRANSFERS else None
         if not isinstance(encoded, str):
             return outcome
         data = base64.b64decode(encoded)

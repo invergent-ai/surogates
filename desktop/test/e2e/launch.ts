@@ -34,8 +34,8 @@ const TAKEN = ["PATH", "DISPLAY", "XAUTHORITY", "SUROGATE_VM_IMAGE"];
 /**
  * The environment of every app a test launches: a session of its own under *home*, the test's
  * data home. It has no session bus, so it reaches and starts no keyring daemon, portal, gvfsd or
- * at-spi; its own home, runtime, config, cache and state folders; and X11, on xvfb's display. It
- * throws on any other display, before anything is made or started.
+ * at-spi; its own home, runtime, config, cache, state and temp folders; and X11, on xvfb's display.
+ * It throws on any other display, before anything is made or started.
  */
 export function shellEnv(home: string): Record<string, string> {
   // xvfb-run -a sets both: its display, never the desktop's :0, and an authority in a folder of its own.
@@ -48,14 +48,15 @@ export function shellEnv(home: string): Record<string, string> {
     const value = process.env[name];
     if (value) env[name] = value;
   }
-  const [own, config, cache, state] = ["h", "c", "k", "s"].map((name) => join(home, name));
-  for (const folder of [own, config, cache, state]) mkdirSync(folder!, { recursive: true, mode: 0o700 });
+  // The temp folder goes with the data home: what the app's browser and Playwright leave there, a killed one's too.
+  const [own, config, cache, state, temp] = ["h", "c", "k", "s", "t"].map((name) => join(home, name));
+  for (const folder of [own, config, cache, state, temp]) mkdirSync(folder!, { recursive: true, mode: 0o700 });
   // 0700, as mkdtemp makes it.
   const runtime = runtimes.get(home) ?? mkdtempSync("/tmp/rt-");
   runtimes.set(home, runtime);
   return {
     ...env,
-    HOME: own!, XDG_RUNTIME_DIR: runtime, XDG_CONFIG_HOME: config!, XDG_CACHE_HOME: cache!, XDG_STATE_HOME: state!, XDG_DATA_HOME: home,
+    HOME: own!, XDG_RUNTIME_DIR: runtime, XDG_CONFIG_HOME: config!, XDG_CACHE_HOME: cache!, XDG_STATE_HOME: state!, XDG_DATA_HOME: home, TMPDIR: temp!,
     DBUS_SESSION_BUS_ADDRESS: "disabled:", NO_AT_BRIDGE: "1", XDG_SESSION_TYPE: "x11", GDK_BACKEND: "x11",
   };
 }
@@ -139,18 +140,19 @@ export async function launch(home: string, env: Record<string, string> = {}, arg
 }
 
 // The native confirmations answer globalThis.answer, their first button unless a test sets
-// another, and with globalThis.hold set, only once globalThis.release() is called; the folder
-// dialog picks globalThis.folder, or is cancelled; nothing leaves for the system browser.
+// another, with their checkbox ticked when globalThis.checked is, and with globalThis.hold set,
+// only once globalThis.release() is called; the folder dialog picks globalThis.folder, or is
+// cancelled; nothing leaves for the system browser.
 // What each was asked is kept in the main process, as globalThis.asked and .opened.
 export async function stubNative(shell: ElectronApplication): Promise<void> {
   await shell.evaluate(({ dialog, shell: electronShell }) => {
     const asked: unknown[] = [];
     const opened: string[] = [];
     Object.assign(globalThis, { asked, opened, answer: 0 });
-    const chosen = globalThis as unknown as { answer: number; folder?: string; hold?: boolean; release?: () => void };
+    const chosen = globalThis as unknown as { answer: number; checked?: boolean; folder?: string; hold?: boolean; release?: () => void };
     dialog.showMessageBox = ((...args: unknown[]) => {
       asked.push(args.at(-1));
-      const answered = () => ({ response: chosen.answer, checkboxChecked: false });
+      const answered = () => ({ response: chosen.answer, checkboxChecked: chosen.checked === true });
       if (!chosen.hold) return Promise.resolve(answered());
       return new Promise((resolve) => {
         chosen.release = () => resolve(answered());
