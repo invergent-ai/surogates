@@ -130,6 +130,19 @@ async def test_a_screenshot_is_saved_in_the_folder_among_the_harness_files(compu
     assert "read_file" not in body["hint"]
 
 
+async def test_a_screenshot_the_folder_cannot_take_is_said_so_as_the_cloud_says_it(computer) -> None:
+    png = b"\x89PNG\r\n\x1a\n" + b"x" * 32
+    rig = computer({"ok": base64.b64encode(png).decode("ascii")})
+    # A file where the harness's folder would be: the write fails on the computer.
+    (rig.folder / ".surogates-results").write_text("not a folder")
+
+    body = json.loads(await browser._browser_screenshot_handler({}, **rig.kwargs))
+
+    assert body["error"] == "screenshot_save_failed"
+    assert (body["bytes"], body["mime_type"]) == (len(png), "image/png")
+    assert body["detail"]
+
+
 async def test_closing_closes_only_the_sessions_tab_on_the_computer(computer) -> None:
     rig = computer({"ok": FRAMES}, {"ok": {"closed": True}}, {"ok": FRAMES})
     await browser._browser_get_state_handler({}, **rig.kwargs)

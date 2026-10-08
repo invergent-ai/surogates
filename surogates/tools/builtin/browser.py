@@ -30,9 +30,10 @@ from surogates.devices.browser import (
     forget_snapshot_cache,
 )
 from surogates.devices.browser import snapshot_cache as device_snapshot_cache
-from surogates.devices.workspace import DeviceWorkspaceIO
+from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
 from surogates.sandbox.copy_files import write_copy, writes_to_copy
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
 from surogates.storage.tenant import (
     boundary_workspace_key,
@@ -1048,7 +1049,16 @@ async def _save_device_screenshot(client: Any, arguments: dict[str, Any], worksp
         )
     png_bytes = result["png_bytes"]
     relative_path = f"{_DEVICE_SCREENSHOT_DIR}/{_new_screenshot_path()}"
-    await workspace_io.write(await workspace_io.resolve(relative_path), png_bytes)
+    try:
+        await workspace_io.write(await workspace_io.resolve(relative_path), png_bytes)
+    except (OSError, WorkspaceSandboxError, DeviceOperationError) as exc:
+        # As the cloud answers a shot it could not save, in the computer's own words.
+        return json.dumps({
+            "error": "screenshot_save_failed",
+            "bytes": len(png_bytes),
+            "mime_type": "image/png",
+            "detail": (exc.strerror if isinstance(exc, OSError) else None) or str(exc),
+        })
     body: dict[str, Any] = {
         "saved": True,
         "path": relative_path,
