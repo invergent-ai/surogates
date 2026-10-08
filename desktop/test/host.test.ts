@@ -136,7 +136,8 @@ describe("a tool host", { timeout: 30_000 }, () => {
   it("fails to start without its sandbox, and says why", async () => {
     const harness = host({ bwrapPath: "/nonexistent/bwrap" });
     const failed = await harness.until((messages) => messages.find((message) => message.type === "failed"));
-    expect(failed.type === "failed" && failed.message).toMatch(/bwrap/);
+    // In Section 9's words, before srt is asked.
+    expect(failed).toMatchObject({ type: "failed", message: "Surogate's sandbox tools are missing. Run the install script again. It lacks bubblewrap" });
     expect(failed).not.toHaveProperty("folder");
     expect(await harness.exited).toBe(1);
   });

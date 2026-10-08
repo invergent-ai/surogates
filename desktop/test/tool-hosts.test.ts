@@ -148,10 +148,12 @@ describe("ToolHosts", { timeout: 30_000 }, () => {
 
   it("answers every operation when the sandbox cannot start, and tries again for the next", async () => {
     const executor = toolHosts({ bwrapPath: "/nonexistent/bwrap" });
-    const first = await executor.run(op("stat", { key: "/x" }), signal());
-    expect(first).toMatchObject({ error: { type: "unavailable" } });
-    expect((first as { error: { message: string } }).error.message).toMatch(/bwrap/);
-    expect(await executor.run(op("stat", { key: "/x" }), signal())).toMatchObject({ error: { type: "unavailable" } });
+    // In Section 9's words, never srt's.
+    const missing: Outcome = {
+      error: { type: "unavailable", message: "This computer could not open the folder's sandbox: Surogate's sandbox tools are missing. Run the install script again. It lacks bubblewrap" },
+    };
+    expect(await executor.run(op("stat", { key: "/x" }), signal())).toEqual(missing);
+    expect(await executor.run(op("stat", { key: "/x" }), signal())).toEqual(missing);
     expect(spawned).toHaveLength(2);
   });
 

@@ -1,6 +1,10 @@
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
-import { hideSrtTmp, isReserved, sandboxPolicy } from "../src/hosts/policy.js";
+import { fileToolsMissing, hideSrtTmp, isReserved, sandboxPolicy } from "../src/hosts/policy.js";
 
 describe("the file helper's sandbox policy", () => {
   it("reads the system, the app, the folder and its working folder, writes the last two, and reaches no host", () => {
@@ -16,6 +20,31 @@ describe("the file helper's sandbox policy", () => {
         denyWrite: ["/tmp/claude", "/private/tmp/claude"],
       },
     });
+  });
+});
+
+describe("the file helper's tools on this computer", () => {
+  it("names each the helper's sandbox lacks as the install script installs it: the version's bwrap, or bwrap, socat and rg on the PATH", () => {
+    const bin = mkdtempSync(join(tmpdir(), "file-tools-"));
+    const tool = (name: string) => {
+      writeFileSync(join(bin, name), "#!/bin/sh\n");
+      chmodSync(join(bin, name), 0o755);
+    };
+    try {
+      expect(fileToolsMissing(undefined, bin)).toEqual(["bubblewrap", "socat", "ripgrep"]);
+      tool("bwrap");
+      tool("socat");
+      tool("rg");
+      expect(fileToolsMissing(undefined, bin)).toEqual([]);
+      // The installed app's own copy, beside its version: one on the PATH does not stand in for it.
+      expect(fileToolsMissing(join(bin, "bin", "bwrap"), bin)).toEqual(["bubblewrap"]);
+      expect(fileToolsMissing(join(bin, "bwrap"), bin)).toEqual([]);
+      // A file that cannot be run is not the tool.
+      chmodSync(join(bin, "socat"), 0o644);
+      expect(fileToolsMissing(undefined, bin)).toEqual(["socat"]);
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
   });
 });
 

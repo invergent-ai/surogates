@@ -6,7 +6,7 @@
 
 import { spawnSync } from "node:child_process";
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, truncateSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync,
 } from "node:fs";
 import { open } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -796,5 +796,22 @@ describe("the sandbox's tools, through the app", () => {
     expect(await page.textContent("#sandbox-check")).toBe("Check again");
     await page.click("#sandbox-check");
     await expect.poll(() => page.isHidden("#sandbox")).toBe(true);
+  });
+
+  it("says the file helper's tools are missing too, and a file tool answers so in the same words, never srt's", async () => {
+    // Every program of this computer's but socat and ripgrep, as on a computer the install script has not run on.
+    const bin = mkdtempSync(join(home, "bin-"));
+    for (const name of readdirSync("/usr/bin")) if (name !== "socat" && name !== "rg") symlinkSync(join("/usr/bin", name), join(bin, name));
+    const folder = join(home, "files");
+    mkdirSync(folder);
+    const client = await launched({ PATH: bin });
+    const page = await shellPage(app!);
+    const missing = "Surogate's sandbox tools are missing. Run the install script again. It lacks socat, ripgrep";
+    // The look asks QEMU and virtiofsd for their versions first, each within 5 s.
+    await expect.poll(() => page.textContent("#sandbox-text"), { timeout: 15_000 }).toBe(missing);
+    await bind(client, folder);
+    expect(await operation("stat", { key: join(folder, "a.txt") })).toEqual({
+      error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${missing}` },
+    });
   });
 });

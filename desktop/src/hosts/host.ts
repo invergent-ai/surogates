@@ -22,7 +22,7 @@ import { APP_QUIT, FINISHED_TTL_SECONDS, lostWith } from "../guest/processes.js"
 import { type FolderRecord, lockFolder, readRecord, writeRecord } from "./folder-record.js";
 import { HookGuard } from "./hooks.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
-import { GLOB, hideSrtTmp, quote, sandboxPolicy } from "./policy.js";
+import { fileToolsMissing, GLOB, hideSrtTmp, quote, sandboxPolicy, toolsMissing } from "./policy.js";
 
 const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
 const READY_TIMEOUT_MS = 15_000;
@@ -223,6 +223,9 @@ async function start(message: HostStart): Promise<void> {
     .filter((entry) => !within(entry))
     .join(":") || "/usr/bin:/bin";
   process.env.PATH = hostPath;
+  // What srt and the helper run, looked for first: a computer that lacks one is told in Section 9's words, not srt's.
+  const lacking = fileToolsMissing(message.bwrapPath, hostPath);
+  if (lacking.length > 0) throw new Error(toolsMissing(lacking));
   const bwrapPath = message.bwrapPath ?? findOnPath("bwrap", hostPath, "/") ?? undefined;
   const socatPath = findOnPath("socat", hostPath, "/") ?? undefined;
   const policy = sandboxPolicy({ folder: path, tmp, appDirs, bwrapPath, socatPath });

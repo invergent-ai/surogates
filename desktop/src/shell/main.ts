@@ -21,11 +21,12 @@ import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
+import { fileToolsMissing, toolsMissing } from "../hosts/policy.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmEnv, vmOptions } from "../vm/client.js";
 import { type Delivery, ImageDelivery, installBase, readManifest } from "../vm/image.js";
-import { missingTools, toolsMissing } from "../vm/linux.js";
+import { missingTools } from "../vm/linux.js";
 import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
@@ -47,7 +48,7 @@ import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
-import { appTools } from "./tools.js";
+import { appTools, BWRAP } from "./tools.js";
 import { asShown } from "./text.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
@@ -320,10 +321,13 @@ function startDelivery(check = false): void {
   }
 }
 
-// What the VM lacks of this computer, looked for: at the app's start, and at the line's Check again.
-// zstd counts only while the image's delivery has something left to unpack.
+// What the sandbox lacks of this computer, looked for: at the app's start, and at the line's Check
+// again. The file helper's tools first, then the VM's; zstd counts only while the image's delivery
+// has something left to unpack.
 function lookForTools(): void {
-  lackingFound = missingTools({}, delivery !== null && delivery.state.state !== "ready").then((found) => {
+  lackingFound = missingTools({}, delivery !== null && delivery.state.state !== "ready").then((vm) => {
+    // With no PATH, where the file host itself looks: its own default.
+    const found = [...fileToolsMissing(BWRAP, process.env.PATH || "/usr/bin:/bin"), ...vm];
     lacking = found;
     changed();
     return found;

@@ -88,9 +88,6 @@ function onPath(name: string): boolean {
   });
 }
 
-// Section 9's words for a computer that lacks what the VM runs on, and what it lacks.
-export const toolsMissing = (lacking: string[]) => `Surogate's sandbox tools are missing. Run the install script again. It lacks ${lacking.join(", ")}`;
-
 // The major and minor version *program* says it is, as `--version` prints it, or null: one that has
 // not answered in 5 s is killed, as a SIGTERM may be ignored.
 const versionOf = (program: string, args: string[]) => new Promise<[number, number] | null>((resolve) => {

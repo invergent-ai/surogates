@@ -2,11 +2,25 @@
 // readable but the system, the app, the folder and the helper's working folder; nothing
 // writable but the folder and that working folder; no network.
 
+import { findOnPath } from "../files/operations.js";
 import { inside } from "../files/paths.js";
 
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 
 const SYSTEM = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/proc", "/sys", "/dev", "/run/systemd/resolve"];
+// Section 9's words for a computer that lacks what the sandbox runs on, and what it lacks.
+export const toolsMissing = (lacking: string[]) => `Surogate's sandbox tools are missing. Run the install script again. It lacks ${lacking.join(", ")}`;
+
+/**
+ * What the file helper's sandbox lacks of this computer, each named as the install script
+ * installs it: bubblewrap, at *bwrap* (the installed version's own copy) or else on *path*;
+ * socat, which srt runs; and ripgrep, which the helper searches with.
+ */
+export function fileToolsMissing(bwrap: string | undefined, path: string): string[] {
+  return [["bubblewrap", bwrap ?? "bwrap"], ["socat", "socat"], ["ripgrep", "rg"]]
+    .filter(([, program]) => findOnPath(program!, path, "/") === null).map(([name]) => name!);
+}
+
 // srt reads these in a policy path as a glob: allowRead widens, allowWrite drops the path.
 export const GLOB = /[*?[\]]/;
 
