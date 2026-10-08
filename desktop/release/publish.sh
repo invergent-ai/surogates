@@ -85,15 +85,23 @@ case "$VERB" in
     [ -f "$unpacked/$helper" ] && [ "$(realpath "$unpacked/$helper")" = "$tree/$helper" ] || fail "the tarball has no root helper of its own at $helper"
     cmp -s "$unpacked/$helper" "$HERE/install.sh" \
       || fail "the tarball's root helper, $helper, is not the install.sh beside this script, byte for byte: every later update is checked by the release keys it lists"
+    # The state schema of what the app keeps in each user's home, as the tarball's own package names
+    # it: a rollback takes only a release whose schema is the installed one's or later. Read as the
+    # helper is: from the tarball unpacked whole, which is what an install leaves, and from a file
+    # of the tree's own, asked in a command of its own as the helper's path is.
+    package="surogate-desktop-$VERSION-linux-x64/resources/app/package.json"
+    [ -f "$unpacked/$package" ] && [ "$(realpath "$unpacked/$package")" = "$tree/$package" ] || fail "the tarball's resources/app/package.json names no stateSchema"
+    schema="$(jq -e '.stateSchema | select(type == "number" and . >= 1 and . == floor and . < 1e15) | floor' "$unpacked/$package" 2>/dev/null)" \
+      || fail "the tarball's resources/app/package.json names no stateSchema"
     # All that is read of the unpacked tarball is read by here. It is removed before anything is
     # signed, and from its removal on no signal ends the signing: one would leave a manifest
     # without its signature, or end a signing that has just said it signed.
     cleanup || fail "the unpacked tarball could not be removed from $unpacked: nothing is signed"
     # The tarball by its hash and its size in bytes, a number: the root helper takes no manifest
     # without either, and copies no more of a tarball than the size its manifest names.
-    jq -cn --arg version "$VERSION" --arg sha256 "$sha256" --argjson size "$(stat -c %s "$OUT/$TARBALL")" \
+    jq -cn --arg version "$VERSION" --arg sha256 "$sha256" --argjson size "$(stat -c %s "$OUT/$TARBALL")" --argjson schema "$schema" \
       '{version: $version, channel: "stable", platform: "linux", arch: "x64",
-        url: "releases/\($version)/surogate-desktop-\($version)-linux-x64.tar.gz", sha256: $sha256, size: $size}' >"$OUT/manifest.json"
+        url: "releases/\($version)/surogate-desktop-\($version)-linux-x64.tar.gz", sha256: $sha256, size: $size, stateSchema: $schema}' >"$OUT/manifest.json"
     openssl pkeyutl -sign -inkey <(printf '%s\n' "$DESKTOP_RELEASE_KEY") -rawin -in "$OUT/manifest.json" -out "$OUT/manifest.json.sig"
     echo "signed $OUT/manifest.json"
     ;;

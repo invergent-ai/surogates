@@ -1,11 +1,12 @@
 #!/bin/bash -p
 # Surogate Desktop's install script, and each version's bin/surogate-apply-update, the root
-# helper that applies a verified release: the current version's copy at
-# /opt/surogate/bin/surogate-apply-update is the one pkexec runs.
+# helper that applies a verified release: the copy at /opt/surogate/bin/surogate-apply-update is
+# the one pkexec runs, the newest release's that this computer has installed.
 #
 #   curl -fsSL https://surogate.ai/desktop/install.sh | bash                      install, update or repair
 #   curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --uninstall    remove it
 #   install.sh --base <url>                                   install from another server (an enterprise's)
+#   curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --version <x.y.z>    roll back to that release
 #   surogate-apply-update --apply <manifest> <signature> <tarball>      as root: apply a downloaded release
 #
 # Every line is in a function, and main runs from the script's last line: a download cut
@@ -24,6 +25,11 @@ settings() {
   # The folder of the lock that one install, update or removal at a time holds: root's alone, and
   # outside /opt/surogate, so that it is there before the tree is made and after it is removed.
   LOCKS=/run/surogate-desktop
+  # The helper pkexec runs, and beside it the manifest of the release it is of. The helper's own
+  # list of release keys is the one this computer trusts (trusted), and neither ever goes back to
+  # an older release's (apply).
+  HELPER="$ROOT/bin/surogate-apply-update"
+  HELPER_MARK="$ROOT/bin/release.json"
   # How long an apply waits, in seconds: for another's lock; for its read of a release's tarball;
   # and for each other thing it has the asking user's own processes do, all of them small. That
   # user can make each last its whole bound. The reads made with the lock held, a manifest's, a
@@ -39,6 +45,7 @@ settings() {
   OWN=()
   # The release keys' public halves: a release's manifest is signed by the private half of one of
   # them (Ed25519). A rotation lists the old key and the new for one release, which the old signs.
+  # On a computer that has a helper, the helper's list is the one that counts, and not this one.
   RELEASE_KEYS=(
     '-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEA9SZBZHM7o/wDBWPfbhPMxucA2139J9j+nFHJYNwPA1w=
@@ -113,20 +120,52 @@ supported() {
     || { echo "Surogate Desktop supports Ubuntu 24.04 LTS or a later LTS release (x64)" >&2; exit 1; }
 }
 
-# Whether manifest $1 is signed, in signature $2, by the private half of one of the release keys.
+# Whether $1 is a file as an apply leaves one, read as numbers alone, as the lock's folder is: its
+# kind and its mode as one, $2 (81ed: a file, and no link, at 0755; 81a4: one at 0644), and 0,
+# root's own.
+roots_own() {
+  [ "$(stat -c '%f %u' -- "$1" 2>/dev/null)" = "$2 0" ]
+}
+
+# The release keys this computer trusts, into the array $1 names. One file says which: the helper
+# pkexec runs, whose own list they are, whichever script asks, that helper or an install script
+# of any age. Its list is read as settings writes one, each entry between its two quotes, and the
+# helper is not run. Only a computer with no helper, at its first install, takes this script's
+# own list. A helper that is not as an apply leaves one, or lists nothing, is refused: this
+# script's list never stands in for it, and would be an older one where the script is.
+trusted() {
+  local -n list="$1"
+  local text
+  list=("${RELEASE_KEYS[@]}")
+  [ -e "$HELPER" ] || [ -L "$HELPER" ] || return 0
+  list=()
+  roots_own "$HELPER" 81ed || fail "$HELPER is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again"
+  text="$(sed -n '/^[[:space:]]*RELEASE_KEYS=($/,/^[[:space:]]*)$/p' "$HELPER")"
+  while [[ "$text" == *\'*\'* ]]; do
+    text="${text#*\'}"
+    list+=("${text%%\'*}")
+    text="${text#*\'}"
+  done
+  [ "${#list[@]}" -gt 0 ] || fail "$HELPER lists no release key: remove Surogate Desktop with --uninstall, and install it again"
+}
+
+# Whether manifest $1 is signed, in signature $2, by the private half of one of the release keys
+# this computer trusts.
 signed() {
-  local key
-  for key in "${RELEASE_KEYS[@]}"; do
+  local key keys
+  trusted keys
+  for key in "${keys[@]}"; do
     openssl pkeyutl -verify -pubin -inkey <(printf '%s\n' "$key") -rawin -in "$1" -sigfile "$2" >/dev/null 2>&1 && return 0
   done
   return 1
 }
 
 # A signed manifest's fields: a release of this channel for this platform, its tarball where every
-# release's is, its hash, each whole (jq's $ also matches before a last newline), and its tarball's
-# size in bytes, a whole number above 0 and below 10^15, which jq writes in digits alone. The
-# manifest is one JSON document: of two, the first would be applied and both kept as the version's
-# mark. Printed as "<version> <sha256> <size>".
+# release's is, its hash, each whole (jq's $ also matches before a last newline), its tarball's
+# size in bytes, a whole number above 0 and below 10^15, which jq writes in digits alone, and the
+# state schema of what the app keeps in each user's home, a whole number from 1 and below 10^15.
+# The manifest is one JSON document: of two, the first would be applied and both kept as the
+# version's mark. Printed as "<version> <sha256> <size>".
 release_of() {
   jq -ers --arg channel "$CHANNEL" '
     select(length == 1) | .[0]
@@ -134,7 +173,8 @@ release_of() {
       and .channel == $channel and .platform == "linux" and .arch == "x64"
       and .url == "releases/\(.version)/surogate-desktop-\(.version)-linux-x64.tar.gz"
       and (.sha256 | type == "string" and test("\\A[0-9a-f]{64}\\z"))
-      and (.size | type == "number" and . > 0 and . == floor and . < 1e15))
+      and (.size | type == "number" and . > 0 and . == floor and . < 1e15)
+      and (.stateSchema | type == "number" and . >= 1 and . == floor and . < 1e15))
     | "\(.version) \(.sha256) \(.size | floor)"' "$1" 2>/dev/null
 }
 
@@ -143,6 +183,26 @@ installed_version() {
   local target
   target="$(readlink "$ROOT/current" 2>/dev/null)" || return 0
   basename "$target"
+}
+
+# The release the helper pkexec runs is of, as its mark beside it names it: nothing on a computer
+# with no helper. Fails where a helper has no mark of root's own that names a release.
+helper_release() {
+  [ -e "$HELPER" ] || [ -L "$HELPER" ] || return 0
+  roots_own "$HELPER_MARK" 81a4 && jq -er '.version | select(type == "string" and test("\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))' "$HELPER_MARK" 2>/dev/null
+}
+
+# Refuses release $2, whose signed manifest is $1, unless it can read what the installed version
+# keeps in each user's home: its state schema is the installed one's or later.
+reads_state() {
+  local installed schema now
+  installed="$(installed_version)"
+  [ -n "$installed" ] || fail "Surogate Desktop is not installed: run its install script first"
+  now="$(jq -er '.stateSchema | select(type == "number" and . >= 1 and . == floor and . < 1e15) | floor' "$ROOT/current/release.json" 2>/dev/null)" \
+    || fail "the installed $installed names no state schema: run Surogate Desktop's install script again"
+  schema="$(jq -r '.stateSchema | floor' "$1")"
+  [ "$schema" -ge "$now" ] \
+    || fail "$2 cannot read what the installed $installed keeps for its users: its state schema is $schema, and $installed's $now"
 }
 
 # Whether a process runs from version folder $1: its program is in it.
@@ -263,12 +323,15 @@ taken() {
 # downloaded them can still change, so each is read once, as that user, into root's staging, and
 # only the copies are checked and used. The tree is extracted in staging, refused when anything in
 # it is not a plain file, folder or link inside it, moved into versions/<version> with its own copy
-# of bwrap, and /opt/surogate/current is switched to it by one rename; its helper is then the one
-# pkexec runs. An older version than the installed one is refused. The previous version is kept,
-# and older ones not running are removed, by an update; a repair removes none. A version that is
-# here whole is repaired as it is, and its tarball is not read: $3 may then be empty.
+# of bwrap, and /opt/surogate/current is switched to it by one rename. Its helper is then the one
+# pkexec runs, unless this computer has installed a newer release: that one's helper stays, and
+# the release keys it lists with it. An older version than the installed one is refused, unless
+# $4 is "older", as only an administrator's --version asks; it is then refused when it cannot read
+# what the installed one keeps for its users. The previous version is kept, and older ones not
+# running are removed, by an update; a repair removes none. A version that is here whole is
+# repaired as it is, and its tarball is not read: $3 may then be empty.
 apply() {
-  local manifest="$1" signature="$2" tarball="$3" file
+  local manifest="$1" signature="$2" tarball="$3" older="${4:-}" file
   # A folder or a missing file is refused here; a link, as each is copied, below.
   for file in "$manifest" "$signature" ${tarball:+"$tarball"}; do
     as_reader "$SMALL_WAIT" test -f "$file" || unread "$file"
@@ -309,9 +372,12 @@ apply() {
   read -r version sha256 size <<<"$release"
   local previous
   previous="$(installed_version)"
-  if [ -n "$previous" ] && dpkg --compare-versions "$version" lt "$previous"; then
+  if [ -n "$previous" ] && [ "$older" != older ] && dpkg --compare-versions "$version" lt "$previous"; then
     fail "$version is older than the installed $previous"
   fi
+  # A rollback's state schema is compared here, with the lock held: the version it was compared
+  # with before the lock may have been updated since.
+  [ "$older" != older ] || reads_state "$work/manifest.json" "$version"
   # The system's bwrap, which the app gives srt: a copy in the version's folder takes the app's
   # AppArmor profile, not one Ubuntu attaches to /usr/bin/bwrap. Made again at each apply, as apt
   # may have updated it.
@@ -379,7 +445,17 @@ apply() {
   else
     install -m 0755 /usr/bin/bwrap "$work/bwrap"
   fi
-  install -m 0755 "${top:-$folder}/bin/surogate-apply-update" "$work/helper"
+  # The helper pkexec runs, and the release keys it lists, are the newest release's that this
+  # computer has installed, and never go back: its mark says which release that is. An older
+  # release, as a rollback applies one, a later update that is still below the newest, and a repair
+  # after either, each leave the helper and its mark as they are.
+  local newest keep=""
+  newest="$(helper_release)" || fail "$HELPER_MARK does not say which release $HELPER is of: remove Surogate Desktop with --uninstall, and install it again"
+  if [ -n "$newest" ] && dpkg --compare-versions "$version" lt "$newest"; then keep=1; fi
+  if [ -z "$keep" ]; then
+    install -m 0755 "${top:-$folder}/bin/surogate-apply-update" "$work/helper"
+    install -m 0644 "$work/manifest.json" "$work/helper.json"
+  fi
   ln -s "$folder" "$work/current"
   # All of it is on the disk before any of it has its name. A rename reaches the disk before a
   # new file's bytes do: a power cut soon after would leave a version's folder under its name, its
@@ -400,7 +476,13 @@ apply() {
   mv -T "$work/current" "$ROOT/current"
   # The helper pkexec runs, at a path with no link in it: polkit 127 (Ubuntu 26.04) matches an
   # action's exec.path against the program's resolved path, polkit 124 (24.04) against the path given.
-  mv -T "$work/helper" "$ROOT/bin/surogate-apply-update"
+  # Its mark first: stopped between the two, the helper is still the release's before, which the
+  # same apply, run again, replaces; with the helper first, its mark would name an older release
+  # than it is of, and a release between the two could then take its place.
+  if [ -z "$keep" ]; then
+    mv -T "$work/helper.json" "$HELPER_MARK"
+    mv -T "$work/helper" "$HELPER"
+  fi
   stoppable
 
   # Kept: this version and the one before it. Removed: the rest, once nothing runs from them.
@@ -560,6 +642,39 @@ notes() {
   [ -z "${RELOGIN:-}" ] || say "$SUDO_USER was added to the kvm group: log out and back in to make the agent's commands fast."
 }
 
+# Release $1 from the base the install record names, by its own signed manifest, applied even when
+# it is older than the installed one: an administrator's rollback. A version that is still here
+# whole is switched to as it is, and only its manifest and signature are asked of the base; any
+# other is downloaded again, no more of it than its manifest's size. Refused when a release key
+# this computer trusts now did not sign it, and when it cannot read what the installed version
+# keeps in its users' homes, as its state schema says.
+roll_back() {
+  local version="$1" base download release named size tarball=""
+  base="$(jq -er '.base' "$RECORD" 2>/dev/null)" || fail "Surogate Desktop is not installed: run its install script first"
+  [ -n "$(installed_version)" ] || fail "Surogate Desktop is not installed: run its install script first"
+  scratch download --tmpdir tmp.XXXXXXXXXX
+  # Each download as the install's own (install_latest): its address's letters read as UTF-8, and
+  # no more of it than it is for, a manifest's 4096 bytes and a signature's 64 and one more.
+  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 4096 -o "$download/manifest.json" "$base/desktop/releases/$version/manifest.json" \
+    || fail "could not download $base/desktop/releases/$version/manifest.json"
+  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 65 -o "$download/manifest.json.sig" "$base/desktop/releases/$version/manifest.json.sig" \
+    || fail "could not download $base/desktop/releases/$version/manifest.json.sig"
+  signed "$download/manifest.json" "$download/manifest.json.sig" \
+    || fail "$base/desktop/releases/$version/manifest.json is not signed by Surogate's release key"
+  release="$(release_of "$download/manifest.json")" && read -r named _ size <<<"$release" && [ "$named" = "$version" ] \
+    || fail "$base/desktop/releases/$version/manifest.json is not release $version of Surogate Desktop for this computer"
+  # Before its tarball is asked for; apply compares them again, with the lock held.
+  reads_state "$download/manifest.json" "$version"
+  # A version that is here whole is not downloaded again: apply takes it as it is.
+  if ! whole "$download/manifest.json" "$ROOT/versions/$version"; then
+    say "downloading Surogate Desktop $version"
+    tarball="$download/release.tar.gz"
+    LC_ALL=C.UTF-8 curl -q -fSL --proto '=https,http' --max-filesize "$size" -o "$tarball" "$base/desktop/releases/$version/surogate-desktop-$version-linux-x64.tar.gz" \
+      || fail "could not download Surogate Desktop $version from $base"
+  fi
+  apply "$download/manifest.json" "$download/manifest.json.sig" "$tarball" older
+}
+
 install_all() {
   packages
   apparmor_profile
@@ -578,6 +693,13 @@ install_all() {
 http_url() {
   local LC_ALL=C
   [[ "$1" =~ ^https?://[^[:space:]]+$ ]]
+}
+
+# Whether $1 is a version, x.y.z in the ten digits, read in no locale of its caller's as a base is:
+# in most locales, more than ten characters are digits.
+a_version() {
+  local LC_ALL=C
+  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
 # An XDG folder: $1 when it is absolute, as the XDG specification reads it, else the default $2.
@@ -700,6 +822,20 @@ main() {
       fi
       install_all "$base"
       ;;
+    --version)
+      [ "$#" -eq 2 ] && a_version "$2" || fail "usage: install.sh --version <x.y.z>"
+      supported
+      unlinked
+      if [ "$EUID" -ne 0 ]; then
+        say "rolling back needs administrator rights: sudo asks for your password once"
+        { declare -f; declare -p http_proxy https_proxy HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY 2>/dev/null || true; echo 'main "$@"'; } \
+          | sudo -- bash -s -- "$@" || exit "$?"
+        return
+      fi
+      # What rolls back is the system's own tools, wherever its caller's PATH points.
+      export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+      roll_back "$2"
+      ;;
     --uninstall)
       unlinked "nothing was removed. Remove the link, and run this again: what it names is then yours to remove"
       if [ "$EUID" -ne 0 ]; then
@@ -722,7 +858,7 @@ main() {
       uninstall "$@"
       ;;
     *)
-      fail "usage: install.sh [--base <url>] [--uninstall]"
+      fail "usage: install.sh [--base <url>] [--version <x.y.z>] [--uninstall]"
       ;;
   esac
 }

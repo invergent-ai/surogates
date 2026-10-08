@@ -1,6 +1,7 @@
 {
   "name": "surogate-desktop",
   "version": "0.0.0",
+  "stateSchema": 1,
   "private": true,
   "description": "Surogate Desktop: lets an agent's tools work on a folder of your computer.",
   "license": "AGPL-3.0-only",

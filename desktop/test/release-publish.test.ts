@@ -55,14 +55,17 @@ const trusting = (trusted = [PUBLIC]) => readFileSync(join(RELEASE, "install.sh"
   .replace(/RELEASE_KEYS=\(\n[^)]*\)/, `RELEASE_KEYS=(\n${trusted.map((key) => `    '${key}'`).join("\n")}\n  )`);
 const NAME_OF = (version: string) => `surogate-desktop-${version}-linux-x64`;
 // A release's tarball in *out*, small, in the layout package.sh gives one: a program in Electron's
-// place, and as its root helper the install script beside publish.sh in *dir*/release, as
-// package.sh packs the repository's. *change* edits its tree before it is tarred; *then* adds to
-// the archive after it, as tar's own -r does, before it is compressed.
+// place, its app's package.json, which names its state schema, and as its root helper the install
+// script beside publish.sh in *dir*/release, as package.sh packs the repository's. *change* edits
+// its tree before it is tarred; *then* adds to the archive after it, as tar's own -r does, before
+// it is compressed.
 const packed = (dir: string, out: string, version: string, change: (top: string) => void = () => {}, then: (archive: string, name: string) => void = () => {}) => {
   const tree = mkdtempSync(join(dir, "tree-"));
   const top = join(tree, NAME_OF(version));
   mkdirSync(join(top, "bin"), { recursive: true });
+  mkdirSync(join(top, "resources", "app"), { recursive: true });
   writeFileSync(join(top, "surogate"), "#!/bin/sh\n", { mode: 0o755 });
+  writeFileSync(join(top, "resources", "app", "package.json"), JSON.stringify({ version, stateSchema: 1 }));
   copyFileSync(join(dir, "release", "install.sh"), join(top, "bin", "surogate-apply-update"));
   spawnSync("chmod", ["755", join(top, "bin", "surogate-apply-update")]);
   change(top);
@@ -74,6 +77,8 @@ const packed = (dir: string, out: string, version: string, change: (top: string)
   rmSync(tree, { recursive: true, force: true });
   return tarball;
 };
+// A change of a release's tree: *app* as its app's package.json.
+const withApp = (app: unknown) => (top: string) => writeFileSync(join(top, "resources", "app", "package.json"), JSON.stringify(app));
 // Members added to a release's archive after its tree, as tar's own -r adds them, each group with
 // its *mode*, whatever its mode here: a name that ends with / is a folder, added alone, and any
 // other a file of *contents*. So a folder closed to its owner is the archive's, and never one of
@@ -169,24 +174,71 @@ describe("the desktop's release manifest", () => {
     recording(dir, "openssl");
   });
 
-  it("signs the exact bytes of a manifest that names the tarball by its hash and its size", () => {
+  it("signs the exact bytes of a manifest that names the tarball by its hash and size, and the app's state schema", () => {
+    packed(dir, out, "1.2.3", withApp({ version: "1.2.3", stateSchema: 3 }));
     expect(sign()).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n` });
     const manifest = readFileSync(join(out, "manifest.json"));
     // The shape install.sh's --apply checks, field for field, on one line.
     expect(manifest.toString()).toBe(`${JSON.stringify({
       version: "1.2.3", channel: "stable", platform: "linux", arch: "x64", url: "releases/1.2.3/surogate-desktop-1.2.3-linux-x64.tar.gz",
-      sha256: sha256(readFileSync(tarball())), size: statSync(tarball()).size,
+      sha256: sha256(readFileSync(tarball())), size: statSync(tarball()).size, stateSchema: 3,
     })}\n`);
     expect(verify(null, manifest, keys.publicKey, readFileSync(join(out, "manifest.json.sig")))).toBe(true);
+  });
+
+  it("refuses to sign a tarball whose app names no state schema, as a release unpacks it", () => {
+    const app = (top: string) => join(top, "resources", "app", "package.json");
+    const cases: Array<[string, (top: string) => void]> = [
+      ...[{ version: "1.2.3" }, { version: "1.2.3", stateSchema: 0 }, { version: "1.2.3", stateSchema: "1" }, { version: "1.2.3", stateSchema: 1.5 }, { version: "1.2.3", stateSchema: 1e15 }]
+        .map((named): [string, (top: string) => void] => [JSON.stringify(named), withApp(named)]),
+      ["no package of the app's", (top) => rmSync(app(top))],
+      // A package of this computer's that names one, and a link to it where the app's is: the
+      // app that is installed would read whatever its own computer has there.
+      ["a link in its place", (top) => {
+        writeFileSync(join(dir, "elsewhere.json"), JSON.stringify({ version: "1.2.3", stateSchema: 1 }));
+        rmSync(app(top));
+        symlinkSync(join(dir, "elsewhere.json"), app(top));
+      }],
+    ];
+    for (const [what, change] of cases) {
+      packed(dir, out, "1.2.3", change);
+      expect(sign(), what).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: the tarball's resources/app/package.json names no stateSchema\n" });
+      // Nothing is signed, and nothing of the tarball's is left unpacked.
+      expect(readdirSync(out), what).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+      expect(readdirSync(tmp), what).toEqual([]);
+    }
+  });
+
+  it("names the state schema of the app as a release unpacks it, where the archive holds another under its package's own name", () => {
+    const app = `${NAME_OF("1.2.3")}/resources/app/package.json`;
+    // The app's package where it is, at schema 3, and after it in the archive, under another name
+    // for the same folder, one at schema 4: unpacked, as an install unpacks it, the second replaces the first.
+    packed(dir, out, "1.2.3", withApp({ version: "1.2.3", stateSchema: 3 }), (archive, name) => {
+      const after = mkdtempSync(join(dir, "after-"));
+      mkdirSync(join(after, name, "resources", "app"), { recursive: true });
+      writeFileSync(join(after, name, "resources", "app", "package.json"), JSON.stringify({ version: "1.2.3", stateSchema: 4 }));
+      symlinkSync("resources/app", join(after, name, "other"));
+      expect(spawnSync("tar", ["--owner=0", "--group=0", "-C", after, "-rf", archive, `${name}/other`, `${name}/other/package.json`]).status).toBe(0);
+    });
+    expect(sign().status).toBe(0);
+    expect((JSON.parse(readFileSync(join(out, "manifest.json"), "utf8")) as { stateSchema: number }).stateSchema).toBe(4);
+    // The archive does hold the first under the package's own name.
+    expect(spawnSync("tar", ["-xzOf", tarball(), app], { encoding: "utf8" }).stdout).toBe(JSON.stringify({ version: "1.2.3", stateSchema: 3 }));
+  });
+
+  it("names the state schema of this package in each release it makes", () => {
+    const { stateSchema } = JSON.parse(readFileSync(join(RELEASE, "..", "package.json"), "utf8")) as { stateSchema: unknown };
+    expect(Number.isInteger(stateSchema) && (stateSchema as number) >= 1).toBe(true);
   });
 
   it("signs a manifest that the install script's own checks take: its signature, and each of its fields", () => {
     expect(sign().status).toBe(0);
     // What every install and every installed helper checks a release by, from the script's
     // functions without its last line, which runs it: the two cannot drift apart.
-    const checked = spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && signed "$2" "$2.sig" && release_of "$2"`, "_", join(dir, "release", "install.sh"), join(out, "manifest.json")], {
-      encoding: "utf8",
-    });
+    // As on a computer with no helper yet, where the script's own list is the one that counts: never
+    // the list of a Surogate Desktop that this computer has installed.
+    const checked = spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && HELPER="$3" && signed "$2" "$2.sig" && release_of "$2"`, "_",
+      join(dir, "release", "install.sh"), join(out, "manifest.json"), join(dir, "no-helper")], { encoding: "utf8" });
     expect(checked).toMatchObject({ status: 0, stdout: `1.2.3 ${sha256(readFileSync(tarball()))} ${statSync(tarball()).size}\n`, stderr: "" });
   });
 
