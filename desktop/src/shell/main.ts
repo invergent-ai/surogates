@@ -40,7 +40,7 @@ import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } 
 import { PreferencesStore } from "./preferences.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
-import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
+import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { asShown } from "./pages/ui.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
@@ -156,10 +156,15 @@ let connecting = false;
 // What the web client tells once its user signed in (undefined until it has said), and the projects it serves.
 let account: DesktopAccount | null | undefined;
 
-// Whether the page is *who*'s. One that said nobody is signed in is no account's. One that has not
-// said yet is whoever is signed in to the app, whose sign-in gave it its session.
+// Whose the page is: the account it said is signed in, null once it said nobody is, and until it has
+// said, whoever is signed in to the app, whose sign-in gave it its session.
+function pageOwner(): DesktopAccount | null {
+  return account === undefined ? signedIn?.account ?? null : account;
+}
+
+// Whether the page is *who*'s. One that said nobody is signed in is no account's.
 function pageIs(who: { orgId: string; userId: string }): boolean {
-  const owner = account === undefined ? signedIn?.account ?? null : account;
+  const owner = pageOwner();
   return owner?.orgId === who.orgId && owner.userId === who.userId;
 }
 const projects = new PageProjects((message) => main?.webContents()?.send("desktop:projects", message));
@@ -1222,11 +1227,11 @@ function deviceLine(agent: Agent): string {
   return describeAgent(agent, kept?.token === null ? { status: "revoked", computer: kept.name } : null);
 }
 
-// Who the web client says is signed in, or until it has said, the app's own sign-in, whose organisation's name is Settings' alone.
+// Who the sidebar names: whose the page is (pageOwner), with the app's own sign-in's organisation, which is Settings' alone, left out.
 function sidebarAccount(): DesktopAccount | null {
-  if (account !== undefined) return account;
-  if (!signedIn) return null;
-  const { orgName: _, ...shown } = signedIn.account;
+  const owner: SignedInAccount | null = pageOwner();
+  if (owner === null) return null;
+  const { orgName: _, ...shown } = owner;
   return shown;
 }
 
