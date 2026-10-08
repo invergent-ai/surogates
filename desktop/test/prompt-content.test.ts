@@ -171,6 +171,7 @@ describe("the browser's prompts", () => {
     for (const [action, title] of [
       ["script", "Run a script in bank.example?"], ["click", "Click in bank.example?"], ["type", "Type into bank.example?"],
       ["press", "Press keys in bank.example?"], ["drag", "Drag in bank.example?"],
+      ["down", "Press the mouse in bank.example?"], ["up", "Release the mouse in bank.example?"],
     ] as const) {
       const content = approval({ kind: "browser", chat: CHAT, action, detail: "x", page });
       expect(content.title).toBe(title);

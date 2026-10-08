@@ -212,6 +212,8 @@ const MAX_ADDRESS_LINES = 12;
 const BROWSER_ACTS: Record<Exclude<BrowserAction, "use" | "open">, { title: string; does: string; label: string }> = {
   script: { title: "Run a script in", does: "wants to run this script in the page open in its browser. A script can read the page and act on the site as you.", label: "Script" },
   click: { title: "Click in", does: "wants to click the page open in its browser, at this place.", label: "Where" },
+  down: { title: "Press the mouse in", does: "wants to press the mouse button in the page open in its browser, at this place, and hold it down.", label: "Where" },
+  up: { title: "Release the mouse in", does: "wants to release the mouse button in the page open in its browser, at this place.", label: "Where" },
   type: { title: "Type into", does: "wants to type this into the page open in its browser.", label: "Text" },
   press: { title: "Press keys in", does: "wants to press these keys in the page open in its browser.", label: "Keys" },
   drag: { title: "Drag in", does: "wants to drag along these points in the page open in its browser.", label: "Path" },

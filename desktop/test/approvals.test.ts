@@ -998,6 +998,19 @@ describe("the browser on this computer", () => {
     expect(await approvals.admit(navigate(), never())).toEqual(ACT_DENIED);
   });
 
+  it("names a mouse press and a mouse release for what they are, not a click", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant" });
+    for (const action of ["down", "up"]) {
+      expect(await approvals.admit(op("browser.mouse", { action, x: 5, y: 6, button: "right" }), never())).toBeNull();
+    }
+    expect(user.asked.map((request) => request.kind === "browser" && [request.action, request.detail])).toEqual([
+      ["down", "5, 6 (right button)"], ["up", "5, 6 (right button)"],
+    ]);
+  });
+
   it("names the page each act would act in, as the browser says it just before, wherever the page sent itself", async () => {
     bind(ROOT, "ask");
     journal.bindings.allowBrowser(ROOT);

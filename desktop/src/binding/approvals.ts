@@ -71,7 +71,8 @@ export type ApprovalRequest =
   // page: an act's, the address of the page it acts in, as the browser said it just before; null when it did not say in time.
   | { kind: "browser"; chat: ChatLabel; action: BrowserAction; detail: string; page?: string | null };
 
-export type BrowserAction = "use" | "open" | "script" | "click" | "type" | "press" | "drag" | "other";
+// down and up: a mouse button pressed and held, and released, each where it is.
+export type BrowserAction = "use" | "open" | "script" | "click" | "down" | "up" | "type" | "press" | "drag" | "other";
 
 // Allow it this once; deny it; allow it and stop asking in this chat, which then works
 // freely (not offered for a network prompt); or, for a network prompt only, allow its
@@ -191,7 +192,8 @@ function browserAct({ kind, args }: Operation): { action: BrowserAction; detail:
   if (kind === "browser.mouse" && args.action === "drag") return { action: "drag", detail: JSON.stringify(args.path ?? []) };
   if (kind === "browser.mouse") {
     const button = args.button === undefined || args.button === "left" ? "" : ` (${text(args.button)} button)`;
-    return { action: "click", detail: `${text(args.x)}, ${text(args.y)}${button}` };
+    const action = args.action === "down" || args.action === "up" ? args.action : "click";
+    return { action, detail: `${text(args.x)}, ${text(args.y)}${button}` };
   }
   return { action: "other", detail: kind };
 }
