@@ -544,7 +544,7 @@ export class BrowserHost {
       // Asked about from here on, whatever is named for it.
       if (of !== undefined) this.prompted.add(of);
       const chooser = this.choosers.get(session);
-      const at = chooser ? await this.placed(session, chooser) : null;
+      const at = chooser ? await this.placed(chooser) : null;
       // Its user holds the browser, or took it over meanwhile: no input is named, or kept, for any upload.
       if (this.held !== null) return tab;
       if (!chooser || !at?.here) {
@@ -809,10 +809,9 @@ export class BrowserHost {
     kept.heard = null;
   }
 
-  // Where *chooser*'s input is now, as the browser says it (place). Null where its page is closed or
-  // this session's no more, went elsewhere since it asked, or does not say within LOOK_MS.
-  private async placed(session: string, chooser: FileChooser): Promise<Place | null> {
-    if (this.sessionOf(chooser.page()) !== session) return null;
+  // Where *chooser*'s input is now, as the browser says it (place). Null where its page is closed, went
+  // elsewhere since it asked, or does not say within LOOK_MS.
+  private async placed(chooser: FileChooser): Promise<Place | null> {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), LOOK_MS);

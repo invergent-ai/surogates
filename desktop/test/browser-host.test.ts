@@ -1154,6 +1154,18 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     await f.goto("http://fixture.test/fileinput?second");
     expect((await upload()).error?.type).toBe("browser");
     expect(await f.evaluate(filed)).toEqual([[]]);
+    // Gone from its page before the prompt is made: there is no input to name, so the prompt is about the tab's page,
+    // and the upload it is about is given to nothing.
+    await f.goto("http://fixture.test/fileinput");
+    await asksFor(a, () => f.click("#file"));
+    await f.evaluate(() => {
+      const input = document.getElementById("file")!;
+      Object.assign(window, { taken: input });
+      input.remove();
+    });
+    expect(await host.address(a, true)).toBe("http://fixture.test/twoframes");
+    expect((await upload()).error?.message).toBe(NOT_ASKED);
+    expect(await f.evaluate(() => [...(window as unknown as { taken: HTMLInputElement }).taken.files!].map((file) => file.name))).toEqual([]);
     // Its page closed.
     await named();
     const [popup] = await Promise.all([page.waitForEvent("popup", { timeout: 10_000 }), page.evaluate("void window.open('/fileinput')")]);
@@ -1208,6 +1220,13 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     expect(await holds()).toEqual([[["third.pdf"]], [["fourth.pdf"]]]);
     // Asked about once, an upload sent again under its id is one nobody was asked about.
     expect((await upload("third")).error?.message).toBe(NOT_ASKED);
+    // The input that asked after the one a prompt named is still the session's next once that one has its files.
+    await asksFor(a, () => f.click("#file"));
+    expect(await host.address(a, true, "fifth")).toBe("http://fixture.test/fileinput");
+    await asksFor(a, () => g.click("#file"));
+    expect(await upload("fifth")).toMatchObject({ ok: { files: 1 } });
+    expect(await upload("sixth")).toMatchObject({ ok: { files: 1 } });
+    expect(await holds()).toEqual([[["fifth.pdf"]], [["sixth.pdf"]]]);
   }, 60_000);
 
   it("names no input of a page too busy to say where it is, for an upload's prompt, and keeps the session's line no longer than a moment for it", async () => {
@@ -1238,9 +1257,11 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     await asksFor(a, () => page.click("#file"));
     expect((await upload()).error?.message).toBe(NOT_ASKED);
     expect(await page.evaluate(filed)).toEqual([[], []]);
-    // The next upload, about which nobody was asked, is given to the input that asked last, as before.
-    expect(await upload()).toMatchObject({ ok: { files: 1 } });
+    // The next upload, about which nobody was asked, is given to the input that asked last, as before: and its
+    // answer says what the page did that its agent has not heard of yet, as any answer that carries notices.
+    expect(await upload()).toEqual({ ok: { files: 1, notices: [FILE_ASKED] } });
     expect(await page.evaluate(filed)).toEqual([[], ["report.pdf"]]);
+    expect((await op(a, "browser.mouse", { action: "move", x: 5, y: 5 })).ok.notices).toEqual([]);
   }, 30_000);
 
   it("gives a file input as many files as it takes: one where it takes one, several where it takes several, and none where it asks for a folder", async () => {
