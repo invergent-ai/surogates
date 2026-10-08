@@ -1,7 +1,7 @@
 #!/bin/bash -p
-# Surogate Desktop's install script (spec, Section 9), and each version's
-# bin/surogate-apply-update, the root helper that applies a verified release: the current
-# version's copy at /opt/surogate/bin/surogate-apply-update is the one pkexec runs.
+# Surogate Desktop's install script, and each version's bin/surogate-apply-update, the root
+# helper that applies a verified release: the current version's copy at
+# /opt/surogate/bin/surogate-apply-update is the one pkexec runs.
 #
 #   curl -fsSL https://surogate.ai/desktop/install.sh | bash                      install, update or repair
 #   install.sh --base <url>                                   install from another server (an enterprise's)
