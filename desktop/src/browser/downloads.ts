@@ -120,13 +120,21 @@ function numbered(name: string, n: number): string {
   return `${name.slice(0, name.length - extension.length)} (${n})${extension}`;
 }
 
-// What is staged at *path*, whole; or its size, where that is over what a write may carry. Its size is
-// looked at before it is read, and no more than that is read: whatever is there, no more than a write's
-// most is held in memory. A link at its last name is not followed.
+// Why what is staged was not read, in the file tools' words for it, where no error of the system's says.
+class Unread extends Error {}
+
+// What is staged at *path*, whole; or its size, where that is over what a write may carry. It is looked at
+// before it is read, by what was opened and with no link at its last name followed: what is no file is
+// refused there, and it is opened without waiting, so a named pipe put there, which a read would wait on
+// for good with the chat's saves behind it, holds nothing back. No more than its size is read: whatever
+// is there, no more than a write's most is held in memory.
 async function stagedAt(path: string): Promise<Buffer | number> {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    const { size } = await file.stat();
+    const found = await file.stat();
+    if (found.isDirectory()) throw new Unread(strerror("EISDIR") ?? "");
+    if (!found.isFile()) throw new Unread("Not a regular file");
+    const { size } = found;
     if (size > MAX_WRITE_BYTES) return size;
     const data = Buffer.alloc(size);
     let read = 0;
@@ -186,7 +194,7 @@ async function save(
     } catch (error) {
       // Gone with the browser's close, say. Told by the error's code alone, in the file tools' words for it:
       // what the error says itself names where the browser host keeps its files on this computer.
-      const why = strerror((error as NodeJS.ErrnoException | null)?.code);
+      const why = error instanceof Unread ? error.message : strerror((error as NodeJS.ErrnoException | null)?.code);
       return notSaved(why === null ? COULD_NOT : `the file the browser kept could not be read (${why})`);
     }
     // Where the chat's downloads go: the folder's own Downloads, there or still to be made. Why nothing is saved

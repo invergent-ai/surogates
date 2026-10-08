@@ -1,4 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -313,6 +317,30 @@ describe("a download the agent's page started", () => {
       'The page downloaded "free.txt", but it was not saved: its chat was deleted.',
     );
     expect(existsSync(downloads)).toBe(false);
+  });
+
+  it("refuses what is staged where it is no file, before it reads it: a named pipe there holds no save back, and the chat's next goes on", async () => {
+    bind("free");
+    const pipe = join(base, "staged", "pipe");
+    execFileSync("mkfifo", [pipe]);
+    const save = downloadSaver(journal.bindings, saver);
+    const first = save({ ...stage("report.txt"), path: pipe });
+    const next = save(stage("notes.txt"));
+    try {
+      // Nobody writes to it: a read of it would wait for one, and the chat's line behind it.
+      expect(await Promise.race([first, new Promise((done) => setTimeout(() => done("no answer"), 3_000))])).toBe(
+        'The page downloaded "report.txt", but it was not saved: the file the browser kept could not be read (Not a regular file).',
+      );
+      expect(await next).toBe('The page downloaded "notes.txt". It is saved in the chat\'s folder as Downloads/notes.txt.');
+      expect([existsSync(pipe), readdirSync(downloads)]).toEqual([false, ["notes.txt"]]);
+    } finally {
+      // Whatever still waits to read it is let go: a writer comes, and goes.
+      try {
+        closeSync(openSync(pipe, constants.O_WRONLY | constants.O_NONBLOCK));
+      } catch {
+        // Nothing waits.
+      }
+    }
   });
 
   it("saves nothing for a chat this computer did not bind", async () => {
