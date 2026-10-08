@@ -9,7 +9,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  closeSync, createReadStream, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, truncateSync,
+  closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, truncateSync,
   writeFileSync,
 } from "node:fs";
 import { open, statfs } from "node:fs/promises";
@@ -111,23 +111,24 @@ function zstdAt(path: string): boolean {
   }
 }
 
-// *path*'s data, or a folder's entries, on disk.
-function sync(path: string): void {
-  const fd = openSync(path, "r");
+// *path*'s data, or a folder's entries, on disk. Not on the main thread, which is the windows': a
+// slow disk's flush of 2.9 GB would hold them.
+async function sync(path: string): Promise<void> {
+  const handle = await open(path, "r");
   try {
-    fsyncSync(fd);
+    await handle.sync();
   } finally {
-    closeSync(fd);
+    await handle.close();
   }
 }
 
 // *from* renamed to *to* so that a power cut finds the new name only with all of its bytes,
 // which ext4 commits apart from a rename: its data and the folder it was made in first.
-function settle(from: string, to: string): void {
-  sync(from);
-  sync(dirname(from));
+async function settle(from: string, to: string): Promise<void> {
+  await sync(from);
+  await sync(dirname(from));
   renameSync(from, to);
-  sync(dirname(to));
+  await sync(dirname(to));
 }
 
 // Whether *folder* is the whole image: its last step there, and each file at its manifest's size.
@@ -189,16 +190,16 @@ export async function deliver(options: DeliverOptions): Promise<string> {
     if (!existsSync(downloaded)) {
       const others = manifest.files.filter((other) => other !== file).reduce((sum, other) => sum + here(other), 0);
       await download(options, file, `${downloaded}.partial`, (have) => options.progress?.(others + have, total));
-      settle(`${downloaded}.partial`, downloaded);
+      await settle(`${downloaded}.partial`, downloaded);
     }
     signal?.throwIfAborted();
     await unpack(downloaded, unpacked, file, signal);
     rmSync(downloaded);
   }
-  settle(work, folder);
+  await settle(work, folder);
   writeFileSync(join(folder, COMPLETE), `${manifest.key}\n`);
-  sync(join(folder, COMPLETE));
-  sync(folder);
+  await sync(join(folder, COMPLETE));
+  await sync(folder);
   return folder;
 }
 
@@ -320,7 +321,7 @@ async function unpack(from: string, to: string, file: ImageFile, signal?: AbortS
     rmSync(from, { force: true });
     throw new Error(`${file.name} was not the file the app expects`);
   }
-  settle(partial, to);
+  await settle(partial, to);
 }
 
 export type Delivery =
