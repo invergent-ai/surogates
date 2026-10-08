@@ -127,8 +127,9 @@
           </div>
           <p class="row-note" id="browser-note" hidden></p>
         </section>
-        <section data-section="folders" hidden>
-          <h2>Folders and permissions</h2>
+        <section data-section="folders" data-focus-list="folders" hidden>
+          <!-- The keyboard's place once nothing is left to take back or stop. -->
+          <h2 tabindex="-1" data-focus="folders">Folders and permissions</h2>
           <p class="error" id="folders-failed" role="alert"></p>
           <p class="desc" id="folders-none">No chat works on a folder of this computer.</p>
           <div id="folders"></div>

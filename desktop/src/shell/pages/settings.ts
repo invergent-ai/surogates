@@ -2,7 +2,7 @@
 // sections of rows, each a label, a description and its control. All text comes from
 // the main process and is set with textContent only.
 
-import { asShown, byId, fillIcons, markTheme, showText } from "./ui.js";
+import { asShown, byId, fillIcons, keepFocus, markTheme, showText } from "./ui.js";
 
 interface Appearance {
   theme: "system" | "light" | "dark";
@@ -96,6 +96,10 @@ function line(text: string, action: string, name: string, act: () => Promise<voi
   button.type = "button";
   button.textContent = action;
   button.setAttribute("aria-label", `${action} ${asShown(name)}`);
+  // A held Enter ends this line only, not the next one's, whose button takes the keyboard after it.
+  button.addEventListener("keydown", (event) => {
+    if (event.repeat) event.preventDefault();
+  });
   // Drawn again either way: a list that changed meanwhile shows what holds, and a refusal is said above it.
   button.addEventListener("click", () => void act().then(() => {
     failure = null;
@@ -109,6 +113,11 @@ function line(text: string, action: string, name: string, act: () => Promise<voi
 // A chat's row: its title, as text, its mode, each host its user let it reach, and each background process it runs.
 // Its title is what a search finds it by.
 function chatRow(chat: Folder["chats"][number]): HTMLElement {
+  // Each line's button, named by its chat and what it ends: a redraw gives the keyboard back to it.
+  const keyed = (made: HTMLElement, what: string) => {
+    made.querySelector("button")!.dataset.focus = `${chat.root} ${what}`;
+    return made;
+  };
   const row = document.createElement("div");
   row.className = "row";
   row.dataset.label = chat.title;
@@ -122,8 +131,8 @@ function chatRow(chat: Folder["chats"][number]): HTMLElement {
   label.append(
     title,
     mode,
-    ...chat.hosts.map((host) => line(`Reaches ${host}, on every port`, "Take back", host, () => settings.takeBack(chat.root, host))),
-    ...chat.processes.map(({ id, command }) => line(`Runs ${command}`, "Stop", command, () => settings.stop(chat.root, id))),
+    ...chat.hosts.map((host) => keyed(line(`Reaches ${host}, on every port`, "Take back", host, () => settings.takeBack(chat.root, host)), `host ${host}`)),
+    ...chat.processes.map(({ id, command }) => keyed(line(`Runs ${command}`, "Stop", command, () => settings.stop(chat.root, id)), `process ${id}`)),
   );
   row.append(label);
   return row;
@@ -139,16 +148,19 @@ async function renderFolders(): Promise<void> {
     unread = said(error);
   }
   showText(byId("folders-failed"), unread ?? failure ?? "");
-  byId("folders-none").hidden = folders.length > 0 || unread !== null;
-  byId("folders").replaceChildren(...folders.map((folder) => {
-    const group = document.createElement("div");
-    group.className = "folder";
-    const path = document.createElement("h3");
-    path.className = "folder-path";
-    showText(path, folder.folder);
-    group.append(path, ...folder.chats.map(chatRow));
-    return group;
-  }));
+  // A Take back or Stop that had the keyboard keeps it, or gives it to the line that took its place.
+  keepFocus(() => {
+    byId("folders-none").hidden = folders.length > 0 || unread !== null;
+    byId("folders").replaceChildren(...folders.map((folder) => {
+      const group = document.createElement("div");
+      group.className = "folder";
+      const path = document.createElement("h3");
+      path.className = "folder-path";
+      showText(path, folder.folder);
+      group.append(path, ...folder.chats.map(chatRow));
+      return group;
+    }));
+  });
   // Rows drawn since the search was typed are searched too.
   search();
 }
