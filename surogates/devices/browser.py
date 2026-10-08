@@ -38,7 +38,9 @@ answer in the session's tab: its first tab, or one after its last closed, whethe
 this navigation made the tab or an earlier operation did.  The session's browser pane
 hears of it (browser.provisioned), of a close that closed one (browser.destroyed) and
 of a computer with no supported browser (browser.unavailable), each with
-``computer: true``.  Errors:
+``computer: true`` and the session whose tab it is.  A sub-agent's are written to its
+root chat's log too: the chat's pane shows its browser while a tab of its own or of
+a sub-agent's is open.  Errors:
 
   {"type": "browser", "message"}     the page or the browser failed: a RuntimeError,
                                      which the handlers report as their own failure
@@ -72,6 +74,7 @@ from uuid import UUID
 
 from surogates.browser.client import BrowserClientBase
 from surogates.browser.control import paused_by_user_result
+from surogates.devices.binding import is_binding_root
 from surogates.devices.workspace import (
     MAX_MESSAGE_CHARS,
     DeviceOperationError,
@@ -105,17 +108,38 @@ class BrowserRefusal(Exception):
         self.error = json.loads(result).get("error")
 
 
-async def tell_pane(session_store: Any, session_id: Any, event: EventType) -> None:
+async def tell_pane(
+    session_store: Any, session_id: Any, event: EventType, session_config: dict[str, Any] | None = None,
+) -> None:
     """Tell the session's browser pane of its browser on the user's computer.
 
-    The browser call is answered whether or not the pane hears: what it did on the computer is done.
+    A sub-agent's tab is in its chat's browser: its root chat's log is written the same event, which
+    names the sub-agent, as a sub-agent's artifacts reach its parent's thread
+    (surogates.tools.builtin.delegate).  The chat's pane counts a tab for each session it is told of.
+
+    The browser call is answered whether or not a pane hears: what it did on the computer is done.
     """
     if session_store is None or session_id is None:
         return
-    try:
-        await session_store.emit_event(UUID(str(session_id)), event, {"session_id": str(session_id), "computer": True})
-    except Exception:
-        logger.warning("Could not tell the browser pane of session %s of %s", session_id, event.value, exc_info=True)
+    logs = [session_id]
+    if not is_binding_root(session_id, session_config):
+        # As the server stamped it when the session was made under its chat, never from tool input.
+        logs.append((session_config or {})["sandbox_root_session_id"])
+    for log in logs:
+        try:
+            await session_store.emit_event(UUID(str(log)), event, {"session_id": str(session_id), "computer": True})
+        except Exception:
+            logger.warning(
+                "Could not tell the browser pane of session %s of %s of session %s",
+                log, event.value, session_id, exc_info=True,
+            )
+
+
+def of_a_sub_agent(event: Any) -> bool:
+    """Whether a browser event in a session's log names another session: a sub-agent's tab, written to
+    its root chat's log for the chat's pane."""
+    named = event.data.get("session_id")
+    return named is not None and str(named) != str(event.session_id)
 
 
 def answering_refusals(handler: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
@@ -130,7 +154,10 @@ def answering_refusals(handler: Callable[..., Awaitable[str]]) -> Callable[..., 
             return await handler(arguments, **kwargs)
         except BrowserRefusal as refusal:
             if refusal.error == "no_browser":
-                await tell_pane(kwargs.get("session_store"), kwargs.get("session_id"), EventType.BROWSER_UNAVAILABLE)
+                await tell_pane(
+                    kwargs.get("session_store"), kwargs.get("session_id"), EventType.BROWSER_UNAVAILABLE,
+                    kwargs.get("session_config"),
+                )
             return refusal.result
 
     return answered

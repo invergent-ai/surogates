@@ -192,16 +192,28 @@ async def _on_computer(app_state: Any, session_id: UUID, tenant: TenantContext) 
 
 
 async def _computer_browser_state(app_state: Any, session_id: UUID) -> BrowserStateResponse:
-    """A local-folder chat's browser, as its last browser event says it.
+    """A local-folder chat's browser, as its browser events say it.
+
+    Open while a tab is: the session's own, or a sub-agent's, whose events the worker writes to its
+    root chat's log too, each naming the session whose tab it is (surogates.devices.browser.tell_pane).
+    A computer with no supported browser has no tab either, whoever's call found it so.
 
     The browser is on the user's computer, which the server does not watch: a tab the
     user closed there is still open here until the agent's next browser call says.
     """
     events = await app_state.session_store.get_events(session_id, types=_COMPUTER_BROWSER)
-    last = events[-1].type if events else None
-    if last == EventType.BROWSER_PROVISIONED.value:
+    tabs: set[str] = set()
+    for event in events:
+        of = str((event.data or {}).get("session_id") or session_id)
+        if event.type == EventType.BROWSER_PROVISIONED.value:
+            tabs.add(of)
+        elif event.type == EventType.BROWSER_DESTROYED.value:
+            tabs.discard(of)
+        else:
+            tabs.clear()
+    if tabs:
         status = "live"
-    elif last == EventType.BROWSER_UNAVAILABLE.value:
+    elif events and events[-1].type == EventType.BROWSER_UNAVAILABLE.value:
         status = "unavailable"
     else:
         raise HTTPException(status_code=404, detail="No browser for session")

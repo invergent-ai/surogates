@@ -225,6 +225,84 @@ async def test_the_sessions_pane_hears_there_is_no_browser_on_the_computer(compu
     ]
 
 
+async def test_a_sub_agents_tab_on_the_computer_is_told_to_its_root_chats_pane_too(computer) -> None:
+    rig = computer(
+        {"ok": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []}},
+        {"ok": {"closed": True}},
+        {"error": {"type": "no_browser", "message": "none"}},
+    )
+    session, root = rig.kwargs["session_id"], uuid4()
+    # As the server stamps a session made under a chat: the chat whose folder it works in.
+    rig.kwargs["session_config"]["sandbox_root_session_id"] = str(root)
+    # Each names the sub-agent: the chat's pane counts a tab for each session.
+    told = {"session_id": str(session), "computer": True}
+
+    await browser._browser_navigate_handler({"url": "https://example.com", "snapshot": False}, **rig.kwargs)
+    await browser._browser_close_handler({}, **rig.kwargs)
+    await browser._browser_navigate_handler({"url": "https://example.com"}, **rig.kwargs)
+
+    assert rig.kwargs["session_store"].emitted == [
+        (session, EventType.BROWSER_PROVISIONED, told), (root, EventType.BROWSER_PROVISIONED, told),
+        (session, EventType.BROWSER_DESTROYED, told), (root, EventType.BROWSER_DESTROYED, told),
+        (session, EventType.BROWSER_UNAVAILABLE, told), (root, EventType.BROWSER_UNAVAILABLE, told),
+    ]
+
+
+async def test_a_chat_that_is_its_own_root_is_told_of_its_tab_once(computer) -> None:
+    rig = computer({"ok": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []}})
+    session = rig.kwargs["session_id"]
+    # A project's thread names itself: its own sandbox root.
+    rig.kwargs["session_config"]["sandbox_root_session_id"] = str(session)
+
+    await browser._browser_navigate_handler({"url": "https://example.com", "snapshot": False}, **rig.kwargs)
+
+    assert rig.kwargs["session_store"].emitted == [
+        (session, EventType.BROWSER_PROVISIONED, {"session_id": str(session), "computer": True}),
+    ]
+
+
+async def test_a_root_chats_pane_that_cannot_be_told_leaves_the_sub_agents_own_told_and_its_call_answered(computer) -> None:
+    rig = computer({"ok": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []}})
+    session, root = rig.kwargs["session_id"], uuid4()
+    rig.kwargs["session_config"]["sandbox_root_session_id"] = str(root)
+    events = rig.kwargs["session_store"]
+    record = events.emit_event
+
+    async def root_away(session_id: UUID, *args: Any) -> int:
+        if session_id == root:
+            raise RuntimeError("the root's event log is away")
+        return await record(session_id, *args)
+
+    events.emit_event = root_away
+    body = json.loads(await browser._browser_navigate_handler({"url": "https://example.com", "snapshot": False}, **rig.kwargs))
+
+    assert body["title"] == "Example"
+    assert events.emitted == [(session, EventType.BROWSER_PROVISIONED, {"session_id": str(session), "computer": True})]
+
+
+def test_a_sub_agents_tab_closed_on_the_computer_is_not_told_to_its_root_chats_agent() -> None:
+    from surogates.harness.loop import AgentHarness
+
+    root, child = uuid4(), uuid4()
+
+    def closed(log: UUID, **data: Any) -> SimpleNamespace:
+        return SimpleNamespace(id=1, session_id=log, type=EventType.BROWSER_DESTROYED.value, data=data)
+
+    def told(event: SimpleNamespace) -> list[str]:
+        return [message["content"] for message in AgentHarness._rebuild_messages(SimpleNamespace(), [event])]
+
+    # In the root's log for its pane alone: the root's own tab is as it was, and its agent is told of no close.
+    assert told(closed(root, session_id=str(child), computer=True)) == []
+    # A session's own tab closed is told to its agent: the root's and the sub-agent's on the computer, the
+    # cloud's, and one that names no session.
+    for own in (
+        closed(root, session_id=str(root), computer=True), closed(child, session_id=str(child), computer=True),
+        closed(root, session_id=str(root), browser_id="b-1"), closed(root, browser_id="b-1"),
+    ):
+        [note] = told(own)
+        assert "The browser was closed" in note
+
+
 async def test_a_pane_that_cannot_be_told_leaves_the_browser_call_answered(computer) -> None:
     rig = computer({"ok": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []}})
 

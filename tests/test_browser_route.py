@@ -83,11 +83,14 @@ class StubControl:
 
 
 class StubSessions:
-    """The session store in a test: each session as its row has it, and the types of its browser events in order."""
+    """The session store in a test: each session as its row has it, and its browser events in order.
+
+    An event is its type alone, for the session's own, or its type and the sub-agent whose it is.
+    """
 
     def __init__(self) -> None:
         self.sessions: dict[UUID, Any] = {}
-        self.events: dict[UUID, list[str]] = {}
+        self.events: dict[UUID, list[str | tuple[str, UUID]]] = {}
 
     async def get_session(self, session_id: UUID) -> Any:
         if session_id not in self.sessions:
@@ -96,7 +99,11 @@ class StubSessions:
 
     async def get_events(self, session_id: UUID, *, types: list[Any] | None = None, **_: Any) -> list[Any]:
         wanted = {kind.value for kind in types or []}
-        return [SimpleNamespace(type=kind) for kind in self.events.get(session_id, []) if kind in wanted]
+        events = [entry if isinstance(entry, tuple) else (entry, session_id) for entry in self.events.get(session_id, [])]
+        return [
+            SimpleNamespace(type=kind, data={"session_id": str(of), "computer": True})
+            for kind, of in events if kind in wanted
+        ]
 
     def emitter(self, events: list[tuple[str, str, dict]]):
         """The app's emitter in a test: what it emits is recorded, and is in its session's log for the routes to read back."""
@@ -246,6 +253,67 @@ class TestStateEndpoint:
         other.state.session_store = store
         async with AsyncClient(transport=ASGITransport(app=other), base_url="http://test") as client:
             assert (await client.get(f"/v1/sessions/{sid}/browser/state")).status_code == 404
+
+    async def test_a_local_folder_chats_browser_is_open_while_a_tab_of_its_own_or_of_a_sub_agents_is(self, app_factory) -> None:
+        build, _resolver, _control = app_factory
+        sid, child, another = uuid4(), uuid4(), uuid4()
+        store = StubSessions()
+        store.sessions[sid] = SimpleNamespace(
+            org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
+        )
+        app = build()
+        app.state.session_store = store
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            async def status() -> str | int:
+                response = await client.get(f"/v1/sessions/{sid}/browser/state")
+                return response.json()["status"] if response.status_code == 200 else response.status_code
+
+            # A sub-agent's tab alone, as the worker writes it to its root's log: the chat's browser is open there.
+            store.events[sid] = [("browser.provisioned", child)]
+            assert await status() == "live"
+            # The chat's own tab too, then the sub-agent's closed: the chat's own is open still.
+            store.events[sid] += ["browser.provisioned", ("browser.destroyed", child)]
+            assert await status() == "live"
+            # Another sub-agent's, then the chat's own closed: that sub-agent's is open still.
+            store.events[sid] += [("browser.provisioned", another), "browser.destroyed"]
+            assert await status() == "live"
+            # The last of them closed: no browser for the chat.
+            store.events[sid].append(("browser.destroyed", another))
+            assert await status() == 404
+            # A sub-agent's call found no supported browser there: no tab is open either, whoever's it was.
+            store.events[sid] += ["browser.provisioned", ("browser.unavailable", child)]
+            assert await status() == "unavailable"
+
+    async def test_a_token_that_does_not_cover_a_root_chat_reads_nothing_of_its_sub_agents_browser(self, app_factory) -> None:
+        build, _resolver, _control = app_factory
+        sid, child = uuid4(), uuid4()
+        on_computer = {"execution": {"kind": "device", "device_id": str(uuid4())}}
+        store = StubSessions()
+        store.sessions[sid] = SimpleNamespace(org_id=ORG_1, agent_id="agent", config=on_computer)
+        store.sessions[child] = SimpleNamespace(
+            org_id=ORG_1, agent_id="agent", config={**on_computer, "sandbox_root_session_id": str(sid)},
+        )
+        # The sub-agent's tab, in its own log and in its root's.
+        store.events[child] = ["browser.provisioned"]
+        store.events[sid] = [("browser.provisioned", child)]
+
+        async def statuses(scope: UUID, of: UUID) -> list[int]:
+            app = build(user_id=None, session_scope_id=scope)
+            app.state.session_store = store
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                return [
+                    (await client.get(f"{prefix}/sessions/{of}/browser/state")).status_code
+                    for prefix in ("/v1", "/v1/api")
+                ]
+
+        # Another session's token reads the root's state no more for the sub-agent's tab in it.
+        assert await statuses(uuid4(), sid) == [404, 404]
+        # The sub-agent's own token reads its own, never its root's.
+        assert await statuses(child, child) == [200, 200]
+        assert await statuses(child, sid) == [404, 404]
+        # The root's own token reads the chat's browser, its sub-agent's tab in it.
+        assert await statuses(sid, sid) == [200, 200]
 
     async def test_a_token_for_another_session_does_not_read_a_local_folder_chats_browser(self, app_factory) -> None:
         build, _resolver, _control = app_factory

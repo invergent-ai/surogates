@@ -9,6 +9,7 @@ import re
 from uuid import UUID
 
 from surogates.devices.binding import device_of
+from surogates.devices.browser import of_a_sub_agent
 from surogates.harness.context_files import load_folder_context
 from surogates.harness.loop_attachments import (
     _attachments_note_from_data,
@@ -495,7 +496,9 @@ class ContextReplayMixin:
                 if note is not None:
                     held_reports.append(note)
 
-            elif etype == EventType.BROWSER_DESTROYED.value:
+            # A sub-agent's tab on the user's computer is in this log for the
+            # chat's pane alone: this session's own tab is as it was.
+            elif etype == EventType.BROWSER_DESTROYED.value and not of_a_sub_agent(event):
                 # Without this the close is a UI-only event: the model keeps
                 # the screenshots and page text it already has, and its next
                 # browser call quietly provisions a fresh blank one. Nothing

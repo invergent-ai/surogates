@@ -686,6 +686,13 @@ export interface AgentChatState {
   stopped: boolean;
   workspaceRefreshKey: number;
   browser: AgentChatBrowserState | null;
+  /**
+   * The sessions with a tab open in the browser on the user's computer: the
+   * chat's own, and its sub-agents', whose browser events the server writes to
+   * their root chat's log too. The chat's browser is there while one is left.
+   * Empty for a chat in the cloud, whose browser is one.
+   */
+  browserTabs: string[];
   // "simple" groups iteration content under one-liners + appends a
   // TurnSummaryCard; "expert" renders today's per-tool timeline.
   // Persisted per-user via AgentChatAdapter.getChatViewMode /

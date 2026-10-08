@@ -584,6 +584,55 @@ describe("AgentChat", () => {
     expect(pane()).toBe("The chat's computer has no supported browser.");
   });
 
+  it("shows a chat the browser its sub-agent opened on its computer, heard on the chat's own stream, until the last tab there closes", async () => {
+    const stream = new FakeEventStream();
+    const opened: string[] = [];
+    const adapter = {
+      ...createAdapter(stream),
+      openEventStream(input: { sessionId: string }) {
+        opened.push(input.sessionId);
+        return stream;
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const draw = ({ available }: { available: boolean }) => <p data-testid="host-pane">{available ? "open there" : "none there"}</p>;
+    const card = () => container?.querySelector('[data-testid="session-pane-card-browser"]') ?? null;
+    const hostPane = () => container?.querySelector('[data-testid="host-pane"]')?.textContent;
+    const hear = async (type: "browser.provisioned" | "browser.destroyed", id: number, session: string) => {
+      await act(async () => {
+        stream.emit(type, id, { session_id: session, computer: true });
+        await Promise.resolve();
+      });
+    };
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" computerBrowser={draw} />);
+      await Promise.resolve();
+    });
+    expect(card()).toBeNull();
+
+    // The sub-agent's tab, written by the server to its root chat's log: the chat offers its browser.
+    await hear("browser.provisioned", 10, "child-1");
+    expect(card()?.textContent).toContain("On the chat's computer");
+    await openPane(container, "browser");
+    expect(hostPane()).toBe("open there");
+
+    // The chat's own tab too, then the sub-agent's closed: the chat's own is showing still.
+    await hear("browser.provisioned", 11, "s-1");
+    await hear("browser.destroyed", 12, "child-1");
+    expect(card()).not.toBeNull();
+    expect(hostPane()).toBe("open there");
+
+    // The last tab closed: the card and the pane go.
+    await hear("browser.destroyed", 13, "s-1");
+    expect(card()).toBeNull();
+    expect(container.querySelector('[data-testid="browser-pane"]')).toBeNull();
+    // All of it on the one stream the chat has: none was opened for the sub-agent.
+    expect(opened).toEqual(["s-1"]);
+  });
+
   it("toggles the browser pane from its card", async () => {
     const stream = new FakeEventStream();
     const adapter = {

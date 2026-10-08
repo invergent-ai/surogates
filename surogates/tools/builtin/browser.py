@@ -360,7 +360,7 @@ async def _browser_navigate_handler(
 
     # A tab of the session's opened on the user's computer: its pane shows that the browser is open there.
     if getattr(client, "opened", False):
-        await tell_pane(session_store, session_id, EventType.BROWSER_PROVISIONED)
+        await tell_pane(session_store, session_id, EventType.BROWSER_PROVISIONED, session_config)
     payload: dict[str, Any] = _noted({"url": result["url"], "title": result["title"]}, client)
     if snapshot is None:
         payload["snapshot_error"] = (
@@ -584,7 +584,7 @@ async def _browser_close_handler(
         closed = await DeviceBrowserClient(workspace_io.runner).close_tab()
         forget_snapshot_cache(str(session_id))
         if closed:
-            await tell_pane(session_store, session_id, EventType.BROWSER_DESTROYED)
+            await tell_pane(session_store, session_id, EventType.BROWSER_DESTROYED, session_config)
         return json.dumps({"closed": closed})
     if _on_a_computer(session_config):
         return browser_unavailable_result(_NO_COMPUTER)
