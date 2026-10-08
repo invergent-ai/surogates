@@ -665,6 +665,24 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(`${loop.status} ${loop.stderr}`).toMatch(/^(0 |1 Surogate Desktop: the release's archive links outside itself: resources\/(loop|round)\n)$/);
   });
 
+  it("says a file's or a link's name as one word of one line, whatever the name holds", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    // A name that would read as a line of the helper's own, and colour what follows it.
+    const line = "\nSurogate Desktop: 9.9.9 is installed\u001b[31m";
+    const quoted = "\\nSurogate Desktop: 9.9.9 is installed\\E[31m";
+    for (const [index, name] of ["manifest.json", "manifest.json.sig", "release.tar.gz"].entries()) {
+      const names = ["/home/tester/manifest.json", "/home/tester/manifest.json.sig", "/home/tester/release.tar.gz"];
+      names[index] = `/home/tester/no ${name}${line}`;
+      expect(docker(["exec", box.container, "/opt/surogate-test/install.sh", "--apply", ...names]), name)
+        .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: $'/home/tester/no ${name}${quoted}' is not a downloaded release's file\n` });
+    }
+    const linked = releaseOf("1.0.0", (top) => symlinkSync("/etc", join(top, "resources", `out${line}`)));
+    manifestOf("1.0.0", linked);
+    expect(apply(linked)).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: the release's archive links outside itself: $'resources/out${quoted}'\n` });
+  });
+
   it("says what stops it: its arguments, a user who is not root, too little room, and bubblewrap missing", () => {
     const usage = "Surogate Desktop: usage: surogate-apply-update --apply <manifest> <signature> <tarball>\n";
     expect(root("/opt/surogate-test/install.sh --apply /home/tester/manifest.json")).toMatchObject({ status: 1, stderr: usage });

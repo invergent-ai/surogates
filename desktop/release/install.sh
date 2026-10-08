@@ -46,6 +46,12 @@ say() {
   echo "Surogate Desktop: $*"
 }
 
+# A file's or a link's name as one word of one line, whatever it holds: a new line in one, or a
+# terminal's codes, would otherwise read as lines of this script's own.
+named() {
+  printf '%q' "$1"
+}
+
 # A step that failed where no failure is expected: said in a line of this script's own, after
 # whatever the step said itself.
 unexpected() {
@@ -147,7 +153,7 @@ taken() {
     | head -c "$(( most + 1 ))" 2>/dev/null >"$copy" && ends=(0 0) || ends=("${PIPESTATUS[@]}")
   # Root's own end of the pipe failed: the disk's fault, and not the file's.
   [ "${ends[1]}" -eq 0 ] || fail "$ROOT/staging could not be written: is its disk full?"
-  [ "${ends[0]}" -eq 0 ] && [ "$(stat -c %s "$copy")" -le "$most" ] || fail "$file is not a downloaded release's file"
+  [ "${ends[0]}" -eq 0 ] && [ "$(stat -c %s "$copy")" -le "$most" ] || fail "$(named "$file") is not a downloaded release's file"
 }
 
 # Applies a release as root: its manifest $1, signature $2 and tarball $3, which the user who
@@ -161,7 +167,7 @@ apply() {
   local manifest="$1" signature="$2" tarball="$3" file
   # A folder or a missing file is refused here; a link, as each is copied, below.
   for file in "$manifest" "$signature" "$tarball"; do
-    as_reader test -f "$file" || fail "$file is not a downloaded release's file"
+    as_reader test -f "$file" || fail "$(named "$file") is not a downloaded release's file"
   done
   mkdir -p "$ROOT/versions" "$ROOT/bin"
   # Root's alone from its first moment: the update's lock is on it.
@@ -198,7 +204,7 @@ apply() {
   # Room for the tarball's copy and the tree it unpacks to, which is about two and a half times
   # its size. No more of the tarball is copied than the size that room was found for.
   local size need room
-  size="$(as_reader stat -c %s -- "$tarball" 2>/dev/null)" && [[ "$size" =~ ^[0-9]+$ ]] || fail "$tarball is not a downloaded release's file"
+  size="$(as_reader stat -c %s -- "$tarball" 2>/dev/null)" && [[ "$size" =~ ^[0-9]+$ ]] || fail "$(named "$tarball") is not a downloaded release's file"
   need=$(( size / 256 ))
   room="$(df --output=avail -k "$ROOT" | tail -n 1)"
   [ "$room" -ge "$need" ] || fail "$ROOT needs $(( (need + 1023) / 1024 )) MB free to apply this release, and has $(( room / 1024 )) MB"
@@ -233,7 +239,7 @@ apply() {
     while IFS= read -r -d '' link; do
       target="$(readlink "$link")"
       [[ "$target" != /* ]] && [[ "$(realpath -ms "${link%/*}/$target")" == "$top"/* ]] && [[ "$(realpath -m "$link" 2>/dev/null)" == "$top"/* ]] \
-        || fail "the release's archive links outside itself: ${link#"$top"/}"
+        || fail "the release's archive links outside itself: $(named "${link#"$top"/}")"
     done < <(find "$top" -type l -print0)
     # The app and its helper are programs, no folders, and bin a folder of the tree's own, where
     # this version's bwrap goes.
