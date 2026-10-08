@@ -243,7 +243,8 @@ async function download(options: DeliverOptions, file: ImageFile, partial: strin
           // Past the size the manifest names: it is not the file.
           if (have + read.value.length > file.downloadSize) break;
           hash.update(read.value);
-          await out.write(read.value);
+          // A write may take less than it is given: what is hashed is what is on disk.
+          for (let at = 0; at < read.value.length;) at += (await out.write(read.value, at)).bytesWritten;
           have += read.value.length;
           got(have);
         }
@@ -279,6 +280,9 @@ async function unpack(from: string, to: string, file: ImageFile): Promise<void> 
   });
   if (said !== null) {
     rmSync(partial, { force: true });
+    // Kept while it is the download, as when the disk is full or zstd is missing; one that no longer
+    // is, as after bit rot, goes, so the next try downloads it again.
+    if (sizeOf(from) !== file.downloadSize || (await hashOf(from)).digest("hex") !== file.downloadSha256) rmSync(from, { force: true });
     throw new Error(`zstd could not unpack ${file.download}: ${said}`);
   }
   if (sizeOf(partial) !== file.size || (await hashOf(partial)).digest("hex") !== file.sha256) {

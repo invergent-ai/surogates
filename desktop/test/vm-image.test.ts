@@ -199,6 +199,29 @@ describe("the guest image's delivery", () => {
     expect(readdirSync(join(images(), `${KEY}.partial`)).sort()).toEqual(["rootfs.img"]);
   });
 
+  it("unpacks a download already in its folder without fetching it, and when zstd cannot, keeps it only while it is still the download", async () => {
+    const work = join(images(), `${KEY}.partial`);
+    mkdirSync(work, { recursive: true });
+    // The download, whole, and zstd unable to write beside it, as on a full disk: it is kept, and unpacked once zstd can.
+    writeFileSync(join(work, "rootfs.img.zst"), served.get(`/desktop/vm/${KEY}/rootfs.img.zst`)!);
+    chmodSync(work, 0o500);
+    try {
+      await expect(deliver(options())).rejects.toThrow(/^zstd could not unpack rootfs\.img\.zst: /);
+    } finally {
+      chmodSync(work, 0o700);
+    }
+    expect(existsSync(join(work, "rootfs.img.zst"))).toBe(true);
+    expect(readFileSync(join(await deliver(options()), "rootfs.img")).equals(rootfs)).toBe(true);
+    expect(heard.map(({ url }) => url)).toEqual([`/desktop/vm/${KEY}/vmlinuz.zst`]);
+    // One that is no longer the download, as after bit rot, goes, and the next try downloads it again.
+    rmSync(join(images(), KEY), { recursive: true });
+    mkdirSync(work);
+    writeFileSync(join(work, "rootfs.img.zst"), randomBytes(1000));
+    await expect(deliver(options())).rejects.toThrow(/^zstd could not unpack rootfs\.img\.zst: /);
+    expect(existsSync(join(work, "rootfs.img.zst"))).toBe(false);
+    expect(readFileSync(join(await deliver(options()), "rootfs.img")).equals(rootfs)).toBe(true);
+  });
+
   it("checks the free space before it fetches anything", async () => {
     manifest = { ...manifest, files: manifest.files.map((file) => ({ ...file, size: 2 ** 52 })) };
     await expect(deliver(options())).rejects.toThrow(/^there is not enough free disk space: it needs \d+\.\d GB, and \d+\.\d GB is free$/);
