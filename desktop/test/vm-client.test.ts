@@ -18,11 +18,13 @@ let clients: VmClient[];
 const SLEEP = "31.357";
 const running = () => Number(spawnSync("pgrep", ["-fc", `^sleep ${SLEEP}$`], { encoding: "utf8" }).stdout.trim() || 0);
 
-// *ready*: what the client waits for before a boot, as the app's image.
+// *ready*: what the client waits for before a boot, as the app's image. Its stand-in boots open a KVM
+// device of their own, which this test makes, never this computer's.
 function client(ready?: (signal: AbortSignal) => Promise<void>): VmClient {
+  writeFileSync(join(dir, "kvm"), "");
   const options: VmOptions = {
     kernel: "/i/vmlinuz", rootfs: "/i/rootfs.img", agentDisk: "/a/agent.img", sessions: join(dir, "sessions.img"), run: join(dir, "run"),
-    console: join(dir, "console.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" },
+    console: join(dir, "console.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" }, kvm: join(dir, "kvm"),
   };
   const made = new VmClient({
     vm: options,
