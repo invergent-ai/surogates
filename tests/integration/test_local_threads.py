@@ -16,11 +16,16 @@ from surogates.devices.binding import Binding
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.store import DeviceStore
 from surogates.harness.tool_exec import execute_single_tool
+from surogates.sandbox.pool import SandboxPool, sandbox_session_key
 from surogates.session.events import EventType
+from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
 from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.fake_laptop import FakeLaptop
+from tests.test_steer_loop import _final_response
+from tests.thread_pods import ThreadPods
 
+from . import test_turn_sagas
 from .test_device_sessions import has_failed, is_bound
 from .test_devices import (  # noqa: F401  (api and link_url are fixtures)
     AGENT_ID,
@@ -35,6 +40,7 @@ from .test_devices import (  # noqa: F401  (api and link_url are fixtures)
     register,
 )
 from .test_workstream_library import library, upload
+from .test_turn_sagas import a_turn, calling
 from .test_workstream_overview import rows
 from .test_workstream_threads import PROPOSED, call_tool, children_of, events_of, queued, start, turn_ends
 from .test_workstreams import create, master_of
@@ -371,3 +377,49 @@ async def answered_by_the_journal(api, project: dict, master) -> object:
     assert await ops.complete(UUID(device["id"]), 1, bind.id, bind.digest, {"ok": None}) == "completed"
     assert (await begin(api, project, thread_id)).status_code == 201
     return await api.app.state.session_store.get_session(UUID(thread_id))
+
+
+async def test_a_thread_on_the_users_computer_works_in_its_folder_and_reports_to_its_master(api, laptop, monkeypatch, tmp_path):
+    _, master, thread = await begun_local(api, laptop)
+    # The harness reads the project's storage, as a worker's does.
+    made = test_turn_sagas._make_loop_harness
+
+    def with_storage(**kwargs):
+        harness = made(**kwargs)
+        harness._storage = api.app.state.storage
+        return harness
+
+    monkeypatch.setattr(test_turn_sagas, "_make_loop_harness", with_storage)
+    pods = ThreadPods(tmp_path / "pods")
+    pool = SandboxPool(pods)
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "Budget.xlsx", "content": "Total,42\n"})),
+        _final_response("The totals are in Budget.xlsx."),
+    ], pool=pool)
+    assert (laptop.folder / "Budget.xlsx").read_text() == "Total,42\n"
+    # Its work is the folder's: no pod, no copy, nothing landed.
+    assert (pods.pods, pods.copies) == ({}, {})
+    [report] = await events_of(api, master.id, EventType.WORKER_COMPLETE)
+    assert (report.data["worker_id"], report.data["title"], report.data["result"]) == (
+        str(thread.id), "Check the totals", "The totals are in Budget.xlsx.",
+    )
+    assert "landing" not in report.data, report.data
+    assert await queued(api, master)
+
+
+async def test_a_helper_of_a_thread_on_the_users_computer_works_in_the_threads_folder(api, laptop):
+    _, _, thread = await begun_local(api, laptop)
+    store = api.app.state.session_store
+    helper = await create_child_session(store=store, parent=thread, channel="worker")
+    written = await execute_single_tool(
+        {"id": "call_1", "function": {"name": "write_file", "arguments": json.dumps({"path": "Notes.md", "content": "42\n"})}},
+        session=helper, lease=await store.try_acquire_lease(helper.id, "worker-local", ttl_seconds=60), store=store,
+        tools=builtin_tools(), tenant=MagicMock(asset_root="/tmp/test"),
+        redis=api.app.state.redis, session_factory=api.app.state.session_factory,
+    )
+    assert (laptop.folder / "Notes.md").is_file(), written["content"]
+    assert (laptop.folder / "Notes.md").read_text() == "42\n"
+    # Through the thread's binding: the helper names the thread as its root, and is never bound itself.
+    assert (helper.config["execution"], sandbox_session_key(helper)) == (thread.config["execution"], str(thread.id))
+    with pytest.raises(ValueError, match="Only a root session is bound to a folder"):
+        await journal(api).bind(session_id=helper.id, device_id=UUID(laptop.device_id), folder=FOLDER, nonce=NONCE)
