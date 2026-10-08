@@ -97,9 +97,10 @@ describe("the release's check of the guest's kernel", () => {
     const text = stanzas.map(([name, version]) => `Package: ${name}\nArchitecture: amd64\nVersion: ${version}\n`).join("\n");
     return spawnSync("xz", ["-c"], { input: text }).stdout;
   };
-  // Not spawnSync: the archive is this process's own server, which must answer meanwhile.
-  const check = () => new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
-    execFile(join(REPO, "images/guest/kernel-current.sh"), { env: { ...process.env, UBUNTU_SECURITY: archive } }, (error, stdout, stderr) => {
+  // Not spawnSync: the archive is this process's own server, which must answer meanwhile. *repo*: the
+  // repository whose script and Dockerfile it reads.
+  const check = (repo = REPO) => new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
+    execFile(join(repo, "images/guest/kernel-current.sh"), { env: { ...process.env, UBUNTU_SECURITY: archive } }, (error, stdout, stderr) => {
       resolve({ status: error ? (typeof error.code === "number" ? error.code : null) : 0, stdout, stderr });
     });
   });
@@ -136,6 +137,25 @@ describe("the release's check of the guest's kernel", () => {
     // An index that lists two versions, the newer first.
     packages = index(["linux-image-generic-hwe-24.04", "7.0.0-38.38~24.04.4"], ["linux-image-generic-hwe-24.04", pin]);
     expect(await check()).toMatchObject(newer);
+  });
+
+  it("fails on a version dpkg cannot compare, the archive's or the pin's, rather than taking it for not newer", async () => {
+    packages = index(["linux-image-generic-hwe-24.04", "v7.0.0-38.38~24.04.4"], ["linux-image-generic-hwe-24.04", pin]);
+    expect(await check()).toMatchObject({
+      status: 1, stderr: `kernel-current.sh: dpkg cannot compare noble-security's linux-image-generic-hwe-24.04 v7.0.0-38.38~24.04.4 with the guest's pin ${pin}\n`,
+    });
+    // A Dockerfile whose text names a second kernel .deb: two lines, no one version.
+    const mirror = mkdtempSync(join(tmpdir(), "kernel-current-"));
+    try {
+      mkdirSync(join(mirror, "images/guest"), { recursive: true });
+      mkdirSync(join(mirror, "images/sandbox"));
+      copyFileSync(join(REPO, "images/guest/kernel-current.sh"), join(mirror, "images/guest/kernel-current.sh"));
+      writeFileSync(join(mirror, "images/sandbox/Dockerfile"), `${DOCKERFILE}# https://x/linux-image-7.0.0-99-generic_7.0.0-99.99~24.04.1_amd64.deb old\n`);
+      packages = index(["linux-image-generic-hwe-24.04", "7.0.0-38.38~24.04.4"]);
+      expect(await check(mirror)).toMatchObject({ status: 1, stderr: "kernel-current.sh: images/sandbox/Dockerfile's kernel pin is not one version dpkg can compare\n" });
+    } finally {
+      rmSync(mirror, { recursive: true, force: true });
+    }
   });
 
   it("fails when the archive cannot say", async () => {

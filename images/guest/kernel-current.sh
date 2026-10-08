@@ -17,14 +17,25 @@ META=linux-image-generic-hwe-24.04
 # The pin's version, from its image .deb's name: linux-image-<abi>-generic_<version>_amd64.deb.
 pinned="$(sed -n 's|.*/linux-image-[^_]*-generic_\([^_]*\)_amd64\.deb .*|\1|p' "$REPO_ROOT/images/sandbox/Dockerfile")"
 [ -n "$pinned" ] || { echo "kernel-current.sh: no kernel pin in images/sandbox/Dockerfile" >&2; exit 1; }
+dpkg --validate-version "$pinned" 2> /dev/null \
+  || { echo "kernel-current.sh: images/sandbox/Dockerfile's kernel pin is not one version dpkg can compare" >&2; exit 1; }
 # Every version the index lists of it: one a stanza, in no order to rely on.
 listed="$(curl -q -fsS --connect-timeout 30 --speed-limit 1024 --speed-time 60 --max-time 600 "$ARCHIVE/dists/noble-security/main/binary-amd64/Packages.xz" | xz -dc \
   | awk -v want="$META" '$1 == "Package:" { name = $2 } $1 == "Version:" && name == want { print $2 }')"
 [ -n "$listed" ] || { echo "kernel-current.sh: noble-security lists no $META" >&2; exit 1; }
+# A version dpkg cannot parse fails the check: dpkg only warns, and may answer either way.
 for current in $listed; do
-  if dpkg --compare-versions "$current" gt "$pinned"; then
-    echo "kernel-current.sh: noble-security carries $META $current, newer than the guest's pin $pinned: pin it in images/sandbox/Dockerfile" >&2
-    exit 1
-  fi
+  unclear="kernel-current.sh: dpkg cannot compare noble-security's $META $current with the guest's pin $pinned"
+  dpkg --validate-version "$current" 2> /dev/null || { echo "$unclear" >&2; exit 1; }
+  compared=0
+  dpkg --compare-versions "$current" gt "$pinned" || compared=$?
+  case "$compared" in
+    0)
+      echo "kernel-current.sh: noble-security carries $META $current, newer than the guest's pin $pinned: pin it in images/sandbox/Dockerfile" >&2
+      exit 1
+      ;;
+    1) ;;
+    *) echo "$unclear" >&2; exit 1 ;;
+  esac
 done
 echo "the guest's kernel $pinned is noble-security's current one"
