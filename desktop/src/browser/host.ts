@@ -60,6 +60,8 @@ const TAB_MS = 10_000;
 const QUIT_MS = 2_000;
 // How long bringing a page to the front may take.
 const SHOW_MS = 2_000;
+// How long a page whose question was left to its user may take to show that it has been answered.
+const ASKING_MS = 500;
 // How long a closing browser's processes may take to exit (Edge's take about 5 s on xvfb), below the client's STOP_MS.
 const RELEASE_MS = 6_000;
 export const PROXY_BYPASSED =
@@ -75,6 +77,9 @@ export const downloaded = (name: string): string =>
 const failed = (message: string): Outcome => ({ error: { type: "browser", message } });
 const DELETED = failed("The chat was deleted, and its tabs closed with it");
 const ANOTHER_CHATS = failed("This session's tab in the agent's browser on this computer is another chat's");
+export const ASKING = failed(
+  "The page asked its user a question while they held the browser, and it is still open. It is theirs to answer, in the agent's browser on this computer: nothing is done in this page until they have.",
+);
 
 // A browser's error, its first line: Playwright's call log follows it.
 export const said = (error: unknown): string => (error instanceof Error ? error.message : String(error)).split("\n")[0] ?? "";
@@ -291,6 +296,9 @@ export class BrowserHost {
   // in it says it opened, whether or not that navigation made it. One that failed, or a script that came
   // first, has told nobody.
   private readonly untold = new Set<string>();
+  // The pages whose own question (an alert, a confirm, a prompt, a leave-this-page) opened while their
+  // user held the browser, and was left for them to answer there: until the page is seen to answer again.
+  private readonly asking = new Set<Page>();
   // The chat whose user holds the browser, until that chat hands it back: every chat's operation here is
   // answered paused meanwhile. The browser is the agent's one browser on this computer, every tab a tab of
   // one window, on one profile.
@@ -419,6 +427,12 @@ export class BrowserHost {
       // nothing in one. The last look before it acts, and the only one where its session has its tab already.
       if (found === null || stop.aborted) return PAUSED;
       page = found;
+      // A question its page asked its user is theirs still, handed back or not: nothing acts in the page,
+      // and nothing waits on it, until they have answered it.
+      if (this.asking.has(page)) {
+        if (!(await this.answers(page))) return ASKING;
+        if (stop.aborted) return PAUSED;
+      }
       const value = BOUNDED.has(kind) ? await this.bounded(page, operation(page, args, stop), stop) : await operation(page, args, stop);
       // Taken over while it acted: what its pages did meanwhile stays for its session's next answer.
       if (stop.aborted) return PAUSED;
@@ -519,11 +533,32 @@ export class BrowserHost {
     page.once("close", () => {
       const pages = this.tabs.get(session);
       if (pages?.includes(page)) pages.splice(pages.indexOf(page), 1);
+      this.asking.delete(page);
+    });
+    // A page's own question. While the agent drives, it is answered at once and unseen, as Playwright
+    // answers one nobody listens for: left open it would hold every operation in its page. While its
+    // user holds the browser it is theirs to answer, in the browser: nobody answers it for them, and
+    // their agent is told nothing of it.
+    page.on("dialog", (dialog) => {
+      if (this.held !== null) return void this.asking.add(page);
+      void (dialog.type() === "beforeunload" ? dialog.accept() : dialog.dismiss()).catch(() => {});
     });
     page.on("popup", (popup) => this.adopt(session, popup));
     // With a listener, the browser opens no file dialog of its own: no path the agent did not get reaches a page.
     page.on("filechooser", () => this.note(session, FILE_ASKED));
     page.on("download", (download) => this.note(session, downloaded(download.suggestedFilename())));
+  }
+
+  // Whether *page* answers now. One with a question open answers nothing until it is answered: so a page
+  // that answers has had its question answered since, and is its agent's again.
+  private async answers(page: Page): Promise<boolean> {
+    let timer: NodeJS.Timeout | undefined;
+    const answered = await Promise.race([page.evaluate("1").then(() => true, () => true), new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), ASKING_MS);
+    })]);
+    clearTimeout(timer);
+    if (answered) this.asking.delete(page);
+    return answered;
   }
 
   // What a session's page did that its agent could not see happen. While its user holds the browser, what

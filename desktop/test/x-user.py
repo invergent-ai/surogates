@@ -9,6 +9,7 @@ Run only inside test/isolated.sh, whose DISPLAY is an Xvfb of the run's own:
     x-user.py focus <window id>     give the window the keyboard (the display has no window manager)
     x-user.py click <x> <y>         a left click at that place on the screen
     x-user.py type <text>           each character's key, pressed and released
+    x-user.py press <key>           one key by its X name, as Return or Escape
 """
 
 import ctypes
@@ -27,6 +28,8 @@ def main(argv: list[str]) -> None:
     x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
     x11.XKeysymToKeycode.restype = ctypes.c_ubyte
     x11.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    x11.XStringToKeysym.restype = ctypes.c_ulong
+    x11.XStringToKeysym.argtypes = [ctypes.c_char_p]
     x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
     x11.XSetInputFocus.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
     xtst.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
@@ -55,6 +58,13 @@ def main(argv: list[str]) -> None:
             xtst.XTestFakeKeyEvent(display, key, 0, CURRENT_TIME)
             x11.XSync(display, 0)
             time.sleep(0.06)
+    elif what == "press":
+        symbol = x11.XStringToKeysym(argv[1].encode())
+        if not symbol:
+            sys.exit(f"x-user.py: no such key: {argv[1]}")
+        key = x11.XKeysymToKeycode(display, symbol)
+        xtst.XTestFakeKeyEvent(display, key, 1, CURRENT_TIME)
+        xtst.XTestFakeKeyEvent(display, key, 0, CURRENT_TIME)
     else:
         sys.exit(f"x-user.py: no such act: {what}")
     x11.XSync(display, 0)

@@ -19,7 +19,7 @@ import type { BrowserContext, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { PAUSED } from "../src/browser/client.js";
-import { BrowserHost, type BrowserHostOptions, FILE_ASKED, holding, type Launch, PROXY_BYPASSED, WEAKENING } from "../src/browser/host.js";
+import { ASKING, BrowserHost, type BrowserHostOptions, FILE_ASKED, holding, type Launch, PROXY_BYPASSED, WEAKENING } from "../src/browser/host.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
 
 const EXECUTABLE = TEST_BROWSER;
@@ -1013,6 +1013,85 @@ await navigator.serviceWorker.ready;`);
     expect((await op(a, "browser.mouse", { action: "move", x: 5, y: 5 }, "chat-1")).ok.notices).toEqual([]);
     // What the page does once the agent drives again is told as before.
     expect((await op(a, "browser.mouse", { action: "click", x: 60, y: 210, button: "left", clicks: 1 }, "chat-1")).ok.notices).toEqual([FILE_ASKED]);
+  }, 30_000);
+
+  it("leaves a page's own question open for its user while they hold the browser: nobody answers it for them, and their own answer reaches the page", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/t/HELD" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const answered = () => within(500, page.evaluate("window.answered"));
+    // While the agent drives, a page's question is answered at once, unseen, as before: left open it would hold the page.
+    expect(await within(5_000, script(a, "return [confirm('Leave?'), prompt('Why?')];", "chat-1"))).toEqual([false, null]);
+    // A question the page asks by itself a moment on: by then its user holds the browser.
+    await script(a, "setTimeout(() => { window.answered = confirm('Pay?'); }, 300); return 1;", "chat-1");
+    host.pause("chat-1", true);
+    expect(await host.show("chat-1")).toBe(true);
+    // Open still, 2 s on: the page waits on it, and nobody has answered it for them.
+    await new Promise((done) => setTimeout(done, 2_300));
+    expect(await answered()).toBe("late");
+    // Their own accept, at their keyboard, reaches the page.
+    asUser("focus", xwindow()!.id);
+    asUser("press", "Return");
+    await expect.poll(answered, { timeout: 5_000 }).toBe(true);
+    // The agent is told nothing of it.
+    host.pause("chat-1", false);
+    expect((await op(a, "browser.mouse", { action: "move", x: 5, y: 5 }, "chat-1")).ok.notices).toEqual([]);
+    expect(await script(a, "return window.answered;", "chat-1")).toBe(true);
+  }, 30_000);
+
+  it("refuses the agent a page whose question its user left open at the hand back, in words it can read, until they have answered it", async () => {
+    expect(ASKING).toEqual({
+      error: {
+        type: "browser",
+        message: "The page asked its user a question while they held the browser, and it is still open. It is theirs to answer, in the agent's browser on this computer: nothing is done in this page until they have.",
+      },
+    });
+    const [a, b] = [session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/t/HELD" }, "chat-1");
+    await op(b, "browser.navigate", { url: "http://fixture.test/second" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const answered = () => within(500, page.evaluate("window.answered"));
+    await script(a, "setTimeout(() => { window.answered = confirm('Pay?'); }, 300); return 1;", "chat-1");
+    host.pause("chat-1", true);
+    await new Promise((done) => setTimeout(done, 1_000));
+    expect(await answered()).toBe("late");
+    // Handed back with it open: left as its user left it, and each operation in that page refused at once, not left to hang.
+    host.pause("chat-1", false);
+    for (const [kind, args] of [
+      ["browser.evaluate", { code: "return 1;" }], ["browser.navigate", { url: "http://fixture.test/second" }],
+      ["browser.mouse", { action: "click", x: 60, y: 110, button: "left", clicks: 1 }], ["browser.screenshot", { clip: null, labels: [] }],
+    ] as const) {
+      expect(await within(2_000, op(a, kind, args, "chat-1")), kind).toEqual(ASKING);
+    }
+    expect(await answered()).toBe("late");
+    expect(page.url()).toBe("http://fixture.test/t/HELD");
+    // Another page of the chat's is the agent's as ever.
+    expect(await script(b, "return document.title;", "chat-1")).toBe("Second");
+    // Its user answers it, here with a no: the page is the agent's again, and reads what they answered.
+    asUser("focus", xwindow()!.id);
+    asUser("press", "Escape");
+    await expect.poll(async () => (await op(a, "browser.evaluate", { code: "return window.answered;" }, "chat-1")).ok?.value, { timeout: 10_000 }).toBe(false);
+    const asking = (host as unknown as { asking: Set<Page> }).asking;
+    expect(asking.size).toBe(0);
+    // A question left open again: its agent can still close the tab, which goes with its question, unanswered.
+    await script(a, "setTimeout(() => { window.answered = confirm('Pay again?'); }, 300); return 1;", "chat-1");
+    host.pause("chat-1", true);
+    await new Promise((done) => setTimeout(done, 1_000));
+    host.pause("chat-1", false);
+    expect(await within(2_000, op(a, "browser.evaluate", { code: "return 1;" }, "chat-1"))).toEqual(ASKING);
+    expect(asking.size).toBe(1);
+    expect(await within(5_000, op(a, "browser.close", {}, "chat-1"))).toEqual({ ok: { closed: true } });
+    expect(asking.size).toBe(0);
+    expect(await pages()).toBe(1);
+  }, 30_000);
+
+  it("leaves a page it was asked to confirm leaving, while the agent drives, as before", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    // A page that asks before it is left, once its user, or its agent, has acted in it.
+    await script(a, "addEventListener('beforeunload', (event) => { event.preventDefault(); event.returnValue = 'stay'; }); return 1;", "chat-1");
+    await op(a, "browser.mouse", { action: "click", x: 60, y: 110, button: "left", clicks: 1 }, "chat-1");
+    expect((await within(10_000, op(a, "browser.navigate", { url: "http://fixture.test/second" }, "chat-1")) as { ok?: { title: string } }).ok?.title).toBe("Second");
   }, 30_000);
 
   it("leaves the page its user holds where it is: a navigation in flight is stopped, and no bound closes it", async () => {
