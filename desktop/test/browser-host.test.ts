@@ -1660,6 +1660,14 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     expect(await host.address(a, true)).toBe("http://fixture.test/twoframes");
     expect((await upload()).error?.message).toBe(NOT_ASKED);
     expect(await f.evaluate(() => [...(window as unknown as { taken: HTMLInputElement }).taken.files!].map((file) => file.name))).toEqual([]);
+    // Made another kind of input before the prompt is made: no file input to name either.
+    await f.goto("http://fixture.test/fileinput");
+    await asksFor(a, () => f.click("#file"));
+    await f.evaluate(() => {
+      (document.getElementById("file") as HTMLInputElement).type = "text";
+    });
+    expect(await host.address(a, true)).toBe("http://fixture.test/twoframes");
+    expect((await upload()).error?.message).toBe(NOT_ASKED);
     // Its page closed.
     await named();
     const [popup] = await Promise.all([page.waitForEvent("popup", { timeout: 10_000 }), page.evaluate("void window.open('/fileinput')")]);
