@@ -484,6 +484,13 @@ describe("a page's download, as the host stages it", () => {
     const late = fileOf(6);
     await arrives(downloadOf("late.txt", late, Promise.resolve(late)), {} as Page);
     expect([staged, existsSync(late), [...state().unseen.keys()]]).toEqual([[], false, [SESSION]]);
+    // Nor is a session told whose chat the host does not know: its file, too large or not, is removed.
+    state().unseen.clear();
+    state().roots.delete(SESSION);
+    const [whole, over] = [fileOf(6), fileOf(MAX_WRITE_BYTES + 1)];
+    await arrives(downloadOf("whole.txt", whole, Promise.resolve(whole)));
+    await arrives(downloadOf("over.bin", over, Promise.resolve(over)));
+    expect([staged, existsSync(whole), existsSync(over), state().unseen.size]).toEqual([[], false, false, 0]);
     // A name as long as a page likes is quoted at what a name may be.
     expect(notFinished("x".repeat(300), "canceled")).toBe(`The page's download of "${"x".repeat(200)}" did not finish (canceled), so it was not saved.`);
   });

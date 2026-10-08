@@ -365,6 +365,20 @@ describe("a download the agent's page started", () => {
     expect(asked).toMatchObject([{ kind: "change", download: "page" }, { kind: "change", download: "user" }]);
   });
 
+  it("asks about the name it will take: a link at a name is passed over before anyone is asked, and no write is tried at it", async () => {
+    bind("ask");
+    mkdirSync(downloads);
+    symlinkSync(join(folder, "nowhere.txt"), join(downloads, "report.txt"));
+    const writes: unknown[] = [];
+    const counting: Saver = {
+      admit: saver.admit,
+      run: (operation, signal) => (operation.kind === "write" && writes.push(operation.args.key), saver.run(operation, signal)),
+    };
+    expect(await saveDownload(stage("report.txt"), journal.bindings, counting)).toContain("as Downloads/report (2).txt.");
+    expect(asked).toMatchObject([{ kind: "change", path: join(downloads, "report (2).txt") }]);
+    expect(writes).toEqual([join(downloads, "report (2).txt")]);
+  });
+
   it("passes over a name where a link was made while its prompt was open, and takes the next, asking nobody again", async () => {
     bind("ask");
     // A link to a file outside the folder, not there yet: written through, it would make that file.
