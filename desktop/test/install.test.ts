@@ -514,6 +514,29 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
   });
 
+  it("has a version's files on the disk before the version has its name, and before current names it", () => {
+    const first = releaseOf("1.0.0");
+    manifestOf("1.0.0", first);
+    expect(apply(first).status).toBe(0);
+    const second = releaseOf("1.1.0");
+    manifestOf("1.1.0", second);
+    stage(second);
+    const flushed = /^\d+ +syncfs\(\d+\) += 0$/;
+    const switched = /rename\w*\(.*"\/opt\/surogate\/staging\/apply\.\w+\/current", .*"\/opt\/surogate\/current".*\) += 0$/;
+    // An update: its tree is flushed where it was unpacked, in staging.
+    const update = traced();
+    const named = update(/rename\w*\(.*"\/opt\/surogate\/staging\/apply\.\w+\/tree[^"]*", .*"\/opt\/surogate\/versions\/1\.1\.0".*\) += 0$/);
+    expect(update(flushed)).toBeGreaterThan(-1);
+    expect(named).toBeGreaterThan(update(flushed));
+    expect(update(switched)).toBeGreaterThan(named);
+    // A repair: its bwrap is flushed before it has its name in the version's folder.
+    const repair = traced();
+    const placed = repair(/rename\w*\(.*"\/opt\/surogate\/staging\/apply\.\w+\/bwrap", .*"\/opt\/surogate\/versions\/1\.1\.0\/bin\/bwrap".*\) += 0$/);
+    expect(repair(flushed)).toBeGreaterThan(-1);
+    expect(placed).toBeGreaterThan(repair(flushed));
+    expect(repair(switched)).toBeGreaterThan(placed);
+  });
+
   it("has the installed version whole again by one rename, when a release of it built again replaces its folder", () => {
     for (const version of ["1.0.0", "1.1.0"]) {
       const tarball = releaseOf(version);

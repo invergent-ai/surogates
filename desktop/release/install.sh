@@ -152,10 +152,10 @@ apply() {
   for file in "$manifest" "$signature" "$tarball"; do
     as_reader test -f "$file" || fail "$file is not a downloaded release's file"
   done
-  mkdir -p "$ROOT/versions"
+  mkdir -p "$ROOT/versions" "$ROOT/bin"
   # Root's alone from its first moment: the update's lock is on it.
   ( umask 077 && mkdir -p "$ROOT/staging" )
-  chmod 0755 "$ROOT" "$ROOT/versions"
+  chmod 0755 "$ROOT" "$ROOT/versions" "$ROOT/bin"
   chmod 0700 "$ROOT/staging"
   # One at a time, by a lock on a folder only root can open: any user may open one that all may
   # read, hold a lock on it, and so stop every update.
@@ -194,7 +194,10 @@ apply() {
   taken "$tarball" "$work/release.tar.gz" "$size"
   [ "$(sha256sum <"$work/release.tar.gz" | cut -d' ' -f1)" = "$sha256" ] || fail "the downloaded release is not the one its manifest names"
 
-  local folder="$ROOT/versions/$version" name="surogate-desktop-$version-linux-x64"
+  # What this apply puts under a name is first made whole in its own folder: the version's tree,
+  # when its folder is not here whole already, or its new bwrap alone; the link that current
+  # becomes; and the helper pkexec runs.
+  local folder="$ROOT/versions/$version" name="surogate-desktop-$version-linux-x64" top=""
   if ! whole "$work/manifest.json" "$folder"; then
     # tar unpacks a set-id member without its bit (--no-same-permissions), so that only the
     # archive's own listing shows one: the fourth and seventh letters of a member's mode.
@@ -205,7 +208,8 @@ apply() {
       || fail "the release's archive could not be unpacked"
     [ "$(ls -A "$work/tree")" = "$name" ] && [ -d "$work/tree/$name" ] && [ ! -L "$work/tree/$name" ] \
       || fail "the release's archive holds more than $name/"
-    local top="$work/tree/$name" link
+    top="$work/tree/$name"
+    local link
     # tar keeps no name with .. and nothing outside the tree, and no set-id bit; one that did
     # reach the tree is refused here too.
     [ -z "$(find "$top" \( -type b -o -type c -o -type p -o -type s -o -perm /6000 -o \( -type f -links +1 \) \) -print -quit)" ] \
@@ -224,21 +228,28 @@ apply() {
     # or a folder too, and is never written through or into.
     rm -rf -- "$top/release.json" "$top/bin/bwrap"
     install -m 0755 /usr/bin/bwrap "$top/bin/bwrap"
-    # Last: a version folder with its manifest is whole, and one rename gives it its name. Where
-    # that name is the installed version's, its old folder leaves it first.
+    # Last: a version folder with its manifest is whole.
     cp "$work/manifest.json" "$top/release.json"
+  else
+    install -m 0755 /usr/bin/bwrap "$work/bwrap"
+  fi
+  install -m 0755 "${top:-$folder}/bin/surogate-apply-update" "$work/helper"
+  ln -s "$folder" "$work/current"
+  # All of it is on the disk before any of it has its name. A rename reaches the disk before a
+  # new file's bytes do: a power cut soon after would leave a version's folder under its name, its
+  # mark there or not, with files that are empty, and current may name it already.
+  sync -f "$work"
+  if [ -n "$top" ]; then
+    # One rename gives the tree its name. Where that is the installed version's, its old folder
+    # leaves the name first.
     [ ! -e "$folder" ] || mv -T "$folder" "$work/replaced"
     mv -T "$top" "$folder"
   else
-    install -m 0755 /usr/bin/bwrap "$work/bwrap"
     mv -T "$work/bwrap" "$folder/bin/bwrap"
   fi
-  ln -s "$folder" "$work/current"
   mv -T "$work/current" "$ROOT/current"
   # The helper pkexec runs, at a path with no link in it: polkit 127 (Ubuntu 26.04) matches an
   # action's exec.path against the program's resolved path, polkit 124 (24.04) against the path given.
-  mkdir -p "$ROOT/bin"
-  install -m 0755 "$folder/bin/surogate-apply-update" "$work/helper"
   mv -T "$work/helper" "$ROOT/bin/surogate-apply-update"
 
   # Kept: this version and the one before it. Removed: the rest, once nothing runs from them.
