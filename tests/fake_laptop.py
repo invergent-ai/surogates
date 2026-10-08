@@ -13,7 +13,10 @@ import base64
 import errno
 import hashlib
 import json
+import os
 import re
+import time
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -26,15 +29,36 @@ from surogates.devices.workspace import (
     MAX_NAMES,
     MAX_PAYLOAD_BYTES,
     MAX_READ_BYTES,
+    MAX_WALK_DEPTH,
+    MAX_WALK_FILES,
+    MAX_WALK_LOOKS,
     MAX_WRITE_BYTES,
     OUTPUT_CAP_CHARS,
     READ_TOO_LARGE,
+    RESULT_TRANSFERS,
+    SHOWN_DOT_FOLDERS,
+    WALK_BUDGET_S,
+    WALK_MARGIN_NS,
     WRITE_TOO_LARGE,
+    is_well_formed,
     transfer_of,
 )
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import RevisionConflict, RipgrepError, WorkspaceIO
 from surogates.tools.workspace_io.local import CODE_UNITS
+
+# What the app asks its user about before it runs, in Ask every time (desktop/src/binding/approvals.ts).
+ASKED = {"run", "start", "write", "delete", "write_stdin"}
+# What the app answers the user's own request still asked about, or waiting for its data, once its link
+# ends (desktop/src/operations/runner.ts): its caller was told "offline", so it never runs.
+DISMISSED = {"error": {
+    "type": "cancelled", "message": "This computer's link dropped before this was allowed, so it did not run",
+}}
+_REQUEST = "request:"
+# What the app answers a change its user denied (desktop/src/binding/approvals.ts).
+CHANGE_DENIED = {"error": {"type": "os", "code": "EACCES", "message": "The user denied this change on this computer"}}
+# No file handle left, in the process or the system: what a walk has not reached is unknown.
+_OUT_OF_HANDLES = {errno.EMFILE, errno.ENFILE}
 
 _PROCESS_KINDS = {"start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"}
 
@@ -58,6 +82,11 @@ CONFLICT = (
 BAD_PAGE = (
     "read_lines takes one of the encodings read_file picks, an offset from 1, an integer limit "
     f"and a max_bytes from 0 to {MAX_PAYLOAD_BYTES}"
+)
+# What a walk whose args the app does not take is answered, as the app answers it.
+BAD_WALK = (
+    "walk takes a key, the folder names it skips anywhere and directly under the key, whether it skips "
+    "hidden folders, and a since an earlier walk gave, or null"
 )
 
 
@@ -205,6 +234,8 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
         return None
     if kind == "list_dir":
         return (await folder.list_dir(a["key"]))[:MAX_NAMES]
+    if kind == "walk":
+        return _walk(a)
     if kind == "ripgrep":
         found = await folder.ripgrep(
             a["key"], mode=a["mode"], pattern=a["pattern"], glob=a["glob"], context=a["context"],
@@ -225,6 +256,105 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
             "timed_out": result.timed_out,
         }
     raise LookupError(f"unsupported operation {kind!r}")
+
+
+def _walk(a: dict[str, Any]) -> dict[str, Any]:
+    """As the app walks: depth first, each folder entered as it is met, through a handle on its parent and never
+    through a link, and each folder's entries read as the walk goes, as the operating system lists them."""
+    key = a.get("key")
+    if not isinstance(key, str):
+        # The key before anything else, as the app checks it.
+        raise ValueError("'key' must be a string")
+    skip, top, hidden, since = (a.get(name) for name in ("skip", "skip_top", "skip_hidden", "since"))
+    if (
+        type(hidden) is not bool
+        or not all(isinstance(names, list) and all(isinstance(name, str) for name in names) for names in (skip, top))
+        # Present, as the app reads it: null or at most 20 digits, the clock in nanoseconds past the year 5000.
+        or "since" not in a
+        or not (since is None or (isinstance(since, str) and since.isascii() and since.isdigit() and len(since) <= 20))
+    ):
+        raise ValueError(BAD_WALK)
+    cursor = str(time.time_ns() - WALK_MARGIN_NS)
+    deadline = time.monotonic() + WALK_BUDGET_S
+    after = None if since is None else int(since)
+    files: list[list[Any]] = []
+    cost, looks, truncated = 2, 0, False
+    # Each folder the walk is in: its handle, its path from the key, and its entries still to look at.
+    levels: list[tuple[int, str, Iterator[os.DirEntry[str]]]] = []
+    fd = os.open(key, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        # Its entries' stats are taken through the handle too, so by no path that could hold a link.
+        levels.append((fd, "", os.scandir(fd)))
+    except OSError:
+        os.close(fd)
+        raise
+    try:
+        while levels and not truncated:
+            fd, rel, entries = levels[-1]
+            try:
+                entry = next(entries, None)
+            except OSError:
+                entry = None  # what it could not read of a folder is left out
+            if entry is None:
+                levels.pop()
+                _close(fd, entries)
+                continue
+            looks += 1
+            if looks > MAX_WALK_LOOKS or time.monotonic() > deadline:
+                truncated = True
+                break
+            path = f"{rel}/{entry.name}" if rel else entry.name
+            if not is_well_formed(path):
+                # As the app: a name that is not UTF-8 cannot be looked up by its decoded text.
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                hides = hidden and entry.name.startswith(".") and entry.name not in SHOWN_DOT_FOLDERS
+                if entry.name in skip or (not rel and entry.name in top) or hides:
+                    continue
+                # The key is the first level: this folder would be len(levels) below it.
+                if len(levels) > MAX_WALK_DEPTH:
+                    truncated = True
+                    break
+                # A folder it may not read, or a link in a folder's place, is left out. Out of handles, it stops:
+                # what the rest holds is unknown.
+                try:
+                    child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                except OSError as exc:
+                    if exc.errno in _OUT_OF_HANDLES:
+                        truncated = True
+                        break
+                    continue
+                try:
+                    levels.append((child, path, os.scandir(child)))
+                except OSError as exc:
+                    os.close(child)
+                    if exc.errno in _OUT_OF_HANDLES:
+                        truncated = True
+                        break
+                continue
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if after is not None and st.st_mtime_ns < after and st.st_ctime_ns < after:
+                continue
+            more = len(json.dumps(path)) + 24
+            if len(files) == MAX_WALK_FILES or cost + more > MAX_PAYLOAD_BYTES:
+                truncated = True
+                break
+            files.append([path, st.st_size])
+            cost += more
+    finally:
+        for fd, _, entries in levels:
+            _close(fd, entries)
+    return {"files": files, "truncated": truncated, "cursor": cursor}
+
+
+def _close(fd: int, entries: Iterator[os.DirEntry[str]]) -> None:
+    entries.close()  # type: ignore[attr-defined]  # a scandir iterator
+    os.close(fd)
 
 
 async def _run_process(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
@@ -256,10 +386,16 @@ class InProcessRunner:
     def __init__(self, folder: WorkspaceIO) -> None:
         self.folder = folder
         self.kinds: list[str] = []
+        # The browser's kinds, answered by this as FakeLaptop's are: kind, args -> outcome.
+        self.browser: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
 
     async def run(self, kind: str, args: dict[str, Any], payload: bytes | None = None) -> dict[str, Any]:
         self.kinds.append(kind)
         sent = json.loads(json.dumps(args))
+        if kind.startswith("browser."):
+            if self.browser is None:
+                return {"error": {"type": "unsupported", "message": f"This computer does not handle {kind} yet"}}
+            return json.loads(json.dumps(self.browser(kind, sent)))
         if payload is not None:
             # A write's data that crossed as a transfer: whole, as its args name it, then written as one that carried it.
             named = sent.pop("transfer")
@@ -308,6 +444,13 @@ class FakeLaptop:
         self.reply = True
         # Received operations are neither run nor answered: a long command.
         self.hold = False
+        # Only those the app asks its user about in Ask every time are held: a prompt left open.
+        self.hold_asked = False
+        # The browser's kinds (surogates.devices.browser), answered by this: kind, args -> outcome.
+        # None answers them as an app without a browser does.
+        self.browser: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
+        # What it holds asked about, by id: answered once release() allows it.
+        self._asked: dict[str, dict[str, Any]] = {}
         self.cancelled: set[str] = set()
         # The type of every frame received after welcome, in order.
         self.frames: list[str] = []
@@ -340,6 +483,17 @@ class FakeLaptop:
         # Each task works on its own connection's socket. Added to, not replaced: an earlier
         # connection's tasks still end at disconnect().
         self._tasks += [asyncio.create_task(self._read(ws)), asyncio.create_task(self._ping(ws))]
+
+    async def release(self, answer: dict[str, Any] | None = None) -> None:
+        """Its user answers what it holds asked about, on this connection: allowed, each runs now; or each is
+        answered *answer*, as a denial, without running."""
+        self.hold_asked = False
+        asked, self._asked = self._asked, {}
+        for frame in asked.values():
+            if frame["id"] not in self.cancelled and self._ws is not None:
+                if answer is not None:
+                    self.outcomes[frame["id"]] = answer
+                await self._answer(frame, self._ws)
 
     def prepare(self, nonce: str, folder: str) -> None:
         """Stand in for the user confirming *folder* for a new chat."""
@@ -386,7 +540,17 @@ class FakeLaptop:
         finally:
             if self._ws is ws:
                 self.connected = False
+                self._dropped()
             self._heard.set()
+
+    def _dropped(self) -> None:
+        """As the app when its link ends: the user's own requests still asked about, or waiting for their
+        data, are answered not run, and that answer goes when the server sends them again."""
+        waiting = {**self._asked, **{operation_id: op for operation_id, (op, _) in self._incoming.items()}}
+        for operation_id, frame in waiting.items():
+            if frame["invocation_id"].startswith(_REQUEST) and operation_id not in self.outcomes:
+                self.outcomes[operation_id] = DISMISSED
+                self._asked.pop(operation_id, None)
 
     def _bind(self, frame: dict[str, Any]) -> dict[str, Any]:
         args = frame["args"]
@@ -408,9 +572,16 @@ class FakeLaptop:
                 # Answered, never run.
                 self.outcomes[operation_id] = MALFORMED_TRANSFER
             elif "transfer" in frame["args"]:
-                # A write whose data follows: it runs once that data is whole.
+                # A write whose data follows: it is asked about, and runs, once that data is whole.
                 self._incoming[operation_id] = (frame, bytearray())
                 return
+        await self._admit(frame, ws)
+
+    async def _admit(self, frame: dict[str, Any], ws: ClientConnection) -> None:
+        """As the app's admit phase: with hold_asked, what it asks its user about waits, a prompt left open."""
+        if self.hold_asked and frame["kind"] in ASKED and frame["id"] not in self.outcomes:
+            self._asked[frame["id"]] = frame
+            return
         await self._answer(frame, ws)
 
     async def _chunk(self, frame: dict[str, Any], ws: ClientConnection) -> None:
@@ -442,16 +613,22 @@ class FakeLaptop:
         # As the app's runner puts the data back inline: the other args, an expected revision too, stay.
         args = {name: value for name, value in op["args"].items() if name != "transfer"}
         args["data"] = base64.b64encode(data).decode("ascii")
-        await self._answer({**op, "args": args}, ws)
+        await self._admit({**op, "args": args}, ws)
 
     async def _answer(self, frame: dict[str, Any], ws: ClientConnection) -> None:
         operation_id = frame["id"]
         if operation_id not in self.outcomes:
             self.ran.append(frame["kind"])
-            outcome = (
-                self._bind(frame) if frame["kind"] == "bind"
-                else await perform(self.folder, frame["kind"], frame["args"])
-            )
+            if frame["kind"] == "bind":
+                outcome = self._bind(frame)
+            elif frame["kind"] == "retire":
+                # A deleted chat: its folder is forgotten, never touched.
+                self.bindings.pop(frame["session_id"], None)
+                outcome = {"ok": None}
+            elif frame["kind"].startswith("browser."):
+                outcome = self._browse(frame["kind"], frame["args"])
+            else:
+                outcome = await perform(self.folder, frame["kind"], frame["args"])
             self.outcomes[operation_id] = self._carried(operation_id, frame["kind"], outcome)
         if not self.reply:
             await ws.close()
@@ -469,14 +646,19 @@ class FakeLaptop:
             await ws.send(json.dumps(result))
         # A transfer whose data is gone was acknowledged: the server has its result.
 
+    def _browse(self, kind: str, args: dict[str, Any]) -> dict[str, Any]:
+        if self.browser is None:
+            return {"error": {"type": "unsupported", "message": f"This computer does not handle {kind} yet"}}
+        return self.browser(kind, args)
+
     def _end(self, operation_id: str) -> None:
         """The server recorded this result, or does not want it: its data is not sent again."""
         self._ended.add(operation_id)
         self.payloads.pop(operation_id, None)
 
     def _carried(self, operation_id: str, kind: str, outcome: dict[str, Any]) -> dict[str, Any]:
-        """A read's data over MAX_PAYLOAD_BYTES leaves its outcome, which names it by size and SHA-256."""
-        encoded = outcome.get("ok") if kind == "read" else None
+        """A read's or a screenshot's data over MAX_PAYLOAD_BYTES leaves its outcome, which names it by size and SHA-256."""
+        encoded = outcome.get("ok") if kind in RESULT_TRANSFERS else None
         if not isinstance(encoded, str):
             return outcome
         data = base64.b64decode(encoded)

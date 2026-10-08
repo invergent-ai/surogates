@@ -21,9 +21,11 @@ from uuid import UUID, uuid4
 from surogates.devices.binding import device_of
 from surogates.devices.binding import device_owners as _owners
 from surogates.devices.operations import DeviceOperations, JournalRunner
-from surogates.devices.workspace import DeviceWorkspaceIO
+from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
 from surogates.sandbox.pool import sandbox_session_key
-from surogates.tools.builtin.file_ops import forget_read_tracker
+from surogates.tools.builtin.file_ops import forget_read_tracker, patch_targets
+from surogates.tools.utils.tool_result_storage import HARNESS_FOLDER_REFUSAL, in_harness_folder
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
 if TYPE_CHECKING:
     from surogates.tools.registry import ToolRegistry
@@ -47,6 +49,17 @@ INTERRUPTED = json.dumps({"error": (
     "resumed safely. Some of its effects may have happened. Check the folder before "
     "repeating it."
 )})
+# A browser tool's: its effects are on the page in the user's browser, not in the folder.
+INTERRUPTED_IN_BROWSER = json.dumps({"error": (
+    "interrupted: this call was resumed after its worker stopped, and could not be "
+    "resumed safely. Some of its effects may have happened on the page. Read it with "
+    "browser_get_state before repeating it."
+)})
+
+
+def interrupted(tool_name: str) -> str:
+    """The result of *tool_name*'s call that could not be resumed safely, in its own words."""
+    return INTERRUPTED_IN_BROWSER if tool_name.startswith("browser_") else INTERRUPTED
 
 
 def refusal(name: str) -> str:
@@ -56,6 +69,35 @@ def refusal(name: str) -> str:
         # The saga compensator reads ``success``.
         return json.dumps({"success": False, "error": error})
     return json.dumps({"error": error})
+
+
+async def harness_folder_refusal(workspace_io: DeviceWorkspaceIO, name: str, args: Any) -> str | None:
+    """The model's own write_file or patch into the harness's folder, refused; else None.
+
+    Each target is judged as the computer resolves it, as Ask every time
+    judges a write.  One the computer will not resolve is the handler's to
+    refuse, in the computer's words.  A JSON string is judged as the
+    arguments it encodes, which ``ToolRegistry.dispatch`` parses and runs.
+    """
+    if name not in ("write_file", "patch"):
+        return None
+    if isinstance(args, str):
+        try:
+            args = json.loads(args) if args.strip() else {}
+        except json.JSONDecodeError:
+            return None  # the registry refuses it
+    if not isinstance(args, dict):
+        return None
+    for path in [args.get("path")] if name == "write_file" else patch_targets(args):
+        if not isinstance(path, str) or not path:
+            continue
+        try:
+            key = await workspace_io.resolve(path)
+        except (OSError, ValueError, WorkspaceSandboxError, DeviceOperationError):
+            continue
+        if in_harness_folder(key):
+            return json.dumps({"error": HARNESS_FOLDER_REFUSAL})
+    return None
 
 
 class DeviceCall:
@@ -106,8 +148,23 @@ class DeviceCall:
         except Exception:
             logger.warning("could not mark what a tool call read as consumed", exc_info=True)
 
-    async def dispatch(self, name: str, args: dict[str, Any], *, read_tracker_id: str | None = None) -> str:
-        """Run a sandbox tool's handler on the computer, reading as the session unless *read_tracker_id* says."""
+    async def dispatch(self, name: str, args: dict[str, Any] | str, *, read_tracker_id: str | None = None) -> str:
+        """Run a model's sandbox tool call on the computer, reading as the session unless *read_tracker_id* says.
+
+        The model is the session's own, or an expert's through :meth:`execute`:
+        its write into the harness's own folder is refused, whichever loop
+        sent it.  The harness writes there through :meth:`spill`.
+        """
+        refused = await harness_folder_refusal(self._workspace_io, name, args)
+        if refused is not None:
+            return refused
+        return await self._run(name, args, read_tracker_id or self._read_tracker_id)
+
+    async def spill(self, path: str, content: str) -> str:
+        """The harness's own write_file of a result too long to keep in context, into its own folder."""
+        return await self._run("write_file", {"path": path, "content": content}, self._harness_tool_tracker_id)
+
+    async def _run(self, name: str, args: dict[str, Any] | str, read_tracker_id: str) -> str:
         return await self._tools.dispatch(
             name,
             args,
@@ -118,7 +175,7 @@ class DeviceCall:
             task_id=self._task_id,
             # What this session read, apart from its root and its sub-agents:
             # a result in one's conversation is not in the others'.
-            read_tracker_id=read_tracker_id or self._read_tracker_id,
+            read_tracker_id=read_tracker_id,
             tools=self._tools,
         )
 
@@ -126,6 +183,11 @@ class DeviceCall:
         return DEVICE_SANDBOX_ID
 
     async def execute(self, session_id: str, name: str, input: str) -> str:
+        """A sandbox tool call a harness tool makes through this call.
+
+        An expert's tool loop makes its model's here, so they are refused as
+        the session's own are (see :meth:`dispatch`).
+        """
         if name.startswith("_"):
             # _code and _checkpoint: coding agents and checkpoints are switched off.
             return refusal(name)

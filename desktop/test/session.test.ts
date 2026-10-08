@@ -34,7 +34,7 @@ class Unsealing extends Secrets {
 
 const SIGNED_IN: SignedIn = {
   origin: "https://agent.example.com", agentId: "a", authTime: 1_700_000_000, refreshToken: "surg_rt_secret",
-  account: { name: "Flavius Burca", email: "flavius@example.com", userId: "u", orgId: "o" },
+  account: { name: "Flavius Burca", email: "flavius@example.com", userId: "u", orgId: "o", orgName: "Surogate" },
 };
 
 let dir: string;
@@ -95,6 +95,10 @@ describe("the sign-in, as this computer keeps it", () => {
     writeFileSync(path, JSON.stringify(broken));
     expect(store().get()).toBeNull();
     expect(errors.map(String)).toEqual([expect.stringContaining("does not hold a sign-in Surogate can use")]);
+    // An organisation named by something other than text.
+    writeFileSync(path, JSON.stringify({ ...broken, account: { ...SIGNED_IN.account, orgName: 7 } }));
+    expect(store().get()).toBeNull();
+    expect(errors).toHaveLength(2);
   });
 });
 
@@ -216,7 +220,15 @@ describe("who signed in", () => {
       asked.push(new Headers(init.headers).get("authorization"));
       return new Response(JSON.stringify({ id: "u", org_id: "o", email: "ada@example.com", display_name: null }));
     };
-    expect(await accountOf("https://agent.example.com", "at-1", fetch)).toEqual({ name: "ada@example.com", email: "ada@example.com", userId: "u", orgId: "o" });
+    expect(await accountOf("https://agent.example.com", "at-1", fetch)).toStrictEqual({ name: "ada@example.com", email: "ada@example.com", userId: "u", orgId: "o" });
     expect(asked).toEqual(["Bearer at-1"]);
+  });
+
+  it("names their organisation, as Settings shows it", async () => {
+    const fetch: Fetch = async () =>
+      new Response(JSON.stringify({ id: "u", org_id: "o", org_name: "Surogate", email: "ada@example.com", display_name: "Ada" }));
+    expect(await accountOf("https://agent.example.com", "at-1", fetch)).toEqual({
+      name: "Ada", email: "ada@example.com", userId: "u", orgId: "o", orgName: "Surogate",
+    });
   });
 });

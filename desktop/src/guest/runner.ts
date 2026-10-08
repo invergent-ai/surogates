@@ -23,8 +23,8 @@ import { listen } from "./listeners.js";
 import { KILL_GRACE_MS } from "./processes.js";
 import type { FromRunner, SpawnRequest, ToRunner } from "./protocol.js";
 
-// The root's cgroup in the guest. A run's cgroup is in its run folder, a background
-// process's in its proc folder, where its memory is counted. And the root's socket to the host proxy.
+// The root's cgroup in the guest, where its memory is counted. A run's cgroup is in its run
+// folder, a background process's in its proc folder. And the root's socket to the host proxy.
 const { cgroups: CGROUPS = null, tunnel: TUNNEL = null } = parseArgs({ options: { cgroups: { type: "string" }, tunnel: { type: "string" } } }).values;
 // The cgroups of commands that have ended, each removed once nothing of it runs.
 const ended = new Set<string>();
@@ -41,6 +41,8 @@ interface Child {
   killed: boolean;
   exited: boolean;
   done: boolean;
+  // The root's out-of-memory kills when it started.
+  ooms: number;
 }
 
 // One word on a bash line: in '...', an embedded quote written as '\''. A copy
@@ -101,12 +103,13 @@ function signalAll(child: Child, signal: NodeJS.Signals): void {
   }
 }
 
-// What the kernel noted in a background process's cgroup: that it ended one of its processes for memory.
-function outOfMemory(cgroup: string | null): boolean {
+// How many processes the kernel has ended for memory in the root's cgroup, its only one
+// that counts memory (root.ts, contain); 0 without one.
+function oomKills(): number {
   try {
-    return cgroup !== null && /^oom_kill [1-9]/m.test(readFileSync(join(cgroup, "memory.events"), "utf8"));
+    return CGROUPS ? Number(/^oom_kill (\d+)$/m.exec(readFileSync(join(CGROUPS, "memory.events"), "utf8"))?.[1] ?? 0) : 0;
   } catch {
-    return false;
+    return 0;
   }
 }
 
@@ -137,7 +140,10 @@ function finish(id: string): void {
   // Killed: what it left may hold its output open, and nothing more is read.
   child.proc.stdout?.destroy();
   child.proc.stderr?.destroy();
-  const oom = outOfMemory(child.cgroup);
+  // A background process the kernel ended for memory: by SIGKILL, itself or the shell or
+  // terminal it ran in, while the root's kills rose. One that only lost a child goes unnoted.
+  const killed = child.proc.signalCode === "SIGKILL" || child.proc.exitCode === 137;
+  const oom = !child.foreground && killed && oomKills() > child.ooms;
   say({ type: "exit", id, code: child.proc.exitCode, signal: child.proc.signalCode as NodeJS.Signals | null, ...(oom ? { oom } : {}) });
   if (child.foreground) retire(child.cgroup);
 }
@@ -168,7 +174,7 @@ function start(request: SpawnRequest): void {
     say({ type: "error", id, message: error instanceof Error ? error.message : String(error) });
     return;
   }
-  const child: Child = { proc, cgroup, foreground: !request.stdin, killed: false, exited: false, done: false };
+  const child: Child = { proc, cgroup, foreground: !request.stdin, killed: false, exited: false, done: false, ooms: oomKills() };
   children.set(id, child);
   let started = false;
   // A command that stops reading its stdin is not an error of the runner's.

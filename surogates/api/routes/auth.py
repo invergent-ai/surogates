@@ -22,7 +22,7 @@ from surogates.audit import (
     client_ip,
 )
 from surogates.db.agent_users import SOURCE_LOGIN, ensure_agent_user
-from surogates.db.models import ChannelIdentity, User
+from surogates.db.models import ChannelIdentity, Org, User
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.tenant.auth.database import DatabaseAuthProvider
 from surogates.tenant.auth.firebase import (
@@ -130,6 +130,10 @@ class AuthConfigResponse(BaseModel):
     # self-registration. Public data — the buy page itself is public.
     commerce_mode: str = "free"
     commerce_buy_url: str | None = None
+    # Where the agent's users see their usage and billing: the console the
+    # operator names (SUROGATES_API_CONSOLE_URL).  None: the agent names
+    # none, and Surogate Desktop shows no Usage or Plans and billing.
+    console_url: str | None = None
 
 
 class FirebaseExchangeRequest(BaseModel):
@@ -178,6 +182,7 @@ async def auth_config(
         linkable_channels=list(agent_runtime.linkable_channels),
         commerce_mode=str(commerce.get("commerce_mode") or "free"),
         commerce_buy_url=commerce.get("commerce_buy_url"),
+        console_url=request.app.state.settings.api.console_url or None,
     )
     cache = getattr(request.app.state, "firebase_config_cache", None)
     project_id = getattr(agent_runtime, "project_id", None)
@@ -622,33 +627,14 @@ async def refresh(body: RefreshRequest, request: Request) -> AccessTokenResponse
     return AccessTokenResponse(access_token=access_token)
 
 
-@router.get("/auth/me", response_model=UserResponse)
-async def me(
-    request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
-) -> UserResponse:
-    """Return profile information for the currently authenticated user."""
-    from sqlalchemy import select
+class MeResponse(UserResponse):
+    """The signed-in user, with their organisation's name: Surogate Desktop's Settings shows it."""
 
-    from surogates.db.models import User
+    org_name: str
 
-    session_factory = request.app.state.session_factory
-    async with session_factory() as session:
-        result = await session.execute(
-            select(User).where(
-                User.id == tenant.user_id,
-                User.org_id == tenant.org_id,
-            )
-        )
-        user = result.scalar_one_or_none()
 
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found.",
-        )
-
-    return UserResponse(
+def _me(user: User, org_name: str) -> MeResponse:
+    return MeResponse(
         id=user.id,
         org_id=user.org_id,
         email=user.email,
@@ -658,7 +644,36 @@ async def me(
         auth_provider=user.auth_provider,
         sign_in_provider=user.sign_in_provider,
         created_at=user.created_at,
+        org_name=org_name,
     )
+
+
+@router.get("/auth/me", response_model=MeResponse)
+async def me(
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> MeResponse:
+    """Return profile information for the currently authenticated user."""
+    session_factory = request.app.state.session_factory
+    async with session_factory() as session:
+        result = await session.execute(
+            select(User, Org.name)
+            .join(Org, Org.id == User.org_id)
+            .where(
+                User.id == tenant.user_id,
+                User.org_id == tenant.org_id,
+            )
+        )
+        found = result.one_or_none()
+
+    if found is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    user, org_name = found
+    return _me(user, org_name)
 
 
 # ---------------------------------------------------------------------------
@@ -682,12 +697,12 @@ class UserUpdateRequest(BaseModel):
     phone: str | None = None
 
 
-@router.patch("/auth/me", response_model=UserResponse)
+@router.patch("/auth/me", response_model=MeResponse)
 async def update_me(
     body: UserUpdateRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
-) -> UserResponse:
+) -> MeResponse:
     """Update profile fields for the currently authenticated user."""
     if (
         body.display_name is None
@@ -774,18 +789,9 @@ async def update_me(
                 detail="That username is already taken.",
             )
         await session.refresh(user)
+        org_name = await session.scalar(select(Org.name).where(Org.id == user.org_id))
 
-    return UserResponse(
-        id=user.id,
-        org_id=user.org_id,
-        email=user.email,
-        display_name=user.display_name,
-        username=user.username,
-        phone=user.phone,
-        auth_provider=user.auth_provider,
-        sign_in_provider=user.sign_in_provider,
-        created_at=user.created_at,
-    )
+    return _me(user, org_name)
 
 
 # ---------------------------------------------------------------------------

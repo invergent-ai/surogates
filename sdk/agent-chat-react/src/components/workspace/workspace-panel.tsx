@@ -36,6 +36,7 @@ import {
 import { ScrollArea } from "../ui/scroll-area";
 import { Skeleton } from "../ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import { changeChatFiles, useChatFiles } from "./chat-files";
 
 const SKELETON_WIDTHS = [75, 60, 90, 65, 80, 70, 85, 55];
 
@@ -52,6 +53,8 @@ interface WorkspacePanelProps {
 	refreshSignal?: number;
 	disabled?: boolean;
 }
+
+const NO_ENTRIES: AgentChatWorkspaceEntry[] = [];
 
 function collectExpandedPaths(
 	entries: AgentChatWorkspaceEntry[],
@@ -195,45 +198,79 @@ export function WorkspacePanel({
 	disabled = false,
 }: WorkspacePanelProps) {
 	const fileInputRef = useRef<HTMLInputElement>(null);
-	const [entries, setEntries] = useState<AgentChatWorkspaceEntry[]>([]);
-	const [treeLoading, setTreeLoading] = useState(false);
-	const [treeError, setTreeError] = useState<string | null>(null);
-	const [notice, setNotice] = useState<string | null>(null);
-	const [uploading, setUploading] = useState(false);
-	const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+	// The shown chat's, kept by chat beyond this panel (chat-files.ts): nothing of another chat's shows or locks here.
+	const {
+		entries = NO_ENTRIES,
+		truncated = false,
+		loading = false,
+		error = null,
+		waiting = null,
+		notice = null,
+		uploading = false,
+		deleteTarget = null,
+		deleting = false,
+	} = useChatFiles(sessionId);
 	const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
 	const sessionIdRef = useRef(sessionId);
+	// False once the panel has gone, folded away: a change that ends then reads no tree.
+	const mountedRef = useRef(true);
+	// The tree's read under way, and its chat: one waiting for its computer stops when another starts, or the panel goes.
+	const readingRef = useRef<{ chat: string; controller: AbortController } | null>(null);
 
 	sessionIdRef.current = sessionId;
 
+	// The read under way stops, and what it waited for is said no more.
+	const stopReading = useCallback(() => {
+		const was = readingRef.current;
+		readingRef.current = null;
+		if (!was) return;
+		was.controller.abort();
+		changeChatFiles(was.chat, { loading: false, waiting: null });
+	}, []);
+
+	// A change sent goes on as the panel goes, and ends in its chat's entry. Only the tree's read stops.
+	useEffect(() => {
+		mountedRef.current = true;
+		return () => {
+			mountedRef.current = false;
+			stopReading();
+		};
+	}, [stopReading]);
+
 	const fetchTree = useCallback(async () => {
-		if (!sessionId) {
-			setEntries([]);
-			setExpandedPaths(new Set());
-			setTreeLoading(false);
-			setTreeError(null);
-			return;
-		}
-		const requestedSessionId = sessionId;
-		setTreeLoading(true);
-		setTreeError(null);
+		// Made for a chat the panel has left, or by a panel gone, as a change that ends there calls it:
+		// it reads nothing, and stops nothing of the chat the panel shows now.
+		if (!mountedRef.current || sessionIdRef.current !== sessionId) return;
+		stopReading();
+		if (!sessionId) return;
+		const chat = sessionId;
+		const reading = { chat, controller: new AbortController() };
+		readingRef.current = reading;
+		// The read the panel still wants: neither replaced by a later one nor stopped.
+		const current = () => readingRef.current === reading;
+		changeChatFiles(chat, { loading: true, waiting: null, error: null });
 		try {
 			const tree = await adapter.getWorkspaceTree({
-				sessionId: requestedSessionId,
+				sessionId: chat,
+				signal: reading.controller.signal,
+				onWaiting: (said) => {
+					if (current()) changeChatFiles(chat, { waiting: said });
+				},
 			});
-			if (sessionIdRef.current !== requestedSessionId) return;
-			setEntries(tree.entries);
+			if (!current()) return;
+			changeChatFiles(chat, { entries: tree.entries, truncated: tree.truncated });
 			setExpandedPaths(new Set(collectExpandedPaths(tree.entries)));
 		} catch (error) {
-			if (sessionIdRef.current !== requestedSessionId) return;
-			setEntries([]);
-			setTreeError((error as Error).message);
+			if (!current()) return;
+			changeChatFiles(chat, { entries: [], error: (error as Error).message });
 		} finally {
-			if (sessionIdRef.current === requestedSessionId) {
-				setTreeLoading(false);
+			// Ended: a wait told after the tree came is not said over it.
+			if (current()) {
+				readingRef.current = null;
+				changeChatFiles(chat, { loading: false, waiting: null });
 			}
 		}
-	}, [adapter, sessionId]);
+	}, [adapter, sessionId, stopReading]);
 
 	useEffect(() => {
 		void fetchTree();
@@ -282,25 +319,27 @@ export function WorkspacePanel({
 	const handleUpload = useCallback(
 		async (files: FileList) => {
 			if (disabled || !sessionId || files.length === 0) return;
-			setUploading(true);
-			setNotice(null);
+			const chat = sessionId;
+			changeChatFiles(chat, { uploading: true, notice: null });
 			try {
 				for (const uploadedFile of Array.from(files)) {
 					await adapter.uploadWorkspaceFile({
-						sessionId,
+						sessionId: chat,
 						file: uploadedFile,
+						onWaiting: (said) => changeChatFiles(chat, { notice: said }),
 					});
 				}
-				setNotice(
-					files.length === 1
-						? `Uploaded ${files[0]?.name ?? "file"}`
-						: `Uploaded ${files.length} files`,
-				);
+				changeChatFiles(chat, {
+					notice:
+						files.length === 1
+							? `Uploaded ${files[0]?.name ?? "file"}`
+							: `Uploaded ${files.length} files`,
+				});
 				await fetchTree();
 			} catch (error) {
-				setNotice((error as Error).message);
+				changeChatFiles(chat, { notice: (error as Error).message });
 			} finally {
-				setUploading(false);
+				changeChatFiles(chat, { uploading: false });
 				if (fileInputRef.current) fileInputRef.current.value = "";
 			}
 		},
@@ -310,17 +349,24 @@ export function WorkspacePanel({
 	const handleDelete = useCallback(
 		async (path: string) => {
 			if (disabled || !sessionId) return;
+			const chat = sessionId;
+			changeChatFiles(chat, { deleting: true });
 			try {
-				await adapter.deleteWorkspaceFile({ sessionId, path });
-				if (selectedPath === path) {
+				await adapter.deleteWorkspaceFile({
+					sessionId: chat,
+					path,
+					onWaiting: (said) => changeChatFiles(chat, { notice: said }),
+				});
+				// The selection is the shown chat's, while the panel shows it.
+				if (mountedRef.current && sessionIdRef.current === chat && selectedPath === path) {
 					onSelectedPathChange(null);
 				}
-				setNotice(`Deleted ${path.split("/").pop() ?? path}`);
+				changeChatFiles(chat, { notice: `Deleted ${path.split("/").pop() ?? path}` });
 				await fetchTree();
 			} catch (error) {
-				setNotice((error as Error).message);
+				changeChatFiles(chat, { notice: (error as Error).message });
 			} finally {
-				setDeleteTarget(null);
+				changeChatFiles(chat, { deleteTarget: null, deleting: false });
 			}
 		},
 		[
@@ -380,11 +426,11 @@ export function WorkspacePanel({
 							variant="ghost"
 							size="icon-sm"
 							onClick={() => void fetchTree()}
-							disabled={!sessionId || treeLoading}
+							disabled={!sessionId || loading}
 							aria-label="Refresh workspace"
 						>
 							<RefreshCwIcon
-								className={cn("size-4", treeLoading && "animate-spin")}
+								className={cn("size-4", loading && "animate-spin")}
 							/>
 						</Button>
 					</TooltipTrigger>
@@ -393,14 +439,33 @@ export function WorkspacePanel({
 			</div>
 
 			{notice && (
-				<div className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
+				<div
+					data-testid="workspace-notice"
+					className="border-b border-line px-3 py-2 text-xs text-muted-foreground"
+				>
 					{notice}
+				</div>
+			)}
+
+			{truncated && entries.length > 0 && (
+				<div className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
+					Some files are not shown.
 				</div>
 			)}
 
 			<ScrollArea className="min-h-0 flex-1">
 				<div className="px-1 py-1">
-					{treeLoading && entries.length === 0 && (
+					{waiting && (
+						<div
+							role="status"
+							data-testid="tree-waiting"
+							className="px-3 py-2 text-sm text-muted-foreground"
+						>
+							{waiting}
+						</div>
+					)}
+
+					{loading && !waiting && entries.length === 0 && (
 						<div className="space-y-1 p-2">
 							{Array.from({ length: 8 }).map((_, index) => (
 								<Skeleton
@@ -414,14 +479,14 @@ export function WorkspacePanel({
 						</div>
 					)}
 
-					{treeError && (
+					{error && (
 						<div className="flex items-start gap-2 p-3 text-sm text-destructive">
 							<AlertCircleIcon className="mt-0.5 size-4 shrink-0" />
-							<span>{treeError}</span>
+							<span>{error}</span>
 						</div>
 					)}
 
-					{!treeLoading && !treeError && entries.length === 0 && (
+					{!loading && !error && entries.length === 0 && (
 						<div className="px-4 py-8 text-center text-sm text-faint">
 							<p>No workspace files</p>
 							<Button
@@ -447,7 +512,9 @@ export function WorkspacePanel({
 						>
 							<RenderEntries
 								entries={entries}
-								onDelete={setDeleteTarget}
+								onDelete={(path) => {
+									if (sessionId) changeChatFiles(sessionId, { deleteTarget: path });
+								}}
 								downloadUrlFor={(path) =>
 									sessionId
 										? adapter.getWorkspaceDownloadUrl({ sessionId, path })
@@ -466,10 +533,13 @@ export function WorkspacePanel({
 					deleteTarget?.split("/").pop() ?? "this file"
 				} from the workspace.`}
 				confirmLabel="Delete"
-				onConfirm={() =>
-					deleteTarget ? handleDelete(deleteTarget) : Promise.resolve()
-				}
-				onCancel={() => setDeleteTarget(null)}
+				loading={deleting}
+				onConfirm={() => {
+					if (deleteTarget) void handleDelete(deleteTarget);
+				}}
+				onCancel={() => {
+					if (sessionId) changeChatFiles(sessionId, { deleteTarget: null });
+				}}
 			/>
 		</aside>
 	);
@@ -480,7 +550,8 @@ interface ConfirmDialogProps {
 	title: string;
 	description: ReactNode;
 	confirmLabel: string;
-	onConfirm: () => Promise<void> | void;
+	loading: boolean;
+	onConfirm: () => void;
 	onCancel: () => void;
 }
 
@@ -489,20 +560,10 @@ function ConfirmDialog({
 	title,
 	description,
 	confirmLabel,
+	loading,
 	onConfirm,
 	onCancel,
 }: ConfirmDialogProps) {
-	const [loading, setLoading] = useState(false);
-
-	const handleConfirm = async () => {
-		setLoading(true);
-		try {
-			await onConfirm();
-		} finally {
-			setLoading(false);
-		}
-	};
-
 	return (
 		<Dialog
 			open={open}
@@ -522,7 +583,7 @@ function ConfirmDialog({
 					<Button
 						variant="destructive"
 						disabled={loading}
-						onClick={handleConfirm}
+						onClick={onConfirm}
 					>
 						{loading && (
 							<Loader2Icon className="mr-1.5 size-3.5 animate-spin" />

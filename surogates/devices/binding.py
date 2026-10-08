@@ -24,6 +24,9 @@ from surogates.db.models import DeviceOperation
 # invocation id never takes this form, and its ordinals start at 1.
 BIND = "bind"
 
+# The same for a deleted root's retirement: its computer forgets the folder.
+RETIRE = "retire"
+
 # The sandbox keys of the session on the user's computer this task works for,
 # set by AgentHarness.wake (see surogates.devices.sandbox).  Here, not there,
 # so the workspace fallback can read it without importing the device journal.
@@ -36,6 +39,14 @@ def device_of(config: dict[str, Any] | None) -> UUID | None:
     if not isinstance(execution, dict) or execution.get("kind") != "device":
         return None
     return UUID(execution["device_id"])
+
+
+def is_binding_root(session_id: UUID, config: dict[str, Any] | None) -> bool:
+    """Whether a session holds a folder binding of its own: a root, or a
+    project's thread, which is its own sandbox root.  A session created
+    under another names that one, and works in its folder."""
+    root = (config or {}).get("sandbox_root_session_id")
+    return not root or root == str(session_id)
 
 
 @dataclass(frozen=True, slots=True)

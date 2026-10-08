@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, update
 
 from surogates.api.session_guards import (
+    require_device_access,
     require_session_visible,
     require_user_writable_session,
 )
@@ -133,6 +134,8 @@ async def respond_to_ask_user_question(
         )
     await require_session_visible(request, session)
     require_user_writable_session(session)
+    # The answer wakes the agent, on a local-folder chat in its user's folder: the chat's own user's to give.
+    await require_device_access(request, session, tenant)
 
     # Sanity-check the tool_call_id format -- short, printable, no newlines.
     tc_id = tool_call_id.strip()

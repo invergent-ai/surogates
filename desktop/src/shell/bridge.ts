@@ -5,7 +5,7 @@
 // its shape. What the page sends is copied field by field. No call answers an approval.
 
 import type {
-  DesktopAccount, DesktopAppearance, DesktopDeviceState, DesktopPreparedFolder,
+  DesktopAccount, DesktopAppearance, DesktopBinding, DesktopDeviceState, DesktopPreparedFolder, DesktopThreadLabel,
 } from "../../../web/src/lib/desktop-bridge-contract.js";
 import { sameOrigin } from "./window-policy.js";
 
@@ -19,7 +19,7 @@ export interface BridgeCalls {
   getDevice(): DesktopDeviceState;
   webSignIn(): Promise<{ code: string } | null>;
   signOut(): Promise<void>;
-  prepareFolder(choice: "last" | "pick", window: string): Promise<DesktopPreparedFolder | null>;
+  prepareFolder(choice: "last" | "pick", window: string, thread: DesktopThreadLabel | null): Promise<DesktopPreparedFolder | null>;
   bindSession(sessionId: string, token: string, window: string): Promise<void>;
   // The chat asks every time from now on: the page can make a chat only safer.
   setMode(sessionId: string, mode: "ask"): Promise<void>;
@@ -27,6 +27,10 @@ export interface BridgeCalls {
   requestFreeMode(sessionId: string, window: string): Promise<boolean>;
   // A folder confirmed in this window whose chat was never created: its bind is refused from now on.
   cancelPrepared(token: string, window: string): Promise<void>;
+  // What the page may know of a chat's folder here; null for a chat with none on this computer.
+  getBinding(sessionId: string): Promise<DesktopBinding | null>;
+  // The chat's folder shown in the file manager, while it is still the one its user confirmed.
+  revealFolder(sessionId: string): Promise<void>;
   getAppearance(): DesktopAppearance;
   setAccount(account: DesktopAccount | null): void;
   // The page registered its projects source (true), or withdrew it; the source stays in the page's preload.
@@ -42,6 +46,16 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const text = (value: unknown, max: number): value is string => typeof value === "string" && value.length <= max;
 const named = (value: unknown): value is string => text(value, 200) && value !== "";
 
+// A project's name and a thread's title, as the server keeps them: at most 256 UTF-16 units, and not blank.
+const titled = (value: unknown): value is string => text(value, 256) && value.trim() !== "";
+
+function threadOf(value: unknown): DesktopThreadLabel | null {
+  if (value === undefined || value === null) return null;
+  const { project, thread } = (typeof value === "object" ? value : {}) as Record<string, unknown>;
+  if (!titled(project) || !titled(thread)) throw new Error("Not a project's thread");
+  return { project, thread };
+}
+
 function accountOf(value: unknown): DesktopAccount | null {
   if (value === null) return null;
   const { name, email, userId, orgId } = (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
@@ -52,9 +66,9 @@ function accountOf(value: unknown): DesktopAccount | null {
 export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<string, Handler> {
   // One question of each kind at a time for a window: a page cannot pile prompts up behind the one it has open.
   const asking = new Set<string>();
-  const alone = <T>(kind: string, window: string, ask: () => Promise<T>): Promise<T> => {
+  const alone = <T>(kind: string, window: string, ask: () => Promise<T>, busy = "Surogate is already asking"): Promise<T> => {
     const key = `${kind}\0${window}`;
-    if (asking.has(key)) return Promise.reject(new Error("Surogate is already asking"));
+    if (asking.has(key)) return Promise.reject(new Error(busy));
     asking.add(key);
     return Promise.resolve().then(ask).finally(() => asking.delete(key));
   };
@@ -66,9 +80,10 @@ export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<strin
     getDevice: checked(() => calls.getDevice()),
     webSignIn: checked(() => calls.webSignIn()),
     signOut: checked(() => calls.signOut()),
-    prepareFolder: checked((window, choice) => {
+    prepareFolder: checked((window, choice, thread) => {
       if (choice !== "last" && choice !== "pick") throw new Error("Not a folder choice");
-      return alone("folder", window, () => calls.prepareFolder(choice, window));
+      const label = threadOf(thread);
+      return alone("folder", window, () => calls.prepareFolder(choice, window, label));
     }),
     bindSession: checked((window, sessionId, token) => {
       if (typeof sessionId !== "string" || !UUID.test(sessionId)) throw new Error("Not a chat");
@@ -87,6 +102,14 @@ export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<strin
     cancelPrepared: checked((window, token) => {
       if (typeof token !== "string" || !PREPARED.test(token)) throw new Error("Not a folder confirmation");
       return calls.cancelPrepared(token, window);
+    }),
+    getBinding: checked((_window, sessionId) => {
+      if (typeof sessionId !== "string" || !UUID.test(sessionId)) throw new Error("Not a chat");
+      return calls.getBinding(sessionId);
+    }),
+    revealFolder: checked((window, sessionId) => {
+      if (typeof sessionId !== "string" || !UUID.test(sessionId)) throw new Error("Not a chat");
+      return alone("show folder", window, () => calls.revealFolder(sessionId), "Surogate is still showing a folder");
     }),
     getAppearance: checked(() => calls.getAppearance()),
     setAccount: checked((_window, account) => calls.setAccount(accountOf(account))),

@@ -7,12 +7,14 @@ import type * as React from "react";
 import { useState } from "react";
 
 import { getAppRouteTitle } from "@/components/app-route-title";
+import { ComputerAddedBanner } from "@/components/computer-added-banner";
 import {
   Sheet,
   SheetClose,
   SheetContent,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { getDesktop } from "@/lib/desktop-bridge";
 
 type AppShellProps = {
   sidebar: React.ReactNode;
@@ -40,6 +42,17 @@ export function AppShell({ sidebar, headerSlot, children }: AppShellProps) {
     if (sheetOpen) {
       setSheetOpen(false);
     }
+  }
+
+  // In Surogate Desktop the web client is the conversation alone: the desktop's own sidebar
+  // lists the projects, the chats (on /chats) and the pages, and its user menu reaches Settings.
+  if (getDesktop()) {
+    return (
+      <main className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden">
+        <ComputerAddedBanner />
+        {children}
+      </main>
+    );
   }
 
   return (
@@ -117,6 +130,7 @@ export function AppShell({ sidebar, headerSlot, children }: AppShellProps) {
         </header>
 
         <main className="flex min-h-0 flex-1 min-w-0 flex-col overflow-hidden">
+          <ComputerAddedBanner />
           {children}
         </main>
       </div>

@@ -1,8 +1,11 @@
 """Builtin ``create_artifact`` tool.
 
-Routes through :class:`HarnessAPIClient` because artifacts live in the
-session workspace, which is a tenant-gated resource the worker accesses via
-the API server.  Same wiring as the ``memory`` and ``skills`` tools.
+A cloud session's artifacts are made through :class:`HarnessAPIClient`,
+because they live in the session workspace, which is a tenant-gated resource
+the worker accesses via the API server: the same wiring as the ``memory`` and
+``skills`` tools.  A chat on a local folder makes them in the folder, through
+:class:`FolderArtifacts` under the tool call that makes them
+(:func:`artifact_client`).
 
 Handler-side validation: we parse the spec locally with
 :class:`ArtifactSpec` before the HTTP round-trip.  Catching malformed
@@ -17,10 +20,12 @@ import json
 import os
 import re
 from typing import Any
+from uuid import UUID
 
 from pydantic import ValidationError
 
 from surogates.artifacts.models import ArtifactKind, ArtifactSpec
+from surogates.artifacts.store import FolderArtifacts
 from surogates.research.memory_bank import parse_jsonl
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -147,6 +152,21 @@ async def _validate_citations(
             "source IDs are valid."
         ),
     )
+
+
+def artifact_client(kwargs: dict[str, Any]) -> Any:
+    """What a tool makes its artifacts through: the session-scoped API client, or, on a local folder, the folder.
+
+    A chat on a local folder makes its artifacts in its folder, through the
+    tool call's own ``workspace_io``, so they are journaled under the call,
+    and under its root chat's folder there (``task_id``), as its root lists them.
+    """
+    workspace_io = kwargs.get("workspace_io")
+    if workspace_io is not None:
+        return FolderArtifacts(
+            workspace_io, kwargs["session_store"], UUID(str(kwargs["session_id"])), str(kwargs["task_id"]),
+        )
+    return kwargs.get("api_client")
 
 
 def register(registry: ToolRegistry) -> None:
@@ -395,8 +415,8 @@ async def _create_artifact_handler(
     arguments: dict[str, Any],
     **kwargs: Any,
 ) -> str:
-    """Validate locally, then delegate to the session-scoped API client."""
-    api_client = kwargs.get("api_client")
+    """Validate locally, then make it through the session-scoped API client, or in the call's local folder."""
+    api_client = artifact_client(kwargs)
     if api_client is None:
         # Reached when the worker did not wire ``harness_api_client``
         # (anonymous website-channel session, or

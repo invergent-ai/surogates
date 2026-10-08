@@ -181,8 +181,8 @@ describe("a chat that asks every time", () => {
     bind(ROOT, "ask");
     user.auto = "deny";
     for (const kind of [
-      "resolve", "check_write", "stat", "read", "read_lines", "list_dir", "ripgrep", "which", "poll", "read_output",
-      "wait", "kill", "list_processes",
+      "resolve", "check_write", "stat", "read", "read_lines", "list_dir", "walk", "ripgrep", "which", "poll",
+      "read_output", "wait", "kill", "list_processes",
     ]) {
       expect(await approvals.admit(op(kind, { key: `${FOLDER}/a.txt` }), never())).toBeNull();
     }
@@ -202,6 +202,29 @@ describe("a chat that asks every time", () => {
       op("write", { key: [spill], data: "" }),
       op("write", { key: `${FOLDER}/.surogates-results/../a.txt`, data: "" }),
       op("write", { key: `${FOLDER}/.surogates-results/./x.log`, data: "" }),
+    ]) {
+      expect(await approvals.admit(operation, never())).toEqual(CHANGE_DENIED);
+    }
+    expect(user.asked).toHaveLength(6);
+  });
+
+  it("never asks about the whiteboard's canvas the chat's page saves, and asks about anything else there", async () => {
+    bind(ROOT, "ask");
+    user.auto = "deny";
+    const canvas = `${FOLDER}/_whiteboard/canvas.json`;
+    // The page's save is the user's own request.
+    const saved = { ...op("write", { key: canvas, data: "" }), invocationId: "request:0f3a9c2e7b1d4a6f" };
+    expect(await approvals.admit(saved, never())).toBeNull();
+    expect(user.asked).toEqual([]);
+    for (const operation of [
+      // An agent's tool call writing the canvas would replace the user's board: asked, as anywhere else.
+      op("write", { key: canvas, data: "" }),
+      op("delete", { key: canvas }),
+      op("write", { key: `${FOLDER}/sub/_whiteboard/canvas.json`, data: "" }),
+      op("write", { key: `${FOLDER}/_whiteboard/../a.txt`, data: "" }),
+      // Only the canvas: an agent's write beside it is asked about, as anywhere else.
+      op("write", { key: `${FOLDER}/_whiteboard/other.json`, data: "" }),
+      op("write", { key: `${FOLDER}/_whiteboard/sub/x`, data: "" }),
     ]) {
       expect(await approvals.admit(operation, never())).toEqual(CHANGE_DENIED);
     }
@@ -445,6 +468,23 @@ describe("a command's connection to a destination off the package hosts", () => 
     expect(await approvals.askNetwork(ROOT, { host: "[::1]", port: 3000, privateNetwork: false }, never())).toBe("allow_session");
     expect(approvals.granted(ROOT)).toEqual(["example.com", "[::1]"]);
     expect(approvals.granted(OTHER)).toEqual([]);
+  });
+
+  it("asks again about a host its user took back, and keeps the chat's other hosts and another chat's", async () => {
+    bind(ROOT, "free");
+    bind(OTHER, "free");
+    journal.bindings.allowDomain(ROOT, "example.com");
+    journal.bindings.allowDomain(ROOT, "[::1]");
+    journal.bindings.allowDomain(OTHER, "example.com");
+    journal.bindings.disallowDomain(ROOT, "example.com");
+    expect([approvals.granted(ROOT), approvals.granted(OTHER)]).toEqual([["[::1]"], ["example.com"]]);
+    user.auto = "deny";
+    expect(await approvals.askNetwork(ROOT, SITE, never())).toBe("deny");
+    expect(user.asked.map(({ kind }) => kind)).toEqual(["network"]);
+    // A host never allowed, or a chat not bound here, changes nothing.
+    journal.bindings.disallowDomain(ROOT, "pypi.example.org");
+    journal.bindings.disallowDomain(CHILD, "example.com");
+    expect(approvals.granted(OTHER)).toEqual(["example.com"]);
   });
 
   it("lets through unasked another port of a host allowed for the session while it waited its turn", async () => {
@@ -855,6 +895,28 @@ describe("approvals over the link", () => {
     expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
   });
 
+  it("answers a browser operation that comes just before its chat's bind folder_unavailable, asking no one", async () => {
+    const notes = join(base, "notes");
+    mkdirSync(notes);
+    const binder = binderFor(user, hosts, {
+      pickFolder: () => Promise.resolve(notes),
+      confirmFolder: () => Promise.resolve({ mode: "free" }),
+    });
+    const ready = await binder.prepareFolder("pick", "window-1", never());
+    if (!ready) throw new Error("the folder was not confirmed");
+    const navigate = op("browser.navigate", { url: "https://example.com/", wait_until: "load" });
+    const bindChat: Operation = {
+      id: "bind-1", sessionId: ROOT, callingSessionId: ROOT, invocationId: "bind", ordinal: 0, kind: "bind",
+      args: { folder: ready.folder, nonce: ready.nonce }, digest: "b",
+    };
+    // One burst, the browser's first use behind the chat's bind: its prompt would otherwise open for a chat bound after it.
+    server.behindWelcome = [frame(navigate), frame(bindChat)];
+    await connect(binder);
+    await server.until(() => results(navigate.id).length === 1 && results(bindChat.id).length === 1);
+    expect(results(navigate.id)[0]?.outcome).toEqual(FOLDER_UNAVAILABLE);
+    expect([ran, user.asked]).toEqual([[], []]);
+  });
+
   it("gives a command its whole timeout once it is allowed, however long its prompt was open: the tools have it only from then", { timeout: 30_000 }, async () => {
     bind(ROOT, "ask");
     let reached = 0;
@@ -876,5 +938,179 @@ describe("approvals over the link", () => {
     // The guest's timeout runs from the command's start in the guest, so from here.
     expect(reached).toBeGreaterThanOrEqual(allowed);
     expect(results(run.id)[0]?.outcome).toEqual({ ok: "ran run" });
+  });
+});
+
+describe("the browser on this computer", () => {
+  const BROWSER_DENIED = { error: { type: "denied", message: "The user did not let the agent use the browser on this computer in this chat" } };
+  const ACT_DENIED = { error: { type: "denied", message: "The user denied this in the agent's browser on this computer" } };
+  const navigate = (root = ROOT, calling = root) => op("browser.navigate", { url: "https://example.com/", wait_until: "load" }, root, calling);
+
+  it("asks a chat's first use in either mode, once: Allow for this chat holds for the chat and its sub-agents, with its binding", async () => {
+    for (const [root, mode] of [[ROOT, "free"], [OTHER, "ask"]] as const) {
+      bind(root, mode);
+      user = new User("allow_session");
+      approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant" });
+      expect(await approvals.admit(op("browser.observe", { script: "snapshot@1", params: {} }, root), never())).toBeNull();
+      expect(user.asked).toEqual([{ kind: "browser", chat: { ...chat(), root, calling: root }, action: "use", detail: "" }]);
+      // A sub-agent of the chat, and a read, ask nothing more.
+      expect(await approvals.admit(op("browser.screenshot", { clip: null, labels: [] }, root, CHILD), never())).toBeNull();
+      expect(user.asked).toHaveLength(1);
+    }
+    // Kept with the binding: the next launch asks nothing more.
+    journal.close();
+    journal = new OperationJournal(join(base, "journal.sqlite"));
+    user = new User("deny");
+    approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant" });
+    expect(await approvals.admit(navigate(), never())).toBeNull();
+    expect(user.asked).toEqual([]);
+  });
+
+  it("refuses a first use the user denies, or nobody answers, or a dismissed prompt, and asks again next time", async () => {
+    bind(ROOT, "free");
+    user = new User("deny");
+    approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant" });
+    expect(await approvals.admit(navigate(), never())).toEqual(BROWSER_DENIED);
+    user.auto = "allow";
+    expect(await approvals.admit(navigate(), never())).toEqual(BROWSER_DENIED);
+    user.auto = "timeout";
+    expect(await approvals.admit(navigate(), never())).toEqual({
+      error: { type: "denied", message: "Nobody answered on this computer in time, so the agent's browser did nothing" },
+    });
+    user.auto = null;
+    const dismissed = new AbortController();
+    const asking = approvals.admit(navigate(), dismissed.signal);
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    dismissed.abort();
+    expect(await asking).toEqual(ACT_DENIED);
+    expect(user.asked).toHaveLength(4);
+    expect(journal.bindings.browsing(ROOT)).toBe(false);
+  });
+
+  it("asks in Ask every time before each act on the page, after the first use, and never before a read", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant" });
+    for (const read of [
+      op("browser.observe", { script: "snapshot@1", params: {} }), op("browser.screenshot", { clip: null, labels: [] }), op("browser.close", {}),
+      op("browser.mouse", { action: "move", x: 1, y: 2 }), op("browser.mouse", { action: "wheel", x: 1, y: 2, delta_x: 0, delta_y: 300 }),
+    ]) {
+      expect(await approvals.admit(read, never())).toBeNull();
+    }
+    expect(user.asked).toEqual([]);
+    for (const act of [
+      navigate(), op("browser.evaluate", { code: "return 1;" }), op("browser.mouse", { action: "click", x: 5, y: 6, button: "right", clicks: 1 }),
+      op("browser.keyboard", { action: "type", text: "secret", at: null, delay: 0 }), op("browser.keyboard", { action: "type", text: 'say "hi"', at: { x: 7, y: 8 }, delay: 0 }),
+      op("browser.keyboard", { action: "press", keys: "Control+Enter", delay: 0 }),
+      op("browser.mouse", { action: "drag", path: [[1, 2], [3, 4]], button: "left" }),
+    ]) {
+      expect(await approvals.admit(act, never())).toBeNull();
+    }
+    expect(user.asked.map((request) => request.kind === "browser" && [request.action, request.detail])).toEqual([
+      ["open", "https://example.com/"], ["script", "return 1;"], ["click", "5, 6 (right button)"], ["type", "secret"],
+      ["type", '"say \\"hi\\"" at 7, 8'], ["press", "Control+Enter"], ["drag", "[[1,2],[3,4]]"],
+    ]);
+    user.auto = "deny";
+    expect(await approvals.admit(navigate(), never())).toEqual(ACT_DENIED);
+  });
+
+  it("names a mouse press and a mouse release for what they are, not a click", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant" });
+    for (const action of ["down", "up"]) {
+      expect(await approvals.admit(op("browser.mouse", { action, x: 5, y: 6, button: "right" }), never())).toBeNull();
+    }
+    expect(user.asked.map((request) => request.kind === "browser" && [request.action, request.detail])).toEqual([
+      ["down", "5, 6 (right button)"], ["up", "5, 6 (right button)"],
+    ]);
+  });
+
+  it("names the page each act would act in, as the browser says it just before, wherever the page sent itself", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    let at = "https://evil.example/";
+    const sessions: string[] = [];
+    approvals = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant", address: (session) => (sessions.push(session), Promise.resolve(at)),
+    });
+    expect(await approvals.admit(navigate(ROOT, CHILD), never())).toBeNull();
+    // The page it opened sent itself on to another site, one its user is signed in to.
+    at = "https://bank.example/account";
+    for (const act of [
+      op("browser.evaluate", { code: "return 1;" }, ROOT, CHILD), op("browser.mouse", { action: "click", x: 5, y: 6, button: "left", clicks: 1 }, ROOT, CHILD),
+      op("browser.keyboard", { action: "type", text: "hunter2", at: null, delay: 0 }, ROOT, CHILD), op("browser.keyboard", { action: "press", keys: "Enter", delay: 0 }, ROOT, CHILD),
+      op("browser.mouse", { action: "drag", path: [[1, 2], [3, 4]], button: "left" }, ROOT, CHILD),
+    ]) {
+      expect(await approvals.admit(act, never())).toBeNull();
+    }
+    expect(user.asked.map((request) => request.kind === "browser" && [request.action, request.page])).toEqual([
+      ["open", undefined], ...["script", "click", "type", "press", "drag"].map((action) => [action, "https://bank.example/account"]),
+    ]);
+    // The calling session's page: a sub-agent acts in its own tab.
+    expect(sessions).toEqual([CHILD, CHILD, CHILD, CHILD, CHILD]);
+  });
+
+  it("says the page is not known when the browser does not say within a second, and asks all the same", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant", address: () => new Promise(() => {}) });
+    const started = performance.now();
+    expect(await approvals.admit(op("browser.evaluate", { code: "return 1;" }), never())).toBeNull();
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(user.asked).toMatchObject([{ action: "script", page: null }]);
+  });
+
+  it("asks a chat that asks every time its first use and then the act, in its one line, and Stop asking lets it work freely", async () => {
+    bind(ROOT, "ask");
+    user = new User();
+    approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant" });
+    const asking = approvals.admit(navigate(), never());
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    // A command of the chat waits behind the browser's prompts.
+    const command = approvals.admit(op("run", RUN), never());
+    user.answer("allow_session");
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    expect(user.open[0]?.request).toMatchObject({ kind: "browser", action: "open" });
+    user.answer("stop_asking");
+    expect(await asking).toBeNull();
+    // The chat works freely now: the command waiting is let through unasked.
+    expect(await command).toBeNull();
+    expect(journal.bindings.get(ROOT)?.mode).toBe("free");
+  });
+
+  it("tells whoever watches of a chat's first use allowed once, and of nothing for a chat this computer did not bind", () => {
+    bind(ROOT, "free");
+    const heard: string[] = [];
+    journal.bindings.watch((root) => heard.push(root));
+    journal.bindings.allowBrowser(ROOT);
+    journal.bindings.allowBrowser(ROOT);
+    journal.bindings.allowBrowser("77777777-7777-4777-8777-777777777777");
+    expect(heard).toEqual([ROOT]);
+  });
+
+  it("lets a close through unasked in a chat whose agent may not use the browser: it closes nothing", async () => {
+    for (const [root, mode] of [[ROOT, "free"], [OTHER, "ask"]] as const) {
+      bind(root, mode);
+      expect(await approvals.admit(op("browser.close", {}, root), never())).toBeNull();
+    }
+    expect(user.asked).toEqual([]);
+    expect(journal.bindings.browsing(ROOT)).toBe(false);
+  });
+
+  it("forgets a deleted chat's first use with its binding", () => {
+    bind(ROOT, "free");
+    journal.bindings.allowBrowser(ROOT);
+    journal.bindings.retire(ROOT);
+    expect(journal.bindings.browsing(ROOT)).toBe(false);
+  });
+
+  it("refuses a browser operation for a chat this computer did not bind, asking no one", async () => {
+    expect(await approvals.admit(navigate(), never())).toEqual(FOLDER_UNAVAILABLE);
+    expect(user.asked).toEqual([]);
   });
 });

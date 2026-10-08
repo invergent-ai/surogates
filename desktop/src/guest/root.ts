@@ -16,15 +16,34 @@ import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STO
 import { PROXY_URL } from "./listeners.js";
 import { socketOf } from "./network.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
-import { type Answer, type HostUser, MAX_SHARES, type Question, ROOT_ID, type Share } from "./protocol.js";
+import { type Answer, HELD, type HostUser, MAX_SHARES, type Question, ROOT_ID, type Share } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 
-// The sessions disk's folder of roots (vm/init), each named by its root session id.
-export const SESSIONS = "/run/surogate/sessions/roots";
+// The sessions disk (vm/init), and its folder of roots, each named by its root session id.
+const SESSIONS_DISK = "/run/surogate/sessions";
+export const SESSIONS = `${SESSIONS_DISK}/roots`;
 // Each share's virtiofs mount, readable by root only.
 const SHARES = "/run/surogate/shares";
 // Each root's cgroup, under the one vm/init bounds below the guest's memory.
 export const CGROUPS = "/sys/fs/cgroup/roots";
+/** 6 in a guest whose kernel's command line, *cmdline*, has surogate.emulated=1 (vm/qemu.ts), and 1 otherwise. */
+export const slowerFor = (cmdline: string) => (/(?:^|\s)surogate\.emulated=1(?:\s|$)/.test(cmdline) ? 6 : 1);
+// The agent's own bounds, each below, in a guest *slower* times as slow. An emulated guest is
+// several times slower at everything, and the host waits six times as long for a setup, a
+// teardown and a power-off (vm/manager.ts, WAITS): each bound grows as much, so it still fits
+// inside the host's.
+export const boundsFor = (slower: number) => ({
+  emptyMs: 3_000 * slower, killedMs: 1_000 * slower, flushMs: 3_000 * slower, mountMs: 5_000 * slower,
+  runnerReadyMs: 5_000 * slower, questionMs: 10_000 * slower, backstopMs: 10_000 * slower, ruleMs: 12_000 * slower,
+});
+// This guest's.
+export const BOUNDS = boundsFor(slowerFor((() => {
+  try {
+    return readFileSync("/proc/cmdline", "utf8");
+  } catch {
+    return "";
+  }
+})()));
 // How many processes one root may have of the guest's 32 768.
 const PIDS_MAX = 4096;
 // How many cgroups one root may have below its own: its runner's, its runs' and its
@@ -35,8 +54,14 @@ const PIDS_MAX = 4096;
 const CGROUPS_MAX = 256;
 // How long a root's processes have to end once its cgroup is killed. One stuck in
 // a stat of a stalled share cannot end until the share answers.
-const EMPTY_MS = 3_000;
+const EMPTY_MS = BOUNDS.emptyMs;
 const EMPTY_RETRY_MS = 10;
+// How long a shutdown waits for every root's processes, killed together, to end: inside the
+// host's 5 s from its shutdown to the guest's power-off.
+const KILLED_MS = BOUNDS.killedMs;
+// How long a flush of a share waits for its server: one that has not answered by then stalled.
+// A teardown's fits the host's 15 s with EMPTY_MS; the stop's, its 5 s with KILLED_MS.
+const FLUSH_MS = BOUNDS.flushMs;
 const ENTER_ROOT = "/run/surogate/agent/enter-root";
 // The cloud's layout of the commands' environment, written by the image's build.
 const LAYOUT = "/etc/surogate/environment";
@@ -61,17 +86,16 @@ const FULL = `This computer's sandbox holds ${MAX_SHARES} chats already`;
 const CLOUD_HOME = /(?<=^|:)\/home\/sandbox(?=\/|:|$)/g;
 // A share the host has just added is there once the guest's kernel has found its
 // device, within about 50 ms: until then its mount fails, and is tried again.
-const MOUNT_MS = 5_000;
+const MOUNT_MS = BOUNDS.mountMs;
 const MOUNT_RETRY_MS = 25;
 // A root's runner starts in about 50 ms. The host gives a setup 15 s, past this, MOUNT_MS and EMPTY_MS.
-const RUNNER_READY_MS = 5_000;
+const RUNNER_READY_MS = BOUNDS.runnerReadyMs;
 // A runner that answers no question in this long is stopped, by one of its own
 // commands, or stuck in a stat of the folder that does not return: it is lost.
-const QUESTION_MS = 10_000;
-// How long past its timeout a run waits for its runner to report the command's
-// end. A runner that answers nothing, its loop blocked on a stalled stat or the
-// runner stopped by a command, holds no run longer than its timeout and this.
-const GRACE_MS = 2_000;
+const QUESTION_MS = BOUNDS.questionMs;
+// How far past a command's timeout its backstop in the guest falls (Backstop).
+const BACKSTOP_MS = BOUNDS.backstopMs;
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 // The commands' environment: the cloud's layout under the root's own HOME, and the user's names.
 // Their proxy variables name the root's runner's proxies, the commands' one way out; ALL_PROXY
@@ -144,12 +168,12 @@ async function mountShare(tag: string): Promise<string> {
   if (mounted.has(tag)) return share;
   await mkdir(share, { recursive: true });
   await chmod(SHARES, 0o700);
-  for (const deadline = Date.now() + MOUNT_MS; ;) {
+  for (const deadline = performance.now() + MOUNT_MS; ;) {
     try {
       await execute("/usr/bin/mount", ["-t", "virtiofs", "-o", "nosuid,nodev", tag, share]);
       break;
     } catch (error) {
-      if (Date.now() > deadline) throw error;
+      if (performance.now() > deadline) throw error;
       await new Promise((resolve) => setTimeout(resolve, MOUNT_RETRY_MS));
     }
   }
@@ -167,6 +191,54 @@ export async function unmountShare(share: Share): Promise<void> {
   await rmdir(path).catch(() => {});
 }
 
+// *path*'s filesystem written out, that one alone (syncfs, as sync -f does): never sync(2),
+// which writes out every filesystem in the guest, and waits for good on a share that stalled.
+// True once it has been, false if it has not within *ms*, its sync left waiting.
+function flush(path: string, ms = Infinity): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = ms === Infinity ? undefined : setTimeout(() => resolve(false), ms);
+    execFile("/usr/bin/sync", ["-f", path], (error) => {
+      clearTimeout(timer);
+      resolve(!error);
+    });
+  });
+}
+
+/**
+ * What a root torn down wrote, written out: its home's and /tmp's on the sessions disk, and its
+ * folder's through its share, if the share was mounted and its root's processes all ended. False
+ * when the share did not answer within FLUSH_MS: it stalled, and is held.
+ */
+export async function flushRoot(share: Share, stalled: boolean): Promise<boolean> {
+  const shared = !stalled && TAG.test(share.tag) && mounted.has(share.tag);
+  const [, answered] = await Promise.all([flush(SESSIONS_DISK), shared ? flush(join(SHARES, share.tag), FLUSH_MS) : true]);
+  return answered;
+}
+
+/**
+ * The guest's stop: every root's processes end at once, every share and the sessions disk are
+ * written out, each alone, and the guest powers off. Only the sessions disk could lose writes to
+ * a power cut: the image and the agent disk are read-only, and the shares are written through.
+ */
+export async function powerOff(): Promise<void> {
+  await writeFile(join(CGROUPS, "cgroup.kill"), "1").catch(() => {});
+  // Killed, they end at once; one waiting on a share that stalled cannot, and the guest powers off around it.
+  await emptied(CGROUPS, KILLED_MS).catch(() => {});
+  // A share that stalled answers no flush: it is left to its bound.
+  await Promise.all([...mounted].map((tag) => flush(join(SHARES, tag), KILLED_MS)));
+  // Written out first: a root whose process cannot end still holds the disk in its own
+  // namespace, so the unmount here may leave it mounted there. Unmounted by its last holder,
+  // it is clean, and the next boot's check has nothing to replay.
+  await flush(SESSIONS_DISK);
+  await execute("/usr/bin/umount", [SESSIONS_DISK]).catch(() => {});
+  await writeFile("/proc/sysrq-trigger", "o");
+}
+
+// The guest's clock set to *now*, milliseconds since the epoch.
+export async function setClock(now: number): Promise<void> {
+  await execute("/usr/bin/date", ["-u", "-s", `@${(now / 1000).toFixed(3)}`]);
+}
+
 // The root's runner in its own namespaces: mount, PID, IPC, UTS, network and
 // cgroup, as util-linux's unshare makes them, and enter-root builds them. Ending
 // the runner's stdin ends the runner, then tini, the namespaces' PID 1, and
@@ -182,16 +254,23 @@ export async function enter(root: string, place: Place, share: Share, user: Host
   const uid = uidOf(root);
   const mount = await mountShare(share.tag);
   const cgroup = join(CGROUPS, root);
-  // Made again for a root set up again once its runner was lost.
+  // Made at the root's first setup in this guest, and kept until the guest stops: the root's
+  // own memory cgroup, the only one it has. Removed while pages it charged remain, as a
+  // file a command left in /tmp, it would linger dying, counted by no limit.
   await mkdir(cgroup, { recursive: true });
   // Nothing of the root runs while enter-root checks its mount points: what it ran before ends first.
   await killRoot(root).catch(() => {
     throw new Error("what this chat ran before has not ended yet");
   });
-  // Then its cgroup is made again empty: the cgroups its runner and commands had go too.
-  // In it: init for the runner, run for each run's cgroup, proc for each background process's.
-  await removeCgroup(cgroup);
-  for (const leaf of ["init", "run", "proc"]) await mkdir(join(cgroup, leaf), { recursive: true });
+  // Then the cgroups its runner and commands had below it go, and are made again empty:
+  // init for the runner, run for each run's cgroup, proc for each background process's.
+  // None of them counts memory, so none lingers once removed.
+  for (const leaf of ["init", "run", "proc"]) {
+    await removeCgroup(join(cgroup, leaf)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    await mkdir(join(cgroup, leaf));
+  }
   await writeFile(join(cgroup, "pids.max"), String(PIDS_MAX));
   // No cgroup deeper than a command's, and at most CGROUPS_MAX.
   await writeFile(join(cgroup, "cgroup.max.descendants"), String(CGROUPS_MAX));
@@ -222,24 +301,19 @@ async function removeCgroup(path: string): Promise<void> {
 }
 
 // Once *root*'s runner is up: unshare, its one process outside its namespaces, joins
-// the runner's cgroup, so the root's own holds no process. Then each background
-// process's memory is counted in its own cgroup, where an out-of-memory kill shows. A
-// run's is not: its answer has no note, and a memory cgroup outlives its rmdir while
-// pages it charged remain, as a file a run left in /tmp.
+// the runner's cgroup, so the root's own holds no process. The root's memory is counted
+// in its own cgroup alone, where an out-of-memory kill shows (runner.ts): no cgroup below
+// it counts memory, so its next setup can enter it again, and none lingers once removed.
 export async function contain(root: string, pid: number | undefined): Promise<void> {
-  const cgroup = join(CGROUPS, root);
-  await writeFile(join(cgroup, "init", "cgroup.procs"), String(pid));
-  await writeFile(join(cgroup, "cgroup.subtree_control"), "+memory");
-  await writeFile(join(cgroup, "proc", "cgroup.subtree_control"), "+memory");
+  await writeFile(join(CGROUPS, root, "init", "cgroup.procs"), String(pid));
 }
 
 /**
  * The cgroups the agent makes for a root's background processes, in the root's proc
- * folder (spec, Section 11, Cgroups), which only the agent writes. A memory cgroup a
- * command made there and removed again would hold guest kernel memory that no limit
- * counts, for as long as the page cache it charged lives. Each is the root's user's to
- * enter and to end, through its cgroup.procs and cgroup.kill, which its runner writes;
- * the agent removes it once nothing of it runs.
+ * folder (spec, Section 11, Cgroups), which only the agent writes. None counts memory:
+ * the root's own cgroup does (contain), so none lingers once removed. Each is
+ * the root's user's to enter and to end, through its cgroup.procs and cgroup.kill, which
+ * its runner writes; the agent removes it once nothing of it runs.
  */
 export class ProcessCgroups {
   // Ended processes whose cgroups still held what they left: tried again at each start.
@@ -279,27 +353,94 @@ export async function killRoot(root: string): Promise<void> {
   if (!ROOT_ID.test(root)) return;
   const cgroup = join(CGROUPS, root);
   await writeFile(join(cgroup, "cgroup.kill"), "1");
-  for (const deadline = Date.now() + EMPTY_MS; !/^populated 0$/m.test(await readFile(join(cgroup, "cgroup.events"), "utf8"));) {
-    if (Date.now() > deadline) throw new Error(`the processes of ${root} have not ended`);
+  await emptied(cgroup).catch(() => {
+    throw new Error(`the processes of ${root} have not ended`);
+  });
+}
+
+// Resolves once *cgroup* holds no process, or rejects if it still does after *ms*.
+async function emptied(cgroup: string, ms = EMPTY_MS): Promise<void> {
+  for (const deadline = performance.now() + ms; !/^populated 0$/m.test(await readFile(join(cgroup, "cgroup.events"), "utf8"));) {
+    if (performance.now() > deadline) throw new Error("not emptied");
     await new Promise((resolve) => setTimeout(resolve, EMPTY_RETRY_MS));
   }
 }
 
-// *answer*, or the signal, or *ms* passing, whichever comes first: the runner's
-// view of the folder can stall, as a stat through virtiofs can.
-function first<T>(answer: Promise<T>, signal: AbortSignal, ms?: number): Promise<T | "cancelled" | "timeout"> {
+// *answer*, or the signal, or *late*, whichever comes first: the runner's view of the
+// folder can stall, as a stat through virtiofs can.
+function first<T>(answer: Promise<T>, signal: AbortSignal, late?: Promise<"timeout">): Promise<T | "cancelled" | "timeout"> {
   return new Promise((resolve) => {
     const done = (value: T | "cancelled" | "timeout") => {
-      clearTimeout(timer);
       signal.removeEventListener("abort", aborted);
       resolve(value);
     };
     const aborted = () => done("cancelled");
-    const timer = ms === undefined ? undefined : setTimeout(() => done("timeout"), Math.min(ms, 2 ** 31 - 1));
     if (signal.aborted) return done("cancelled");
     signal.addEventListener("abort", aborted, { once: true });
     void answer.then(done);
+    void late?.then(done);
   });
+}
+
+// What a run's backstop knows of the host: how long it has said nothing, and when it next speaks.
+export interface HostHeard {
+  silentFor(): number;
+  // Resolves when the host next speaks; *stop* takes the waiter off its list.
+  next(stop: AbortSignal): Promise<void>;
+}
+
+/**
+ * A run's deadline in the guest, a backstop only (spec, Section 11, Lifecycle): this computer
+ * keeps the command's timeout on its own monotonic clock, which does not count its sleep, and
+ * ends the command there (vm/manager.ts, Guest.op). The backstop falls *margin* past that
+ * timeout, later by each time the computer slept (extend), and never while the host has been
+ * silent past *silence*: a guest whose clock counted the sleep wakes to find it due, and waits
+ * to hear the host, which ends the command itself if its time has come, then gives it the margin again.
+ */
+export class Backstop {
+  readonly fell: Promise<"timeout">;
+  private due: number;
+  private timer: NodeJS.Timeout | undefined;
+  private fall: () => void = () => {};
+  private ended = false;
+  private readonly stop = new AbortController();
+
+  constructor(ms: number, private readonly margin: number, private readonly host: HostHeard | null, private readonly silence: number) {
+    this.due = performance.now() + ms + margin;
+    this.fell = new Promise((resolve) => {
+      this.fall = () => resolve("timeout");
+    });
+    this.arm();
+  }
+
+  extend(ms: number): void {
+    this.due += ms;
+    this.arm();
+  }
+
+  end(): void {
+    this.ended = true;
+    clearTimeout(this.timer);
+    this.stop.abort();
+  }
+
+  private arm(): void {
+    clearTimeout(this.timer);
+    if (this.ended) return;
+    this.timer = setTimeout(() => this.reached(), Math.min(Math.max(0, this.due - performance.now()), MAX_TIMER_MS));
+  }
+
+  private reached(): void {
+    if (this.host && this.host.silentFor() > this.silence) {
+      void this.host.next(this.stop.signal).then(() => {
+        this.due = Math.max(this.due, performance.now() + this.margin);
+        this.arm();
+      });
+      return;
+    }
+    if (performance.now() < this.due) return this.arm();
+    this.fall();
+  }
 }
 
 export class Root {
@@ -310,6 +451,8 @@ export class Root {
     readonly runner: SessionRunner,
     private readonly lose: () => Promise<void>,
     private readonly questionMs: number,
+    // A run's backstop, falling past its timeout of *ms* (Roots.backstop).
+    private readonly backstop: (ms: number) => Backstop,
   ) {}
 
   // Everything of the root ends; resolves once it has, and its runner has gone.
@@ -331,24 +474,28 @@ export class Root {
       const checked = runArgs(args);
       if (!("command" in checked)) return checked;
       // One for the whole run, its folder lookup and its command.
-      const deadline = Date.now() + checked.timeout * 1000 + GRACE_MS;
-      const { folder, home } = this.place;
-      const placed = await first(this.ask({ type: "place", id, folder, home, workdir: checked.workdir }), signal, checked.timeout * 1000);
-      if (placed === "cancelled") return CANCELLED;
-      if (placed === "timeout") return timedOut(checked.timeout);
-      if (!placed) return SANDBOX_STOPPED;
-      if (placed.type === "refused") return { error: placed.refusal };
-      if (placed.type !== "placed") return SANDBOX_STOPPED;
-      if (placed.unenterable) return ran(cannotEnter(placed.unenterable, placed.cwd), -1);
-      if (signal.aborted) return CANCELLED;
-      const child = this.runner.spawn({ id, command: checked.command, cwd: placed.cwd, env: {}, pty: false, stdin: false });
-      // The runner's report of its end, or the cancel, or the deadline. The kill
-      // waits in the runner's input, and a report after the answer settles nothing.
-      const ended = await first(supervise(child, checked.timeout, signal), signal, deadline - Date.now());
-      if (ended === "cancelled") return CANCELLED;
-      if (ended !== "timeout") return ended;
-      child.kill();
-      return timedOut(checked.timeout);
+      const backstop = this.backstop(checked.timeout * 1000);
+      try {
+        const { folder, home } = this.place;
+        const placed = await first(this.ask({ type: "place", id, folder, home, workdir: checked.workdir }), signal, backstop.fell);
+        if (placed === "cancelled") return CANCELLED;
+        if (placed === "timeout") return timedOut(checked.timeout);
+        if (!placed) return SANDBOX_STOPPED;
+        if (placed.type === "refused") return { error: placed.refusal };
+        if (placed.type !== "placed") return SANDBOX_STOPPED;
+        if (placed.unenterable) return ran(cannotEnter(placed.unenterable, placed.cwd), -1);
+        if (signal.aborted) return CANCELLED;
+        const child = this.runner.spawn({ id, command: checked.command, cwd: placed.cwd, env: {}, pty: false, stdin: false });
+        // The runner's report of its end, or the cancel, or the backstop. The kill
+        // waits in the runner's input, and a report after the answer settles nothing.
+        const ended = await first(supervise(child, signal), signal, backstop.fell);
+        if (ended === "cancelled") return CANCELLED;
+        if (ended !== "timeout") return ended;
+        child.kill();
+        return timedOut(checked.timeout);
+      } finally {
+        backstop.end();
+      }
     });
   }
 
@@ -391,9 +538,15 @@ export interface RootsOptions {
   cgroups?: string;
   // The mount of a share whose root was torn down goes (unmountShare).
   unmount?(share: Share): Promise<void>;
+  // What a root torn down wrote, written out, its share's too unless it *stalled*: false when the share did not answer (flushRoot).
+  flush?(share: Share, stalled: boolean): Promise<boolean>;
   // The root's socket for its connections to the host proxy, its guest user's, made before its namespaces (Network.listen); resolves with what closes it.
   tunnels?(root: string, uid: number): Promise<() => void>;
   questionMs?: number;
+  // How far past a run's timeout its backstop falls: BACKSTOP_MS by default.
+  backstopMs?: number;
+  // How long the host may say nothing before a backstop waits to hear it; without it, none waits (the tests).
+  hostSilenceMs?: number;
 }
 
 // The roots set up in this guest, by root session id.
@@ -408,8 +561,46 @@ export class Roots {
   // teardown: set up again once its runner was lost, a root still answers for
   // what ended with that runner, and how.
   private readonly registries = new Map<string, Processes>();
+  // The roots whose end left something running that would not end.
+  private readonly held = new Set<string>();
+  // Every run's backstop in this guest, and when the host was last heard, and who waits to hear it next.
+  private readonly backstops = new Set<Backstop>();
+  private heardAt = performance.now();
+  private readonly hearing = new Set<() => void>();
+  private readonly host: HostHeard = {
+    silentFor: () => performance.now() - this.heardAt,
+    next: (stop) => new Promise((resolve) => {
+      this.hearing.add(resolve);
+      stop.addEventListener("abort", () => this.hearing.delete(resolve), { once: true });
+    }),
+  };
 
   constructor(private readonly options: RootsOptions) {}
+
+  /** The host spoke: a backstop that waited to hear it goes on. */
+  heard(): void {
+    this.heardAt = performance.now();
+    for (const go of this.hearing) go();
+    this.hearing.clear();
+  }
+
+  /** The computer slept *ms*: every run's backstop falls that much later. */
+  woke(ms: number): void {
+    for (const backstop of this.backstops) backstop.extend(ms);
+  }
+
+  // A run's backstop, kept in the set until it ends.
+  private backstop(ms: number): Backstop {
+    const silence = this.options.hostSilenceMs;
+    const made = new Backstop(ms, this.options.backstopMs ?? BACKSTOP_MS, silence === undefined ? null : this.host, silence ?? 0);
+    this.backstops.add(made);
+    const end = made.end.bind(made);
+    made.end = () => {
+      this.backstops.delete(made);
+      end();
+    };
+    return made;
+  }
 
   uid(root: string): number {
     return this.options.uid(root);
@@ -446,6 +637,8 @@ export class Roots {
       try {
         await this.options.kill(root);
       } catch {
+        // Something of it would not end: its share stays held until its teardown says so.
+        this.held.add(root);
         await runner.stop();
       }
       unlisten();
@@ -470,9 +663,11 @@ export class Roots {
       unlisten();
       throw error;
     }
-    listed = new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS);
+    listed = new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS, (ms) => this.backstop(ms));
     if (!this.registries.has(root)) this.registries.set(root, this.registry(root, ended));
     this.roots.set(root, listed);
+    // Set up again, what it ran before has ended: nothing of it holds its share any more.
+    this.held.delete(root);
   }
 
   // A root's registry, its processes in whichever runner the root has set up.
@@ -531,7 +726,12 @@ export class Roots {
         this.roots.delete(root);
         await target.end();
       }
+      // What it wrote, written out. A share that does not answer its own flush stalled, and is held too.
+      if (!((await this.options.flush?.(share, this.held.has(root))) ?? true)) this.held.add(root);
       await this.options.unmount?.(share);
+      // What of it would not end, a process waiting on a share that stalled, still holds the
+      // share: the host keeps it in the guest, which could not let it go.
+      if (this.held.delete(root)) throw new Error(HELD);
     })());
   }
 

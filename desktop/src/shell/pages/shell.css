@@ -696,6 +696,10 @@ body.main.first {
   gap: 2px;
 }
 
+.tabs[hidden] {
+  display: none;
+}
+
 .tab {
   display: inline-flex;
   align-items: center;
@@ -900,7 +904,8 @@ body.main.first {
   visibility: hidden;
 }
 
-.thread .place {
+.thread .place,
+.file .place {
   display: inline-flex;
   margin-left: 6px;
   vertical-align: -2px;
@@ -956,6 +961,40 @@ body.main.first {
 .library .desc {
   padding: 12px;
   font-size: 13px;
+}
+
+/* A thread read in the pane: its head, then the hole its transcript, the agent's page, fills. */
+.reading {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.reading[hidden] {
+  display: none;
+}
+
+.reading-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.reading-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-hole {
+  flex: 1;
+  min-height: 0;
 }
 
 
@@ -1097,6 +1136,48 @@ body.settings-page {
   font-weight: 600;
 }
 
+.settings-content .row + h2 {
+  margin-top: 36px;
+}
+
+/* What a chat holds, under its mode, each with the button that ends it. */
+.row .line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+  color: var(--fg-2);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+/* A long command shows its first two lines. */
+.row .line > span {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.row .line button {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: none;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+/* A folder's path, as a heading over its chats: written left to right, whole, and wrapped anywhere. */
+.folder-path {
+  margin: 24px 0 4px;
+  font: 13px/1.5 ui-monospace, "Noto Sans Mono", monospace;
+  direction: ltr;
+  unicode-bidi: isolate;
+  overflow-wrap: anywhere;
+}
+
 .row {
   display: flex;
   align-items: center;
@@ -1123,6 +1204,22 @@ body.settings-page {
   user-select: text;
 }
 
+.row select.choice {
+  max-width: 280px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--fg);
+  font: inherit;
+}
+
+.row-note {
+  padding: 10px 0;
+  color: var(--dim);
+  font-size: 13px;
+}
+
 .segmented {
   display: inline-flex;
   flex-shrink: 0;
@@ -1145,6 +1242,11 @@ body.settings-page {
 .segmented.icons button {
   min-width: 34px;
   padding: 0;
+}
+
+.segmented button:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .segmented button[aria-pressed="true"] {
@@ -1236,7 +1338,8 @@ body.prompt-page {
   overflow-wrap: anywhere;
 }
 
-.prompt .special {
+.prompt .special,
+.settings-content .special {
   padding: 0 3px;
   border-radius: 4px;
   background: var(--accent);
@@ -1296,4 +1399,56 @@ body.prompt-page {
 .prompt .actions .btn[aria-disabled="true"] {
   opacity: 0.5;
   cursor: default;
+}
+
+/* About Surogate: a small window of its own, as Claude Desktop's, moved by any of its bare parts. */
+body.about-page {
+  height: 100vh;
+  background: var(--panel);
+  -webkit-app-region: drag;
+}
+
+.about {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 56px 40px 28px;
+  text-align: center;
+}
+
+.about h1 {
+  font: 400 26px/1.25 "Noto Serif", Georgia, serif;
+}
+
+.about .btn {
+  justify-content: center;
+  width: 100%;
+}
+
+.about #documentation {
+  margin-top: auto;
+}
+
+.about .mark {
+  display: inline-flex;
+}
+
+/* What a screen reader hears of the sandbox's line, outside it: each change of its state, not each percent. */
+#sandbox-said {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Empty, the waiting quit's line takes no room, and stays a live region. */
+#quitting:has(#quitting-text:empty) {
+  margin: 0;
+  padding: 0;
+  border: 0;
 }

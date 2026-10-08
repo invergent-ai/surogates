@@ -4,11 +4,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { DatabaseSync } from "node:sqlite";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApprovalPrompts, ApprovalRequest } from "../src/binding/approvals.js";
 import {
-  ALREADY_BOUND, Binder, type BinderOptions, type FolderPrompts, type FolderSheet, NOT_RECORDED, type Prepared,
+  ALREADY_BOUND, Binder, type BinderOptions, type FolderLook, type FolderPrompts, type FolderSheet, NOT_FORGOTTEN, NOT_RECORDED,
+  type Prepared,
 } from "../src/binding/binder.js";
 import { BOOT_ID } from "../src/binding/folder.js";
 import { connectDevice } from "../src/device.js";
@@ -22,6 +25,7 @@ import { FakeLinkServer } from "./fake-server.js";
 
 const ROOT = "44444444-4444-4444-8444-444444444444";
 const OTHER = "55555555-5555-4555-8555-555555555555";
+const THIRD = "66666666-6666-4666-8666-666666666666";
 const WINDOW = "window-1";
 
 // The user, as the dialog and the sheet meet them: each dialog picks the next of
@@ -95,6 +99,13 @@ function binder(user: User, overrides: Partial<BinderOptions> = {}): Binder {
 
 const never = () => new AbortController().signal;
 
+// The look a test holds, ended, as the folder answering ends it. The looks are the process's: one a
+// failing test left held would refuse every later look in the file, and hide that first failure.
+async function ended(answer: (found: FolderLook) => void): Promise<void> {
+  answer(statSync(notes));
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
 // The user confirms *folder* through the dialog and the sheet.
 async function confirmed(user: User, chooser: Binder, folder = notes, mode: Mode = "free"): Promise<Prepared> {
   user.picks.push(folder);
@@ -142,7 +153,7 @@ describe("preparing a new chat's folder", () => {
     const made = user.sheets[0]?.folder ?? "";
     expect(made).toMatch(new RegExp(`^${join(base, "home", "Surogate", "Research-assistant")}/\\d{4}-\\d{2}-\\d{2}$`));
     expect(user.dialogs).toEqual([]);
-    expect(user.sheets).toEqual([{ agent: "Research assistant", folder: made, mode: "free", links: null, refusal: null }]);
+    expect(user.sheets).toEqual([{ agent: "Research assistant", folder: made, mode: "free", links: null, refusal: null, thread: null }]);
     expect(ready).toEqual({
       folder: made, mode: "ask", nonce: expect.stringMatching(/^[A-Za-z0-9_-]{16,128}$/), token: expect.any(String),
     });
@@ -235,6 +246,13 @@ describe("preparing a new chat's folder", () => {
     expect(user.dialogs).toEqual([join(base, "home")]);
     expect(user.sheets.map((sheet) => sheet.folder)).toEqual([notes]);
     expect(readdirSync(join(base, "data", "Research-assistant"))).toEqual([]);
+  });
+
+  it("names on the sheet the project's thread the folder is for", async () => {
+    const user = new User([notes], [{ mode: "ask" }]);
+    const thread = { project: "Q3 report", thread: "Check the totals" };
+    expect(await binder(user).prepareFolder("pick", WINDOW, never(), thread)).toMatchObject({ folder: notes, mode: "ask" });
+    expect(user.sheets.map((sheet) => sheet.thread)).toEqual([thread]);
   });
 
   it("shows the files in the folder that are linked from elsewhere", async () => {
@@ -428,6 +446,29 @@ describe("a chat's bind operation", () => {
     expect(asked).toEqual(["command"]);
   });
 
+  it("asks no one about an operation the tool hosts refuse anyway, and answers their refusal", async () => {
+    journal.bindings.add({ root: ROOT, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "ask", boundAt: 1 });
+    const asked: string[] = [];
+    const chooser = binder(new User(), {
+      refusal: (operation) => (operation.kind === "browser.navigate" ? { error: { type: "no_browser", message: "none" } } : null),
+      approvalPrompts: { approve: (request) => (asked.push(request.kind), Promise.resolve("allow")), confirmFreeMode: () => Promise.resolve(false) },
+    });
+    const navigate = { ...bindOp(ROOT, { folder: notes, nonce: "n" }), kind: "browser.navigate", invocationId: "1:c", ordinal: 1, args: { url: "https://example.com/" } };
+    expect(await chooser.admit(navigate, never())).toEqual({ error: { type: "no_browser", message: "none" } });
+    expect(asked).toEqual([]);
+    expect(await chooser.admit({ ...navigate, kind: "write", args: { key: `${notes}/a.md`, data: "" } }, never())).toBeNull();
+    expect(asked).toEqual(["change"]);
+  });
+
+  it("tells the hosts of a deleted chat's retirement, so its browser tabs close", async () => {
+    journal.bindings.add({ root: ROOT, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "ask", boundAt: 1 });
+    const retired: string[] = [];
+    const chooser = binder(new User(), { retired: (root) => void retired.push(root) });
+    expect(await chooser.admit({ ...bindOp(ROOT, { folder: notes, nonce: "n" }), kind: "retire", invocationId: "retire", ordinal: 0, args: {} }, never())).toEqual({ ok: null });
+    expect(retired).toEqual([ROOT]);
+    expect(journal.bindings.get(ROOT)).toBeUndefined();
+  });
+
   it("tells the approvals the command each background process runs, as it starts", async () => {
     const asked: ApprovalRequest[] = [];
     hosts.run = (operation) => Promise.resolve(operation.kind === "start" ? { ok: { session_id: "proc_1", pid: 7 } } : { ok: null });
@@ -457,6 +498,66 @@ describe("a chat's bind operation", () => {
     expect(await chooser.run(op, never())).toEqual({ ok: "ran resolve" });
     await chooser.end();
     expect([hosts.ran, hosts.ended]).toEqual([[op], 1]);
+  });
+});
+
+describe("a deleted chat's retire operation", () => {
+  const retireOp = (root: string, changes: Partial<Operation> = {}): Operation => ({
+    id: `retire-${root}`, sessionId: root, callingSessionId: root, invocationId: "retire", ordinal: 0, kind: "retire",
+    args: {}, digest: `digest-${root}`, ...changes,
+  });
+  const bound = (root: string) =>
+    journal.bindings.add({ root, nonce: `nonce-${root}`, folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
+
+  it("forgets the chat's folder and what its user allowed for it, touches no file, and leaves other chats bound", async () => {
+    bound(ROOT);
+    bound(OTHER);
+    journal.bindings.allowDomain(ROOT, "example.com");
+    writeFileSync(join(notes, "kept.txt"), "kept");
+    const chooser = binder(new User());
+    expect(await chooser.admit(retireOp(ROOT), never())).toEqual({ ok: null });
+    expect(journal.bindings.get(ROOT)).toBeUndefined();
+    expect(journal.bindings.domains(ROOT)).toEqual([]);
+    expect(journal.bindings.get(OTHER)).toMatchObject({ folder: notes });
+    expect(statSync(join(notes, "kept.txt")).size).toBe(4);
+    expect(hosts.ran).toEqual([]);
+    // Once more, as after a restart: nothing left to forget.
+    expect(await chooser.admit(retireOp(ROOT), never())).toEqual({ ok: null });
+  });
+
+  it.each([
+    ["a session under the chat", { callingSessionId: OTHER }],
+    ["another invocation", { invocationId: "12:call_1" }],
+    ["a later ordinal", { ordinal: 1 }],
+  ])("is refused when it comes from %s, and forgets nothing", async (_name, changes) => {
+    bound(ROOT);
+    expect(await binder(new User()).admit(retireOp(ROOT, changes), never())).toEqual(NOT_BOUND);
+    expect(journal.bindings.get(ROOT)).toMatchObject({ folder: notes });
+  });
+
+  it("keeps the chat's granted hosts with its binding when the journal cannot forget it whole", async () => {
+    bound(ROOT);
+    journal.bindings.allowDomain(ROOT, "example.com");
+    const db = (journal.bindings as unknown as { db: DatabaseSync }).db;
+    const prepare = db.prepare.bind(db);
+    vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
+      if (sql.startsWith("DELETE FROM bindings")) throw new Error("database or disk is full");
+      return prepare(sql);
+    });
+    expect(await binder(new User()).admit(retireOp(ROOT), never())).toEqual(NOT_FORGOTTEN);
+    vi.restoreAllMocks();
+    expect(journal.bindings.get(ROOT)).toMatchObject({ folder: notes });
+    expect(journal.bindings.domains(ROOT)).toEqual(["example.com"]);
+  });
+
+  it("says so when the journal cannot forget the folder", async () => {
+    bound(ROOT);
+    const failures: unknown[] = [];
+    vi.spyOn(journal.bindings, "retire").mockImplementation(() => {
+      throw new Error("database or disk is full");
+    });
+    expect(await binder(new User(), { onError: (error) => failures.push(error) }).admit(retireOp(ROOT), never())).toEqual(NOT_FORGOTTEN);
+    expect(failures).toHaveLength(1);
   });
 });
 
@@ -620,6 +721,115 @@ describe("dropping a confirmed folder", () => {
     expect(await chooser.admit(bindOp(ROOT, ready), never())).toEqual({ ok: null });
     chooser.cancelPrepared(ready.token, WINDOW);
     expect(journal.bindings.get(ROOT)?.folder).toBe(notes);
+  });
+});
+
+describe("what the page may know of a chat's folder", () => {
+  it("is the folder and the mode of a chat bound here, as its mode changes, and nothing for a chat with none", async () => {
+    const user = new User();
+    const chooser = binder(user);
+    expect(chooser.bindingOf(ROOT)).toBeNull();
+    const ready = await confirmed(user, chooser, notes, "ask");
+    expect(await chooser.admit(bindOp(ROOT, ready), never())).toEqual({ ok: null });
+    expect(chooser.bindingOf(ROOT)).toEqual({ folder: notes, mode: "ask" });
+    journal.bindings.setMode(ROOT, "free");
+    expect(chooser.bindingOf(ROOT)).toEqual({ folder: notes, mode: "free" });
+    expect(chooser.bindingOf(OTHER)).toBeNull();
+  });
+
+  it("tells whoever watches of each chat bound and each change of its mode, until they stop, whatever one of them throws", async () => {
+    const heard: string[] = [];
+    journal.bindings.watch(() => {
+      throw new Error("a listener that fails");
+    });
+    const stop = journal.bindings.watch((root) => heard.push(root));
+    const user = new User();
+    const chooser = binder(user);
+    const ready = await confirmed(user, chooser);
+    // Recorded all the same: a listener's failure is not the binding's.
+    expect(await chooser.admit(bindOp(ROOT, ready), never())).toEqual({ ok: null });
+    chooser.approvals.setMode(ROOT, "ask");
+    // A write that changes nothing tells nothing: a chat with no folder here, a mode it has already.
+    journal.bindings.setMode(OTHER, "ask");
+    journal.bindings.setMode(ROOT, "ask");
+    stop();
+    journal.bindings.setMode(ROOT, "free");
+    expect(heard).toEqual([ROOT, ROOT]);
+  });
+
+  it("shows a chat's folder only while it is still the one its user confirmed", async () => {
+    const user = new User();
+    const chooser = binder(user);
+    const ready = await confirmed(user, chooser);
+    await chooser.admit(bindOp(ROOT, ready), never());
+    expect(await chooser.folderToShow(ROOT)).toBe(notes);
+    await expect(chooser.folderToShow(OTHER)).rejects.toThrow("This chat has no folder on this computer");
+    // Another folder at its path, a link to another folder, a file: none is the chat's.
+    renameSync(notes, join(base, "moved"));
+    mkdirSync(notes);
+    const replaced = `The folder ${notes} was replaced after it was confirmed for this chat`;
+    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(replaced);
+    rmSync(notes, { recursive: true });
+    symlinkSync(join(base, "other"), notes);
+    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(replaced);
+    rmSync(notes);
+    writeFileSync(notes, "");
+    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(replaced);
+    rmSync(notes);
+    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`The folder ${notes} is not there`);
+  });
+
+  it("refuses a link at the folder's path, even one to the folder confirmed", async () => {
+    const user = new User();
+    const chooser = binder(user);
+    await chooser.admit(bindOp(ROOT, await confirmed(user, chooser)), never());
+    const moved = join(base, "moved");
+    renameSync(notes, moved);
+    symlinkSync(moved, notes);
+    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`The folder ${notes} was replaced after it was confirmed for this chat`);
+  });
+
+  it("refuses a file that took the folder's inode, as a deleted folder's can be given again", async () => {
+    // On ext4 a file made where the folder was gets a new inode, which the inode compare already
+    // refuses: a look that answers a file with the binding's own inode pins the folder check.
+    const user = new User();
+    const { dev, ino } = statSync(notes);
+    const chooser = binder(user, { look: async () => ({ isDirectory: () => false, dev, ino }) });
+    await chooser.admit(bindOp(ROOT, await confirmed(user, chooser)), never());
+    await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`The folder ${notes} was replaced after it was confirmed for this chat`);
+  });
+
+  it("gives up on a folder that does not answer, and looks again only once that look has ended", async () => {
+    const user = new User();
+    const { promise: answered, resolve: answer } = Promise.withResolvers<{ isDirectory(): boolean; dev: number; ino: number }>();
+    const chooser = binder(user, { look: () => answered, lookMs: 50 });
+    await chooser.admit(bindOp(ROOT, await confirmed(user, chooser)), never());
+    try {
+      // A dead network or FUSE mount: its look holds a thread until it returns, so one look at a time.
+      await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`The folder ${notes} did not answer within 0.05 s`);
+      await expect(chooser.folderToShow(ROOT)).rejects.toThrow(`Surogate is still looking for ${notes}`);
+    } finally {
+      await ended(answer);
+    }
+    expect(await chooser.folderToShow(ROOT)).toBe(notes);
+  });
+
+  it("looks at two folders at most at once, across chats and the binders made since", async () => {
+    const user = new User();
+    const { promise: answered, resolve: answer } = Promise.withResolvers<FolderLook>();
+    const chooser = binder(user, { look: () => answered, lookMs: 50 });
+    for (const root of [ROOT, OTHER, THIRD]) await chooser.admit(bindOp(root, await confirmed(user, chooser)), never());
+    const again = binder(user, { look: () => answered, lookMs: 50 });
+    try {
+      // Chats under one dead mount: each look holds one of libuv's four threads until it returns.
+      for (const root of [ROOT, OTHER]) await expect(chooser.folderToShow(root)).rejects.toThrow(`The folder ${notes} did not answer`);
+      await expect(chooser.folderToShow(THIRD)).rejects.toThrow("Surogate is still looking for another folder");
+      // A stack made again, as a rotation makes it, finds the looks still running.
+      await expect(again.folderToShow(THIRD)).rejects.toThrow("Surogate is still looking for another folder");
+    } finally {
+      await ended(answer);
+    }
+    expect(await again.folderToShow(THIRD)).toBe(notes);
   });
 });
 

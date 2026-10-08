@@ -4,7 +4,7 @@ import type { ApprovalRequest, ChatLabel } from "../src/binding/approvals.js";
 import type { FolderSheet } from "../src/binding/binder.js";
 import { approval, folderSheet, freeMode, sizeOf } from "../src/shell/prompt-content.js";
 
-const SHEET: FolderSheet = { agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null };
+const SHEET: FolderSheet = { agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null, thread: null };
 const CHAT: ChatLabel = { agent: "acme.surogate.ai", root: "r", calling: "r", folder: "/home/me/notes" };
 const ids = (content: { buttons: Array<{ id: string }> }) => content.buttons.map((button) => button.id);
 const allowing = (content: { buttons: Array<{ id: string; allows: boolean }> }) => content.buttons.filter((b) => b.allows).map((b) => b.id);
@@ -18,6 +18,21 @@ describe("the folder sheet", () => {
     expect(content.choice?.value).toBe("free");
     expect([ids(content), allowing(content)]).toEqual([["cancel", "change", "accept"], ["accept"]]);
     expect([content.focus, content.cancel, content.enter]).toEqual(["choice", "cancel", "accept"]);
+  });
+
+  it("names the project's thread the folder is for, each name in a field of its own, and makes room for them", () => {
+    const thread = { project: "Q3 report", thread: "Check the totals" };
+    const content = folderSheet({ ...SHEET, thread });
+    expect(content.details).toEqual([
+      { label: "Folder", value: "/home/me/notes", code: true, keep: "" },
+      { label: "Project", value: "Q3 report", code: false, keep: "" },
+      { label: "Thread", value: "Check the totals", code: false, keep: "" },
+    ]);
+    expect(content.height).toBeGreaterThan(folderSheet(SHEET).height);
+    // A long name takes more lines.
+    expect(folderSheet({ ...SHEET, thread: { ...thread, thread: "x".repeat(256) } }).height).toBeGreaterThan(content.height);
+    expect(folderSheet({ ...SHEET, thread, refusal: "the folder holds the app's own data" }).details.map((d) => d.label))
+      .toEqual(["Folder", "Project", "Thread"]);
   });
 
   it("offers only Cancel and Change for a folder that cannot be used, saying why", () => {
@@ -141,5 +156,61 @@ describe("the Work-freely confirmation", () => {
     const content = freeMode(CHAT);
     expect(content.title).toBe("Let acme.surogate.ai work freely in notes?");
     expect([ids(content), allowing(content), content.focus, content.cancel]).toEqual([["keep", "free"], ["free"], "keep", "keep"]);
+  });
+});
+
+describe("the browser's prompts", () => {
+  it("asks a chat's first use with Deny focused, and Allow for this chat held back", () => {
+    const content = approval({ kind: "browser", chat: CHAT, action: "use", detail: "" });
+    expect(content.title).toBe("Let acme.surogate.ai use a browser on this computer?");
+    // The profile is the agent's: what the user signed in to there from another chat stays signed in.
+    expect(content.lead).not.toContain("nothing of yours");
+    expect(content.lead).toContain("It has a profile of its own, apart from your own browser; what you sign in to there stays signed in for acme.surogate.ai, in its other chats too.");
+    expect(content.notes).toContain("It cannot reach this computer's own services or your private networks.");
+    expect([ids(content), allowing(content), content.focus, content.cancel]).toEqual([["deny", "allow_session"], ["allow_session"], "deny", "deny"]);
+  });
+
+  it("shows what an act would do in the page, whole, with the operation's buttons", () => {
+    const script = approval({ kind: "browser", chat: { ...CHAT, calling: "child" }, action: "script", detail: "const a = 1;\nreturn a;", page: "about:blank" });
+    expect(script.title).toBe("Run a script in the page?");
+    expect(script.lead.startsWith("A sub-agent of acme.surogate.ai wants to run this script")).toBe(true);
+    expect(script.details).toEqual([
+      { label: "Page", value: "about:blank", code: true, keep: "" },
+      { label: "Script, 2 lines", value: "const a = 1;\nreturn a;", code: true, keep: "\n\t" },
+    ]);
+    expect([ids(script), script.focus]).toEqual([["deny", "stop_asking", "allow"], "deny"]);
+    const open = approval({ kind: "browser", chat: CHAT, action: "open", detail: "https://example.com/‮gnp.exe" });
+    expect(open.details).toEqual([{ label: "Address", value: "https://example.com/‮gnp.exe", code: true, keep: "" }]);
+  });
+
+  it("names the site each act would act in, and its page's whole address, or says it is not known", () => {
+    const page = "https://bank.example/account?id=1";
+    for (const [action, title] of [
+      ["script", "Run a script in bank.example?"], ["click", "Click in bank.example?"], ["type", "Type into bank.example?"],
+      ["press", "Press keys in bank.example?"], ["drag", "Drag in bank.example?"],
+      ["down", "Press the mouse in bank.example?"], ["up", "Release the mouse in bank.example?"],
+    ] as const) {
+      const content = approval({ kind: "browser", chat: CHAT, action, detail: "x", page });
+      expect(content.title).toBe(title);
+      expect(content.details[0]).toEqual({ label: "Page", value: page, code: true, keep: "" });
+    }
+    const unknown = approval({ kind: "browser", chat: CHAT, action: "type", detail: "hunter2", page: null });
+    expect(unknown.title).toBe("Type into the page?");
+    expect(unknown.details[0]).toEqual({ label: "Page", value: "Not known: the browser did not say in time", code: false, keep: "" });
+    // Its host as the address bar shows it, and cut at its start as an open's is.
+    expect(approval({ kind: "browser", chat: CHAT, action: "click", detail: "1, 2", page: "https://bück.example/" }).title).toBe("Click in xn--bck-hoa.example?");
+    const long = approval({ kind: "browser", chat: CHAT, action: "click", detail: "1, 2", page: `https://bank.example.${"x".repeat(80)}.attacker.net/` });
+    expect(long.title.endsWith(".attacker.net?")).toBe(true);
+    expect(long.height).toBeGreaterThan(approval({ kind: "browser", chat: CHAT, action: "click", detail: "1, 2", page }).height);
+  });
+
+  it("names the host an open would go to, cut at its start, and opens tall enough for the whole address", () => {
+    expect(approval({ kind: "browser", chat: CHAT, action: "open", detail: "https://example.com:8443/a" }).title).toBe("Open example.com:8443?");
+    const padded = `bank.example.${"x".repeat(80)}.attacker.net`;
+    const long = approval({ kind: "browser", chat: CHAT, action: "open", detail: `https://${padded}/login?next=${"y".repeat(200)}` });
+    expect(long.title.startsWith("Open …")).toBe(true);
+    expect(long.title.endsWith(".attacker.net?")).toBe(true);
+    const short = approval({ kind: "browser", chat: CHAT, action: "open", detail: "https://a.example/" });
+    expect(long.height).toBeGreaterThan(short.height + 5 * 19);
   });
 });

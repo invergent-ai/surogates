@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import logging
 import os
 import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -32,7 +35,9 @@ from surogates.db.agent_users import purge_user_account
 from surogates.db.models import Device, DeviceOperation, Event
 from surogates.devices import link as link_module
 from surogates.devices import operations as operations_module
+from surogates.devices import workspace as workspace_module
 from surogates.devices.binding import BIND, Binding, binding_of, device_of
+from surogates.devices.browser import DeviceBrowserClient
 from surogates.devices.operations import (
     CANCELLED_OUTCOME,
     DeviceOperations,
@@ -42,12 +47,17 @@ from surogates.devices.operations import (
     operation_channel,
 )
 from surogates.devices.presence import DevicePresence, PRESENCE_TTL_S, presence_key
-from surogates.devices.sandbox import INTERRUPTED
+from surogates.devices.sandbox import INTERRUPTED, INTERRUPTED_IN_BROWSER
 from surogates.devices.store import REVOKED_OUTCOME, DeviceStore
 from surogates.devices.waits import DeviceWaitNotice
-from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
+from surogates.devices.workspace import WALK_MARGIN_NS, DeviceOperationError, DeviceWorkspaceIO
 from surogates.governance.policy import GovernanceGate
 from surogates.harness.device_replay import replay_unanswered
+from surogates.harness import loop_artifact_completion
+from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
+from surogates.harness import loop_context_replay
+from surogates.harness.loop_context_replay import ContextReplayMixin
+from surogates.harness.prompt_cache import SystemPromptCache
 from surogates.harness.tool_exec import execute_single_tool
 from surogates.runtime.turn_slots import TurnSlots, current_turn
 from surogates.session.events import EventType
@@ -334,6 +344,23 @@ async def test_the_list_shows_which_devices_are_online(api, redis_client):
     await DevicePresence(redis_client).claim(device_id, "pod-a:1")
     listed = (await api.client.get("/v1/devices", headers=api.auth())).json()
     assert listed[0]["online"] is True
+
+
+async def test_the_list_says_when_a_computer_was_added_and_when_it_was_reauthorized(api):
+    issued = await register(api)
+    [listed] = (await api.client.get("/v1/devices", headers=api.auth())).json()
+    assert (listed["created_at"], listed["reauthorized_at"]) == (issued["created_at"], None)
+
+    response = await api.client.post(f"/v1/devices/{issued['id']}/reauthorize", headers=api.auth())
+    assert response.status_code == 200, response.text
+    restored = response.json()
+    assert restored["reauthorized_at"] is not None
+    [listed] = (await api.client.get("/v1/devices", headers=api.auth())).json()
+    assert (listed["created_at"], listed["reauthorized_at"]) == (issued["created_at"], restored["reauthorized_at"])
+    # UTC, with its zone: a browser reads a time without one as its own local time.
+    added, reauthorized = (datetime.fromisoformat(listed[key]) for key in ("created_at", "reauthorized_at"))
+    assert added.utcoffset() == reauthorized.utcoffset() == timedelta(0)
+    assert reauthorized >= added
 
 
 async def test_revoking_and_reauthorizing_notify_the_connection(api, redis_client):
@@ -1162,7 +1189,8 @@ async def test_completing_checks_device_digest_and_credentials(api, session_fact
 
     assert await ops.complete(second, 1, op.id, op.digest, {"ok": True}) == "rejected"
     assert await ops.complete(first, 1, op.id, "0" * 64, {"ok": True}) == "rejected"
-    assert await ops.complete(first, 1, uuid.uuid4(), op.digest, {"ok": True}) == "rejected"
+    # One the journal no longer has, as a request reaped since: nothing to record, nothing to refuse.
+    assert await ops.complete(first, 1, uuid.uuid4(), op.digest, {"ok": True}) == "gone"
     assert await ops.complete(first, 2, op.id, op.digest, {"ok": True}) == "stale"
     assert await ops.complete(first, 1, op.id, op.digest, {"ok": True}) == "completed"
     assert await ops.complete(first, 1, op.id, op.digest, {"ok": True}) == "duplicate"
@@ -1687,6 +1715,39 @@ async def test_large_and_binary_output_crosses_the_link(laptop_rig):
     assert rig.laptop.connected
 
 
+async def test_a_screenshot_over_a_mebibyte_comes_back_whole_from_the_computer(laptop_rig):
+    rig = laptop_rig
+    png = b"\x89PNG\r\n\x1a\n" + os.urandom(1536 * 1024)
+    rig.laptop.browser = lambda kind, args: {"ok": base64.b64encode(png).decode("ascii")}
+    await rig.laptop.connect()
+    client = DeviceBrowserClient(JournalRunner(
+        rig.ops, device_id=rig.device_id, root_session_id=rig.root, calling_session_id=rig.root,
+        invocation_id=f"call-{uuid.uuid4()}",
+    ))
+
+    shot = await asyncio.wait_for(client.screenshot(), 10.0)
+
+    assert shot["png_bytes"] == png
+    assert rig.laptop.ran == ["browser.screenshot"]
+    assert rig.laptop.chunks_sent
+
+
+async def test_a_scripts_value_shaped_as_a_transfer_comes_back_as_its_value_with_the_link_up(laptop_rig):
+    rig = laptop_rig
+    returned = {"transfer": {"size": 5, "sha256": "a" * 64}}
+    rig.laptop.browser = lambda kind, args: {"ok": {"value": returned}}
+    await rig.laptop.connect()
+    client = DeviceBrowserClient(JournalRunner(
+        rig.ops, device_id=rig.device_id, root_session_id=rig.root, calling_session_id=rig.root,
+        invocation_id=f"call-{uuid.uuid4()}",
+    ))
+
+    assert await asyncio.wait_for(client.evaluate("return await (await fetch('/api/transfers/1')).json();"), 10.0) == returned
+    # Never read as the link's own framing: the computer stays connected.
+    assert rig.laptop.connected
+    assert rig.laptop.ran == ["browser.evaluate"]
+
+
 async def test_a_tool_handler_works_over_the_link(laptop_rig):
     rig = laptop_rig
     await rig.laptop.connect()
@@ -2040,6 +2101,54 @@ async def test_a_resumed_harness_tool_is_reported_interrupted_without_running_ag
     assert result.data["content"] == INTERRUPTED
 
 
+async def test_a_resumed_browser_call_is_reported_interrupted_without_acting_again(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    acted: list[str] = []
+
+    def browse(kind: str, args: dict) -> dict:
+        acted.append(kind)
+        return {"ok": {}}
+
+    rig.laptop.browser = browse
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    first = await tool_call(rig, store, tools, "call_1", "browser_click", {"x": 5, "y": 6}, **io)
+    assert json.loads(first["content"]) == {"clicked": True}
+    await forget_result(store, session_factory, rig.root, "call_1")
+    await take_over(store, rig)
+
+    resumed = await resume_call(rig, store, tools, "call_1", "browser_click", {"x": 5, "y": 6}, **io)
+
+    # A click on the user's own browser is not clicked again: what it did is for the user to see,
+    # and for the agent to read on the page, not in the folder.
+    assert resumed["content"] == INTERRUPTED_IN_BROWSER
+    assert "browser_get_state" in resumed["content"] and "folder" not in resumed["content"]
+    assert acted == ["browser.mouse"]
+
+
+async def test_a_screenshot_over_a_mebibyte_crosses_the_link_and_lands_in_the_folder(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    png = b"\x89PNG\r\n\x1a\n" + os.urandom(1536 * 1024)
+    rig.laptop.browser = lambda kind, args: {"ok": base64.b64encode(png).decode("ascii")}
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+
+    result = await tool_call(
+        rig, store, tools, "call_1", "browser_screenshot", {},
+        redis_client=redis_client, session_factory=session_factory,
+    )
+
+    body = json.loads(result["content"])
+    assert (rig.folder / body["relative_path"]).read_bytes() == png
+    # Both ways in chunks: the shot from the computer, then the file back to it.
+    assert rig.laptop.chunks_sent and rig.laptop.chunks_received
+
+
 async def test_a_resumed_patch_after_a_read_returns_what_the_computer_did(
     laptop_rig, session_factory, redis_client,
 ):
@@ -2351,7 +2460,7 @@ async def test_a_lost_announcement_is_delivered_at_a_ping(laptop_rig, session_fa
     assert await asyncio.wait_for(wio.which("sh"), 5.0) is True
 
 
-async def test_a_reply_for_another_devices_operation_closes_the_link(api, link_url, laptop_rig):
+async def test_a_reply_for_another_devices_operation_is_rejected_and_closes_the_link(api, link_url, laptop_rig):
     rig = laptop_rig
     other = await register(api, name="Other laptop")
     waiting = asyncio.create_task(device_io(rig.ops, rig.device_id, rig.root, rig.folder).which("sh"))
@@ -2359,9 +2468,34 @@ async def test_a_reply_for_another_devices_operation_closes_the_link(api, link_u
     [op] = await rig.ops.pending(rig.device_id, 1)
     async with linked(link_url, other["token"]) as (ws, _):
         await send(ws, {"type": "op_result", "id": str(op.id), "digest": op.digest, "outcome": {"ok": True}})
+        # Named, so the app drops that reply rather than send it again at every welcome.
+        assert await receive(ws) == {"type": "rejected", "id": str(op.id)}
         assert await close_code(ws) == 4400
     assert await rig.ops.pending(rig.device_id, 1) != []
     await stop(waiting)
+
+
+async def test_a_result_header_for_another_devices_read_is_rejected_open_or_closed(api, link_url, laptop_rig):
+    rig = laptop_rig
+    other = await register(api, name="Other laptop")
+    reading = asyncio.create_task(device_io(rig.ops, rig.device_id, rig.root, rig.folder).read("a.txt"))
+    await eventually(lambda: has_pending(rig.ops, rig.device_id))
+    [op] = await rig.ops.pending(rig.device_id, 1)
+    header = {
+        "type": "op_result", "id": str(op.id), "digest": op.digest,
+        "outcome": {"ok": {"transfer": {"size": workspace_module.MAX_PAYLOAD_BYTES + 1, "sha256": "0" * 64}}},
+    }
+    async with linked(link_url, other["token"]) as (ws, _):
+        await send(ws, header)
+        assert await receive(ws) == {"type": "rejected", "id": str(op.id)}
+        assert await close_code(ws) == 4400
+    await stop(reading)  # closed now, cancelled
+    assert await rig.ops.pending(rig.device_id, 1) == []
+    async with linked(link_url, other["token"]) as (ws, _):
+        await send(ws, header)
+        # Refused, as for an open one: whether another device's operation is closed is not its to learn.
+        assert await receive(ws) == {"type": "rejected", "id": str(op.id)}
+        assert await close_code(ws) == 4400
 
 
 @pytest.mark.parametrize("change", [
@@ -3174,3 +3308,212 @@ async def test_a_recording_waits_for_a_delete_in_flight_and_is_refused(laptop_ri
         await asyncio.gather(deleting, return_exceptions=True)
         if running is not None:
             await stop(running)
+
+
+async def test_an_artifact_is_made_in_the_folder_under_its_tool_call(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store = SessionStore(session_factory)
+    result = await tool_call(
+        rig, store, builtin_tools(), "call_1", "create_artifact",
+        {"name": "notes", "kind": "markdown", "spec": {"content": "# Notes"}},
+        redis_client=redis_client, session_factory=session_factory,
+    )
+    made = json.loads(result["content"])
+    assert made["success"] is True, made
+    assert (rig.folder / ".surogates-results" / "artifacts" / str(rig.root) / made["artifact_id"] / "v1.json").is_file()
+    # Under the call: a resumed call finds them, and is reported interrupted.
+    call_event = await call_event_of(store, rig.root, "call_1")
+    async with session_factory() as db:
+        invocations = set((await db.execute(
+            select(DeviceOperation.invocation_id)
+            .where(DeviceOperation.root_session_id == rig.root, DeviceOperation.kind != BIND)
+        )).scalars())
+    assert invocations == {f"{call_event}:call_1"}
+    [created] = await store.get_events(rig.root, types=[EventType.ARTIFACT_CREATED])
+    assert created.data["artifact_id"] == made["artifact_id"]
+
+
+async def test_a_fenced_svg_is_promoted_into_the_folder(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store = SessionStore(session_factory)
+    harness = SimpleNamespace(
+        _api_client=None, _storage=None, _session_factory=session_factory, _redis=redis_client, _store=store,
+    )
+    await ArtifactCompletionMixin._promote_fenced_artifacts(
+        harness, await store.get_session(rig.root), "Here:\n```svg\n<svg viewBox='0 0 1 1'></svg>\n```", [],
+    )
+    [created] = await store.get_events(rig.root, types=[EventType.ARTIFACT_CREATED])
+    assert (rig.folder / ".surogates-results" / "artifacts" / str(rig.root) / created.data["artifact_id"] / "v1.json").is_file()
+
+
+async def test_a_fenced_svg_waits_on_no_computer_that_is_away(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    store = SessionStore(session_factory)
+    harness = SimpleNamespace(
+        _api_client=None, _storage=None, _session_factory=session_factory, _redis=redis_client, _store=store,
+    )
+    # The laptop never connected: said at once, and the reply goes on without it.
+    await asyncio.wait_for(ArtifactCompletionMixin._promote_fenced_artifacts(
+        harness, await store.get_session(rig.root), "```svg\n<svg></svg>\n```", [],
+    ), 5.0)
+    assert await store.get_events(rig.root, types=[EventType.ARTIFACT_CREATED]) == []
+
+
+async def test_a_fenced_svg_waits_no_longer_than_its_bound_on_a_computer_that_does_not_answer(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    rig.laptop.hold = True  # online, but answers nothing
+    monkeypatch.setattr(loop_artifact_completion, "HARNESS_WITHIN_S", 0.5)
+    store = SessionStore(session_factory)
+    harness = SimpleNamespace(
+        _api_client=None, _storage=None, _session_factory=session_factory, _redis=redis_client, _store=store,
+    )
+    await asyncio.wait_for(ArtifactCompletionMixin._promote_fenced_artifacts(
+        harness, await store.get_session(rig.root), "```svg\n<svg></svg>\n```", [],
+    ), 3.0)
+    assert await store.get_events(rig.root, types=[EventType.ARTIFACT_CREATED]) == []
+
+
+class TurnEnd(ArtifactCompletionMixin):
+    """The harness's turn-end scan, with only what it reads."""
+
+    def __init__(self, store, session_factory, redis_client) -> None:
+        self._store, self._session_factory, self._redis, self._storage = store, session_factory, redis_client, None
+        self._turn_started_at = datetime.now(timezone.utc)
+
+
+async def test_the_turns_files_are_what_its_computer_changed_since_the_turn_began(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    (rig.folder / "before.md").write_text("old")
+    # Past the cursor's margin, which covers a filesystem's coarser clock.
+    await asyncio.sleep(WALK_MARGIN_NS / 1e9 + 0.1)
+    await rig.laptop.connect()
+    store = SessionStore(session_factory)
+    session = await store.get_session(rig.root)
+    turn = TurnEnd(store, session_factory, redis_client)
+    # At its first tool call.
+    await turn._mark_turn_start(session)
+    assert turn._turn_cursor is not None
+    for name, text in [("report.md", "new"), ("seen.md", "s"), ("empty.md", ""), ("uploads/in.md", "u"),
+                       (".surogates-results/terminal-output-1.log", "x"), ("node_modules/x/i.js", ""),
+                       # The user's own: the harness keeps a local folder's artifacts under .surogates-results/.
+                       ("_artifacts/summary.md", "a")]:
+        (rig.folder / name).parent.mkdir(parents=True, exist_ok=True)
+        (rig.folder / name).write_text(text)
+    root = session.config["workspace_path"]
+
+    found, entries = await turn._scan_workspace_for_new_files(
+        session_id=rig.root, already_seen_paths={f"{root}/seen.md"},
+    )
+
+    assert sorted(artifact.ref for artifact in found) == ["_artifacts/summary.md", "empty.md", "report.md"]
+    # No stamp: the folder's clock chose them, and the server's is another.
+    assert entries["report.md"] == entries[f"{root}/report.md"] == {"size": 3, "modified": None}
+    assert entries["empty.md"]["size"] == 0
+    assert "before.md" not in entries
+
+
+class Listing:
+    """The cloud's storage, recording what a turn lists of it."""
+
+    def __init__(self) -> None:
+        self.listed: list[tuple[str, str]] = []
+
+    async def list_entries(self, bucket, prefix=""):
+        self.listed.append((bucket, prefix))
+        return [{"key": f"{prefix}report.md", "size": 3, "modified": datetime.now(timezone.utc)}]
+
+
+async def test_a_turn_whose_computer_was_away_at_its_start_lists_no_files_and_never_the_cloud(
+    laptop_rig, session_factory, redis_client, caplog,
+):
+    rig = laptop_rig
+    caplog.set_level(logging.INFO, logger="surogates.harness.loop_artifact_completion")
+    store = SessionStore(session_factory)
+    turn = TurnEnd(store, session_factory, redis_client)
+    turn._storage = listing = Listing()
+    # The laptop never connected: no cursor at its first tool call, and nothing waited on.
+    await asyncio.wait_for(turn._mark_turn_start(await store.get_session(rig.root)), 5.0)
+    assert turn._turn_cursor is None
+
+    found, entries = await turn._scan_workspace_for_new_files(session_id=rig.root, already_seen_paths=set())
+
+    # The chat's cloud prefix is metadata only: no permission to read it.  Nothing was seen.
+    assert (found, entries, listing.listed) == ([], None, [])
+    assert "did not say where this turn began" in caplog.text
+
+
+async def test_a_computer_that_does_not_answer_holds_the_turn_no_longer_than_its_bound(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    rig.laptop.hold = True  # online, but answers nothing
+    monkeypatch.setattr(loop_artifact_completion, "HARNESS_WITHIN_S", 0.5)
+    store = SessionStore(session_factory)
+    session = await store.get_session(rig.root)
+    turn = TurnEnd(store, session_factory, redis_client)
+    assert await asyncio.wait_for(turn._folder_cursor(session), 3.0) is None
+    assert await asyncio.wait_for(turn._walk_folder(session, since="1"), 3.0) is None
+
+
+class Prompting(ContextReplayMixin):
+    """The harness's prompt build, with only what it reads."""
+
+    class Builder:
+        folder_context: str | None = None
+
+        def build(self) -> str:
+            return f"prompt with {self.folder_context}"
+
+    def __init__(self, session_factory, redis_client) -> None:
+        self._session_factory, self._redis, self._storage = session_factory, redis_client, None
+        self._system_prompt_cache, self._prompt = SystemPromptCache(), self.Builder()
+        self._coding_repos, self._ssh_targets = [], []
+
+
+async def test_a_local_folders_agents_md_is_read_through_its_computer_when_the_prompt_is_built(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    (rig.folder / "AGENTS.md").write_text("Use tabs.")
+    await rig.laptop.connect()
+    session = await SessionStore(session_factory).get_session(rig.root)
+    harness = Prompting(session_factory, redis_client)
+
+    assert await harness._build_system_prompt(session) == "prompt with Use tabs."
+    looked = len(rig.laptop.ran)
+    # Built once, as any prompt: the next wake on this worker reuses it.
+    assert await harness._build_system_prompt(session) == "prompt with Use tabs."
+    assert len(rig.laptop.ran) == looked
+
+
+async def test_a_prompt_built_while_its_computer_is_away_goes_without_the_folders_context_and_is_not_kept(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    (rig.folder / "AGENTS.md").write_text("Use tabs.")
+    session = await SessionStore(session_factory).get_session(rig.root)
+    harness = Prompting(session_factory, redis_client)
+    assert await asyncio.wait_for(harness._build_system_prompt(session), 5.0) == "prompt with None"
+    # Built again once the computer is back, rather than cached without it.
+    await rig.laptop.connect()
+    assert await harness._build_system_prompt(session) == "prompt with Use tabs."
+
+
+async def test_a_prompt_waits_no_longer_than_its_bound_on_a_computer_that_does_not_answer(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    rig.laptop.hold = True  # online, but answers nothing
+    monkeypatch.setattr(loop_context_replay, "HARNESS_WITHIN_S", 0.5)
+    session = await SessionStore(session_factory).get_session(rig.root)
+    prompt = await asyncio.wait_for(Prompting(session_factory, redis_client)._build_system_prompt(session), 3.0)
+    assert prompt == "prompt with None"

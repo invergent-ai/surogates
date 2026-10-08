@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'" />
     <title>Surogate</title>
     <link rel="stylesheet" href="shell.css" />
     <script type="module" src="shell.js"></script>
@@ -50,6 +50,7 @@
       <ul class="nav">
         <li><button class="item" type="button" id="new" data-icon="square-pen">New</button></li>
         <li><button class="item" type="button" id="open-projects" data-icon="layout-grid">Projects</button></li>
+        <li><button class="item" type="button" data-path="/chats" data-icon="messages-square">Chats</button></li>
         <li><button class="item" type="button" data-path="/inbox" data-icon="inbox">Inbox</button></li>
         <li><button class="item" type="button" data-path="/missions" data-icon="target">Missions</button></li>
         <li><button class="item" type="button" data-path="/skills" data-icon="sparkles">Skills</button></li>
@@ -59,6 +60,9 @@
       <p class="warn" id="failure" role="alert" hidden></p>
       <p class="warn" id="notice" hidden></p>
       <p class="warn" id="device-action" hidden><span id="device-action-text"></span> <button class="link" id="device-action-button" type="button"></button></p>
+      <span id="sandbox-said" role="status"></span>
+      <p class="warn" id="sandbox" hidden><span id="sandbox-text"></span> <button class="link" id="sandbox-log" type="button" hidden>Show log</button> <button class="link" id="sandbox-retry" type="button" hidden>Retry</button> <button class="link" id="sandbox-check" type="button" hidden>Check again</button></p>
+      <p class="warn" id="quitting"><span id="quitting-text" role="status"></span> <button class="link" id="quit-now" type="button" hidden>Quit now</button></p>
       <div class="user">
         <button class="user-row" id="user" type="button" aria-haspopup="menu" aria-expanded="false">
           <span class="avatar" id="avatar"></span><span class="who" id="user-name"></span><span data-icon="chevron-up"></span>
@@ -68,6 +72,8 @@
       <div class="popover" id="user-menu" role="menu" hidden>
         <p class="menu-head" id="user-email"></p>
         <button class="menu-item" type="button" role="menuitem" data-action="settings" data-icon="settings">Settings<span class="shortcut">Ctrl+Shift+,</span></button>
+        <button class="menu-item" type="button" role="menuitem" data-action="account" data-icon="circle-user-round">Account settings</button>
+        <button class="menu-item" type="button" role="menuitem" data-action="devices" data-icon="laptop">Devices</button>
         <button class="menu-item" type="button" role="menuitem" data-action="usage" data-icon="gauge">Usage</button>
         <button class="menu-item" type="button" role="menuitem" data-action="language" data-icon="languages" disabled title="Comes in a later version">Language</button>
         <button class="menu-item" type="button" role="menuitem" data-action="help" data-icon="circle-help">Get help</button>
@@ -140,6 +146,14 @@
       </div>
       <div class="library" id="routines" hidden>
         <ul id="routine-list"></ul>
+      </div>
+      <div class="reading" id="reading" hidden>
+        <div class="reading-head">
+          <button class="icon" id="reading-back" type="button" title="Back to the threads" data-icon="arrow-left"></button>
+          <span class="reading-title" id="reading-title"></span>
+          <button class="btn" id="reading-open" type="button">Open</button>
+        </div>
+        <div class="pane-hole" id="pane-hole"></div>
       </div>
     </aside>
   </body>

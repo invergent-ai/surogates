@@ -4,7 +4,7 @@
 
 import { basename, posix } from "node:path";
 
-import { type ApprovalRequest, type ChatLabel, PREVIEW_BYTES } from "../binding/approvals.js";
+import { type ApprovalRequest, type BrowserAction, type ChatLabel, PREVIEW_BYTES } from "../binding/approvals.js";
 import type { FolderSheet } from "../binding/binder.js";
 import type { LinkSummary } from "../binding/links.js";
 
@@ -70,28 +70,38 @@ function linked({ count, examples, complete }: LinkSummary): string {
   return `${complete ? "" : "At least "}${files} also linked from elsewhere; commands the agent runs can change those copies too: ${examples.join(", ")}${more}.`;
 }
 
+// A name the page sent, as a field of its own, and the height its lines take.
+const plain = (label: string, value: string): PromptDetail => ({ label, value, code: false, keep: "" });
+const tall = (value: string) => 26 + Math.ceil(value.length / 45) * 19;
+
 /** The folder sheet: the folder, its mode, and what the user should know; or why it cannot be used. */
 export function folderSheet(sheet: FolderSheet): PromptContent {
   const name = named(sheet.folder);
-  const folder = code("Folder", sheet.folder);
+  // A project's thread is named under its folder: the page's words, set as text.
+  const details = [code("Folder", sheet.folder)];
+  let room = 0;
+  if (sheet.thread !== null) {
+    details.push(plain("Project", sheet.thread.project), plain("Thread", sheet.thread.thread));
+    room = tall(sheet.thread.project) + tall(sheet.thread.thread);
+  }
   if (sheet.refusal !== null) {
     return {
       title: `${name} cannot be used`,
       lead: `${sheet.agent} cannot work in this folder: ${sheet.refusal}. Choose another folder.`,
-      details: [folder],
+      details,
       notes: [],
       choice: null,
       buttons: [button("cancel", "Cancel"), button("change", "Change…")],
       focus: "change",
       cancel: "cancel",
       enter: null,
-      height: 280,
+      height: 280 + room,
     };
   }
   return {
     title: `Work in ${name}?`,
     lead: `${sheet.agent} will read and change the files in this folder, and run commands there. It works in the cloud: the files it reads and what its commands print are sent to it, and can stay in the conversation.`,
-    details: [folder],
+    details,
     notes: sheet.links ? [linked(sheet.links)] : [],
     choice: { ...MODES, value: sheet.mode },
     buttons: [button("cancel", "Cancel"), button("change", "Change…"), button("accept", "Use this folder", true)],
@@ -99,7 +109,7 @@ export function folderSheet(sheet: FolderSheet): PromptContent {
     focus: "choice",
     cancel: "cancel",
     enter: "accept",
-    height: sheet.links ? 550 : 490,
+    height: (sheet.links ? 550 : 490) + room,
   };
 }
 
@@ -178,6 +188,7 @@ export function approval(request: ApprovalRequest): PromptContent {
       height: 380,
     };
   }
+  if (request.kind === "browser") return browserPrompt(request);
   const address = `${request.host}:${request.port}`;
   const title = `Connect to ${ending(request.host)}:${request.port}?`;
   return {
@@ -193,6 +204,83 @@ export function approval(request: ApprovalRequest): PromptContent {
     // Tall enough to show the title, the lead, the warning and the whole address as it opens: a title past
     // 30 characters wraps to three lines of 25 px, and a line of 19 px in the address's block holds about 40.
     height: 245 + (title.length > 30 ? 75 : 25) + (request.privateNetwork ? 70 : 0) + Math.ceil(address.length / 40) * 19,
+  };
+}
+
+// An address's host, as an open prompt's title names it; the address whole when it has none.
+const hostOf = (address: string): string => {
+  try {
+    return new URL(address).host || address;
+  } catch {
+    return address;
+  }
+};
+// The most lines an address's block opens with; a longer one scrolls in it.
+const MAX_ADDRESS_LINES = 12;
+
+// What each browser operation's prompt says it would do in the page, and what its detail is: its title names where.
+const BROWSER_ACTS: Record<Exclude<BrowserAction, "use" | "open">, { title: string; does: string; label: string }> = {
+  script: { title: "Run a script in", does: "wants to run this script in the page open in its browser. A script can read the page and act on the site as you.", label: "Script" },
+  click: { title: "Click in", does: "wants to click the page open in its browser, at this place.", label: "Where" },
+  down: { title: "Press the mouse in", does: "wants to press the mouse button in the page open in its browser, at this place, and hold it down.", label: "Where" },
+  up: { title: "Release the mouse in", does: "wants to release the mouse button in the page open in its browser, at this place.", label: "Where" },
+  type: { title: "Type into", does: "wants to type this into the page open in its browser.", label: "Text" },
+  press: { title: "Press keys in", does: "wants to press these keys in the page open in its browser.", label: "Keys" },
+  drag: { title: "Drag in", does: "wants to drag along these points in the page open in its browser.", label: "Path" },
+  other: { title: "Act in", does: "wants to act in the page open in its browser.", label: "Operation" },
+};
+
+// The site an act's page is on, as its title names it, cut at its start as an open's is: "the page" for one on none.
+const siteOf = (page: string | null | undefined): string => {
+  if (!page || !/^https?:/.test(page)) return "the page";
+  return ending(hostOf(page));
+};
+
+/** The browser's prompts (spec, Section 5): its first use in a chat, and each act in a chat that asks every time. */
+function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): PromptContent {
+  const { chat } = request;
+  if (request.action === "use") {
+    return {
+      title: `Let ${chat.agent} use a browser on this computer?`,
+      lead: `${asker(chat)} wants to open web pages in a browser on this computer, for this chat. It has a profile of its own, apart from your own browser; what you sign in to there stays signed in for ${chat.agent}, in its other chats too.`,
+      details: [],
+      notes: [
+        "What its pages show is sent to the agent, and can stay in the conversation.",
+        "It cannot reach this computer's own services or your private networks.",
+      ],
+      choice: null,
+      buttons: [button("deny", "Deny"), button("allow_session", "Allow for this chat", true)],
+      focus: "deny",
+      cancel: "deny",
+      enter: null,
+      height: 380,
+    };
+  }
+  if (request.action === "open") {
+    // Named by its host, cut at its start as a network prompt's is, and tall enough for the whole address as it opens.
+    const title = `Open ${ending(hostOf(request.detail))}?`;
+    return {
+      ...OPERATION,
+      title,
+      lead: `${asker(chat)} wants to open this address in its browser on this computer.`,
+      details: [code("Address", request.detail)],
+      height: 245 + (title.length > 30 ? 75 : 25) + Math.min(Math.ceil(request.detail.length / 40), MAX_ADDRESS_LINES) * 19,
+    };
+  }
+  const act = BROWSER_ACTS[request.action];
+  // The page it acts in, whole: a page can send itself to another site after it was opened.
+  const page = request.page === undefined
+    ? []
+    : [request.page === null ? { label: "Page", value: "Not known: the browser did not say in time", code: false, keep: "" } : code("Page", request.page)];
+  const title = `${act.title} ${siteOf(request.page)}?`;
+  return {
+    ...OPERATION,
+    title,
+    lead: `${asker(chat)} ${act.does}`,
+    // A script's lines are shown as they are, with how many there are: what follows its first can be out of view.
+    details: [...page, request.action === "script" ? code(lined(act.label, request.detail), request.detail, "\n\t") : code(act.label, request.detail)],
+    height: (request.action === "script" ? 420 : 340) + (title.length > 30 ? 50 : 0)
+      + (request.page ? 25 + Math.min(Math.ceil(request.page.length / 40), MAX_ADDRESS_LINES) * 19 : request.page === null ? 45 : 0),
   };
 }
 

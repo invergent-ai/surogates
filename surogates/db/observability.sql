@@ -37,6 +37,9 @@ BEGIN
     END IF;
 END $$;
 
+-- When a device's token was last reissued (``Device.reauthorized_at``): none was dated before.
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS reauthorized_at timestamptz;
+
 CREATE INDEX IF NOT EXISTS idx_events_audit_type_time
     ON events (org_id, type, created_at);
 

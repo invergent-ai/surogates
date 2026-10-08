@@ -266,6 +266,8 @@ export interface AgentChatSessionTreeNode {
   model?: string | null;
   messageCount?: number;
   toolCallCount?: number;
+  /** A chat on a folder of the user's computer: that computer's name. Null in the cloud. */
+  computer?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1011,6 +1013,16 @@ export interface AgentChatAdapter {
     proposalId: string;
     key: string;
   }): Promise<AgentChatThreadRow>;
+  /**
+   * Start a thread the master proposed for the user's computer, in Surogate Desktop only: in a
+   * folder its user confirms in the desktop's own sheet, which names the project and *title*.
+   */
+  startLocalThread?(input: {
+    projectId: string;
+    proposalId: string;
+    key: string;
+    title: string;
+  }): Promise<AgentChatThreadRow>;
   getArtifact(input: {
     sessionId: string;
     artifactId: string;
@@ -1033,21 +1045,37 @@ export interface AgentChatAdapter {
     reason?: string;
   }): Promise<{ eventId?: number; eventType?: string }>;
   listSlashCommands?(): Promise<AgentChatSlashCommand[]>;
+  /**
+   * A local-folder chat's tree, while its computer is offline, may wait for it: *onWaiting* is told
+   * what to say meanwhile, as "Waiting for <computer>", and *signal* stops waiting for it. A host
+   * that does not wait answers as before.
+   */
   getWorkspaceTree(input: {
     sessionId: string;
+    signal?: AbortSignal;
+    onWaiting?: (said: string) => void;
   }): Promise<AgentChatWorkspaceTree>;
   getWorkspaceFile(input: {
     sessionId: string;
     path: string;
   }): Promise<AgentChatWorkspaceFile>;
+  /**
+   * A local-folder chat's change may wait for its user on the computer its
+   * folder is on; *signal* stops waiting for it, and *onWaiting* is told what to
+   * say meanwhile, as "Waiting for you to allow this on <computer>".
+   */
   uploadWorkspaceFile(input: {
     sessionId: string;
     file: File;
     directory?: string;
+    signal?: AbortSignal;
+    onWaiting?: (said: string) => void;
   }): Promise<AgentChatWorkspaceUpload>;
   deleteWorkspaceFile(input: {
     sessionId: string;
     path: string;
+    signal?: AbortSignal;
+    onWaiting?: (said: string) => void;
   }): Promise<void>;
   /**
    * Build a same-origin URL the browser can navigate to (or anchor at via

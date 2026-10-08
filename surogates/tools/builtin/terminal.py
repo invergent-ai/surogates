@@ -28,7 +28,7 @@ from typing import Any, Optional
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.ansi_strip import strip_ansi
 from surogates.tools.utils.tool_output_limits import get_max_bytes
-from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR
+from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import WorkspaceIO, workspace_io_from
 
@@ -145,6 +145,7 @@ async def _spill_full_output(output: str, wio: WorkspaceIO) -> str | None:
     digest = hashlib.sha256(output.encode("utf-8", errors="replace")).hexdigest()[:32]
     path = f"{WORKSPACE_STORAGE_DIR}/terminal-output-{digest}.log"
     try:
+        await keep_out_of_git(wio)
         await wio.write(
             await wio.resolve(path), output.encode("utf-8", errors="replace"),
         )
@@ -217,6 +218,17 @@ DEVICE_GIT_NOTE = (
     "`.claude/agents`, `.bashrc` and the like): such a write fails with \"Operation not permitted\". "
     "Commit, rebase, merge and cherry-pick work. Run `git init` and `git clone` in your home folder instead, "
     "and ask the user to run `git submodule update`, `git worktree add` and `git worktree remove` on their computer."
+)
+
+# Appended beside it: the guest serves a shared folder uncached, and refuses a shared
+# mapping of its files (ENODEV) rather than let either side lose the other's writes.
+DEVICE_MAPPING_NOTE = (
+    "A program that maps a file in a shared folder for shared use, such as SQLite in WAL mode, fails there "
+    "(SQLite says \"disk I/O error\"); keep such a database in your home folder. A database in a shared folder "
+    "may use a rollback journal only while nothing on the user's computer has it open: locks do not cross the "
+    "share, and writes from both sides at once are lost. A database already in WAL mode, including one a failed "
+    "attempt switched, cannot be opened there: convert it on the user's computer, or delete it if your command "
+    "just made it."
 )
 
 

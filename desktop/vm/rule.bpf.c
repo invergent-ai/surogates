@@ -14,6 +14,7 @@ char LICENSE[] SEC("license") = "GPL";
 #define EPERM 1
 #define FUSE_SUPER_MAGIC 0x65735546 // virtiofs; the only share fs on Linux
 #define FMODE_WRITE 0x2
+#define O_TRUNC 01000
 #define ATTR_MODE (1 << 0)
 #define ATTR_UID (1 << 1)
 #define ATTR_GID (1 << 2)
@@ -160,19 +161,21 @@ int BPF_PROG(on_truncate, const struct path *path)
 	return DENY(refused(BPF_CORE_READ(path, dentry, d_sb), BPF_CORE_READ(path, dentry), 0));
 }
 
+// A read-only open with O_TRUNC is a write: virtiofsd truncates at the open, before setattr is asked.
 SEC("lsm/file_open")
 int BPF_PROG(on_open, struct file *file)
 {
-	if (!(BPF_CORE_READ(file, f_mode) & FMODE_WRITE))
+	if (!(BPF_CORE_READ(file, f_mode) & FMODE_WRITE) && !(BPF_CORE_READ(file, f_flags) & O_TRUNC))
 		return 0;
 	struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
 	return DENY(refused(BPF_CORE_READ(dentry, d_sb), dentry, 0));
 }
 
-// The pinned kernel's hook takes no idmap (6.9 added one): declared with it, the program
-// read attr as the dentry and the hook's return slot, 0, as attr, and allowed every chmod.
+// The hook takes the mount's idmap first, as every kernel since 6.9 passes it: declared
+// without it, the program would read attr as the dentry and allow every chmod. The image's
+// build holds each program to its hook's arguments in the pinned kernel's BTF.
 SEC("lsm/inode_setattr")
-int BPF_PROG(on_setattr, struct dentry *dentry, struct iattr *attr)
+int BPF_PROG(on_setattr, struct mnt_idmap *idmap, struct dentry *dentry, struct iattr *attr)
 {
 	unsigned int valid = BPF_CORE_READ(attr, ia_valid);
 	if (!(valid & (ATTR_MODE | ATTR_UID | ATTR_GID | ATTR_SIZE)))

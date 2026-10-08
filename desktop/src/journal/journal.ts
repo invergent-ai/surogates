@@ -82,6 +82,7 @@ export class OperationJournal {
           domain TEXT NOT NULL,
           PRIMARY KEY (root, domain)
         );
+        CREATE TABLE IF NOT EXISTS browsing (root TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS chunks (
           id TEXT NOT NULL,
           seq INTEGER NOT NULL,

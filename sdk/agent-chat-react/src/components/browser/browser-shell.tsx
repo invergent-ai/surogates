@@ -277,22 +277,25 @@ export function BrowserShell({
         >
           <Reload />
         </button>
-        <button
-          type="button"
-          data-testid="browser-shell-control"
-          aria-label={hasControl ? "Return control" : "Take control"}
-          aria-pressed={hasControl}
-          onClick={onToggleControl}
-          className={
-            hasControl
-              ? "flex size-[26px] shrink-0 items-center justify-center rounded-[5px] bg-[#F5A524] text-black"
-              : ICON
-          }
-        >
-          {/* One glyph in both states: a second, circular one beside Reload
-              would read as another refresh button. Colour is the mode. */}
-          <Pointer />
-        </button>
+        {/* Offered where it takes or returns control, or says the viewer holds it. */}
+        {(onToggleControl || hasControl) && (
+          <button
+            type="button"
+            data-testid="browser-shell-control"
+            aria-label={hasControl ? "Return control" : "Take control"}
+            aria-pressed={hasControl}
+            onClick={onToggleControl}
+            className={
+              hasControl
+                ? "flex size-[26px] shrink-0 items-center justify-center rounded-[5px] bg-[#F5A524] text-black"
+                : ICON
+            }
+          >
+            {/* One glyph in both states: a second, circular one beside Reload
+                would read as another refresh button. Colour is the mode. */}
+            <Pointer />
+          </button>
+        )}
         <div
           data-testid="browser-shell-url"
           className="flex h-7 min-w-0 flex-grow items-center gap-1.5 rounded-md border border-line bg-background px-2.5 text-[11px] text-foreground"

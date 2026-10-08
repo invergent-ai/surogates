@@ -32,8 +32,9 @@ export function windowOpen(url: string, frameName: string): "popup" | "external"
   return external(url) ? "external" : "deny";
 }
 
-// The web client's own pages the sidebar opens: a path of its own, never one the page made up.
-const PATHS = /^\/(?:chat|inbox|missions|skills|settings)$|^\/chat\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// The web client's own pages the sidebar and the user menu open: a path of its own, never one the
+// page made up. Settings opens on its Devices too, as the "computer added" notice opens it.
+const PATHS = /^\/(?:chat|chats|inbox|missions|skills|settings|settings\?tab=devices)$|^\/chat\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export const webClientPath = (path: string): boolean => PATHS.test(path);
 

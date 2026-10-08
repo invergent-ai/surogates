@@ -3,7 +3,7 @@
 // (spec, Section 1). It starts the file helper inside the sandbox and relays the file
 // operations to it. Commands run in the VM (spec, Section 11): around each, the host is
 // the hook guard, and it keeps the folder's record, the user's hooks and the handles of
-// the root's processes in the guest. A Node child process with an IPC channel.
+// the root's processes in the guest. It runs on the app's own node, spawned with an IPC channel.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 
-import { BOOT_ID, checkFolder } from "../binding/folder.js";
+import { checkFolder, confirmedFolder } from "../binding/folder.js";
 import { findOnPath } from "../files/operations.js";
 import type { Outcome } from "../link/protocol.js";
 import { realpath } from "../files/paths.js";
@@ -158,11 +158,7 @@ async function start(message: HostStart): Promise<void> {
   const globbed = [tmp, ...appDirs].find((entry) => GLOB.test(entry));
   if (globbed) throw new Error(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${globbed}`);
   const { path, dev, ino } = checked;
-  // A reboot can renumber the folder's mount: after one, only the inode is compared.
-  // A boot id that could not be read counts as this boot.
-  const { expect } = message;
-  const rebooted = expect.boot !== "" && BOOT_ID !== "" && expect.boot !== BOOT_ID;
-  if (expect.ino !== ino || (!rebooted && expect.dev !== dev)) {
+  if (!confirmedFolder(message.expect, checked)) {
     throw new FolderUnavailable(`the folder ${message.folder} was replaced after it was confirmed for this chat`);
   }
   folder = { path, dev, ino };
@@ -245,14 +241,15 @@ async function start(message: HostStart): Promise<void> {
   // wrap time. The helper guards those names itself, so it is wrapped from the
   // temp folder and the user's folder stays as it was.
   process.chdir(tmp);
-  const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} ${quote(HELPER)}`);
+  // The helper runs on this host's node, the app's own, as plain Node, with no inspector on SIGUSR1.
+  const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} --disable-sigusr1 ${quote(HELPER)}`);
   const [file, flag, line] = argv;
   if (!file || flag === undefined || line === undefined) throw new Error("srt returned no command");
   // Named here only: srt's returned env is this process's own, and the app's may hold its credentials.
   // --norc --noprofile: with a socket for stdin, as this pipe is, bash reads ~/.bashrc out here.
   const child = spawn(file, ["--norc", "--noprofile", flag, hideSrtTmp(line)], {
     cwd: path,
-    env: { HOME: home, LANG: message.env.LANG || "C.UTF-8", PATH: hostPath, SUROGATE_FOLDER: path, ELECTRON_RUN_AS_NODE: "1" },
+    env: { HOME: home, LANG: message.env.LANG || "C.UTF-8", PATH: hostPath, SUROGATE_FOLDER: path },
     stdio: ["pipe", "pipe", "pipe"],
   });
   helper = child;

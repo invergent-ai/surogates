@@ -8,6 +8,7 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdirSync, rmdirSync } from "node:fs";
+import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { NOT_BOUND } from "../hosts/tool-hosts.js";
@@ -16,11 +17,23 @@ import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
 import { report } from "../report.js";
 import { type ApprovalPrompts, Approvals } from "./approvals.js";
-import { BOOT_ID, checkFolder, type FolderGuards } from "./folder.js";
+import { BOOT_ID, checkFolder, confirmedFolder, type FolderGuards } from "./folder.js";
 import { type LinkSummary, scanLinks } from "./links.js";
 
 // How long a confirmed folder waits for its chat's bind operation.
 export const PREPARED_MS = 5 * 60_000;
+
+// How long Show folder waits for a look at the folder: a dead network or FUSE mount never answers.
+export const LOOK_MS = 5_000;
+
+// What a look at a folder answers: whether it is one, and its identity.
+export type FolderLook = { isDirectory(): boolean; dev: number; ino: number };
+
+// The chats whose folder Show folder looks at now, until the look returns, its deadline past or
+// not. Kept for the process, not the binder: a stack made again finds the looks still running.
+const looking = new Set<string>();
+// Looks at once, across chats: one dead mount can hold two of libuv's four threads, never more.
+const LOOKS_AT_ONCE = 2;
 
 // The server appends ". Start a new chat." to a binding refusal's message: none ends in ".".
 export const ALREADY_BOUND: Outcome = {
@@ -30,7 +43,17 @@ export const ALREADY_BOUND: Outcome = {
 export const NOT_RECORDED: Outcome = {
   error: { type: "binding", message: "This computer could not record the folder for this chat" },
 };
+// A deleted chat's binding could not be forgotten: the server keeps its answer.
+export const NOT_FORGOTTEN: Outcome = {
+  error: { type: "binding", message: "This computer could not forget the folder of a deleted chat" },
+};
 const BOUND: Outcome = { ok: null };
+
+// The project's thread a folder is asked for: its names, as the page sent them.
+export interface ThreadLabel {
+  project: string;
+  thread: string;
+}
 
 // What the sheet shows. Accepting binds *folder* with the mode chosen there.
 export interface FolderSheet {
@@ -39,6 +62,7 @@ export interface FolderSheet {
   mode: Mode; // as the sheet opens
   links: LinkSummary | null; // null: no file in the folder is linked from elsewhere
   refusal: string | null; // why no chat may work on this folder: the sheet offers Change and Cancel only
+  thread: ThreadLabel | null; // a project's thread the folder is for; null for a new chat
 }
 
 // The desktop shell's own windows; fakes in tests. Each call is dismissed by its signal.
@@ -63,10 +87,16 @@ export interface BinderOptions {
   guards: FolderGuards;
   agent: string;
   hosts: Executor; // runs everything but the binding
+  refusal?(operation: Operation): Outcome | null; // what the hosts refuse anyway, before anyone is asked
+  retired?(root: string): void; // a deleted chat's root: the hosts let go of what they keep for it
+  address?(session: string): Promise<string>; // the page a session's next browser operation acts in, for its prompt
   // The user is asked about every other operation first in a chat that asks every time,
   // and about a network destination off the package hosts in either mode.
   approvalPrompts: ApprovalPrompts;
   preparedMs?: number;
+  // How Show folder looks at a folder, and how long it waits; node:fs's lstat and LOOK_MS unless a test says.
+  look?: (path: string) => Promise<FolderLook>;
+  lookMs?: number;
   // A binding, a "Stop asking" or a host allowed for the session that could not be recorded,
   // or a network prompt that failed, and why.
   onError?: (error: unknown) => void;
@@ -142,7 +172,7 @@ export class Binder implements Executor {
 
   constructor(private readonly options: BinderOptions) {
     this.approvals = new Approvals({
-      bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, onError: options.onError,
+      bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, address: options.address, onError: options.onError,
     });
   }
 
@@ -152,7 +182,9 @@ export class Binder implements Executor {
    * from the folder dialog. Null when the user cancels. Every new chat asks, the last
    * folder too, so a server cannot bind a chat to a folder the user did not see.
    */
-  async prepareFolder(choice: "last" | "pick", window: string, signal: AbortSignal): Promise<Prepared | null> {
+  async prepareFolder(
+    choice: "last" | "pick", window: string, signal: AbortSignal, thread: ThreadLabel | null = null,
+  ): Promise<Prepared | null> {
     const { guards } = this.options;
     const last = this.options.bindings.last()?.folder;
     const usable = choice === "last" && last !== undefined && checkFolder(last, guards).ok ? last : null;
@@ -160,7 +192,7 @@ export class Binder implements Executor {
     const made = usable === null && choice === "last" && !signal.aborted ? newFolder(guards, this.options.agent) : null;
     let prepared: Prepared | null = null;
     try {
-      prepared = await this.confirm(usable ?? made, last ?? guards.home, window, signal);
+      prepared = await this.confirm(usable ?? made, last ?? guards.home, window, signal, thread);
       return prepared;
     } finally {
       // Taken: it goes still if its chat is never bound.
@@ -168,6 +200,46 @@ export class Binder implements Executor {
       if (preparation) preparation.made = true;
       else if (made !== null) this.release(made);
     }
+  }
+
+  /** What the page may know of a chat's folder here: where it is, and whether it asks; null for a chat with none on this computer. */
+  bindingOf(sessionId: string): { folder: string; mode: Mode } | null {
+    const binding = this.options.bindings.get(sessionId);
+    // A mode it does not know asks, as the approvals take it.
+    return binding ? { folder: binding.folder, mode: binding.mode === "free" ? "free" : "ask" } : null;
+  }
+
+  /**
+   * The chat's folder, for the file manager to show, while it is still the folder its user
+   * confirmed: one replaced since, by another folder, a link or a file, is refused. The user waits
+   * LOOK_MS at most. Node cannot cancel a look, and one into a dead mount holds one of libuv's four
+   * threads until it returns, which the main process's other file calls and lookups then wait on: so
+   * a chat has one look at a time, and the process LOOKS_AT_ONCE.
+   */
+  async folderToShow(sessionId: string): Promise<string> {
+    const binding = this.options.bindings.get(sessionId);
+    if (!binding) throw new Error("This chat has no folder on this computer");
+    if (looking.has(sessionId)) throw new Error(`Surogate is still looking for ${binding.folder}`);
+    if (looking.size >= LOOKS_AT_ONCE) throw new Error("Surogate is still looking for another folder");
+    looking.add(sessionId);
+    // lstat: a link at its path is never the folder. The path was resolved when it was bound,
+    // so only its last name can have become a link since.
+    const look = (this.options.look ?? lstat)(binding.folder).then((found) => found, () => null);
+    void look.finally(() => looking.delete(sessionId));
+    const ms = this.options.lookMs ?? LOOK_MS;
+    let timer: NodeJS.Timeout | undefined;
+    const found = await Promise.race([
+      look,
+      new Promise<"late">((resolve) => {
+        timer = setTimeout(() => resolve("late"), ms).unref();
+      }),
+    ]).finally(() => clearTimeout(timer));
+    if (found === "late") throw new Error(`The folder ${binding.folder} did not answer within ${ms / 1000} s`);
+    if (!found) throw new Error(`The folder ${binding.folder} is not there`);
+    if (!found.isDirectory() || !confirmedFolder(binding, found)) {
+      throw new Error(`The folder ${binding.folder} was replaced after it was confirmed for this chat`);
+    }
+    return binding.folder;
   }
 
   /** Drop a folder confirmed in *window* whose chat was never created: its bind is refused from now on. A chat bound already keeps it. */
@@ -203,7 +275,9 @@ export class Binder implements Executor {
   }
 
   // The sheet for *offered*, or for the folder the dialog picks from *startIn*, until the user accepts one or cancels.
-  private async confirm(offered: string | null, startIn: string, window: string, signal: AbortSignal): Promise<Prepared | null> {
+  private async confirm(
+    offered: string | null, startIn: string, window: string, signal: AbortSignal, thread: ThreadLabel | null,
+  ): Promise<Prepared | null> {
     const { prompts, guards } = this.options;
     // A page that has gone gets no prompt: the signal is looked at before each one.
     let folder = offered ?? (signal.aborted ? null : await prompts.pickFolder(startIn, signal));
@@ -217,6 +291,7 @@ export class Binder implements Executor {
         mode: "free",
         links,
         refusal: checked.ok ? null : checked.message,
+        thread,
       };
       const answer = await prompts.confirmFolder(sheet, signal);
       if (answer === null || signal.aborted) return null;
@@ -251,7 +326,10 @@ export class Binder implements Executor {
   // nothing, so it settles at once, an aborted one too: suspend waits for it. Every
   // other operation is the approvals', which settle once the signal aborts.
   async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
-    if (operation.kind !== "bind") return this.approvals.admit(operation, signal);
+    if (operation.kind === "retire") return this.retire(operation);
+    // What the tools refuse anyway (no browser on this computer, say) is refused before anyone is
+    // asked; in the same tick, so a chat's bind in the same burst cannot slip in before the approvals look.
+    if (operation.kind !== "bind") return this.options.refusal?.(operation) ?? this.approvals.admit(operation, signal);
     const root = operation.sessionId;
     const { folder, nonce } = operation.args;
     const own = operation.callingSessionId === root && operation.invocationId === "bind" && operation.ordinal === 0;
@@ -276,6 +354,21 @@ export class Binder implements Executor {
     }
     preparation.root = root;
     this.answered.set(operation.id, preparation);
+    return BOUND;
+  }
+
+  // A deleted chat's root: its binding goes, so nothing more runs for it; its folder stays as it is.
+  private retire(operation: Operation): Outcome {
+    const own = operation.callingSessionId === operation.sessionId && operation.invocationId === "retire" && operation.ordinal === 0;
+    if (!own) return NOT_BOUND;
+    // Its tabs close whether or not its binding can be forgotten: the chat is gone.
+    this.options.retired?.(operation.sessionId);
+    try {
+      this.options.bindings.retire(operation.sessionId);
+    } catch (error) {
+      report(this.options.onError, error);
+      return NOT_FORGOTTEN;
+    }
     return BOUND;
   }
 

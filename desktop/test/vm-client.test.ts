@@ -1,13 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
-import { forkManager, type FromManager, type ManagerProcess, VmClient, vmOptions } from "../src/vm/client.js";
-import { unavailable, type VmOperation, type VmOptions } from "../src/vm/manager.js";
+import { forkManager, type FromManager, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmEnv, vmOptions } from "../src/vm/client.js";
+import { type Boot, unavailable, type VmOperation, type VmOptions } from "../src/vm/manager.js";
 
 let dir: string;
 let path: string | undefined;
@@ -18,13 +18,17 @@ let clients: VmClient[];
 const SLEEP = "31.357";
 const running = () => Number(spawnSync("pgrep", ["-fc", `^sleep ${SLEEP}$`], { encoding: "utf8" }).stdout.trim() || 0);
 
-function client(): VmClient {
+// *ready*: what the client waits for before a boot, as the app's image. Its stand-in boots open a KVM
+// device of their own, which this test makes, never this computer's.
+function client(ready?: (signal: AbortSignal) => Promise<void>): VmClient {
+  writeFileSync(join(dir, "kvm"), "");
   const options: VmOptions = {
     kernel: "/i/vmlinuz", rootfs: "/i/rootfs.img", agentDisk: "/a/agent.img", sessions: join(dir, "sessions.img"), run: join(dir, "run"),
-    console: join(dir, "console.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" },
+    console: join(dir, "console.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" }, kvm: join(dir, "kvm"),
   };
   const made = new VmClient({
     vm: options,
+    ready,
     spawn: () => {
       const manager = forkManager();
       spawned.push(manager);
@@ -43,7 +47,7 @@ beforeEach(() => {
   mkdirSync(join(dir, "bin"));
   // A QEMU that never says hello while dir/slow is there, and otherwise cannot start.
   const qemu = join(dir, "bin", "qemu-system-x86_64");
-  writeFileSync(qemu, `#!/bin/sh\nif [ -e '${dir}/slow' ]; then exec sleep ${SLEEP}; fi\necho 'no KVM here' >&2\nexit 1\n`);
+  writeFileSync(qemu, `#!/bin/sh\necho run >> '${dir}/qemu-runs'\nif [ -e '${dir}/slow' ]; then exec sleep ${SLEEP}; fi\necho 'no KVM here' >&2\nexit 1\n`);
   chmodSync(qemu, 0o755);
   path = process.env.PATH;
   process.env.PATH = `${join(dir, "bin")}:${path}`;
@@ -341,5 +345,238 @@ describe("the VM's files", () => {
     expect(installed.sessions).toBe("/home/ana/.local/share/surogate/vm/sessions.img");
     // Without XDG_RUNTIME_DIR: the user's own folder logind makes, never /tmp.
     expect(vmOptions("/d", { ...ana, uid: 1234 }, {}).run).toMatch(/^\/run\/user\/1234\/surogate\/vm-[0-9a-f]{8}$/);
+  });
+
+  it("boot the image the app delivered with its agent disk, SUROGATE_VM_IMAGE's in its place when set, and open SUROGATE_VM_KVM for KVM", () => {
+    const delivered = { image: "/d/vm/images/abc", agentDisk: "/opt/surogate/current/resources/vm/agent.img" };
+    const installed = vmOptions("/d", ana, {}, delivered);
+    expect([installed.kernel, installed.rootfs, installed.agentDisk, installed.kvm]).toEqual([
+      "/d/vm/images/abc/vmlinuz", "/d/vm/images/abc/rootfs.img", "/opt/surogate/current/resources/vm/agent.img", undefined,
+    ]);
+    expect(vmOptions("/d", ana, { SUROGATE_VM_IMAGE: "/mine" }, delivered).rootfs).toBe("/mine/rootfs.img");
+    expect(vmOptions("/d", ana, {}).rootfs).toBe(join(REPO_IMAGE, "rootfs.img"));
+    expect(vmOptions("/d", ana, { SUROGATE_VM_KVM: "/nowhere" }).kvm).toBe("/nowhere");
+  });
+
+  it("take SUROGATE_VM_IMAGE and SUROGATE_VM_KVM only in a development build: a packaged app boots only the image its manifest checks", () => {
+    const delivered = { image: "/d/vm/images/abc" };
+    const env = { SUROGATE_VM_IMAGE: "/mine", SUROGATE_VM_KVM: "/nowhere", XDG_RUNTIME_DIR: "/run/user/1000" };
+    const packaged = vmOptions("/d", ana, vmEnv(env, true), delivered);
+    expect([packaged.rootfs, packaged.kvm]).toEqual(["/d/vm/images/abc/rootfs.img", undefined]);
+    expect(packaged.run).toMatch(/^\/run\/user\/1000\/surogate\//);
+    const developed = vmOptions("/d", ana, vmEnv(env, false), delivered);
+    expect([developed.rootfs, developed.kvm]).toEqual(["/mine/rootfs.img", "/nowhere"]);
+  });
+});
+
+describe("the delivered image, and each boot", () => {
+  it("waits for the VM to be able to boot, its image here, before it starts a manager, and starts one once it is", async () => {
+    let here = () => {};
+    const vm = client(() => new Promise<void>((resolve) => {
+      here = resolve;
+    }));
+    const answered = vm.perform(operation(), signal());
+    expect(await within(answered, 300)).toBe("no answer");
+    expect(spawned).toHaveLength(0);
+    here();
+    // The stand-in QEMU cannot start: the manager ran, and said so.
+    expect(await answered).toEqual(unavailable("did not start: QEMU exited: no KVM here"));
+    expect(spawned).toHaveLength(1);
+  });
+
+  it("has its manager boot again at once at the user's Retry, the boot that did not start forgotten", async () => {
+    const vm = client();
+    const runs = () => readFileSync(join(dir, "qemu-runs"), "utf8").split("\n").filter(Boolean).length;
+    const failed = unavailable("did not start: QEMU exited: no KVM here");
+    expect(await vm.perform(operation(), signal())).toEqual(failed);
+    // Inside the boot's backoff: answered at once, with no boot.
+    expect(await vm.perform(operation(), signal())).toEqual(failed);
+    expect(runs()).toBe(1);
+    vm.retry();
+    // At once, not after the backoff's second.
+    const begun = performance.now();
+    expect(await vm.perform(operation(), signal())).toEqual(failed);
+    expect(runs()).toBe(2);
+    expect(performance.now() - begun).toBeLessThan(500);
+  });
+
+  it("answers what waits with why the VM cannot boot, as an image that could not be downloaded, and starts no manager", async () => {
+    const vm = client(async () => {
+      throw new Error("could not be downloaded: there is not enough free disk space: it needs 3.5 GB, and 1.2 GB is free");
+    });
+    expect(await vm.perform(operation(), signal())).toEqual(
+      unavailable("could not be downloaded: there is not enough free disk space: it needs 3.5 GB, and 1.2 GB is free"),
+    );
+    expect(spawned).toHaveLength(0);
+  });
+
+  it("answers a cancel, and the app's quit, at once while it waits for the VM to be able to boot", async () => {
+    const waiting = (cancel: AbortSignal) => new Promise<void>((_resolve, reject) => cancel.addEventListener("abort", () => reject(cancel.reason), { once: true }));
+    const vm = client(waiting);
+    const cancel = new AbortController();
+    const cancelled = vm.perform(operation(), cancel.signal);
+    cancel.abort();
+    expect(await cancelled).toEqual(CANCELLED);
+    const quitting = vm.perform(operation(), signal());
+    await vm.stop();
+    expect(await quitting).toEqual(unavailable("is stopping"));
+  });
+
+  for (const [emulated, bound] of [[null, 10_000], ["no-kvm", 35_000]] as const) {
+    it(`tells each boot, and gives a manager whose last guest ran ${emulated ? "emulated" : "with KVM"} ${bound / 1000} s to stop before it is killed`, async () => {
+      vi.useFakeTimers();
+      try {
+        const killed = { count: 0 };
+        const exits: Array<() => void> = [];
+        let tell = (_message: FromManager) => {};
+        const vm = new VmClient({
+          vm: { kernel: "/k", rootfs: "/r", agentDisk: "/a", sessions: join(dir, "s.img"), run: join(dir, "run"), console: join(dir, "c.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" } },
+          // It says it runs, and from then on lets its stops go unheard.
+          spawn: () => ({
+            send: (message) => void (message.type === "start" && setTimeout(() => tell({ type: "ready" }), 1)),
+            onMessage: (listener) => {
+              tell = listener;
+            },
+            onExit: (listener) => void exits.push(listener),
+            kill: () => {
+              killed.count += 1;
+              for (const exit of exits.splice(0)) exit();
+            },
+          }),
+        });
+        const boots: Boot[] = [];
+        vm.onBoot((boot) => boots.push(boot));
+        void vm.perform(operation(), signal());
+        await vi.advanceTimersByTimeAsync(10);
+        tell({ type: "boot", boot: { failed: "QEMU exited" } });
+        tell({ type: "boot", boot: { emulated } });
+        expect(boots).toEqual([{ failed: "QEMU exited" }, { emulated }]);
+        const stopped = vm.stop();
+        await vi.advanceTimersByTimeAsync(bound - 100);
+        expect(killed.count).toBe(0);
+        await vi.advanceTimersByTimeAsync(200);
+        expect(killed.count).toBe(1);
+        await stopped;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  }
+});
+
+describe("a manager that runs on", () => {
+  // A manager that says it runs, then answers what *answers* says, or nothing; killed once.
+  const fake = (answers: { pongs: boolean; held: Array<() => void> }, sent: ToManager[], exits: Array<() => void>, killed: { count: number }): ManagerProcess => {
+    const heard: Array<(message: FromManager) => void> = [];
+    return {
+      send: (message) => {
+        sent.push(message);
+        if (message.type === "start") setTimeout(() => heard.forEach((listener) => listener({ type: "ready" })), 5);
+        if (message.type === "stop") for (const exit of exits.splice(0)) exit();
+        if (message.type !== "ping") return;
+        const pong = () => heard.forEach((listener) => listener({ type: "pong" }));
+        if (answers.pongs) pong();
+        else answers.held.push(pong);
+      },
+      onMessage: (listener) => void heard.push(listener),
+      onExit: (listener) => void exits.push(listener),
+      kill: () => {
+        killed.count += 1;
+        for (const exit of exits.splice(0)) exit();
+      },
+    };
+  };
+  const vmOf = (manager: () => ManagerProcess) => {
+    const vm = new VmClient({
+      vm: { kernel: "/k", rootfs: "/r", agentDisk: "/a", sessions: join(dir, "s.img"), run: join(dir, "run"), console: join(dir, "c.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" } },
+      spawn: manager,
+      pingMs: 100,
+    });
+    clients.push(vm);
+    return vm;
+  };
+
+  it("starts no manager for a wake when none runs", () => {
+    let starts = 0;
+    const vm = vmOf(() => {
+      starts += 1;
+      return fake({ pongs: true, held: [] }, [], [], { count: 0 });
+    });
+    vm.resume();
+    expect(starts).toBe(0);
+  });
+
+  it("is kept at the computer's wake, told it, and the pings it missed asleep not held against it", async () => {
+    const answers = { pongs: false, held: [] as Array<() => void> };
+    const sent: ToManager[] = [];
+    const killed = { count: 0 };
+    const vm = vmOf(() => fake(answers, sent, [], killed));
+    const running = vm.perform(operation(), signal());
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    vm.resume();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    answers.pongs = true;
+    for (const pong of answers.held.splice(0)) pong();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(killed.count).toBe(0);
+    expect(sent.filter((message) => message.type === "resume")).toHaveLength(1);
+    expect(await within(running, 100)).toBe("no answer");
+  });
+
+  it("is killed once it has answered no ping three times, what it ran answered as stopped by the sandbox", async () => {
+    const killed = { count: 0 };
+    const vm = vmOf(() => fake({ pongs: false, held: [] }, [], [], killed));
+    const begun = performance.now();
+    expect(await within(vm.perform(operation(), signal()), 2_000)).toEqual(SANDBOX_STOPPED);
+    expect(performance.now() - begun).toBeLessThan(1_000);
+    expect(killed.count).toBeGreaterThan(0);
+  });
+
+  it("is started again, once it went by itself, only once a second has passed, and two seconds after the next", async () => {
+    const starts: number[] = [];
+    const vm = vmOf(() => {
+      starts.push(performance.now());
+      const exits: Array<() => void> = [];
+      const manager = fake({ pongs: true, held: [] }, [], exits, { count: 0 });
+      // It runs, then crashes.
+      setTimeout(() => exits.splice(0).forEach((exit) => exit()), 50);
+      return manager;
+    });
+    for (let n = 0; n < 3; n += 1) expect(await vm.perform(operation(), signal())).toEqual(SANDBOX_STOPPED);
+    const [first = 0, second = 0, third = 0] = starts;
+    expect(second - first).toBeGreaterThan(1_000);
+    expect(third - second).toBeGreaterThan(2_000);
+  });
+
+  it("answers a cancel at once while it backs off", async () => {
+    const vm = vmOf(() => {
+      const exits: Array<() => void> = [];
+      const manager = fake({ pongs: true, held: [] }, [], exits, { count: 0 });
+      setTimeout(() => exits.splice(0).forEach((exit) => exit()), 50);
+      return manager;
+    });
+    expect(await vm.perform(operation(), signal())).toEqual(SANDBOX_STOPPED);
+    const cancel = new AbortController();
+    const waiting = vm.perform(operation(), cancel.signal);
+    setTimeout(() => cancel.abort(), 100);
+    const begun = performance.now();
+    expect(await waiting).toEqual(CANCELLED);
+    expect(performance.now() - begun).toBeLessThan(500);
+  });
+
+  it("answers an operation waiting out its backoff as soon as the app quits, not when its wait ends", async () => {
+    const vm = vmOf(() => {
+      const exits: Array<() => void> = [];
+      const manager = fake({ pongs: true, held: [] }, [], exits, { count: 0 });
+      setTimeout(() => exits.splice(0).forEach((exit) => exit()), 50);
+      return manager;
+    });
+    expect(await vm.perform(operation(), signal())).toEqual(SANDBOX_STOPPED);
+    // Its wait is a second; up to a minute after repeated crashes.
+    const waiting = vm.perform(operation(), signal());
+    setTimeout(() => void vm.stop(), 100);
+    const begun = performance.now();
+    expect(await waiting).toEqual(unavailable("is stopping"));
+    expect(performance.now() - begun).toBeLessThan(500);
   });
 });

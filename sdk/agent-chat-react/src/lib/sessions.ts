@@ -1,5 +1,14 @@
 import type { AgentChatSession } from "../types";
 
+/**
+ * The computer a chat on a folder of the user's computer works on, by the name the server
+ * stamped when the chat was made; null for a chat in the cloud.
+ */
+export function sessionComputer(config: Record<string, unknown> | undefined): string | null {
+  const execution = config?.execution as { kind?: unknown; device_name?: unknown } | undefined;
+  return execution?.kind === "device" && typeof execution.device_name === "string" ? execution.device_name : null;
+}
+
 export function isScheduledRunSession(
   session: AgentChatSession | null | undefined,
 ): boolean {

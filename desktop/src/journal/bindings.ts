@@ -40,23 +40,75 @@ const read = (row: Row | undefined): Binding | undefined =>
   };
 
 export class Bindings {
+  private readonly listeners = new Set<(root: string) => void>();
+
   constructor(private readonly db: DatabaseSync) {}
+
+  /** Hear each root bound, each change of a root's mode, each host allowed for it, and each root's binding forgotten, once it is written; the returned function stops it. */
+  watch(listener: (root: string) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
 
   /** Record a root's binding. A root is bound once: a second binding for it throws. */
   add(binding: Binding): void {
     this.db
       .prepare(`INSERT INTO bindings (root, nonce, folder, dev, ino, boot, mode, bound_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(binding.root, binding.nonce, binding.folder, binding.dev, binding.ino, binding.boot, binding.mode, binding.boundAt);
+    this.changed(binding.root);
+  }
+
+  /**
+   * Forget a deleted root's binding and what its user allowed for it, both or neither.
+   * The folder is not touched; an unknown root changes nothing, and tells nothing.
+   */
+  retire(root: string): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    let forgotten: number | bigint;
+    try {
+      this.db.prepare(`DELETE FROM domains WHERE root = ?`).run(root);
+      this.db.prepare(`DELETE FROM browsing WHERE root = ?`).run(root);
+      forgotten = this.db.prepare(`DELETE FROM bindings WHERE root = ?`).run(root).changes;
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // SQLite rolled back by itself, as on a full disk.
+      }
+      throw error;
+    }
+    if (forgotten > 0) this.changed(root);
   }
 
   /** A root's mode from now on, for it and its sub-agents. An unknown root changes nothing. */
   setMode(root: string, mode: Mode): void {
-    this.db.prepare(`UPDATE bindings SET mode = ? WHERE root = ?`).run(mode, root);
+    // Told only when it changed: an unknown root, or the mode it has, changes nothing.
+    const { changes } = this.db.prepare(`UPDATE bindings SET mode = ? WHERE root = ? AND mode <> ?`).run(mode, root, mode);
+    if (changes > 0) this.changed(root);
+  }
+
+  // A listener's failure is not the write's: it is written, and the others hear it.
+  private changed(root: string): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(root);
+      } catch {
+        // Nothing here can tell anyone more.
+      }
+    }
   }
 
   /** Let *domain* (a host, as srt's allowedDomains takes it) through for a bound root from now on. Once each; an unknown root changes nothing. */
   allowDomain(root: string, domain: string): void {
-    this.db.prepare(`INSERT OR IGNORE INTO domains (root, domain) SELECT root, ? FROM bindings WHERE root = ?`).run(domain, root);
+    // Told only when kept: a host allowed already, or a root with no binding, changes nothing.
+    const { changes } = this.db.prepare(`INSERT OR IGNORE INTO domains (root, domain) SELECT root, ? FROM bindings WHERE root = ?`).run(domain, root);
+    if (changes > 0) this.changed(root);
+  }
+
+  /** Take *domain* back from a root: its next connection there asks again. One never allowed changes nothing. */
+  disallowDomain(root: string, domain: string): void {
+    this.db.prepare(`DELETE FROM domains WHERE root = ? AND domain = ?`).run(root, domain);
   }
 
   /** What a root's user allowed for it past the package hosts, in the order allowed. */
@@ -65,10 +117,29 @@ export class Bindings {
     return rows.map((row) => row.domain);
   }
 
+  /** Let a bound root's agent use the browser on this computer from now on, as its user allowed. An unknown root changes nothing. */
+  allowBrowser(root: string): void {
+    // Told only when kept: a root allowed already, or one with no binding, changes nothing.
+    const { changes } = this.db.prepare(`INSERT OR IGNORE INTO browsing (root) SELECT root FROM bindings WHERE root = ?`).run(root);
+    if (changes > 0) this.changed(root);
+  }
+
+  /** Whether the root's user let its agent use the browser on this computer. */
+  browsing(root: string): boolean {
+    return this.db.prepare(`SELECT 1 FROM browsing WHERE root = ?`).get(root) !== undefined;
+  }
+
   get(root: string): Binding | undefined {
     const select = this.db.prepare(`SELECT * FROM bindings WHERE root = ?`);
     select.setReadBigInts(true);
     return read(select.get(root) as Row | undefined);
+  }
+
+  /** Every binding, the first bound first. */
+  all(): Binding[] {
+    const select = this.db.prepare(`SELECT * FROM bindings ORDER BY bound_at, rowid`);
+    select.setReadBigInts(true);
+    return (select.all() as unknown as Row[]).map((row) => read(row)!);
   }
 
   /** Every folder a chat is bound to, once each, the first bound first: what a restore names. */

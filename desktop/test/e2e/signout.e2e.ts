@@ -1,9 +1,10 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { type BrowserIdentity, profilesOf } from "../../src/browser/choose.js";
 import { connect, FakeAgent, opened, signIn, signedInAndAdded, webClient } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
@@ -33,6 +34,17 @@ const credentials = () => (existsSync(state("credentials.json")) ? JSON.parse(re
 const asked = (shell: ElectronApplication) =>
   shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string; detail: string }> }).asked.map((options) => options.message));
 const revokes = () => agent.link.received.filter((frame) => frame.type === "revoke").length;
+// The confirmation the user was asked whose message is *message*, as the app passed it.
+const confirmation = async (shell: ElectronApplication, message: string) =>
+  (await shell.evaluate(() => (globalThis as unknown as { asked: Array<Record<string, unknown>> }).asked)).find((options) => options.message === message);
+const FORGET = /^Also forget the sites .+'s browser on this computer is signed in to$/;
+// The computer's identity's browser profiles, as the agent's browser would have left them here.
+function browserProfiles(): string {
+  const profiles = profilesOf(join(home, "surogate"), credentials()[0] as unknown as BrowserIdentity);
+  mkdirSync(join(profiles, "chrome", "Default"), { recursive: true });
+  writeFileSync(join(profiles, "chrome", "Default", "Cookies"), "a site's sign-in");
+  return profiles;
+}
 
 // Launched with its state under home, signed in as ACCOUNT, and this computer added; the web client with something in its storage.
 async function signedIn(): Promise<{ shell: ElectronApplication; page: Page; client: Page }> {
@@ -66,6 +78,31 @@ describe("logging out", () => {
     await expect.poll(() => client.evaluate(() => localStorage.getItem("surogates_auth_token"))).toBeNull();
     // Signed out, the web client has nothing to give: the window asks for a sign-in.
     expect(await client.evaluate(() => window.surogateDesktop!.webSignIn())).toBeNull();
+  });
+
+  it("offers to forget the agent's browser sign-ins only where its browser keeps a profile here, and forgets them when ticked", async () => {
+    const { shell, page } = await signedIn();
+    await logOut(page);
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    // The agent's browser never ran here: there is nothing to forget, so nothing is offered.
+    expect((await confirmation(shell, `Log out of ${host}?`))?.checkboxLabel).toBeUndefined();
+    await quit(shell);
+    const again = await signedIn();
+    const profiles = browserProfiles();
+    await again.shell.evaluate(() => Object.assign(globalThis, { checked: true }));
+    await logOut(again.page);
+    await expect.poll(() => again.page.isVisible("#sign-in")).toBe(true);
+    expect(await confirmation(again.shell, `Log out of ${host}?`)).toMatchObject({ checkboxLabel: expect.stringMatching(FORGET), checkboxChecked: false });
+    expect(existsSync(profiles)).toBe(false);
+  });
+
+  it("keeps the agent's browser sign-ins at a log out its user did not tick", async () => {
+    const { shell, page } = await signedIn();
+    const profiles = browserProfiles();
+    await logOut(page);
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    expect((await confirmation(shell, `Log out of ${host}?`))?.checkboxLabel).toMatch(FORGET);
+    expect(readFileSync(join(profiles, "chrome", "Default", "Cookies"), "utf8")).toBe("a site's sign-in");
   });
 
   it("is what the web client's own Log out asks for", async () => {
@@ -219,6 +256,32 @@ describe("removing the agent", () => {
     expect(revokes()).toBe(1);
     expect(existsSync(state("agent.json"))).toBe(false);
     expect(await shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.contentView.children.length)).toBe(0);
+  });
+
+  it("offers to forget the agent's browser sign-ins, ticked, and forgets them", async () => {
+    const { shell, page } = await signedIn();
+    const profiles = browserProfiles();
+    await shell.evaluate(() => Object.assign(globalThis, { checked: true }));
+    await page.click("#user");
+    await page.click('[data-action="remove"]');
+    await expect.poll(() => page.isVisible("#first-run")).toBe(true);
+    expect(await confirmation(shell, `Remove ${host} from Surogate?`)).toMatchObject({ checkboxLabel: expect.stringMatching(FORGET), checkboxChecked: true });
+    expect(existsSync(profiles)).toBe(false);
+  });
+
+  it("offers to forget nothing on the sign-in screen when this computer keeps no access to the agent", async () => {
+    const first = await signedIn();
+    await quit(first.shell);
+    // Nobody signed in, and no access of this computer's kept: whose browser profiles there were is not known.
+    rmSync(state("session.json"));
+    rmSync(state("credentials.json"));
+    app = await launch(home);
+    await stubNative(app);
+    const page = await shellPage(app);
+    await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    await page.click("#sign-in-remove");
+    await expect.poll(() => page.isVisible("#first-run")).toBe(true);
+    expect((await confirmation(app, `Remove ${host} from Surogate?`))?.checkboxLabel).toBeUndefined();
   });
 
   it("is offered on the sign-in screen too, with nobody signed in", async () => {

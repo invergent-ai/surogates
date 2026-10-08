@@ -5,6 +5,21 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- Surogate Desktop's theme from the first frame (desktop design, Progress: "Appearance is a
+         setting"). The desktop's Light, Dark or Match system drives prefers-color-scheme in every
+         page it shows, its Overview pane's transcript too, which has no bridge (lib/appearance.ts's
+         takesDesktopLook), so the root takes it here, before the stylesheets paint the body from
+         it; the app keeps it so (app/provider.tsx). In a browser the theme is next-themes' own, but
+         on /transcript/<id>, the pane's page, which a browser reaches only by its address typed:
+         there it is the system's. -->
+    <script>
+      if (window.surogateDesktop || location.pathname.startsWith("/transcript/")) {
+        const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.classList.toggle("dark", dark);
+        // Native scrollbars and form controls with it, as next-themes sets them once the app runs.
+        document.documentElement.style.colorScheme = dark ? "dark" : "light";
+      }
+    </script>
     <!-- `interactive-widget=resizes-content` makes Chrome on Android shrink
          the layout viewport when the keyboard opens instead of sliding the
          page up behind it, which keeps the composer attached to the top of

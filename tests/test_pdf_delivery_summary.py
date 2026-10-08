@@ -68,3 +68,38 @@ async def test_pdf_summary_keeps_inspected_pdf_and_excludes_generator_and_cache(
             "artifacts": [{"kind": "file", "label": pdf, "ref": pdf}],
         },
     )
+
+
+async def test_a_turn_whose_folder_could_not_be_listed_flags_no_file_its_reply_names(monkeypatch):
+    session_id, turn_id = uuid4(), str(uuid4())
+    session = SimpleNamespace(id=session_id, channel="web", config={
+        "execution": {"kind": "device", "device_id": str(uuid4())}, "workspace_path": "/home/me/notes",
+    })
+    events = [
+        SimpleNamespace(type=EventType.LLM_REQUEST, data={"turn_id": turn_id}),
+        SimpleNamespace(type=EventType.TOOL_CALL, data={"name": "terminal", "arguments": {"command": "make report.pdf"}}),
+    ]
+
+    async def no_walk(self, session, *, since):
+        return None  # its computer did not answer in time
+
+    monkeypatch.setattr(ArtifactCompletionMixin, "_walk_folder", no_walk)
+    # Its computer did not say where the turn began, or did and then did not list it.
+    for cursor in (None, "1700000000000000000"):
+        harness = ArtifactCompletionMixin()
+        harness._turn_started_at = datetime.now(timezone.utc)
+        harness._turn_marked, harness._turn_cursor = True, cursor  # it made a tool call
+        harness._pending_iteration_summary_tasks = {}
+        harness._turn_summarizer = None
+        harness._storage = None
+        harness._store = AsyncMock()
+        harness._store.get_session.return_value = session
+        harness._store.get_events.side_effect = [[], events]
+
+        await harness._drain_and_emit_turn_summary(
+            session_id=session_id, turn_id=turn_id, user_message="make the report",
+            final_message="I saved report.pdf in the folder.",
+        )
+
+        # Unseen is not unsupported: a wrong warning is worse than none.
+        harness._store.emit_event.assert_not_awaited()

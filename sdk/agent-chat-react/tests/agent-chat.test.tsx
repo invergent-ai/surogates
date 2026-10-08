@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { AgentChat } from "../src/agent-chat";
+import { forgetChatFiles } from "../src/components/workspace/chat-files";
 import type {
   AgentChatAdapter,
   AgentChatEventStream,
@@ -195,6 +196,7 @@ afterEach(() => {
   container?.remove();
   container = null;
   window.localStorage.removeItem("@invergent/agent-chat-react:viewMode");
+  forgetChatFiles();
 });
 
 describe("AgentChat", () => {
@@ -1069,6 +1071,136 @@ describe("AgentChat", () => {
     ).toBeNull();
   });
 
+  describe("a chat's files, as the user moves to another chat and back", () => {
+    // The adapter's upload as a local-folder chat's waits on its computer: told to stop, it stops.
+    function waitingUpload(said: string | null) {
+      const upload = { end: (_outcome: Error | null) => {}, signal: undefined as AbortSignal | undefined };
+      const uploadWorkspaceFile = (input: { sessionId: string; file: File; signal?: AbortSignal; onWaiting?: (said: string) => void }) => {
+        upload.signal = input.signal;
+        if (said) input.onWaiting?.(said);
+        return new Promise<{ path: string; size: number }>((resolve, reject) => {
+          input.signal?.addEventListener("abort", () => reject(input.signal?.reason));
+          upload.end = (outcome) => (outcome ? reject(outcome) : resolve({ path: "notes.txt", size: 5 }));
+        });
+      };
+      return { upload, uploadWorkspaceFile };
+    }
+    const notice = () => container!.querySelector('[data-testid="workspace-notice"]')?.textContent ?? null;
+    const locked = () => container!.querySelector<HTMLButtonElement>('button[aria-label="Upload files"]')?.disabled;
+    async function shown(adapter: AgentChatAdapter, sessionId: string): Promise<void> {
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId={sessionId} />);
+        await Promise.resolve();
+      });
+      await openPane(container!, "files");
+    }
+    async function upload(): Promise<void> {
+      const input = container!.querySelector('[data-testid="workspace-panel"] input[type=file]') as HTMLInputElement;
+      Object.defineProperty(input, "files", { value: [new File(["draft"], "notes.txt")] });
+      await act(async () => {
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    }
+
+    it("keeps an upload's wait and lock to its chat, finishes it meanwhile, and says its end there on the way back", async () => {
+      const stream = new FakeEventStream();
+      const { upload: sent, uploadWorkspaceFile } = waitingUpload("Waiting for you to allow this on chat one's ThinkPad");
+      const reads: string[] = [];
+      const base = createAdapter(stream);
+      const adapter = {
+        ...base,
+        uploadWorkspaceFile,
+        async getWorkspaceTree(input: { sessionId: string }) {
+          reads.push(input.sessionId);
+          return { root: "workspace", entries: [], truncated: false };
+        },
+      } satisfies AgentChatAdapter;
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await shown(adapter, "s-1");
+      await upload();
+      expect([notice(), locked()]).toEqual(["Waiting for you to allow this on chat one's ThinkPad", true]);
+      await shown(adapter, "s-2");
+      expect([notice(), locked()]).toEqual([null, false]);
+      await act(async () => {
+        sent.end(null);
+      });
+      expect([notice(), locked()]).toEqual([null, false]);
+      // Folded away from chat one, the panel asked nothing more of its computer.
+      expect(reads.filter((chat) => chat === "s-1")).toHaveLength(1);
+      await shown(adapter, "s-1");
+      expect([notice(), locked()]).toEqual(["Uploaded notes.txt", false]);
+    });
+
+    it("asks a folded chat's computer for nothing as its change ends, and says the end once unfolded", async () => {
+      const stream = new FakeEventStream();
+      const { upload: sent, uploadWorkspaceFile } = waitingUpload(null);
+      const reads: string[] = [];
+      const adapter = {
+        ...createAdapter(stream),
+        uploadWorkspaceFile,
+        async getWorkspaceTree(input: { sessionId: string }) {
+          reads.push(input.sessionId);
+          return { root: "workspace", entries: [], truncated: false };
+        },
+      } satisfies AgentChatAdapter;
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await shown(adapter, "s-1");
+      await upload();
+      await openPane(container, "files");
+      expect(container.querySelector('[data-testid="workspace-panel"]')).toBeNull();
+      await act(async () => {
+        sent.end(null);
+      });
+      expect(reads).toEqual(["s-1"]);
+      await openPane(container, "files");
+      expect(notice()).toBe("Uploaded notes.txt");
+    });
+
+    it("says a refusal of a chat's change only over that chat, once the user is back there", async () => {
+      const stream = new FakeEventStream();
+      const { upload: sent, uploadWorkspaceFile } = waitingUpload(null);
+      const adapter = { ...createAdapter(stream), uploadWorkspaceFile } satisfies AgentChatAdapter;
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await shown(adapter, "s-1");
+      await upload();
+      await shown(adapter, "s-2");
+      await act(async () => {
+        sent.end(new Error("Local access revoked"));
+      });
+      expect(notice()).toBeNull();
+      await shown(adapter, "s-1");
+      expect(notice()).toBe("Local access revoked");
+    });
+
+    it("says nothing of a chat's tree wait over the next chat's, and stops asking for it", async () => {
+      const stream = new FakeEventStream();
+      const signals: Record<string, AbortSignal | undefined> = {};
+      const adapter = {
+        ...createAdapter(stream),
+        getWorkspaceTree(input: { sessionId: string; signal?: AbortSignal; onWaiting?: (said: string) => void }) {
+          signals[input.sessionId] = input.signal;
+          if (input.sessionId === "s-1") input.onWaiting?.("Waiting for chat one's ThinkPad");
+          return new Promise<never>(() => {});
+        },
+      } satisfies AgentChatAdapter;
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      const waiting = () => container!.querySelector('[data-testid="tree-waiting"]')?.textContent ?? null;
+      await shown(adapter, "s-1");
+      expect(waiting()).toBe("Waiting for chat one's ThinkPad");
+      await shown(adapter, "s-2");
+      expect(waiting()).toBeNull();
+      expect(signals["s-1"]?.aborted).toBe(true);
+    });
+  });
+
   it("keeps the workspace file viewer closed after clicking close", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);
@@ -1113,6 +1245,79 @@ describe("AgentChat", () => {
     ).toBeNull();
   });
 
+  it("says the chat waits for its computer while its work waits on it, in a status region there before it speaks", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+    act(() => {
+      stream.emit("user.message", 1, { content: "Tidy my notes" });
+    });
+
+    const region = () => container!.querySelector('[data-testid="device-wait"]');
+    // Live before it speaks, so that a screen reader hears it when it does.
+    expect([region()?.getAttribute("role"), region()?.textContent]).toEqual(["status", ""]);
+    act(() => {
+      stream.emit("device.waiting", 2, { device_id: "d-1", device_name: "Flavius's ThinkPad", reason: "offline" });
+    });
+    expect(region()?.textContent).toBe("Waiting for Flavius's ThinkPad. The chat goes on once it is back online.");
+    act(() => {
+      stream.emit("device.resumed", 3, { device_id: "d-1" });
+    });
+    expect(region()?.textContent).toBe("");
+  });
+
+  it("marks the transcript and its composer as the one the host's transcript settings shape, with or without a chat", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId={null} />);
+      await Promise.resolve();
+    });
+    expect(container.querySelector("[data-transcript] textarea")).not.toBeNull();
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+    act(() => {
+      stream.emit("user.message", 1, { content: "Tidy my notes" });
+    });
+    const transcript = container.querySelector("[data-transcript]");
+    expect(transcript?.textContent).toContain("Tidy my notes");
+    expect(transcript?.querySelector("textarea")).not.toBeNull();
+  });
+
+  it("shows what the host puts under the composer", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <AgentChat adapter={adapter} sessionId={null} composerFooter={<p data-testid="footer">On this computer</p>} />,
+      );
+      await Promise.resolve();
+    });
+
+    const footer = container.querySelector('[data-testid="footer"]');
+    const composer = container.querySelector("textarea");
+    expect(footer?.textContent).toBe("On this computer");
+    expect(composer!.compareDocumentPosition(footer!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("disables the composer and workspace upload when chat is disabled", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);
@@ -1135,6 +1340,128 @@ describe("AgentChat", () => {
     );
     expect(uploadButton).not.toBeNull();
     expect(uploadButton!.disabled).toBe(true);
+  });
+
+  it("offers nothing that writes to a chat the host only reads: no answer to its questions, no Retry and no Stop", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" disabled />);
+      await Promise.resolve();
+    });
+    const buttons = () => [...container!.querySelectorAll("button")].map((button) => button.textContent?.trim() || button.getAttribute("aria-label"));
+    act(() => {
+      stream.emit("user.message", 1, { content: "Tidy my notes" });
+      stream.emit("llm.request", 2, {});
+      stream.emit("tool.call", 3, {
+        tool_call_id: "ask-1",
+        name: "ask_user_question",
+        arguments: { questions: [{ prompt: "Which folder first?", choices: [{ label: "Notes" }, { label: "Drafts" }] }] },
+      });
+      stream.emit("tool.call", 4, {
+        tool_call_id: "ask-2",
+        name: "ask_user_question",
+        arguments: { questions: [{ prompt: "Keep the drafts?" }, { prompt: "Rename the notes?" }] },
+      });
+    });
+    expect(container.textContent).toContain("Which folder first?");
+    expect(container.textContent).toContain("Waiting for an answer");
+    expect(buttons()).not.toContain("Notes");
+    expect(buttons()).not.toContain("Submit");
+    expect(buttons()).not.toContain("Stop");
+    act(() => {
+      stream.emit("session.fail", 5, { error_category: "provider_error", error_title: "The model failed", retryable: true });
+    });
+    expect(container.textContent).toContain("The model failed");
+    expect(buttons()).not.toContain("Retry");
+  });
+
+  it("shows a chat the host only reads no Browser card, and its browser nothing that takes it over or shuts it down", async () => {
+    // The shell opens a socket as it mounts; happy-dom would dial it.
+    vi.stubGlobal("WebSocket", class {
+      readyState = 0;
+      onopen = null;
+      onmessage = null;
+      onclose = null;
+      onerror = null;
+      send() {}
+      close() {}
+    });
+    try {
+      const stream = new FakeEventStream();
+      const adapter = {
+        ...createAdapter(stream),
+        async acquireBrowserControl() {
+          return { outcome: "granted" as const, ownerUserId: "u" };
+        },
+        async closeBrowserSession() {},
+        browserShellUrl() {
+          return "ws://browser.test/shell";
+        },
+      };
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId="s-1" disabled />);
+        await Promise.resolve();
+      });
+      await act(async () => {
+        stream.emit("browser.provisioned", 10, { session_id: "s-1" });
+        await Promise.resolve();
+      });
+      expect(container.querySelector('[data-testid="session-pane-card-browser"]')).toBeNull();
+      // The composer's tools still show it, to watch.
+      await act(async () => {
+        container!.querySelector<HTMLElement>('[aria-label="Composer tools"]')!.click();
+      });
+      await act(async () => {
+        [...document.body.querySelectorAll<HTMLElement>('[role="option"]')]
+          .find((item) => item.textContent?.trim() === "Browser")!
+          .click();
+      });
+      expect(container.querySelector('[data-testid="browser-shell"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="browser-shell-control"]')).toBeNull();
+      await act(async () => {
+        container!.querySelector<HTMLButtonElement>('[data-testid="browser-shell"] button[aria-label="More"]')!.click();
+      });
+      const offered = [...container.querySelectorAll("button")].map((button) => button.textContent?.trim());
+      expect(offered).toContain("Maximize");
+      expect(offered).not.toContain("Close browser");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rates an expert's response only in a chat the host writes to", async () => {
+    const stream = new FakeEventStream();
+    const adapter = { ...createAdapter(stream), async submitExpertFeedback() { return {}; } };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+    act(() => {
+      stream.emit("tool.call", 1, {
+        tool_call_id: "expert-1",
+        name: "consult_expert",
+        arguments: { expert: "Architecture reviewer", question: "Review the example app architecture." },
+      });
+      stream.emit("tool.result", 2, { tool_call_id: "expert-1", content: "Appropriate." });
+      stream.emit("expert.result", 3, { summary: "Appropriate." });
+    });
+    expect(container.textContent).toContain("Rate this expert's response:");
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" disabled />);
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Consulted expert");
+    expect(container.textContent).not.toContain("Rate this expert's response:");
   });
 
   it("renders consult_expert as a dedicated expert block instead of raw JSON", async () => {

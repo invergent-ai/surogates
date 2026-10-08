@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from uuid import UUID
 
+from surogates.devices.binding import device_of
+from surogates.harness.context_files import load_folder_context
 from surogates.harness.loop_attachments import (
     _attachments_note_from_data,
     _render_inlined_attachments,
@@ -19,6 +22,7 @@ from surogates.harness.loop_tool_recovery import collapse_repeated_tool_rounds
 from surogates.harness.sanitize import strip_budget_warnings
 from surogates.harness.tool_exec import _WORKSPACE_TOKEN
 from surogates.session.events import EventType
+from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_files
 
 logger = logging.getLogger(__name__)
 
@@ -650,12 +654,31 @@ class ContextReplayMixin:
     # System prompt
     # ------------------------------------------------------------------
 
+    async def _read_folder_context(self, session: Session) -> tuple[bool, str | None]:
+        """Whether a local folder's computer answered within ``HARNESS_WITHIN_S``, and its AGENTS.md (or CLAUDE.md, …) if it has one."""
+        try:
+            async with asyncio.timeout(HARNESS_WITHIN_S), session_files(
+                session, storage=self._storage, session_factory=self._session_factory, redis=self._redis,
+            ) as files:
+                return True, await load_folder_context(files)
+        except Exception as exc:
+            logger.log(
+                gave_up_level(exc), "Session %s: its folder's project context could not be read", session.id,
+                exc_info=True,
+            )
+            return False, None
+
     async def _build_system_prompt(self, session: Session) -> str:
         """Delegate to PromptBuilder, with per-session caching."""
         cached = self._system_prompt_cache.get(session.id)
         if cached is not None:
             return cached
 
+        # A prompt built without what its computer could not say is not kept:
+        # the next wake asks again.
+        answered = True
+        if device_of(session.config) is not None:
+            answered, self._prompt.folder_context = await self._read_folder_context(session)
         prompt = self._prompt.build()
         # Tell the agent which GitHub repos it can act on (so it doesn't guess
         # names) and to link the issues/commits/PRs it mentions.
@@ -680,7 +703,8 @@ class ContextReplayMixin:
             prompt = (
                 f"{prompt}\n\n## Session instructions\n\n{override.strip()}"
             )
-        self._system_prompt_cache.set(session.id, prompt)
+        if answered:
+            self._system_prompt_cache.set(session.id, prompt)
         return prompt
 
 

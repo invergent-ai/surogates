@@ -4,42 +4,66 @@
 // Readiness is awaited with then(), never a top-level await: an ES module main that
 // awaits app.whenReady() deadlocks.
 
-import { rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
 import {
-  app, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, safeStorage, session, shell, utilityProcess,
+  app, BrowserWindow, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, powerMonitor, safeStorage, session, shell, Tray, utilityProcess,
   type WebContents, webContents,
 } from "electron";
 
 import type { DesktopAccount } from "../../../web/src/lib/desktop-bridge-contract.js";
 import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow, Tier } from "../../../web/src/lib/projects-contract.js";
+import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
+import { type BrowserChoice, BrowserSetting, browserVersion, choiceRows, chosenBrowser, findBrowsers, KNOWN, profileOf, profilesOf, unsupportedAt } from "../browser/choose.js";
+import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
-import { type FromManager, MANAGER, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../vm/client.js";
+import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmEnv, vmOptions } from "../vm/client.js";
 import { VmExecutor } from "../vm/executor.js";
+import { type Delivery, ImageDelivery, installBase, readManifest } from "../vm/image.js";
+import { missingTools, toolsMissing } from "../vm/linux.js";
+import type { Boot } from "../vm/manager.js";
+import { openAbout } from "./about.js";
+import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
+import { autostartFile, HIDDEN, LAUNCHER, loginRefusal, setStartAtLogin, startsAtLogin } from "./autostart.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
 import { reauthorize, rebind, register } from "./computer.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
+import { linkIn, type OpenLink } from "./deep-link.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
-import { letWindowClose, MainWindow, onSettingsKey } from "./main-window.js";
+import { type FolderRow, listFolders, LiveProcesses, stopOperation } from "./folders.js";
+import { letWindowClose, MainWindow } from "./main-window.js";
+import { appMenu, trayIcon, trayMenu } from "./menus.js";
+import { Notifications } from "./notifications.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
+import { PreferencesStore } from "./preferences.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
-import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
-import { segments } from "./pages/ui.js";
+import { type SandboxAction, sandboxLine } from "./sandbox.js";
+import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
+import { asShown } from "./pages/ui.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
+
+// Started from VS Code's terminal, or Claude Code's, the app has ELECTRON_RUN_AS_NODE set. Its Electron,
+// RunAsNode fuse off, ignores it but keeps it, and what the app starts would take it: the VM manager's
+// QEMU and virtiofsd, the system browser, every spawn. It goes before anything is started.
+delete process.env.ELECTRON_RUN_AS_NODE;
 
 const PAGES = join(import.meta.dirname, "pages");
 const PAGES_PRELOAD = join(import.meta.dirname, "pages-preload.cjs");
 const BRIDGE_PRELOAD = join(import.meta.dirname, "preload.cjs");
+const PANE_PRELOAD = join(import.meta.dirname, "pane-preload.cjs");
+const ASSETS = join(import.meta.dirname, "..", "..", "assets");
+// The app's version, as its package names it.
+const VERSION = (JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf8")) as { version: string }).version;
 
 // Everything the app keeps lives under one root, Electron's own data too: the folder
 // guards refuse it as a chat's folder, so no agent reaches a device token through one.
@@ -51,7 +75,16 @@ app.setPath("userData", join(root, "electron"));
 
 const states = new WindowStates(join(root, "window-state.json"));
 const appearance = new AppearanceStore(join(root, "settings.json"));
+const preferences = new PreferencesStore(join(root, "preferences.json"));
+// Start at login's entry, in the user's XDG config folder; and what it starts: the installed app's
+// launcher, or a development build's Electron on this main.
+// A relative XDG_CONFIG_HOME is ignored, as the XDG Base Directory specification says: Electron's appData takes it as it is.
+const configHome = process.env.XDG_CONFIG_HOME?.startsWith("/") ? process.env.XDG_CONFIG_HOME : join(app.getPath("home"), ".config");
+const autostart = autostartFile(configHome);
+const loginCommand = (): string[] => (app.isPackaged ? [LAUNCHER] : [process.execPath, import.meta.filename]);
 const agents = new AgentStore(join(root, "agent.json"));
+// Settings → Browser: the browser the agent drives on this computer, for every agent.
+const browserSetting = new BrowserSetting(join(root, "browser.json"));
 let main: MainWindow | null = null;
 let theme: Theme;
 // After ready: safeStorage answers only then.
@@ -120,6 +153,8 @@ let rotating: Credential | null = null;
 
 // A credential whose token the agent still takes: one a device can start on.
 const live = (credential: Credential | null): credential is LiveCredential => credential?.token != null;
+// What a page asking of a computer the agent revoked is told.
+const REVOKED = "This computer's access to the agent was revoked: restore it from Surogate's window";
 // What the file hosts are told of this computer's user: the home, which no chat's folder may be, and the language.
 const env = { HOME: homedir(), LANG: process.env.LANG || "C.UTF-8" };
 // This computer's credential for the agent, as stored: what the page is told, and what keeps a second registration out.
@@ -128,10 +163,20 @@ let kept: Credential | null = null;
 let device: { credential: Credential; status: LinkStatus; stack: DeviceStack | null; started: Promise<DeviceStack> } | null = null;
 let registering = false;
 let connecting = false;
-// Who waits for the threads working on this computer to finish: a quit that the user told to wait.
-const idle = new Set<() => void>();
 // What the web client tells once its user signed in (undefined until it has said), and the projects it serves.
 let account: DesktopAccount | null | undefined;
+
+// Whose the page is: the account it said is signed in, null once it said nobody is, and until it has
+// said, whoever is signed in to the app, whose sign-in gave it its session.
+function pageOwner(): DesktopAccount | null {
+  return account === undefined ? signedIn?.account ?? null : account;
+}
+
+// Whether the page is *who*'s. One that said nobody is signed in is no account's.
+function pageIs(who: { orgId: string; userId: string }): boolean {
+  const owner = pageOwner();
+  return owner?.orgId === who.orgId && owner.userId === who.userId;
+}
 const projects = new PageProjects((message) => main?.webContents()?.send("desktop:projects", message));
 let served = false;
 // Settled once the page serves its projects: a project chosen while it loads waits for this.
@@ -160,6 +205,8 @@ let overview: { project: Project; threads: ThreadRow[]; library: LibraryEntry[];
 let unfollow = (): void => {};
 // The project dialog's view, while it is open over the window.
 let projectDialog: WebContents | null = null;
+// The open project's thread read in the Overview pane, beside its conversation.
+let reading: { id: string; title: string } | null = null;
 
 const report = (error: unknown): void => {
   console.error(error);
@@ -174,11 +221,19 @@ const trying = (write: () => void): void => {
   }
 };
 
-// The VM manager in an Electron utility process (spec, Section 11): a hang or a crash
-// there leaves the windows and the device link alone. What is sent before it has spawned waits.
-function utilityManager(): ManagerProcess {
-  const child = utilityProcess.fork(MANAGER, [], { serviceName: "Surogate VM", stdio: "inherit" });
-  const waiting: ToManager[] = [];
+// A process of the app's own in an Electron utility process: the VM manager (spec, Section 11)
+// and each device's browser host (Section 1). A hang or a crash there leaves the windows and the
+// device link alone. What is sent before it has spawned waits. *temp*: its temp folder, made now; the app's by default.
+function utility<To, From>(script: string, serviceName: string, temp?: string): {
+  send(message: To): void;
+  onMessage(listener: (message: From) => void): void;
+  onExit(listener: () => void): void;
+  kill(): void;
+} {
+  if (temp) mkdirSync(temp, { recursive: true, mode: 0o700 });
+  const env = temp ? { env: { ...process.env, TMPDIR: temp } } : {};
+  const child = utilityProcess.fork(script, [], { serviceName, stdio: "inherit", ...env });
+  const waiting: To[] = [];
   let spawned = false;
   let exited = false;
   child.once("spawn", () => {
@@ -194,7 +249,7 @@ function utilityManager(): ManagerProcess {
       if (spawned) child.postMessage(message);
       else waiting.push(message);
     },
-    onMessage: (listener) => void child.on("message", (message) => listener(message as FromManager)),
+    onMessage: (listener) => void child.on("message", (message) => listener(message as From)),
     onExit: (listener) => {
       if (exited) listener();
       else child.once("exit", () => listener());
@@ -203,13 +258,121 @@ function utilityManager(): ManagerProcess {
   };
 }
 
-// The app's one VM, shared by every device, for this computer's user.
-let vm: VmClient | null = null;
-const vmFor = (): VmClient => {
+const utilityManager = (): ManagerProcess => utility<ToManager, FromManager>(MANAGER, "Surogate VM");
+// A browser host keeps its own temp files, the browser's and Playwright's, under *profiles*: they go
+// with the profiles, and a host that is killed leaves none in the system's temp folder.
+const utilityBrowser = (profiles: string) => () => utility<ToBrowser, FromBrowser>(BROWSER_HOST, "Surogate browser", join(profiles, "tmp"));
+
+// What the VM needs of this computer (spec, Section 11, Requirements): what it lacks, looked for
+// once the app is ready (null until then); its image's download, in a packaged app, or why there
+// is none to make; its last boot.
+let lacking: string[] | null = null;
+let lackingFound: Promise<string[]> = Promise.resolve([]);
+const VM_RESOURCES = app.isPackaged ? join(process.resourcesPath, "vm") : null;
+// The environment the VM is made from: a packaged app's has no image or KVM device of a test's.
+const VM_ENV = vmEnv(process.env, app.isPackaged);
+let delivery: ImageDelivery | null = null;
+// Aborted at the quit: a download or an unpack under way stops with the app, never writing on after it.
+const stopDelivery = new AbortController();
+let undeliverable: string | null = null;
+let boot: Boot | null = null;
+const deliveryState = (): Delivery | null => delivery?.state ?? (undeliverable === null ? null : { state: "failed", why: undeliverable });
+const vmUser = () => {
   const { uid, gid, username } = userInfo();
-  vm ??= new VmClient({ vm: vmOptions(root, { uid, gid, name: username, home: env.HOME }), spawn: utilityManager });
+  return { uid, gid, name: username, home: env.HOME };
+};
+
+// The guest's image: a packaged app downloads it from where it was installed from (the install
+// script's record), and a development build boots the repository's, unless SUROGATE_INSTALL_JSON
+// names an install record of a test's. SUROGATE_VM_IMAGE names an image to boot as it is, in a
+// development build only.
+function imageDelivery(): ImageDelivery | null {
+  const record = app.isPackaged ? "/etc/surogate/install.json" : process.env.SUROGATE_INSTALL_JSON;
+  if (VM_ENV.SUROGATE_VM_IMAGE || !record) return null;
+  return new ImageDelivery({
+    manifest: readManifest(join(VM_RESOURCES ?? REPO_IMAGE, "manifest.json")),
+    // An installed app's record is root's alone to write, as the install script leaves it.
+    base: () => installBase(record, app.isPackaged),
+    images: join(root, "vm", "images"),
+    // No cookie of the app's own session goes with it, and none of it through the HTTP cache: a second
+    // copy of what is downloaded, and cached ranges in a resume.
+    fetch: (url, init) => net.fetch(url, { ...init, credentials: "omit", cache: "no-store" }),
+    signal: stopDelivery.signal,
+  }, changed);
+}
+
+// The image's delivery started, once made: its manifest unreadable is a delivery that failed, so a
+// packaged app never boots the repository's image in its place. *check*: as Retry asks.
+function startDelivery(check = false): void {
+  try {
+    delivery ??= imageDelivery();
+    undeliverable = null;
+    delivery?.start(check);
+  } catch (error) {
+    undeliverable = error instanceof Error ? error.message : String(error);
+  }
+}
+
+// What the VM lacks of this computer, looked for: at the app's start, and at the line's Check again.
+// zstd counts only while the image's delivery has something left to unpack.
+function lookForTools(): void {
+  lackingFound = missingTools({}, delivery !== null && delivery.state.state !== "ready").then((found) => {
+    lacking = found;
+    changed();
+    return found;
+  });
+}
+
+// Resolves once the VM can boot: it lacks nothing of this computer, and its image is here.
+async function vmReady(signal: AbortSignal): Promise<void> {
+  const found = await lackingFound;
+  if (found.length > 0) throw new Error(`cannot start: ${toolsMissing(found)}`);
+  if (undeliverable !== null) throw new Error(`could not be downloaded: ${undeliverable}`);
+  try {
+    await delivery?.wait(signal);
+  } catch (error) {
+    if (signal.aborted) throw error;
+    throw new Error(`could not be downloaded: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+// The app's one VM, shared by every device, for this computer's user, and the background processes
+// alive in it, which Settings shows with Stop as they change.
+let vm: VmClient | null = null;
+const alive = new LiveProcesses();
+const vmFor = (): VmClient => {
+  if (vm) return vm;
+  vm = new VmClient({
+    vm: vmOptions(root, vmUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
+    ready: vmReady,
+    spawn: utilityManager,
+  });
+  // The status line follows each boot, and the first on this version's image lets the older ones go.
+  vm.onBoot((told) => {
+    boot = told;
+    if ("emulated" in told) delivery?.prune();
+    changed();
+  });
+  vm.onProcesses((processRoot, change) => {
+    alive.heard(processRoot, change);
+    main?.settingsContents()?.send("settings:changed");
+  });
   return vm;
 };
+
+// The status line's buttons, each only while the line shows it: Show log of a boot that did not
+// start; Check again for the tools; Retry the image's download, or, after a boot of the delivered
+// image did not start, its check by its hashes, and the next boot's line is the next boot's.
+function sandboxAction(action: unknown): void {
+  if (!sandboxLine(lacking, deliveryState(), boot).actions.includes(action as SandboxAction)) return;
+  if (action === "log") return void shell.openPath(vmOptions(root, vmUser(), VM_ENV).console);
+  if (action === "check") return lookForTools();
+  // The manager forgets that boot too, so the line never says Ready while it still refuses.
+  boot = null;
+  vm?.retry();
+  startDelivery(true);
+  changed();
+}
 
 function bounds(value: unknown): Bounds {
   const { x, y, width, height } = (value ?? {}) as Partial<Bounds>;
@@ -220,6 +383,8 @@ function bounds(value: unknown): Bounds {
 
 // What the window's page and an open Settings show changed: each reads its state again.
 function changed(): void {
+  followAgent();
+  updateTray();
   // The web client shows only while someone is signed in to the app, and has its session.
   main?.gate(signedIn === null || reloading);
   main?.window.webContents.send("shell:changed");
@@ -229,11 +394,38 @@ function changed(): void {
 const appearanceNow = () => ({ ...appearance.get(), theme: theme.dark ? ("dark" as const) : ("light" as const) });
 
 // The web client hears every change of how the app looks: the theme in effect, and the transcript's settings.
+// A thread read in the pane is read again in the transcript's settings, which its address carries.
 function tellAppearance(): void {
   main?.webContents()?.send("desktop:appearance", appearanceNow());
+  if (reading) main?.read(transcriptPath(reading.id));
 }
 
-const links = () => linksFor(agents.get()?.origin ?? null);
+// A thread's transcript, as the pane reads it: the web client's transcript page, in the transcript's settings.
+function transcriptPath(threadId: string): string {
+  const { textSize, transcriptWidth, motion } = appearance.get();
+  return `/transcript/${threadId}?${new URLSearchParams({ textSize, transcriptWidth, motion })}`;
+}
+
+/**
+ * Read *threadId*, a thread of the open project, in the Overview pane, beside the project's
+ * conversation (Section 12); null closes it. One that has left the pane since it was drawn is said
+ * so, and so is one whose id is no chat's.
+ */
+function read(threadId: string | null): void {
+  const thread = view.kind === "project" && overview?.project.id === view.id
+    ? overview.threads.find((found) => found.id === threadId) : undefined;
+  if (threadId !== null && (!thread || !webClientPath(`/chat/${thread.id}`))) {
+    failure = NO_SUCH_THREAD;
+    return changed();
+  }
+  reading = thread ? { id: thread.id, title: thread.title } : null;
+  // Read, it draws away the refusal of an earlier one: no choice of what the centre shows, so a project opening goes on.
+  if (thread) failure = null;
+  main?.read(reading ? transcriptPath(reading.id) : null);
+  changed();
+}
+
+const links = () => linksFor(agents.get());
 
 function openLink(which: unknown): void {
   const known = links();
@@ -382,6 +574,11 @@ function remember(project: Project): void {
 }
 
 function show(next: View): void {
+  // The pane's transcript is the open project's: anything else the centre shows closes it, its own thread included.
+  if (reading && !(next.kind === "project" && view.kind === "project" && next.id === view.id && next.thread?.id !== reading.id)) {
+    reading = null;
+    main?.read(null);
+  }
   view = next;
   follow();
   changed();
@@ -462,10 +659,25 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     token: credential.token,
     agent: agent.name,
     identity: { deviceId: credential.deviceId, orgId: credential.orgId, agentId: credential.agentId, userId: credential.userId },
-    // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the VM.
-    tools: (bindings, network) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor() }),
+    // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the
+    // VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
+    tools: (bindings, network, changed) => new Browsing({
+      tools: new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(), changed }),
+      browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
+      bindingOf: (bound) => bindings.get(bound),
+      launch: () => {
+        const browser = chosenBrowser(browserSetting.get(), findBrowsers());
+        return browser && { executable: browser.executable, profile: profileOf(root, credential, browser) };
+      },
+    }),
     prompts,
     approvalPrompts: prompts,
+    // The page hears which of this account's chats changed on this computer, while it is this account's page.
+    onBindingChanged: (root) => {
+      // Settings → Folders and permissions draws the chat's folder, mode and hosts again.
+      main?.settingsContents()?.send("settings:changed");
+      if (pageIs(credential)) main?.webContents()?.send("desktop:binding-changed", root);
+    },
     onStatus: (status) => {
       if (device?.credential === credential) device.status = status;
       // The agent ended this token while it is this computer's: cleaned up here, its folders kept for a restore.
@@ -473,9 +685,9 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
       changed();
     },
     onWorking: (count) => {
-      if (count > 0) return;
-      for (const resume of idle) resume();
-      idle.clear();
+      // A quit told to wait for the threads goes on once none works, and says meanwhile how many are left.
+      if (count === 0) waiting?.();
+      else if (waiting) changed();
     },
     onError: report,
   }));
@@ -604,7 +816,8 @@ async function bindToComputer(agent: Agent, signal: AbortSignal): Promise<void> 
 
 /**
  * The agent's capabilities, read again: a server that gained local folders since it was added now
- * offers them. Kept while the agent is the one added; anything else is said and changes nothing.
+ * offers them, and the console it names now is the one the links open. Kept while the agent is the
+ * one added; anything else is said and changes nothing.
  */
 async function refreshAgent(agent: Agent): Promise<void> {
   try {
@@ -613,12 +826,13 @@ async function refreshAgent(agent: Agent): Promise<void> {
       report(new Error(`${agent.origin} now answers as agent ${fresh.agentId} at ${fresh.origin}: Surogate keeps the agent it added`));
       return;
     }
-    if (fresh.desktopSessions === agent.desktopSessions && fresh.multiSession === agent.multiSession) return;
+    const { desktopSessions, multiSession, consoleUrl } = fresh;
+    if (desktopSessions === agent.desktopSessions && multiSession === agent.multiSession && consoleUrl === agent.consoleUrl) return;
     // Removed while it was asked: it is not kept again.
     const now = agents.get();
     if (now?.origin !== agent.origin || now.agentId !== agent.agentId) return;
     // In place: the bridge and the device hold this agent.
-    Object.assign(agent, { desktopSessions: fresh.desktopSessions, multiSession: fresh.multiSession });
+    Object.assign(agent, { desktopSessions, multiSession, consoleUrl });
     agents.set(agent);
     changed();
     void registerComputer(agent);
@@ -664,11 +878,39 @@ async function endDevice(credential: Credential): Promise<void> {
   // A revoked device still being cleaned up has its journal open.
   await retiring;
   trying(() => rmSync(join(root, "devices", credential.deviceId), { recursive: true, force: true }));
+  // What was read and heard of its chats goes with them: their titles, and the background processes they ran.
+  titles.clear();
+  reads.clear();
+  alive.clear();
+}
+
+// The app's native message boxes up now. While one is, a link waits, the first that comes; it opens
+// once the last is answered, and after what answered it, a quit's included, has acted on the answer.
+let boxes = 0;
+let linkWaiting: OpenLink | null = null;
+
+/** A native message box, over *parent* when there is one: the button pressed. */
+async function messageBox(options: Electron.MessageBoxOptions, parent: BrowserWindow | undefined = main?.window): Promise<number> {
+  return (await messageBoxResult(options, parent)).response;
+}
+
+/** A native message box, over *parent* when there is one: the button pressed, and whether its checkbox was ticked. */
+async function messageBoxResult(options: Electron.MessageBoxOptions, parent: BrowserWindow | undefined = main?.window): Promise<Electron.MessageBoxReturnValue> {
+  boxes += 1;
+  try {
+    return parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+  } finally {
+    boxes -= 1;
+    const link = boxes === 0 ? linkWaiting : null;
+    if (link) {
+      linkWaiting = null;
+      setTimeout(() => void openDeepLink(link).catch(report), 0);
+    }
+  }
 }
 
 async function ask(options: Electron.MessageBoxOptions): Promise<boolean> {
-  const { response } = main ? await dialog.showMessageBox(main.window, options) : await dialog.showMessageBox(options);
-  return response === 0;
+  return (await messageBox(options)) === 0;
 }
 
 // "1 thread working on this computer stops." when one works: what a log out cuts off.
@@ -685,7 +927,7 @@ function cutOff(): string {
  */
 async function signOut(agent: Agent, removing: boolean): Promise<void> {
   if (signingOut) return;
-  const confirmed = await ask(removing
+  const options: Electron.MessageBoxOptions = removing
     ? {
       type: "warning", message: `Remove ${agent.name} from Surogate?`,
       detail: `You are logged out, this computer's access to ${agent.name} ends, and the folders it was given here are forgotten. Surogate then asks for an agent again.${cutOff()}`,
@@ -695,7 +937,17 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
       type: "warning", message: `Log out of ${agent.name}?`,
       detail: `This computer's access to ${agent.name} ends, and the folders it was given here are forgotten.${cutOff()}`,
       buttons: ["Log out", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
-    });
+    };
+  // Whose browser profiles they are, before the log out forgets the computer's credential: none
+  // when this computer keeps no access to the agent, or its browser never ran here.
+  const profiles = kept && existsSync(profilesOf(root, kept)) ? profilesOf(root, kept) : null;
+  // What the agent's browser here is signed in to is the user's to keep or not (spec, Section 7), with a window or without,
+  // asked only where there is something to forget.
+  const asked = profiles
+    ? { ...options, checkboxLabel: `Also forget the sites ${agent.name}'s browser on this computer is signed in to`, checkboxChecked: removing }
+    : options;
+  const { response, checkboxChecked: forgetBrowser } = await messageBoxResult(asked);
+  const confirmed = response === 0;
   if (!confirmed || signingOut) return;
   const { promise, resolve: done } = Promise.withResolvers<void>();
   signingOut = promise;
@@ -710,10 +962,14 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
     signInAgain = false;
     sessionStore.clear();
     if (kept) await endDevice(kept);
+    // The browser closed with the device: its profiles can go now.
+    if (forgetBrowser && profiles) trying(() => rmSync(profiles, { recursive: true, force: true, maxRetries: 3 }));
     // Ended at the agent too, best effort: offline, the refresh token stays valid there until it expires.
     void ending?.end().catch(report);
     account = null;
     forgetAccount();
+    // What the agent told the user who logged out opens nothing more.
+    notifications?.closeAll();
     await clearWindow(agent);
     if (removing) {
       agents.clear();
@@ -869,6 +1125,9 @@ async function signIn(agent: Agent): Promise<void> {
       await endDevice(previous);
       if (cancelled()) return;
     }
+    // What the agent told another account here opens nothing more: its notices go with its sign-in.
+    const before = signedIn?.account ?? previous;
+    if (before && (before.orgId !== who.orgId || before.userId !== who.userId)) notifications?.closeAll();
     // The sign-in this one replaces ends at the agent: none is left valid with no copy here.
     void signedIn?.end().catch(report);
     const signedInNow: SignedIn = { origin: agent.origin, agentId: agent.agentId, account: who, authTime: tokens.authTime, refreshToken: tokens.refreshToken };
@@ -923,16 +1182,12 @@ async function preparing<T>(window: string, prepare: (signal: AbortSignal) => Pr
 function bridge(contents: WebContents, agent: Agent): void {
   // Each load of the page is a page of its own: what its user refused there holds until it is replaced.
   let load = 0;
-  // The device is the account's it was registered for: a page signed in as anyone else sees none.
-  // Until the page says who it is, it is whoever is signed in to the app, whose sign-in gave it its session.
-  const anotherAccount = () => {
-    const owner = account ?? signedIn?.account ?? null;
-    return kept !== null && (owner?.orgId !== kept.orgId || owner.userId !== kept.userId);
-  };
+  // The device is the account's it was registered for: a page of anyone else's, or of nobody's, sees none.
+  const anotherAccount = () => kept !== null && !pageIs(kept);
   // The device, once started: a page asking while it still starts, as at a launch, waits for it.
   const registered = async (): Promise<DeviceStack> => {
     if (anotherAccount()) throw new Error("This computer is registered with the agent for another account");
-    if (kept?.token === null) throw new Error("This computer's access to the agent was revoked: restore it from Surogate's window");
+    if (kept?.token === null) throw new Error(REVOKED);
     if (!device) throw new Error("This computer is not registered with the agent");
     return device.stack ?? device.started;
   };
@@ -956,7 +1211,8 @@ function bridge(contents: WebContents, agent: Agent): void {
       if (typeof code !== "string") throw new Error("The agent gave this window no session");
       return { code };
     },
-    prepareFolder: (choice, window) => preparing(window, async (signal) => (await registered()).binder.prepareFolder(choice, window, signal)),
+    prepareFolder: (choice, window, thread) =>
+      preparing(window, async (signal) => (await registered()).binder.prepareFolder(choice, window, signal, thread)),
     bindSession: async (sessionId, token, window) => {
       await (await registered()).binder.bindSession(sessionId, token, window);
     },
@@ -964,6 +1220,9 @@ function bridge(contents: WebContents, agent: Agent): void {
     requestFreeMode: (sessionId, window) =>
       preparing(window, async (signal) => (await registered()).binder.approvals.requestFreeMode(sessionId, signal, `${window}:${load}`)),
     cancelPrepared: async (token, window) => (await registered()).binder.cancelPrepared(token, window),
+    getBinding: async (sessionId) => (await registered()).binder.bindingOf(sessionId),
+    // Shown selected in its parent, never opened: a file put at its path after the look is only selected, never run.
+    revealFolder: async (sessionId) => shell.showItemInFolder(await (await registered()).binder.folderToShow(sessionId)),
     getAppearance: appearanceNow,
     setAccount: (reported) => {
       // Another account, or none, or the first: nothing listed before is theirs. A page that
@@ -1009,6 +1268,79 @@ function open(window: MainWindow, agent: Agent): void {
   contents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
     if (isMainFrame) navigated(url);
   });
+  // The chat it shows, followed for the end of its turns while the window is away.
+  contents.on("did-navigate", (_event, url) => showing(url));
+  contents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
+    if (isMainFrame) showing(url);
+  });
+}
+
+// A link being opened: one that comes meanwhile only shows the window.
+let linking = false;
+// A link handed before the window was made.
+let linkEarly: OpenLink | null = null;
+
+/** Connect to the agent at *address*, once the user confirms it natively: why it did not, or null. One connection at a time. */
+async function connectTo(address: string): Promise<string | null> {
+  if (agents.get()) return "This app is already connected to an agent";
+  if (connecting) return "Surogate is already connecting";
+  connecting = true;
+  try {
+    const agent = await connectAgent(address, { get: getFollowing, store: agents, confirm: confirmAgent });
+    if (agent && main) open(main, agent);
+    changed();
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  } finally {
+    connecting = false;
+  }
+}
+
+/**
+ * Open a surogate:// link the system handed the app, in its window: the agent it names, at the page
+ * it names. An agent new to the app is connected to once the user confirms it, as the first run's
+ * Connect is; another agent than the one added is said, and opened not: the app works for one agent.
+ */
+async function openDeepLink(link: OpenLink): Promise<void> {
+  if (leaving) return;
+  // A second launch can hand one while the app still starts: it is opened once the window is there.
+  if (!main) {
+    linkEarly ??= link;
+    return;
+  }
+  main.show();
+  // One link at a time: one that comes while a link, or the first run's Connect, is asked only shows the window.
+  if (linking || connecting) return;
+  if (boxes > 0) {
+    linkWaiting ??= link;
+    return;
+  }
+  linking = true;
+  try {
+    const agent = agents.get();
+    const host = new URL(link.origin).host;
+    if (!agent) {
+      // A link any web page can make: nothing is asked of its address, or of where that sends Surogate, before the user says so.
+      const continued = await ask({
+        type: "question", message: `Open a link to connect to ${host}?`,
+        detail: `A link asks Surogate to connect to ${host}. Surogate contacts it only if you continue, and asks again before this computer joins it.`,
+        buttons: ["Continue", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
+      });
+      if (!continued) return;
+      const refused = await connectTo(link.origin);
+      if (refused) await ask({ type: "warning", message: `Surogate did not connect to ${host}`, detail: refused, buttons: ["OK"], noLink: true });
+    } else if (agent.origin !== link.origin) {
+      await ask({
+        type: "info", message: `Surogate works for ${agent.name}`,
+        detail: `This link is for ${host}. Remove ${agent.name} from Surogate to connect to another agent.`, buttons: ["OK"], noLink: true,
+      });
+    } else if (link.path !== "/") {
+      goWeb(link.path);
+    }
+  } finally {
+    linking = false;
+  }
 }
 
 async function confirmAgent(agent: Agent, typed: string): Promise<boolean> {
@@ -1022,8 +1354,7 @@ async function confirmAgent(agent: Agent, typed: string): Promise<boolean> {
     cancelId: 1,
     noLink: true,
   };
-  const { response } = main ? await dialog.showMessageBox(main.window, options) : await dialog.showMessageBox(options);
-  return response === 0;
+  return (await messageBox(options)) === 0;
 }
 
 // What the user can do about this computer, as the sidebar offers it.
@@ -1043,19 +1374,27 @@ function deviceLine(agent: Agent): string {
   return describeAgent(agent, kept?.token === null ? { status: "revoked", computer: kept.name } : null);
 }
 
+// Who the sidebar names: whose the page is (pageOwner), with the app's own sign-in's organisation, which is Settings' alone, left out.
+function sidebarAccount(): DesktopAccount | null {
+  const owner: SignedInAccount | null = pageOwner();
+  if (owner === null) return null;
+  const { orgName: _, ...shown } = owner;
+  return shown;
+}
+
 function state() {
   const agent = agents.get();
   return {
     first: agent === null,
-    agent: agent && { name: agent.name },
+    agent: agent && { name: agent.name, desktopSessions: agent.desktopSessions },
     device: agent && {
       text: deviceLine(agent),
       status: device?.status ?? (kept?.token === null ? "revoked" : null),
     },
-    // Who the web client says is signed in, or until it has said, the app's own sign-in.
-    account: account === undefined ? signedIn?.account ?? null : account,
+    account: sidebarAccount(),
     view,
     overview: view.kind === "project" && overview?.project.id === view.id ? overview : null,
+    reading,
     projects: listed,
     failure,
     links: Object.keys(links()),
@@ -1064,59 +1403,353 @@ function state() {
       ? "Credentials on this computer are not encrypted: Linux has no secret store here" : null,
     signIn: { needed: agent !== null && (signedIn === null || reloading), pending: signingIn !== null, failure: signInFailure },
     deviceAction: deviceAction(agent),
+    // While a quit waits for the threads working on this computer: how many it waits for.
+    quitting: waiting ? (device?.stack?.working() ?? 0) : null,
+    sandbox: sandboxLine(lacking, deliveryState(), boot),
   };
 }
 
-// Held until it is clicked or closed: a notification nothing holds can lose its click.
-let notice: Notification | null = null;
+// The tray, once the app is ready; and its menu as last set, set again only when it changes.
+let tray: Tray | null = null;
+let trayDrawn = "";
+
+const trayImage = (): string => join(ASSETS, trayIcon(theme.dark, process.env.XDG_CURRENT_DESKTOP));
+
+function updateTray(): void {
+  if (!tray) return;
+  const agent = agents.get();
+  const template = trayMenu({ device: agent ? deviceLine(agent) : null, quitting: waiting ? (device?.stack?.working() ?? 0) : null }, {
+    show: () => main?.show(),
+    settings: menuActions.settings,
+    quit: () => app.quit(),
+    quitNow: () => waiting?.(),
+  });
+  const drawn = JSON.stringify(template.map((item) => [item.label, item.enabled]));
+  if (drawn === trayDrawn) return;
+  trayDrawn = drawn;
+  tray.setContextMenu(Menu.buildFromTemplate(template));
+}
+
+// The system's notifications, once the app is ready.
+let notifications: Notifications | null = null;
+
+// What an inbox item's notification says under its title, by its kind: the app's own words.
+const TOLD: Record<string, string> = {
+  input_required: "Asks you a question.",
+  action_required: "Needs you to do something.",
+  governance_gate: "Waits for your approval.",
+  task_complete: "Finished.",
+  progress_checkin: "Checked in.",
+};
+
+// Only the app's own words for a kind it knows: the agent's kind is no key of an object's prototype.
+const bodyOf = (kind: string): string => Object.hasOwn(TOLD, kind) ? TOLD[kind]! : "Has something for you.";
+
+// The window is away: hidden, minimised, or behind another app's.
+const away = (): boolean => BrowserWindow.getFocusedWindow() === null;
+
+// A page of the web client, the window shown: what a notification's click opens. Once the quit goes
+// on there is no notice left to click: the quit closes them all as it hides the window.
+function openPage(path: string): void {
+  if (!main || !webClientPath(path)) return;
+  main.show();
+  goWeb(path);
+}
+
+const burst = new Burst();
+
+// Once the quit goes on, nothing more is told: the user is done with the app. The end of a turn in
+// the chat followed is told by its follow, though the inbox has it too while no page streams the chat;
+// before the follow has started, it may never hear of that turn, and the inbox tells it.
+function tellItem(item: InboxItem): void {
+  if (leaving || !away()) return;
+  if (item.kind === "task_complete" && chat?.id === item.sessionId && chat.started()) return;
+  const told = burst.add(item);
+  if (told.length <= BURST) {
+    notifications?.show({
+      tag: `chat:${item.sessionId}`, title: item.title, body: bodyOf(item.kind), open: () => openPage(`/chat/${item.sessionId}`),
+    });
+    return;
+  }
+  // A flood, as after a night asleep, is one notice of how many came, which opens the inbox; the burst's own go.
+  for (const each of told) notifications?.close(`chat:${each.sessionId}`);
+  notifications?.show({ tag: "inbox", title: `${told.length} new items in your inbox`, body: "Open your inbox to see them.", open: () => openPage("/inbox") });
+}
+
+function tellTurnEnd(sessionId: string, title: string): void {
+  if (leaving || !away()) return;
+  notifications?.show({ tag: `chat:${sessionId}`, title, body: "Finished.", open: () => openPage(`/chat/${sessionId}`) });
+}
+
+// The chat the web client shows: while the window is away, it is followed to the end of each turn,
+// which the agent leaves out of the inbox while the window's own page streams the chat.
+let chatShown: string | null = null;
+
+function showing(url: string): void {
+  const path = new URL(url).pathname;
+  chatShown = path.startsWith("/chat/") && webClientPath(path) ? path.slice("/chat/".length) : null;
+  followAgent();
+}
+
+// What the agent tells, followed on the app's own sign-in, for whoever is signed in now: their
+// inbox, and the chat the web client shows while the window is away. What comes for a sign-in that
+// has ended meanwhile is told no more, and nothing is followed once the quit goes on.
+let inbox: { session: DesktopSession; stop(): void } | null = null;
+let chat: { session: DesktopSession; id: string; stop(): void; started(): boolean } | null = null;
+
+function followAgent(): void {
+  const session = leaving ? null : signedIn;
+  const agentId = agents.get()?.agentId ?? "";
+  const api = (path: string, init?: RequestInit) => session!.api(path, init);
+  if (inbox?.session !== session) {
+    inbox?.stop();
+    inbox = session && {
+      session,
+      stop: followInbox({
+        api, agentId, onError: report, onItem: (item) => {
+          if (signedIn === session) tellItem(item);
+        },
+      }),
+    };
+  }
+  const watched = session && away() ? chatShown : null;
+  if (chat?.session !== session || chat?.id !== watched) {
+    chat?.stop();
+    chat = session && watched !== null
+      ? {
+        session, id: watched,
+        ...followChat({
+          api, agentId, onError: report, sessionId: watched, onTurnEnd: (title) => {
+            if (signedIn === session) tellTurnEnd(watched, title);
+          },
+        }),
+      }
+      : null;
+  }
+}
 
 // A prompt waits while the window is hidden: the system's notification says so, and opens the window.
-// It names nothing the agent sent: some notification services read markup in a body.
 function notifyAsking(): void {
-  if (!Notification.isSupported()) return;
-  const shown = new Notification({ title: "Surogate is asking you something", body: "Open Surogate to answer." });
-  notice = shown;
-  const done = () => {
-    if (notice === shown) notice = null;
-  };
-  shown.on("click", () => {
-    done();
-    main?.show();
-  });
-  shown.on("close", done);
-  shown.show();
+  if (leaving) return;
+  notifications?.show({ tag: "asking", title: "Surogate is asking you something", body: "Open Surogate to answer.", open: () => main?.show() });
 }
 
+// A page of the web client in the centre: what the sidebar's links, New chat and a notification open.
+function goWeb(path: string): void {
+  if (!main) return;
+  choose();
+  // The open project's conversation, or a thread its pane lists, keeps the project open, with its
+  // crumb and Overview, as View thread does; any other page leaves it.
+  const open = view.kind === "project" && overview?.project.id === view.id ? view : null;
+  const chatId = path.startsWith("/chat/") ? path.slice("/chat/".length) : null;
+  const thread = open ? overview?.threads.find((found) => found.id === chatId) : undefined;
+  if (open && (thread || chatId === open.masterSessionId)) {
+    view = { ...open, thread: thread ? { id: thread.id, title: thread.title } : null };
+    // Shown in the centre, its transcript in the pane has nothing more to show.
+    if (thread && reading?.id === thread.id) read(null);
+    changed();
+  } else {
+    show({ kind: "web" });
+  }
+  main.showWeb(true);
+  void main.go(path);
+}
+
+// The window's menu button opens the app's own menu, as Claude Desktop's does; the project's opens its own.
 function popup(which: unknown): void {
   const shown = main;
   const agent = agents.get();
   if (!shown) return;
-  const template: Electron.MenuItemConstructorOptions[] = which === "project"
-    ? [
+  const menu = which === "project"
+    ? Menu.buildFromTemplate([
       { label: "Reload", click: () => shown.reload() },
       { label: "Open in browser", enabled: agent !== null, click: () => agent && void shell.openExternal(agent.origin) },
-    ]
-    : [
-      { label: "Settings…", accelerator: "Ctrl+Shift+,", click: showSettings },
-      { type: "separator" },
-      { label: "Quit Surogate", accelerator: "Ctrl+Q", click: () => app.quit() },
-    ];
-  Menu.buildFromTemplate(template).popup({ window: shown.window });
+    ])
+    : Menu.getApplicationMenu();
+  menu?.popup({ window: shown.window });
 }
 
-function settingsState() {
+// What the app's menu does: on the agent's page, or the window, which it shows first.
+const menuActions = {
+  newChat: () => {
+    main?.show();
+    goWeb("/chat");
+  },
+  settings: () => {
+    main?.show();
+    showSettings();
+  },
+  quit: () => app.quit(),
+  reload: () => main?.reload(),
+  zoom: (step: -1 | 0 | 1) => main?.zoom(step),
+  devTools: (which: "agent" | "window") => (which === "agent" ? main?.webContents() : main?.window.webContents)?.openDevTools({ mode: "detach" }),
+  documentation: () => openLink("help"),
+  about: () => {
+    if (!main) return;
+    main.show();
+    openAbout({
+      parent: main.window, page: join(PAGES, "about.html"), preload: PAGES_PRELOAD, dark: theme.dark, version: VERSION,
+      documentation: () => openLink("help"),
+    });
+  },
+};
+
+// Why the last browser picked with Custom… was not kept, until the next choice.
+let browserFailure: string | null = null;
+
+// Settings → Browser's rows: what is found here, each named with the version it says.
+async function browserState() {
+  const found = findBrowsers();
+  const choice = browserSetting.get();
+  const versions = new Map<string, string>();
+  await Promise.all(found.filter((browser) => browser.unsupported === null).map(async (browser) => {
+    const version = await browserVersion(browser.executable);
+    if (version) versions.set(browser.executable, version);
+  }));
+  return { choice: choice.choice, rows: choiceRows(choice, found, versions), none: chosenBrowser(choice, found) === null, failure: browserFailure };
+}
+
+/**
+ * A choice in Settings → Browser: Automatic or a browser found here, kept as it is; or Custom…, a
+ * program the user picks in the system's dialog, kept only once it has launched as the agent's
+ * browser does. The next launch of the agent's browser uses it.
+ */
+async function chooseBrowser(value: unknown): Promise<void> {
+  browserFailure = null;
+  try {
+    if (value === "custom") return;
+    if (value !== "pick") {
+      if (value !== "auto" && !KNOWN.some(({ id }) => id === value)) throw new Error(`No browser ${String(value)}`);
+      browserSetting.set({ choice: value } as BrowserChoice);
+      return;
+    }
+    const options = { title: "Choose the agent's browser", buttonLabel: "Choose", properties: ["openFile" as const] };
+    const picked = main ? await dialog.showOpenDialog(main.window, options) : await dialog.showOpenDialog(options);
+    const path = picked.canceled ? undefined : picked.filePaths[0];
+    if (!path) return;
+    let real: string;
+    try {
+      real = realpathSync(path);
+    } catch {
+      // Gone since it was picked, or a link that leads nowhere.
+      browserFailure = `Surogate cannot use ${path}: it cannot be read here.`;
+      return;
+    }
+    const why = unsupportedAt(real);
+    if (why) {
+      browserFailure = `Surogate cannot use ${real}: ${why}.`;
+      return;
+    }
+    // A try's own profile is a passing one, in the folder of every identity's profiles.
+    const once = new BrowserClient(utilityBrowser(join(root, "browser-profiles")));
+    const tried = await once.tryBrowser(real).finally(() => once.stop());
+    if ("error" in tried) browserFailure = `${real} did not start as a browser Surogate can drive: ${tried.error.message}`;
+    else browserSetting.set({ choice: "custom", executable: real, version: String((tried.ok as { version?: unknown } | null)?.version ?? "") });
+  } finally {
+    changed();
+  }
+}
+
+// The app's menu, with Developer in developer mode only: its tools read and change everything on the agent's page.
+function setMenu(): void {
+  Menu.setApplicationMenu(Menu.buildFromTemplate(appMenu(menuActions, preferences.get().developer)));
+}
+
+// Developer mode is asked about before it is turned on, in a box of the app's own, so a link waits
+// while it is up. One question at a time: On pressed again while it is up asks nothing more.
+let askingDeveloper: Promise<boolean> | null = null;
+
+function confirmDeveloper(): Promise<boolean> {
+  askingDeveloper ??= ask({
+    type: "warning",
+    message: "Turn on developer mode?",
+    detail: "Its developer tools can read and change everything on the agent's page, your sign-in to it included. "
+      + "Turn it on only if you know why you need it, never because a page or a message asks you to.",
+    buttons: ["Turn on", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  }).finally(() => {
+    askingDeveloper = null;
+  });
+  return askingDeveloper;
+}
+
+// Keep running and developer mode, as Settings sends them: "on" or "off".
+async function setPreference(key: "keepRunning" | "developer", value: unknown): Promise<void> {
+  if (value !== "on" && value !== "off") throw new Error(`No setting ${key} = ${String(value)}`);
+  const on = value === "on";
+  if (key === "developer" && on && !preferences.get().developer && !(await confirmDeveloper())) return;
+  preferences.set(key, on);
+  if (key !== "developer") return;
+  setMenu();
+  // Off, the tools it opened close with it.
+  if (!on) for (const contents of [main?.webContents(), main?.window.webContents]) contents?.closeDevTools();
+}
+
+const onOff = (on: boolean) => (on ? "on" : "off");
+
+// Past the guest's own bound on a kill: 2 s for the process to end on SIGTERM, 2 s more on SIGKILL.
+const STOP_PROCESS_MS = 15_000;
+
+// Each bound chat's title, read on the app's own sign-in, and kept once the agent named it. One it
+// names not yet, or whose read failed, is read once each time Settings opens, not at each redraw.
+// ponytail: kept until the app quits or this computer's access ends for its user, one per chat bound here: a chat renamed meanwhile keeps its old title until then.
+const titles = new Map<string, string>();
+const reads = new Map<string, Promise<string>>(); // this opening of Settings' own
+
+function chatTitle(root: string): Promise<string> {
+  const known = titles.get(root);
+  if (known !== undefined) return Promise.resolve(known);
+  const session = signedIn;
+  if (!session) return Promise.resolve("A chat");
+  let read = reads.get(root);
+  if (!read) {
+    read = titleOf((path, init) => session.api(path, init), agents.get()?.agentId ?? "", root).then((title) => {
+      if (title !== "A chat") titles.set(root, title);
+      return title;
+    }, (error: unknown) => {
+      report(error);
+      return "A chat";
+    });
+    reads.set(root, read);
+  }
+  return read;
+}
+
+// The device's stack while its journal is open: a computer the agent revoked keeps its stack, closed, until it is restored.
+const openStack = (): DeviceStack | null => (kept?.token === null ? null : device?.stack ?? null);
+
+// Settings → Folders and permissions: the folders this computer works on for its device's account.
+async function folderRows(): Promise<FolderRow[]> {
+  if (kept?.token === null) throw new Error(REVOKED);
+  const stack = device?.stack;
+  return stack ? listFolders(stack.bindings, chatTitle, alive) : [];
+}
+
+// What Settings shows, read once the browsers have said their versions: a state asked for
+// before a change, and answered after it, still shows the change.
+async function settingsState() {
+  const browser = await browserState();
   const agent = agents.get();
+  const { keepRunning, developer } = preferences.get();
   return {
+    browser,
     appearance: appearance.get(),
+    preferences: { startAtLogin: onOff(startsAtLogin(autostart)), keepRunning: onOff(keepRunning), developer: onOff(developer) },
+    // Why this build cannot start at login, or null.
+    startAtLoginRefused: loginRefusal(loginCommand()),
     account,
     computer: {
       name: hostname(),
       connection: agent ? deviceLine(agent) : "",
       added: kept?.addedAt ?? null,
-      organisation: account?.orgId ?? kept?.orgId ?? null,
+      // The app's own sign-in names it, before the web client reports and whatever it reports.
+      organisation: signedIn?.account.orgName ?? null,
       agents: agent ? [agent.name] : [],
     },
     links: { usage: "usage" in links() },
+    sandbox: sandboxLine(lacking, deliveryState(), boot),
   };
 }
 
@@ -1154,9 +1787,9 @@ function changedFrom(shown: Project, fields: ProjectFields): Partial<ProjectFiel
 // character as its code point (U+202E), so none reorders or hides the question around it.
 async function confirmArchive(name: string): Promise<boolean> {
   if (!main) return false;
-  const { response } = await dialog.showMessageBox(main.window, {
+  const response = await messageBox({
     type: "warning",
-    message: `Archive ${segments(name).map((run) => run.text).join("")}?`,
+    message: `Archive ${asShown(name)}?`,
     detail: "It leaves your projects, with its conversation and its threads. Its files and its memory are kept.",
     buttons: ["Archive", "Cancel"],
     defaultId: 1,
@@ -1254,6 +1887,8 @@ function showProject(editing: Opened | null): void {
 function showSettings(): void {
   const page = join(PAGES, "settings.html");
   main?.openSettings(page, PAGES_PRELOAD, (contents) => {
+    // A chat named not yet is asked about again, once.
+    reads.clear();
     const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
       contents.ipc.handle(channel, (event, ...args: unknown[]) => {
         if (!ownPage(event.senderFrame, page)) throw new Error("Not Settings' own page");
@@ -1261,8 +1896,36 @@ function showSettings(): void {
       });
     };
     handle("settings:state", settingsState);
+    handle("settings:folders", folderRows);
+    // A host a chat's user let it reach, taken back: the chat's next connection there asks again.
+    handle("settings:take-back", (root, host) => {
+      const bindings = openStack()?.bindings;
+      if (!bindings || typeof root !== "string" || typeof host !== "string" || !bindings.domains(root).includes(host)) {
+        throw new Error("This chat cannot reach that host");
+      }
+      bindings.disallowDomain(root, host);
+    });
+    // A chat's background process, stopped by its user, as the agent's own kill stops one. Only one
+    // Settings shows: the VM runs other devices' chats too, and a chat deleted here keeps its processes there.
+    handle("settings:stop", async (processRoot, id) => {
+      const stack = openStack();
+      if (
+        !stack || typeof processRoot !== "string" || typeof id !== "string" || !stack.bindings.get(processRoot)
+        || !alive.of(processRoot).some((found) => found.id === id)
+      ) {
+        throw new Error("This chat runs no such process");
+      }
+      const outcome = await stack.binder.run(stopOperation(processRoot, id), AbortSignal.timeout(STOP_PROCESS_MS));
+      if ("error" in outcome) throw new Error(outcome.error.message);
+    });
     // A theme in effect that changes reaches the web client through the theme's own paint.
-    handle("settings:set", (key, value) => {
+    handle("settings:set", async (key, value) => {
+      if (key === "browser") return chooseBrowser(value);
+      if (key === "keepRunning" || key === "developer") return setPreference(key, value);
+      if (key === "startAtLogin") {
+        if (value !== "on" && value !== "off") throw new Error(`No setting startAtLogin = ${String(value)}`);
+        return setStartAtLogin(autostart, value === "on", loginCommand());
+      }
       if (key !== "theme") {
         appearance.set(String(key), value);
         tellAppearance();
@@ -1273,6 +1936,7 @@ function showSettings(): void {
       }
     });
     handle("settings:link", openLink);
+    handle("settings:sandbox", sandboxAction);
     handle("settings:close", () => main?.closeSettings());
   });
 }
@@ -1286,21 +1950,9 @@ function wire(window: MainWindow, page: string): void {
   };
   handle("shell:state", state);
   // One connection at a time: a second Enter while the first is asked waits for none.
-  handle("shell:connect", async (address) => {
-    if (agents.get()) return "This app is already connected to an agent";
-    if (connecting) return "Surogate is already connecting";
+  handle("shell:connect", (address) => {
     if (typeof address !== "string" || address.length > 2048) return "That is not a web address";
-    connecting = true;
-    try {
-      const agent = await connectAgent(address, { get: getFollowing, store: agents, confirm: confirmAgent });
-      if (agent) open(window, agent);
-      changed();
-      return null;
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error);
-    } finally {
-      connecting = false;
-    }
+    return connectTo(address);
   });
   handle("shell:sign-in", () => {
     const agent = agents.get();
@@ -1320,10 +1972,7 @@ function wire(window: MainWindow, page: string): void {
   });
   handle("shell:go", (path) => {
     if (typeof path !== "string" || !webClientPath(path)) throw new Error("Not a page of the web client");
-    choose();
-    show({ kind: "web" });
-    window.showWeb(true);
-    window.go(path);
+    goWeb(path);
   });
   handle("shell:projects", () => {
     choose();
@@ -1363,9 +2012,16 @@ function wire(window: MainWindow, page: string): void {
       return changed();
     }
     view = { ...view, thread: { id: thread.id, title: thread.title } };
+    // Shown in the centre, its transcript in the pane has nothing more to show.
+    if (reading?.id === thread.id) read(null);
     window.go(path);
     changed();
   });
+  handle("shell:read", (id) => {
+    if (id !== null && typeof id !== "string") throw new Error("Not a thread");
+    read(id);
+  });
+  handle("shell:focus-pane", () => window.focusPane());
   // A thread of the open project resolved, or reopened, from its row: the page's answer is its row.
   // A row's action is no choice of what the centre shows, so a project opening meanwhile still opens:
   // it takes a number of its own, and only the latest action's refusal is said.
@@ -1405,6 +2061,7 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:forward", () => move(() => window.forward()));
   handle("shell:reload", () => window.reload());
   handle("shell:place", (hole) => window.place(bounds(hole)));
+  handle("shell:place-pane", (hole) => window.placePane(bounds(hole)));
   handle("shell:menu", popup);
   handle("shell:settings", showSettings);
   handle("shell:new-project", () => showProject(null));
@@ -1412,7 +2069,10 @@ function wire(window: MainWindow, page: string): void {
     if (view.kind !== "project") throw new Error("No project is open");
     showProject({ id: view.id, name: view.name, masterSessionId: view.masterSessionId });
   });
+  // A quit waiting for the threads goes now: the user said so, in the window.
+  handle("shell:quit-now", () => waiting?.());
   handle("shell:link", openLink);
+  handle("shell:sandbox", sandboxAction);
 }
 
 // Quitting, as Claude Desktop quits (its updater's session guard): with threads working on this
@@ -1427,8 +2087,7 @@ async function confirmQuit(working: number): Promise<"quit" | "wait" | "cancel">
     cancelId: 2,
     noLink: true,
   };
-  const shown = main?.window.isVisible() ? main.window : undefined;
-  const { response } = shown ? await dialog.showMessageBox(shown, options) : await dialog.showMessageBox(options);
+  const response = await messageBox(options, main?.window.isVisible() ? main.window : undefined);
   return (["quit", "wait", "cancel"] as const)[response] ?? "cancel";
 }
 
@@ -1437,6 +2096,8 @@ let quitting: Promise<void> | null = null;
 let waiting: (() => void) | null = null;
 let askingAgain = false;
 let stopped = false;
+// Once the quit goes on: nothing shows the window again while the device stops.
+let leaving = false;
 
 // A quit asked again while the first waits for the threads: quit now, or keep waiting.
 async function quitNow(): Promise<void> {
@@ -1450,9 +2111,7 @@ async function quitNow(): Promise<void> {
     cancelId: 1,
     noLink: true,
   };
-  const shown = main?.window.isVisible() ? main.window : undefined;
-  const { response } = shown ? await dialog.showMessageBox(shown, options) : await dialog.showMessageBox(options);
-  if (response === 0) waiting?.();
+  if ((await messageBox(options, main?.window.isVisible() ? main.window : undefined)) === 0) waiting?.();
 }
 
 async function quit(): Promise<void> {
@@ -1463,11 +2122,22 @@ async function quit(): Promise<void> {
     if (answer === "wait" && (device?.stack?.working() ?? 0) > 0) {
       await new Promise<void>((resume) => {
         waiting = resume;
-        idle.add(resume);
+        changed();
       });
       waiting = null;
     }
   }
+  // The user is done with the app: its window, its tray and what it told go now, while the device
+  // stops in its order, and nothing brings the window back. Before ready there is nothing to close.
+  leaving = true;
+  main?.window.hide();
+  // Every other window of the app's goes with it: About, a prompt, the Composio sign-in.
+  for (const window of BrowserWindow.getAllWindows()) if (window !== main?.window) window.close();
+  tray?.destroy();
+  tray = null;
+  notifications?.closeAll();
+  // What the agent tells is followed no more, though a window hidden already emits no hide to stop it.
+  followAgent();
   // A sign-in under way closes its port in the browser's face, and keeps what the agent already
   // issued it; revocations still owed are tried at the next launch.
   signingIn?.abort(QUIT);
@@ -1475,6 +2145,7 @@ async function quit(): Promise<void> {
   // A log out under way finishes first: it keeps the revocation owed, and forgets the folders.
   await signingOut;
   await Promise.all([...revocations.values()].map((revoking) => revoking.stop()));
+  stopDelivery.abort(new Error("Surogate quit"));
   // The device, then the VM, which stops even when the device's stop fails. A stop that
   // fails still quits: the next launch answers what it cut off.
   try {
@@ -1488,7 +2159,14 @@ async function quit(): Promise<void> {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on("second-instance", () => main?.show());
+  // A second launch shows the window, unless it is a start at login, and hands it the link it was started
+  // with, if any; once the quit goes on, it does neither.
+  app.on("second-instance", (_event, argv) => {
+    if (leaving) return;
+    if (!argv.includes(HIDDEN)) main?.show();
+    const link = linkIn(argv);
+    if (link) void openDeepLink(link).catch(report);
+  });
   // The device link stays up with the window closed (spec, Section 7).
   app.on("window-all-closed", () => {});
   app.on("before-quit", (event) => {
@@ -1510,18 +2188,42 @@ if (!app.requestSingleInstanceLock()) {
   });
   void app.whenReady().then(() => {
     credentials = new CredentialStore(join(root, "credentials.json"), safeStorage, report);
+    notifications = new Notifications(Notification.isSupported() ? (content) => new Notification(content) : null, report);
     sessionStore = new SessionStore(join(root, "session.json"), safeStorage, report);
     // Before the window: its first frame is in the chosen theme.
     theme = new Theme(nativeTheme, appearance, (dark) => {
       main?.paint(dark);
+      tray?.setImage(trayImage());
       tellAppearance();
     });
-    onSettingsKey(showSettings);
+    // Electron's own menu goes: its reload, zoom and developer tools would act on the window's own pages.
+    setMenu();
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
+    // The VM slept with the computer: at its wake its clock is set, and its keepalive starts afresh.
+    powerMonitor.on("resume", () => vm?.resume());
+    // Its image downloaded in the background, and what the VM needs of this computer looked for.
+    startDelivery();
+    lookForTools();
     const page = join(PAGES, "shell.html");
-    main = new MainWindow({ states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed });
+    main = new MainWindow({
+      states, page, preload: PAGES_PRELOAD, panePreload: PANE_PRELOAD, dark: theme.dark, onChange: changed,
+      // A quit already waiting for the threads asks nothing more: the window hides meanwhile, as with Keep running on.
+      quitsOnClose: () => !preferences.get().keepRunning && !waiting,
+      // Started at login: the window waits for the user, in the tray or at the next launch.
+      hidden: process.argv.includes(HIDDEN),
+    });
     wire(main, page);
+    // In the tray where the desktop has one; GNOME without one shows the window at the next launch.
+    tray = new Tray(trayImage());
+    tray.setToolTip("Surogate");
+    tray.on("click", () => main?.show());
+    updateTray();
     main.window.on("focus", () => void refreshProjects());
+    // The window going away, or coming back, starts or ends the follow of the chat it shows.
+    app.on("browser-window-focus", () => followAgent());
+    app.on("browser-window-blur", () => followAgent());
+    main.window.on("show", () => followAgent());
+    main.window.on("hide", () => followAgent());
     // Revocations owed from an earlier run, whatever agent they were for: each keeps its agent's address, device and token.
     const stored = credentials.list();
     for (const owed of stored.filter((credential) => credential.revoking)) {
@@ -1529,15 +2231,23 @@ if (!app.requestSingleInstanceLock()) {
       rmSync(join(root, "devices", owed.deviceId), { recursive: true, force: true });
       revokeLater(owed);
     }
+    // The link the app was started with, or one a second launch handed it meanwhile, once its window can show it.
+    const launched = linkIn(process.argv) ?? linkEarly;
     const agent = agents.get();
-    if (!agent) return;
+    if (!agent) {
+      if (launched) void openDeepLink(launched).catch(report);
+      return;
+    }
     const remembered = sessionStore.get();
     if (remembered?.origin === agent.origin && remembered.agentId === agent.agentId) startSession(remembered);
     // Gated before the web client is attached: with nobody signed in, it never shows.
     changed();
     // A window no sign-in of the app's owns has nobody signed in: whatever an older one left there goes.
     const shown = main;
-    void (signedIn ? Promise.resolve() : clearWindow(agent)).catch(report).then(() => open(shown, agent));
+    void (signedIn ? Promise.resolve() : clearWindow(agent)).catch(report).then(() => {
+      open(shown, agent);
+      if (launched) void openDeepLink(launched).catch(report);
+    });
     kept = stored.find((credential) => !credential.revoking && credential.origin === agent.origin && credential.agentId === agent.agentId) ?? null;
     if (live(kept)) void startStack(agent, kept).catch(report);
     // An earlier try to add this computer did not end in a device: try again, once.

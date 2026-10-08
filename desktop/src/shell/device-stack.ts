@@ -14,7 +14,7 @@ import type { NetworkApprovals } from "../hosts/tool-hosts.js";
 import type { Bindings } from "../journal/bindings.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
-import type { Welcome } from "../link/protocol.js";
+import type { Operation, Outcome, Welcome } from "../link/protocol.js";
 import { APP_CLOSED, type Executor } from "../operations/runner.js";
 
 // How long a quit waits for what runs to be recorded "closed by the app". An operation
@@ -29,7 +29,15 @@ export type Identity = Pick<Welcome, "deviceId" | "orgId" | "agentId" | "userId"
 // may hold: the binder's sheet checks the same ones, or it could accept a folder the tools refuse.
 export interface ToolLayer extends Executor {
   guards(): FolderGuards;
+  // The sessions with a background process alive on the tools: a quit would end their work.
+  live(): string[];
   stop(): Promise<void>;
+  // What the tools refuse anyway, before the chat's user is asked about it: null to ask as usual.
+  refusal?(operation: Operation): Outcome | null;
+  // A deleted chat's root: what the tools keep for it goes, such as its browser tabs.
+  retired?(root: string): void;
+  // The address of the page a calling session's next browser operation acts in, for its prompt.
+  address?(session: string): Promise<string>;
 }
 
 export interface DeviceStackOptions {
@@ -38,13 +46,16 @@ export interface DeviceStackOptions {
   token: string;
   agent: string; // the agent's name, as the prompts show it
   identity: Identity; // who every welcome must name
-  tools(bindings: Bindings, network: NetworkApprovals): ToolLayer;
+  // *changed*: what the tools' live() names may have changed.
+  tools(bindings: Bindings, network: NetworkApprovals, changed: () => void): ToolLayer;
   prompts: FolderPrompts;
   approvalPrompts: ApprovalPrompts;
   onStatus(status: LinkStatus): void;
+  // Each chat bound here, each change of a chat's mode, and each chat's folder forgotten, by the chat's id, once it is written.
+  onBindingChanged?: (root: string) => void;
   onError(error: unknown): void;
   // How many sessions (a chat, and each of its sub-agents) have an operation running on the tools,
-  // each time that changes: the quit asks first.
+  // or a background process alive there, each time that changes: the quit asks first.
   onWorking?: (count: number) => void;
   quitTimeoutMs?: number;
   delay?: (attempt: number) => number;
@@ -54,6 +65,7 @@ const ENDED: readonly LinkStatus[] = ["revoked", "unauthenticated"];
 
 export interface DeviceStack {
   readonly binder: Binder;
+  readonly bindings: Bindings; // the journal's: each chat's folder, mode and grants
   working(): number;
   stop(): Promise<void>;
   /** Revoke this device on its own link, then stop: true once the agent confirmed, false when it could not hear it in time. */
@@ -93,17 +105,24 @@ export async function stopDevice(started: Promise<DeviceStack> | undefined, shar
 function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: { tools?: ToolLayer }): DeviceStack {
   // The tools ask the binder's approvals about the network; the binder exists by the time any host asks.
   const network: NetworkApprovals = { askNetwork: (root, asked, signal) => binder.approvals.askNetwork(root, asked, signal) };
-  const tools = options.tools(journal.bindings, network);
-  made.tools = tools;
   // Each session's operations on the tools, counted as they run: the binder runs nothing else there.
   // A chat's sub-agents are sessions of their own: their operations carry the chat as sessionId.
+  // A chat with a background process alive on the tools works too, as a quit would end it.
   const running = new Map<string, number>();
+  let told = 0;
+  const working = (): number => new Set([...running.keys(), ...(made.tools?.live() ?? [])]).size;
+  const tell = (): void => {
+    const now = working();
+    if (now !== told) options.onWorking?.((told = now));
+  };
+  const tools = options.tools(journal.bindings, network, tell);
+  made.tools = tools;
+  if (options.onBindingChanged) journal.bindings.watch(options.onBindingChanged);
   const count = (session: string, change: number): void => {
-    const before = running.size;
     const left = (running.get(session) ?? 0) + change;
     if (left === 0) running.delete(session);
     else running.set(session, left);
-    if (running.size !== before) options.onWorking?.(running.size);
+    tell();
   };
   const counted: Executor = {
     run: async (operation, signal) => {
@@ -122,6 +141,9 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     guards: tools.guards(),
     agent: options.agent,
     hosts: counted,
+    refusal: (operation) => tools.refusal?.(operation) ?? null,
+    retired: (root) => tools.retired?.(root),
+    address: tools.address?.bind(tools),
     approvalPrompts: options.approvalPrompts,
     onError: options.onError,
   });
@@ -183,7 +205,8 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
   };
   return {
     binder,
-    working: () => running.size,
+    bindings: journal.bindings,
+    working,
     stop,
     retire: () => {
       retiring = true;

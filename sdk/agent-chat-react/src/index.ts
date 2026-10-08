@@ -93,6 +93,7 @@ export {
 export type { CitationSegment } from "./components/research/citation-text";
 export { ScheduledWorkPanel } from "./components/scheduled/scheduled-work-panel";
 export { SessionTreePanel } from "./components/sessions/session-tree-panel";
+export { sessionComputer } from "./lib/sessions";
 export type { AgentChatProps } from "./agent-chat";
 export type { ChatComposerError } from "./components/chat/chat-composer";
 export type { AgentChatAdapterContextValue } from "./adapter-context";

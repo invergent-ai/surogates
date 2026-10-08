@@ -215,6 +215,30 @@ describe("the sidebar's projects", () => {
   });
 });
 
+describe("the sidebar's pages", () => {
+  it("open the web client's list of chats, a page of its own, and the user menu's Devices its Settings there", async () => {
+    const { page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click('[data-path="/chats"]');
+    await expect.poll(() => client.url()).toBe(`${origin}/chats`);
+    await expect.poll(() => page.textContent("#title")).toBe(new URL(origin).host);
+    await page.click("#user");
+    await page.click('#user-menu [data-action="devices"]');
+    await expect.poll(() => client.url()).toBe(`${origin}/settings?tab=devices`);
+    expect(await page.isVisible("#user-menu")).toBe(false);
+  });
+
+  it.each([["with", true], ["without", false]])("open the web client's own Settings from the user menu, for an agent %s local folders, and Devices only with them", async (_, localFolders) => {
+    agent.config = { ...agent.config, desktop_sessions: localFolders };
+    const { page, client } = await signedIn();
+    await page.click("#user");
+    expect(await page.isVisible('#user-menu [data-action="devices"]')).toBe(localFolders);
+    await page.click('#user-menu [data-action="account"]');
+    await expect.poll(() => client.url()).toBe(`${origin}/settings`);
+    expect(await page.isVisible("#user-menu")).toBe(false);
+  });
+});
+
 describe("the Projects page", () => {
   it("shows the projects as cards, sorted and searched, in place of the web client and the Overview", async () => {
     const { shell, page } = await signedIn();
@@ -257,7 +281,9 @@ describe("the Projects page", () => {
     const { page, client } = await signedIn();
     await opened(page, client, REPORT);
     const thread = FIXTURE_IDS.question;
+    // Its row reads it in the pane; the pane's Open shows it in the centre.
     await page.click(`[data-thread="${thread}"]`);
+    await page.click("#reading-open");
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${thread}`);
     await page.click("#open-projects");
     await expect.poll(() => page.isVisible("#projects-page")).toBe(true);
@@ -434,6 +460,9 @@ const overlayOpen = (shell: ElectronApplication, page: string) => shell.evaluate
   BrowserWindow.getAllWindows()[0]!.contentView.children
     .some((view) => (view as Electron.WebContentsView).webContents.getURL().endsWith(file)), page);
 const dialogOpen = (shell: ElectronApplication) => overlayOpen(shell, "/project.html");
+// Click *selector* on the dialog, which closes it: the dialog can go before the click is acknowledged,
+// and that it went is what tells the click landed.
+const clickClosing = (dialog: Page, selector: string) => dialog.click(selector, { noWaitAfter: true }).catch(() => {});
 
 describe("the project dialog", () => {
   it("makes a new project from its name and goal, lists it at once, and opens its conversation", async () => {
@@ -446,7 +475,7 @@ describe("the project dialog", () => {
     expect(await dialog.isVisible("#archive")).toBe(false);
     await dialog.fill("#name", "  Hiring brief ");
     await dialog.fill("#goal", "Hire two analysts by December.");
-    await dialog.click("#save");
+    await clickClosing(dialog, "#save");
     await expect.poll(() => dialogOpen(shell)).toBe(false);
     const made = agent.projects!.projects.find((project) => project.name === "Hiring brief")!;
     expect(made.goal).toBe("Hire two analysts by December.");
@@ -465,14 +494,14 @@ describe("the project dialog", () => {
     await dialog.fill("#name", "Q3 report");
     await dialog.fill("#instructions", "Write in French.");
     await dialog.selectOption("#thread-tier", "pro");
-    await dialog.click("#save");
+    await clickClosing(dialog, "#save");
     await expect.poll(() => dialogOpen(shell)).toBe(false);
     await expect.poll(() => page.textContent("#title")).toBe("Q3 report");
     expect(agent.projects!.projects.find((project) => project.id === REPORT))
       .toMatchObject({ name: "Q3 report", instructions: "Write in French.", coordinatorTier: null, threadTier: "pro" });
     await page.click("#project-settings");
     dialog = await projectDialog(shell);
-    await dialog.click("#archive");
+    await clickClosing(dialog, "#archive");
     await expect.poll(() => dialogOpen(shell)).toBe(false);
     const asked = await shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string }> }).asked);
     expect(asked.at(-1)!.message).toBe("Archive Q3 report?");
@@ -511,7 +540,7 @@ describe("the project dialog", () => {
         expect(await dialog.isEnabled(field), field).toBe(false);
       }
       expect(await dialog.evaluate(() => document.activeElement?.id)).toBe("cancel");
-      await dialog.click("#cancel");
+      await clickClosing(dialog, "#cancel");
       await expect.poll(() => dialogOpen(shell)).toBe(false);
     });
   }
@@ -570,8 +599,10 @@ describe("the project dialog", () => {
     expect([await dialog.textContent("#save"), await dialog.getAttribute("#form", "aria-busy")]).toEqual(["Creating…", "true"]);
     await expect.poll(() => dialogOpen(shell), { timeout: 5_000 }).toBe(false);
     await expect.poll(() => page.textContent("#title")).toBe("Busy");
-    // The new project's conversation is a load of its own: its page is as slow again.
-    await client.waitForLoadState();
+    // The new project's conversation is a load of its own, which can start after the title shows: its
+    // page is as slow again, once it has loaded.
+    const busy = agent.projects!.projects.find((project) => project.name === "Busy")!;
+    await client.waitForURL(`${origin}/chat/${busy.masterSessionId}`);
     await client.evaluate(() => {
       (window as unknown as { fakeProjects: { lag: number } }).fakeProjects.lag = 1_500;
     });
@@ -633,7 +664,7 @@ describe("the project dialog", () => {
       Object.assign(fake.data.projects.find((found) => found.id === project)!, { goal: "Changed elsewhere", instructions: "Also elsewhere" });
     }, REPORT);
     await dialog.selectOption("#thread-tier", "pro");
-    await dialog.click("#save");
+    await clickClosing(dialog, "#save");
     await expect.poll(() => dialogOpen(shell)).toBe(false);
     expect(agent.projects!.projects.find((project) => project.id === REPORT)).toMatchObject({
       name: "Quarterly report", goal: "Changed elsewhere", instructions: "Also elsewhere", threadTier: "pro",

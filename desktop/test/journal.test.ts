@@ -6,7 +6,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { INTERRUPTED, MAX_OPEN_REPORTED, OperationJournal, RETAIN_MS } from "../src/journal/journal.js";
-import type { Binding } from "../src/journal/bindings.js";
+import { type Binding, Bindings } from "../src/journal/bindings.js";
 import type { Operation } from "../src/link/protocol.js";
 
 function operation(id: string, digest = `digest-${id}`): Operation {
@@ -379,6 +379,51 @@ describe("the bindings", () => {
     expect([after.bindings.domains("r2"), after.bindings.domains("r3")]).toEqual([[], []]);
     expect(after.bindings.get("r1")).toEqual(binding("r1", 1));
     after.close();
+  });
+
+  it("tell whoever watches of each host allowed for a bound root, once it is kept", () => {
+    const journal = new OperationJournal(path);
+    journal.bindings.add(binding("r1", 1));
+    const told: string[] = [];
+    journal.bindings.watch((root) => told.push(root));
+    journal.bindings.allowDomain("r1", "example.com");
+    // Allowed already, or for a root with no binding: nothing is kept, and nothing told.
+    journal.bindings.allowDomain("r1", "example.com");
+    journal.bindings.allowDomain("r2", "example.com");
+    expect(told).toEqual(["r1"]);
+    journal.close();
+  });
+
+  it("forget a deleted root's binding and its allowed hosts both or neither, and tell of it once forgotten", () => {
+    const journal = new OperationJournal(path);
+    journal.bindings.add(binding("r1", 1));
+    journal.bindings.allowDomain("r1", "example.com");
+    // The binding's DELETE fails after the hosts' ran, as on a full disk.
+    const db = (journal as unknown as { db: DatabaseSync }).db;
+    const failing = new Proxy(db, {
+      get(target, name) {
+        if (name === "prepare") {
+          return (sql: string) => {
+            if (sql.startsWith("DELETE FROM bindings")) return { run: () => { throw new Error("disk I/O error"); } };
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, name) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const told: string[] = [];
+    const unwritten = new Bindings(failing);
+    unwritten.watch((root) => told.push(root));
+    expect(() => unwritten.retire("r1")).toThrow("disk I/O error");
+    expect([journal.bindings.get("r1"), journal.bindings.domains("r1")]).toEqual([binding("r1", 1), ["example.com"]]);
+    journal.bindings.watch((root) => told.push(root));
+    journal.bindings.retire("r1");
+    expect([journal.bindings.get("r1"), journal.bindings.domains("r1")]).toEqual([undefined, []]);
+    // A root with no binding left changes nothing, and tells nothing.
+    journal.bindings.retire("r1");
+    expect(told).toEqual(["r1"]);
+    journal.close();
   });
 
   it("read back a folder whose device and inode numbers are past 2^53", () => {

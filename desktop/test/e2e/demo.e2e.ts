@@ -1,7 +1,7 @@
 // The demo's thread runs its commands in the VM, as the app does: behind
 // SUROGATE_VM_TESTS=1, with KVM, the image and npm run agent-disk.
 
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { OperationJournal } from "../../src/journal/journal.js";
 import { APP_CLOSED } from "../../src/operations/runner.js";
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { dataHome, launch, press, prompt, quit, shellPage, stubNative } from "./launch.js";
+import { dataHome, launch, press, prompt, quit, shellPage, stubNative, trayLabels, watchTray } from "./launch.js";
 
 const THREAD = "6c1e9f7d-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
 
@@ -127,6 +127,95 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the demo", () => {
 });
 
 describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("quitting", () => {
+  it("says, while it waits, that it quits once the thread finishes, in the window and the tray, and goes from the window first when told to quit now", async () => {
+    const { shell, page } = await bound();
+    await watchTray(shell);
+    // The quit's line is a live region from the start, empty, so that a screen reader hears it when it speaks.
+    expect(await page.evaluate(() => {
+      const line = document.getElementById("quitting-text")!;
+      return [line.getAttribute("role"), line.textContent, line.closest("[hidden]") === null];
+    })).toEqual(["status", "", true]);
+    expect(await page.isVisible("#quit-now")).toBe(false);
+    agent.link.send(op("run-5", "run", { command: "sleep 603", workdir: null, timeout: 900 }));
+    await expect.poll(() => sleeping(603), { timeout: 30_000 }).toBe(1);
+    await answer(shell, 1);
+    quitApp(shell);
+    await expect.poll(() => page.textContent("#quitting-text")).toBe("Quitting once 1 thread working on this computer finishes.");
+    expect(await page.isVisible("#quit-now")).toBe(true);
+    await expect.poll(() => trayLabels(shell)).toEqual(["Show Surogate", "Connected as Laptop", "", "Settings…", "Quit now"]);
+    // The window goes the moment the user says quit now, before the device has stopped.
+    const hidden = new Promise<void>((resolve) => shell.on("console", (message) => {
+      if (message.text() === "window hidden") resolve();
+    }));
+    await shell.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.once("hide", () => console.log("window hidden"));
+    });
+    const closed = shell.waitForEvent("close");
+    await page.click("#quit-now");
+    await hidden;
+    // Once it goes, a second launch brings no window back while the device stops.
+    expect(await shell.evaluate(({ app: electron, BrowserWindow }) => {
+      electron.emit("second-instance", {}, [], "");
+      return BrowserWindow.getAllWindows().some((window) => window.isVisible());
+    }).catch(() => false)).toBe(false);
+    await closed;
+    app = undefined;
+    const journal = new OperationJournal(join(home, "surogate", "devices", "d", "journal.sqlite"));
+    try {
+      expect(journal.unsent().find((result) => result.id === "run-5")?.outcome).toEqual(APP_CLOSED);
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("asks, with Keep running off, before closing the window quits while a thread works, and keeps the window on Cancel", async () => {
+    // Off since an earlier run.
+    mkdirSync(join(home, "surogate"), { recursive: true });
+    writeFileSync(join(home, "surogate", "preferences.json"), JSON.stringify({ keepRunning: false }));
+    const { shell, page } = await bound();
+    agent.link.send(op("run-6", "run", { command: "sleep 604", workdir: null, timeout: 900 }));
+    await expect.poll(() => sleeping(604), { timeout: 30_000 }).toBe(1);
+    await answer(shell, 2);
+    const shown = () => shell.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.isVisible());
+    await shell.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.close());
+    await expect.poll(async () => (await asked(shell)).at(-1)?.message).toBe("Surogate is still working");
+    // Cancel: the window stays, and so do the link and the command.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await shown()).toBe(true);
+    expect(await page.getAttribute("#device", "title")).toBe("Connected as Laptop");
+    expect(await sleeping(604)).toBe(1);
+    // Quit anyway, so the test's own quit goes through the app's.
+    await answer(shell, 0);
+  });
+
+  it("hides the window, asking nothing more, when it is closed with Keep running off while a quit waits for the threads", async () => {
+    mkdirSync(join(home, "surogate"), { recursive: true });
+    writeFileSync(join(home, "surogate", "preferences.json"), JSON.stringify({ keepRunning: false }));
+    const { shell } = await bound();
+    agent.link.send(op("run-7", "run", { command: "sleep 605", workdir: null, timeout: 900 }));
+    await expect.poll(() => sleeping(605), { timeout: 30_000 }).toBe(1);
+    const shown = () => shell.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.isVisible());
+    const close = () => shell.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.close());
+    // Closed: the quit asks, and is told to wait for them, and the window stays.
+    await answer(shell, 1);
+    await close();
+    await expect.poll(async () => (await asked(shell)).at(-1)?.message).toBe("Surogate is still working");
+    expect(await shown()).toBe(true);
+    const questions = (await asked(shell)).length;
+    // Closed again while the quit waits: the window goes, as with Keep running on, and nothing more is asked.
+    await close();
+    await expect.poll(shown).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect((await asked(shell)).length).toBe(questions);
+    expect(await sleeping(605)).toBe(1);
+    // Quit now, so the test's own quit goes through the app's.
+    await answer(shell, 0);
+  });
+
   it("waits for the threads when told to, and quits once they finish", async () => {
     const { shell } = await bound();
     agent.link.send(op("run-3", "run", { command: "sleep 601", workdir: null, timeout: 900 }));

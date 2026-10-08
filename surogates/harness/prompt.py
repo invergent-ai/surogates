@@ -128,6 +128,9 @@ class PromptBuilder:
         # builder's build() can stay sync.
         self._soul_md_content: str | None = soul_md_content
         self._agent_md_content: str | None = agent_md_content
+        # A local folder's project context, read through its computer when
+        # the harness builds the prompt (it is not on this host).
+        self.folder_context: str | None = None
         # Per-agent slash-command availability, shared with the dispatch
         # gate.  Held so model-facing command advertisements can be kept
         # in sync with runtime availability.  NOTE: the scheduled-loop
@@ -1055,11 +1058,15 @@ class PromptBuilder:
 
         workspace = self._get_workspace_path()
         # A folder on the user's computer is not on this host: its project
-        # files cannot be read here.
-        if workspace and device_of(self._session.config) is None:
+        # files are read through the computer (folder_context), never here.
+        if workspace and device_of(self._session.config) is not None:
+            project_ctx = self.folder_context
+        elif workspace:
             project_ctx = load_project_context(workspace)
-            if project_ctx:
-                parts.append(f"## Project Context\n{project_ctx}")
+        else:
+            project_ctx = None
+        if project_ctx:
+            parts.append(f"## Project Context\n{project_ctx}")
 
         if not parts:
             return ""

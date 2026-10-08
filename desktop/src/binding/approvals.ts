@@ -20,12 +20,29 @@ import { report } from "../report.js";
 // What Ask every time never asks about: these only read, or make things safer (kill).
 // Every other kind asks (run, start, write, delete, write_stdin), and so does a new one.
 export const UNASKED: ReadonlySet<string> = new Set([
-  "resolve", "check_write", "stat", "read", "read_lines", "list_dir", "ripgrep", "which", "poll", "read_output", "wait",
-  "kill", "list_processes",
+  "resolve", "check_write", "stat", "read", "read_lines", "list_dir", "walk", "ripgrep", "which", "poll", "read_output",
+  "wait", "kill", "list_processes",
 ]);
 
-// The harness's own files: the terminal spills long output here.
-const RESULTS = ".surogates-results";
+// Writes never asked about: under the folder at the top of a chat's folder where the
+// terminal spills long output, and the chat's page saving its whiteboard's canvas, every
+// few seconds while the user draws. That save is the user's own request (its invocation
+// starts "request:", surogates/devices/operations.py): an agent's tool call writing the
+// canvas would replace the user's board, and is asked about. Anything else under
+// _whiteboard/ is asked about too: the agent could write there, and the file panel hides it.
+const UNASKED_FOLDERS = [".surogates-results"];
+const CANVAS = "_whiteboard/canvas.json";
+const REQUEST = "request:";
+
+// The browser's kinds (surogates/devices/browser.py). A chat's first use of the browser on this
+// computer asks in either mode, and "Allow for this chat" lasts as long as the chat's binding;
+// in a chat that asks every time, each one that acts on the page asks too. These do not ask:
+// they read the page, close the chat's own tab, or only move or scroll the mouse. A page can
+// still act on any of them, as it can on its own timers.
+const BROWSER = "browser.";
+const BROWSER_READS: ReadonlySet<string> = new Set(["browser.observe", "browser.screenshot", "browser.close"]);
+const LOOKING: ReadonlySet<unknown> = new Set(["move", "wheel"]);
+const acts = ({ kind, args }: Operation): boolean => !BROWSER_READS.has(kind) && !(kind === "browser.mouse" && LOOKING.has(args.action));
 
 // The chat a prompt is for, and the session asking: a sub-agent of the chat when it is not the root.
 // A network prompt names the root: a connection is known by its root's socket, not by which session's command made it.
@@ -48,7 +65,14 @@ export type ApprovalRequest =
   | { kind: "change"; chat: ChatLabel; action: "write" | "delete"; path: string; bytes: number | null; preview: Preview | null }
   // command: what the process runs, as its start named it; null for a process this run of the app did not start.
   | { kind: "input"; chat: ChatLabel; process: string; command: string | null; data: string }
-  | { kind: "network"; chat: ChatLabel; host: string; port: number; privateNetwork: boolean };
+  | { kind: "network"; chat: ChatLabel; host: string; port: number; privateNetwork: boolean }
+  // The chat's first use of the browser here ("use", with no detail), or what an operation would do
+  // in its page: the address it opens, the script it runs, where it clicks, what it types or presses, its drag's path.
+  // page: an act's, the address of the page it acts in, as the browser said it just before; null when it did not say in time.
+  | { kind: "browser"; chat: ChatLabel; action: BrowserAction; detail: string; page?: string | null };
+
+// down and up: a mouse button pressed and held, and released, each where it is.
+export type BrowserAction = "use" | "open" | "script" | "click" | "down" | "up" | "type" | "press" | "drag" | "other";
 
 // Allow it this once; deny it; allow it and stop asking in this chat, which then works
 // freely (not offered for a network prompt); or, for a network prompt only, allow its
@@ -70,13 +94,26 @@ export interface ApprovalsOptions {
   bindings: Bindings;
   prompts: ApprovalPrompts;
   agent: string; // the agent's name, for the prompts
+  // The address of the page a calling session's next browser operation acts in: a page moves itself, so an act's prompt names it.
+  address?: (session: string) => Promise<string>;
   onError?: (error: unknown) => void; // a choice that could not be recorded, or a network prompt that failed, and why
 }
+
+// How long an act's prompt waits for its page's address before it says the page is not known.
+const ADDRESS_MS = 1_000;
 
 const DENIED = {
   command: "The user denied this command on this computer",
   change: "The user denied this change on this computer",
   input: "The user denied this input on this computer",
+} as const;
+
+// A browser operation the user did not let happen: the tool's result says so (surogates/devices/browser.py).
+const browserDenied = (message: string): Outcome => ({ error: { type: "denied", message } });
+const BROWSER_DENIED = {
+  use: "The user did not let the agent use the browser on this computer in this chat",
+  act: "The user denied this in the agent's browser on this computer",
+  unanswered: "Nobody answered on this computer in time, so the agent's browser did nothing",
 } as const;
 
 // Not denied: nobody was there to answer.
@@ -141,6 +178,26 @@ function requestFor(operation: Operation, binding: Binding, agent: string, comma
   return { kind: "command", chat, command: text("command"), workdir, background: kind === "start" };
 }
 
+// What a browser operation would do in the page, as its prompt shows it.
+function browserAct({ kind, args }: Operation): { action: BrowserAction; detail: string } {
+  const text = (value: unknown) => String(value ?? "");
+  if (kind === "browser.navigate") return { action: "open", detail: text(args.url) };
+  if (kind === "browser.evaluate") return { action: "script", detail: text(args.code) };
+  if (kind === "browser.keyboard" && args.action === "press") return { action: "press", detail: text(args.keys) };
+  if (kind === "browser.keyboard") {
+    // Typing into a ref clicks there first: the prompt says where, after the text in quotes.
+    const at = args.at as { x?: unknown; y?: unknown } | null | undefined;
+    return { action: "type", detail: at ? `${JSON.stringify(text(args.text))} at ${text(at.x)}, ${text(at.y)}` : text(args.text) };
+  }
+  if (kind === "browser.mouse" && args.action === "drag") return { action: "drag", detail: JSON.stringify(args.path ?? []) };
+  if (kind === "browser.mouse") {
+    const button = args.button === undefined || args.button === "left" ? "" : ` (${text(args.button)} button)`;
+    const action = args.action === "down" || args.action === "up" ? args.action : "click";
+    return { action, detail: `${text(args.x)}, ${text(args.y)}${button}` };
+  }
+  return { action: "other", detail: kind };
+}
+
 // Settles as *promise* does, or with undefined at once when *signal* aborts.
 function settled<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
   if (signal.aborted) return Promise.resolve(undefined);
@@ -172,6 +229,7 @@ export class Approvals {
    * leaves the line, and its open prompt is dismissed.
    */
   async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
+    if (operation.kind.startsWith(BROWSER)) return this.browse(operation, signal);
     if (UNASKED.has(operation.kind)) return null;
     const checked = this.asking(operation);
     if ("answer" in checked) return checked.answer;
@@ -202,6 +260,86 @@ export class Approvals {
       }
       return answer === "allow" || answer === "stop_asking" ? null : denied(operation.kind);
     });
+  }
+
+  // A browser operation: the chat's first asks whether its agent may use the browser here at all,
+  // and in Ask every time each that acts on the page asks too, in the chat's line. Fails closed.
+  private async browse(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
+    const root = operation.sessionId;
+    const needed = (): { binding: Binding; use: boolean; act: boolean } | { answer: Outcome | null } => {
+      let binding: Binding | undefined;
+      let allowed = false;
+      try {
+        binding = this.options.bindings.get(root);
+        allowed = binding !== undefined && this.options.bindings.browsing(root);
+      } catch (error) {
+        return { answer: browserDenied(couldNotAsk(error)) };
+      }
+      if (!binding) return { answer: FOLDER_UNAVAILABLE };
+      // A chat whose agent may not use the browser has no tab: its close closes nothing, and asks nothing.
+      if (!allowed && operation.kind === "browser.close") return { answer: null };
+      const act = binding.mode !== "free" && acts(operation);
+      return allowed && !act ? { answer: null } : { binding, use: !allowed, act };
+    };
+    const first = needed();
+    if ("answer" in first) return first.answer;
+    return this.inLine(root, signal, browserDenied(BROWSER_DENIED.act), async () => {
+      // Allowed, or freed, while it waited its turn: asked no more than it still needs.
+      const now = needed();
+      if ("answer" in now) return now.answer;
+      const chat = { agent: this.options.agent, root, calling: operation.callingSessionId, folder: now.binding.folder };
+      const ask = async (request: ApprovalRequest): Promise<ApprovalAnswer | Outcome> => {
+        try {
+          // Raced against its signal: a prompt that ignores it cannot hold a cancel or a suspend.
+          const answer = await settled(this.options.prompts.approve(request, signal), signal);
+          // A dismissed prompt's answer is not its user's.
+          if (signal.aborted) return browserDenied(BROWSER_DENIED.act);
+          return answer === "timeout" ? browserDenied(BROWSER_DENIED.unanswered) : (answer ?? "deny");
+        } catch (error) {
+          return browserDenied(couldNotAsk(error));
+        }
+      };
+      if (now.use) {
+        const answer = await ask({ kind: "browser", chat, action: "use", detail: "" });
+        if (typeof answer !== "string") return answer;
+        if (answer !== "allow_session") return browserDenied(BROWSER_DENIED.use);
+        try {
+          this.options.bindings.allowBrowser(root);
+        } catch (error) {
+          // The user let this one through either way.
+          report(this.options.onError, error);
+        }
+      }
+      if (!now.act) return null;
+      const act = browserAct(operation);
+      // An open names where it goes; any other act, the page it acts in now.
+      const answer = await ask(act.action === "open"
+        ? { kind: "browser", chat, ...act }
+        : { kind: "browser", chat, ...act, page: await this.pageOf(operation.callingSessionId, signal) });
+      if (typeof answer !== "string") return answer;
+      if (answer === "stop_asking") {
+        try {
+          this.options.bindings.setMode(root, "free");
+        } catch (error) {
+          report(this.options.onError, error);
+        }
+      }
+      return answer === "allow" || answer === "stop_asking" ? null : browserDenied(BROWSER_DENIED.act);
+    });
+  }
+
+  // The address of the page *session*'s act would act in, as the browser says it; null when it does not in time.
+  private async pageOf(session: string, signal: AbortSignal): Promise<string | null> {
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), ADDRESS_MS);
+    });
+    const said = Promise.resolve().then(() => this.options.address?.(session) ?? null).catch(() => null);
+    try {
+      return (await settled(Promise.race([said, late]), signal)) ?? null;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** A background command has started: a prompt before input to its process names the command. */
@@ -347,8 +485,12 @@ export class Approvals {
     // cannot carry a write that skips its prompt here out of this folder; a key that
     // is not already normal asks all the same.
     const key = operation.args.key;
-    const spill = typeof key === "string" && posix.normalize(key) === key && key.startsWith(`${binding.folder}/${RESULTS}/`);
-    if (operation.kind === "write" && spill) {
+    const unasked = typeof key === "string" && posix.normalize(key) === key
+      && (
+        (key === `${binding.folder}/${CANVAS}` && operation.invocationId.startsWith(REQUEST))
+        || UNASKED_FOLDERS.some((name) => key.startsWith(`${binding.folder}/${name}/`))
+      );
+    if (operation.kind === "write" && unasked) {
       return { answer: null };
     }
     return { binding };

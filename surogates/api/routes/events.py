@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from surogates.api.session_guards import (
-    require_bound_session,
+    require_device_access,
     require_session_visible,
     require_user_writable_session,
 )
@@ -35,6 +35,9 @@ router = APIRouter()
 # Only truly terminal statuses close the SSE stream. "failed" is excluded
 # because users can retry by sending a new message (which resets to active).
 _TERMINAL_STATUSES = frozenset({"completed", "archived"})
+# What ends a watching stream (``watch=1``). A chat is ``completed`` between its
+# turns, and a watcher waits through that for the next turn.
+_WATCH_TERMINAL_STATUSES = frozenset({"archived"})
 
 # Maximum time (seconds) an SSE connection stays open before the server
 # closes it gracefully.  Clients are expected to reconnect.
@@ -100,6 +103,32 @@ def _get_session_store(request: Request) -> SessionStore:
             detail="Session store not available.",
         )
     return store
+
+
+async def _wait_for_publish(pubsub, timeout: float) -> float:
+    """Wait up to *timeout* seconds for a publish on *pubsub*: the seconds waited.
+
+    Subscribe replies wake nothing. A subscription that fails waits as a
+    stream without Redis does, a poll interval, so that the caller reads on
+    and misses nothing.
+    """
+    loop = asyncio.get_event_loop()
+    started = loop.time()
+    deadline = started + timeout
+    while (remaining := deadline - loop.time()) > 0:
+        try:
+            message = await asyncio.wait_for(
+                pubsub.get_message(ignore_subscribe_messages=True, timeout=remaining),
+                timeout=remaining + 0.5,
+            )
+        except asyncio.TimeoutError:
+            break
+        except Exception:
+            await asyncio.sleep(min(remaining, _POLL_INTERVAL))
+            break
+        if message is not None:
+            break
+    return loop.time() - started
 
 
 def _require_service_account_api_route(
@@ -187,7 +216,7 @@ async def send_session_events(
     await _verify_session_access(request, store, session_id, tenant)
     session = await store.get_session(session_id)
     require_user_writable_session(session)
-    await require_bound_session(request, session)
+    await require_device_access(request, session, tenant)
 
     sent: list[SentSessionEvent] = []
     for event in body.events:
@@ -280,13 +309,25 @@ async def stream_events(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
     after: int = 0,
+    watch: bool = False,
 ) -> EventSourceResponse:
     """Stream session events via Server-Sent Events.
 
     The client provides ``after`` (the last event ID it received) and the
-    server yields all subsequent events as they appear.  When the session
+    server yields all subsequent events as they appear.  ``after=-1`` starts
+    at the session's newest event, with none of its past.  When the session
     reaches a terminal status, a ``session.done`` event is emitted and the
     stream closes.
+
+    ``watch=1`` follows the session across its turns, as Surogate Desktop
+    follows the chat its window shows: only ``archived``, or a session gone,
+    ends it, and ``completed`` between two turns does not. Its first event,
+    ``stream.start``, carries the cursor it starts from as its id, so that a
+    watcher that reconnects, at ``stream.timeout`` or after a drop, takes up
+    there with ``after=<that id>``. A watch waits on the session's channel, and
+    reads the session only when a publish wakes it or at the keepalive. With no
+    channel, as without Redis or when its subscription fails, it falls back to
+    the poll every stream has, a read each ``_POLL_INTERVAL``.
     """
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
@@ -314,7 +355,9 @@ async def stream_events(
     redis = getattr(request.app.state, "redis", None)
 
     async def event_generator():  # noqa: ANN202
-        cursor = after
+        # after=-1: from the session's newest event on, with nothing to replay.
+        from_now = after < 0
+        cursor = await asyncio.shield(store.last_event_id(session_id)) if from_now else after
         elapsed = 0.0
         # Drop llm.delta events while draining the backlog.  Deltas are
         # per-token chunks that exist only to animate live streaming; the
@@ -325,7 +368,8 @@ async def stream_events(
         # time) so the rows never leave the database.  Once we catch up
         # (first empty fetch), we switch to live mode and forward deltas
         # unmodified.
-        in_replay = True
+        in_replay = not from_now
+        terminal = _WATCH_TERMINAL_STATUSES if watch else _TERMINAL_STATUSES
         # Wide replay batch so catching up on a long conversation takes 1-2
         # DB round-trips instead of hundreds.  Live polling uses the narrow
         # batch since there's rarely more than a handful of pending events.
@@ -337,7 +381,21 @@ async def stream_events(
         if redis is not None:
             try:
                 pubsub = redis.pubsub()
-                await pubsub.subscribe(f"surogates:session:{session_id}")
+                if watch:
+                    # By pattern, of the exact name (a UUID has no glob
+                    # characters): the agent counts a chat's exact subscribers
+                    # as its live viewers, and leaves its check-ins and
+                    # completions out of the inbox while one is there. A watch
+                    # is no viewer.
+                    await pubsub.psubscribe(f"surogates:session:{session_id}")
+                    # redis-py sends the subscription without waiting for Redis
+                    # to take it, and a watch waits long on the channel after
+                    # its first read: a publish in between would be heard of
+                    # only at the keepalive. So the first read waits for
+                    # Redis's reply.
+                    await pubsub.get_message(timeout=_POLL_INTERVAL)
+                else:
+                    await pubsub.subscribe(f"surogates:session:{session_id}")
             except Exception:
                 pubsub = None
 
@@ -345,6 +403,8 @@ async def stream_events(
             # Send an immediate comment to establish the SSE connection
             # (browsers show the request as "pending" until first byte).
             yield {"comment": "connected"}
+            if watch:
+                yield {"id": str(cursor), "event": "stream.start", "data": "{}"}
             # Last time any byte was sent to the client. A research/mission
             # coordinator goes idle for minutes between wakes (dispatch ->
             # wait for executors -> harvest); without a periodic keepalive
@@ -401,7 +461,7 @@ async def stream_events(
                         }
                         return
 
-                    if session.status in _TERMINAL_STATUSES:
+                    if session.status in terminal:
                         # Race guard: a POST /messages currently in flight
                         # commits SESSION_RESUME and publishes on
                         # ``surogates:session:{id}``. We subscribed above so
@@ -447,7 +507,7 @@ async def stream_events(
                                 }
                                 return
 
-                        if session.status in _TERMINAL_STATUSES:
+                        if session.status in terminal:
                             yield {
                                 "event": "session.done",
                                 "data": json.dumps(
@@ -462,18 +522,29 @@ async def stream_events(
                         continue
 
                     # Wait for a Redis notification or fall back to polling.
-                    if pubsub is not None:
-                        try:
-                            msg = await asyncio.wait_for(
-                                pubsub.get_message(ignore_subscribe_messages=True, timeout=_POLL_INTERVAL),
-                                timeout=_POLL_INTERVAL + 0.5,
-                            )
-                        except (asyncio.TimeoutError, Exception):
-                            pass
+                    if watch and pubsub is not None:
+                        # A watch sits through a chat's idle hours: it reads the
+                        # chat again only when a publish wakes it (every
+                        # emit_event publishes after its commit), or at the
+                        # keepalive, or as the stream ends.
+                        now = asyncio.get_event_loop().time()
+                        elapsed += await _wait_for_publish(
+                            pubsub,
+                            min(last_emit + _KEEPALIVE_INTERVAL - now, _MAX_STREAM_DURATION - elapsed),
+                        )
                     else:
-                        await asyncio.sleep(_POLL_INTERVAL)
+                        if pubsub is not None:
+                            try:
+                                msg = await asyncio.wait_for(
+                                    pubsub.get_message(ignore_subscribe_messages=True, timeout=_POLL_INTERVAL),
+                                    timeout=_POLL_INTERVAL + 0.5,
+                                )
+                            except (asyncio.TimeoutError, Exception):
+                                pass
+                        else:
+                            await asyncio.sleep(_POLL_INTERVAL)
 
-                    elapsed += _POLL_INTERVAL
+                        elapsed += _POLL_INTERVAL
 
                     # Keep the connection warm through proxy idle timeouts.
                     now = asyncio.get_event_loop().time()

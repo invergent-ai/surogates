@@ -20,7 +20,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from surogates.devices.binding import device_of
-from surogates.devices.sandbox import INTERRUPTED, UNAVAILABLE_TOOLS, device_call_for, refusal
+from surogates.devices.sandbox import UNAVAILABLE_TOOLS, device_call_for, interrupted, refusal
 from surogates.session.events import EventType
 from surogates.harness.message_utils import make_skipped_tool_result
 from surogates.harness.resilience import unknown_tool_error
@@ -1732,7 +1732,7 @@ async def _run_single_tool(
             # The journal holds only what reached the computer.  A harness
             # tool also acts off it (it creates an artifact, it pays for a
             # model call), and running it again would do that again.
-            result_content = INTERRUPTED
+            result_content = interrupted(tool_name)
         elif device_call is not None and location == ToolLocation.SANDBOX:
             result_content = await device_call.dispatch(tool_name, tool_args)
         elif location == ToolLocation.SANDBOX and sandbox_pool is not None:
@@ -1898,7 +1898,7 @@ async def _run_single_tool(
         writer=spill_writer,
     )
     if replay_of is not None and device_call is not None and await device_call.diverged():
-        result_content = INTERRUPTED
+        result_content = interrupted(tool_name)
         await device_call.close_open()
 
     # Sanitise the event payload — frontend SSE consumers must not see

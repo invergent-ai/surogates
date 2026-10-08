@@ -194,6 +194,18 @@ def _files(facts: ThreadFacts) -> list[dict[str, str]]:
     return files
 
 
+def place_of(execution: Any) -> dict[str, Any]:
+    """Where a thread works, as the shell's ``ThreadPlace``, from its
+    ``config.execution``: the cloud, or the user's computer by the name
+    stamped when the thread was made.  Whether that computer is online now
+    is the reader's to say (``online`` starts false)."""
+    if not isinstance(execution, dict) or execution.get("kind") != "device":
+        return {"kind": "cloud"}
+    return {
+        "kind": "device", "device_id": execution["device_id"], "device_name": execution["device_name"], "online": False,
+    }
+
+
 def units(text: str) -> int:
     """*text*'s length in UTF-16 units, as the shell counts it."""
     return len(text.encode("utf-16-le")) // 2
