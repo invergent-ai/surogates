@@ -37,6 +37,21 @@ describe("QEMU's command line", () => {
     ]);
   });
 
+  it("runs an emulated guest on QEMU's TCG, a host thread a vCPU, with the CPU TCG gives, and tells the agent so", () => {
+    const kvm = qemuArgs(DISKS, "/run/vm", "/d/console.log", 4);
+    const tcg = qemuArgs(DISKS, "/run/vm", "/d/console.log", 4, true);
+    const replaced = (args: string[], from: string[], to: string[]) => {
+      const at = args.join("\0").indexOf(from.join("\0"));
+      expect(at).toBeGreaterThanOrEqual(0);
+      return args.join("\0").replace(from.join("\0"), to.join("\0")).split("\0");
+    };
+    const append = kvm[kvm.indexOf("-append") + 1]!;
+    expect(tcg).toEqual(replaced(
+      replaced(kvm, ["-machine", "q35,accel=kvm,memory-backend=mem", "-cpu", "host"], ["-machine", "q35,memory-backend=mem", "-accel", "tcg,thread=multi,tb-size=256", "-cpu", "max"]),
+      [append], [`${append} surogate.emulated=1`],
+    ));
+  });
+
   it("doubles a comma in a path, which QEMU would read as the next option", () => {
     const args = qemuArgs({ ...DISKS, rootfs: "/home/a,b/rootfs.img", sessions: "/d,x/sessions.img" }, "/run/a,b", "/l,c/console.log", 2);
     expect(args).toContain("if=none,id=root,file=/home/a,,b/rootfs.img,format=raw,readonly=on");

@@ -9,7 +9,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { type ProcessHandle, RUNNER_GONE } from "../src/guest/processes.js";
 import type { HostUser, Share } from "../src/guest/protocol.js";
-import { enter, NOT_SET_UP, rootEnvironment, Roots } from "../src/guest/root.js";
+import { boundsFor, enter, NOT_SET_UP, rootEnvironment, Roots, slowerFor } from "../src/guest/root.js";
+import { WAITS } from "../src/vm/manager.js";
+import { qemuArgs } from "../src/vm/qemu.js";
 
 const RUNNER = fileURLToPath(new URL("../dist/guest/runner.js", import.meta.url));
 const R1: Share = { kind: "virtiofs", tag: "r1" };
@@ -758,5 +760,31 @@ describe("a root's environment", () => {
       PATH: `${home}/.local/bin:/opt/home/sandbox/bin:/home/sandboxes/bin`,
       PYTHONUSERBASE: home,
     });
+  });
+});
+
+describe("the agent's own bounds", () => {
+  // The kernel's command line as the host boots the guest, with KVM and emulated.
+  const cmdline = (emulated: boolean) => {
+    const args = qemuArgs({ kernel: "/i/vmlinuz", rootfs: "/i/rootfs.img", agentDisk: "/a/agent.img", sessions: "/d/sessions.img" }, "/run/vm", "/d/console.log", 4, emulated);
+    return args[args.indexOf("-append") + 1] ?? "";
+  };
+
+  it("grows six times in a guest whose kernel says it runs emulated, and each still fits inside the host's emulated waits", () => {
+    const kvm = boundsFor(slowerFor(cmdline(false)));
+    const emulated = boundsFor(slowerFor(cmdline(true)));
+    expect(kvm).toEqual({
+      emptyMs: 3_000, killedMs: 1_000, flushMs: 3_000, mountMs: 5_000, runnerReadyMs: 5_000, questionMs: 10_000, backstopMs: 10_000, ruleMs: 12_000,
+    });
+    expect(emulated).toEqual(Object.fromEntries(Object.entries(kvm).map(([name, ms]) => [name, ms * 6])));
+    // Only the flag itself: another value of it, or a word that ends in it, is a guest with KVM.
+    for (const line of [`${cmdline(false)} surogate.emulated=10`, `${cmdline(false)} nosurogate.emulated=1`]) expect(boundsFor(slowerFor(line))).toEqual(kvm);
+    // A set-up: the share's mount, what the root ran before to end, and its runner's start. A
+    // power-off: every root's processes ended, then each share flushed. The rule, before the hello.
+    for (const [bounds, waits] of [[kvm, WAITS.kvm], [emulated, WAITS.emulated]] as const) {
+      expect(bounds.mountMs + bounds.emptyMs + bounds.runnerReadyMs).toBeLessThan(waits.setupMs);
+      expect(bounds.killedMs + bounds.flushMs).toBeLessThan(waits.powerOffMs);
+      expect(bounds.ruleMs).toBeLessThan(waits.helloMs);
+    }
   });
 });

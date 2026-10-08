@@ -1,6 +1,8 @@
 // The guest under QEMU and KVM, booted by the VM manager: the image built by
 // images/guest/build.sh, the agent disk built from this package (npm run build
 // first). Behind SUROGATE_VM_TESTS=1; SUROGATE_VM_IMAGE names another image folder.
+// Without KVM they fail, as Section 11 has a VM job do: a job runs them emulated only by
+// naming a device that does not exist in SUROGATE_VM_KVM, as the app takes it.
 
 import { spawnSync } from "node:child_process";
 import {
@@ -23,7 +25,7 @@ import { OperationJournal } from "../../src/journal/journal.js";
 import type { Operation, Outcome } from "../../src/link/protocol.js";
 import { VmClient, vmOptions } from "../../src/vm/client.js";
 import { VmExecutor } from "../../src/vm/executor.js";
-import { bootLinux } from "../../src/vm/linux.js";
+import { bootLinux, emulation } from "../../src/vm/linux.js";
 import { type Folder, Guest, VmManager, type VmOptions } from "../../src/vm/manager.js";
 
 const IMAGE = process.env.SUROGATE_VM_IMAGE ?? fileURLToPath(new URL("../../../images/guest/out", import.meta.url));
@@ -137,6 +139,14 @@ function agentDiskWith(dir: string, init: string): string {
 const host = userInfo();
 const USER: HostUser = { uid: host.uid, gid: host.gid, name: host.username, home: host.homedir };
 
+// The device each guest opens for KVM: /dev/kvm, unless the job hides it.
+const KVM = process.env.SUROGATE_VM_KVM;
+
+beforeAll(() => {
+  if (process.env.SUROGATE_VM_TESTS !== "1" || KVM !== undefined) return;
+  expect(emulation(), "the VM tests need KVM, or SUROGATE_VM_KVM naming a device that does not exist to run them emulated").toBeNull();
+});
+
 describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 60_000 }, () => {
   let dir: string;
   let folder: string;
@@ -159,7 +169,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     options = {
       kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
       // Under $XDG_RUNTIME_DIR: a vhost-user socket's path must fit in 108 bytes.
-      run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "logs", "console.log"), user: USER,
+      run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "logs", "console.log"), user: USER, kvm: KVM,
     };
     const first = await Guest.boot(bootLinux, options);
     console.log(`M1, first boot, formatting the sessions disk: hello after ${first.helloMs.toFixed(0)} ms`);
@@ -1200,7 +1210,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest's memory", { t
     mkdirSync(join(dir, "folder"));
     options = {
       kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
-      run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER,
+      run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER, kvm: KVM,
     };
     guest = await Guest.boot(bootLinux, options);
     expect(await guest.ready(ROOT, folderOf(join(dir, "folder")))).toBeNull();
@@ -1238,7 +1248,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     for (const name of ["a", "b"]) mkdirSync(join(dir, name));
     options = {
       kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
-      run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER,
+      run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER, kvm: KVM,
     };
     managers = [];
   });
@@ -1274,6 +1284,22 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     expect(await op(OTHER, join(dir, "b"), "run", { command: "pwd; id -u", workdir: null, timeout: 10 })).toEqual({
       ok: { output: `${join(dir, "b")}\n${FIRST_UID + 1}\n`, returncode: 0, timed_out: false },
     });
+  });
+
+  it("starts QEMU and each folder's virtiofsd with none of the app's environment but its PATH", async () => {
+    // What a user's shell may export, and either program acts on, or a node it started would.
+    const exported = { OPENSSL_CONF: join(dir, "openssl.cnf"), NODE_OPTIONS: "--title=leaked", SUROGATE_EXPORTED: "1" };
+    Object.assign(process.env, exported);
+    try {
+      managers.push(new VmManager(options));
+      expect(await op(ROOT, join(dir, "a"), "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+    } finally {
+      for (const name of Object.keys(exported)) delete process.env[name];
+    }
+    // Each process's environment as it was started, as /proc keeps it.
+    const environ = (pid: number) => readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").filter(Boolean).map((entry) => entry.slice(0, entry.indexOf("=")));
+    expect(environ(qemuPid())).toEqual(["PATH"]);
+    expect(environ(newestDaemon(options.run))).toEqual(["PATH"]);
   });
 
   it("refuses a folder replaced since its chat was bound", async () => {
@@ -1528,7 +1554,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
   it("gives two apps' data folders two guests, and one's boot leaves the other's running", async () => {
     // A runtime folder of the test's own, as each app has its own data.
     const runtime = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-rt-"));
-    const env = { SUROGATE_VM_IMAGE: IMAGE, XDG_RUNTIME_DIR: runtime };
+    const env = { SUROGATE_VM_IMAGE: IMAGE, XDG_RUNTIME_DIR: runtime, ...(KVM === undefined ? {} : { SUROGATE_VM_KVM: KVM }) };
     const [one, two] = ["one", "two"].map((app) => new VmManager({ ...vmOptions(join(dir, app), USER, env), agentDisk: options.agentDisk }));
     try {
       const echo = (manager: VmManager | undefined, root: string, path: string, line: string) =>
@@ -1612,7 +1638,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     vm = new VmClient({
       vm: {
         kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
-        run, console: join(dir, "console.log"), user: USER,
+        run, console: join(dir, "console.log"), user: USER, kvm: KVM,
       },
     });
     const { dev, ino } = statSync(folder);
@@ -1997,7 +2023,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
     vm = new VmClient({
       vm: {
         kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
-        run, console: join(dir, "console.log"), user: USER,
+        run, console: join(dir, "console.log"), user: USER, kvm: KVM,
       },
     });
     // The chat as the app binds one, working freely: only the network asks.
@@ -2159,5 +2185,101 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
+  });
+});
+
+// M12: the same workload in a guest booted emulated, under QEMU's TCG, as this computer
+// would boot it with no KVM, and in one with KVM. Logged for Progress; the emulated
+// guest must answer within Section 11's emulated waits.
+// A job that hides KVM boots every guest above emulated already: M12 measures the two side by side.
+describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1" || KVM !== undefined)("the emulated guest (M12)", { timeout: 600_000 }, () => {
+  let dir: string;
+  const runs: string[] = [];
+  const pss = (pid: number) => Number(/^Pss:\s+(\d+)/m.exec(readFileSync(`/proc/${pid}/smaps_rollup`, "utf8"))?.[1] ?? 0) / 1024;
+
+  beforeAll(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-emulated-")));
+  });
+
+  afterAll(() => {
+    for (const run of runs) rmSync(run, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // One guest's workload, booted with *kvm* the device KVM is opened from: its numbers, by name.
+  async function measure(name: string, kvm: string): Promise<Record<string, number | string | boolean | null>> {
+    const folder = join(dir, `${name}-folder`);
+    mkdirSync(folder);
+    const run = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-"));
+    runs.push(run);
+    const options: VmOptions = {
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, `${name}-sessions.img`),
+      run, console: join(dir, `${name}-console.log`), user: USER, kvm,
+    };
+    // The first boot formats the sessions disk; the one measured checks it, as every later boot does.
+    await (await Guest.boot(bootLinux, options)).stop();
+    const guest = await Guest.boot(bootLinux, options);
+    const command = (line: string, timeout = 300) => guest.op(ROOT, "run", { command: line, workdir: null, timeout }, signal());
+    const took = async (work: () => Promise<unknown>) => {
+      const begun = performance.now();
+      const done = await work();
+      expect(done).toMatchObject({ ok: { returncode: 0, timed_out: false } });
+      return Math.round(performance.now() - begun);
+    };
+    try {
+      const qemu = Number(readFileSync(join(run, "qemu.pid"), "utf8"));
+      const booted = pss(qemu);
+      expect(await guest.ready(ROOT, folderOf(folder))).toBeNull();
+      const firstMs = Math.round(performance.now() - guest.launched);
+      expect(await command("echo hi")).toMatchObject({ ok: { output: "hi\n" } });
+      // What the agent reads to grow its own bounds.
+      const flagged = ((await command("cat /proc/cmdline")) as { ok: { output: string } }).ok.output.includes(" surogate.emulated=1");
+      const pings: number[] = [];
+      for (let n = 0; n < 20; n += 1) {
+        const begun = performance.now();
+        expect(await guest.request({ type: "ping" })).toMatchObject({ type: "pong" });
+        pings.push(performance.now() - begun);
+      }
+      // A file this computer wrote, read at once by a command, twenty times; then 64 MiB read through the share.
+      const fresh = await took(async () => {
+        for (let n = 0; n < 20; n += 1) {
+          writeFileSync(join(folder, "fresh.txt"), `${n}\n`);
+          expect(await command("cat fresh.txt")).toMatchObject({ ok: { output: `${n}\n` } });
+        }
+        return { ok: { returncode: 0, timed_out: false } };
+      });
+      writeFileSync(join(folder, "big.bin"), Buffer.alloc(64 * 1024 * 1024, 7));
+      const readMs = await took(() => command("cat big.bin > /dev/null"));
+      const pipMs = await took(() => command("pip install --no-cache-dir --quiet requests==2.32.3 && python3 -c 'import requests'"));
+      const importMs = await took(() => command("python3 -c 'import numpy, pandas, matplotlib'"));
+      const used = pss(qemu);
+      // The keepalive's margin: the agent's answer to a ping while eight busy loops hold every vCPU for 20 s.
+      const busy = guest.op(ROOT, "run", { command: "for n in 1 2 3 4 5 6 7 8; do timeout 20 sh -c 'while :; do :; done' & done; wait", workdir: null, timeout: 60 }, signal());
+      let slowest = 0;
+      for (const end = performance.now() + 20_000; performance.now() < end; await new Promise((resolve) => setTimeout(resolve, 500))) {
+        const begun = performance.now();
+        expect(await guest.request({ type: "ping" }, 90_000)).toMatchObject({ type: "pong" });
+        slowest = Math.max(slowest, performance.now() - begun);
+      }
+      await busy;
+      return {
+        emulated: guest.emulated, flagged, helloMs: Math.round(guest.helloMs), firstMs, pingMs: Number(median(pings).toFixed(2)),
+        freshMs: Math.round(fresh / 20), readMBs: Math.round(64 / (readMs / 1000)), pipMs, importMs,
+        busyPingMs: Math.round(slowest), qemuPssMiB: Math.round(booted), qemuPssAfterMiB: Math.round(used),
+      };
+    } finally {
+      await guest.stop();
+    }
+  }
+
+  it("boots emulated with no KVM, within the emulated hello's 120 s, and runs what a guest with KVM runs", async () => {
+    const emulated = await measure("tcg", join(dir, "no-kvm"));
+    const kvm = await measure("kvm", "/dev/kvm");
+    console.log(`M12 emulated: ${JSON.stringify(emulated)}`);
+    console.log(`M12 KVM: ${JSON.stringify(kvm)}`);
+    expect(emulated).toMatchObject({ emulated: "no-kvm", flagged: true });
+    expect(kvm).toMatchObject({ emulated: null, flagged: false });
+    expect(emulated.helloMs).toBeLessThan(120_000);
+    expect(readFileSync(join(dir, "tcg-console.log"), "utf8")).toMatch(/surogate: the protected-names rule attached 11 of 11 hooks/);
   });
 });

@@ -9,10 +9,11 @@ import {
   accessSync, closeSync, constants, existsSync, ftruncateSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync,
 } from "node:fs";
 import { connect, type Socket } from "node:net";
+import { userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 import type { Share } from "../guest/protocol.js";
-import type { BootVm, VmBackend, VmOptions } from "./manager.js";
+import type { BootVm, Emulated, VmBackend, VmOptions } from "./manager.js";
 import { Qmp, qemuArgs, ROOT_PORTS, VIRTIOFSD, virtiofsdArgs } from "./qemu.js";
 
 const SESSIONS_BYTES = 32 * 1024 ** 3;
@@ -58,9 +59,14 @@ export function sweep(run: string): void {
   mkdirSync(run, { recursive: true, mode: 0o700 });
 }
 
+// What QEMU and virtiofsd are given of the app's environment: its PATH, where setpriv finds QEMU and
+// virtiofsd finds newuidmap and newgidmap, and nothing else: the user's shell may export what either
+// acts on, OPENSSL_CONF and the loader's variables among them.
+const toolEnv = () => ({ PATH: process.env.PATH ?? "" });
+
 // A child that dies with this process, and the end of what it said on stderr.
 function launch(argv: string[]): { child: ChildProcess; said: () => string } {
-  const child = spawn("/usr/bin/setpriv", ["--pdeathsig", "KILL", "--", ...argv], { stdio: ["ignore", "ignore", "pipe"] });
+  const child = spawn("/usr/bin/setpriv", ["--pdeathsig", "KILL", "--", ...argv], { stdio: ["ignore", "ignore", "pipe"], env: toolEnv() });
   let said = "";
   child.stderr?.on("data", (chunk: Buffer) => {
     said = (said + chunk.toString()).slice(-4000);
@@ -103,11 +109,48 @@ async function reach(path: string, qemu: ChildProcess, deadline: number): Promis
 }
 
 /**
+ * Null when this user can open *kvm* read and write, as QEMU does for KVM; otherwise why
+ * the guest runs emulated. One that cannot open it but is in its group (in *groups*,
+ * /etc/group), as the install script's user is until they log in again, is told to.
+ */
+export function emulation(kvm = "/dev/kvm", groups = "/etc/group"): Emulated | null {
+  try {
+    closeSync(openSync(kvm, constants.O_RDWR));
+    return null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EACCES" && (error as NodeJS.ErrnoException).code !== "EPERM") return "no-kvm";
+  }
+  let line: string | undefined;
+  try {
+    line = readFileSync(groups, "utf8").split("\n").find((entry) => entry.startsWith(`${basename(kvm)}:`));
+  } catch {
+    // No group file to read: as one that does not name this user.
+  }
+  const [, , gid, members = ""] = line?.split(":") ?? [];
+  const named = members.split(",").includes(userInfo().username);
+  return named && !process.getgroups?.().includes(Number(gid)) ? "relogin" : "no-access";
+}
+
+// QEMU's words when it cannot use KVM it could open: another hypervisor holds it, or the host's VM lacks it.
+const KVM_FAILED = /failed to initialize kvm|Could not access KVM kernel module/;
+
+/**
  * QEMU on *options*, once its control and net ports and its monitor have taken their
- * connections: its runtime folder swept first, and the sparse sessions disk made
- * at the first boot. Rejects with why not, QEMU's own words included.
+ * connections: with KVM when this user can open it, and emulated otherwise, or when
+ * QEMU could not use it. Its runtime folder is swept first, and the sparse sessions
+ * disk made at the first boot. Rejects with why not, QEMU's own words included.
  */
 export const bootLinux: BootVm = async (options, signal, deadline) => {
+  const emulated = emulation(options.kvm);
+  try {
+    return await launchVm(options, signal, deadline, emulated);
+  } catch (error) {
+    if (emulated !== null || signal?.aborted || !KVM_FAILED.test((error as Error).message)) throw error;
+    return launchVm(options, signal, deadline, "kvm-failed");
+  }
+};
+
+async function launchVm(options: VmOptions, signal: AbortSignal | undefined, deadline: number, emulated: Emulated | null): Promise<VmBackend> {
   if (signal?.aborted) throw new Error("The boot was stopped");
   // Its uid and gid maps: without them no folder could be shared, and virtiofsd's own words would not reach the user.
   if (!onPath("newuidmap") || !onPath("newgidmap")) throw new Error("virtiofsd needs newuidmap and newgidmap (the uidmap package)");
@@ -120,7 +163,7 @@ export const bootLinux: BootVm = async (options, signal, deadline) => {
     closeSync(fd);
   }
   mkdirSync(dirname(options.console), { recursive: true, mode: 0o700 });
-  const { child: qemu, said } = launch(["qemu-system-x86_64", ...qemuArgs(options, options.run, options.console, options.cpus)]);
+  const { child: qemu, said } = launch(["qemu-system-x86_64", ...qemuArgs(options, options.run, options.console, options.cpus, emulated !== null)]);
   const halt = () => qemu.kill("SIGKILL");
   signal?.addEventListener("abort", halt, { once: true });
   let control: Socket | null = null;
@@ -130,7 +173,7 @@ export const bootLinux: BootVm = async (options, signal, deadline) => {
     net = control ? await reach(join(options.run, "net.sock"), qemu, deadline) : null;
     const monitor = net ? await reach(join(options.run, "qmp.sock"), qemu, deadline) : null;
     if (!control || !net || !monitor) throw new Error(ended(qemu) ? "QEMU exited" : "QEMU did not open its sockets");
-    return new LinuxVm(options, qemu, said, control, net, await Qmp.open(monitor, deadline));
+    return new LinuxVm(options, qemu, said, control, net, await Qmp.open(monitor, deadline), emulated);
   } catch (error) {
     control?.destroy();
     net?.destroy();
@@ -140,7 +183,7 @@ export const bootLinux: BootVm = async (options, signal, deadline) => {
   } finally {
     signal?.removeEventListener("abort", halt);
   }
-};
+}
 
 // A folder shared into the guest: its number, the root port it is on, and its virtiofsd.
 interface Shared {
@@ -170,6 +213,7 @@ class LinuxVm implements VmBackend {
     readonly control: Socket,
     readonly net: Socket,
     private readonly qmp: Qmp,
+    readonly emulated: Emulated | null,
   ) {
     this.exited = exited(qemu).then(said);
   }

@@ -22,27 +22,35 @@ import { bootLinux } from "./linux.js";
 import { type Egress, NetProxy, withNotice } from "./proxy.js";
 import type { Disks } from "./qemu.js";
 
-const HELLO_MS = 15_000;
-// A ping every PING_MS; MISSED in a row unanswered is a hung guest.
+// A ping every PING_MS, with KVM or emulated.
 const PING_MS = 10_000;
-const MISSED = 3;
-// The agent's own bounds on a setup fit inside it: 5 s to mount the share, 3 s for
-// what the root ran before to end, and 5 s for its runner to start.
-const SETUP_MS = 15_000;
-// A share's hot-add, from the agent's uid to the folder in the guest (Section 11's timeouts).
-const SHARE_MS = 15_000;
+// Section 11's waits for a boot, with KVM and emulated, where everything in the guest is slower:
+// - helloMs, from the launch to the agent's hello;
+// - missed, the pings in a row unanswered that make a hung guest;
+// - powerOffMs, from the shutdown asked to the VM's exit, past which it is ended;
+// - setupMs, a root's set-up, and the agent's answer to a teardown. The agent's own bounds
+//   fit inside it: its share's mount, what the root ran before to end, and its runner's start;
+// - shareMs, a share's hot-add, from the agent's uid to the folder in the guest, and its removal.
+export const WAITS = {
+  kvm: { helloMs: 15_000, missed: 3, powerOffMs: 5_000, setupMs: 15_000, shareMs: 15_000 },
+  emulated: { helloMs: 120_000, missed: 9, powerOffMs: 30_000, setupMs: 90_000, shareMs: 90_000 },
+} as const;
 // The agent gives its roots uids from here up.
 const FIRST_UID = 10_000;
-// From the shutdown asked to the VM's exit: past it, the VM is ended (Section 11, Lifecycle).
-const POWER_OFF_MS = 5_000;
 // This computer's wall clock past its monotonic one by more than this since the last look: it slept.
 const SLEPT_MS = 2_000;
 const MAX_TIMER_MS = 2 ** 31 - 1;
+
+// Why a boot runs emulated, under QEMU's TCG, rather than with KVM (spec, Section 11): this
+// computer has no hardware virtualization (no-kvm); its user cannot open it, and is in its group
+// from the next login on (relogin) or is not (no-access); or QEMU could not use it (kvm-failed).
+export type Emulated = "no-kvm" | "no-access" | "relogin" | "kvm-failed";
 
 export interface VmOptions extends Disks {
   run: string; // the backend's runtime folder, this user's own: on Linux, the sockets and pidfiles
   console: string; // the guest's console log
   user: HostUser; // whom the roots run for: the name and home they see
+  kvm?: string; // the device KVM is opened from: /dev/kvm
   cpus?: number;
   pingMs?: number;
   shareMs?: number;
@@ -70,6 +78,8 @@ export interface VmBackend {
   readonly net: Duplex;
   /** Settles once the VM has gone, however it went, with the end of what its hypervisor said, or "". */
   readonly exited: Promise<string>;
+  /** Null with the OS's hardware virtualization, else why the VM runs emulated. */
+  readonly emulated: Emulated | null;
   /**
    * *folder* shared into the running guest for the root whose guest uid is *uid*.
    * Resolves with how the agent mounts it, whose kind also says who maps the
@@ -128,6 +138,8 @@ export interface VmOperation {
 }
 
 export const unavailable = (why: string): Outcome => ({ error: { type: "unavailable", message: `This computer's sandbox ${why}` } });
+// What the agent is told once a chat, at the end of its first run's output, while the guest runs emulated.
+export const EMULATED_NOTICE = "This computer runs commands in an emulated sandbox, about 5 to 20 times slower than usual. Give long commands more time.";
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 // The folder is not the one its chat was bound to: its share would serve whatever is at the path now.
@@ -201,6 +213,7 @@ export class Guest {
   private keepalive: NodeJS.Timeout | undefined;
   // Pings in a row the agent has not answered.
   private missed = 0;
+  readonly emulated: Emulated | null;
   // This computer's wall clock less its monotonic one, at the last look: the sleep is what it grew by since.
   private offset = Date.now() - performance.now();
   private readonly shareMs: number;
@@ -230,12 +243,14 @@ export class Guest {
       if (entry) entry.setup = null;
     });
     control.onHandles((root, handles, live) => told(root, { handles, live }));
+    this.emulated = vm.emulated;
+    const waits = WAITS[vm.emulated ? "emulated" : "kvm"];
     let waiting = false;
     this.keepalive = setInterval(() => {
       // A tick may come before the wake's resume: the sleep is told whichever comes first.
       this.wake();
       this.missed = waiting ? this.missed + 1 : 0;
-      if (this.missed >= MISSED) return this.lose();
+      if (this.missed >= waits.missed) return this.lose();
       if (waiting) return;
       waiting = true;
       void control.request({ type: "ping" }).then((pong) => {
@@ -243,9 +258,9 @@ export class Guest {
       });
     }, options.pingMs ?? PING_MS);
     this.keepalive.unref();
-    this.shareMs = options.shareMs ?? SHARE_MS;
-    this.setupMs = options.setupMs ?? SETUP_MS;
-    this.powerOffMs = options.powerOffMs ?? POWER_OFF_MS;
+    this.shareMs = options.shareMs ?? waits.shareMs;
+    this.setupMs = options.setupMs ?? waits.setupMs;
+    this.powerOffMs = options.powerOffMs ?? waits.powerOffMs;
     // Each connection a root's command makes, judged with the root the agent named.
     this.proxy = new NetProxy(vm.net, { egress });
   }
@@ -256,13 +271,14 @@ export class Guest {
    */
   static async boot(boot: BootVm, options: VmOptions, signal?: AbortSignal, told: Told = () => {}, egress = REFUSING): Promise<Guest> {
     const launched = performance.now();
-    const deadline = launched + HELLO_MS;
-    const vm = await boot(options, signal, deadline);
+    // The backend's own part, QEMU's sockets and monitor, is as quick emulated: the guest has not begun.
+    const vm = await boot(options, signal, launched + WAITS.kvm.helloMs);
     const halt = () => void vm.kill();
     signal?.addEventListener("abort", halt, { once: true });
     // Stopped between the backend's listener and this one.
     if (signal?.aborted) halt();
     try {
+      const deadline = launched + WAITS[vm.emulated ? "emulated" : "kvm"].helloMs;
       const control = await ControlLink.open(vm.control, options.user, deadline, vm.exited);
       return new Guest(options, vm, control, launched, performance.now() - launched, told, egress);
     } catch (error) {
@@ -343,7 +359,7 @@ export class Guest {
   /**
    * *folder*, shared into the guest for *root* once its identity is checked again
    * and the agent has given the root's guest uid. Resolves with how the agent mounts
-   * it. A uid not given within SHARE_MS stops the guest, as a setup with no answer
+   * it. A uid not given within shareMs stops the guest, as a setup with no answer
    * does; the backend ends a VM that cannot share any more, and the guest goes with it.
    */
   async share(root: string, folder: Folder): Promise<Share> {
@@ -376,7 +392,7 @@ export class Guest {
     const entry = this.roots.get(root);
     if (!entry) return;
     // A setup under way lands first: the teardown then ends what it set up. One that
-    // does not land within SETUP_MS loses the guest, the root's processes with it.
+    // does not land within setupMs loses the guest, the root's processes with it.
     if ((await Promise.race([entry.setup, late(this.setupMs)])) === "late") return this.lose();
     entry.setup = null;
     // One that could not be added has left already.
@@ -397,7 +413,7 @@ export class Guest {
   /**
    * The guest's own stop, the spike's sync before kill: its agent ends every root, writes
    * the sessions disk out and lets it go, and powers the guest off. A VM still running
-   * POWER_OFF_MS after the ask is ended. Settles once all of it has gone.
+   * powerOffMs after the ask is ended. Settles once all of it has gone.
    */
   stop(): Promise<void> {
     this.stopping ??= (async () => {
@@ -472,6 +488,8 @@ export class VmManager {
   private failed: string | null = null;
   // Operations and teardowns under way: a guest with none, and no root, stops.
   private working = 0;
+  // The chats told that their commands run emulated: once a chat, whichever boot it was in.
+  private readonly noticed = new Set<string>();
 
   // *told*: each change of a root's processes in its guests. *egress*: who lets a root's commands reach past the package hosts.
   constructor(
@@ -504,7 +522,10 @@ export class VmManager {
       const failure = await Promise.race([guest.ready(operation.root, operation.folder, operation.ended), aborted(signal)]);
       if (failure === "aborted") return CANCELLED;
       if (failure) return this.stopping ? unavailable("is stopping") : failure;
-      return await guest.op(operation.root, operation.kind, operation.args, signal);
+      const outcome = await guest.op(operation.root, operation.kind, operation.args, signal);
+      if (!guest.emulated || operation.kind !== "run" || !("ok" in outcome) || this.noticed.has(operation.root)) return outcome;
+      this.noticed.add(operation.root);
+      return withNotice(outcome, EMULATED_NOTICE);
     } finally {
       this.done();
     }
