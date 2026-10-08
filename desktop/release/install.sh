@@ -461,20 +461,24 @@ kvm_group() {
 # The newest release at $1, checked as the user's update would be, then applied. An installed
 # version newer than it stays (a mirror can lag, or a cache): the rest of the install repairs around it.
 install_latest() {
-  local base="$1" download release version installed tarball=""
+  local base="$1" download release version size installed tarball=""
   scratch download --tmpdir tmp.XXXXXXXXXX
   # curl reads its address's letters as UTF-8 (C.UTF-8, which has no language of its own): a
   # server's name may have letters outside ASCII, as the name the user fetched this script from
   # may, and in a locale without them curl refuses the name before it looks it up.
-  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' -o "$download/manifest.json" "$base/desktop/latest.json" \
+  # No download is longer than what it is for, whatever its server sends, into root's /tmp, which
+  # may be memory: a manifest is a line of 4096 bytes at most, as an apply takes one; its signature
+  # is Ed25519's 64 bytes, and one more shows one that is too long; and a tarball is the size its
+  # signed manifest names.
+  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 4096 -o "$download/manifest.json" "$base/desktop/latest.json" \
     || fail "could not download $base/desktop/latest.json"
-  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' -o "$download/manifest.json.sig" "$base/desktop/latest.json.sig" \
+  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 65 -o "$download/manifest.json.sig" "$base/desktop/latest.json.sig" \
     || fail "could not download $base/desktop/latest.json.sig"
   signed "$download/manifest.json" "$download/manifest.json.sig" \
     || fail "$base/desktop/latest.json is not signed by Surogate's release key"
   release="$(release_of "$download/manifest.json")" \
     || fail "$base/desktop/latest.json is not a release of Surogate Desktop for this computer"
-  read -r version _ <<<"$release"
+  read -r version _ size <<<"$release"
   installed="$(installed_version)"
   if [ -n "$installed" ] && dpkg --compare-versions "$version" lt "$installed"; then
     say "kept the installed $installed, newer than the server's $version"
@@ -484,7 +488,7 @@ install_latest() {
   if ! whole "$download/manifest.json" "$ROOT/versions/$version"; then
     say "downloading Surogate Desktop $version"
     tarball="$download/release.tar.gz"
-    LC_ALL=C.UTF-8 curl -q -fSL --proto '=https,http' -o "$tarball" "$base/desktop/$(jq -r .url "$download/manifest.json")" \
+    LC_ALL=C.UTF-8 curl -q -fSL --proto '=https,http' --max-filesize "$size" -o "$tarball" "$base/desktop/$(jq -r .url "$download/manifest.json")" \
       || fail "could not download Surogate Desktop $version from $base"
   fi
   apply "$download/manifest.json" "$download/manifest.json.sig" "$tarball"

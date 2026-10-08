@@ -23,14 +23,18 @@ const ENABLED = process.env.SUROGATE_INSTALL_TESTS === "1";
 const CALL_MS = 300_000;
 
 // A static server of the folder it is given, on a port of its own, which it prints. A proxy's
-// request, which names the whole URL, is served by its path alike.
+// request, which names the whole URL, is served by its path alike. While the folder holds a file
+// named unsized, it does not say how much it sends, as a server need not.
 const SERVE = `
 const { createServer } = require("node:http");
-const { readFileSync } = require("node:fs");
+const { existsSync, readFileSync } = require("node:fs");
 const { join } = require("node:path");
 createServer((request, response) => {
   try {
-    response.end(readFileSync(join(process.argv[1], decodeURIComponent(new URL(request.url, "http://x").pathname))));
+    const body = readFileSync(join(process.argv[1], decodeURIComponent(new URL(request.url, "http://x").pathname)));
+    if (existsSync(join(process.argv[1], "unsized"))) response.write(body);
+    else response.setHeader("Content-Length", body.length).write(body);
+    response.end();
   } catch {
     response.writeHead(404).end();
   }
@@ -1698,6 +1702,47 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     // The lock by itself, from the script's functions without its last line, in German: its folder made, then found there.
     const alone = root(`rm -rf ${LOCKS}; for found in no yes; do ${GERMAN} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && lock' || exit; done; stat -c '%f %u' ${LOCKS}`);
     expect(alone).toMatchObject({ status: 0, stdout: "41c0 0\n", stderr: "" });
+  });
+
+  it("downloads no more of a release than its signed manifest names, and no more of a manifest or a signature than one holds, whatever its server sends", () => {
+    publish("2.3.0");
+    const desktop = join(www(), "desktop");
+    const tarball = join(desktop, "releases", "2.3.0", "surogate-desktop-2.3.0-linux-x64.tar.gz");
+    const kept = Object.fromEntries(["latest.json", "latest.json.sig"].map((name) => [name, readFileSync(join(desktop, name))]));
+    const release = readFileSync(tarball);
+    // What the install says last: curl's own words for a download past its bound, then the script's line.
+    const stopped = (line: string) => {
+      const installed = install();
+      expect(installed.status, line).toBe(1);
+      expect(installed.stderr.trimEnd().split("\n").slice(-2), line).toEqual([expect.stringMatching(/^curl: \(63\) .*[Mm]aximum (allowed )?file size/), `Surogate Desktop: ${line}`]);
+      // Its download's folder goes, and nothing is installed.
+      expect(root("find /tmp -mindepth 1 -maxdepth 1 -name 'tmp.*'; test ! -e /opt/surogate/current").stdout, line).toBe("");
+    };
+    // A server that does not say how much it sends: the download stops at its bound, into root's /tmp, which is memory on Ubuntu 26.04.
+    writeFileSync(join(www(), "unsized"), "");
+    try {
+      // A manifest is a line, of 4096 bytes at most.
+      writeFileSync(join(desktop, "latest.json"), Buffer.concat([kept["latest.json"]!, Buffer.alloc(4097 - kept["latest.json"]!.length, " ")]));
+      stopped(`could not download ${base}/desktop/latest.json`);
+      writeFileSync(join(desktop, "latest.json"), kept["latest.json"]!);
+      // Its signature is Ed25519's 64 bytes.
+      writeFileSync(join(desktop, "latest.json.sig"), Buffer.concat([kept["latest.json.sig"]!, Buffer.alloc(2)]));
+      stopped(`could not download ${base}/desktop/latest.json.sig`);
+      writeFileSync(join(desktop, "latest.json.sig"), kept["latest.json.sig"]!);
+      // The tarball is the size its signed manifest names, and here a megabyte more.
+      writeFileSync(tarball, Buffer.concat([release, Buffer.alloc(1024 * 1024)]));
+      stopped(`could not download Surogate Desktop 2.3.0 from ${base}`);
+    } finally {
+      rmSync(join(www(), "unsized"));
+    }
+    // And from a server that says how much it would send: nothing of it is asked for.
+    stopped(`could not download Surogate Desktop 2.3.0 from ${base}`);
+    // The release as it was signed is installed.
+    writeFileSync(tarball, release);
+    const installed = install();
+    expect(installed.status, installed.stderr).toBe(0);
+    expect(current()).toBe("/opt/surogate/versions/2.3.0");
+    expect(uninstall().status).toBe(0);
   });
 
   it("looks up a server whose name has a letter outside ASCII, as the user's own download of the script did: root's part reads its base's letters as UTF-8", () => {
