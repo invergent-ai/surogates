@@ -12,7 +12,8 @@ import type { Launch } from "./host.js";
 // The same from src/browser and from dist/browser.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
 export const BROWSER_HOST = join(PACKAGE, "dist", "browser", "main.js");
-const STOP_MS = 5_000;
+// Above the host's own bound on its browser's close (RELEASE_MS).
+const STOP_MS = 10_000;
 
 export const CANCELLED: Outcome = {
   error: { type: "cancelled", message: "The session stopped this before the computer finished it" },

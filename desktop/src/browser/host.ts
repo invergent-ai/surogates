@@ -5,7 +5,7 @@
 // (main.ts); the browser dies with it, as its pipe closes.
 
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { type BrowserContext, chromium, type Page } from "playwright-core";
@@ -54,6 +54,8 @@ const CHECK_MS = 15_000;
 // How long a new tab may take; and how long a browser that refused one may take to quit, as it does after its last tab.
 const TAB_MS = 10_000;
 const QUIT_MS = 2_000;
+// How long a closing browser's processes may take to exit (Edge's take about 5 s on xvfb), below the client's STOP_MS.
+const RELEASE_MS = 6_000;
 export const PROXY_BYPASSED =
   "The agent's browser would not go through Surogate's proxy: its proxy settings are managed elsewhere on this computer, for example by a policy. So it is not used.";
 
@@ -90,6 +92,40 @@ function opened(context: BrowserContext): Promise<Page> {
     void page.then((late) => late.close(), () => {}).catch(() => {});
     throw error;
   }).finally(settle);
+}
+
+// The processes on *profile*, by pid: each names it on its command line. None where /proc is not.
+function holding(profile: string): number[] {
+  const named = [`${profile}\0`, `${profile}/`, `${profile} `];
+  try {
+    return readdirSync("/proc").filter((pid) => /^\d+$/.test(pid)).flatMap((pid) => {
+      try {
+        const line = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+        return named.some((name) => line.includes(name)) ? [Number(pid)] : [];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Settles once no process holds *profile*. A browser can answer its close before its last
+ * process has exited, as Edge does, and those still running write the profile again: a removal
+ * would leave it half there, and a launch would meet them on it. What is left at RELEASE_MS is killed.
+ */
+async function released(profile: string): Promise<void> {
+  const deadline = Date.now() + RELEASE_MS;
+  while (holding(profile).length > 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+  for (const pid of holding(profile)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Gone already.
+    }
+  }
 }
 
 /** How the browser is launched: headed, its sandbox on, over the pipe, and every request through the proxy on *port*. */
@@ -144,6 +180,8 @@ export class BrowserHost {
   private live: BrowserContext | null = null;
   // A browser being closed whole: the next launch waits for it, as the profile is still its.
   private ending: Promise<void> | null = null;
+  // The profile of the browser launched last: a close waits until nothing holds it.
+  private profile: string | null = null;
   // Each calling session's pages: its tab first, then the popups it opened, in order.
   private readonly tabs = new Map<string, Page[]>();
   // The chat each calling session is of: its root's.
@@ -196,7 +234,7 @@ export class BrowserHost {
     const running = await this.running?.catch(() => null);
     this.running = null;
     this.live = null;
-    await running?.close().catch(() => {});
+    if (running) await this.shut(running);
     await this.ending;
     await this.proxy?.server.close();
     this.proxy = null;
@@ -339,10 +377,17 @@ export class BrowserHost {
       this.running = null;
       this.spare = null;
     }
-    const ending = context.close().catch(() => {});
+    const ending = this.shut(context);
     this.ending = ending;
     await ending;
     if (this.ending === ending) this.ending = null;
+  }
+
+  // *context*'s browser closes, every process of it: one still running at RELEASE_MS is killed.
+  private async shut(context: BrowserContext): Promise<void> {
+    const closing = context.close().catch(() => {});
+    if (this.profile !== null) await released(this.profile);
+    await closing;
   }
 
   // The browser in service, or one launched now: a browser the user closed is launched again.
@@ -370,8 +415,10 @@ export class BrowserHost {
   }
 
   private async launch(launch: Launch): Promise<BrowserContext> {
-    // The browser before it has gone: a new one on its profile would hand itself to it.
+    // The browser before it has gone, every process of it: a new one on its profile would hand itself to it.
     await this.ending;
+    await released(launch.profile);
+    this.profile = launch.profile;
     this.proxy ??= await (async () => {
       const server = new BrowserProxy(this.options.proxy);
       return { server, port: await server.listen() };

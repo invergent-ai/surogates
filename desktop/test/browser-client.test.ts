@@ -195,6 +195,20 @@ describe.skipIf(!run)("the browser host's process", () => {
     expect(browserOf(profile)).toEqual([]);
   });
 
+  it("leaves nothing writing its profile once it is stopped, so that a log out's removal right after forgets it whole", async () => {
+    profile = mkdtempSync(join(tmpdir(), "sb-profiles-"));
+    const client = new BrowserClient();
+    const launch = { executable: EXECUTABLE!, profile: join(profile, "browser") };
+    const signal = new AbortController().signal;
+    await client.perform(launch, operation("op-1", "browser.navigate", { url: "http://127.0.0.1:9/" }), signal);
+    await client.perform(launch, operation("op-2", "browser.evaluate", { code: "await new Promise((r) => setTimeout(r, 1500)); return 1;" }), signal);
+    await client.stop();
+    rmSync(profile, { recursive: true, force: true });
+    // As the browser would write it again, if any of it were still running.
+    await new Promise((done) => setTimeout(done, 2_000));
+    expect(existsSync(profile)).toBe(false);
+  });
+
   it("launches a browser the user picked once, headless, and says its version", async () => {
     const client = new BrowserClient();
     try {

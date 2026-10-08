@@ -783,7 +783,7 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
     sessionStore.clear();
     if (kept) await endDevice(kept);
     // The browser closed with the device: its profiles can go now.
-    if (forgetBrowser && profiles) trying(() => rmSync(profiles, { recursive: true, force: true }));
+    if (forgetBrowser && profiles) trying(() => rmSync(profiles, { recursive: true, force: true, maxRetries: 3 }));
     // Ended at the agent too, best effort: offline, the refresh token stays valid there until it expires.
     void ending?.end().catch(report);
     account = null;
