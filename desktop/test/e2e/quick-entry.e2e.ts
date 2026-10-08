@@ -9,7 +9,7 @@ import { rmSync } from "node:fs";
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
+import { connect, FakeAgent, signedInAndAdded, signIn, webClient } from "./fake-agent.js";
 import { dataHome, launch, pickInTray, quit, shellEnv, shellPage, stubNative, trayLabels, watchTray } from "./launch.js";
 
 let home: string;
@@ -401,6 +401,33 @@ describe("quick entry", () => {
     await expect.poll(() => quick.textContent("#refused")).toBe("Sign in to your agent in Surogate's window first.");
     expect(await quick.inputValue("#text")).toBe("Draft the March invoices");
     expect(new URL(client.url()).pathname).toBe("/chat");
+    expect(await handed(app!)).toEqual([]);
+  });
+
+  it("sends nothing to an agent that keeps one conversation, says why, and leaves the window and Settings as they are", async () => {
+    agent.config = { ...agent.config, multi_session: false };
+    // Signed in, with no computer added: such an agent's chats stay in the cloud.
+    app = await launch(home);
+    await stubNative(app);
+    await watchTray(app);
+    const page = await shellPage(app);
+    await connect(page, origin);
+    await signIn(app, page, agent);
+    const client = await webClient(app, origin);
+    await watchHanded(app!);
+    await client.evaluate(() => history.pushState(null, "", "/inbox"));
+    await page.click("#open-settings");
+    await expect.poll(() => settingsOpen(app!)).toBe(true);
+    await pickInTray(app!, "Quick entry");
+    const quick = await quickPage(app!);
+    await quick.fill("#text", "Draft the March invoices");
+    await quick.press("#text", "Enter");
+    await expect.poll(() => quick.textContent("#refused"))
+      .toBe("This agent keeps one conversation, and quick entry starts new chats, so nothing was sent. Write to it in Surogate's window.");
+    expect(await quick.inputValue("#text")).toBe("Draft the March invoices");
+    expect((await quickWindow(app!))?.shown).toBe(true);
+    expect(new URL(client.url()).pathname).toBe("/inbox");
+    expect(await settingsOpen(app!)).toBe(true);
     expect(await handed(app!)).toEqual([]);
   });
 

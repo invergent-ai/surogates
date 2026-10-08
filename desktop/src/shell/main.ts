@@ -1608,6 +1608,9 @@ async function sendQuickEntry(text: string): Promise<string | null> {
   if (!shown || !view || !agent || notTheirs()) return SIGN_IN;
   const unreachable = `Surogate cannot reach ${agent.name} right now, so nothing was sent.`;
   if (shown.unreachable !== null) return unreachable;
+  // Quick entry starts new chats, and an agent of one conversation has none to start: said before
+  // Settings closes or the window loads anything. Its page says the same, where it knows better than the app's last read.
+  if (agent.multiSession === false) return "This agent keeps one conversation, and quick entry starts new chats, so nothing was sent. Write to it in Surogate's window.";
   // A newer message takes the place of one still on its way.
   if (handing) handed(handing.id, "A newer message took its place.");
   quickEntry?.hide();
