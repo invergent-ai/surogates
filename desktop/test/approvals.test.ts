@@ -1016,6 +1016,16 @@ describe("the browser on this computer", () => {
     expect(journal.bindings.get(ROOT)?.mode).toBe("free");
   });
 
+  it("tells whoever watches of a chat's first use allowed once, and of nothing for a chat this computer did not bind", () => {
+    bind(ROOT, "free");
+    const heard: string[] = [];
+    journal.bindings.watch((root) => heard.push(root));
+    journal.bindings.allowBrowser(ROOT);
+    journal.bindings.allowBrowser(ROOT);
+    journal.bindings.allowBrowser("77777777-7777-4777-8777-777777777777");
+    expect(heard).toEqual([ROOT]);
+  });
+
   it("forgets a deleted chat's first use with its binding", () => {
     bind(ROOT, "free");
     journal.bindings.allowBrowser(ROOT);
