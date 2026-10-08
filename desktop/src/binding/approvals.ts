@@ -545,8 +545,8 @@ export class Approvals {
     // Fail closed: the tool hosts read the binding again only when it runs, so a bind
     // arriving meanwhile must not let it run unasked.
     if (!binding) return { answer: FOLDER_UNAVAILABLE };
-    // A mode it does not know asks. So does a download its user made while they held the browser, in either
-    // mode: saved in the chat's folder, it is the agent's to read.
+    // A mode it does not know asks. So does a download taken for its user's, one that came while they held the
+    // browser or just after they handed it back, in either mode: saved in the chat's folder, it is the agent's to read.
     if (binding.mode === "free" && download !== "user") return { answer: null };
     // The file helper takes only its own resolved paths as keys, so a link or a ".."
     // cannot carry a write that skips its prompt here out of this folder; a key that
