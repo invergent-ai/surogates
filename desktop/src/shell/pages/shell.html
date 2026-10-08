@@ -55,7 +55,7 @@
         <li><button class="item" type="button" data-path="/skills" data-icon="sparkles">Skills</button></li>
       </ul>
       <div class="group-head" id="projects-head"><span>Projects</span></div>
-      <div class="projects" id="projects"></div>
+      <div class="projects" id="projects" data-focus-list="projects"></div>
       <p class="warn" id="failure" role="alert" hidden></p>
       <p class="warn" id="notice" hidden></p>
       <p class="warn" id="device-action" hidden><span id="device-action-text"></span> <button class="link" id="device-action-button" type="button"></button></p>
@@ -105,7 +105,7 @@
           <label class="search wide" data-icon="search">
             <input id="project-search" type="search" placeholder="Search projects…" aria-label="Search projects" autocomplete="off" spellcheck="false" />
           </label>
-          <div class="cards" id="cards"></div>
+          <div class="cards" id="cards" data-focus-list="cards"></div>
           <p class="desc" id="no-projects">No projects yet. Start one with New project: its conversation coordinates the threads that do the work.</p>
           <p class="desc" id="no-match" hidden>No projects match.</p>
         </section>
@@ -130,10 +130,10 @@
       <div class="threads" id="threads">
         <h2 class="greeting" id="greeting">Welcome back.</h2>
         <p class="desc" id="greeting-line"></p>
-        <details class="section" data-group="waiting" open><summary data-icon="chevron-down">Waiting on you <span class="count">0</span></summary><p class="desc">Threads that need your reply or approval, or that failed.</p><ul></ul></details>
-        <details class="section" data-group="working" open><summary data-icon="chevron-down">Working <span class="count">0</span></summary><ul></ul></details>
-        <details class="section" data-group="idle" open><summary data-icon="chevron-down">Idle <span class="count">0</span></summary><ul></ul></details>
-        <details class="section" data-group="resolved"><summary data-icon="chevron-down">Resolved <span class="count">0</span></summary><ul></ul></details>
+        <details class="section" data-group="waiting" data-focus-list="waiting" open><summary data-icon="chevron-down" data-focus="summary:waiting">Waiting on you <span class="count">0</span></summary><p class="desc">Threads that need your reply or approval, or that failed.</p><ul></ul></details>
+        <details class="section" data-group="working" data-focus-list="working" open><summary data-icon="chevron-down" data-focus="summary:working">Working <span class="count">0</span></summary><ul></ul></details>
+        <details class="section" data-group="idle" data-focus-list="idle" open><summary data-icon="chevron-down" data-focus="summary:idle">Idle <span class="count">0</span></summary><ul></ul></details>
+        <details class="section" data-group="resolved" data-focus-list="resolved"><summary data-icon="chevron-down" data-focus="summary:resolved">Resolved <span class="count">0</span></summary><ul></ul></details>
       </div>
       <div class="library" id="library" hidden>
         <ul id="files"></ul>

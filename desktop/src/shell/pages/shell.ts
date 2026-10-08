@@ -2,7 +2,7 @@
 // Overview pane. The agent's web client is drawn over the centre's hole, in a view of
 // its own. All text comes from the main process and is set with textContent only.
 
-import { ago, byId, fillIcons, icon, markTheme } from "./ui.js";
+import { ago, byId, fillIcons, icon, keepFocus, markTheme } from "./ui.js";
 
 // A project, as Section 12's ProjectSummary has it.
 interface ProjectRow {
@@ -102,6 +102,7 @@ function group(project: ProjectRow, selected: boolean): HTMLElement {
   const wrapper = element("div", "group");
   wrapper.dataset.project = project.id;
   const open = button(selected ? "item project selected" : "item project", "", () => void shell.project(project.id));
+  open.dataset.focus = `project:${project.id}`;
   open.append(icon("folder"), element("span", "name", project.name));
   if (project.waiting > 0) {
     open.append(element("span", "waiting"));
@@ -115,6 +116,7 @@ function group(project: ProjectRow, selected: boolean): HTMLElement {
 function card(project: ProjectRow): HTMLElement {
   const made = button("card", "", () => void shell.project(project.id));
   made.dataset.project = project.id;
+  made.dataset.focus = `card:${project.id}`;
   const badge = element("span", "badge");
   badge.append(icon("folder"));
   made.append(badge, element("span", "name", project.name), element("span", "age", ago(project.updatedAt, Date.now(), "long")));
@@ -162,6 +164,7 @@ function threadRow(thread: ThreadRow): HTMLElement {
   const row = button("thread", "", () => void shell.thread(thread.id));
   row.dataset.group = thread.group;
   row.dataset.thread = thread.id;
+  row.dataset.focus = `thread:${thread.id}`;
   const title = element("span", "title", thread.title);
   if (thread.place.kind === "device") {
     const place = element("span", "place");
@@ -184,6 +187,7 @@ function threadRow(thread: ThreadRow): HTMLElement {
   const resolved = thread.group === "resolved";
   const act = button("act", resolved ? "Reopen" : "Resolve", () => void (resolved ? shell.reopen(thread.id) : shell.resolve(thread.id)));
   act.dataset.act = thread.id;
+  act.dataset.focus = `act:${thread.id}`;
   act.setAttribute("aria-label", `${resolved ? "Reopen" : "Resolve"} ${thread.title}`);
   const item = element("li", "");
   item.append(row, act);
@@ -238,8 +242,13 @@ function showTab(): void {
   byId("routines").hidden = tab !== "routines";
 }
 
+// Drawn anew, the lists keep the keyboard where it was.
 async function render(): Promise<void> {
   const state = await shell.state();
+  keepFocus(() => draw(state));
+}
+
+function draw(state: State): void {
   state.projects.sort(byActivity);
   last = state;
   renderOverview(state);

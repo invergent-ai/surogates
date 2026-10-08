@@ -7,7 +7,7 @@ import { FIXTURE_IDS, type ProjectFixtures, projectFixtures } from "../../../web
 import { ACCOUNT, connect, FakeAgent, signIn, webClient } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
-const { report: REPORT, budget: BUDGET, question: QUESTION, idle: IDLE } = FIXTURE_IDS;
+const { report: REPORT, budget: BUDGET, question: QUESTION, approval: APPROVAL, failed: FAILED, idle: IDLE, resolved: RESOLVED } = FIXTURE_IDS;
 
 let home: string;
 let agent: FakeAgent;
@@ -201,6 +201,40 @@ describe("the Overview pane", () => {
     expect(await page.textContent(act)).toBe("Reopen");
     await page.click(act);
     await expect.poll(() => texts(page, ".section summary")).toEqual(["Waiting on you 3", "Working 2", "Idle 1", "Resolved 1"]);
+  });
+
+  it("keeps the keyboard on what had it when the window's page draws again: a project in the sidebar, a thread's row", async () => {
+    const { shell, page } = await opened();
+    const redraw = () => shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("shell:changed"));
+    for (const selector of [`#projects [data-project="${BUDGET}"] .project`, `[data-thread="${QUESTION}"]`]) {
+      await page.focus(selector);
+      const before = await page.evaluate(() => (document.activeElement as HTMLElement).outerHTML);
+      await redraw();
+      // Drawn anew: the element is another, and the keyboard is on it.
+      await expect.poll(() => page.evaluate((chosen) => document.activeElement === document.querySelector(chosen), selector)).toBe(true);
+      expect(await page.evaluate(() => (document.activeElement as HTMLElement).outerHTML)).toBe(before);
+    }
+  });
+
+  it("gives the keyboard, after a Resolve or Reopen moves its row, to the row that took its place, or to where the row went", async () => {
+    const { page } = await opened();
+    const focused = () => page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.focus ?? null);
+    // The second of three waiting threads, resolved from the keyboard: the third takes its place.
+    await page.focus(`[data-act="${APPROVAL}"]`);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => texts(page, ".section summary")).toEqual(["Waiting on you 2", "Working 2", "Idle 1", "Resolved 2"]);
+    await expect.poll(focused).toBe(`act:${FAILED}`);
+    // The only idle thread: its group goes, and the folded group it went to has the keyboard.
+    await page.focus(`[data-act="${IDLE}"]`);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => texts(page, ".section summary")).toEqual(["Waiting on you 2", "Working 2", "Idle 0", "Resolved 3"]);
+    await expect.poll(focused).toBe("summary:resolved");
+    // Reopened from the Resolved group: the next resolved row takes its place.
+    await page.keyboard.press("Enter");
+    await page.focus(`[data-act="${IDLE}"]`);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => texts(page, ".section summary")).toEqual(["Waiting on you 2", "Working 2", "Idle 1", "Resolved 2"]);
+    await expect.poll(focused).toBe(`act:${RESOLVED}`);
   });
 
   it("shows a row's Resolve or Reopen in its age's place, over nothing else of the row", async () => {

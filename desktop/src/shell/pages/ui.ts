@@ -108,6 +108,31 @@ export function markTheme(): void {
 
 export const byId = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 
+// What of *list* can have the keyboard now: its elements named with data-focus, as they show.
+const shownIn = (list: Element | null): HTMLElement[] =>
+  list ? [...list.querySelectorAll<HTMLElement>("[data-focus]")].filter((found) => found.checkVisibility()) : [];
+
+/**
+ * Run *redraw*, which draws lists anew, and keep the keyboard where it was. An element a redraw makes
+ * again is named by its data-focus, and a list it can leave by its data-focus-list. The keyboard goes
+ * back to the element of the same name while it shows in the same list. One that went to another
+ * list, out of sight, or away gives it to what took its place in its list, or else to the first of
+ * the list it went to, as a folded group's summary.
+ */
+export function keepFocus(redraw: () => void): void {
+  const had = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>("[data-focus]");
+  const list = had?.closest<HTMLElement>("[data-focus-list]")?.dataset.focusList;
+  const at = had ? shownIn(had.closest("[data-focus-list]")).indexOf(had) : -1;
+  redraw();
+  if (!had) return;
+  const now = document.activeElement as HTMLElement | null;
+  if (now && now !== document.body && now.checkVisibility()) return;
+  const same = document.querySelector<HTMLElement>(`[data-focus="${CSS.escape(had.dataset.focus!)}"]`);
+  if (same?.checkVisibility() && same.closest<HTMLElement>("[data-focus-list]")?.dataset.focusList === list) return same.focus();
+  const left = list === undefined ? [] : shownIn(document.querySelector(`[data-focus-list="${CSS.escape(list)}"]`));
+  (left[Math.min(at, left.length - 1)] ?? shownIn(same?.closest("[data-focus-list]") ?? null)[0])?.focus();
+}
+
 const RELATIVE = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
 
 /** How long ago *when* was: "17m" in a row, or "17 minutes ago" on a card. A time ahead of *now* is now. */
