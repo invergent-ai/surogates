@@ -703,6 +703,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
   it("says what stops it: its arguments, a user who is not root, too little room, and bubblewrap missing", () => {
     const usage = "Surogate Desktop: usage: surogate-apply-update --apply <manifest> <signature> <tarball>\n";
     expect(root("/opt/surogate-test/install.sh --apply /home/tester/manifest.json")).toMatchObject({ status: 1, stderr: usage });
+    expect(root("/opt/surogate-test/install.sh --apply /home/tester/manifest.json /home/tester/manifest.json.sig ''")).toMatchObject({ status: 1, stderr: usage });
     expect(docker(["exec", "-u", "tester", box.container, "/opt/surogate-test/install.sh", "--apply", ...files().split(" ")]))
       .toMatchObject({ status: 1, stderr: "Surogate Desktop: applying a release needs administrator rights\n" });
     const tarball = releaseOf("1.0.0");
@@ -838,14 +839,26 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     publish("1.1.0");
   });
 
-  it("installs the same release again, and keeps the version before it", () => {
+  it("installs the same release again, without downloading it while it is here whole, and keeps the version before it", () => {
     // The server's 1.1.0 is a build of its own since the last install: the installed one is replaced by it.
     const replaced = install();
     expect(replaced.status, replaced.stderr).toBe(0);
+    expect(replaced.stdout).toContain("Surogate Desktop: downloading Surogate Desktop 1.1.0\n");
     expect(versions()).toEqual(["1.0.0", "1.1.0"]);
+    // Here whole, it is repaired as it is: its bwrap taken again, and nothing downloaded.
+    expect(root("echo stale >/opt/surogate/versions/1.1.0/bin/bwrap").status).toBe(0);
     const repaired = install();
     expect(repaired.status, repaired.stderr).toBe(0);
+    expect(repaired.stdout).not.toContain("downloading");
     expect(repaired.stdout).toContain("Surogate Desktop: 1.1.0 is installed\n");
+    expect(root("cmp /usr/bin/bwrap /opt/surogate/versions/1.1.0/bin/bwrap").status).toBe(0);
+    expect(versions()).toEqual(["1.0.0", "1.1.0"]);
+    // Without one of its programs, it is downloaded and unpacked again.
+    expect(root("rm /opt/surogate/versions/1.1.0/surogate").status).toBe(0);
+    const mended = install();
+    expect(mended.status, mended.stderr).toBe(0);
+    expect(mended.stdout).toContain("Surogate Desktop: downloading Surogate Desktop 1.1.0\n");
+    expect(root("test -x /opt/surogate/versions/1.1.0/surogate").status).toBe(0);
     expect(versions()).toEqual(["1.0.0", "1.1.0"]);
   });
 

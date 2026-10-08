@@ -162,11 +162,12 @@ taken() {
 # it is not a plain file, folder or link inside it, moved into versions/<version> with its own copy
 # of bwrap, and /opt/surogate/current is switched to it by one rename; its helper is then the one
 # pkexec runs. An older version than the installed one is refused. The previous version is kept,
-# and older ones not running are removed, by an update; a repair removes none.
+# and older ones not running are removed, by an update; a repair removes none. A version that is
+# here whole is repaired as it is, and its tarball is not read: $3 may then be empty.
 apply() {
   local manifest="$1" signature="$2" tarball="$3" file
   # A folder or a missing file is refused here; a link, as each is copied, below.
-  for file in "$manifest" "$signature" "$tarball"; do
+  for file in "$manifest" "$signature" ${tarball:+"$tarball"}; do
     as_reader test -f "$file" || fail "$(named "$file") is not a downloaded release's file"
   done
   mkdir -p "$ROOT/versions" "$ROOT/bin"
@@ -201,21 +202,23 @@ apply() {
   # AppArmor profile, not one Ubuntu attaches to /usr/bin/bwrap. Made again at each apply, as apt
   # may have updated it.
   [ -x /usr/bin/bwrap ] || fail "bubblewrap is missing: run Surogate Desktop's install script again"
-  # Room for the tarball's copy and the tree it unpacks to, which is about two and a half times
-  # its size. No more of the tarball is copied than the size that room was found for.
-  local size need room
-  size="$(as_reader stat -c %s -- "$tarball" 2>/dev/null)" && [[ "$size" =~ ^[0-9]+$ ]] || fail "$(named "$tarball") is not a downloaded release's file"
-  need=$(( size / 256 ))
-  room="$(df --output=avail -k "$ROOT" | tail -n 1)"
-  [ "$room" -ge "$need" ] || fail "$ROOT needs $(( (need + 1023) / 1024 )) MB free to apply this release, and has $(( room / 1024 )) MB"
-  taken "$tarball" "$work/release.tar.gz" "$size"
-  [ "$(sha256sum <"$work/release.tar.gz" | cut -d' ' -f1)" = "$sha256" ] || fail "the downloaded release is not the one its manifest names"
 
   # What this apply puts under a name is first made whole in its own folder: the version's tree,
   # when its folder is not here whole already, or its new bwrap alone; the link that current
   # becomes; and the helper pkexec runs.
   local folder="$ROOT/versions/$version" name="surogate-desktop-$version-linux-x64" top=""
   if ! whole "$work/manifest.json" "$folder"; then
+    # The install script hands no tarball for a version it found here whole.
+    [ -n "$tarball" ] || fail "$version is no longer whole in $ROOT: run Surogate Desktop's install script again"
+    # Room for the tarball's copy and the tree it unpacks to, which is about two and a half times
+    # its size. No more of the tarball is copied than the size that room was found for.
+    local size need room
+    size="$(as_reader stat -c %s -- "$tarball" 2>/dev/null)" && [[ "$size" =~ ^[0-9]+$ ]] || fail "$(named "$tarball") is not a downloaded release's file"
+    need=$(( size / 256 ))
+    room="$(df --output=avail -k "$ROOT" | tail -n 1)"
+    [ "$room" -ge "$need" ] || fail "$ROOT needs $(( (need + 1023) / 1024 )) MB free to apply this release, and has $(( room / 1024 )) MB"
+    taken "$tarball" "$work/release.tar.gz" "$size"
+    [ "$(sha256sum <"$work/release.tar.gz" | cut -d' ' -f1)" = "$sha256" ] || fail "the downloaded release is not the one its manifest names"
     # tar unpacks a set-id member without its bit (--no-same-permissions), so that only the
     # archive's own listing shows one: the fourth and seventh letters of a member's mode.
     tar -tvzf "$work/release.tar.gz" >"$work/listing" 2>/dev/null || fail "the release's archive could not be unpacked"
@@ -334,7 +337,7 @@ kvm_group() {
 # The newest release at $1, checked as the user's update would be, then applied. An installed
 # version newer than it stays (a mirror can lag, or a cache): the rest of the install repairs around it.
 install_latest() {
-  local base="$1" download release version installed
+  local base="$1" download release version installed tarball=""
   download="$(mktemp -d)"
   OWN+=("$download")
   curl -q -fsSL --proto '=https,http' -o "$download/manifest.json" "$base/desktop/latest.json" \
@@ -351,10 +354,14 @@ install_latest() {
     say "kept the installed $installed, newer than the server's $version"
     return 0
   fi
-  say "downloading Surogate Desktop $version"
-  curl -q -fSL --proto '=https,http' -o "$download/release.tar.gz" "$base/desktop/$(jq -r .url "$download/manifest.json")" \
-    || fail "could not download Surogate Desktop $version from $base"
-  apply "$download/manifest.json" "$download/manifest.json.sig" "$download/release.tar.gz"
+  # A version that is here whole is not downloaded again: apply repairs it as it is.
+  if ! whole "$download/manifest.json" "$ROOT/versions/$version"; then
+    say "downloading Surogate Desktop $version"
+    tarball="$download/release.tar.gz"
+    curl -q -fSL --proto '=https,http' -o "$tarball" "$base/desktop/$(jq -r .url "$download/manifest.json")" \
+      || fail "could not download Surogate Desktop $version from $base"
+  fi
+  apply "$download/manifest.json" "$download/manifest.json.sig" "$tarball"
 }
 
 # The launcher, the desktop entry that registers surogate:// for every user, and the polkit
@@ -445,7 +452,7 @@ main() {
     --apply)
       # The helper runs the system's own tools, wherever its caller's PATH points.
       export PATH=/usr/sbin:/usr/bin:/sbin:/bin
-      [ "$#" -eq 4 ] || fail "usage: surogate-apply-update --apply <manifest> <signature> <tarball>"
+      [ "$#" -eq 4 ] && [ -n "$4" ] || fail "usage: surogate-apply-update --apply <manifest> <signature> <tarball>"
       [ "$EUID" -eq 0 ] || fail "applying a release needs administrator rights"
       supported
       asker
