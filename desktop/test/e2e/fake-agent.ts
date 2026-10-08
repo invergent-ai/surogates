@@ -14,6 +14,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { expect } from "vitest";
 
 import type { Project, ProjectFixtures, ProjectsSource, ThreadRow } from "../../../web/src/lib/projects.js";
+import type { SignedInAccount } from "../../src/shell/session.js";
 import { FakeLinkServer } from "../fake-server.js";
 
 // As surogates/devices/store.py issues one: surg_dev_ and token_urlsafe(33).
@@ -22,7 +23,7 @@ export const TOKEN = `surg_dev_${"t".repeat(44)}`;
 export const ROTATED = `surg_dev_${"r".repeat(44)}`;
 
 // The signed-in user, as /auth/me and the fake link's welcome name them.
-export const ACCOUNT = { name: "Flavius Burca", email: "flavius@example.com", userId: "u", orgId: "o" };
+export const ACCOUNT = { name: "Flavius Burca", email: "flavius@example.com", userId: "u", orgId: "o", orgName: "Surogate" };
 
 // The routes a test can hold: who the agent is, who signed in, adding this computer, reauthorizing it,
 // an inbox item's read and a chat's title.
@@ -50,7 +51,7 @@ export class FakeAgent {
   // /auth/me; below zero, the page registers them only when a test calls window.fakeProjects.register().
   registerAfterMs = 0;
   // Who signs in, as /auth/me answers.
-  account = ACCOUNT;
+  account: SignedInAccount = ACCOUNT;
   // False: the agent adds or restores a computer only on a more recent sign-in.
   recent = true;
   // How long before the token exchange the user signed in, as the tokens' auth_time says.
@@ -132,8 +133,8 @@ export class FakeAgent {
     if (path === "/api/v1/auth/me" && bearer) {
       await this.answered("me");
       if (this.meStatus !== 200) return json(response, this.meStatus, {});
-      const { name, email, userId, orgId } = this.account;
-      return json(response, 200, { id: userId, org_id: orgId, email, display_name: name });
+      const { name, email, userId, orgId, orgName } = this.account;
+      return json(response, 200, { id: userId, org_id: orgId, org_name: orgName, email, display_name: name });
     }
     if (request.method === "POST" && path === "/api/v1/auth/oauth/web-code" && bearer) return json(response, 200, { code: "web-code" });
     if (request.method === "POST" && path === "/api/v1/devices" && bearer) {

@@ -130,11 +130,12 @@ def _staging_request(
     *,
     bundle: _FakeBundle | None = None,
     system_bundle: _FakeBundle | None = None,
+    session_config: dict | None = None,
 ) -> SimpleNamespace:
     """A request whose session authorizes and whose storage is local disk."""
 
     async def _authorized(*_args: object) -> SimpleNamespace:
-        return SimpleNamespace(config={})
+        return SimpleNamespace(config=session_config or {})
 
     monkeypatch.setattr(
         skills_routes, "_authorize_session_for_staging", _authorized,
@@ -270,3 +271,45 @@ async def test_agent_bundle_skill_files_still_come_from_skills_prefix(
         session_id, ".skills/proc/references/notes.md",
     ) in keys
     assert result["content"] == "notes"
+
+
+ON_A_COMPUTER = {"execution": {"kind": "device", "device_id": str(uuid4())}, "workspace_path": "/home/me/notes"}
+
+
+@pytest.mark.asyncio
+async def test_a_local_folder_chats_skill_is_not_staged_in_the_cloud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    system_bundle = _xlsx_system_bundle()
+    system_bundle._files["xlsx/assets/template.xlsx"] = b"\xff\xfe"
+    request = _staging_request(tmp_path, monkeypatch, system_bundle=system_bundle, session_config=ON_A_COMPUTER)
+
+    detail = await view_skill(name="xlsx", request=request, tenant=_make_tenant(), session_id=uuid4())
+    binary = await read_skill_file(
+        name="xlsx", path="assets/template.xlsx", request=request, tenant=_make_tenant(), session_id=uuid4(),
+    )
+
+    # Its tool call puts them in its folder (surogates.tools.builtin.skills).
+    assert detail.linked_files == ["assets/template.xlsx", "scripts/recalc.py"]
+    assert detail.staged_at is None
+    assert binary == {
+        "file_path": "assets/template.xlsx", "content": "[Binary file]", "binary": True,
+        "hint": 'Call skill_view("xlsx") to put this skill\'s files in the folder.',
+    }
+    assert await request.app.state.storage.list_keys(STORAGE_BUCKET, prefix="") == []
+
+
+@pytest.mark.asyncio
+async def test_a_skill_file_is_read_as_stored_for_a_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    system_bundle = _xlsx_system_bundle()
+    system_bundle._files["xlsx/assets/template.xlsx"] = b"\xff\xfe"
+    request = _staging_request(tmp_path, monkeypatch, system_bundle=system_bundle)
+
+    raw = await read_skill_file(
+        name="xlsx", path="assets/template.xlsx", request=request, tenant=_make_tenant(), raw=True,
+    )
+
+    assert raw.body == b"\xff\xfe"
+    assert raw.media_type == "application/octet-stream"

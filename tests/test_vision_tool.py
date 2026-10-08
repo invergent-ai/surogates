@@ -329,3 +329,122 @@ async def test_execute_single_tool_passes_active_harness_model_and_client(tmp_pa
 
     assert json.loads(result["content"])["analysis"] == "vision result"
     assert create.await_args.kwargs["model"] == "surogate"
+
+
+@pytest.mark.asyncio
+async def test_vision_analyze_reads_a_local_folders_image_through_its_tool_call(tmp_path: Path) -> None:
+    from surogates.devices.workspace import DeviceWorkspaceIO
+    from surogates.tools.builtin.vision import _vision_analyze_handler
+    from surogates.tools.workspace_io import LocalWorkspaceIO
+    from tests.fake_laptop import InProcessRunner
+
+    folder = tmp_path.resolve()
+    (folder / "shots").mkdir()
+    _png(folder / "shots" / "a.png")
+    files = DeviceWorkspaceIO(InProcessRunner(LocalWorkspaceIO(workspace_path=str(folder))), root=str(folder))
+    create = AsyncMock(return_value=_fake_response())
+    kwargs = {
+        "workspace_io": files,
+        # The cloud's storage holds nothing of a local folder's.
+        "storage": FakeStorage({}),
+        "session_id": UUID(int=1),
+        "session_config": {"storage_bucket": "agent-bucket", "workspace_path": str(folder)},
+        "llm_client": SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
+        "model": "surogate",
+    }
+
+    for image in ("shots/a.png", f"{folder}/shots/a.png"):
+        payload = json.loads(await _vision_analyze_handler({"image": image}, **kwargs))
+        assert payload["analysis"] == "a small red-orange square", payload
+    assert create.await_args.kwargs["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+    missing = json.loads(await _vision_analyze_handler({"image": "shots/none.png"}, **kwargs))
+    assert missing["error"] == "Image file not found: shots/none.png"
+    outside = json.loads(await _vision_analyze_handler({"image": "../elsewhere.png"}, **kwargs))
+    assert "error" in outside
+
+
+@pytest.mark.asyncio
+async def test_a_local_folders_image_over_the_cap_is_refused_before_it_is_read(tmp_path: Path, monkeypatch) -> None:
+    from surogates.devices.workspace import DeviceWorkspaceIO
+    from surogates.tools.builtin import vision
+    from surogates.tools.workspace_io import LocalWorkspaceIO
+    from tests.fake_laptop import InProcessRunner
+
+    folder = tmp_path.resolve()
+    _png(folder / "big.png")
+    monkeypatch.setattr(vision, "_MAX_IMAGE_BYTES", 10)
+    runner = InProcessRunner(LocalWorkspaceIO(workspace_path=str(folder)))
+    create = AsyncMock(return_value=_fake_response())
+    payload = json.loads(await vision._vision_analyze_handler(
+        {"image": "big.png"},
+        workspace_io=DeviceWorkspaceIO(runner, root=str(folder)),
+        llm_client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
+        model="surogate",
+    ))
+    assert payload["error"].startswith("Image file is too large:")
+    assert runner.kinds == ["resolve", "stat"]
+    create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_local_folders_image_its_computer_will_not_read_is_said_in_its_words(tmp_path: Path) -> None:
+    from surogates.devices.workspace import DeviceWorkspaceIO
+    from surogates.tools.builtin.vision import _vision_analyze_handler
+    from surogates.tools.workspace_io import LocalWorkspaceIO
+    from tests.fake_laptop import InProcessRunner
+
+    class Revoked(InProcessRunner):
+        async def run(self, kind, args, payload=None):
+            if kind == "read":
+                return {"error": {"type": "revoked", "message": "Local access to this computer was revoked"}}
+            return await super().run(kind, args, payload)
+
+    folder = tmp_path.resolve()
+    _png(folder / "a.png")
+    create = AsyncMock(return_value=_fake_response())
+    payload = json.loads(await _vision_analyze_handler(
+        {"image": "a.png"},
+        workspace_io=DeviceWorkspaceIO(Revoked(LocalWorkspaceIO(workspace_path=str(folder))), root=str(folder)),
+        llm_client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
+        model="surogate",
+    ))
+    assert payload == {"error": "Could not read image a.png: Local access to this computer was revoked"}
+    create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_local_folders_image_is_read_no_further_than_the_cap_whatever_its_stat_said(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from surogates.devices.workspace import DeviceWorkspaceIO
+    from surogates.tools.builtin import vision
+    from surogates.tools.workspace_io import LocalWorkspaceIO
+    from tests.fake_laptop import InProcessRunner
+
+    class Grown(InProcessRunner):
+        """The file grew after its stat: the stat says one byte."""
+
+        asked: list = []
+
+        async def run(self, kind, args, payload=None):
+            outcome = await super().run(kind, args, payload)
+            if kind == "stat" and outcome.get("ok"):
+                outcome["ok"]["size"] = 1
+            if kind == "read":
+                self.asked.append(args["max_bytes"])
+            return outcome
+
+    folder = tmp_path.resolve()
+    _png(folder / "big.png")
+    monkeypatch.setattr(vision, "_MAX_IMAGE_BYTES", 10)
+    runner = Grown(LocalWorkspaceIO(workspace_path=str(folder)))
+    create = AsyncMock(return_value=_fake_response())
+    payload = json.loads(await vision._vision_analyze_handler(
+        {"image": "big.png"},
+        workspace_io=DeviceWorkspaceIO(runner, root=str(folder)),
+        llm_client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
+        model="surogate",
+    ))
+    assert payload["error"].startswith("Image file is too large:"), payload
+    assert runner.asked == [11]
+    create.assert_not_called()

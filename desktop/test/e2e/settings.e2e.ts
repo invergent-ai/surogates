@@ -1,13 +1,14 @@
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { once } from "node:events";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { ACCOUNT, connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
+import { dataHome, ELECTRON, launch, MAIN, quit, secondLaunch, shellPage, stubNative } from "./launch.js";
 
 let home: string;
 let agent: FakeAgent;
@@ -116,6 +117,18 @@ describe("the user menu", () => {
     expect(await shell.evaluate(() => (globalThis as unknown as { opened: unknown[] }).opened.length)).toBe(2);
   });
 
+  it("names the user from the app's own sign-in until the web client reports, with nothing of the organisation", async () => {
+    const shell = await launch(home);
+    app = shell;
+    await stubNative(shell);
+    const page = await shellPage(shell);
+    await connect(page, origin);
+    await signedInAndAdded(shell, page, agent);
+    const { orgName: _, ...shown } = ACCOUNT;
+    await expect.poll(() => page.evaluate(() => (window as unknown as { surogateShell: { state(): Promise<{ account: unknown }> } })
+      .surogateShell.state().then((state) => state.account))).toEqual(shown);
+  });
+
   it("forgets the account once the user signs out in the web client", async () => {
     const { page, client } = await signedIn();
     await client.evaluate(() => window.surogateDesktop!.setAccount(null));
@@ -199,7 +212,7 @@ describe("Settings", () => {
     await settings.fill("#settings-search", "");
     // Off surogate.ai Usage stays gone, the search cleared too.
     expect(await texts(settings, ".settings-nav .item")).toEqual([
-      "General", "Account", "This computer", "Folders and permissionsLater", "SkillsLater", "ConnectorsLater",
+      "General", "Account", "This computer", "Folders and permissions", "SkillsLater", "ConnectorsLater",
     ]);
     expect(await texts(settings, ".settings-nav h3")).toEqual(["Settings", "Customize"]);
   });
@@ -224,7 +237,8 @@ describe("Settings", () => {
     const settings = await settingsPage(shell);
     await settings.click('[data-section="account"]');
     expect(await settings.textContent("#email")).toBe("flavius@example.com");
-    expect(await settings.textContent("#organisation")).toBe("o");
+    // By its name, not its id.
+    expect(await settings.textContent("#organisation")).toBe("Surogate");
     await settings.click('[data-section="computer"]');
     expect(await settings.textContent("#computer")).toBe(hostname());
     expect(await settings.textContent("#connection")).toBe("Connected as Laptop");
@@ -233,10 +247,229 @@ describe("Settings", () => {
     // A development build boots the repository's image, and nothing has stopped it yet.
     expect(await settings.textContent("#sandbox")).toBe("Ready");
     expect([await settings.isHidden("#sandbox-log"), await settings.isHidden("#sandbox-retry")]).toEqual([true, true]);
-    expect(await settings.isDisabled('[data-section="folders"]')).toBe(true);
     // What changes while it is open shows at once.
     await client.evaluate(() => window.surogateDesktop!.setAccount(null));
     await settings.click('[data-section="account"]');
     await expect.poll(() => settings.textContent("#email")).toBe("Not signed in");
+    // Named by the app's own sign-in, not by what the web client reports.
+    expect(await settings.textContent("#organisation")).toBe("Surogate");
+  });
+});
+
+describe("Settings → General", () => {
+  // The value a setting's control shows chosen, or null.
+  const pressed = (settings: Page, setting: string) =>
+    settings.$eval(`[data-setting="${setting}"]`, (control) => control.querySelector<HTMLElement>('[aria-pressed="true"]')?.dataset.value ?? null)
+      .catch(() => null);
+  const preferences = () => JSON.parse(readFileSync(join(home, "surogate", "preferences.json"), "utf8")) as Record<string, unknown>;
+  const menu = (shell: ElectronApplication) => shell.evaluate(({ Menu }) => Menu.getApplicationMenu()?.items.map((item) => item.label));
+  // The app's own questions, as the native box was asked them; and the box held up until it is let go.
+  const asked = (shell: ElectronApplication) =>
+    shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message?: string }> }).asked.map((options) => options.message));
+  const hold = (shell: ElectronApplication) => shell.evaluate(() => Object.assign(globalThis, { hold: true }));
+  const release = (shell: ElectronApplication) => shell.evaluate(() => (globalThis as unknown as { release(): void }).release());
+
+  it("starts at login from an entry in the user's own autostart folder, once it is on, and hidden", async () => {
+    const { shell, page } = await signedIn();
+    // The test's own config folder, as its session's XDG_CONFIG_HOME: never the user's.
+    const entry = join(home, "c", "autostart", "surogate.desktop");
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    expect(await pressed(settings, "startAtLogin")).toBe("off");
+    await settings.click('[data-setting="startAtLogin"] [data-value="on"]');
+    await expect.poll(() => pressed(settings, "startAtLogin")).toBe("on");
+    // A development build starts itself: its Electron, on its main.
+    expect(readFileSync(entry, "utf8").split("\n").find((line) => line.startsWith("Exec="))).toBe(`Exec=${ELECTRON} ${MAIN} --hidden`);
+    await settings.click('[data-setting="startAtLogin"] [data-value="off"]');
+    await expect.poll(() => pressed(settings, "startAtLogin")).toBe("off");
+    expect(existsSync(entry)).toBe(false);
+  });
+
+  it("starts at login from the user's own ~/.config when XDG_CONFIG_HOME is not an absolute path, as the XDG Base Directory specification says", async () => {
+    // A relative one, which would land in the test's own folder were it taken.
+    app = await launch(home, { XDG_CONFIG_HOME: relative(process.cwd(), join(home, "relative")) });
+    await shellPage(app);
+    await app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("settings")!.click());
+    const settings = await settingsPage(app);
+    await settings.click('[data-setting="startAtLogin"] [data-value="on"]');
+    await expect.poll(() => pressed(settings, "startAtLogin")).toBe("on");
+    // The test's own home: never the user's.
+    expect(existsSync(join(home, "h", ".config", "autostart", "surogate.desktop"))).toBe(true);
+    expect(existsSync(join(home, "relative", "autostart"))).toBe(false);
+  });
+
+  // The main window, once there is one: whether its page still loads, and whether it shows.
+  const mainWindow = () => app!.evaluate(({ BrowserWindow }) => {
+    const [main] = BrowserWindow.getAllWindows();
+    return main ? { loading: main.webContents.isLoading(), visible: main.isVisible() } : null;
+  });
+
+  it("shows no window when it starts at login, until it is launched again", async () => {
+    app = await launch(home, {}, ["--hidden"]);
+    await expect.poll(async () => (await mainWindow())?.loading).toBe(false);
+    expect((await mainWindow())?.visible).toBe(false);
+    expect(await secondLaunch(home)).toBe(0);
+    await expect.poll(async () => (await mainWindow())?.visible).toBe(true);
+  });
+
+  it("shows no window at a second start at login while it runs hidden", async () => {
+    app = await launch(home, {}, ["--hidden"]);
+    await expect.poll(async () => (await mainWindow())?.loading).toBe(false);
+    // Started at login again, as a second graphical login of the same user starts it.
+    expect(await secondLaunch(home, "--hidden")).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect((await mainWindow())?.visible).toBe(false);
+  });
+
+  it("shows no window when it starts at login with the window left maximised", async () => {
+    // Maximising a window shows it: one started hidden is maximised once it is first shown.
+    mkdirSync(join(home, "surogate"), { recursive: true });
+    writeFileSync(join(home, "surogate", "window-state.json"), JSON.stringify({ main: { x: 0, y: 0, width: 1000, height: 700, maximized: true } }));
+    app = await launch(home, {}, ["--hidden"]);
+    await expect.poll(async () => (await mainWindow())?.loading).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect((await mainWindow())?.visible).toBe(false);
+    expect(await secondLaunch(home)).toBe(0);
+    await expect.poll(async () => (await mainWindow())?.visible).toBe(true);
+  });
+
+  it("keeps the window maximised after a start at login that quits before the window is shown", async () => {
+    const state = join(home, "surogate", "window-state.json");
+    mkdirSync(join(home, "surogate"), { recursive: true });
+    writeFileSync(state, JSON.stringify({ main: { x: 0, y: 0, width: 1000, height: 700, maximized: true } }));
+    app = await launch(home, {}, ["--hidden"]);
+    await expect.poll(async () => (await mainWindow())?.loading).toBe(false);
+    // The tray's Quit Surogate, with no thread working: the window was never shown.
+    const exited = once(app.process(), "exit");
+    void app.evaluate(({ app: electron }) => electron.quit()).catch(() => {});
+    await exited;
+    expect(JSON.parse(readFileSync(state, "utf8")).main.maximized).toBe(true);
+  });
+
+  it("does not start at login from a build whose path GNOME would not start, and says so", async () => {
+    // This build's Electron, as a folder whose name holds a % would give it.
+    const percent = join(home, "percent.cjs");
+    writeFileSync(percent, `process.execPath = ${JSON.stringify("/opt/100%/electron")};`);
+    app = await launch(home, {}, [], [percent]);
+    await shellPage(app);
+    await app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("settings")!.click());
+    const settings = await settingsPage(app);
+    expect(await settings.textContent("#login-refused")).toBe("This build cannot start at login: GNOME does not start a program whose path holds a %.");
+    expect(await settings.isDisabled('[data-setting="startAtLogin"] [data-value="on"]')).toBe(true);
+    // Asked all the same, as the page could ask: refused, and nothing is written.
+    const set = settings.evaluate(() => (globalThis as unknown as { surogateSettings: { set(key: string, value: string): Promise<void> } })
+      .surogateSettings.set("startAtLogin", "on"));
+    await expect(set).rejects.toThrow("GNOME does not start a program whose path holds a %");
+    expect(existsSync(join(home, "c", "autostart"))).toBe(false);
+  });
+
+  it("turns off an entry already there from a build that cannot start at login", async () => {
+    // Written by an earlier build, or by the user.
+    const entry = join(home, "c", "autostart", "surogate.desktop");
+    mkdirSync(dirname(entry), { recursive: true });
+    writeFileSync(entry, "[Desktop Entry]\nType=Application\nName=Surogate\nExec=/usr/local/bin/surogate --hidden\n");
+    const percent = join(home, "percent.cjs");
+    writeFileSync(percent, `process.execPath = ${JSON.stringify("/opt/100%/electron")};`);
+    app = await launch(home, {}, [], [percent]);
+    await shellPage(app);
+    await app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("settings")!.click());
+    const settings = await settingsPage(app);
+    await expect.poll(() => pressed(settings, "startAtLogin")).toBe("on");
+    expect(await settings.isDisabled('[data-setting="startAtLogin"] [data-value="on"]')).toBe(true);
+    expect(await settings.isDisabled('[data-setting="startAtLogin"] [data-value="off"]')).toBe(false);
+    await settings.click('[data-setting="startAtLogin"] [data-value="off"]');
+    await expect.poll(() => pressed(settings, "startAtLogin")).toBe("off");
+    expect(existsSync(entry)).toBe(false);
+  });
+
+  it("does not start at login from a build whose path systemd's autostart reader would misread, and says so", async () => {
+    // This build's Electron, as a folder whose name holds a $ would give it.
+    const dollar = join(home, "dollar.cjs");
+    writeFileSync(dollar, `process.execPath = ${JSON.stringify("/opt/a$b/electron")};`);
+    app = await launch(home, {}, [], [dollar]);
+    await shellPage(app);
+    await app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("settings")!.click());
+    const settings = await settingsPage(app);
+    expect(await settings.textContent("#login-refused")).toBe(
+      "This build cannot start at login: KDE and other desktops start it through systemd, which misreads a $, a ` or a \\ in its path.",
+    );
+    expect(await settings.isDisabled('[data-setting="startAtLogin"] [data-value="on"]')).toBe(true);
+    const set = settings.evaluate(() => (globalThis as unknown as { surogateSettings: { set(key: string, value: string): Promise<void> } })
+      .surogateSettings.set("startAtLogin", "on"));
+    await expect(set).rejects.toThrow("which misreads a $, a ` or a \\ in its path");
+    expect(existsSync(join(home, "c", "autostart"))).toBe(false);
+  });
+
+  it("quits when the window is closed once Keep running is off, and keeps the choice", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    // On, as the app starts: closing the window hides it, and the device link stays up.
+    expect(await pressed(settings, "keepRunning")).toBe("on");
+    await settings.click('[data-setting="keepRunning"] [data-value="off"]');
+    await expect.poll(() => pressed(settings, "keepRunning")).toBe("off");
+    expect(preferences()).toMatchObject({ keepRunning: false });
+    const exited = once(shell.process(), "exit");
+    await shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.close());
+    await exited;
+  });
+
+  it("puts Developer in the menu only in developer mode, which it asks about before it turns it on", async () => {
+    const { shell, page } = await signedIn();
+    expect(await menu(shell)).toEqual(["File", "Edit", "View", "Help"]);
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    expect(await pressed(settings, "developer")).toBe("off");
+    // Cancelled: it stays off.
+    await shell.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    await settings.click('[data-setting="developer"] [data-value="on"]');
+    await expect.poll(async () => (await asked(shell)).at(-1)).toBe("Turn on developer mode?");
+    expect(await pressed(settings, "developer")).toBe("off");
+    expect(await menu(shell)).toEqual(["File", "Edit", "View", "Help"]);
+    await shell.evaluate(() => Object.assign(globalThis, { answer: 0 }));
+    await settings.click('[data-setting="developer"] [data-value="on"]');
+    await expect.poll(() => menu(shell)).toEqual(["File", "Edit", "View", "Developer", "Help"]);
+    expect(preferences()).toMatchObject({ developer: true });
+    // Off again, with no question, and the developer tools it opened close with it.
+    const questions = (await asked(shell)).length;
+    await shell.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("dev-agent")!.click());
+    const tools = () => shell.evaluate(({ webContents }) => webContents.getAllWebContents().filter((contents) => contents.isDevToolsOpened()).length);
+    await expect.poll(tools).toBe(1);
+    await settings.click('[data-setting="developer"] [data-value="off"]');
+    await expect.poll(() => menu(shell)).toEqual(["File", "Edit", "View", "Help"]);
+    await expect.poll(tools).toBe(0);
+    expect((await asked(shell)).length).toBe(questions);
+  });
+
+  it("asks about developer mode once, however often On is pressed while its question is up", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    await hold(shell);
+    const asking = (await asked(shell)).length + 1;
+    await settings.click('[data-setting="developer"] [data-value="on"]');
+    await expect.poll(async () => (await asked(shell)).length).toBe(asking);
+    await settings.click('[data-setting="developer"] [data-value="on"]');
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect((await asked(shell)).length).toBe(asking);
+    // Its one answer turns it on.
+    await release(shell);
+    await expect.poll(() => pressed(settings, "developer")).toBe("on");
+  });
+
+  it("keeps a surogate:// link waiting while it asks about developer mode, and opens it once answered", async () => {
+    const chat = "7d2e0f8a-2b3c-4d5e-9f60-718293a4b5c6";
+    const { shell, page, client } = await signedIn();
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    await hold(shell);
+    await settings.click('[data-setting="developer"] [data-value="on"]');
+    await expect.poll(async () => (await asked(shell)).at(-1)).toBe("Turn on developer mode?");
+    const before = client.url();
+    expect(await secondLaunch(home, `surogate://open?url=${encodeURIComponent(`${origin}/chat/${chat}`)}`)).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(client.url()).toBe(before);
+    await release(shell);
+    await expect.poll(() => new URL(client.url()).pathname).toBe(`/chat/${chat}`);
   });
 });

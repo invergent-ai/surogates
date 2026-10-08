@@ -651,3 +651,289 @@ async def test_image_unmetered_without_hooks_stays_free(tmp_path):
         workspace_path=str(tmp_path),
     ))
     assert "error" not in result
+
+
+class _Events:
+    def __init__(self):
+        self.emitted = []
+
+    async def emit_event(self, session_id, kind, data):
+        self.emitted.append((session_id, kind, data))
+
+
+class _NoStorage:
+    """The cloud's storage, which a local folder's tool call never touches."""
+
+    async def read(self, *_):
+        raise AssertionError("a local folder's image was read from the cloud's storage")
+
+    async def write(self, *_):
+        raise AssertionError("a local folder's media was written to the cloud's storage")
+
+
+def _on_a_folder(folder, runner=None):
+    from uuid import uuid4
+
+    from surogates.devices.workspace import DeviceWorkspaceIO
+    from surogates.tools.workspace_io import LocalWorkspaceIO
+    from tests.fake_laptop import InProcessRunner
+
+    runner = runner or InProcessRunner(LocalWorkspaceIO(workspace_path=str(folder)))
+    return {
+        "workspace_io": DeviceWorkspaceIO(runner, root=str(folder)),
+        "session_store": _Events(),
+        "session_id": str(uuid4()),
+        "task_id": str(uuid4()),  # the chat's root, as execute_single_tool passes it
+        "storage": _NoStorage(),
+        "session_config": {"storage_bucket": "agent-bucket", "workspace_path": str(folder)},
+    }
+
+
+@pytest.mark.asyncio
+async def test_generate_image_on_a_local_folder_reads_and_writes_the_folder(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler
+
+    folder = tmp_path.resolve()
+    (folder / "in.png").write_bytes(base64.b64decode(_PNG_B64))
+    client = _FakeImageClient(images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}])
+    kwargs = _on_a_folder(folder)
+
+    result = json.loads(await _generate_image_handler(
+        # The agent sees the folder at its real path.
+        {"prompt": "a red square", "input_images": ["in.png"], "output_path": f"{folder}/art/logo.png"},
+        media_gen=_image_cfg(client), **kwargs,
+    ))
+
+    assert result["path"] == "art/logo.png", result
+    assert (folder / "art" / "logo.png").read_bytes() == base64.b64decode(_PNG_B64)
+    sent = client.last_create_kwargs["messages"][0]["content"][1]["image_url"]["url"]
+    assert sent.startswith("data:image/png;base64,")
+    assert result["artifact"] is True
+    [(_, _, made)] = kwargs["session_store"].emitted
+    assert made["kind"] == "image"
+    assert (folder / ".surogates-results" / "artifacts" / kwargs["task_id"] / made["artifact_id"] / "v1.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_a_generated_image_its_user_does_not_allow_says_so(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler
+    from surogates.tools.workspace_io import LocalWorkspaceIO
+    from tests.fake_laptop import InProcessRunner
+
+    class Denying(InProcessRunner):
+        async def run(self, kind, args, payload=None):
+            if kind == "write":
+                return {"error": {"type": "os", "code": "EACCES", "message": "The user did not allow this change"}}
+            return await super().run(kind, args, payload)
+
+    folder = tmp_path.resolve()
+    client = _FakeImageClient(images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}])
+    result = json.loads(await _generate_image_handler(
+        {"prompt": "a red square"},
+        media_gen=_image_cfg(client), **_on_a_folder(folder, Denying(LocalWorkspaceIO(workspace_path=str(folder)))),
+    ))
+
+    # The computer's words, without Python's errno prefix.
+    assert result["error"] == "The user did not allow this change"
+    assert not (folder / "media").exists()
+
+
+@pytest.mark.asyncio
+async def test_generated_media_never_replaces_a_file_of_the_users(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler, _generate_video_handler
+
+    folder = tmp_path.resolve()
+    (folder / "README.md").write_text("mine\n")
+    client = _FakeImageClient(images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}])
+
+    image = json.loads(await _generate_image_handler(
+        {"prompt": "a logo", "output_path": "README.md"}, media_gen=_image_cfg(client), **_on_a_folder(folder),
+    ))
+    video = json.loads(await _generate_video_handler(
+        {"prompt": "a clip", "output_path": f"{folder}/README.md"}, media_gen=_video_cfg(), **_on_a_folder(folder),
+    ))
+
+    # write_file's refusal, before anything is paid for: the model names another file.
+    for refused in (image, video):
+        assert refused["error"].startswith("Refusing to overwrite 'README.md': it already exists."), refused
+    assert client.last_create_kwargs is None
+    assert (folder / "README.md").read_text() == "mine\n"
+
+
+@pytest.mark.asyncio
+async def test_a_path_outside_the_folder_is_the_computers_to_refuse(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler
+
+    folder = tmp_path.resolve()
+    client = _FakeImageClient(images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}])
+    result = json.loads(await _generate_image_handler(
+        {"prompt": "a logo", "output_path": "/home/someone/Desktop/logo.png"},
+        media_gen=_image_cfg(client), **_on_a_folder(folder),
+    ))
+    assert "error" in result and "logo.png" in result["error"], result
+    assert client.last_create_kwargs is None
+    assert list(folder.rglob("*")) == []
+
+
+@pytest.mark.asyncio
+async def test_generated_media_never_goes_into_the_harnesss_own_folder(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler, _generate_video_handler
+
+    folder = tmp_path.resolve()
+    client = _FakeImageClient(images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}])
+    image = json.loads(await _generate_image_handler(
+        {"prompt": "a logo", "output_path": ".surogates-results/skills/deck/assets/logo.png"},
+        media_gen=_image_cfg(client), **_on_a_folder(folder),
+    ))
+    video = json.loads(await _generate_video_handler(
+        {"prompt": "a clip", "output_path": f"{folder}/.surogates-results/clip.mp4"},
+        media_gen=_video_cfg(), **_on_a_folder(folder),
+    ))
+    # Refused before anything is paid for.
+    for refused in (image, video):
+        assert refused == {"error": "That folder is Surogate's own; write somewhere else in the chat's folder."}
+    assert client.last_create_kwargs is None
+    assert not (folder / ".surogates-results").exists()
+
+
+def _revoked(folder, refused: str):
+    """The computer, once its access was revoked for the *refused* kind of operation."""
+    from surogates.tools.workspace_io import LocalWorkspaceIO
+    from tests.fake_laptop import InProcessRunner
+
+    class Revoked(InProcessRunner):
+        async def run(self, kind, args, payload=None):
+            if kind == refused:
+                return {"error": {"type": "revoked", "message": "Local access to this computer was revoked"}}
+            return await super().run(kind, args, payload)
+
+    return Revoked(LocalWorkspaceIO(workspace_path=str(folder)))
+
+
+@pytest.mark.asyncio
+async def test_a_computer_that_refuses_generated_media_or_its_input_says_so_in_its_own_words(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler
+
+    folder = tmp_path.resolve()
+    (folder / "in.png").write_bytes(base64.b64decode(_PNG_B64))
+    client = _FakeImageClient(images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}])
+    # Its input read refused: nothing is generated.
+    unread = json.loads(await _generate_image_handler(
+        {"prompt": "a red square", "input_images": ["in.png"]},
+        media_gen=_image_cfg(client), **_on_a_folder(folder, _revoked(folder, "read")),
+    ))
+    assert unread == {"error": "Could not read image in.png: Local access to this computer was revoked"}
+    assert client.last_create_kwargs is None
+    # Its write refused after the generation.
+    unsaved = json.loads(await _generate_image_handler(
+        {"prompt": "a red square"}, media_gen=_image_cfg(client), **_on_a_folder(folder, _revoked(folder, "write")),
+    ))
+    assert unsaved == {"error": "Local access to this computer was revoked"}
+    assert client.last_create_kwargs is not None
+    assert not (folder / "media").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_file_made_while_its_media_is_generated_is_kept_byte_for_byte(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler
+
+    folder = tmp_path.resolve()
+    target = folder / "art" / "logo.png"
+
+    class MadeMeanwhile(_FakeImageClient):
+        """The user saves a file by that name while the model draws."""
+
+        async def _create(self, **kwargs):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"the user's own logo")
+            return await super()._create(**kwargs)
+
+    client = MadeMeanwhile(images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}])
+    result = json.loads(await _generate_image_handler(
+        {"prompt": "a logo", "output_path": "art/logo.png"}, media_gen=_image_cfg(client), **_on_a_folder(folder),
+    ))
+
+    # Checked again at the write, in write_file's words.
+    assert result == {"error": (
+        "Refusing to overwrite 'art/logo.png': it already exists. "
+        "Name a new file for the generated media, or delete this one first."
+    )}
+    assert target.read_bytes() == b"the user's own logo"
+
+
+@pytest.mark.asyncio
+async def test_a_video_too_large_for_a_local_folder_stops_downloading_once_past_its_cap(tmp_path, monkeypatch):
+    import httpx as _httpx
+
+    from surogates.tools.builtin import media_gen
+
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    monkeypatch.setattr(media_gen, "MAX_WRITE_BYTES", 1_000)
+    sent: list[int] = []
+
+    async def chunks():
+        for _ in range(10):
+            sent.append(500)
+            yield b"x" * 500
+
+    def handler(request):
+        if request.method == "POST":
+            return _httpx.Response(202, json={
+                "id": "job-9", "status": "completed", "unsigned_urls": ["https://openrouter.ai/api/v1/videos/job-9/content"],
+            })
+        return _httpx.Response(200, content=chunks())
+
+    _patch_video_transport(monkeypatch, handler)
+    folder = tmp_path.resolve() / "laptop"
+    folder.mkdir()
+    refused = json.loads(await media_gen._generate_video_handler(
+        {"prompt": "a long clip"}, media_gen=_video_cfg(), **_on_a_folder(folder),
+    ))
+    # What the folder's computer takes in one write: no more is held, or fetched.
+    assert refused == {"error": "Video download exceeds 1000 bytes"}
+    assert sum(sent) < 5_000
+    assert not (folder / "media").exists()
+    # The cloud's cap is its own, as before.
+    sent.clear()
+    saved = json.loads(await media_gen._generate_video_handler(
+        {"prompt": "a long clip"}, media_gen=_video_cfg(), workspace_path=str(tmp_path),
+    ))
+    assert (tmp_path / saved["path"]).read_bytes() == b"x" * 5_000
+
+
+@pytest.mark.parametrize(("tool", "refused", "paid"), [
+    ("image", "stat", False),  # its check before the model is paid
+    ("video", "stat", False),  # its check before the job is paid
+    ("video", "write", True),  # its save, after the job was paid for
+])
+@pytest.mark.asyncio
+async def test_a_computer_that_refuses_generated_media_says_so_at_every_step(tmp_path, monkeypatch, tool, refused, paid):
+    import httpx as _httpx
+
+    from surogates.tools.builtin.media_gen import _generate_image_handler, _generate_video_handler
+
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    jobs: list[str] = []
+
+    def handler(request):
+        if request.method == "POST":
+            jobs.append("submitted")
+            return _httpx.Response(202, json={
+                "id": "job-7", "status": "completed", "unsigned_urls": ["https://openrouter.ai/api/v1/videos/job-7/content"],
+            })
+        return _httpx.Response(200, content=b"mp4-bytes")
+
+    _patch_video_transport(monkeypatch, handler)
+    folder = tmp_path.resolve()
+    client = _FakeImageClient(images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}])
+    kwargs = _on_a_folder(folder, _revoked(folder, refused))
+    if tool == "image":
+        result = await _generate_image_handler(
+            {"prompt": "a logo", "output_path": "logo.png"}, media_gen=_image_cfg(client), **kwargs,
+        )
+    else:
+        result = await _generate_video_handler({"prompt": "a clip"}, media_gen=_video_cfg(), **kwargs)
+
+    assert json.loads(result) == {"error": "Local access to this computer was revoked"}
+    assert bool(jobs or client.last_create_kwargs) is paid
+    assert not (folder / "media").exists()

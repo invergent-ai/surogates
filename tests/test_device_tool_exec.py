@@ -19,7 +19,9 @@ from surogates.runtime.turn_slots import current_turn, turn_waiting
 from surogates.sandbox.base import SandboxUnavailableError
 from surogates.session.store import LeaseNotHeldError
 from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.runtime import ToolRuntime
 from surogates.tools.workspace_io import LocalWorkspaceIO, workspace_io_from
+from tests.fake_laptop import InProcessRunner
 from tests.test_turn_slots import held_turn
 
 pytestmark = pytest.mark.asyncio
@@ -153,7 +155,10 @@ async def test_containment_is_left_to_the_computer():
     registry.get("read_file").handler.assert_called_once()
 
 
-async def test_an_oversized_result_spills_onto_the_computer():
+async def test_an_oversized_result_spills_onto_the_computer(monkeypatch):
+    # The folder's ignore file is asked for through the call too; this computer answers nothing.
+    kept_out = AsyncMock()
+    monkeypatch.setattr("surogates.tools.utils.tool_result_storage.keep_out_of_git", kept_out)
     registry = registry_with("search_files", output="x" * 150_000, max_result_size=200_000)
     registry.register(
         "write_file",
@@ -166,6 +171,7 @@ async def test_an_oversized_result_spills_onto_the_computer():
     assert isinstance(write.call_args.kwargs["workspace_io"], DeviceWorkspaceIO)
     # The spill reuses the runner of the call that produced the result.
     assert write.call_args.kwargs["workspace_io"] is registry.get("search_files").handler.call_args.kwargs["workspace_io"]
+    kept_out.assert_awaited_once_with(write.call_args.kwargs["workspace_io"])
 
 
 async def test_a_committed_result_marks_what_the_call_read_consumed_after_the_commit(monkeypatch):
@@ -294,3 +300,100 @@ async def test_a_tool_call_is_activity_of_its_turn():
     # The lone tool call waited, so all of the turn waited and gave its slot back.
     assert seen == [False]
     assert semaphore.locked() and gate.held == 1
+
+
+def on_the_folder(monkeypatch, folder) -> None:
+    """Each tool call's DeviceCall on *folder*, run in-process as the computer would."""
+    runner = InProcessRunner(LocalWorkspaceIO(workspace_path=str(folder)))
+
+    def call_for(session, *, tools, **_kwargs) -> DeviceCall:
+        return DeviceCall(
+            tools=tools, workspace_io=DeviceWorkspaceIO(runner, root=str(folder)),
+            task_id=str(session.id), read_tracker_id=str(session.id),
+        )
+
+    monkeypatch.setattr("surogates.harness.tool_exec.device_call_for", call_for)
+
+
+async def test_the_model_never_writes_the_harnesss_own_folder_and_the_harness_still_does(monkeypatch, tmp_path):
+    folder = tmp_path.resolve()
+    on_the_folder(monkeypatch, folder)
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    registry.register(
+        "long_listing",
+        ToolSchema(name="long_listing", description="list", parameters={"type": "object", "properties": {}}),
+        handler=AsyncMock(return_value="x" * 150_000),
+        max_result_size=100_000,
+    )
+    session = device_session(workspace_path=str(folder))
+    staged = ".surogates-results/skills/xlsx/scripts/recalc.py"
+    # However it is spelled: the computer resolves it, as Ask every time judges it.
+    for name, args in (
+        ("write_file", {"path": staged, "content": "print('rewritten')\n"}),
+        ("write_file", {"path": f"{folder}/{staged}", "content": "x"}),
+        ("write_file", {"path": f"notes/../{staged}", "content": "x"}),
+        ("patch", {"mode": "patch", "patch": f"*** Begin Patch\n*** Add File: {staged}\n+x\n*** End Patch"}),
+        ("patch", {"mode": "replace", "path": staged, "old_string": "a", "new_string": "b"}),
+    ):
+        refused = await run(registry, session, name, args)
+        assert json.loads(refused["content"]) == {
+            "error": "That folder is Surogate's own; write somewhere else in the chat's folder.",
+        }, (name, args)
+    assert not (folder / staged).exists()
+    # Anywhere else in the folder, as before.
+    written = await run(registry, session, "write_file", {"path": "notes.md", "content": "n"})
+    assert json.loads(written["content"])["status"] == "ok"
+    # The harness's own spill there still lands, through the same call.
+    spilled = await run(registry, session, "long_listing", {})
+    [spill] = (folder / ".surogates-results").glob("*.txt")
+    assert spill.read_text().startswith("x" * 100_000) and spill.name in spilled["content"]
+
+
+async def test_an_experts_write_to_the_harnesss_own_folder_is_refused_too_and_the_spill_still_lands(tmp_path):
+    from surogates.governance.policy import GovernanceGate
+    from surogates.tools.router import ToolRouter
+    from surogates.tools.utils.tool_result_storage import make_sandbox_writer
+
+    folder = tmp_path.resolve()
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    call = DeviceCall(
+        tools=registry, workspace_io=DeviceWorkspaceIO(InProcessRunner(LocalWorkspaceIO(workspace_path=str(folder))), root=str(folder)),
+        task_id=str(uuid4()), read_tracker_id=str(uuid4()),
+    )
+    # An expert's tool loop: its calls reach the computer through the tool call's DeviceCall.
+    expert = ToolRouter(registry, call, GovernanceGate())
+    staged = ".surogates-results/skills/xlsx/scripts/recalc.py"
+    for name, args in (
+        ("write_file", {"path": staged, "content": "print('rewritten')\n"}),
+        ("patch", {"mode": "patch", "patch": f"*** Begin Patch\n*** Add File: {staged}\n+x\n*** End Patch"}),
+        ("patch", {"mode": "replace", "path": staged, "old_string": "a", "new_string": "b"}),
+    ):
+        refused = await expert.execute(name=name, arguments=args, tenant=MagicMock(), session_id=uuid4())
+        assert json.loads(refused) == {
+            "error": "That folder is Surogate's own; write somewhere else in the chat's folder.",
+        }, (name, args)
+    assert not (folder / staged).exists()
+    written = await expert.execute(
+        name="write_file", arguments={"path": "notes.md", "content": "n"}, tenant=MagicMock(), session_id=uuid4(),
+    )
+    assert json.loads(written)["status"] == "ok"
+    # The harness's own spill there, through the same call, still lands.
+    assert await make_sandbox_writer(call, "root")(".surogates-results/call_1.txt", "x" * 10)
+    assert (folder / ".surogates-results" / "call_1.txt").read_text() == "x" * 10
+
+
+async def test_a_double_encoded_write_to_the_harnesss_own_folder_is_refused_as_any(tmp_path):
+    folder = tmp_path.resolve()
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    call = DeviceCall(
+        tools=registry, workspace_io=DeviceWorkspaceIO(InProcessRunner(LocalWorkspaceIO(workspace_path=str(folder))), root=str(folder)),
+        task_id=str(uuid4()), read_tracker_id=str(uuid4()),
+    )
+    staged = ".surogates-results/skills/xlsx/scripts/recalc.py"
+    # A JSON string of the arguments, which the registry parses and runs as their object.
+    refused = await call.dispatch("write_file", json.dumps({"path": staged, "content": "print('rewritten')\n"}))
+    assert json.loads(refused) == {"error": "That folder is Surogate's own; write somewhere else in the chat's folder."}
+    assert not (folder / staged).exists()

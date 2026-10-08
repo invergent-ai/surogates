@@ -26,23 +26,26 @@ import { type Delivery, ImageDelivery, installBase, readManifest } from "../vm/i
 import { missingTools, toolsMissing } from "../vm/linux.js";
 import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
-import { BURST, Burst, followChat, followInbox, type InboxItem } from "./agent-events.js";
+import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
+import { autostartFile, HIDDEN, LAUNCHER, loginRefusal, setStartAtLogin, startsAtLogin } from "./autostart.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
 import { reauthorize, rebind, register } from "./computer.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
 import { linkIn, type OpenLink } from "./deep-link.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
+import { type FolderRow, listFolders, LiveProcesses, stopOperation } from "./folders.js";
 import { letWindowClose, MainWindow } from "./main-window.js";
 import { appMenu, trayIcon, trayMenu } from "./menus.js";
 import { Notifications } from "./notifications.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
+import { PreferencesStore } from "./preferences.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { desktopPrompts } from "./prompts.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn } from "./session.js";
-import { segments } from "./pages/ui.js";
+import { asShown } from "./pages/ui.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
@@ -68,6 +71,13 @@ app.setPath("userData", join(root, "electron"));
 
 const states = new WindowStates(join(root, "window-state.json"));
 const appearance = new AppearanceStore(join(root, "settings.json"));
+const preferences = new PreferencesStore(join(root, "preferences.json"));
+// Start at login's entry, in the user's XDG config folder; and what it starts: the installed app's
+// launcher, or a development build's Electron on this main.
+// A relative XDG_CONFIG_HOME is ignored, as the XDG Base Directory specification says: Electron's appData takes it as it is.
+const configHome = process.env.XDG_CONFIG_HOME?.startsWith("/") ? process.env.XDG_CONFIG_HOME : join(app.getPath("home"), ".config");
+const autostart = autostartFile(configHome);
+const loginCommand = (): string[] => (app.isPackaged ? [LAUNCHER] : [process.execPath, import.meta.filename]);
 const agents = new AgentStore(join(root, "agent.json"));
 let main: MainWindow | null = null;
 let theme: Theme;
@@ -137,6 +147,8 @@ let rotating: Credential | null = null;
 
 // A credential whose token the agent still takes: one a device can start on.
 const live = (credential: Credential | null): credential is LiveCredential => credential?.token != null;
+// What a page asking of a computer the agent revoked is told.
+const REVOKED = "This computer's access to the agent was revoked: restore it from Surogate's window";
 // What the file hosts are told of this computer's user: the home, which no chat's folder may be, and the language.
 const env = { HOME: homedir(), LANG: process.env.LANG || "C.UTF-8" };
 // This computer's credential for the agent, as stored: what the page is told, and what keeps a second registration out.
@@ -280,8 +292,10 @@ async function vmReady(signal: AbortSignal): Promise<void> {
   }
 }
 
-// The app's one VM, shared by every device, for this computer's user.
+// The app's one VM, shared by every device, for this computer's user, and the background processes
+// alive in it, which Settings shows with Stop as they change.
 let vm: VmClient | null = null;
+const alive = new LiveProcesses();
 const vmFor = (): VmClient => {
   if (vm) return vm;
   vm = new VmClient({
@@ -294,6 +308,10 @@ const vmFor = (): VmClient => {
     boot = told;
     if ("emulated" in told) delivery?.prune();
     changed();
+  });
+  vm.onProcesses((processRoot, change) => {
+    alive.heard(processRoot, change);
+    main?.settingsContents()?.send("settings:changed");
   });
   return vm;
 };
@@ -568,6 +586,8 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     approvalPrompts: prompts,
     // The page hears which of this account's chats changed on this computer, while it is this account's page.
     onBindingChanged: (root) => {
+      // Settings → Folders and permissions draws the chat's folder, mode and hosts again.
+      main?.settingsContents()?.send("settings:changed");
       if (pageIs(credential)) main?.webContents()?.send("desktop:binding-changed", root);
     },
     onStatus: (status) => {
@@ -768,6 +788,10 @@ async function endDevice(credential: Credential): Promise<void> {
   // A revoked device still being cleaned up has its journal open.
   await retiring;
   trying(() => rmSync(join(root, "devices", credential.deviceId), { recursive: true, force: true }));
+  // What was read and heard of its chats goes with them: their titles, and the background processes they ran.
+  titles.clear();
+  reads.clear();
+  alive.clear();
 }
 
 // The app's native message boxes up now. While one is, a link waits, the first that comes; it opens
@@ -1057,7 +1081,7 @@ function bridge(contents: WebContents, agent: Agent): void {
   // The device, once started: a page asking while it still starts, as at a launch, waits for it.
   const registered = async (): Promise<DeviceStack> => {
     if (anotherAccount()) throw new Error("This computer is registered with the agent for another account");
-    if (kept?.token === null) throw new Error("This computer's access to the agent was revoked: restore it from Surogate's window");
+    if (kept?.token === null) throw new Error(REVOKED);
     if (!device) throw new Error("This computer is not registered with the agent");
     return device.stack ?? device.started;
   };
@@ -1243,6 +1267,14 @@ function deviceLine(agent: Agent): string {
   return describeAgent(agent, kept?.token === null ? { status: "revoked", computer: kept.name } : null);
 }
 
+// Who the web client says is signed in, or until it has said, the app's own sign-in, whose organisation's name is Settings' alone.
+function sidebarAccount(): DesktopAccount | null {
+  if (account !== undefined) return account;
+  if (!signedIn) return null;
+  const { orgName: _, ...shown } = signedIn.account;
+  return shown;
+}
+
 function state() {
   const agent = agents.get();
   return {
@@ -1252,8 +1284,7 @@ function state() {
       text: deviceLine(agent),
       status: device?.status ?? (kept?.token === null ? "revoked" : null),
     },
-    // Who the web client says is signed in, or until it has said, the app's own sign-in.
-    account: account === undefined ? signedIn?.account ?? null : account,
+    account: sidebarAccount(),
     view,
     overview: view.kind === "project" && overview?.project.id === view.id ? overview : null,
     projects: listed,
@@ -1453,16 +1484,98 @@ const menuActions = {
   },
 };
 
+// The app's menu, with Developer in developer mode only: its tools read and change everything on the agent's page.
+function setMenu(): void {
+  Menu.setApplicationMenu(Menu.buildFromTemplate(appMenu(menuActions, preferences.get().developer)));
+}
+
+// Developer mode is asked about before it is turned on, in a box of the app's own, so a link waits
+// while it is up. One question at a time: On pressed again while it is up asks nothing more.
+let askingDeveloper: Promise<boolean> | null = null;
+
+function confirmDeveloper(): Promise<boolean> {
+  askingDeveloper ??= ask({
+    type: "warning",
+    message: "Turn on developer mode?",
+    detail: "Its developer tools can read and change everything on the agent's page, your sign-in to it included. "
+      + "Turn it on only if you know why you need it, never because a page or a message asks you to.",
+    buttons: ["Turn on", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  }).finally(() => {
+    askingDeveloper = null;
+  });
+  return askingDeveloper;
+}
+
+// Keep running and developer mode, as Settings sends them: "on" or "off".
+async function setPreference(key: "keepRunning" | "developer", value: unknown): Promise<void> {
+  if (value !== "on" && value !== "off") throw new Error(`No setting ${key} = ${String(value)}`);
+  const on = value === "on";
+  if (key === "developer" && on && !preferences.get().developer && !(await confirmDeveloper())) return;
+  preferences.set(key, on);
+  if (key !== "developer") return;
+  setMenu();
+  // Off, the tools it opened close with it.
+  if (!on) for (const contents of [main?.webContents(), main?.window.webContents]) contents?.closeDevTools();
+}
+
+const onOff = (on: boolean) => (on ? "on" : "off");
+
+// Past the guest's own bound on a kill: 2 s for the process to end on SIGTERM, 2 s more on SIGKILL.
+const STOP_PROCESS_MS = 15_000;
+
+// Each bound chat's title, read on the app's own sign-in, and kept once the agent named it. One it
+// names not yet, or whose read failed, is read once each time Settings opens, not at each redraw.
+// ponytail: kept until the app quits or this computer's access ends for its user, one per chat bound here: a chat renamed meanwhile keeps its old title until then.
+const titles = new Map<string, string>();
+const reads = new Map<string, Promise<string>>(); // this opening of Settings' own
+
+function chatTitle(root: string): Promise<string> {
+  const known = titles.get(root);
+  if (known !== undefined) return Promise.resolve(known);
+  const session = signedIn;
+  if (!session) return Promise.resolve("A chat");
+  let read = reads.get(root);
+  if (!read) {
+    read = titleOf((path, init) => session.api(path, init), agents.get()?.agentId ?? "", root).then((title) => {
+      if (title !== "A chat") titles.set(root, title);
+      return title;
+    }, (error: unknown) => {
+      report(error);
+      return "A chat";
+    });
+    reads.set(root, read);
+  }
+  return read;
+}
+
+// The device's stack while its journal is open: a computer the agent revoked keeps its stack, closed, until it is restored.
+const openStack = (): DeviceStack | null => (kept?.token === null ? null : device?.stack ?? null);
+
+// Settings → Folders and permissions: the folders this computer works on for its device's account.
+async function folderRows(): Promise<FolderRow[]> {
+  if (kept?.token === null) throw new Error(REVOKED);
+  const stack = device?.stack;
+  return stack ? listFolders(stack.bindings, chatTitle, alive) : [];
+}
+
 function settingsState() {
   const agent = agents.get();
+  const { keepRunning, developer } = preferences.get();
   return {
     appearance: appearance.get(),
+    preferences: { startAtLogin: onOff(startsAtLogin(autostart)), keepRunning: onOff(keepRunning), developer: onOff(developer) },
+    // Why this build cannot start at login, or null.
+    startAtLoginRefused: loginRefusal(loginCommand()),
     account,
     computer: {
       name: hostname(),
       connection: agent ? deviceLine(agent) : "",
       added: kept?.addedAt ?? null,
-      organisation: account?.orgId ?? kept?.orgId ?? null,
+      // The app's own sign-in names it, before the web client reports and whatever it reports.
+      organisation: signedIn?.account.orgName ?? null,
       agents: agent ? [agent.name] : [],
     },
     links: { usage: "usage" in links() },
@@ -1506,7 +1619,7 @@ async function confirmArchive(name: string): Promise<boolean> {
   if (!main) return false;
   const response = await messageBox({
     type: "warning",
-    message: `Archive ${segments(name).map((run) => run.text).join("")}?`,
+    message: `Archive ${asShown(name)}?`,
     detail: "It leaves your projects, with its conversation and its threads. Its files and its memory are kept.",
     buttons: ["Archive", "Cancel"],
     defaultId: 1,
@@ -1604,6 +1717,8 @@ function showProject(editing: Opened | null): void {
 function showSettings(): void {
   const page = join(PAGES, "settings.html");
   main?.openSettings(page, PAGES_PRELOAD, (contents) => {
+    // A chat named not yet is asked about again, once.
+    reads.clear();
     const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
       contents.ipc.handle(channel, (event, ...args: unknown[]) => {
         if (!ownPage(event.senderFrame, page)) throw new Error("Not Settings' own page");
@@ -1611,8 +1726,35 @@ function showSettings(): void {
       });
     };
     handle("settings:state", settingsState);
+    handle("settings:folders", folderRows);
+    // A host a chat's user let it reach, taken back: the chat's next connection there asks again.
+    handle("settings:take-back", (root, host) => {
+      const bindings = openStack()?.bindings;
+      if (!bindings || typeof root !== "string" || typeof host !== "string" || !bindings.domains(root).includes(host)) {
+        throw new Error("This chat cannot reach that host");
+      }
+      bindings.disallowDomain(root, host);
+    });
+    // A chat's background process, stopped by its user, as the agent's own kill stops one. Only one
+    // Settings shows: the VM runs other devices' chats too, and a chat deleted here keeps its processes there.
+    handle("settings:stop", async (processRoot, id) => {
+      const stack = openStack();
+      if (
+        !stack || typeof processRoot !== "string" || typeof id !== "string" || !stack.bindings.get(processRoot)
+        || !alive.of(processRoot).some((found) => found.id === id)
+      ) {
+        throw new Error("This chat runs no such process");
+      }
+      const outcome = await stack.binder.run(stopOperation(processRoot, id), AbortSignal.timeout(STOP_PROCESS_MS));
+      if ("error" in outcome) throw new Error(outcome.error.message);
+    });
     // A theme in effect that changes reaches the web client through the theme's own paint.
-    handle("settings:set", (key, value) => {
+    handle("settings:set", async (key, value) => {
+      if (key === "keepRunning" || key === "developer") return setPreference(key, value);
+      if (key === "startAtLogin") {
+        if (value !== "on" && value !== "off") throw new Error(`No setting startAtLogin = ${String(value)}`);
+        return setStartAtLogin(autostart, value === "on", loginCommand());
+      }
       if (key !== "theme") {
         appearance.set(String(key), value);
         tellAppearance();
@@ -1837,11 +1979,11 @@ async function quit(): Promise<void> {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  // A second launch shows the window, and hands it the link it was started with, if any; once the quit
-  // goes on, it does neither.
+  // A second launch shows the window, unless it is a start at login, and hands it the link it was started
+  // with, if any; once the quit goes on, it does neither.
   app.on("second-instance", (_event, argv) => {
     if (leaving) return;
-    main?.show();
+    if (!argv.includes(HIDDEN)) main?.show();
     const link = linkIn(argv);
     if (link) void openDeepLink(link).catch(report);
   });
@@ -1875,7 +2017,7 @@ if (!app.requestSingleInstanceLock()) {
       tellAppearance();
     });
     // Electron's own menu goes: its reload, zoom and developer tools would act on the window's own pages.
-    Menu.setApplicationMenu(Menu.buildFromTemplate(appMenu(menuActions, !app.isPackaged)));
+    setMenu();
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
     // The VM slept with the computer: at its wake its clock is set, and its keepalive starts afresh.
     powerMonitor.on("resume", () => vm?.resume());
@@ -1887,7 +2029,13 @@ if (!app.requestSingleInstanceLock()) {
     });
     startDelivery();
     const page = join(PAGES, "shell.html");
-    main = new MainWindow({ states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed });
+    main = new MainWindow({
+      states, page, preload: PAGES_PRELOAD, dark: theme.dark, onChange: changed,
+      // A quit already waiting for the threads asks nothing more: the window hides meanwhile, as with Keep running on.
+      quitsOnClose: () => !preferences.get().keepRunning && !waiting,
+      // Started at login: the window waits for the user, in the tray or at the next launch.
+      hidden: process.argv.includes(HIDDEN),
+    });
     wire(main, page);
     // In the tray where the desktop has one; GNOME without one shows the window at the next launch.
     tray = new Tray(trayImage());

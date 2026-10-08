@@ -11,10 +11,14 @@ import { type SecretStore, seal, seals, unseal } from "./credentials.js";
 import { type Fetch, OAuthError, refreshTokens, revokeTokens, type Tokens } from "./oauth.js";
 import { readState, writeState } from "./state-file.js";
 
+// Who signed in, as the agent's /auth/me names them: with their organisation's name, which
+// Settings shows and an older agent does not send.
+export type SignedInAccount = DesktopAccount & { orgName?: string };
+
 export interface SignedIn {
   origin: string;
   agentId: string;
-  account: DesktopAccount;
+  account: SignedInAccount;
   authTime: number; // when the user signed in, in seconds since the epoch
   refreshToken: string;
 }
@@ -34,9 +38,10 @@ interface Stored extends Omit<SignedIn, "refreshToken"> {
 
 function usable(value: unknown): value is Stored {
   const { origin, agentId, account, authTime, sealed, plain } = (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
-  const { name, email, userId, orgId } = (typeof account === "object" && account !== null ? account : {}) as Record<string, unknown>;
+  const { name, email, userId, orgId, orgName } = (typeof account === "object" && account !== null ? account : {}) as Record<string, unknown>;
   return typeof origin === "string" && typeof agentId === "string" && typeof authTime === "number"
     && [name, email, userId, orgId].every((field) => typeof field === "string")
+    && (orgName === undefined || typeof orgName === "string")
     && (typeof sealed === "string" || typeof plain === "string");
 }
 
@@ -123,7 +128,7 @@ export class DesktopSession {
     if (first) this.took(first);
   }
 
-  get account(): DesktopAccount {
+  get account(): SignedInAccount {
     return this.signedIn.account;
   }
 
@@ -203,16 +208,20 @@ export class DesktopSession {
 }
 
 /** Who *accessToken* signs in as, from the agent's GET /api/v1/auth/me. */
-export async function accountOf(origin: string, accessToken: string, fetch: Fetch): Promise<DesktopAccount> {
+export async function accountOf(origin: string, accessToken: string, fetch: Fetch): Promise<SignedInAccount> {
   const response = await fetch(new URL("/api/v1/auth/me", origin).href, {
     headers: { authorization: `Bearer ${accessToken}` },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`The agent did not say who signed in (HTTP ${response.status})`);
   const me = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-  const { id, org_id: orgId, email, display_name: name } = me ?? {};
+  const { id, org_id: orgId, org_name: orgName, email, display_name: name } = me ?? {};
   if (typeof id !== "string" || typeof orgId !== "string" || typeof email !== "string") {
     throw new Error("The agent's answer about who signed in is not one Surogate understands");
   }
-  return { name: typeof name === "string" && name !== "" ? name : email, email, userId: id, orgId };
+  return {
+    name: typeof name === "string" && name !== "" ? name : email, email, userId: id, orgId,
+    // An older agent names no organisation.
+    ...(typeof orgName === "string" ? { orgName } : {}),
+  };
 }

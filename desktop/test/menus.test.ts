@@ -59,7 +59,7 @@ describe("the app's menu", () => {
     expect(items(menu).map((item) => item.role).filter(Boolean)).toEqual(["close", "undo", "redo", "cut", "copy", "paste", "selectAll"]);
   });
 
-  it("leaves Developer out of a packaged app, which has no developer mode yet", () => {
+  it("leaves Developer out unless developer mode is on", () => {
     expect(appMenu(recording().actions, false).map((top) => top.label)).toEqual(["File", "Edit", "View", "Help"]);
   });
 });

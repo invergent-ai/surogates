@@ -351,31 +351,41 @@ async def _expand_note_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         )
         if target is None:
             return json.dumps({"error": "ref target not accessible"})
-        storage = kwargs.get("storage")
-        bucket = (target.config or {}).get("storage_bucket")
-        if storage is None or not bucket:
-            return json.dumps({"error": "artifact storage unavailable"})
         from surogates.artifacts.store import (
             ArtifactNotFoundError,
             ArtifactStore,
         )
+        from surogates.devices.binding import device_of
+        from surogates.devices.workspace import DeviceOperationError
+        from surogates.sandbox.pool import sandbox_session_key
         from surogates.session.attachment_ingest import workspace_root_id
         from surogates.storage.tenant import boundary_workspace_prefix
+        from surogates.tools.workspace_io import StorageWorkspaceIO
 
-        artifact_store = ArtifactStore(
-            storage,
-            session_id=target_sid,
-            bucket=bucket,
-            key_prefix=boundary_workspace_prefix(
-                target.config,
-                target,
-                workspace_root_id(target),
-            ),
-        )
+        if device_of(target.config) is not None:
+            # On a local folder: read through this tool call, and only on
+            # the same folder, the one its computer gives this call.
+            files = kwargs.get("workspace_io")
+            if files is None or sandbox_session_key(target) != kwargs.get("task_id"):
+                return json.dumps({"error": "ref artifact is on a local folder this session cannot reach"})
+        else:
+            storage = kwargs.get("storage")
+            bucket = (target.config or {}).get("storage_bucket")
+            if storage is None or not bucket:
+                return json.dumps({"error": "artifact storage unavailable"})
+            files = StorageWorkspaceIO(
+                storage,
+                bucket=bucket,
+                prefix=boundary_workspace_prefix(target.config, target, workspace_root_id(target)),
+            )
+        artifact_store = ArtifactStore(files, session_id=target_sid, root=sandbox_session_key(target))
         try:
             payload = await artifact_store.get_payload(artifact_id)
         except ArtifactNotFoundError:
             return json.dumps({"error": "ref artifact not found"})
+        except DeviceOperationError as exc:
+            # A local folder's computer that will not read it, in its own words.
+            return json.dumps({"error": f"ref artifact could not be read: {exc}"})
         detail = json.dumps(payload)[:_EXPAND_MAX_CHARS]
         return json.dumps(
             {"note_id": note_id, "kind": "artifact", "detail": detail}

@@ -63,7 +63,10 @@ def build_browser_screenshot_key(
         session_id,
         relative_path,
     )
+from surogates.devices.workspace import DeviceOperationError
 from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
 logger = logging.getLogger(__name__)
 
@@ -877,6 +880,10 @@ SCREENSHOT_SCHEMA = {
 }
 
 _SCREENSHOT_DIR = "browser-screenshots"
+# A chat on a local folder keeps its screenshots in the folder, among the
+# harness's own files, so a chat that asks every time is not asked about
+# each one.
+_DEVICE_SCREENSHOT_DIR = WORKSPACE_STORAGE_DIR
 
 
 def _new_screenshot_path() -> str:
@@ -956,6 +963,36 @@ async def _save_screenshot_to_storage(
     return relative_path
 
 
+async def _screenshot_in_folder(png_bytes: bytes, result: dict[str, Any], workspace_io: Any) -> str:
+    """Write a local folder's screenshot into the folder, through the tool call's own operations.
+
+    A write the computer refuses is answered as the cloud answers a shot it
+    could not save, in the computer's own words.
+    """
+    relative_path = f"{_DEVICE_SCREENSHOT_DIR}/{_new_screenshot_path()}"
+    try:
+        await keep_out_of_git(workspace_io)
+        await workspace_io.write(await workspace_io.resolve(relative_path), png_bytes)
+    except (OSError, WorkspaceSandboxError, DeviceOperationError) as exc:
+        return json.dumps({
+            "error": "screenshot_save_failed",
+            "bytes": len(png_bytes),
+            "mime_type": "image/png",
+            "detail": (exc.strerror if isinstance(exc, OSError) else None) or str(exc),
+        })
+    body: dict[str, Any] = {
+        "saved": True,
+        "path": relative_path,
+        "relative_path": relative_path,
+        "mime_type": "image/png",
+        "bytes": len(png_bytes),
+        "hint": "This screenshot is not displayed to you. Call vision_analyze with this path to view it.",
+    }
+    if "annotations" in result:
+        body["annotations"] = result["annotations"]
+    return json.dumps(body)
+
+
 async def _browser_screenshot_handler(
     arguments: dict[str, Any],
     *,
@@ -969,6 +1006,7 @@ async def _browser_screenshot_handler(
     storage: Any | None = None,
     sandbox_pool: Any | None = None,
     task_id: str | None = None,
+    workspace_io: Any | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -984,7 +1022,7 @@ async def _browser_screenshot_handler(
 
     _browser_id, endpoint, snapshot_cache = preflight
     storage_bucket = (session_config or {}).get("storage_bucket")
-    should_save = bool(workspace_path or (storage is not None and storage_bucket))
+    should_save = bool(workspace_io is not None or workspace_path or (storage is not None and storage_bucket))
     if not should_save:
         return json.dumps(
             {
@@ -1021,6 +1059,8 @@ async def _browser_screenshot_handler(
             )
 
     png_bytes = result["png_bytes"]
+    if workspace_io is not None:
+        return await _screenshot_in_folder(png_bytes, result, workspace_io)
     if copy:
         try:
             await write_copy(sandbox_pool, task_id, relative_path, png_bytes)

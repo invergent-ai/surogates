@@ -191,3 +191,15 @@ async def test_a_project_threads_loop_never_schedules_a_run(monkeypatch):
     # No routine, so no run works on a copy its thread never lands.
     assert _llm_responses(store) == ["A thread can't start /loop yet: do this step in the thread itself."]
     harness._handle_loop_command.assert_not_awaited()
+
+
+def test_a_local_folder_chat_refuses_auto_research():
+    harness = _harness(AsyncMock(), _permissive())
+    local = _session()
+    local.config["execution"] = {"kind": "device", "device_id": str(uuid4())}
+    assert harness._slash_command_block_reason("/auto-research Go.", local) == (
+        "/auto-research is not available for sessions on a local folder"
+    )
+    # Its other commands run as before, and so does /auto-research elsewhere.
+    assert harness._slash_command_block_reason("/mission Go.", local) is None
+    assert harness._slash_command_block_reason("/auto-research Go.", _session()) is None

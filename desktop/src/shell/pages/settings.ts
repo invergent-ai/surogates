@@ -3,7 +3,7 @@
 // the main process and is set with textContent, or with showText where it may hold the
 // user's paths or QEMU's words.
 
-import { byId, fillIcons, markTheme, showText } from "./ui.js";
+import { asShown, byId, fillIcons, markTheme, showText } from "./ui.js";
 
 interface Appearance {
   theme: "system" | "light" | "dark";
@@ -14,14 +14,25 @@ interface Appearance {
 
 interface State {
   appearance: Appearance;
+  preferences: Record<string, "on" | "off">;
+  startAtLoginRefused: string | null;
   account: { name: string; email: string } | null;
   computer: { name: string; connection: string; added: string | null; organisation: string | null; agents: string[] };
   links: { usage: boolean };
   sandbox: { text: string; actions: Array<"retry" | "log"> };
 }
 
+// A folder this computer's chats work on, and each chat on it (folders.ts).
+interface Folder {
+  folder: string;
+  chats: Array<{ root: string; title: string; mode: "free" | "ask"; hosts: string[]; processes: Array<{ id: string; command: string }> }>;
+}
+
 interface Settings {
   state(): Promise<State>;
+  folders(): Promise<Folder[]>;
+  takeBack(root: string, host: string): Promise<void>;
+  stop(root: string, id: string): Promise<void>;
   set(key: string, value: string): Promise<void>;
   link(which: "usage"): Promise<void>;
   sandbox(action: "retry" | "log"): Promise<void>;
@@ -70,14 +81,94 @@ function search(): void {
 const date = (iso: string | null) =>
   iso === null ? "Not registered" : new Date(iso).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
+// What Electron puts before the main process's words: the name of the call it invoked.
+const INVOKED = /^Error invoking remote method '[^']*': (?:Error: )?/;
+const said = (error: unknown): string => (error instanceof Error ? error.message : String(error)).replace(INVOKED, "");
+
+// Why the user's last Take back or Stop failed: null once one goes through.
+let failure: string | null = null;
+
+// A line under a chat: what it holds, as text, and the button that ends it, named by what it ends, as it is shown.
+function line(text: string, action: string, name: string, act: () => Promise<void>): HTMLElement {
+  const held = document.createElement("span");
+  held.className = "line";
+  const what = document.createElement("span");
+  showText(what, text);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = action;
+  button.setAttribute("aria-label", `${action} ${asShown(name)}`);
+  // Drawn again either way: a list that changed meanwhile shows what holds, and a refusal is said above it.
+  button.addEventListener("click", () => void act().then(() => {
+    failure = null;
+  }, (error: unknown) => {
+    failure = `Surogate did not ${action.toLowerCase()} ${name}: ${said(error)}.`;
+  }).finally(render));
+  held.append(what, button);
+  return held;
+}
+
+// A chat's row: its title, as text, its mode, each host its user let it reach, and each background process it runs.
+// Its title is what a search finds it by.
+function chatRow(chat: Folder["chats"][number]): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "row";
+  row.dataset.label = chat.title;
+  const label = document.createElement("div");
+  label.className = "label";
+  const title = document.createElement("span");
+  showText(title, chat.title);
+  const mode = document.createElement("span");
+  mode.className = "desc";
+  mode.textContent = chat.mode === "free" ? "Works freely" : "Asks every time";
+  label.append(
+    title,
+    mode,
+    ...chat.hosts.map((host) => line(`Reaches ${host}, on every port`, "Take back", host, () => settings.takeBack(chat.root, host))),
+    ...chat.processes.map(({ id, command }) => line(`Runs ${command}`, "Stop", command, () => settings.stop(chat.root, id))),
+  );
+  row.append(label);
+  return row;
+}
+
+async function renderFolders(): Promise<void> {
+  // A list that cannot be read, as on a computer the agent revoked, says why in its place.
+  let folders: Folder[] = [];
+  let unread: string | null = null;
+  try {
+    folders = await settings.folders();
+  } catch (error) {
+    unread = said(error);
+  }
+  showText(byId("folders-failed"), unread ?? failure ?? "");
+  byId("folders-none").hidden = folders.length > 0 || unread !== null;
+  byId("folders").replaceChildren(...folders.map((folder) => {
+    const group = document.createElement("div");
+    group.className = "folder";
+    const path = document.createElement("h3");
+    path.className = "folder-path";
+    showText(path, folder.folder);
+    group.append(path, ...folder.chats.map(chatRow));
+    return group;
+  }));
+  // Rows drawn since the search was typed are searched too.
+  search();
+}
+
 async function render(): Promise<void> {
+  void renderFolders();
   const state = await settings.state();
+  const chosen: Record<string, string> = { ...state.appearance, ...state.preferences };
   for (const control of document.querySelectorAll<HTMLElement>("[data-setting]")) {
-    const chosen = state.appearance[control.dataset.setting as keyof Appearance];
     for (const option of control.querySelectorAll<HTMLElement>("[data-value]")) {
-      option.setAttribute("aria-pressed", String(option.dataset.value === chosen));
+      option.setAttribute("aria-pressed", String(option.dataset.value === chosen[control.dataset.setting ?? ""]));
     }
   }
+  // A build that cannot start at login says why, and its On does nothing; its Off still removes an entry already there.
+  const refused = byId("login-refused");
+  refused.textContent = state.startAtLoginRefused ?? "";
+  refused.hidden = state.startAtLoginRefused === null;
+  document.querySelector<HTMLButtonElement>('[data-setting="startAtLogin"] [data-value="on"]')!.disabled = !refused.hidden;
   byId("email").textContent = state.account?.email ?? "Not signed in";
   byId("name").textContent = state.account?.name ?? "";
   byId("organisation").textContent = state.computer.organisation ?? "";
