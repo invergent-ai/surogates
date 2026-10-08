@@ -151,7 +151,8 @@ asker() {
     uid="${!name:-}"
     [ -n "$uid" ] || continue
     [[ "$uid" =~ ^(0|[1-9][0-9]{0,9})$ ]] || fail "$name is not a user's number"
-    [ "$uid" -ne 0 ] || continue
+    # Compared as it is written: what is no number is then never taken for root's.
+    [ "$uid" != 0 ] || continue
     gid="$(getent passwd "$uid" | cut -d: -f4)" && [[ "$gid" =~ ^[0-9]+$ ]] || fail "$name names no user of this computer"
     READER=("$uid" "$gid")
     return 0
@@ -553,8 +554,10 @@ main() {
   trap '[ "$BASH_SUBSHELL" -gt 0 ] || unexpected "$BASH_COMMAND"' ERR
   case "${1:-}" in
     --apply)
-      # The helper runs the system's own tools, wherever its caller's PATH points.
-      export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+      # The helper runs the system's own tools, wherever its caller's PATH points, and reads what
+      # it is handed in no locale of its caller's, which pkexec and sudo both pass on: in most, more
+      # than ten characters are digits, and a name's other letters are written as they are.
+      export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C
       [ "$#" -eq 4 ] && [ -n "$4" ] || fail "usage: surogate-apply-update --apply <manifest> <signature> <tarball>"
       [ "$EUID" -eq 0 ] || fail "applying a release needs administrator rights"
       supported

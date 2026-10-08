@@ -101,12 +101,13 @@ const NOT_ROOTS_OWN: Array<[string, string]> = [
 ];
 const NOT_ROOTS_OWN_SAID = `Surogate Desktop: ${LOCKS} must be a folder of root's own that no one else opens (mode 700), and no link: remove what is there, and run this again\n`;
 // What --apply needs, on a desktop's baseline: openssl, jq and bubblewrap, which the install
-// script installs, and nothing of Surogate's; and strace, for the tests that read the helper's
-// system calls.
+// script installs, and nothing of Surogate's; strace, for the tests that read the helper's system
+// calls; and a locale as a desktop's user has one, en_US.UTF-8.
 const APPLY_LAB = [
   "RUN apt-get update && apt-get install -y --no-install-recommends openssl jq bubblewrap && rm -rf /var/lib/apt/lists/*",
   "RUN useradd -m tester",
   "RUN apt-get update && apt-get install -y --no-install-recommends strace && rm -rf /var/lib/apt/lists/*",
+  "RUN apt-get update && apt-get install -y --no-install-recommends locales && localedef -i en_US -f UTF-8 en_US.UTF-8 && rm -rf /var/lib/apt/lists/*",
 ];
 // /opt/surogate as a small disk of the container's own, in memory: a copy with no bound fills
 // that, and never this computer's disk.
@@ -813,6 +814,28 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const linked = releaseOf("1.0.0", (top) => symlinkSync("/etc", join(top, "resources", `out${line}`)));
     manifestOf("1.0.0", linked);
     expect(apply(linked)).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: the release's archive links outside itself: $'resources/out${quoted}'\n` });
+  });
+
+  it("reads a name and a user's number in no locale of its caller's, which pkexec and sudo pass on", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    const inLocale = (locale: string, env: string[], run: string[]) => docker(["exec", "-e", `LC_ALL=${locale}`, ...env.flatMap((pair) => ["-e", pair]), box.container, ...run]);
+    // A name's letters outside ASCII are said by their bytes: among them is the mark that turns the line's direction.
+    for (const locale of ["C.UTF-8", "en_US.UTF-8"]) {
+      expect(inLocale(locale, [], ["/opt/surogate-test/install.sh", "--apply", "/home/tester/n\u00e9\u202e.json", "/home/tester/manifest.json.sig", "/home/tester/release.tar.gz"]), locale)
+        .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: $'/home/tester/n\\303\\251\\342\\200\\256.json' is not a downloaded release's file\n" });
+    }
+    // Where the caller's locale has more than ten digits, none but the ten is a user's number.
+    for (const digits of ["\u00b2", "\u0661\u0660\u0660\u0661", "\uff11\uff10\uff10\uff11", "1\u00b2"]) {
+      expect(inLocale("en_US.UTF-8", [`PKEXEC_UID=${digits}`], ["/opt/surogate-test/install.sh", "--apply", ...files().split(" ")]), digits)
+        .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: PKEXEC_UID is not a user's number\n" });
+    }
+    // Nor would what is no number read as root's, in such a locale: the search for the user by
+    // itself, from the script's functions without its last line, which runs it.
+    const alone = inLocale("en_US.UTF-8", ["PKEXEC_UID=\u00b2"], ["bash", "-c", `. <(sed '$d' /opt/surogate-test/install.sh) && settings && asker; echo "reads as \${READER[*]}"`]);
+    expect(alone).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: PKEXEC_UID names no user of this computer\n" });
+    expect(root("test -e /opt/surogate/current").status).toBe(1);
   });
 
   it("leaves nothing in staging when a signal stops it: a terminal closed, Ctrl+C, a kill", () => {
