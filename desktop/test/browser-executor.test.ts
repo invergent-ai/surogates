@@ -618,6 +618,9 @@ describe("an upload's files, read as the chat's file host reads them", () => {
     writeFileSync(join(folder, ".git", "config"), "[remote]\n");
     writeFileSync(join(folder, ".env"), "KEY=value\n");
     expect(await upload(`${folder}/.git/config`, `${folder}/.env`)).toEqual({ ok: "browser" });
-    expect((browsed[0]?.args as { files: Array<{ name: string }> }).files.map((file) => file.name)).toEqual(["config", ".env"]);
+    // Each by its last name, and as plain data where its name says no more of what it is.
+    expect((browsed[0]?.args as { files: Array<{ name: string; mimeType: string }> }).files.map((file) => [file.name, file.mimeType])).toEqual([
+      ["config", "application/octet-stream"], [".env", "application/octet-stream"],
+    ]);
   });
 });

@@ -567,7 +567,8 @@ export class BrowserHost {
       if (this.held !== root) return;
       this.held = null;
       this.handed = { by: root, at: this.now() };
-      // The agent drives again: a file its pages ask for is heard, and opens no chooser of the browser's own.
+      // The agent drives again: a file its pages ask for is heard, and opens no chooser of the browser's own,
+      // also where it was handed back before they were let be.
       clearTimeout(this.ownChooser);
       for (const page of this.hearing.keys()) this.hear(page);
       return;
@@ -588,7 +589,7 @@ export class BrowserHost {
     // Until then a page's ask is still heard, and kept for no one (asks).
     clearTimeout(this.ownChooser);
     this.ownChooser = setTimeout(() => {
-      if (this.held !== null) for (const page of this.hearing.keys()) this.unhear(page);
+      for (const page of this.hearing.keys()) this.unhear(page);
     }, OWN_CHOOSER_MS);
   }
 
@@ -966,7 +967,6 @@ export class BrowserHost {
     session: string, chooser: FileChooser, files: UploadFile[], at: { href: string; origin: string } | null, stop: AbortSignal,
   ): Promise<string | null | typeof HELD> {
     const input = chooser.element();
-    if (stop.aborted) return HELD;
     const made = await input.evaluateHandle(make, files);
     try {
       for (let tries = 0; tries < GIVE_TRIES; tries += 1) {
