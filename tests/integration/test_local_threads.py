@@ -348,9 +348,11 @@ async def test_a_threads_row_names_its_computer_and_says_when_its_work_waits_for
 async def test_the_library_lists_a_local_threads_files_on_its_computer_and_the_clouds_as_they_are(api, laptop):
     project, master, thread = await begun_local(api, laptop)
     await upload(api, master, "Budget.xlsx", b"PK the cloud's")
-    # A ref as the model gave it: from the folder's top, or the whole path there. One outside the folder is none of its files.
+    # A ref as the model gave it: from the folder's top, or the whole path there. One outside the folder is none
+    # of its files, and nor is the folder itself.
     await turn_ends(api, thread, files=[
         "Budget.xlsx", f"{FOLDER}/Totals.md", "_artifacts/Report.pdf", "../Elsewhere/secret.txt", "/etc/hosts",
+        ".", FOLDER,
     ])
     response = await library(api, project)
     assert response.status_code == 200, response.text
