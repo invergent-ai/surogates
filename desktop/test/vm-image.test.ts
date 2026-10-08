@@ -149,10 +149,11 @@ describe("the guest image's delivery", () => {
       response.writeHead(200, { "content-length": body.length });
       response.write(body.subarray(0, cut));
     };
-    for (const at of ["headers", "body"] as const) {
+    // The headers get a bound of their own, longer, as a proxy that scans a file sends them only once it has it all.
+    for (const [at, bound] of [["headers", "1 s"], ["body", "0.5 s"]] as const) {
       quiet = at;
       const begun = performance.now();
-      await expect(deliver({ ...options(), stallMs: 500 })).rejects.toThrow("the download of rootfs.img.zst stopped: nothing came for 0.5 s");
+      await expect(deliver({ ...options(), stallMs: 500, headersMs: 1_000 })).rejects.toThrow(`the download of rootfs.img.zst stopped: nothing came for ${bound}`);
       expect(performance.now() - begun).toBeLessThan(3_000);
     }
     expect(statSync(join(images(), `${KEY}.partial`, "rootfs.img.zst.partial")).size).toBe(cut);
@@ -184,7 +185,7 @@ describe("the guest image's delivery", () => {
         setTimeout(() => response.end(body), 700);
       }, 700);
     };
-    expect(readFileSync(join(await deliver({ ...options(), stallMs: 1_000 }), "rootfs.img")).equals(rootfs)).toBe(true);
+    expect(readFileSync(join(await deliver({ ...options(), stallMs: 1_000, headersMs: 1_000 }), "rootfs.img")).equals(rootfs)).toBe(true);
   });
 
   it("starts a download again when a server sends the whole file for a Range", async () => {

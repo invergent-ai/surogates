@@ -94,12 +94,15 @@ export interface DeliverOptions {
   progress?: (done: number, total: number) => void;
   unpacking?: () => void;
   signal?: AbortSignal;
-  stallMs?: number; // how long nothing may come, headers or bytes, before the download stops: STALL_MS
+  stallMs?: number; // how long no bytes may come before the download stops: STALL_MS
+  headersMs?: number; // how long its headers may take: HEADERS_MS
 }
 
 // Chromium's network bounds no body that stops coming, as from a peer gone over a sleep or a
 // proxy that holds a large download: a download that nothing comes for in this long stops.
 const STALL_MS = 30_000;
+// A proxy that scans a download may send its headers only once it has all of it: they get longer.
+const HEADERS_MS = 120_000;
 // An image's folder's last step, written once all of it is on disk.
 const COMPLETE = "complete";
 const gigabytes = (bytes: number) => `${(bytes / 1e9).toFixed(1)} GB`;
@@ -251,18 +254,18 @@ async function download(options: DeliverOptions, file: ImageFile, partial: strin
   if (have < file.downloadSize) {
     const url = `${options.base}/desktop/vm/${options.manifest.key}/${file.download}`;
     const said = (error: unknown) => (error instanceof Error ? error.message : String(error));
-    // Nothing for stallMs, its headers or its next bytes, stops it, whatever the fetch bounds.
+    // No headers for headersMs, or no next bytes for stallMs, stops it, whatever the fetch bounds.
     const stallMs = options.stallMs ?? STALL_MS;
     const quiet = new AbortController();
     let timer: NodeJS.Timeout | undefined;
-    const heard = () => {
+    const heard = (ms = stallMs) => {
       clearTimeout(timer);
-      timer = setTimeout(() => quiet.abort(new Error(`nothing came for ${stallMs / 1000} s`)), stallMs);
+      timer = setTimeout(() => quiet.abort(new Error(`nothing came for ${ms / 1000} s`)), ms);
     };
     const stalled = new Promise<never>((_resolve, reject) => quiet.signal.addEventListener("abort", () => reject(quiet.signal.reason), { once: true }));
     stalled.catch(() => {});
     const signal = options.signal ? AbortSignal.any([options.signal, quiet.signal]) : quiet.signal;
-    heard();
+    heard(options.headersMs ?? HEADERS_MS);
     try {
       let response: Response;
       try {
@@ -272,7 +275,7 @@ async function download(options: DeliverOptions, file: ImageFile, partial: strin
         if (quiet.signal.aborted) throw new Error(`the download of ${file.download} stopped: ${said(quiet.signal.reason)}`);
         throw new Error(`could not reach ${new URL(url).host}: ${said(error)}`);
       }
-      // Its first bytes get the whole bound, not what the headers left of it.
+      // Its first bytes get the whole idle bound, not what is left of the headers'.
       heard();
       if (response.status === 200 && have > 0) {
         // Not the rest of the file: the whole of it, from a server that ignores a Range, starts it
