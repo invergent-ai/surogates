@@ -422,6 +422,24 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root(`/opt/surogate-test/install.sh --apply ${files()}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
   });
 
+  it("makes its folders root's own, whoever's they were, and takes none of them that is a link", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    // The tree and its folders as another user's, which only root can have left so.
+    const folders = "/opt/surogate /opt/surogate/versions /opt/surogate/bin /opt/surogate/staging";
+    expect(root(`mkdir -p ${folders} && chown tester: ${folders} && chmod 777 ${folders}`).status).toBe(0);
+    expect(apply(tarball)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    expect(root(`stat -c '%a %U:%G' ${folders}`).stdout).toBe("755 root:root\n755 root:root\n755 root:root\n700 root:root\n");
+    // One of the three as a link, here to a folder of that user's: root makes no other folder its own, and works in none.
+    for (const inner of ["staging", "versions", "bin"]) {
+      expect(root(`find /opt/surogate -mindepth 1 -delete; rm -rf /home/tester/theirs; mkdir -m 755 /home/tester/theirs && chown tester: /home/tester/theirs && ln -s /home/tester/theirs /opt/surogate/${inner}`).status).toBe(0);
+      expect(root(`/opt/surogate-test/install.sh --apply ${files()}`), inner).toMatchObject({
+        status: 1, stdout: "", stderr: `Surogate Desktop: /opt/surogate/${inner} is a link, where Surogate Desktop keeps a folder of its own: remove it, and run this again\n`,
+      });
+      expect(root("ls -A /home/tester/theirs; stat -c '%a %U' /home/tester/theirs").stdout, inner).toBe("755 tester\n");
+    }
+  });
+
   it("reads each file as the user who asked, so that a folder swapped for a link gets them nothing they could not read themselves", () => {
     const tarball = releaseOf("1.0.0");
     manifestOf("1.0.0", tarball);

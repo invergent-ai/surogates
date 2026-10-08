@@ -223,10 +223,21 @@ apply() {
   done
   # Before the tree is touched: a removal that runs now takes it away, and this apply makes it again.
   lock
+  # Its folders are root's own, whoever made them. The tree's first: from then on no one else puts
+  # anything in it. Then the three in it, each a folder of the tree's own and never a link, which
+  # would have root make another folder its own, and work there.
+  mkdir -p "$ROOT"
+  chown 0:0 "$ROOT"
+  chmod 0755 "$ROOT"
+  local inner
+  for inner in versions bin staging; do
+    [ ! -L "$ROOT/$inner" ] || fail "$ROOT/$inner is a link, where Surogate Desktop keeps a folder of its own: remove it, and run this again"
+  done
   mkdir -p "$ROOT/versions" "$ROOT/bin"
   # Root's alone from its first moment: what an apply copies and unpacks is in it.
   ( umask 077 && mkdir -p "$ROOT/staging" )
-  chmod 0755 "$ROOT" "$ROOT/versions" "$ROOT/bin"
+  chown 0:0 "$ROOT/versions" "$ROOT/bin" "$ROOT/staging"
+  chmod 0755 "$ROOT/versions" "$ROOT/bin"
   chmod 0700 "$ROOT/staging"
   # What an apply that was killed left in staging goes, before any room is measured. This one's
   # own folder goes however it ends.
