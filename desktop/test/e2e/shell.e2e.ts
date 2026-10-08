@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import type { ElectronApplication } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { dataHome, ELECTRON, gone, launch, MAIN, quit, secondLaunch, shellEnv, shellPage } from "./launch.js";
+import { appsElectron, dataHome, ELECTRON, gone, launch, MAIN, quit, secondLaunch, shellEnv, shellPage } from "./launch.js";
 
 let home: string;
 let app: ElectronApplication | undefined;
@@ -135,6 +135,7 @@ describe("the shell", () => {
       'Object.defineProperty(nativeTheme, "themeSource", { get: () => "system", set: () => { throw new Error("No theme here"); } });',
     ].join("\n"));
     // Loaded before the main, as Playwright loads its own: under NODE_OPTIONS it would run before electron exists.
+    await appsElectron();
     const started = spawn(ELECTRON, ["-r", failing, MAIN, "--password-store=basic"], { env: shellEnv(home), stdio: "ignore", detached: true });
     try {
       const ended = once(started, "exit").then(([code]) => code as number | null);

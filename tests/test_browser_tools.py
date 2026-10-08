@@ -960,3 +960,64 @@ class TestNavigateSnapshot:
         assert "error" not in body
         assert body["url"] == "https://example.com"
         assert "browser_get_state" in body["snapshot_error"]
+
+
+async def test_a_local_folder_chats_screenshot_goes_to_its_folder_not_the_cloud(tenant, tmp_path) -> None:
+    from surogates.devices.workspace import DeviceWorkspaceIO
+    from surogates.tools.builtin.browser import _browser_screenshot_handler
+    from surogates.tools.workspace_io import LocalWorkspaceIO
+    from tests.fake_laptop import InProcessRunner
+
+    folder = tmp_path.resolve()
+    storage = FakeStorage()
+    files = DeviceWorkspaceIO(InProcessRunner(LocalWorkspaceIO(workspace_path=str(folder))), root=str(folder))
+
+    body = json.loads(await _browser_screenshot_handler(
+        {"annotate": True},
+        tenant=tenant,
+        session_id=uuid4(),
+        browser_pool=FakePool(),
+        browser_control=FakeControlStore(),
+        storage=storage,
+        session_config={"storage_bucket": "agent-bucket", "workspace_path": str(folder)},
+        workspace_io=files,
+        _client_factory=lambda endpoint: FakeScreenshotClient(),
+    ))
+
+    # Among the harness's own files, which Ask every time does not ask about; as the computer's own browser keeps them.
+    assert body["relative_path"].startswith(".surogates-results/browser-screenshots/browser-screenshot-")
+    assert body["path"] == body["relative_path"]
+    assert (folder / body["relative_path"]).read_bytes() == b"\x89PNG\r\n\x1a\nimg"
+    assert body["annotations"][0]["ref"] == "@e1"
+    assert "vision_analyze" in body["hint"]
+    assert storage.writes == []
+
+
+async def test_a_local_folder_chats_screenshot_its_computer_refuses_is_said_in_its_words(tenant, tmp_path) -> None:
+    from surogates.devices.workspace import DeviceWorkspaceIO
+    from surogates.tools.builtin.browser import _browser_screenshot_handler
+    from surogates.tools.workspace_io import LocalWorkspaceIO
+    from tests.fake_laptop import InProcessRunner
+
+    class Refusing(InProcessRunner):
+        async def run(self, kind, args, payload=None):
+            if kind == "write":
+                return {"error": {"type": "os", "code": "ENOSPC", "message": "No space left on device"}}
+            return await super().run(kind, args, payload)
+
+    folder = tmp_path.resolve()
+    body = json.loads(await _browser_screenshot_handler(
+        {},
+        tenant=tenant,
+        session_id=uuid4(),
+        browser_pool=FakePool(),
+        browser_control=FakeControlStore(),
+        session_config={"storage_bucket": "agent-bucket", "workspace_path": str(folder)},
+        workspace_io=DeviceWorkspaceIO(Refusing(LocalWorkspaceIO(workspace_path=str(folder))), root=str(folder)),
+        _client_factory=lambda endpoint: FakeScreenshotClient(),
+    ))
+
+    # As the cloud says a shot it could not save, with the computer's own words for why.
+    assert body["error"] == "screenshot_save_failed"
+    assert body["detail"] == "No space left on device"
+    assert body["mime_type"] == "image/png"

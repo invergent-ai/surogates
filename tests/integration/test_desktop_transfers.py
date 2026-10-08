@@ -216,6 +216,8 @@ async def test_a_3_mib_tool_result_spills_onto_the_computer_through_the_app(
         await app.close()
     assert "Full output saved to: .surogates-results/call_1.txt" in result["content"]
     assert (folder / ".surogates-results" / "call_1.txt").read_text() == report
+    # The app writes the folder's ignore file too: no protected name, and not asked about.
+    assert (folder / ".surogates-results" / ".gitignore").read_bytes() == b"*\n"
 
 
 async def test_a_50_mib_write_crosses_the_link_and_small_operations_are_answered_meanwhile(

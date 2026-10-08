@@ -45,6 +45,11 @@ import { asShown } from "./pages/ui.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
+// Started from VS Code's terminal, or Claude Code's, the app has ELECTRON_RUN_AS_NODE set. Its Electron,
+// RunAsNode fuse off, ignores it but keeps it, and what the app starts would take it: the VM manager's
+// QEMU and virtiofsd, the system browser, every spawn. It goes before anything is started.
+delete process.env.ELECTRON_RUN_AS_NODE;
+
 const PAGES = join(import.meta.dirname, "pages");
 const PAGES_PRELOAD = join(import.meta.dirname, "pages-preload.cjs");
 const BRIDGE_PRELOAD = join(import.meta.dirname, "preload.cjs");

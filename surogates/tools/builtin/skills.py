@@ -13,8 +13,14 @@ import re
 from pathlib import Path
 from typing import Any
 
+import httpx
+
+from surogates.devices.binding import device_of
+from surogates.devices.workspace import DeviceOperationError
+from surogates.storage.skill_staging import stage_in_folder, staging_preamble
 from surogates.tools.builtin.skill_validation import GRAPH_FILE, is_graph_file
 from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
 logger = logging.getLogger(__name__)
 
@@ -367,6 +373,41 @@ def _expert_refusal(name: str) -> str:
         ensure_ascii=False,
     )
 
+
+async def _staged_in_folder(raw: str, name: str, api_client: Any, kwargs: dict[str, Any]) -> str:
+    """A local folder's skill, its files put in the folder by this tool call, as the cloud stages them.
+
+    Outside a tool call (a slash command's expansion) there is no call to
+    journal the writes under, so the body says how to have them put there.
+    """
+    payload = json.loads(raw)
+    linked = [path for path in payload.get("linked_files") or [] if not path.endswith("/")]
+    if not payload.get("success") or not linked:
+        return raw
+    body = payload.get("content") or ""
+    # The skill's own name, as the api answers it: the call's spelling of it is no folder name.
+    name = payload.get("name") or name
+    files = kwargs.get("workspace_io")
+    if files is None:
+        payload["content"] = (
+            f"{body}\n\nThis skill's files are not in the folder yet: "
+            f'call skill_view("{name}") to put them there.'
+        )
+        return json.dumps(payload, ensure_ascii=False)
+    root = kwargs["session_config"]["workspace_path"].rstrip("/")
+    try:
+        base = await stage_in_folder(
+            files, skill_name=name, linked_files=linked, owner=str(kwargs.get("task_id")),
+            fetch=lambda path: api_client.skill_file_bytes(name, path),
+        )
+    except (OSError, ValueError, WorkspaceSandboxError, DeviceOperationError, httpx.HTTPError) as exc:
+        payload["content"] = f"{body}\n\nThis skill's files could not be put in the folder: {exc}"
+        return json.dumps(payload, ensure_ascii=False)
+    payload["staged_at"] = f"{root}/{base}/"
+    payload["content"] = staging_preamble(name, payload["staged_at"], workdir=root) + body
+    return json.dumps(payload, ensure_ascii=False)
+
+
 async def _skill_view_handler(
     arguments: dict[str, Any],
     **kwargs: Any,
@@ -402,6 +443,8 @@ async def _skill_view_handler(
                 return _expert_refusal(name)
         except (ValueError, AttributeError):
             pass
+        if file_path is None and device_of(kwargs.get("session_config")) is not None:
+            return await _staged_in_folder(raw, name, api_client, kwargs)
         return raw
 
     tenant = kwargs.get("tenant")
