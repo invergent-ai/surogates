@@ -4,7 +4,7 @@
 // Readiness is awaited with then(), never a top-level await: an ES module main that
 // awaits app.whenReady() deadlocks.
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -21,7 +21,7 @@ import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
-import { fileToolsMissing, toolsMissing } from "../hosts/policy.js";
+import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmEnv, vmOptions } from "../vm/client.js";
@@ -276,6 +276,8 @@ const utilityBrowser = (profiles: string) => () => utility<ToBrowser, FromBrowse
 // is none to make; its last boot.
 let lacking: string[] | null = null;
 let lackingFound: Promise<string[]> = Promise.resolve([]);
+// What the VM itself lacks, as last looked for: a change of the folders looks for the file helper's tools alone.
+let vmLacking: Promise<string[]> = Promise.resolve([]);
 const VM_RESOURCES = app.isPackaged ? join(process.resourcesPath, "vm") : null;
 // The environment the VM is made from: a packaged app's has no image or KVM device of a test's.
 const VM_ENV = vmEnv(process.env, app.isPackaged);
@@ -325,11 +327,40 @@ function startDelivery(check = false): void {
 // again. The file helper's tools first, then the VM's; zstd counts only while the image's delivery
 // has something left to unpack.
 function lookForTools(): void {
-  lackingFound = missingTools({}, delivery !== null && delivery.state.state !== "ready").then((vm) => {
-    // With no PATH, where the file host itself looks: its own default.
-    const found = [...fileToolsMissing(BWRAP, process.env.PATH || "/usr/bin:/bin"), ...vm];
+  vmLacking = missingTools({}, delivery !== null && delivery.state.state !== "ready");
+  lookForFileTools(true);
+}
+
+// Each folder this computer's chats are bound to, as its file host holds it: by what it is now. One
+// that is not there or cannot be read has no file host, and none starts once the journal is closed.
+function boundFolders(): Array<{ dev: number; ino: number }> {
+  const held: Array<{ dev: number; ino: number }> = [];
+  try {
+    for (const folder of openStack()?.bindings.folders() ?? []) {
+      try {
+        held.push(statSync(folder));
+      } catch {
+        // Its chat's operations are answered folder_unavailable.
+      }
+    }
+  } catch {
+    // The device is stopping.
+  }
+  return held;
+}
+
+// The file helper's tools, looked for again beside what the VM was last found to lack: with each
+// look, once the device's folders are known, and at each change of them. They are looked for where
+// the folders' file hosts look, by the hosts' own rule (pathOutside): on the app's PATH without its
+// relative entries, and without any entry in a folder a chat is bound to, where a command may have
+// written a program. So the line and a file tool's answer name the same tools. *said*: tell the
+// pages even when nothing changed, as Check again asks.
+function lookForFileTools(said = false): void {
+  lackingFound = vmLacking.then((vm) => {
+    const found = [...fileToolsMissing(BWRAP, pathOutside(process.env.PATH, boundFolders())), ...vm];
+    const same = lacking !== null && lacking.join("\n") === found.join("\n");
     lacking = found;
-    changed();
+    if (said || !same) changed();
     return found;
   });
 }
@@ -688,6 +719,8 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
       // Settings → Folders and permissions draws the chat's folder, mode and hosts again.
       main?.settingsContents()?.send("settings:changed");
       if (pageIs(credential)) main?.webContents()?.send("desktop:binding-changed", root);
+      // A folder bound or forgotten changes where the file hosts look for their tools.
+      lookForFileTools();
     },
     onStatus: (status) => {
       if (device?.credential === credential) device.status = status;
@@ -707,6 +740,8 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
   changed();
   return started.then((stack) => {
     starting.stack = stack;
+    // This device's folders are known now: the ones its chats were bound to before it started.
+    lookForFileTools();
     return stack;
   }, (error: unknown) => {
     if (device === starting) device = null;

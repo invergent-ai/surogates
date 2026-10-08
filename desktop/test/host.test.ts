@@ -468,6 +468,22 @@ describe("a tool host's own sandbox", { timeout: 30_000 }, () => {
   });
 
   it.each([
+    // Spelled from the root, where a look that took the PATH as it is would read it.
+    ["a relative entry of its PATH", () => [join(base, "only").slice(1), join(base, "only")]],
+    ["an entry of its PATH inside the folder", () => [join(folder, "bin"), join(folder, "bin")]],
+  ])("looks for its own tools only where it lets srt look: with its only bubblewrap in %s, it says bubblewrap is missing", async (_name, entry) => {
+    // Every program of this computer's but bubblewrap.
+    const bin = join(base, "bin");
+    mkdirSync(bin);
+    for (const name of readdirSync("/usr/bin")) if (name !== "bwrap") symlinkSync(join("/usr/bin", name), join(bin, name));
+    const [spelled, dir] = entry() as [string, string];
+    mkdirSync(dir);
+    writeFileSync(join(dir, "bwrap"), "#!/bin/sh\n", { mode: 0o755 });
+    const harness = host({}, base, { ...process.env, PATH: `${spelled}:${bin}` });
+    expect(await refusal(harness)).toBe("Surogate's sandbox tools are missing. Run the install script again. It lacks bubblewrap");
+  });
+
+  it.each([
     ["under a file (ENOTDIR)", () => "/etc/passwd/bin"],
     ["in a loop of links (ELOOP)", () => {
       symlinkSync("loop", join(base, "loop"));

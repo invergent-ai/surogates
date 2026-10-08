@@ -1,10 +1,10 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { fileToolsMissing, hideSrtTmp, isReserved, sandboxPolicy } from "../src/hosts/policy.js";
+import { fileToolsMissing, hideSrtTmp, isReserved, pathOutside, sandboxPolicy } from "../src/hosts/policy.js";
 
 describe("the file helper's sandbox policy", () => {
   it("reads the system, the app, the folder and its working folder, writes the last two, and reaches no host", () => {
@@ -44,6 +44,65 @@ describe("the file helper's tools on this computer", () => {
       expect(fileToolsMissing(undefined, bin)).toEqual(["socat"]);
     } finally {
       rmSync(bin, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the PATH the file helper's tools are looked for on", () => {
+  let base: string;
+  let folder: string;
+  let tools: string;
+  const tool = (dir: string, name: string) => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, name), "#!/bin/sh\n", { mode: 0o755 });
+  };
+
+  beforeEach(() => {
+    base = realpathSync(mkdtempSync(join(tmpdir(), "tools-path-")));
+    folder = join(base, "folder");
+    tools = join(base, "tools");
+    mkdirSync(folder);
+    tool(tools, "socat");
+    tool(tools, "rg");
+  });
+
+  afterEach(() => rmSync(base, { recursive: true, force: true }));
+
+  it("keeps each absolute entry as the folder it leads to now, and none that is relative; with none left, the system's own", () => {
+    symlinkSync(tools, join(base, "link"));
+    expect(pathOutside(`bin:${join(base, "link")}::${folder}:.:${folder}/../tools`, [])).toBe(`${tools}:${folder}:${tools}`);
+    expect(pathOutside("bin::.", [])).toBe("/usr/bin:/bin");
+    expect(pathOutside(undefined, [])).toBe("/usr/bin:/bin");
+  });
+
+  it("drops an entry that is a folder a command may write or lies in one, however it is spelled, and one in a loop of links", () => {
+    mkdirSync(join(folder, "bin"));
+    symlinkSync(join(folder, "bin"), join(base, "alias"));
+    symlinkSync("loop", join(base, "loop"));
+    const entries = [folder, join(folder, "bin"), join(base, "alias"), `${tools}/../folder/bin`, join(base, "loop", "bin"), tools];
+    expect(pathOutside(entries.join(":"), [statSync(folder)])).toBe(tools);
+    // Held by nobody, the folder's entries are entries like any other.
+    expect(pathOutside(`${join(folder, "bin")}:${tools}`, [])).toBe(`${join(folder, "bin")}:${tools}`);
+  });
+
+  it.each([
+    // Spelled from the root, where a look that took the PATH as it is would read it.
+    ["a relative entry of the PATH", () => {
+      tool(join(base, "relative"), "bwrap");
+      return join(base, "relative").slice(1);
+    }],
+    ["an entry of the PATH inside the folder", () => {
+      tool(join(folder, "bin"), "bwrap");
+      return join(folder, "bin");
+    }],
+  ])("finds no bubblewrap whose only copy is in %s: the app looks where the folder's file host does", (_name, entry) => {
+    const path = `${entry()}:${tools}`;
+    mkdirSync(join(base, "working"));
+    // The copy is there, for a look that takes the PATH as it is.
+    expect(fileToolsMissing(undefined, path)).toEqual([]);
+    // The file host holds its folder and its working folder; the app, every folder its chats are bound to.
+    for (const held of [[statSync(folder), statSync(join(base, "working"))], [statSync(folder)]]) {
+      expect(fileToolsMissing(undefined, pathOutside(path, held))).toEqual(["bubblewrap"]);
     }
   });
 });

@@ -814,4 +814,33 @@ describe("the sandbox's tools, through the app", () => {
       error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${missing}` },
     });
   });
+
+  it.each([
+    // Spelled from the root, where a look that took the PATH as it is would read it.
+    ["a relative entry of the PATH", (folder: string) => [join(folder, "..", "only").slice(1), join(folder, "..", "only")]],
+    ["an entry of the PATH inside the folder", (folder: string) => [join(folder, "bin"), join(folder, "bin")]],
+  ])("looks for the file helper's tools where the folder's file host does: with the only bubblewrap in %s, the sidebar and a file tool say alike that it is missing", async (_name, entry) => {
+    // Every program of this computer's but bubblewrap.
+    const bin = mkdtempSync(join(home, "bin-"));
+    for (const name of readdirSync("/usr/bin")) if (name !== "bwrap") symlinkSync(join("/usr/bin", name), join(bin, name));
+    const folder = join(home, "files");
+    mkdirSync(folder);
+    const [spelled, dir] = entry(folder) as [string, string];
+    mkdirSync(dir);
+    writeFileSync(join(dir, "bwrap"), "#!/bin/sh\n", { mode: 0o755 });
+    const env = { PATH: `${spelled}:${bin}` };
+    const client = await launched(env);
+    const missing = "Surogate's sandbox tools are missing. Run the install script again. It lacks bubblewrap";
+    const said = async () => (await shellPage(app!)).textContent("#sandbox-text");
+    // A file host looks in none of its own folder: once a chat is bound to it, nor does the app.
+    await bind(client, folder);
+    await expect.poll(said, { timeout: 15_000 }).toBe(missing);
+    expect(await operation("stat", { key: join(folder, "a.txt") })).toEqual({
+      error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${missing}` },
+    });
+    // At the next launch the chat is bound already, and the app says so with nothing bound anew.
+    await quit(app);
+    app = await launch(home, { XDG_RUNTIME_DIR: runtime, SUROGATE_VM_IMAGE: IMAGE, ...env });
+    await expect.poll(said, { timeout: 30_000 }).toBe(missing);
+  });
 });
