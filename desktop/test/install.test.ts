@@ -516,6 +516,19 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /root/kept/manifest.json.sig ${theirs}` });
     expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/shared/manifest.json /srv/shared/manifest.json.sig /srv/shared/release.tar.gz`))
       .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /srv/shared/manifest.json ${theirs}` });
+    // A file of root's that root's own group reads: who reads has the user's group, and none of root's.
+    expect(root(`rm -rf /srv/roots && mkdir -m 755 /srv/roots && cp ${files()} /srv/roots/ && chown -R root:root /srv/roots && chmod 640 /srv/roots/* && id -G`).stdout).toBe("0\n");
+    expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/roots/manifest.json /srv/roots/manifest.json.sig /srv/roots/release.tar.gz`))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /srv/roots/manifest.json ${theirs}` });
+    // What the user cannot read is refused before anything is made: no folder of the tree's, and none for the lock.
+    expect(root(`find /opt/surogate -mindepth 1 -delete; rm -rf ${LOCKS}`).status).toBe(0);
+    expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /root/kept/manifest.json /root/kept/manifest.json.sig /root/kept/release.tar.gz`))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /root/kept/manifest.json ${theirs}` });
+    expect(root(`ls -A /opt/surogate; test ! -e ${LOCKS}`)).toMatchObject({ status: 0, stdout: "" });
+    // And who reads holds none of the helper's open files: not its descriptor 9, which is the
+    // lock's, and here its caller's. A file that is there only for a process that has it open is not there.
+    expect(root(`/opt/surogate-test/install.sh --apply /proc/self/fdinfo/9 /home/tester/manifest.json.sig /home/tester/release.tar.gz 9</dev/null`))
+      .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: /proc/self/fdinfo/9 is not a downloaded release's file\n" });
     // Root, asked for no one, is told what it was before: the file is its own to read.
     expect(root("/opt/surogate-test/install.sh --apply /root/kept/none.json /root/kept/manifest.json.sig /root/kept/release.tar.gz"))
       .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: /root/kept/none.json is not a downloaded release's file\n" });
