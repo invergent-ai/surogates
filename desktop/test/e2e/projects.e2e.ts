@@ -145,10 +145,12 @@ describe("the sidebar's projects", () => {
   it("are gone, with the open project, once the user signs out", async () => {
     const { page, client } = await signedIn();
     await opened(page, client, REPORT);
+    // The title is the agent's host before the project opens too: only after the project's own does it tell the sign-out.
+    await expect.poll(() => page.textContent("#title")).toBe("Quarterly report");
     await client.waitForLoadState();
     await client.evaluate(() => window.surogateDesktop!.registerProjects(null));
     await expect.poll(() => page.textContent("#title")).toBe(new URL(origin).host);
-    expect(await page.$$eval("#projects .project", (found) => found.length)).toBe(0);
+    await expect.poll(() => page.$$eval("#projects .project", (found) => found.length)).toBe(0);
     expect(await page.isVisible("#projects-head")).toBe(false);
   });
 
