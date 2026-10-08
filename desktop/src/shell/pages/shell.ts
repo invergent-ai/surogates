@@ -3,7 +3,8 @@
 // its own. All text comes from the main process and is set with textContent, or with showText
 // where it may hold the user's paths or QEMU's words.
 
-import { ago, byId, fillIcons, icon, markTheme, showText } from "./ui.js";
+import { ago } from "../text.js";
+import { byId, fillIcons, icon, markTheme, showText } from "./ui.js";
 
 // A project, as Section 12's ProjectSummary has it.
 interface ProjectRow {

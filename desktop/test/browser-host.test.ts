@@ -16,7 +16,8 @@ import { join } from "node:path";
 import type { BrowserContext } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { BrowserHost, type BrowserHostOptions, FILE_ASKED, holding, type Launch, PROXY_BYPASSED, WEAKENING } from "../src/browser/host.js";
+import type { Launch } from "../src/browser/client.js";
+import { BrowserHost, type BrowserHostOptions, FILE_ASKED, holding, PROXY_BYPASSED, WEAKENING } from "../src/browser/host.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
 
 const EXECUTABLE = TEST_BROWSER;

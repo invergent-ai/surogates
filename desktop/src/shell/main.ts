@@ -48,7 +48,7 @@ import { desktopPrompts } from "./prompts.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { appTools } from "./tools.js";
-import { asShown } from "./pages/ui.js";
+import { asShown } from "./text.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 

@@ -5,8 +5,7 @@ import type { FolderGuards } from "../binding/folder.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { ToolLayer } from "../shell/device-stack.js";
-import type { BrowserClient } from "./client.js";
-import type { Launch } from "./host.js";
+import type { BrowserClient, Launch } from "./client.js";
 
 export const BROWSER_KINDS = "browser.";
 

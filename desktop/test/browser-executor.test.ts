@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { Browsing, NO_BROWSER } from "../src/browser/executor.js";
-import type { Launch } from "../src/browser/host.js";
+import type { Launch } from "../src/browser/client.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
 import type { ToolLayer } from "../src/shell/device-stack.js";
