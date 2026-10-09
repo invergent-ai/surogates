@@ -666,22 +666,28 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(numbered).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: PKEXEC_UID names no user of this computer\n" });
     expect(root("test -e /opt/surogate/current").status).toBe(1);
     // So it is with a release kept in root's home, as a root shell that sudo started would name one;
-    // with a name that is no whole path, which under pkexec is looked for in root's home; with a
-    // file that is there for root and missing for the user; and with one the user reads only as a
-    // member of another group.
-    expect(root(`rm -rf /root/kept /srv/shared && mkdir -m 700 /root/kept && cp ${files()} /root/kept/ && (getent group shared >/dev/null || groupadd shared) && gpasswd -a tester shared >/dev/null`
-      + ` && mkdir -m 750 /srv/shared && cp ${files()} /srv/shared/ && chgrp -R shared /srv/shared`).status).toBe(0);
+    // with a name that is no whole path, which under pkexec is looked for in root's home; and with
+    // a file that is there for root and missing for the user.
+    expect(root(`rm -rf /root/kept && mkdir -m 700 /root/kept && cp ${files()} /root/kept/`).status).toBe(0);
     expect(root(`SUDO_UID=${user} /opt/surogate-test/install.sh --apply /root/kept/manifest.json /root/kept/manifest.json.sig /root/kept/release.tar.gz`))
       .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /root/kept/manifest.json ${theirs}` });
     expect(root(`cd /root/kept && PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply manifest.json manifest.json.sig release.tar.gz`))
       .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: manifest.json ${theirs}` });
     expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /home/tester/manifest.json /root/kept/manifest.json.sig /home/tester/release.tar.gz`))
       .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /root/kept/manifest.json.sig ${theirs}` });
-    expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/shared/manifest.json /srv/shared/manifest.json.sig /srv/shared/release.tar.gz`))
-      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /srv/shared/manifest.json ${theirs}` });
+    // Nor does who reads have a group that the system's own list does not give that user: a
+    // folder for a group the user is not in, root's shadow file, and a file of root's alone.
+    expect(root(`rm -rf /srv/closed && (getent group closed >/dev/null || groupadd closed) && mkdir -m 770 /srv/closed && cp ${files()} /srv/closed/ && chgrp -R closed /srv/closed && chmod 640 /srv/closed/*`
+      + " && ! id -Gn tester | grep -qw closed").status).toBe(0);
+    expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/closed/manifest.json /srv/closed/manifest.json.sig /srv/closed/release.tar.gz`))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /srv/closed/manifest.json ${theirs}` });
+    expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /etc/shadow /home/tester/manifest.json.sig /home/tester/release.tar.gz`))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /etc/shadow ${theirs}` });
     // A file of root's that root's own group reads: who reads has the user's group, and none of root's.
     expect(root(`rm -rf /srv/roots && mkdir -m 755 /srv/roots && cp ${files()} /srv/roots/ && chown -R root:root /srv/roots && chmod 640 /srv/roots/* && id -G`).stdout).toBe("0\n");
     expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/roots/manifest.json /srv/roots/manifest.json.sig /srv/roots/release.tar.gz`))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /srv/roots/manifest.json ${theirs}` });
+    expect(root(`chmod 600 /srv/roots/* && PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/roots/manifest.json /srv/roots/manifest.json.sig /srv/roots/release.tar.gz`))
       .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /srv/roots/manifest.json ${theirs}` });
     // What the user cannot read is refused before anything is made: no folder of the tree's, and none for the lock.
     expect(root(`find /opt/surogate -mindepth 1 -delete; rm -rf ${LOCKS}`).status).toBe(0);
@@ -756,16 +762,17 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(root("ls -A /opt/surogate/staging 2>/dev/null").stdout).toBe("");
     }
     // All that root has the asking user's processes do, in order, and for how many seconds each at
-    // most: as that user alone, in their own group and no other.
+    // most: as that user alone, in their own group and the others the system's list gives them.
     const user = Number(root("id -u tester").stdout);
     const traced = root(`PKEXEC_UID=${user} strace -f -qq -v -s 300 -o /tmp/trace -e trace=execve /opt/surogate-test/install.sh --apply ${files()} >/dev/null && grep -F 'execve("/usr/bin/timeout"' /tmp/trace`);
     expect(traced.status, traced.stderr).toBe(0);
     const asked = traced.stdout.trim().split("\n").map((line) => [...(/\[(.*)\], \[/.exec(line)?.[1] ?? "").matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => match[1]).join(" "));
-    const as = `setpriv --reuid ${user} --regid ${user} --clear-groups`;
+    const as = `setpriv --reuid ${user} --regid ${user} --init-groups`;
     const read = "iflag=nofollow,nonblock bs=64K status=none";
     expect(asked).toEqual([
       `timeout --foreground -s KILL 5 ${as} id -u`,
       `timeout --foreground -s KILL 5 ${as} id -g`,
+      `timeout --foreground -s KILL 5 ${as} id -G`,
       `timeout --foreground -s KILL 5 ${as} test -f /home/tester/manifest.json`,
       `timeout --foreground -s KILL 5 ${as} test -f /home/tester/manifest.json.sig`,
       `timeout --foreground -s KILL 5 ${as} test -f /home/tester/release.tar.gz`,
@@ -773,6 +780,70 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       `timeout --foreground -s KILL 5 ${as} dd if=/home/tester/manifest.json.sig ${read}`,
       `timeout --foreground -s KILL 120 ${as} dd if=/home/tester/release.tar.gz ${read}`,
     ]);
+  });
+
+  it("reads as the asking user's own login would, with the groups the system's own list gives that user and no other: an update is applied from a cache home that the user reaches through one of them", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    const user = "$(id -u tester)";
+    const noUser = { status: 1, stdout: "", stderr: "Surogate Desktop: PKEXEC_UID names no user of this computer\n" };
+    // A department's folder, which its group alone may enter, and the user's home in it: their
+    // cache home is their own, and they reach it as a member of that group and in no other way.
+    const updates = "/data/shared/tester/.cache/surogate/updates";
+    expect(root("(getent group shared >/dev/null || groupadd shared) && gpasswd -a tester shared >/dev/null && rm -rf /data && mkdir -p /data/shared && chown root:shared /data/shared && chmod 770 /data/shared"
+      + ` && mkdir -p ${updates} && cp ${files()} ${updates}/ && chown -R tester: /data/shared/tester && chmod -R go= /data/shared/tester`).status).toBe(0);
+    const shared = `${updates}/manifest.json ${updates}/manifest.json.sig ${updates}/release.tar.gz`;
+    // The user reads the file themselves, as their login does; and one who is in no such group does not.
+    expect(root(`(id other >/dev/null 2>&1 || useradd -m other) && runuser -u tester -- cat ${updates}/manifest.json >/dev/null && ! runuser -u other -- cat ${updates}/manifest.json 2>/dev/null`).status).toBe(0);
+    for (const asked of [`PKEXEC_UID=${user}`, `SUDO_UID=${user}`]) {
+      expect(root("find /opt/surogate -mindepth 1 -delete").status, asked).toBe(0);
+      expect(root(`${asked} /opt/surogate-test/install.sh --apply ${shared}`), asked).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+    }
+    expect(root("find /opt/surogate -mindepth 1 -delete").status).toBe(0);
+    // A user of the computer who is not in the group is refused the same files, in the same words as ever.
+    expect(root(`PKEXEC_UID=$(id -u other) /opt/surogate-test/install.sh --apply ${shared}`))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${updates}/manifest.json cannot be read by other: name it by its whole path, in a folder of that user's own\n` });
+    // Who reads, by the script's own functions without its last line: the user, their own group, and that group; none of root's.
+    const reader = (asked: string) => root(`${asked} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 id -G'`);
+    expect(reader(`PKEXEC_UID=${user}`).stdout).toBe(root("id -G tester").stdout);
+    expect(root("id -G tester").stdout.trim().split(" ")).toEqual([root("id -u tester").stdout.trim(), root("getent group shared | cut -d: -f3").stdout.trim()]);
+    // Started by a root that has groups of its own, as sudo's root has: none of them is the reader's.
+    expect(root(`(getent group closed >/dev/null || groupadd closed) && PKEXEC_UID=${user} setpriv --groups 0,$(getent group closed | cut -d: -f3),$(getent group shadow | cut -d: -f3) `
+      + `bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 id -G'`).stdout).toBe(root("id -G tester").stdout);
+    // Where the reader's groups cannot be asked at all, here with an id that answers nothing of
+    // groups, none is taken on trust: the reader is refused.
+    const silent = '#!/bin/sh\n[ "$1" != -G ] || exit 1\nexec /opt/hold/id "$@"\n';
+    expect(swapped("id", silent, [`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply ${shared}; echo "ended $?"`]))
+      .toMatchObject({ stdout: "ended 1\n", stderr: "Surogate Desktop: PKEXEC_UID names no user of this computer\n" });
+    expect(root("test ! -e /opt/surogate/current").status).toBe(0);
+    // A number with no user of the computer, and one with a user under another's name, as a
+    // directory gone wrong may have: that one's list would give the second user the first's groups.
+    // Each is refused in the script's own words, and reads nothing.
+    expect(root(`PKEXEC_UID=4242 /opt/surogate-test/install.sh --apply ${shared}`)).toMatchObject(noUser);
+    expect(root(`echo "tester:x:1700:1700::/nonexistent:/bin/sh" >>/etc/passwd && chmod -R g+rX /data/shared/tester && chgrp -R shared /data/shared/tester`).status).toBe(0);
+    try {
+      // Read by setpriv alone, the second user does read the first's group's file.
+      expect(root(`setpriv --reuid 1700 --regid 1700 --init-groups cat ${updates}/manifest.json >/dev/null`).status).toBe(0);
+      expect(root(`PKEXEC_UID=1700 /opt/surogate-test/install.sh --apply ${shared}`)).toMatchObject(noUser);
+      expect(reader("PKEXEC_UID=1700")).toMatchObject({ ...noUser, stdout: "" });
+    } finally {
+      root("sed -i '$d' /etc/passwd");
+    }
+    // A user and a group whose names have a space in them are a user and a group: read as that
+    // user, in that group, and in no other.
+    expect(root(`echo "o dd:x:1701:1701::/nonexistent:/bin/sh" >>/etc/passwd && echo "sha red:x:1801:o dd" >>/etc/group && rm -rf /srv/odd && mkdir -m 750 /srv/odd && cp ${files()} /srv/odd/ && chgrp -R 1801 /srv/odd && chmod 640 /srv/odd/*`).status).toBe(0);
+    try {
+      expect(reader("PKEXEC_UID=1701").stdout).toBe("1701 1801\n");
+      expect(root("PKEXEC_UID=1701 /opt/surogate-test/install.sh --apply /srv/odd/manifest.json /srv/odd/manifest.json.sig /srv/odd/release.tar.gz"))
+        .toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+      expect(root(`PKEXEC_UID=1701 /opt/surogate-test/install.sh --apply ${shared}`))
+        .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${updates}/manifest.json cannot be read by o\\ dd: name it by its whole path, in a folder of that user's own\n` });
+    } finally {
+      root("sed -i '$d' /etc/passwd /etc/group");
+    }
+    // The removal's own parts that run as the user have that user's groups too, as runuser gives them.
+    expect(root("runuser -u tester -- id -G").stdout).toBe(root("id -G tester").stdout);
   });
 
   it("clears what a killed apply left in staging before it measures the room", () => {

@@ -430,7 +430,7 @@ lock() {
 # caller's environment held. Nothing else is asked who it was. Naming a user only ever lowers the
 # helper's rights to read, from root's to that user's.
 asker() {
-  local name uid gid entry reads_as
+  local name uid gid entry reads_as groups listed
   for name in PKEXEC_UID SUDO_UID; do
     uid="${!name:-}"
     [ -n "$uid" ] || continue
@@ -446,17 +446,32 @@ asker() {
     reads_as="$(as_reader "$SMALL_WAIT" id -u 2>/dev/null)" || reads_as=
     reads_as+=":$(as_reader "$SMALL_WAIT" id -g 2>/dev/null)" || reads_as=
     [ "$reads_as" = "$uid:$gid" ] || fail "$name names no user of this computer"
+    # And the reader has no group but those the system's own list gives a user of that name, as
+    # root reads the list: the reader's other groups are looked up by the name its number has, and
+    # a number under another user's name would have that user's. Each group the reader has is
+    # looked for among them: one that is not there is one it gained.
+    groups="$(as_reader "$SMALL_WAIT" id -G 2>/dev/null)" || groups=
+    listed=" $(id -G -- "${READER[2]}" 2>/dev/null) " || listed=
+    [ -n "$groups" ] || fail "$name names no user of this computer"
+    for gid in $groups; do
+      [[ "$listed" == *" $gid "* ]] || fail "$name names no user of this computer"
+    done
     return 0
   done
 }
 
-# Runs what follows $1 as the user who reads an apply's files, in that user's own group and no
-# other, with none of the helper's open files, and for $1 seconds at most: a filesystem of the
-# user's own may never answer, and the user can stop what runs as them. The command alone is killed
-# then (--foreground): GNU's timeout otherwise kills itself with it, and bash says so in words of
-# its own.
+# Runs what follows $1 as the user who reads an apply's files, as that user's own login would run
+# it: as that user, in their own group, and in the other groups the system's own list gives them
+# (--init-groups), which is root's word and no more than the user's own rights. In their own group
+# alone, a user who reaches their cache home only as a member of another, as under a folder that a
+# department's group alone may enter, could read the update themselves and never have it applied.
+# Never in a group of root's, which the helper's own are, and never in one its caller names. With
+# none of the helper's open files, and for $1 seconds at most: a filesystem of the user's own may
+# never answer, and the user can stop what runs as them. The command alone is killed then
+# (--foreground): GNU's timeout otherwise kills itself with it, and bash says so in words of its
+# own.
 as_reader() {
-  timeout --foreground -s KILL "$1" setpriv --reuid "${READER[0]}" --regid "${READER[1]}" --clear-groups "${@:2}" 9<&- </dev/null
+  timeout --foreground -s KILL "$1" setpriv --reuid "${READER[0]}" --regid "${READER[1]}" --init-groups "${@:2}" 9<&- </dev/null
 }
 
 # Refuses file $1, which the reader could not read as a file. Root never looks at a file it is
