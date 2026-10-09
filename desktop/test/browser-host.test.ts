@@ -24,7 +24,7 @@ import { CANCELLED, PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge, tooMuch } from "../src/browser/downloads.js";
 import {
   A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, EARLIER_RUNNING, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding,
-  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, SAID_MS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, WEAKENING,
+  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, SAID_MS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, UNSAID_MS, WEAKENING,
 } from "../src/browser/host.js";
 import { OPERATIONS } from "../src/browser/operations.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
@@ -1010,8 +1010,9 @@ describe("a page's download, as the host stages it", () => {
     expect(STAGED_MOST_BYTES).toBe(8 * MAX_WRITE_BYTES);
   }, 30_000);
 
-  it("counts what the folder holds under no id it knows for a download of the agent's that the browser said no id of: the bound and the stall are the folder's then", async () => {
+  it("stops a download of the agent's whose id the browser has not said within the stated time, to the millisecond, and tells its agent why; what the folder holds under no id it knows is counted for no one, and stops none of the agent's", async () => {
     const { folder, begin } = staging({ stagedBytes: 1_000 });
+    expect(UNSAID_MS).toBe(2_000);
     // The browser says nothing of this one: no file is known to be its own.
     let fails!: (error: Error) => void;
     const ends = new Promise<string>((_, reject) => {
@@ -1019,17 +1020,24 @@ describe("a page's download, as the host stages it", () => {
     });
     const url = "http://fixture.test/unsaid.bin";
     asks(url);
+    const began = clock;
     const unsaid = arrives({ ...downloadOf("unsaid.bin", join(folder, "x"), ends, url), cancel: () => (did.push("cancel unsaid.bin"), fails(new Error("canceled")), Promise.resolve()) });
     const said = begin("said", "said.bin");
-    writeFileSync(join(folder, "whose.crdownload"), "x".repeat(600));
-    writeFileSync(join(folder, "said.crdownload"), "x".repeat(400));
+    // A file under no id this host knows, far past what may be staged: their own, or anything. Counted for no one.
+    writeFileSync(join(folder, "whose.crdownload"), "x".repeat(50_000));
+    writeFileSync(join(folder, "said.crdownload"), "x".repeat(1_000));
+    clock = began + UNSAID_MS - 1;
     await look();
     await look();
     expect(did).toEqual([]);
-    // A byte more under no id: taken for the agent's own, and both are stopped.
-    writeFileSync(join(folder, "whose.crdownload"), "x".repeat(601));
-    await Promise.all([unsaid, said.arrived]);
-    expect(did.sort()).toEqual(["cancel said.bin", "cancel unsaid.bin"]);
+    // At the stated time with no id said: that one alone is stopped, and its agent told why.
+    clock = began + UNSAID_MS;
+    await unsaid;
+    expect([did, state().unseen.get(SESSION)]).toEqual([["cancel unsaid.bin"], [notFinished("unsaid.bin", "this computer's browser did not say which file it was staged in")]]);
+    // The one whose id was said goes on, and ends.
+    said.ends(1_000);
+    await said.arrived;
+    expect([did, staged.map(({ name }) => name)]).toEqual([["cancel unsaid.bin"], ["said.bin"]]);
   }, 20_000);
 
   it("leaves no id behind for one it drops in a tab no chat owns: the next download of that address and name is counted by its own file, and stopped once it is more than may be staged", async () => {
