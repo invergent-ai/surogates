@@ -27,7 +27,14 @@ const node = (url) => new Promise((resolve) => {
     resolve(response.statusCode);
   }).on("error", (error) => resolve(error.code));
 });
-const chromium = (url) => net.fetch(url).then((response) => response.status, (error) => error.message);
+// Asked again where Chromium gave the request up because the computer's network changed, as it
+// does when a container beside this one starts or ends: that says nothing of a certificate.
+const chromium = async (url) => {
+  for (let tries = 0; ; tries += 1) {
+    const answer = await net.fetch(url).then((response) => response.status, (error) => error.message);
+    if (answer !== "net::ERR_NETWORK_CHANGED" || tries === 20) return answer;
+  }
+};
 
 app.whenReady().then(async () => {
   const answers = { installed: app.isPackaged, said: untrusted?.detail ?? null };

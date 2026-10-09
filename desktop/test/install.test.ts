@@ -3813,7 +3813,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       // A home its user cannot open, with a database in it that root could read.
       database("root", "/home/closed/.pki/nssdb", held);
       expect(root("chown root: /home/closed && chmod 000 /home/closed").status).toBe(0);
-      // Homes that never answer: one at the first look, and one to certutil, as it removes and as it lists.
+      // Homes that never answer: one at the first look, and one to certutil, as it removes an entry or looks for it by its name, and as it lists.
       database("stuck", "/home/stuck/.pki/nssdb", held);
       database("hung", "/home/hung/.pki/nssdb", held);
       database("hung", "/home/hung/.local/share/pki/nssdb", held);
@@ -3826,7 +3826,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       before("getent", '[ "$*" = passwd ] || exec /usr/bin/getent "$@"\n/usr/bin/getent passwd | grep -v "^tester:"\nprintf "linker:x:%s:%s::/srv/half" "$(id -u linker)" "$(id -g linker)"\nexec sleep 30');
       before("id", '[ "$*" != "-G -- slow" ] || exec sleep 30');
       before("test", 'case "$2" in /home/stuck/*) exec sleep 30 ;; esac');
-      watch('case "$*" in "-D -d sql:/home/hung/.pki/nssdb "* | "-L -d sql:/home/hung/.local/share/pki/nssdb") exec sleep 30 ;; esac');
+      watch('case "$*" in "-D -d sql:/home/hung/.pki/nssdb "* | "-L -d sql:/home/hung/.pki/nssdb -n "* | "-L -d sql:/home/hung/.local/share/pki/nssdb") exec sleep 30 ;; esac');
       const began = Date.now();
       const forgotten = alone('SMALL_WAIT=1; forget_company_cas tester /home/tester/dat ""');
       // Each wait is one bound long, and there are six: the list, stuck's home, hung's two databases twice over, and slow's groups.
