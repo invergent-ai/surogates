@@ -1135,6 +1135,34 @@ async def test_waiting_out_the_database_says_what_it_said(session_factory, redis
     assert "InternalClientError: cannot switch to state 11; another operation (2) is in progress" in caplog.text
 
 
+async def test_a_closing_that_fails_after_its_caller_was_stopped_again_says_the_operation_stays_open(
+    api, session_factory, redis_client, monkeypatch, caplog,
+):
+    issued, root = await bound_device(api)
+    ops = DeviceOperations(session_factory, redis_client)
+    request = request_for(UUID(issued["id"]), root)
+    reached, let_go = asyncio.Event(), asyncio.Event()
+
+    async def failing(self, *conditions, decided_for=None):
+        reached.set()
+        await let_go.wait()
+        raise RuntimeError("the journal refused it")
+
+    monkeypatch.setattr(DeviceOperations, "_cancel_where", failing)
+    closing = asyncio.create_task(ops._cancel_own(request))
+    await asyncio.wait_for(reached.wait(), 5.0)
+    with caplog.at_level(logging.WARNING, logger="surogates.devices.operations"):
+        # Its caller is stopped again: the closing goes on without it, and nobody awaits what it raises.
+        await stop(closing)
+        let_go.set()
+        await eventually(lambda: said_it(caplog))
+    assert caplog.text.count("it stays open") == 1 and "the journal refused it" in caplog.text
+
+
+async def said_it(caplog) -> bool:
+    return "it stays open" in caplog.text
+
+
 async def test_a_database_error_that_is_not_a_blip_is_not_retried(
     api, session_factory, redis_client, monkeypatch,
 ):

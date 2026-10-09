@@ -1159,30 +1159,31 @@ class DeviceOperations:
         its computer to run.
         """
         async def close() -> None:
-            async with asyncio.timeout(_CANCEL_PATIENCE_S):
-                while True:
-                    try:
-                        await self._cancel_where(
-                            DeviceOperation.calling_session_id == request.calling_session_id,
-                            DeviceOperation.invocation_id == request.invocation_id,
-                            DeviceOperation.ordinal == request.ordinal,
-                            decided_for=request.device_id,
-                        )
-                        return
-                    except Exception as exc:
-                        if not _database_unavailable(exc):
-                            raise
-                        await asyncio.sleep(_CANCEL_RETRY_S)
+            try:
+                async with asyncio.timeout(_CANCEL_PATIENCE_S):
+                    while True:
+                        try:
+                            await self._cancel_where(
+                                DeviceOperation.calling_session_id == request.calling_session_id,
+                                DeviceOperation.invocation_id == request.invocation_id,
+                                DeviceOperation.ordinal == request.ordinal,
+                                decided_for=request.device_id,
+                            )
+                            return
+                        except Exception as exc:
+                            if not _database_unavailable(exc):
+                                raise
+                            await asyncio.sleep(_CANCEL_RETRY_S)
+            except Exception:
+                # Said here: once its caller was stopped again, nothing awaits this any more.
+                logger.warning(
+                    "could not cancel operation %s of %s; it stays open",
+                    request.ordinal, request.invocation_id, exc_info=True,
+                )
 
-        try:
-            # Shielded, the asking again with it: a second cancel of the
-            # stopping task must not abandon the write half-way.
-            await asyncio.shield(asyncio.ensure_future(close()))
-        except Exception:
-            logger.warning(
-                "could not cancel operation %s of %s; it stays open",
-                request.ordinal, request.invocation_id, exc_info=True,
-            )
+        # Shielded, the asking again with it: a second cancel of the
+        # stopping task must not abandon the write half-way.
+        await asyncio.shield(asyncio.ensure_future(close()))
 
 
 async def reap_transfers(session_factory: async_sessionmaker[AsyncSession]) -> int:
