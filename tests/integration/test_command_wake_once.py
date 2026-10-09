@@ -102,6 +102,8 @@ class Workers:
         self.requests: list[list[dict]] = []
         #: The title the next wake gives an untitled chat, as the wake of a chat's first message does.
         self.title: str | None = None
+        #: Each conversation /compress was given to compress.
+        self.compressed: list[list[dict]] = []
         #: A stand-in for the sandbox pool, where a test's command needs one.
         self.sandbox_pool = None
         #: What the model answers next, in order; "Noted." once it runs out.
@@ -140,6 +142,7 @@ class Workers:
         self._work_done.clear()
 
         async def compress(messages, *_, **__):
+            self.compressed.append(list(messages))
             kept = list(messages[-2:])
             return kept, {"strategy": "summary", "original_message_count": len(messages), "compressed_message_count": len(kept)}
 
@@ -640,6 +643,43 @@ async def test_a_command_behind_a_turns_end_waits_for_an_hour_and_no_longer(work
         assert (workers.ran, (await workers.said(chat))[-1]) == (["_handle_clear_command"], "Conversation cleared.")
     else:
         assert (workers.ran, await workers.log(chat), await workers.status(chat)) == ([], written, "completed")
+
+
+async def test_a_command_left_behind_past_the_cursor_does_not_revive_its_chat(workers):
+    chat = await workers.chat()
+    store = workers.store
+    # A turn's last answer moves the cursor; a command lands before the turn's end is written, and
+    # the harness of the time never ran it.
+    await workers.says(chat, "Go on.")
+    lease = await store.try_acquire_lease(chat, "an-old-worker", ttl_seconds=60)
+    await store.emit_event(chat, EventType.LLM_REQUEST, {})
+    said = await store.emit_event(chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "Done."}})
+    await workers.says(chat, "/clear")
+    await store.emit_event(chat, EventType.SESSION_COMPLETE, {"reason": "completed"})
+    await store.advance_harness_cursor(chat, said, lease.lease_token)
+    await store.release_lease(chat, lease.lease_token)
+    await store.update_session_status(chat, "completed")
+    async with workers.api.app.state.session_factory() as db:
+        await db.execute(text("UPDATE events SET created_at = created_at - interval '2 hours' WHERE session_id = :id"), {"id": chat})
+        await db.commit()
+    await workers.its_browser_is_handed_back(chat)
+    written = await workers.log(chat)
+
+    await workers.wake(chat)
+
+    assert (workers.ran, workers.requests, await workers.log(chat), await workers.status(chat)) == ([], [], written, "completed")
+
+
+async def test_compress_typed_before_a_question_compresses_the_conversation_as_it_was_typed_in(workers):
+    chat = await workers.chat()
+    await workers.says(chat, "/compress")
+    await workers.says(chat, "And Q1?")
+
+    await workers.wake(chat)
+
+    # The command's own message is the one left out, and what was said after it is not its to compress.
+    [conversation] = workers.compressed
+    assert [message["content"] for message in conversation if message["role"] == "user"] == [asked for asked, _ in TALK]
 
 
 async def test_a_command_refused_by_its_users_limit_is_run_at_the_retry_also_when_the_retrys_first_wake_crashes(api, workers):
@@ -1526,6 +1566,31 @@ async def test_a_message_sent_during_a_coding_run_is_answered_and_the_sweeper_do
     assert {"role": "user", "content": "And Q1?"} in conversation
     assert (await workers.status(chat), EventType.SESSION_FAIL.value in await workers.log(chat)) == ("completed", False)
     assert workers.ran == ["_handle_code_command"]
+
+
+async def test_a_coding_run_is_the_answer_to_its_own_command_though_more_was_said_before_it_ran(workers, monkeypatch):
+    async def run(*, store, session, agent, started_metadata, **_):
+        await store.emit_event(session.id, EventType.CODE_RUN_STARTED, {"run_id": "run-1", "agent": agent, **started_metadata})
+        result = await store.emit_event(
+            session.id, EventType.CODE_RUN_RESULT,
+            {"run_id": "run-1", "agent": agent, "final_message": "The totals are fixed.", "error": None},
+        )
+        return CodingRunOutcome(status="ok", result_event_id=result)
+
+    monkeypatch.setattr("surogates.coding_agents.run_core.execute_coding_run", run)
+    workers.sandbox_pool = SimpleNamespace()
+    chat = await workers.chat()
+    await workers.says(chat, '/code claude "Fix the totals"')
+    typed = (await workers.store.get_events(chat, types=[EventType.USER_MESSAGE]))[-1].id
+    await workers.says(chat, "And Q1?")
+
+    for _ in range(3):
+        await workers.wake(chat)
+
+    [started] = await workers.store.get_events(chat, types=[EventType.CODE_RUN_STARTED])
+    assert (started.data["source_event_id"], workers.ran) == (typed, ["_handle_code_command"])
+    [conversation] = workers.requests
+    assert {"role": "user", "content": "And Q1?"} in conversation
 
 
 async def test_a_coding_run_whose_worker_died_is_left_as_its_death_left_it(workers, monkeypatch):
