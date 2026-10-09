@@ -24,7 +24,7 @@ from surogates.scheduled.schedule import parse_schedule
 from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
-from surogates.workstreams.stream import STREAM_TYPES
+from surogates.workstreams.stream import STREAM_TYPES, project_of
 from tests.test_steer_loop import _final_response, _make_loop_harness
 
 from .test_command_wake_once import DiesWriting, workers  # noqa: F401  (workers is a fixture)
@@ -48,7 +48,7 @@ from .test_thread_copies import (  # noqa: F401  (pods is a fixture)
     pods,
     reports,
 )
-from .test_turn_sagas import a_turn, calling
+from .test_turn_sagas import a_turn, calling, stop
 from .test_workstream_threads import queued
 from .test_workstreams import create, master_of
 
@@ -691,8 +691,11 @@ async def a_routine_run(api, master, name: str):
     return run, schedule
 
 
-async def in_its_pod(pool, run, command: str) -> None:
-    """*command* run in the master's pod, which its routine runs work in."""
+async def in_its_pod(api, pool, run, command: str) -> None:
+    """*command* run in the master's pod, which its routine runs work in, as a call of *run*'s turn."""
+    await api.app.state.session_store.emit_event(
+        run.id, EventType.TOOL_CALL, {"tool_call_id": "call_0_terminal", "name": "terminal", "arguments": {"command": command}},
+    )
     await open_pod(pool, run)
     await pool.execute(sandbox_session_key(run), "terminal", json.dumps({"command": command}))
 
@@ -709,6 +712,22 @@ async def pickups(api, commit: str) -> list[WorkstreamHistory]:
         return list((await db.execute(select(WorkstreamHistory).where(
             WorkstreamHistory.kind == "pickup", WorkstreamHistory.commit == commit,
         ))).scalars())
+
+
+async def pickups_of(api, master) -> list[WorkstreamHistory]:
+    """Every pickup recorded alone in *master*'s project, oldest first."""
+    async with api.app.state.session_factory() as db:
+        return list((await db.execute(select(WorkstreamHistory).where(
+            WorkstreamHistory.kind == "pickup", WorkstreamHistory.workstream_id == project_of(master.config["workspace_boundary"]),
+        ).order_by(WorkstreamHistory.id))).scalars())
+
+
+def main_of(pods) -> str:
+    return git(pods.project / "_history", "rev-parse", "refs/heads/main")
+
+
+def changed(row: WorkstreamHistory) -> list[str]:
+    return [f["path"] for f in row.picked_up]
 
 
 async def test_a_routine_runs_changes_are_picked_up_as_the_routines(api, monkeypatch, pods):
@@ -740,7 +759,7 @@ async def test_a_failed_routine_runs_changes_are_the_routines_too(api, monkeypat
     pool = SandboxPool(pods)
     await a_history(api, pool, master)
     run, _ = await a_routine_run(api, master, "Tidy up")
-    await in_its_pod(pool, run, "echo tidied > notes.txt")
+    await in_its_pod(api, pool, run, "echo tidied > notes.txt")
     await ends(api, pool, run, failed=True)
     assert git(pods.project / "_history", "log", "-1", "--format=%an", "refs/heads/main") == "Tidy up"
 
@@ -754,7 +773,7 @@ async def test_a_routine_runs_pickup_first_settles_a_landing_a_killed_worker_lef
     await a_landing_killed(api, monkeypatch, pool, thread, after="apply b.md")
     assert pods.real_names() == ["Report.docx", "a.md", "b.md", "notes.txt", "start.md"]
     run, _ = await a_routine_run(api, master, "Tidy up")
-    await in_its_pod(pool, run, "echo tidied > notes.txt")
+    await in_its_pod(api, pool, run, "echo tidied > notes.txt")
     await ends(api, pool, run)
     # Put back through the master's pod, which has no copy: the half landing is no change of the routine's.
     [killed] = await rows(api, thread)
@@ -785,7 +804,7 @@ async def test_a_routine_run_of_a_project_over_the_cap_records_nothing(api, monk
     # Its wake marks it, as a thread's is marked: its end records nothing.
     [over] = woken
     assert over.config["history_off"] is True
-    await in_its_pod(pool, over, "echo tidied > notes.txt")
+    await in_its_pod(api, pool, over, "echo tidied > notes.txt")
     assert await landing_module.pick_up_routine(
         session_factory=api.app.state.session_factory, sandbox_pool=pool, session=over, saga_settings=None,
     ) is None
@@ -810,3 +829,175 @@ async def test_a_cloud_session_that_is_no_projects_wakes_with_its_bucket(api, mo
     # Its turn runs, unmarked: no project's history is counted for it.
     assert len(ran) == 1 and "history_off" not in ran[0]
     assert await store.get_events(session.id, types=[EventType.HARNESS_CRASH]) == []
+
+
+async def test_your_edit_before_a_routine_run_is_recorded_by_you_and_not_as_the_routines(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    (pods.project / "brief.pdf").write_bytes(b"%PDF uploaded before the routine ran")
+    run, schedule = await a_routine_run(api, master, "Health check")
+    await a_turn(api, monkeypatch, run, [
+        calling(("terminal", {"command": "printf ' checked' >> notes.txt"})), _final_response("Checked."),
+    ], pool=pool)
+    durable = pods.project / "_history"
+    # Two pickups: yours as the run began, before its first call, and then the run's own.
+    yours, its = await pickups_of(api, master)
+    assert (changed(yours), changed(its), its.commit) == (["brief.pdf"], ["notes.txt"], main_of(pods))
+    assert git(durable, "log", "-1", "--format=%ae|%P", its.commit) == f"routine:{schedule.id}@surogate|{yours.commit}"
+    assert git(durable, "log", "-1", "--format=%an <%ae>", yours.commit) == f"{run.user_id} <user:{run.user_id}@surogate>"
+    assert git(durable, "log", "-1", "--format=%(trailers:key=Surogate-Kind,valueonly)", yours.commit) == "pickup"
+    assert yours.steps[0]["arguments"]["author"]["email"] == f"user:{run.user_id}@surogate"
+
+
+async def test_what_you_save_while_a_routine_run_is_at_work_is_recorded_with_the_runs_changes_and_never_lost(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    run, _ = await a_routine_run(api, master, "Health check")
+
+    async def you_save(harness) -> None:
+        (pods.project / "brief.pdf").write_bytes(b"%PDF uploaded while the routine ran")
+
+    await a_turn(api, monkeypatch, run, [
+        calling(("terminal", {"command": "printf ' checked' >> notes.txt"})), calling(("memory", {"action": "add", "content": "x"})),
+        _final_response("Checked."),
+    ], pool=pool, during=you_save)
+    # The real files are one folder, the run's and yours: what changed between its first call and its end is its pickup's.
+    [its] = await pickups_of(api, master)
+    assert changed(its) == ["brief.pdf", "notes.txt"]
+    assert (pods.project / "brief.pdf").read_bytes() == b"%PDF uploaded while the routine ran"
+    assert git(pods.project / "_history", "show", f"{its.commit}:brief.pdf") == "%PDF uploaded while the routine ran"
+
+
+async def test_a_routine_run_that_starts_while_another_is_at_work_takes_none_of_its_changes_for_yours(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    first, _ = await a_routine_run(api, master, "Tidy up")
+    second, schedule = await a_routine_run(api, master, "Health check")
+    await in_its_pod(api, pool, first, "echo a > a.md")
+    await a_turn(api, monkeypatch, second, [
+        calling(("terminal", {"command": "echo b > b.md"})), _final_response("Checked."),
+    ], pool=pool)
+    # What the first had written is a routine's, the one that ended first: never yours.
+    [its] = await pickups_of(api, master)
+    assert (changed(its), its.commit) == (["a.md", "b.md"], main_of(pods))
+    assert git(pods.project / "_history", "log", "--format=%ae", "-2", its.commit).splitlines()[0] == f"routine:{schedule.id}@surogate"
+    await ends(api, pool, first)
+    # And recorded once: the first's own end finds nothing left.
+    assert [r.id for r in await pickups_of(api, master)] == [its.id] and main_of(pods) == its.commit
+    git(pods.project / "_history", "fsck", "--strict", "--no-dangling")
+
+
+async def test_a_routine_runs_pickup_waits_for_a_landing_under_way_and_takes_none_of_its_files(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    await edited(pool, thread, "for f in a b; do echo $f > $f.md; done")
+    run, schedule = await a_routine_run(api, master, "Tidy up")
+    before = main_of(pods)
+    call = landing_module._call
+    applying, go_on = asyncio.Event(), asyncio.Event()
+
+    async def held_up(sandbox_pool, owner, action, **arguments):
+        result = await call(sandbox_pool, owner, action, **arguments)
+        if owner == str(thread.id) and (action, arguments.get("path")) == ("apply", "a.md"):
+            applying.set()
+            await go_on.wait()
+        return result
+
+    monkeypatch.setattr(landing_module, "_call", held_up)
+    landing = asyncio.ensure_future(ends(api, pool, thread))
+    await applying.wait()
+    # The landing has a.md in the real files and not b.md, and holds the project's lock.
+    await in_its_pod(api, pool, run, "echo tidied > notes.txt")
+    routine = asyncio.ensure_future(ends(api, pool, run))
+    await asyncio.sleep(1.5)
+    assert not routine.done() and main_of(pods) == before and await pickups_of(api, master) == []
+    go_on.set()
+    await asyncio.gather(landing, routine)
+    [landed] = await rows(api, thread)
+    [its] = await pickups_of(api, master)
+    durable = pods.project / "_history"
+    assert (landed.saga_state, changed(its), its.commit) == ("completed", ["notes.txt"], main_of(pods))
+    assert git(durable, "log", "-1", "--format=%ae|%P", its.commit) == f"routine:{schedule.id}@surogate|{landed.commit}"
+    git(durable, "fsck", "--strict", "--no-dangling")
+
+
+async def test_a_routine_run_taken_up_by_another_worker_records_its_changes_as_the_routines_all_the_same(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    run, schedule = await a_routine_run(api, master, "Tidy up")
+    await in_its_pod(api, pool, run, "echo tidied > notes.txt")
+    # Its worker died between its work and its record: the worker that ends its turn holds no pod of the master's.
+    await ends(api, SandboxPool(pods), run)
+    [its] = await pickups_of(api, master)
+    assert (changed(its), its.commit) == (["notes.txt"], main_of(pods))
+    assert git(pods.project / "_history", "log", "-1", "--format=%ae", its.commit) == f"routine:{schedule.id}@surogate"
+
+
+async def test_a_routine_run_that_changed_nothing_records_nothing(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    before = main_of(pods)
+    looked, _ = await a_routine_run(api, master, "Health check")
+    await a_turn(api, monkeypatch, looked, [calling(("terminal", {"command": "cat notes.txt"})), _final_response("Fine.")], pool=pool)
+    assert await pickups_of(api, master) == [] and main_of(pods) == before
+    # One that called no tool wrote no file: an edit of yours meanwhile is not its change, and waits for a pickup by you.
+    pick_up = landing_module.pick_up_routine
+
+    async def then_you_save(**arguments):
+        picked = await pick_up(**arguments)
+        (pods.project / "brief.pdf").write_bytes(b"%PDF uploaded while the routine spoke")
+        return picked
+
+    monkeypatch.setattr(loop_artifact_completion, "pick_up_routine", then_you_save)
+    spoke, _ = await a_routine_run(api, master, "Greeting")
+    await a_turn(api, monkeypatch, spoke, [_final_response("Good morning.")], pool=pool)
+    assert await pickups_of(api, master) == [] and main_of(pods) == before
+
+
+async def test_a_stopped_routine_runs_changes_are_the_routines_too(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    run, schedule = await a_routine_run(api, master, "Tidy up")
+    await a_turn(api, monkeypatch, run, [
+        calling(("terminal", {"command": "echo tidied > notes.txt"})), calling(("memory", {"action": "add", "content": "x"})),
+        _final_response("never said"),
+    ], pool=pool, during=stop)
+    [its] = await pickups_of(api, master)
+    assert (changed(its), its.commit) == (["notes.txt"], main_of(pods))
+    assert git(pods.project / "_history", "log", "-1", "--format=%ae", its.commit) == f"routine:{schedule.id}@surogate"
+
+
+async def test_a_routine_run_through_a_masters_pod_made_before_it_kept_a_history_records_nothing(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    before = main_of(pods)
+    provision = pods.provision
+
+    async def older(spec):
+        spec.env.pop("HISTORY_MAIN", None)
+        return await provision(spec)
+
+    monkeypatch.setattr(pods, "provision", older)
+    run, _ = await a_routine_run(api, master, "Tidy up")
+    await a_turn(api, monkeypatch, run, [
+        calling(("terminal", {"command": "echo tidied > notes.txt"})), _final_response("Tidied."),
+    ], pool=pool)
+    # Its turn ends all the same, with nothing recorded.
+    store = api.app.state.session_store
+    assert len(await store.get_events(run.id, types=[EventType.SESSION_COMPLETE])) == 1
+    assert await pickups_of(api, master) == [] and main_of(pods) == before
+    # The next landing records the change, as yours.
+    thread = await a_thread(api, "Draft A", master)
+    await edited(pool, thread, "echo a > a.md")
+    await ends(api, pool, thread)
+    [landed] = await rows(api, thread)
+    assert [f["path"] for f in landed.picked_up] == ["notes.txt"]

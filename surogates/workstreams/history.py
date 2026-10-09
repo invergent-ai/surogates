@@ -134,9 +134,9 @@ async def record_pickup(
     session_factory: Any, saga: Saga, *, workstream_id: UUID | str, commit: str, picked_up: list[dict],
     agent_id: str, user_id: UUID | None,
 ) -> int:
-    """The row of a routine run's pickup, recorded: what it changed in the real files; its id.
+    """The row of a pickup pushed alone, recorded: what the real files changed, a routine run's or yours before it; its id.
 
-    Its one step's arguments name the routine, its author.
+    Its one step's arguments name its author.
     """
     async with session_factory() as db, db.begin():
         return (await db.execute(

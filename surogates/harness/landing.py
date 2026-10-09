@@ -1173,30 +1173,57 @@ def routine_project(session: Any) -> str | None:
     return project_of(config.get("workspace_boundary"))
 
 
-async def pick_up_routine(*, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any) -> dict | None:
+async def routines_at_work(session_factory: Any, session: Any) -> bool:
+    """Whether another routine run of *session*'s master has called a tool and not ended: a change to the real files may be its."""
+    from sqlalchemy import exists, select
+
+    from surogates.db.models import Event
+    from surogates.db.models import Session as SessionRow
+
+    async with session_factory() as db:
+        return bool(await db.scalar(select(exists().where(
+            SessionRow.parent_id == session.parent_id, SessionRow.channel == "scheduled",
+            SessionRow.status == "active", SessionRow.id != session.id,
+            exists().where(Event.session_id == SessionRow.id, Event.type == EventType.TOOL_CALL.value),
+        ))))
+
+
+async def pick_up_routine(
+    *, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any, yours: bool = False,
+) -> dict | None:
     """Record what a master's routine run changed in the real files as the routine's: its pickup, or None.
 
     A pickup alone, pushed under the project's lock in the master's pod the
     run worked in, once the landings a killed worker left running are
     settled: what they applied is put back first, so it is no change of
     the routine's.  One try: a pickup that fails, a run whose pod this
-    worker no longer holds, a project over the cap and one with no history
+    worker does not hold, a project over the cap and one with no history
     yet record nothing, and the next landing picks the changes up as yours.
+
+    With *yours*, before the run's first call: what the real files changed
+    up to here is recorded by you, as a landing's pickup records it, so
+    the run's own pickup holds what changed while it worked and no more.
+    Not while another routine run of the project is at work: a change may
+    be its, and is left for a routine's pickup.
     """
     workstream = routine_project(session)
     owner = sandbox_session_key(session)
     if workstream is None or session.config.get("history_off") or sandbox_pool.sandbox_of(owner) is None:
         return None
-    schedule = UUID(session.config["scheduled_session_id"])
-    try:
-        name = (await ScheduledSessionStore(session_factory).get(schedule)).name
-    except KeyError:
-        name = "A routine"
+    if yours:
+        author = {"name": str(session.user_id), "email": f"user:{session.user_id}@surogate"}
+    else:
+        schedule = UUID(session.config["scheduled_session_id"])
+        try:
+            name = (await ScheduledSessionStore(session_factory).get(schedule)).name
+        except KeyError:
+            name = "A routine"
+        author = {"name": name, "email": f"routine:{schedule}@surogate"}
     orchestrator = _orchestrator(saga_settings)
     saga = orchestrator.create_saga(session.id, kind="landing")
     pickup = orchestrator.add_step(
         saga.saga_id, tool_name="history.pickup", tool_call_id="", max_retries=0, arguments={
-            "author": {"name": name, "email": f"routine:{schedule}@surogate"}, "push": True,
+            "author": author, "push": True,
             "trailers": [
                 ["Surogate-Project", workstream], ["Surogate-Agent", str(session.agent_id)],
                 ["Surogate-User", str(session.user_id)], ["Surogate-Saga", saga.saga_id], ["Surogate-Kind", "pickup"],
@@ -1205,6 +1232,8 @@ async def pick_up_routine(*, session_factory: Any, sandbox_pool: Any, session: A
     )
     async with project_lock(session_factory, workstream) as held:
         await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
+        if yours and await routines_at_work(session_factory, session):
+            return None
         await held()
         picked = await orchestrator.execute_step(
             saga.saga_id, pickup.step_id, lambda: _call(sandbox_pool, owner, "pickup", **pickup.arguments),

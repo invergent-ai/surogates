@@ -41,6 +41,7 @@ from surogates.harness.landing import (
     _fence,
     keep_copy,
     land_turn,
+    TURN_ENDS,
     pick_up_routine,
     prune_later,
     routine_project,
@@ -185,6 +186,8 @@ class ArtifactCompletionMixin:
     _turn_marked: bool = False
     #: The last event before the turn's loop started: the turn's own come after it.
     _turn_after_event_id: int = 0
+    #: The last turn-ending event before a routine run's turn: its calls come after it.
+    _routine_turn: int | None = None
 
     async def _promote_fenced_artifacts(
         self,
@@ -1415,17 +1418,40 @@ class ArtifactCompletionMixin:
             spec = await _build_session_sandbox_spec(session, self._tenant, owner, credential_vault=self._credential_vault)
             await self._sandbox_pool.ensure(owner, spec)
 
-    async def _pick_up_routine(self, session: Session) -> None:
-        """A master's routine run records its changes to the real files as its own, at its turn's end."""
-        if self._sandbox_pool is None or routine_project(session) is None:
+    async def _pick_up_routine(self, session: Session, *, yours: bool = False) -> None:
+        """A master's routine run records its changes to the real files as its own, at its turn's end.
+
+        With *yours*, as its turn begins: your edits up to here, by you, so
+        they are not taken for the run's.  Only before the turn's first
+        call: a turn taken up again after one may have written already.
+        A turn that called no tool wrote no file, and records nothing at
+        its end.  The master's pod is made where this worker holds none:
+        a turn that another worker's death cut off still ends with its
+        changes recorded.
+        """
+        if (
+            self._sandbox_pool is None or routine_project(session) is None
+            or device_of(session.config) is not None or session.config.get("history_off")
+        ):
             return
         try:
+            if yours or self._routine_turn is None:
+                # Read as the turn begins: a stop's route writes its own end before the turn is torn down.
+                ended = await self._store.last_event(session.id, *TURN_ENDS)
+                self._routine_turn = ended.id if ended else 0
+            if yours == await self._store.has_event(session.id, EventType.TOOL_CALL, after=self._routine_turn):
+                return
+            from surogates.harness.tool_exec import _build_session_sandbox_spec
+
+            owner = sandbox_session_key(session)
+            spec = await _build_session_sandbox_spec(session, self._tenant, owner, credential_vault=self._credential_vault)
+            await self._sandbox_pool.ensure(owner, spec)
             await pick_up_routine(
                 session_factory=self._session_factory, sandbox_pool=self._sandbox_pool,
-                session=session, saga_settings=self._saga_settings,
+                session=session, saga_settings=self._saga_settings, yours=yours,
             )
         except Exception:
-            # Its changes are picked up as yours at the next landing.
+            # The changes are picked up at the next landing, as yours.
             logger.exception("Could not pick up the changes of routine run %s", session.id)
 
     async def _fail_session(

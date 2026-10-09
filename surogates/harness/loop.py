@@ -1136,6 +1136,8 @@ class AgentHarness(
                 self._settle_allowance_reservation(session, cost_tracker),
             )
         if self._sandbox_pool is not None:
+            # A stopped routine run's writes are in the real files all the same: they are the routine's.
+            await self._pick_up_routine(session)
             await self._take_back_what_the_turn_handed_on(session)
             try:
                 await self._sandbox_pool.destroy_for_session(str(session.id))
@@ -2281,6 +2283,8 @@ class AgentHarness(
         self._turn_after_event_id = max((e.id for e in all_events or []), default=0)
         if is_project_thread(session.config):
             await self._name_the_turn(session)
+        # What the real files changed before a routine run's first call is yours, not its.
+        await self._pick_up_routine(session, yours=True)
         # --- Saga orchestrator ---
         saga = None
         # A project's thread always runs one: its steps are undone in its copy.
