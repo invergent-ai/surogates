@@ -7,6 +7,7 @@
 // lost guest was running.
 
 import { readFileSync, renameSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import type { Duplex } from "node:stream";
 import { setTimeout as wait } from "node:timers/promises";
 import { Worker } from "node:worker_threads";
@@ -19,7 +20,7 @@ import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { Backoff } from "./backoff.js";
 import { ControlLink, type Request } from "./control.js";
-import { Carrier, letGo } from "./inbound.js";
+import { Carrier, DOOR, Door, Forwarded, letGo } from "./inbound.js";
 import { bootLinux } from "./linux.js";
 import { type Egress, NetProxy, withNotice } from "./proxy.js";
 import type { Disks } from "./qemu.js";
@@ -234,8 +235,9 @@ export class Guest {
   private readonly setupMs: number;
   private readonly powerOffMs: number;
   private readonly proxy: NetProxy;
-  // The way into its roots: the host's end of the inbound port.
+  // The way into its roots: the host's end of the inbound port, and the door the browser's proxy knocks at.
   private readonly carrier: Carrier;
+  private readonly door: Door;
   // The roots set up in it now: a connection is carried into no other.
   private readonly up = new Set<string>();
   // Its own stop, once asked: a guest that goes without one was lost.
@@ -250,6 +252,7 @@ export class Guest {
     readonly helloMs: number,
     private readonly told: Told,
     egress: Egress,
+    forwarded: Forwarded,
   ) {
     this.gone = new Promise((resolve) => {
       this.leave = resolve;
@@ -284,13 +287,17 @@ export class Guest {
     this.proxy = new NetProxy(vm.net, { egress });
     // Each connection made into a root from outside the guest.
     this.carrier = new Carrier(vm.inbound, options.reachMs);
+    // Each connection the browser makes to a chat's own server, into the root the app forwarded its port to.
+    this.door = new Door(join(options.run, DOOR), forwarded, (root, port, first) => this.reach(root, port, first));
   }
 
   /**
    * The guest *boot* starts, once its agent has said hello. Rejects with why it did
    * not start, its hypervisor's words included. *signal* stops a boot under way.
    */
-  static async boot(boot: BootVm, options: VmOptions, signal?: AbortSignal, told: Told = () => {}, egress = REFUSING): Promise<Guest> {
+  static async boot(
+    boot: BootVm, options: VmOptions, signal?: AbortSignal, told: Told = () => {}, egress = REFUSING, forwarded = new Forwarded(),
+  ): Promise<Guest> {
     const launched = performance.now();
     // The backend's own part, QEMU's sockets and monitor, is as quick emulated: the guest has not begun.
     const vm = await boot(options, signal, launched + WAITS.kvm.helloMs);
@@ -301,7 +308,7 @@ export class Guest {
     try {
       const deadline = launched + WAITS[vm.emulated ? "emulated" : "kvm"].helloMs;
       const control = await ControlLink.open(vm.control, options.user, deadline, vm.exited);
-      return new Guest(options, vm, control, launched, performance.now() - launched, told, egress);
+      return new Guest(options, vm, control, launched, performance.now() - launched, told, egress, forwarded);
     } catch (error) {
       await vm.kill();
       throw new Error([describe(error), await vm.exited].filter(Boolean).join(": "));
@@ -436,12 +443,13 @@ export class Guest {
   }
 
   /**
-   * A connection to *port* of *root*'s own loopback, for the agent's browser (spec, Section 5), or
-   * why there is none: "sandbox" for a root not set up in this guest, which is asked nothing, else
-   * what the guest's agent answered. Nothing is set up, or booted, for it.
+   * A connection to *port* of *root*'s own loopback, the family *first* names tried before the other,
+   * for the agent's browser (spec, Section 5), or why there is none: "sandbox" for a root not set up
+   * in this guest, which is asked nothing, else what the guest's agent answered. Nothing is set up,
+   * or booted, for it.
    */
-  reach(root: string, port: number): Promise<Duplex | string> {
-    return this.up.has(root) && !this.ended ? this.carrier.open(root, port) : Promise.resolve("sandbox");
+  reach(root: string, port: number, first: 4 | 6 = 4): Promise<Duplex | string> {
+    return this.up.has(root) && !this.ended ? this.carrier.open(root, port, first) : Promise.resolve("sandbox");
   }
 
   /** Whether something in *root* takes a connection on *port* of its own loopback now: one is made, and let go. */
@@ -511,6 +519,7 @@ export class Guest {
     clearInterval(this.keepalive);
     this.control.close();
     this.proxy.close();
+    this.door.close();
     this.carrier.close();
     this.up.clear();
     // Before what waited on it is answered: the next operation finds them ended.
@@ -534,6 +543,8 @@ export class VmManager {
   private working = 0;
   // The chats told that their commands run emulated: once a chat, whichever boot it was in.
   private readonly noticed = new Set<string>();
+  // What each device's browser may open of its chats' own servers, whichever guest runs.
+  private readonly forwarded = new Forwarded();
 
   // *told*: each change of a root's processes in its guests. *egress*: who lets a root's commands reach past the package hosts.
   // *report*: each boot, and how it went.
@@ -586,6 +597,14 @@ export class VmManager {
     } finally {
       this.done();
     }
+  }
+
+  /**
+   * What the browser of the device that knocks with *key* may open from now on: each port of a chat's
+   * own servers, with the chat's root; none forgets the key. Kept across guests.
+   */
+  forwards(key: string, ports: ReadonlyArray<readonly [number, string]>): void {
+    this.forwarded.set(key, ports);
   }
 
   /** Whether something in *root* listens on *port* of its own loopback now, in the guest that runs: none is booted to ask. Never rejects. */
@@ -645,11 +664,11 @@ export class VmManager {
       // What the console says is then this boot's alone.
       rmSync(this.options.console, { force: true });
       try {
-        return await Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress);
+        return await Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress, this.forwarded);
       } catch (error) {
         if (this.stopping || !this.unchecked()) throw error;
         renameSync(this.options.sessions, `${this.options.sessions}.unchecked`);
-        return Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress);
+        return Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress, this.forwarded);
       }
     })();
     booting.then(async (guest) => {

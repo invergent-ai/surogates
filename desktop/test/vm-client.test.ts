@@ -384,6 +384,55 @@ describe("the VM manager's process", { timeout: 20_000 }, () => {
     expect(starts).toBe(1);
   });
 
+  it("tells its manager the ports each device's browser may open, a manager started later too, and starts none to tell", async () => {
+    const heard: Array<(message: FromManager) => void> = [];
+    const exits: Array<() => void> = [];
+    const sent: ToManager[] = [];
+    const tell = (message: FromManager) => heard.forEach((listener) => listener(message));
+    let starts = 0;
+    const vm = new VmClient({
+      vm: { kernel: "", rootfs: "", agentDisk: "", sessions: "", run: "/run/user/1000/surogate/vm-1", console: "", user: { uid: 1, gid: 1, name: "ana", home: "/home/ana" } },
+      spawn: () => {
+        starts += 1;
+        return {
+          send: (message) => {
+            sent.push(message);
+            if (message.type === "start") tell({ type: "ready" });
+            if (message.type === "stop") exits.forEach((listener) => listener());
+          },
+          onMessage: (listener) => void heard.push(listener),
+          onExit: (listener) => void exits.push(listener),
+          kill: () => exits.splice(0).forEach((listener) => listener()),
+        };
+      },
+    });
+    clients.push(vm);
+    // Where the browser's proxy knocks: in the VM's own runtime folder.
+    expect(vm.door).toBe("/run/user/1000/surogate/vm-1/browser.sock");
+    const KEY = "ab".repeat(32);
+    const OTHER_KEY = "cd".repeat(32);
+    vm.forwards(KEY, [[3000, "root-1"]]);
+    vm.forwards(OTHER_KEY, [[5000, "root-9"]]);
+    vm.forwards(OTHER_KEY, [[5000, "root-9"], [5001, "root-9"]]);
+    expect(starts).toBe(0);
+    void vm.perform(operation(), signal());
+    await vi.waitFor(() => expect(sent.filter((message) => message.type === "forwards")).toHaveLength(2));
+    // Before anything else it is asked: the latest of each device.
+    expect(sent.slice(0, 3)).toEqual([
+      expect.objectContaining({ type: "start" }),
+      { type: "forwards", key: KEY, ports: [[3000, "root-1"]] }, { type: "forwards", key: OTHER_KEY, ports: [[5000, "root-9"], [5001, "root-9"]] },
+    ]);
+    // A device with none left is forgotten, by a manager started after too.
+    vm.forwards(KEY, []);
+    expect(sent.at(-1)).toEqual({ type: "forwards", key: KEY, ports: [] });
+    exits.splice(0).forEach((listener) => listener());
+    sent.length = 0;
+    void vm.perform(operation(), signal());
+    // Started again once its backoff has passed.
+    await vi.waitFor(() => expect(sent.some((message) => message.type === "forwards")).toBe(true), { timeout: 10_000 });
+    expect(sent.filter((message) => message.type === "forwards")).toEqual([{ type: "forwards", key: OTHER_KEY, ports: [[5000, "root-9"], [5001, "root-9"]] }]);
+  });
+
   it("tears a root down through its manager, and starts none to do it", async () => {
     const vm = client();
     await vm.teardown("root-1");
