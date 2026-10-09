@@ -6,10 +6,11 @@ import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSyn
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Duplex } from "node:stream";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { VmManager, type VmOptions } from "../../src/vm/manager.js";
+import { type Guest, VmManager, type VmOptions } from "../../src/vm/manager.js";
 import { agentDisk, background, folderOf, IMAGE, KVM, median, needsKvm, OTHER, ROOT, signal, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
@@ -145,6 +146,32 @@ require("node:http").createServer((req, res) => res.end(JSON.stringify(seen))).l
       `whether a chat listens, median ${median(times).toFixed(1)} ms of 30 (${Math.min(...times).toFixed(1)}–${Math.max(...times).toFixed(1)})`,
       `12 at once in ${(performance.now() - begun).toFixed(0)} ms`,
     ].join("; "));
+  });
+
+  it("closes every connection held into a chat when its root is torn down, within a second: read, unread, or saying nothing", async () => {
+    // The guest that runs, for connections held as the browser's would be: the manager itself only asks and lets go.
+    const guest = await (manager as unknown as { guest: Promise<Guest> }).guest;
+    const held: Duplex[] = [];
+    for (const [port, read] of [[8006, false], [8007, true], [8007, false]] as const) {
+      for (let n = 0; n < 4; n += 1) {
+        const reached = await guest.reach(ROOT, port);
+        if (typeof reached === "string") throw new Error(reached);
+        reached.on("error", () => {});
+        if (read) reached.resume();
+        held.push(reached);
+      }
+    }
+    await new Promise((done) => setTimeout(done, 300));
+    expect(held.filter((reached) => reached.closed)).toHaveLength(0);
+    await manager.teardown(ROOT);
+    const torn = performance.now();
+    await expect.poll(() => held.filter((reached) => reached.closed).length, { timeout: 5_000, interval: 20 }).toBe(held.length);
+    const took = performance.now() - torn;
+    console.log(`${held.length} connections held into a chat, all closed ${took.toFixed(0)} ms after its root was torn down`);
+    expect(took).toBeLessThan(1_000);
+    // Set up again by the chat's next command, the root takes connections as before, and has none of its old servers.
+    expect(await run(ROOT, "true")).toMatchObject({ ok: { returncode: 0 } });
+    expect(await manager.listening(ROOT, 8006)).toBe(false);
   });
 
   it("answers that nothing listens in a chat whose root is torn down, and boots no guest for the question", async () => {

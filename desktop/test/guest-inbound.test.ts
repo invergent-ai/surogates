@@ -125,6 +125,76 @@ describe("the agent's door for connections into a root", () => {
     await vi.waitFor(() => expect(taken.every((socket) => socket.destroyed)).toBe(true));
   });
 
+  it("ends a stream cleanly once the root's connection has ended and gone: every byte of the server's answer arrives, and no reset cuts it", async () => {
+    // A server that answers and ends, as a download that finishes; its connection then goes whole. Its answer is
+    // more than a stream's window lets through unread.
+    const SIZE = 100 * 1024;
+    const whole = createServer((socket) => {
+      taken.push(socket);
+      socket.on("error", () => {});
+      socket.end(Buffer.alloc(SIZE, "d"));
+    });
+    await new Promise<void>((done) => whole.listen(0, "127.0.0.1", done));
+    const to = (whole.address() as { port: number }).port;
+    // Gone as soon as its server has ended, while the stream still holds the answer's last bytes.
+    reach = () => new Promise((done) => {
+      const socket = connect({ host: "127.0.0.1", port: to });
+      socket.once("connect", () => done(socket));
+    });
+    try {
+      const { status, stream } = await into("127.0.0.1:3000");
+      expect(status).toBe(200);
+      // Read only after a while: what the agent's end holds meanwhile is not lost.
+      await new Promise((done) => setTimeout(done, 300));
+      let got = 0;
+      const closed = new Promise<number>((done) => stream.once("close", () => done(stream.rstCode)));
+      stream.on("data", (chunk: Buffer) => {
+        got += chunk.length;
+      });
+      // The host has not ended its own side: the stream closes all the same, with no error.
+      const code = await Promise.race([closed, new Promise<string>((done) => setTimeout(() => done("still open"), 5_000))]);
+      expect([code, got]).toEqual([constants.NGHTTP2_NO_ERROR, SIZE]);
+    } finally {
+      await new Promise<void>((done) => whole.close(() => done()));
+    }
+  });
+
+  it("resets a stream whose root's connection is destroyed before its end, as a root's teardown destroys it, read by the host or not", async () => {
+    const endless = createServer((socket) => {
+      taken.push(socket);
+      socket.on("error", () => {});
+      const part = Buffer.alloc(64 * 1024, "d");
+      const more = () => {
+        while (!socket.destroyed && socket.write(part));
+      };
+      socket.on("drain", more);
+      more();
+    });
+    await new Promise<void>((done) => endless.listen(0, "127.0.0.1", done));
+    const to = (endless.address() as { port: number }).port;
+    // The agent's ends of the roots' connections, as its network holds them.
+    const brought: Socket[] = [];
+    reach = () => new Promise((done) => {
+      const socket = connect({ host: "127.0.0.1", port: to, allowHalfOpen: true });
+      brought.push(socket);
+      socket.once("connect", () => done(socket));
+    });
+    try {
+      for (const read of [true, false]) {
+        const { status, stream } = await into("127.0.0.1:3000");
+        expect(status).toBe(200);
+        if (read) stream.resume();
+        else await vi.waitFor(() => expect(taken.at(-1)?.writableNeedDrain).toBe(true), { timeout: 5_000 });
+        const closed = new Promise<number>((done) => stream.once("close", () => done(stream.rstCode)));
+        await new Promise((done) => setTimeout(done, 100));
+        brought.at(-1)?.destroy();
+        expect(await Promise.race([closed, new Promise<string>((done) => setTimeout(() => done("still open"), 3_000))]), String(read)).toBe(constants.NGHTTP2_CANCEL);
+      }
+    } finally {
+      await new Promise<void>((done) => endless.close(() => done()));
+    }
+  });
+
   it("ends the root's connection when the host resets a stream whose answer is still on its way, with a code or with none", async () => {
     // A server that answers without end, as a download does: the stream holds bytes the host has not read.
     const endless = createServer((socket) => {

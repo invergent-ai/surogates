@@ -6,7 +6,7 @@
 // the authority names first, inside the root's namespaces (root.ts, Roots.reach). The agent opens no stream here, and the host no
 // stream on the net port: neither way's rules read the other's requests.
 
-import { performServerHandshake, type ServerHttp2Stream } from "node:http2";
+import { constants, performServerHandshake, type ServerHttp2Stream } from "node:http2";
 import type { Socket } from "node:net";
 import type { Duplex } from "node:stream";
 
@@ -47,6 +47,12 @@ export class Inbound {
         // And at the host's reset, whatever its code: a stream that still holds bytes of the server's answer
         // is not closed by a reset with no code, and the root's connection would stay open behind it.
         stream.once("aborted", () => reached.destroy());
+        // The other way, a root's connection that has gone takes its stream with it: one destroyed before its
+        // end, as a root's teardown destroys it, by a reset, since nothing else would ever close the stream;
+        // one that had ended, with no error and only once every byte of its answer is written.
+        reached.once("close", () => {
+          if (!stream.destroyed) stream.close(reached.readableEnded ? constants.NGHTTP2_NO_ERROR : constants.NGHTTP2_CANCEL);
+        });
         stream.respond({ ":status": 200 });
         reached.pipe(stream);
         stream.pipe(reached);
