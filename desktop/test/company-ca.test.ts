@@ -6,7 +6,7 @@
 
 import { spawnSync } from "node:child_process";
 import { X509Certificate } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -26,9 +26,9 @@ vi.mock("node:child_process", async (original) => {
   return { ...real, spawnSync };
 });
 
-// What happens to a file once while it is read, and the files whose names say they are root's: the
-// real calls read and look.
-const meanwhile = vi.hoisted(() => ({ during: undefined as (() => void) | undefined, roots: new Set<string>() }));
+// What happens to a file once while it is read; the files whose names say they are root's; and the
+// links that were still what they lead to when they were looked at. The real calls read and look.
+const meanwhile = vi.hoisted(() => ({ during: undefined as (() => void) | undefined, roots: new Set<string>(), linkedSince: new Set<string>() }));
 vi.mock("node:fs", async (original) => {
   const real = await original<typeof import("node:fs")>();
   const readSync = ((...args: Parameters<typeof real.readSync>) => {
@@ -39,7 +39,7 @@ vi.mock("node:fs", async (original) => {
     return read;
   }) as typeof real.readSync;
   const lstatSync = ((path: string, ...rest: []) => {
-    const found = real.lstatSync(path, ...rest);
+    const found = meanwhile.linkedSince.has(path) ? real.statSync(path, ...rest) : real.lstatSync(path, ...rest);
     if (meanwhile.roots.has(path)) found.uid = 0;
     return found;
   }) as typeof real.lstatSync;
@@ -122,6 +122,15 @@ describe("the company's CA file", () => {
     } finally {
       meanwhile.roots.clear();
     }
+    // A link put in its place since the look is not followed, to a file of root's own either.
+    const since = join(certs, "since.pem");
+    symlinkSync("/etc/passwd", since);
+    meanwhile.linkedSince.add(since);
+    try {
+      expect(() => companyCertificates(since, true)).toThrow(`${since} could not be read: ELOOP`);
+    } finally {
+      meanwhile.linkedSince.clear();
+    }
   });
 
   it("is read as it is by a development build, whose file is the developer's own, through a link too", () => {
@@ -166,6 +175,13 @@ describe("the company's CA file", () => {
     meanwhile.during = () => appendFileSync(changing, pem(another));
     expect(() => companyCertificates(changing)).toThrow(`${changing} changed while Surogate read it`);
     meanwhile.during = () => writeFileSync(changing, "");
+    expect(() => companyCertificates(changing)).toThrow(`${changing} changed while Surogate read it`);
+    // And by other certificates of the same length, written since.
+    writeFileSync(changing, pem(company));
+    meanwhile.during = () => {
+      writeFileSync(changing, pem(company).replace("M", "N"));
+      utimesSync(changing, new Date(), new Date(Date.now() + 60_000));
+    };
     expect(() => companyCertificates(changing)).toThrow(`${changing} changed while Surogate read it`);
     writeFileSync(changing, pem(company));
     expect(companyCertificates(changing)).toEqual([pem(company).trim()]);
@@ -313,7 +329,11 @@ describe.skipIf(!existsSync(CERTUTIL))("the company's CA in the user's NSS datab
     writeFileSync(join(home, "password"), "secret\n");
     expect(spawnSync(CERTUTIL, ["-N", "-d", `sql:${own()}`, "-f", join(home, "password")]).status).toBe(0);
     const trust = () => trustInChromium([pem(company)], home, data());
+    started.length = 0;
     expect(trust).toThrow(DatabaseRefusal);
+    // Asked of no terminal: the run that adds is handed a password file that holds none.
+    const adding = started.map(([, args]) => args).filter((args) => args.includes("-A"));
+    expect(adding.map((args) => args.slice(args.indexOf("-f"), args.indexOf("-f") + 2))).toEqual([["-f", "/dev/null"]]);
     expect(trust).toThrow(new RegExp(`^certutil could not change ${own()}: .*SEC_ERROR_TOKEN_NOT_LOGGED_IN`));
     expect(entries(own())).toEqual([]);
   });
