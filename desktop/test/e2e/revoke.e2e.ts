@@ -273,11 +273,14 @@ describe("a later sign-in, which rotates this computer's token", () => {
     await agent.approve((await opened(quitting))[0]!);
     await expect.poll(() => agent.asked.reauthorize).toBe(1);
     const links = agent.link.connections;
-    // The user quits while the agent is still rotating the token, and it answers during the quit.
-    const closing = quit(quitting);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    // The user quits while the agent is still rotating the token, and it answers during the quit: from the
+    // tray's Quit, so the app can be asked whether it has gone on, which it has once its window hid, as it
+    // hides it and cancels the sign-in in one go, and once it has gone.
+    void quitting.evaluate(({ app: electron }) => electron.quit()).catch(() => {});
+    await expect.poll(() => quitting.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isVisible()))
+      .catch(() => false)).toBe(false);
     release();
-    await closing;
+    await quit(quitting);
     // Nothing started on the new token, and nothing was revoked.
     expect(agent.link.connections).toBe(links);
     expect(agent.link.received.filter((frame) => frame.type === "revoke")).toEqual([]);

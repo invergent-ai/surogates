@@ -83,6 +83,8 @@ async function foldersSettings(shell: ElectronApplication, page: Page): Promise<
     found = shell.windows().find((each) => each.url().endsWith("/settings.html"));
     return found !== undefined;
   }).toBe(true);
+  // Its nav is in its HTML: its script, which hears the click, has run once the page has loaded.
+  await found!.waitForLoadState();
   await found!.waitForSelector(".settings-nav .item");
   await found!.click('[data-section="folders"]');
   return found!;
@@ -185,9 +187,12 @@ describe("Settings → Folders and permissions", () => {
     await settings.keyboard.press("Escape").catch(() => {});
     await expect.poll(() => settings.isClosed()).toBe(true);
     // Logged out, then back in: this computer is added again, and the chat bound on it again.
+    // The sign-in shows while the log out still runs, which ignores a sign-in until it ends with the web client's load.
+    const loggedOut = client.waitForEvent("load");
     await page.click("#user");
     await page.click('[data-action="logout"]');
     await expect.poll(() => page.isVisible("#sign-in")).toBe(true);
+    await loggedOut;
     await signedInAndAdded(shell, page, agent);
     // The web client says who is signed in on it, as it does once its session is in.
     await client.evaluate((account) => window.surogateDesktop!.setAccount(account), ACCOUNT);
