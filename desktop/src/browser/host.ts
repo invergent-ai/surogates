@@ -154,6 +154,8 @@ interface Begun {
 const MAX_NOTICES = 20;
 // How many of the browser's words that a download begins are kept while no download is matched to them.
 const UNMATCHED = 64;
+// What Playwright says of a frame that has no line of its own to the browser, its page's own process drawing it.
+const NO_LINE_OF_ITS_OWN = "does not have a separate CDP session";
 /**
  * How long the browser's word that a download begins is kept for the download it is of. Playwright announces a
  * download from that same word of the browser's, so the two come together: one said this long before is of a
@@ -601,6 +603,9 @@ export class BrowserHost {
   // Of a page's own lines, the one to each of its frames, as it will be once made: none where the frame's page's
   // process draws it (framed).
   private readonly frameLines = new WeakMap<CDPSession[], Map<Frame, Promise<CDPSession | null>>>();
+  // The pages' own lines of which one could not be made, or was refused by the browser: such lines do not hear
+  // all of their page, and Playwright's listener stays beside them (line).
+  private readonly unheard = new WeakSet<CDPSession[]>();
   // The pages whose tab crashed, and has not been loaded again since.
   private readonly crashed = new WeakSet<Page>();
   // The pages that have not answered yet since the browser was last handed back (settle): what one of them
@@ -1096,6 +1101,9 @@ export class BrowserHost {
       if (this.hearing.get(page) !== kept || kept.over !== mine || this.held === null) return void this.drop(lines);
       delete kept.over;
       kept.lines = lines;
+      // Playwright's listener goes only where these lines hear all of the page: where one could not be made,
+      // or the browser refused it, Playwright hears on, as before there were such lines.
+      if (this.unheard.has(lines)) return;
       if (kept.heard) page.off("filechooser", kept.heard);
       kept.heard = null;
     });
@@ -1103,14 +1111,24 @@ export class BrowserHost {
 
   // A line of this host's own to *target*, a page or a frame of it, among its page's *lines*: it hears what
   // the target asks for, and the browser opens no chooser of its own for it. None for a frame its page's own
-  // process draws, which that page's line hears, nor for a page that is gone. Never rejects.
+  // process draws, which that page's line hears. Where a line cannot be made for any other reason, or the
+  // browser does not take its word, those lines do not hear all of the page (unheard). Never rejects.
   private async line(page: Page, target: Page | Frame, lines: CDPSession[]): Promise<CDPSession | null> {
-    const line = await page.context().newCDPSession(target).catch(() => null);
-    if (line === null) return null;
+    let line: CDPSession;
+    try {
+      line = await page.context().newCDPSession(target);
+    } catch (error) {
+      if (!said(error).includes(NO_LINE_OF_ITS_OWN)) this.unheard.add(lines);
+      return null;
+    }
     lines.push(line);
     line.on("Page.fileChooserOpened", () => this.overheard(page, lines));
-    // The browser stops a page's own chooser for a line only once the line has the page's events.
-    await Promise.all([line.send("Page.enable"), line.send("Page.setInterceptFileChooserDialog", { enabled: true })]).catch(() => {});
+    try {
+      // The browser stops a page's own chooser for a line only once the line has the page's events.
+      await Promise.all([line.send("Page.enable"), line.send("Page.setInterceptFileChooserDialog", { enabled: true })]);
+    } catch {
+      this.unheard.add(lines);
+    }
     return line;
   }
 
@@ -1143,7 +1161,11 @@ export class BrowserHost {
     const kept = this.hearing.get(page);
     const lines = kept?.lines ?? kept?.over?.lines;
     if (this.held === null || !kept || !lines) return;
-    const made = this.frameLine(page, frame, lines);
+    const made = this.frameLine(page, frame, lines).then((line) => {
+      // Its line could not be made: Playwright hears the page again, so that the frame is not left unheard.
+      if (this.unheard.has(lines) && this.hearing.get(page) === kept && kept.lines === lines) this.hear(page);
+      return line;
+    });
     kept.over?.more.push(made);
   }
 

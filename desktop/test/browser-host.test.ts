@@ -1653,6 +1653,9 @@ describe("a page's download, as the host stages it", () => {
       const frame = {};
       const reads: Array<() => void> = [];
       const answering = { slow: false };
+      // What fails of a line of the host's own, where a test says so: its making, with the words given; or the
+      // browser's taking its word to stop the page's own chooser.
+      const failing: { made: string | null; stops: boolean } = { made: null, stops: false };
       // The host's own lines to the page, each as the browser keeps one: whether it stops the page's own chooser and
       // is told what the page asks for, until it is closed.
       // *takes*: where the page is slow, what makes it take a line's word to stop its chooser, as a busy page does late.
@@ -1665,6 +1668,7 @@ describe("a page's download, as the host stages it", () => {
           send: (method: string, params?: { enabled?: boolean }) => {
             if (method === "Runtime.evaluate") return answering.slow ? new Promise<void>((done) => reads.push(done)) : Promise.resolve();
             if (method !== "Page.setInterceptFileChooserDialog") return Promise.resolve();
+            if (failing.stops && params?.enabled === true) return Promise.reject(new Error("Protocol error (Page.setInterceptFileChooserDialog): Not supported"));
             const stop = () => void (mine.stops = mine.open && params?.enabled === true);
             if (!answering.slow || params?.enabled !== true) return Promise.resolve(stop());
             return new Promise<void>((done) => takes.push(() => done(stop())));
@@ -1680,7 +1684,7 @@ describe("a page's download, as the host stages it", () => {
       const page = {
         on, once: on, off: (event: string, heard: (event: unknown) => void) => void hears.get(event)?.delete(heard),
         goto: () => new Promise(() => {}), mainFrame: () => frame, frames: () => [], url: () => FORM_URL, title: () => Promise.resolve(""), isClosed: () => false,
-        context: () => ({ newCDPSession: () => Promise.resolve(line()) }),
+        context: () => ({ newCDPSession: () => (failing.made === null ? Promise.resolve(line()) : Promise.reject(new Error(failing.made))) }),
       } as unknown as Page;
       if (!state().tabs.has(session)) {
         state().roots.set(session, "chat-1");
@@ -1688,7 +1692,9 @@ describe("a page's download, as the host stages it", () => {
       }
       state().adopt(session, page);
       return {
-        page, reads, answering, takes,
+        page, reads, answering, takes, failing,
+        // A frame of the page's gets a document, as the browser says it.
+        frames: (framed: unknown = {}) => void [...(hears.get("framenavigated") ?? [])].forEach((heard) => heard(framed)),
         // How many lines of the host's own to the page are open, and what tells the host that the page's tab crashed.
         open: () => lines.filter((kept) => kept.open).length,
         crashes: () => void [...(hears.get("crash") ?? [])].forEach((heard) => heard(page)),
@@ -1728,6 +1734,47 @@ describe("a page's download, as the host stages it", () => {
     };
 
     beforeEach(fresh);
+
+    it("keeps Playwright hearing a held page where a line of the host's own to it, or to a frame of it, cannot be made or the browser refuses it: nothing is left unheard; a frame its page's own process draws has no line and needs none", async () => {
+      const state_ = (tab: ReturnType<typeof taken>) => [tab.playwright(), tab.heard(), tab.open()];
+      // The page's own line cannot be made.
+      let tab = taken();
+      tab.failing.made = "Protocol error (Target.attachToTarget): No target with given id found";
+      host.pause("chat-2", true);
+      await turn();
+      await turn();
+      expect(state_(tab)).toEqual([1, 1, 0]);
+      host.pause("chat-2", false);
+      // It is made, and the browser refuses its word.
+      fresh();
+      tab = taken();
+      tab.failing.stops = true;
+      host.pause("chat-2", true);
+      await turn();
+      await turn();
+      expect([tab.playwright(), tab.heard()]).toEqual([1, 1]);
+      host.pause("chat-2", false);
+      // The page's line hears, and Playwright's listener goes. A frame the page's own process draws has no line,
+      // as Playwright says of it: the page's hears it, and nothing changes.
+      fresh();
+      tab = taken();
+      host.pause("chat-2", true);
+      await turn();
+      await turn();
+      expect(state_(tab)).toEqual([0, 1, 1]);
+      tab.failing.made = "cdpSession.newCDPSession: This frame does not have a separate CDP session, it is a part of the parent frame's session";
+      tab.frames();
+      await turn();
+      await turn();
+      expect(state_(tab)).toEqual([0, 1, 1]);
+      // A frame another process draws, whose line cannot be made: Playwright hears the page again.
+      tab.failing.made = "Protocol error (Target.attachToTarget): No target with given id found";
+      tab.frames();
+      await turn();
+      await turn();
+      expect(state_(tab)).toEqual([1, 1, 1]);
+      host.pause("chat-2", false);
+    });
 
     it("does at the one take-over all that it does for either, with nothing the browser says between: no input stays kept for an upload, the request of the navigation it stopped is forgotten and the download on its way stopped; its pages are heard five seconds more, for no one, and again from the hand back, when the minute begins", async () => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
