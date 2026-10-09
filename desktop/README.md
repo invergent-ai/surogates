@@ -100,8 +100,8 @@ large one. What is staged is looked at once a second, so the agent's own can pas
 400 MiB by what comes in a second. Each of the agent's is counted by the file the browser
 names for it as it begins; one the browser has not named two seconds on cannot be told from
 another's, so it is stopped, and the agent told that the browser did not say which file it
-was. Nothing else in the folder is counted. A download of your own counts for nothing in any of this:
-it is never stopped for its size or its silence, and the agent is told nothing of it. One of
+was. Nothing else in the folder is counted. A download of your own counts for nothing in
+any of this: it is never stopped for its size or its silence, and the agent is told nothing of it. One of
 yours with no end goes on until you stop it in the browser or the browser closes. The one
 download that may be either's, in the minute after a hand back, is said below.
 

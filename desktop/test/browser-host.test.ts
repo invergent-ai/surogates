@@ -4940,6 +4940,23 @@ await navigator.serviceWorker.ready;`);
     expect((await op(a, "browser.mouse", { action: "move", x: 5, y: 5 }, "chat-1")).ok.notices).toContain(GIVEN_AS_TAKEN);
   }, 60_000);
 
+  it("opens no window of the browser's own for a page that asks for a file, a folder or a place to save one by the pickers a script calls, at the agent's click: the browser refuses each, as it stops a file input's chooser", async () => {
+    // The pickers are offered only to a site the browser trusts as a secure one.
+    host = hostWith({ args: ["--unsafely-treat-insecure-origin-as-secure=http://fixture.test"] });
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    expect(await op(a, "browser.mouse", { action: "click", x: 60, y: 55, button: "left", clicks: 1 }, "chat-1")).toMatchObject({ ok: {} });
+    const refused = await script(a, `
+      const answers = [];
+      for (const picker of ["showOpenFilePicker", "showDirectoryPicker", "showSaveFilePicker"]) {
+        answers.push(typeof window[picker] !== "function" ? "not offered" : await window[picker]().then(() => "opened", (error) => error.message));
+      }
+      return answers;`, "chat-1");
+    expect(refused).toEqual(Array.from({ length: 3 }, () => expect.stringContaining("Intercepted by Page.setInterceptFileChooserDialog()")));
+    await new Promise((done) => setTimeout(done, 1_500));
+    expect(ownChoosers()).toEqual([]);
+  }, 60_000);
+
   it("hears a file input for the agent from the moment the browser is handed back: its click right after opens no chooser of the browser's own, time after time", async () => {
     const a = session();
     await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
