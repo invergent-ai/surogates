@@ -17,6 +17,9 @@ jobs:
       REMOTE_SCRIPT: /root/update-agent-images.sh
       NODE_HOSTS: ${{ secrets.NODE_HOSTS }}
       MASTER_HOST: ${{ secrets.MASTER_HOST }}
+    # This job holds the key to every node of the cluster and runs no action, only its own
+    # steps. One added here is named by its commit, as in release.yml: a tag can be moved.
+    # scripts/release_workflow_test.rb holds the file to it.
     steps:
       # These hosts must accept SSH on 22022 from GitHub's egress ranges
       # (see https://api.github.com/meta -> .actions). Check first so a

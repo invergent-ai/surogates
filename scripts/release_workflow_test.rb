@@ -451,15 +451,37 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal [["release.yml", "desktop-publish", "desktop-release"]], named
   end
 
-  def test_every_action_is_named_by_its_commit
-    # A tag or a branch can be moved to other code: the build's job writes what is signed, and
-    # other jobs hold R2's keys beside the actions they run.
-    @workflow.fetch("jobs").each do |name, job|
-      job.fetch("steps").each do |step|
-        next unless step.key?("uses")
-
-        assert_match(%r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}\z}, step["uses"], "#{name} runs an action that is not named by its commit")
+  def test_every_action_is_named_by_its_commit_in_every_workflow_file
+    # A tag or a branch can be moved to other code: the build's job writes what is signed, other
+    # jobs hold R2's keys beside the actions they run, and the second file's job holds the key to
+    # every node of the cluster. So every file is asked, each step of each job and each job that
+    # is another workflow, and a file that runs no action today is held to it for the day it does.
+    by_commit = %r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}\z}
+    run = Hash.new { |files, file| files[file] = [] }
+    workflows.each do |file, workflow|
+      run[file]
+      workflow.fetch("jobs").each do |name, job|
+        named = [job["uses"]] + job.fetch("steps", []).map { |step| step["uses"] }
+        named.compact.each do |action|
+          assert_match(by_commit, action, "#{file}: #{name} runs an action that is not named by its commit")
+          run[file] << action.split("@").first
+        end
       end
+    end
+    assert_equal %w[release.yml update-images.yml], run.keys
+    assert_equal %w[
+      actions/checkout actions/download-artifact actions/setup-node actions/upload-artifact astral-sh/setup-uv docker/build-push-action
+      docker/login-action docker/setup-buildx-action pnpm/action-setup softprops/action-gh-release
+    ], run.fetch("release.yml").uniq.sort
+    assert_empty run.fetch("update-images.yml"), "update-images.yml runs an action: name it here, by its commit in the file"
+  end
+
+  def test_the_look_for_an_action_reads_the_file_as_the_runner_does
+    # Every "uses" of a workflow file's text is one the test above has asked: none is in a place it
+    # does not look, as a step of a list that a key of another name holds would be.
+    workflows.each do |file, workflow|
+      read = workflow.fetch("jobs").sum { |_, job| (job.key?("uses") ? 1 : 0) + job.fetch("steps", []).count { |step| step.key?("uses") } }
+      assert_equal File.read(".github/workflows/#{file}").scan(/^\s*(?:-\s+)?uses:/).length, read, "#{file} names an action where no job's steps are"
     end
   end
 
