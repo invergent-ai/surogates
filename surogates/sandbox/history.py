@@ -729,7 +729,9 @@ class History:
         up from the copy's base.
 
         A copy's first take-up looks at whose hand-off it is.  One this
-        turn made, its pod gone since, is taken up whole.  One another turn
+        turn made, its pod gone since, is taken up whole, from the base it
+        was made on: what the turn handed on and what helpers kept since,
+        and nothing the project's files held besides.  One another turn
         made is a turn that neither landed nor was kept, a stopped one whose
         stop was not carried out among them: its own files are left out,
         as a stop leaves them, and what it found and what helpers kept
@@ -750,6 +752,8 @@ class History:
             if followed is not None and followed[0]:
                 _, taken, onto_none, _ = followed
                 since = onto_none or since
+            elif followed is not None and followed[3]:
+                since = followed[3]
         if taken is None:
             # Nothing but another turn's own files: none of it is this copy's.
             self._main("update-ref", self.handed, durable)

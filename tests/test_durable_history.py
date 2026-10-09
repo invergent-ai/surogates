@@ -2125,6 +2125,20 @@ def test_a_stop_takes_back_every_hand_off_of_its_turn_also_one_made_by_a_pod_mad
     assert first.turn == "turn-2"
 
 
+def test_a_copy_made_again_does_not_bring_back_a_file_deleted_from_the_project_since_the_turn_began(tmp_path, project):
+    a_thread_whose_helper_finished_after_its_turn(tmp_path, project)
+    (project / "uploads" / "brief.pdf").write_bytes(b"%PDF uploaded by you")  # after the helper started
+    turn = a_pod(tmp_path, project, turn="turn-2")
+    (turn.copy / "draft.md").write_text("draft")
+    turn.hand_off(author=A, trailers=KEPT)
+    (project / "uploads" / "brief.pdf").unlink()  # you delete it during the turn
+    again = a_pod(tmp_path, project, turn="turn-2")  # the pod went; the copy is made again
+    # What the turn handed on is its own changes and its helpers', not what the project held when it began.
+    assert names_in(again) == ["Report.docx", "draft.md", "notes.txt", "outline.md", "sources.md"]
+    land(again, "saga:2")
+    assert not (project / "uploads" / "brief.pdf").exists() and (project / "sources.md").exists()
+
+
 def test_a_stop_follows_a_bounded_number_of_commits_whatever_the_hand_offs_say(tmp_path, project, monkeypatch):
     monkeypatch.setattr(history_module, "_HAND_BACKS", 6)
     turn = a_pod(tmp_path, project, turn="turn-2")
