@@ -81,6 +81,12 @@ export const OWN_CHOOSER_MS = 5_000;
 // prompt waits for this host's answer (the approvals' ADDRESS_MS), which then gives the upload up. Its
 // session's line is held no longer for it.
 export const LOOK_MS = 800;
+// How long an upload's question of this host waits its turn in its session's line before it is answered
+// that an earlier operation of the session's still runs (EARLIER_RUNNING): with the look at the page after
+// it, less than the prompt waits. The upload's prompt names the site that gets its files, so it cannot be
+// made without this answer, and the chat's other prompts wait behind it: it is not kept waiting for as long
+// as that operation takes, and is told why it has no site to name.
+export const TURN_MS = 100;
 // How long a page may take to answer once the browser is handed back (settle), before the agent acts in it
 // all the same and what it asks for is kept again: a frame of it that is stuck would else keep the agent
 // out of the page for good.
@@ -186,6 +192,8 @@ const unmeasured = (name: string): string => `The page downloaded ${quoted(name)
 const failed = (message: string): Outcome => ({ error: { type: "browser", message } });
 const DELETED = failed("The chat was deleted, and its tabs closed with it");
 const ANOTHER_CHATS = failed("This session's tab in the agent's browser on this computer is another chat's");
+export const EARLIER_RUNNING =
+  "The agent's browser on this computer was still busy with this session's earlier operation, so nobody was asked about this upload and the page was given nothing. Send it again once that operation has answered.";
 export const ASKING = failed(
   "The page asked its user a question while they held the browser, and it is still open. It is theirs to answer, in the agent's browser on this computer: nothing is done in this page until they have.",
 );
@@ -641,7 +649,8 @@ export class BrowserHost {
    * for the upload, so one that asks after cannot take the files in its place, and the upload gives
    * nothing if the input is elsewhere by then. *of*: that upload, by its operation's id; the input is
    * kept for it alone. Where the input is in a frame that runs as no site, there is none to ask its user
-   * about, and the upload is given to nothing: answered so, in place of an address. *root*: the chat that
+   * about, and the upload is given to nothing: answered so, in place of an address; and so where an earlier
+   * operation of the session's still runs, behind which this would wait longer than its prompt does. *root*: the chat that
    * asks. A session's page is said, and its input named, only for the chat the session is of: any other
    * is told a new tab's, as its operation there would be refused (perform). Never rejects.
    */
@@ -651,7 +660,9 @@ export class BrowserHost {
     // not coming: it is not known as asked about, and no input is named for it.
     const sought = { coming: true };
     if (upload && of !== undefined) this.sought.set(of, sought);
-    return this.inLine(session, async () => {
+    let turn = false;
+    const said = this.inLine(session, async () => {
+      turn = true;
       const open = (this.tabs.get(session) ?? []).filter((page) => !page.isClosed());
       if (root !== undefined && open.length > 0 && this.roots.get(session) !== root) return NEW_TAB;
       const tab = open.at(-1)?.url() ?? NEW_TAB;
@@ -681,6 +692,18 @@ export class BrowserHost {
     }).catch(() => NEW_TAB).finally(() => {
       if (of !== undefined && this.sought.get(of) === sought) this.sought.delete(of);
     });
+    if (!upload) return said;
+    // An upload's question whose turn has not come within TURN_MS is behind an operation of its session's
+    // that still runs: answered so, at once, and nothing is kept for the upload when its turn does come.
+    let timer: NodeJS.Timeout | undefined;
+    const busy = new Promise<{ refused: string }>((resolve) => {
+      timer = setTimeout(() => {
+        if (turn) return;
+        sought.coming = false;
+        resolve({ refused: EARLIER_RUNNING });
+      }, TURN_MS);
+    });
+    return Promise.race([said, busy]).finally(() => clearTimeout(timer));
   }
 
   /**

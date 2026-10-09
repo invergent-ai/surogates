@@ -23,8 +23,8 @@ import { ADDRESS_MS } from "../src/binding/approvals.js";
 import { CANCELLED, PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge, tooMuch } from "../src/browser/downloads.js";
 import {
-  A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding,
-  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, SETTLE_MS, STAGED_MOST_BYTES, WEAKENING,
+  A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, EARLIER_RUNNING, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding,
+  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, WEAKENING,
 } from "../src/browser/host.js";
 import { OPERATIONS } from "../src/browser/operations.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
@@ -580,6 +580,10 @@ describe("how many times over a page is asked to answer, as it was counted", () 
 describe("an upload's prompt, as the host is asked for it", () => {
   it("waits for a page to say where its file input is no longer than the prompt waits for the host: its session's line is held for no prompt that has given up", () => {
     expect(LOOK_MS).toBeLessThan(ADDRESS_MS);
+  });
+
+  it("waits for an upload's turn in its session's line, and then for the page, less long together than the prompt waits for the host: the prompt hears why it has no site to name", () => {
+    expect([TURN_MS, TURN_MS + LOOK_MS < ADDRESS_MS]).toEqual([100, true]);
   });
 });
 
@@ -1798,6 +1802,58 @@ describe("a page's download, as the host stages it", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("answers an upload's question at once, in words that say why, where an earlier operation of its session still runs: nothing is kept for that upload, and one asked about once the operation has answered is named its site as ever", async () => {
+      const tab = taken();
+      const asked = tab.input();
+      const moves: Array<() => void> = [];
+      Object.assign(tab.page, { mouse: { move: () => new Promise<void>((done) => moves.push(done)) } });
+      const move = () => host.perform({ executable: join(profile, "no-browser-here"), profile }, "chat-1", SESSION, "browser.mouse", { action: "move", x: 1, y: 1 }, new AbortController().signal);
+      // An operation of the session's that the page has been sent, and is slow to take: *moving* ends once it does.
+      const acting = async () => {
+        const moving = move();
+        await vi.waitFor(() => expect(moves).toHaveLength(1));
+        return { moving };
+      };
+      const keeps = () => [[...state().prompted], state().named.get(SESSION)?.of ?? null];
+      // The session's line is held by such an operation. The upload's prompt waits a second for this answer, and
+      // the session's line would keep it longer: it is told so well within that.
+      const { moving } = await acting();
+      const began = performance.now();
+      expect(await within(ADDRESS_MS - LOOK_MS, host.address(SESSION, true, "upload-1", "chat-1"))).toEqual({ refused: EARLIER_RUNNING });
+      expect(performance.now() - began).toBeGreaterThanOrEqual(TURN_MS - 20);
+      expect(EARLIER_RUNNING).toBe(
+        "The agent's browser on this computer was still busy with this session's earlier operation, so nobody was asked about this upload and the page was given nothing. Send it again once that operation has answered.",
+      );
+      expect(keeps()).toEqual([[], null]);
+      // The operation ends, and the question's turn comes: nothing is kept for the upload then either.
+      moves.shift()!();
+      await moving;
+      await turn();
+      expect(keeps()).toEqual([[], null]);
+      // Asked about again now, it is named its site, and its input kept for it.
+      expect(await host.address(SESSION, true, "upload-2", "chat-1")).toBe(FORM_URL);
+      expect([keeps(), state().named.get(SESSION)?.input?.chooser]).toEqual([[["upload-2"], "upload-2"], asked]);
+      // One whose turn comes in time is answered as ever, though something was before it in the line.
+      const quick = await acting();
+      const waited = host.address(SESSION, true, "upload-3", "chat-1");
+      moves.shift()!();
+      expect(await waited).toBe(FORM_URL);
+      await quick.moving;
+      // And the page of any other operation is said at its turn, however long that takes: its prompt is made without it.
+      const slow = await acting();
+      const page = host.address(SESSION, false, undefined, "chat-1");
+      expect(await within(TURN_MS * 3, page)).toBe("late");
+      moves.shift()!();
+      expect(await page).toBe(FORM_URL);
+      await slow.moving;
+      // An upload's question whose turn came, and whose page is slow to say where its input is, is not answered so:
+      // the look has its own bound, and it is the tab's page its prompt would name, were one made.
+      Object.assign(asked.element(), { evaluate: () => new Promise(() => {}) });
+      const looked = performance.now();
+      expect(await host.address(SESSION, true, "upload-4", "chat-1")).toBe(FORM_URL);
+      expect(performance.now() - looked).toBeGreaterThanOrEqual(LOOK_MS - 20);
     });
 
     it("names no input for an upload's prompt where the browser was taken over while its page was still saying where the input is, though it was handed back before the page said: the upload that prompt is about is given to nothing", async () => {
