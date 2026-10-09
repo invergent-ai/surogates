@@ -2,8 +2,10 @@
 // that stops coming, and one that keeps coming for longer than a bound. The image's delivery and
 // the update each test the rest of it through their own downloads.
 
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,6 +52,34 @@ describe("a download", () => {
     const stalls: Fetch = () => Promise.resolve(answered(parts(4).slice(0, 1), 0, "hangs"));
     await expect(download(file, partial, { fetch: stalls, headersMs: 5_000, stallMs: 200 })).rejects.toThrow("the download of the release stopped: nothing came for 0.2 s");
     expect(statSync(partial).size).toBe(parts(4)[0]!.length);
+  });
+
+  it("resumes into the partial file that is there, and makes none: one that went between its count and its open is not made again from the rest alone", async () => {
+    writeFileSync(partial, body.subarray(0, 1_000));
+    // The file goes once the rest of it has been asked for, as a program of the user's may take it.
+    const rest: Fetch = (_url, init) => {
+      expect((init.headers as Record<string, string>).range).toBe("bytes=1000-");
+      rmSync(partial);
+      return Promise.resolve(new Response(body.subarray(1_000), { status: 206, headers: { "content-range": `bytes 1000-${body.length - 1}/${body.length}` } }));
+    };
+    await expect(download(file, partial, { fetch: rest })).rejects.toThrow(`the download of the release stopped: ${partial} went while the rest of it was asked for`);
+    expect(existsSync(partial)).toBe(false);
+  });
+
+  it("takes for its partial file a file alone: a pipe put in its place is refused at once, and holds no open", { timeout: 5_000 }, async () => {
+    expect(spawnSync("mkfifo", [partial]).status).toBe(0);
+    let asked = 0;
+    const whole: Fetch = () => (asked += 1, Promise.resolve(new Response(body, { status: 200 })));
+    // With no reader, and with one: neither is a file to download into.
+    await expect(download(file, partial, { fetch: whole })).rejects.toThrow(`the download of the release stopped: ${partial} is no file`);
+    const reader = spawn("cat", [partial], { stdio: "ignore" });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await expect(download(file, partial, { fetch: whole })).rejects.toThrow(`the download of the release stopped: ${partial} is no file`);
+    } finally {
+      reader.kill("SIGKILL");
+    }
+    expect(asked).toBe(2);
   });
 
   it("goes on for as long as bytes keep coming: its bound is of the time nothing comes, not of the download", async () => {

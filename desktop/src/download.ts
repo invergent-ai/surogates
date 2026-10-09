@@ -113,11 +113,26 @@ export async function download(file: Download, partial: string, options: Downloa
       // Opened by its own name, never through a link: one put in its place since its folder was
       // looked at fails the open (ELOOP), and nothing is written where it leads. The open is also
       // what empties a file that starts again, so nothing is emptied through a link either.
-      const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | (have > 0 ? constants.O_APPEND : constants.O_TRUNC);
-      const out = await open(partial, flags, 0o600).catch((error: NodeJS.ErrnoException) => {
+      // A resume opens the file that was counted and hashed, and makes none: one that went since
+      // would be made again from the rest alone, with a count and a hash that say it is whole.
+      // And the open waits for nothing: a pipe put in the file's place would hold it, and with it
+      // every later download, until someone read from it. What was opened is then a file, or is refused.
+      const flags = constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK | (have > 0 ? constants.O_APPEND : constants.O_CREAT | constants.O_TRUNC);
+      const refused = (why: string) => {
         void response.body?.cancel().catch(() => {});
-        throw error.code === "ELOOP" ? new Error(`the download of ${file.name} stopped: ${partial} is a link`) : error;
+        return new Error(`the download of ${file.name} stopped: ${partial} ${why}`);
+      };
+      const out = await open(partial, flags, 0o600).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ELOOP") throw refused("is a link");
+        if (error.code === "ENXIO") throw refused("is no file");
+        if (error.code === "ENOENT" && have > 0) throw refused("went while the rest of it was asked for");
+        void response.body?.cancel().catch(() => {});
+        throw error;
       });
+      if (!(await out.stat()).isFile()) {
+        await out.close();
+        throw refused("is no file");
+      }
       const reader = response.body?.getReader();
       const next = () => reader && Promise.race([reader.read(), stalled]);
       try {
