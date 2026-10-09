@@ -451,6 +451,8 @@ return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
     await op(a, "browser.navigate", { url: "http://fixture.test/" });
     for (const { pid } of processes().filter(({ args }) => !args.some((arg) => arg.startsWith("--type=")))) process.kill(Number(pid), "SIGTERM");
     await expect.poll(() => processes().length, { timeout: 10_000 }).toBe(0);
+    // The host hears of the close a turn of the event loop after the processes are gone: until then the next navigation goes to the dead page.
+    await expect.poll(() => (host as unknown as { tabs: Map<string, unknown[]> }).tabs.size, { timeout: 10_000 }).toBe(0);
     expect((await op(a, "browser.navigate", { url: "http://fixture.test/second" })).ok).toMatchObject({ title: "Second", opened: true });
   });
 
