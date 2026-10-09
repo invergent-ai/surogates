@@ -89,14 +89,19 @@ describe("the update's cache", () => {
     // With a newer release offered: it is downloaded into a folder of the app's own.
     lead();
     const tarball = base.publish("1.2.4");
-    await base.updates().check();
+    const logged: string[] = [];
+    await base.updates({ log: (words) => logged.push(words) }).check();
     kept();
     expect(lstatSync(join(base.dir, "cache", "surogate")).isDirectory()).toBe(true);
     downloaded(tarball);
+    // Not without a word: the person who moved that folder to another disk finds the update elsewhere.
+    const SAID = `${join(base.dir, "cache", "surogate")} was a link to ${elsewhere}, and Surogate keeps its updates in a folder of its own: the link is removed, and what it led to is left as it was`;
+    expect(logged).toEqual([SAID]);
     // With nothing newer, where the earlier offer's download goes: only the link does.
     lead();
     base.publish("1.2.3");
-    await base.updates().check();
+    await base.updates({ log: (words) => logged.push(words) }).check();
+    expect(logged).toEqual([SAID, SAID]);
     kept();
     expect(lstatSync(join(base.dir, "cache", "surogate"), { throwIfNoEntry: false })).toBeUndefined();
   });

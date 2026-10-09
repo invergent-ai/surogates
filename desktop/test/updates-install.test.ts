@@ -3,7 +3,7 @@
 // their paths: they are looked at once more first. And from the click to the helper's end the
 // line is the install's, whatever a check finds meanwhile.
 
-import { linkSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -63,26 +63,33 @@ describe("the files the root helper is handed", () => {
     expect(readFileSync(elsewhere).equals(tarball)).toBe(true);
   });
 
-  it("are named by the cache home as it is at the click: one moved since, with a link in its place, is followed as a check follows it, and its files are handed on by their real path", async () => {
+  it("are in the cache home as it led when the app first took it: one that leads elsewhere since is not followed there, at a click or at a check, until the app starts again", async () => {
     const tarball = base.publish("1.2.4");
     const { handed, apply } = helper();
     const found = base.updates({ apply });
     await found.check();
-    const before = (found.state as { files: Staged }).files;
-    // As a cache moved to another disk: the cache home itself may be a link, and nothing below it.
+    // As where a link on the cache home's way was pointed elsewhere: the app would remove and write what it finds there.
     renameSync(join(base.dir, "cache"), join(base.dir, "disk"));
+    mkdirSync(join(base.dir, "elsewhere", "surogate", "updates", "9.9.9"), { recursive: true });
+    writeFileSync(join(base.dir, "elsewhere", "surogate", "updates", "9.9.9", "notes.txt"), "another program's");
+    symlinkSync(join(base.dir, "elsewhere"), join(base.dir, "cache"));
+    const LED = `${join(base.dir, "cache")} led to ${join(base.dir, "cache")} when Surogate looked for its first update, and leads to ${join(base.dir, "elsewhere")} now: no update is kept there until Surogate starts again`;
+    // The paths the app held are not handed on, and the release is not looked for again there.
+    await expect(found.install()).rejects.toThrow(LED);
+    expect([handed, found.state]).toEqual([[], { state: "none" }]);
+    await expect(found.check()).rejects.toThrow(LED);
+    expect(readFileSync(join(base.dir, "elsewhere", "surogate", "updates", "9.9.9", "notes.txt"), "utf8")).toBe("another program's");
+    expect(base.heard.filter(({ url }) => url.endsWith(".tar.gz"))).toHaveLength(1);
+    // Started again, the app takes the cache home as it is then, as one moved to another disk.
+    rmSync(join(base.dir, "cache"));
     symlinkSync(join(base.dir, "disk"), join(base.dir, "cache"));
-    await found.install();
-    // The paths the app held now lead through that link: they are not handed on.
-    expect(handed).toEqual([]);
+    const again = base.updates({ apply });
+    await again.check();
     const moved = join(base.dir, "disk", "surogate", "updates", "1.2.4");
     const files = { manifest: join(moved, "manifest.json"), signature: join(moved, "manifest.json.sig"), tarball: join(moved, "release.tar.gz") };
-    expect(found.state).toEqual({ state: "available", version: "1.2.4", files });
-    expect(files).not.toEqual(before);
+    expect(again.state).toEqual({ state: "available", version: "1.2.4", files });
     expect(readFileSync(files.tarball).equals(tarball)).toBe(true);
-    // The release was there already, where the cache now is: nothing was downloaded again.
-    expect(base.heard.filter(({ url }) => url.endsWith(".tar.gz"))).toHaveLength(1);
-    await found.install();
+    await again.install();
     expect(handed).toEqual([files]);
   });
 

@@ -9,7 +9,7 @@
 import type { ChildProcess } from "node:child_process";
 import { createPublicKey, type KeyObject, verify } from "node:crypto";
 import {
-  closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
+  closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -437,10 +437,15 @@ function regular(path: string): boolean {
 // Whether *path* is a real folder of this user's own, which is then set to 0700. What has its name
 // and is not one is removed, a link by itself and never what it leads to; with *make*, the folder
 // is then made afresh.
-function ownFolder(path: string, make: boolean): boolean {
+function ownFolder(path: string, make: boolean, said?: (words: string) => void): boolean {
   const found = lstatSync(path, { throwIfNoEntry: false });
   const own = found !== undefined && found.isDirectory() && found.uid === process.getuid?.();
-  if (found && !own) rmSync(path, { recursive: true, force: true });
+  if (found && !own) {
+    // A link is what a person leaves who moved the folder alone to a larger disk: it goes, as
+    // itself, and what it led to stays as it was. Said, since the update then lands elsewhere.
+    if (found.isSymbolicLink()) said?.(`${path} was a link to ${readlinkSync(path)}, and Surogate keeps its updates in a folder of its own: the link is removed, and what it led to is left as it was`);
+    rmSync(path, { recursive: true, force: true });
+  }
   if (!own && !make) return false;
   if (!own) mkdirSync(path, { mode: 0o700 });
   // Its mode is set on the folder that is opened, never through a link put there since: that fails the open.
@@ -456,14 +461,19 @@ function ownFolder(path: string, make: boolean): boolean {
 // The updates folder that *cache* names, <cache home>/surogate/updates, by its real path; null when
 // it is not there and is not to be made. The cache home may be a link, as one moved to another
 // disk is: its real path is taken once, here. Below it, surogate and updates are each the user's
-// own real folder (ownFolder).
-function updatesFolder(cache: string, make: boolean): string | null {
+// own real folder (ownFolder). *took* keeps where the cache home led when it was first taken: one
+// that leads elsewhere later, as after a link on its way was pointed somewhere else, is not
+// followed there, where the app would remove and write what it finds. *said*: the log.
+function updatesFolder(cache: string, make: boolean, took: { home: string | null } = { home: null }, said?: (words: string) => void): string | null {
   const home = dirname(dirname(cache));
   if (make) mkdirSync(home, { recursive: true, mode: 0o700 });
   else if (!existsSync(home)) return null;
-  const surogate = join(realpathSync(home), basename(dirname(cache)));
+  const real = realpathSync(home);
+  took.home ??= real;
+  if (real !== took.home) throw new Error(`${home} led to ${took.home} when Surogate looked for its first update, and leads to ${real} now: no update is kept there until Surogate starts again`);
+  const surogate = join(real, basename(dirname(cache)));
   const updates = join(surogate, basename(cache));
-  return ownFolder(surogate, make) && ownFolder(updates, make) ? updates : null;
+  return ownFolder(surogate, make, said) && ownFolder(updates, make) ? updates : null;
 }
 
 // *data* as the new file *path*, this user's alone: what has the name goes first, a link by itself,
@@ -484,8 +494,13 @@ function keep(path: string, data: Buffer): void {
 // below it, surogate, updates and the version's folder are each the user's own real folder, and
 // each file is a regular file of one name. Files that a cache home moved since now leads to
 // through a link are not these.
-function staged(cache: string, files: Staged): boolean {
-  const updates = updatesFolder(cache, false);
+function staged(cache: string, files: Staged, took: { home: string | null }): boolean {
+  let updates: string | null;
+  try {
+    updates = updatesFolder(cache, false, took);
+  } catch {
+    return false; // the cache home leads elsewhere now
+  }
   const folder = dirname(files.tarball);
   return updates !== null && dirname(folder) === updates && ownFolder(folder, false) && [files.manifest, files.signature, files.tarball].every(regular);
 }
@@ -516,6 +531,8 @@ export function installedUpdates(version: string, cache: string, fetch: Fetch, s
 export class Updates {
   state: UpdateState = { state: "none" };
   private checking: Promise<void> | null = null;
+  // Where the cache home led when it was first taken.
+  private readonly took: { home: string | null } = { home: null };
 
   constructor(private readonly options: UpdatesOptions, private readonly changed: () => void = () => {}) {}
 
@@ -541,7 +558,7 @@ export class Updates {
     // no longer the app's own file, no helper is run: the offer goes, and the release is looked
     // for again, for another click. From here on the helper alone decides: it reads each file
     // once, as this user and through no link, and checks its own copies.
-    if (!staged(this.options.cache, files)) {
+    if (!staged(this.options.cache, files, this.took)) {
       this.set({ state: "none" });
       return this.check();
     }
@@ -613,11 +630,11 @@ export class Updates {
     if (this.settled()) return;
     if (!newer(release.version, this.options.version)) {
       // Nothing newer, as once updated to it: what was downloaded for an earlier offer goes.
-      const earlier = updatesFolder(this.options.cache, false);
+      const earlier = updatesFolder(this.options.cache, false, this.took, this.options.log);
       if (earlier) rmSync(earlier, { recursive: true, force: true });
       return this.set({ state: "none" });
     }
-    const cache = updatesFolder(this.options.cache, true)!;
+    const cache = updatesFolder(this.options.cache, true, this.took, this.options.log)!;
     const folder = join(cache, release.version);
     ownFolder(folder, true);
     // In it, what is not a regular file goes before anything is read or written, as in the image's
