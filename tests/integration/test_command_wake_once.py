@@ -454,6 +454,20 @@ async def test_a_routine_is_made_once_also_when_the_worker_dies_before_it_says_s
     assert len(await workers.routines()) == 2
 
 
+async def test_a_routine_is_made_once_though_the_user_said_more_before_the_command_was_run_again(workers):
+    chat = await workers.chat()
+    await workers.says(chat, "/loop 1d Check the cash report")
+    await workers.wake_of_a_worker_that_dies(chat, "answering")
+    [routine] = await workers.routines()
+    # The routine is older than the user's last message, and no older than the command that made it.
+    await workers.says(chat, "And Q1?")
+
+    await workers.wake(chat)
+
+    assert [made.id for made in await workers.routines()] == [routine.id]
+    assert (await workers.said(chat))[-1].startswith(f"Loop scheduled: `{routine.id}`")
+
+
 async def test_a_routine_the_session_made_for_another_prompt_is_not_taken_for_the_commands(workers):
     from surogates.scheduled.schedule import parse_schedule
 
