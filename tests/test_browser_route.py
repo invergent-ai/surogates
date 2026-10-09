@@ -814,8 +814,12 @@ class TestControlEndpoint:
         assert await desk.control(sid, "release", handed_back=True) == (200, {**RELEASED, "resumes": True})
         assert await desk.control(sid, "release") == (200, {**RELEASED, "resumes": False})
         assert (desk.events, desk.wakes) == (told, [str(sid)])
-        # Once a request of the model's has read the hand back, or the chat is stopped, no turn is to come.
+        # The turn under way, a worker holding the chat, the agent is going on.
         desk.store.events[sid].append("llm.request")
+        desk.store.busy.add(sid)
+        assert await desk.control(sid, "release", handed_back=True) == (200, {**RELEASED, "resumes": True})
+        # Once that turn is over, or the chat is stopped, nobody goes on.
+        desk.store.busy.discard(sid)
         assert await desk.control(sid, "release", handed_back=True) == (200, {**RELEASED, "resumes": False})
         desk.store.events[sid].pop()
         desk.store.sessions[sid].status = "paused"

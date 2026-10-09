@@ -540,6 +540,29 @@ test("shows what was said of a hand back only while the computer says nobody hol
   assert.equal(saidOfHandBack(localChatOf("s-1", NOTES, DEVICES, null), AGENT_GOES_ON), null);
 });
 
+test("says of each hand back what the server answered of the agent, in the same words whoever asks", async () => {
+  // What the desktop called the hand back, what the server answered the post, and the pane's words.
+  for (const [handed, answer, words] of [
+    // Its user's confirmed hand back gave the turn; or it repeats one whose turn is to come or under way.
+    ["confirmed", { outcome: "released", resumes: true }, AGENT_GOES_ON],
+    // No turn for it: one under way that is not a hand back's, the chat stopped, the limit spent; or
+    // a repeat of a hand back whose turn is over.
+    ["confirmed", { outcome: "released", resumes: false }, WRITE_TO_THE_AGENT],
+    // A release that is no confirmed hand back is answered that nobody goes on for it.
+    ["released", { outcome: "released", resumes: false }, WRITE_TO_THE_AGENT],
+    // The pane adds nothing of its own to the server's word.
+    ["released", { outcome: "released", resumes: true }, AGENT_GOES_ON],
+    ["confirmed", { outcome: "released" }, WRITE_TO_THE_AGENT],
+  ]) {
+    const desk = browserDesk();
+    desk.answers.handBack = async () => handed;
+    desk.answers.release = async () => answer;
+    const pane = browserPane(desk.posts);
+    await pane.press("handBack", "root-1", desk.desktop);
+    assert.deepEqual(pane.state(), { ...quiet(1), said: words }, `${handed} ${JSON.stringify(answer)}`);
+  }
+});
+
 test("asks the desktop once for each press, the first thing the press does", async () => {
   const { did, desktop, posts } = browserDesk();
   const pane = browserPane(posts);

@@ -319,6 +319,51 @@ async def test_a_hand_back_its_user_confirmed_gives_the_chats_agent_one_turn(com
 
 
 QUOTED = json.dumps({"value": json.loads(paused_by_user_result())})
+async def test_a_repeat_of_a_hand_back_is_answered_that_the_agent_goes_on_while_its_turn_is_to_come_or_under_way(computer):
+    chat = await computer.idle()
+    await computer.control(chat, "acquire")
+    assert await computer.hands_back(chat) == GOES_ON
+
+    try:
+        # The turn has begun: a worker holds the chat, and its first request has read the hand back.
+        lease = await computer.store.try_acquire_lease(chat, "the-turns-worker")
+        await computer.store.emit_event(chat, EventType.LLM_REQUEST, {})
+        # The agent is going on: a repeat is not answered to write to it. A release that is no
+        # confirmed hand back is answered as ever.
+        assert await computer.hands_back(chat) == GOES_ON
+        assert await computer.control(chat, "release") == FOR_THE_PANE
+        # The turn over, the agent has gone on and stopped: to go further it is written to.
+        await computer.store.emit_event(chat, *ANSWERED)
+        await computer.store.release_lease(chat, lease.lease_token)
+        assert await computer.hands_back(chat) == FOR_THE_PANE
+        assert computer.wakes == [str(chat)]
+        log = await computer.log(chat)
+        assert (log.count("browser.control_returned"), log.count("session.resume")) == (1, 1)
+    finally:
+        await computer.unqueue(chat)
+
+
+@pytest.mark.parametrize("since", ["taken over again", "taken over again and released", "stopped"])
+async def test_a_repeat_is_answered_that_nobody_goes_on_once_the_hand_backs_turn_is_off(computer, since):
+    chat = await computer.idle()
+    await computer.control(chat, "acquire")
+    assert await computer.hands_back(chat) == GOES_ON
+    await computer.unqueue(chat)
+
+    if since == "stopped":
+        await computer.store.update_session_status(chat, "paused")
+    else:
+        assert (await computer.control(chat, "acquire"))["outcome"] == "granted"
+    if since == "taken over again and released":
+        assert await computer.control(chat, "release") == FOR_THE_PANE
+    if since == "taken over again":
+        # Handed back from a pane the desktop is not signed in behind: told, and no turn for it.
+        assert await computer.hands_back(chat, sign_in=None) == FOR_THE_PANE
+
+    assert await computer.hands_back(chat) == FOR_THE_PANE
+    assert computer.wakes == [str(chat)]
+
+
 SINCE_THE_TAKE_OVER = [
     "nothing", "its agent met the pause", "a sub-agent of its met the pause", "its agent read a page that quotes the pause",
 ]

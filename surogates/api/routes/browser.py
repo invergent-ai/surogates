@@ -21,7 +21,6 @@ from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceR
 from surogates.browser.control import HANDED_BACK_FROM, RESUMES, AcquireOutcome
 from surogates.browser.shell import ShellSession
 from surogates.devices.binding import device_of, is_binding_root
-from surogates.harness.loop_pending import _hand_back_unread
 from surogates.session.events import EventType
 from surogates.session.store import BrowserControlBusy, BrowserControlTold
 from surogates.tenant.auth.oauth import OAuthTokens
@@ -274,24 +273,6 @@ async def _may_go_on(app_state: Any, chat: Any, tenant: TenantContext) -> dict[s
     return held if refused is None else None
 
 
-# What says whether the turn a hand back gave a chat is still to come.
-_A_HAND_BACKS_TURN = [EventType.LLM_REQUEST, EventType.SESSION_RESUME, EventType.BROWSER_CONTROL_GRANTED]
-
-
-async def _goes_on_already(app_state: Any, session_id: UUID) -> bool:
-    """Whether a chat with no take-over standing has a hand back's turn still to come.
-
-    What a repeat of a confirmed hand back is answered, as the one it repeats was: the chat open
-    in two windows, or a post whose answer was lost.  Only while that turn is to come: once a
-    request of the model's has read the hand back, or the chat was stopped, a release posted then
-    hands nothing back and nobody goes on for it.
-    """
-    store = app_state.session_store
-    if (await store.get_session(session_id)).status != "active":
-        return False
-    return _hand_back_unread(await store.get_events(session_id, types=_A_HAND_BACKS_TURN))
-
-
 async def _computer_browser_state(app_state: Any, session_id: UUID) -> BrowserStateResponse:
     """A local-folder chat's browser, as its browser events say it.
 
@@ -503,8 +484,13 @@ async def post_browser_control(
             return {"outcome": "granted", "owner_user_id": owner_user_id}
         # A release answers whether the agent goes on by itself: only at a hand back its user
         # confirmed, of a take-over that stands, to a chat that can take a turn as it is told.
+        # With nothing to hand back, a confirmed one is a repeat of the hand back that stands (the
+        # chat open in two windows, a post whose answer was lost), and is answered as that one is
+        # true now: that the agent goes on while the turn it gave is to come or under way, and no
+        # longer once that turn is over, off, or the chat stopped.  It gives nothing itself.
         if not await _told_taken_over(request.app.state, chat.id):
-            return {"outcome": "released", RESUMES: body.handed_back and await _goes_on_already(request.app.state, chat.id)}
+            goes_on = body.handed_back and await store.hand_backs_turn_stands(chat.id, behind_tellings=False)
+            return {"outcome": "released", RESUMES: goes_on}
         held = await _may_go_on(request.app.state, chat, tenant) if body.handed_back else None
         told = {"session_id": sid, "released_by": owner_user_id, "computer": True}
         # The turn is given with the telling, or not at all: the chat is made active as a typed
@@ -525,7 +511,7 @@ async def post_browser_control(
             await _give_back_unless_its_turn_stands(request.app.state, chat, held, telling, busy=False)
         if not telling.told:
             # Another post handed it back meanwhile: that one told the chat, and gave what it gave.
-            return {"outcome": "released", RESUMES: body.handed_back and await _goes_on_already(request.app.state, chat.id)}
+            return {"outcome": "released", RESUMES: body.handed_back and telling.turn}
         # The agent's other chats there that still said their user held the browser are told too.
         await _tell_the_agents_other_chats_handed_back(request.app.state, chat.id, tenant, emit, owner_user_id)
         if telling.turn:
