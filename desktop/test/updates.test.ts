@@ -187,10 +187,12 @@ describe("an update", () => {
     writeFileSync(helper, `${helperWith([keys.publicKey])}\nRETIRED_KEY='${pem(next.publicKey)}'\n`);
     expect(releaseKeys(helper)).toHaveLength(1);
     await expect(updates().check()).rejects.toThrow(`${base}/desktop/latest.json is not signed by Surogate's release key`);
-    // An entry that is no Ed25519 key, or no key at all, is skipped, as the helper skips it.
+    // A list with an entry that is no Ed25519 key, or no key at all, is no list, as it is none to the helper.
     const curve = generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey;
-    writeFileSync(helper, helperWith([keys.publicKey, curve]).replace("RELEASE_KEYS=(\n", "RELEASE_KEYS=(\n    '-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----'\n"));
-    expect(releaseKeys(helper)).toHaveLength(1);
+    for (const listed of [helperWith([keys.publicKey, curve]), helperWith([keys.publicKey]).replace("RELEASE_KEYS=(\n", "RELEASE_KEYS=(\n    '-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----'\n")]) {
+      writeFileSync(helper, listed);
+      expect(() => releaseKeys(helper)).toThrow(`${helper} trusts no release key`);
+    }
     writeFileSync(helper, helperWith([]));
     expect(() => releaseKeys(helper)).toThrow(`${helper} trusts no release key`);
     // An installed app reads the list of no helper that another than root may write: this one is the test's.

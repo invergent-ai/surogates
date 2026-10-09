@@ -286,7 +286,8 @@ describe("a helper's list of release keys", () => {
       ["the list given twice", with_((text) => `${text}${text}`), 0],
       ["a carriage return at each of its lines' ends", with_((text) => text.replaceAll("\n", "\r\n")), 0],
       ["a list that never ends", with_((text) => text.replace(/\n *\)\n$/, "\n")), 0],
-      ["a key that is no key", with_((text) => text.replace(/\n[A-Za-z0-9+/=]+\n/, "\nbm90IGEga2V5\n")), 1],
+      ["a key that is no key", with_((text) => text.replace(/\n[A-Za-z0-9+/=]+\n/, "\nbm90IGEga2V5\n")), 0],
+      ["a key's letters on two lines", with_((text) => text.replace(/\n([A-Za-z0-9+/=]{30})([A-Za-z0-9+/=]+)\n/, "\n$1\n$2\n")), 0],
       ["nothing", "", 0],
     ];
     expect(spellings.map(([name, written]) => [name, listedKeys(written).length])).toEqual(spellings.map(([name, , read]) => [name, read]));

@@ -71,9 +71,9 @@ settings() {
   # - one line that opens the list, blanks and then the list's name, an equals sign and an
   #   opening bracket, and nothing after; the script assigns the list nowhere else, and adds to
   #   it nowhere;
-  # - each key as OpenSSL writes a public key (openssl pkey -pubout): a line of blanks, a single
-  #   quote and the BEGIN line; its lines of base64 from the line's start; and the END line from
-  #   the line's start, with a single quote and nothing after;
+  # - each key as OpenSSL writes an Ed25519 public key (openssl pkey -pubout): a line of blanks,
+  #   a single quote and the BEGIN line; its one line of base64 from the line's start, 60
+  #   letters; and the END line from the line's start, with a single quote and nothing after;
   # - one line that closes it, blanks and a closing bracket.
   # No comment, no empty line and no other quoting in it, and at least one key.
   RELEASE_KEYS=(
@@ -220,6 +220,11 @@ listed() {
   # script has the first only where a key is.
   local begin="-----BEGIN" end="-----END"
   begin+=" PUBLIC KEY-----" end+=" PUBLIC KEY-----"
+  # A key's one line between them: an Ed25519 public key as OpenSSL writes one, which is twelve
+  # bytes that say so and the key's 32, in base64, whose last letter holds four bits of a byte
+  # and none of its own. OpenSSL reads more spellings of the same key, and keys of other kinds,
+  # whose signatures no install takes: here a key has the one, and each entry handed on is a key.
+  local ed25519='^MCowBQYDK2VwAyEA[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$'
   entries=()
   lists="$(grep -cE "^[[:blank:]]*${name}\\+?=" -- "$2" 2>/dev/null)" || lists=0
   [ "$lists" = 1 ] || return 0
@@ -236,7 +241,7 @@ listed() {
         fi
         ;;
       key)
-        if [[ "$line" =~ ^[A-Za-z0-9+/=]+$ ]]; then entry+=$'\n'"$line"
+        if [ "$entry" = "$begin" ] && [[ "$line" =~ $ed25519 ]]; then entry+=$'\n'"$line"
         elif [ "$line" = "$end'" ] && [ "$entry" != "$begin" ]; then entries+=("$entry"$'\n'"$end"); at=open
         else at=wrong
         fi

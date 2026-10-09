@@ -346,7 +346,7 @@ describe("the desktop's release manifest", () => {
     }
     // With none, it starts each of them, tar on the tarball among them.
     expect(describes().status).toBe(0);
-    expect(started()).toEqual(["chmod-argv", "cmp-argv", "cut-argv", "dirname-argv", "grep-argv", "head-argv", "jq-argv", "mktemp-argv", "openssl-argv", "realpath-argv", "rm-argv", "sed-argv", "sha256sum-argv", "stat-argv", "tail-argv", "tar-argv"]);
+    expect(started()).toEqual(["chmod-argv", "cmp-argv", "cut-argv", "dirname-argv", "grep-argv", "head-argv", "jq-argv", "mktemp-argv", "realpath-argv", "rm-argv", "sed-argv", "sha256sum-argv", "stat-argv", "tail-argv", "tar-argv"]);
     expect(readFileSync(join(dir, "tar-argv"), "utf8")).toContain(`${tarball()}\n`);
   });
 

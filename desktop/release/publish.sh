@@ -70,7 +70,9 @@ manifest() {
 # Whether the install script beside this one lists its release keys in the one form that an
 # install reads (see the list, in install.sh): read by the script's own reader of a helper's list
 # (listed, from its functions without its last line, which runs it), they are the list as bash
-# set it, key for key, at least one, and each is a public key as OpenSSL writes one. Every install
+# set it, key for key, and at least one. Each is then an Ed25519 public key as OpenSSL writes one,
+# which is that reader's own form of a key: no key of another kind is signed with or sent for,
+# and so no signature of other than Ed25519's 64 bytes, which is all an install takes. Every install
 # asks that reader, and the app asks one of its own that takes the same form: a list that bash
 # alone reads would be signed for, installed, and trust no key. With $1, that key is one of them.
 keys_listed() {
@@ -78,7 +80,6 @@ keys_listed() {
     among="${2:+no}"
     for at in "${!read[@]}"; do
       [ "${read[at]}" = "${RELEASE_KEYS[at]}" ] || exit 1
-      written="$(openssl pkey -pubin -pubout -in <(printf "%s\n" "${read[at]}") 2>/dev/null)" && [ "$written" = "${read[at]}" ] || exit 1
       [ "${read[at]}" != "${2:-}" ] || among=
     done
     [ -z "$among" ] || exit 3' _ "$HERE/install.sh" "${1:-}"

@@ -282,8 +282,8 @@ export function newer(a: string, b: string): boolean {
 /**
  * The release keys *helper* lists, the ones this computer trusts when it is the helper pkexec
  * runs: each Ed25519 public key in its RELEASE_KEYS list, as release/install.sh writes it, and
- * none from anywhere else in the script. An entry that is no such key is skipped, as the helper
- * skips it. With *rootOwned*, a helper that is not root's own word, or that pkexec could not run
+ * none from anywhere else in the script. A list with an entry that is no such key is no list, as
+ * it is none to the helper. With *rootOwned*, a helper that is not root's own word, or that pkexec could not run
  * (rootsOwn), is not read.
  */
 export function releaseKeys(helper: string, rootOwned = false): KeyObject[] {
@@ -295,15 +295,20 @@ export function releaseKeys(helper: string, rootOwned = false): KeyObject[] {
 
 const BEGIN_KEY = "-----BEGIN PUBLIC KEY-----";
 const END_KEY = "-----END PUBLIC KEY-----";
+// A key's one line between them, as the script's reader has it (listed in release/install.sh): an
+// Ed25519 public key as OpenSSL writes one, twelve bytes that say so and the key's 32 in base64,
+// whose last letter holds four bits of a byte and none of its own.
+const ED25519_LINE = /^MCowBQYDK2VwAyEA[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/;
 
 /**
  * The release keys that *script*, an install script, lists: read as the script's own reader
  * reads a helper's list (listed in release/install.sh), line by line and by its one form, and
  * never run. The list is one `RELEASE_KEYS=(` on a line of its own, then each key as OpenSSL
- * writes one, its first line behind a quote and its last before one, then `)` on a line of its
- * own. Any other spelling is no list, and no key of it is read, whatever bash would make of it:
- * a comment in it, other quotes, one line, an indented key, a second list. It never throws, and
- * answers no more keys than an install would trust.
+ * writes an Ed25519 key, its first line behind a quote, its one line of letters, and its last
+ * before a quote, then `)` on a line of its own. Any other spelling is no list, and no key of it
+ * is read, whatever bash or OpenSSL would make of it: a comment in it, other quotes, one line, an
+ * indented key, a key's letters over two lines, a key of another kind, a second list. It never
+ * throws, and answers the keys an install would trust, each as it is written.
  */
 export function listedKeys(script: string): KeyObject[] {
   const entries: string[] = [];
@@ -326,21 +331,13 @@ export function listedKeys(script: string): KeyObject[] {
       if (/^[ \t]*'-----BEGIN PUBLIC KEY-----$/.test(line)) [entry, at] = [BEGIN_KEY, "key"];
       else at = /^[ \t]*\)$/.test(line) ? "closed" : "wrong";
     } else if (at === "key") {
-      if (/^[A-Za-z0-9+/=]+$/.test(line)) entry += `\n${line}`;
+      if (entry === BEGIN_KEY && ED25519_LINE.test(line)) entry += `\n${line}`;
       else if (line === `${END_KEY}'` && entry !== BEGIN_KEY) [entries[entries.length], at] = [`${entry}\n${END_KEY}`, "open"];
       else at = "wrong";
     }
   }
-  if (at !== "closed") return [];
-  return entries.flatMap((pem) => {
-    try {
-      const key = createPublicKey(pem);
-      // A key, and written as OpenSSL writes that key: what the script's signing loads.
-      return key.asymmetricKeyType === "ed25519" && key.export({ type: "spki", format: "pem" }).toString().trim() === pem ? [key] : [];
-    } catch {
-      return []; // not a key OpenSSL loads
-    }
-  });
+  // Each entry is an Ed25519 key in its one spelling, by the line's own form: any 32 bytes load as one.
+  return at === "closed" ? entries.map((pem) => createPublicKey(pem)) : [];
 }
 
 // Whether *text* escapes the first half of a pair with no escape of its second half behind it: jq

@@ -15,10 +15,10 @@ const LIST = /^ *RELEASE_KEYS=\(\n[^)]*\)\n/m;
 const rewritten = (script: string, change: (list: string) => string) => script.replace(LIST, (list) => change(list));
 
 // Each spelling: its name, the script it makes of one whose list holds *keys* in the list's form,
-// and how many of two keys every reader reads of it. And *entries*, where it is another number:
-// how many entries the install script's reader takes of the list before any is asked whether it
-// is a key, which is what its signing hands to OpenSSL.
-export type KeyList = [name: string, written: (script: string) => string, read: number, entries?: number];
+// and how many of two keys every reader reads of it. What the install script's reader reads is
+// what its signing hands to OpenSSL, as it is written, and what the app makes keys of: a key has
+// one spelling, an Ed25519 key's one line as OpenSSL writes it, and every other is no list.
+export type KeyList = [name: string, written: (script: string) => string, read: number];
 export const KEY_LISTS: KeyList[] = [
   ["as it is", (script) => script, 2],
   ["with spaces after an entry's quote", (script) => rewritten(script, (list) => list.replace("-----END PUBLIC KEY-----'\n", "-----END PUBLIC KEY-----'  \n")), 0],
@@ -53,5 +53,16 @@ export const KEY_LISTS: KeyList[] = [
   // the key without it. Read letter for letter, the line is no line of a key.
   ["with a zero byte in a key's line", (script) => rewritten(script, (list) => list.replace(/\n([A-Za-z0-9+/=]{8})(?=[A-Za-z0-9+/=]+\n)/, "\n$1\0")), 0],
   ["with a zero byte behind its closing bracket", (script) => rewritten(script, (list) => list.replace(/\)\n$/, ")\0\n")), 0],
-  ["with a key that is no key", (script) => rewritten(script, (list) => list.replace(/\n[A-Za-z0-9+/=]+\n/, "\nbm90IGEga2V5\n")), 1, 2],
+  // A key is Ed25519's, in the one line OpenSSL writes of one. OpenSSL reads more: the same key's
+  // letters over two lines, or with bits in its last letter that are no byte's; and keys of other
+  // kinds, whose signatures no install takes, as it takes 64 bytes of one and no more.
+  ["with a key that is no key", (script) => rewritten(script, (list) => list.replace(/\n[A-Za-z0-9+/=]+\n/, "\nbm90IGEga2V5\n")), 0],
+  ["with a key's letters on two lines", (script) => rewritten(script, (list) => list.replace(/\n([A-Za-z0-9+/=]{30})([A-Za-z0-9+/=]+)\n/, "\n$1\n$2\n")), 0],
+  ["with a key whose last letter holds bits of no byte", (script) => rewritten(script, (list) => list.replace(/[A-Za-z0-9+/]=\n/, (last) => `${"BFJNRVZdhlptx159"["AEIMQUYcgkosw048".indexOf(last[0]!)]}=\n`)), 0],
+  ["with a key of another kind", (script) => rewritten(script, (list) => list.replace(/\n[A-Za-z0-9+/=]+\n/, "\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMVBDfASKJhXoSCBb3+OSw5Y0F8KE\nRgLG5k0I+l4L3V8F/GVHjRRK6EVyBPqRVisczBpTXU5figSz6i6CZA3E3w==\n")), 0],
+  ["with a key a letter short", (script) => rewritten(script, (list) => list.replace(/\n([A-Za-z0-9+/]{4})([A-Za-z0-9+/=]+)\n/, "\n$2\n")), 0],
+  // The list in its form, and its first key another to bash: set by its place, on a line that
+  // does not begin as one that sets the list. The readers read the list's two, and the release
+  // job, which asks bash key for key, refuses the script.
+  ["with its first key replaced by its place on a later line", (script) => rewritten(script, (list) => `${list}  RELEASE_KEYS[0]='-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA9SZBZHM7o/wDBWPfbhPMxucA2139J9j+nFHJYNwPA1w=\n-----END PUBLIC KEY-----'\n`), 2],
 ];

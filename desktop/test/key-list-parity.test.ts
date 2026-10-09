@@ -44,17 +44,9 @@ function helperLists(script: string): string[] {
   return read.stdout.split("\0").slice(0, -1);
 }
 
-// How many keys that reader reads of it: its entries that are keys as OpenSSL writes one.
-function helperReads(script: string): number {
-  return helperLists(script).filter((entry) => {
-    try {
-      const key = createPublicKey(entry);
-      return key.asymmetricKeyType === "ed25519" && pem(key) === entry;
-    } catch {
-      return false;
-    }
-  }).length;
-}
+// How many keys that reader reads of it: its entries, each as it is written. Nothing here asks
+// whether one is a key: the reader's own form does, and its signing hands OpenSSL what it read.
+const helperReads = (script: string): number => helperLists(script).length;
 
 // How many the app reads.
 function appReads(script: string): number {
@@ -103,11 +95,18 @@ describe("a script's list of release keys, read by the install script, by the re
       .toEqual(KEY_LISTS.map(([name, , read]) => [name, read, read]));
   });
 
-  it("is taken by the install script's reader entry for entry as it is written: no entry of a list out of its form, and none in another spelling than the list's own, whether or not it is a key", () => {
-    // What the reader hands on is what a signature is asked of, by OpenSSL, which reads more
-    // spellings of a key than the one: so the entries are counted before any is asked.
-    expect(KEY_LISTS.map(([name, written]) => [name, helperLists(written(SCRIPT)).length]))
-      .toEqual(KEY_LISTS.map(([name, , read, entries = read]) => [name, entries]));
+  it("is handed on by the install script's reader as it is written, and each entry is a key to the app: the two read the same keys, and not only as many", () => {
+    for (const [name, written] of KEY_LISTS) {
+      const [script, file] = [written(SCRIPT), join(dir, "keys.sh")];
+      writeFileSync(file, script);
+      let app: string[] = [];
+      try {
+        app = releaseKeys(file).map(pem);
+      } catch {
+        // no key
+      }
+      expect([name, helperLists(script)]).toEqual([name, app]);
+    }
     expect(helperLists(SCRIPT)).toEqual([pem(first.publicKey), pem(second.publicKey)]);
   });
 
