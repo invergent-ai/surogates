@@ -1393,6 +1393,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     for (const [what, made] of [
       ["its own helper another user's", `chown tester ${own}/bin/surogate-apply-update`],
       ["its own helper for others to write", `chmod 775 ${own}/bin/surogate-apply-update`],
+      ["its own helper with a set-id bit, which no apply leaves in a version", `chmod 4755 ${own}/bin/surogate-apply-update`],
       ["its own helper no program", `chmod 644 ${own}/bin/surogate-apply-update`],
       ["its own mark another user's", `chown tester ${own}/release.json`],
       ["its folder without its program", `rm ${own}/surogate`],
@@ -2588,6 +2589,10 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       ["another user's", `chown tester ${record}`],
       ["one that all may write", `chmod 666 ${record}`],
       ["one that its group may write", `chmod 664 ${record}`],
+      // Nor one with a set-id or a sticky bit, which no install gives it.
+      ["one with the set-user-id bit", `chmod 4644 ${record}`],
+      ["one with the set-group-id bit", `chmod 2644 ${record}`],
+      ["one with the sticky bit", `chmod 1644 ${record}`],
       ["a pipe", `rm ${record} && mkfifo ${record}`],
       ["a folder", `rm ${record} && mkdir ${record}`],
     ] as const) refused(what, made, notRoots);

@@ -131,15 +131,16 @@ roots_own() {
   [ "$(stat -c '%f %u' -- "$1" 2>/dev/null)" = "$2 0" ]
 }
 
-# Whether $1 is a file of root's own that no one else may write, at whichever mode: a file and no
-# link, root's, with no write bit for its group or for others. Read as numbers alone, as roots_own
+# Whether $1 is a file of root's own that no one else may write, at whichever mode of reading and
+# running: a file and no link, root's, with no write bit for its group or for others, and with no
+# set-id or sticky bit, which nothing this script writes has. Read as numbers alone, as roots_own
 # reads.
 roots_alone() {
   local seen mode
   seen="$(stat -c '%f %u' -- "$1" 2>/dev/null)" || return 1
   [ "${seen#* }" = 0 ] || return 1
   mode=$(( 16#${seen% *} ))
-  (( (mode & 0170000) == 0100000 && (mode & 0022) == 0 ))
+  (( (mode & 0170000) == 0100000 && (mode & 07022) == 0 ))
 }
 
 # The release keys this computer trusts, into the array $1 names. One file says which: the helper
