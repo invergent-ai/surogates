@@ -387,7 +387,11 @@ async def test_a_pruning_the_pod_did_not_finish_is_logged_and_the_landing_stands
         yield held
 
     monkeypatch.setattr(landing, "kept_refs", kept)
+    monkeypatch.setattr(landing, "running_landings", kept)  # none running: the pruning is asked for
     monkeypatch.setattr(landing, "project_lock", the_lock)
     with caplog.at_level(logging.WARNING, logger=landing.__name__):
-        await landing.prune_after(session_factory=None, sandbox_pool=Answers(NO_RESULT[answer]), sandbox_id="pod-1", workstream="w1", packs=0)
+        await landing.prune_after(
+            session_factory=None, sandbox_pool=Answers(NO_RESULT[answer]), sandbox_id="pod-1", workstream="w1", packs=0,
+            saga_settings=None,
+        )
     assert "Could not prune the history of project w1" in caplog.text
