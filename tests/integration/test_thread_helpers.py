@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -807,3 +808,47 @@ async def test_a_task_for_a_sub_agent_the_agent_does_not_have_is_refused_before_
     assert (handed, await helpers_of(api, thread)) == ([(False, [])], [])
     async with api.app.state.session_factory() as db:
         assert (await db.execute(text("SELECT count(*) FROM tasks WHERE parent_session_id = :id"), {"id": thread.id})).scalar() == 0
+
+
+async def a_thread_whose_worker_outlives_its_turn(api, monkeypatch, tmp_path):
+    """A coordinating thread whose first turn started a worker, now at work in its pod, and landed.
+
+    With its master, its pods and pool, the worker and the worker's pool."""
+    master = await master_of(api, await create(api))
+    thread = await a_coordinating_thread(api, master)
+    pods = stored(api, thread, tmp_path)
+    mine, theirs = SandboxPool(pods), SandboxPool(pods)
+
+    async def the_worker_starts_work(harness):
+        [helper] = await helpers_of(api, thread)
+        await edited(theirs, helper, "echo started > started.md")  # its pod opens on the first turn's hand-off
+
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "echo outline > outline.md"})),
+        calling(("spawn_worker", {"goal": "Draft the sources."})),
+        calling(("memory", {"action": "add", "content": "x"})),
+        _final_response("Started."),
+    ], pool=mine, during=the_worker_starts_work), 120)
+    [worker] = await helpers_of(api, thread)
+    await api.app.state.session_store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Meanwhile, draft the summary."})
+    return master, thread, pods, mine, worker, theirs
+
+
+async def test_a_stop_of_a_turn_during_which_an_earlier_turns_worker_handed_back_is_carried_out(api, monkeypatch, tmp_path, caplog):
+    master, thread, pods, mine, worker, theirs = await a_thread_whose_worker_outlives_its_turn(api, monkeypatch, tmp_path)
+
+    async def the_worker_ends_then_the_turn_is_stopped(harness):
+        await ends(api, theirs, worker, settings=None)
+        await stop(harness)
+
+    with caplog.at_level(logging.WARNING):
+        await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+            calling(("terminal", {"command": "echo the stopped turn > stopped.md"})),
+            calling(("spawn_worker", {"goal": "Check something."})),
+            calling(("memory", {"action": "add", "content": "x"})),
+            _final_response("Done."),
+        ], pool=mine, during=the_worker_ends_then_the_turn_is_stopped), 180)
+    assert "Could not take back" not in caplog.text
+    await one_more_turn(api, monkeypatch, pods, thread, "ls > seen-later.txt")
+    # The worker's file lands with the next turn; the stopped turn's does not.
+    assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "seen-later.txt", "started.md"]

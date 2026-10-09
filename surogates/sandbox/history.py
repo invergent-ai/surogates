@@ -768,11 +768,13 @@ class History:
         updates: dict[str, str | None] = {}
         for tip in reversed(kept):
             [since] = self._parents(tip)
+            # Where the helper started may be a hand-off this pod never held: an earlier turn's.
+            self._fetch(since)
             if found is None:
                 # Onto none: the helper's copy is the hand-off, taken up from where it started.
                 found, updates[self.handoff_from] = tip, since
                 continue
-            self._fetch(found, since)
+            self._fetch(found)
             tree, _ = self._merged(since, winner=found, loser=tip)
             found = self._commit(tree, found, tip, _CHECKPOINT, "Kept", [["Surogate-Kind", "kept"]])
         if found is None:

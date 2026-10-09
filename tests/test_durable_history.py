@@ -2000,3 +2000,24 @@ def test_the_ref_of_versions_left_out_names_eight_hand_offs_at_most(tmp_path, pr
     # The last eight days': an older one is let go, and no chain of them grows with the thread's life.
     assert held == set(left_out[-8:])
     assert set(parents(durable, untaken)) == set(left_out[-8:])
+
+
+@pytest.mark.parametrize("pod", ["the turn's own", "one made again"])
+def test_a_stop_keeps_the_work_of_an_earlier_turns_helper_that_handed_back_during_a_turn_that_found_no_hand_off(tmp_path, project, pod):
+    first = a_pod(tmp_path, project)
+    (first.copy / "outline.md").write_text("outline")
+    first.hand_off(author=A, trailers=KEPT)
+    helper = a_helper(tmp_path, project, "h-a")  # a worker that outlives the turn that started it
+    land(first, "saga:1")
+    assert handoffs(project) == {}
+    turn = a_pod(tmp_path, project)
+    (turn.copy / "draft.md").write_text("the stopped turn's draft")
+    gave = turn.hand_off(author=A, trailers=KEPT)["commit"]
+    (helper.copy / "sources.md").write_text("an hour of work")
+    helper.hand_back(author=A, trailers=KEPT)  # during the turn, onto the turn's hand-off
+    # The helper started from a hand-off this pod never held: the stop reads it all the same.
+    stopping = turn if pod == "the turn's own" else a_pod(tmp_path, project)
+    assert stopping.drop_hand_off(gave=[gave]) == {"dropped": True}
+    after = a_pod(tmp_path, project)
+    assert (after.copy / "sources.md").read_text() == "an hour of work" and not (after.copy / "draft.md").exists()
+    assert git(project / "_history", "fsck", "--no-dangling") == ""
