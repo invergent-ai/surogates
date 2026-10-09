@@ -1,9 +1,9 @@
 // The install script (release/install.sh) in Ubuntu containers, never on this computer: its
 // --apply, which each version ships as bin/surogate-apply-update and runs as root; the install from
-// a server, as a user with sudo; and --uninstall. Releases are small stand-ins in the tarball's
-// layout, signed by a key of the test's own. Behind SUROGATE_INSTALL_TESTS=1: it needs Docker, the
-// ubuntu:24.04 and ubuntu:26.04 images, and the Ubuntu archive for apt. The script's own list of
-// release keys is read without either.
+// a server, as a user with sudo; --uninstall; and the company's CA, --ca-cert. Releases are small
+// stand-ins in the tarball's layout, signed by a key of the test's own. Behind
+// SUROGATE_INSTALL_TESTS=1: it needs Docker, the ubuntu:24.04 and ubuntu:26.04 images, and the
+// Ubuntu archive for apt. The script's own list of release keys is read without either.
 
 import { type ChildProcess, execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, createPublicKey, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
@@ -15,8 +15,10 @@ import { promisify } from "node:util";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { companyCertificates } from "../src/shell/company-ca.js";
 import { AS_ROOT } from "../src/shell/updates.js";
 
+import { certificate, rewritten } from "./certificates.js";
 import { HELPER_MODES } from "./helper-modes.js";
 
 const SCRIPT = fileURLToPath(new URL("../release/install.sh", import.meta.url));
@@ -26,23 +28,26 @@ const ENABLED = process.env.SUROGATE_INSTALL_TESTS === "1";
 // The longest one docker call may take: an install with apt's downloads takes under a minute.
 const CALL_MS = 300_000;
 
-// A static server of the folder it is given, on a port of its own, which it prints. A proxy's
-// request, which names the whole URL, is served by its path alike. While the folder holds a file
-// named unsized, it does not say how much it sends, as a server need not.
+// A static server of the folder it is given, on a port of its own, which it prints; over TLS when
+// a certificate and its key follow the folder. A proxy's request, which names the whole URL, is
+// served by its path alike. While the folder holds a file named unsized, it does not say how much
+// it sends, as a server need not.
 const SERVE = `
-const { createServer } = require("node:http");
 const { existsSync, readFileSync } = require("node:fs");
 const { join } = require("node:path");
-createServer((request, response) => {
+const [folder, cert, key] = process.argv.slice(1);
+const answer = (request, response) => {
   try {
-    const body = readFileSync(join(process.argv[1], decodeURIComponent(new URL(request.url, "http://x").pathname)));
-    if (existsSync(join(process.argv[1], "unsized"))) response.write(body);
+    const body = readFileSync(join(folder, decodeURIComponent(new URL(request.url, "http://x").pathname)));
+    if (existsSync(join(folder, "unsized"))) response.write(body);
     else response.setHeader("Content-Length", body.length).write(body);
     response.end();
   } catch {
     response.writeHead(404).end();
   }
-}).listen(0, "127.0.0.1", function () { console.log(this.address().port); });
+};
+(cert ? require("node:https").createServer({ cert: readFileSync(cert), key: readFileSync(key) }, answer) : require("node:http").createServer(answer))
+  .listen(0, "127.0.0.1", function () { console.log(this.address().port); });
 `;
 
 // The helper stopped (SIGKILL) before each command its own shell runs, in turn, each time from the
@@ -354,6 +359,11 @@ describe("the install script's packages", () => {
   it("names each program that the app starts by a path of the system's: pkexec, for an update, and perl, with which it starts a child that has none of its descriptors", () => {
     const asked = /apt-get install [^\n]*/.exec(readFileSync(SCRIPT, "utf8"))?.[0].split(" ") ?? [];
     expect(asked).toEqual(expect.arrayContaining(["pkexec", "perl-base"]));
+  });
+
+  it("names certutil's package in a line of its own, which only a computer that keeps a company's CA runs", () => {
+    const lines = readFileSync(SCRIPT, "utf8").split("\n").filter((line) => line.includes("apt-get install"));
+    expect(lines.filter((line) => line.includes("libnss3-tools"))).toEqual(['    apt-get install -y -qq -o DPkg::Lock::Timeout=300 libnss3-tools || fail "could not install libnss3-tools, which holds certutil"']);
   });
 });
 
@@ -2035,20 +2045,22 @@ exit 0
   });
 });
 
+// A desktop's baseline: sudo for its administrator, curl, AppArmor's parser, polkit, the system
+// bus and the kvm group; and another user of the computer. The container cannot load a profile
+// into the kernel, so its apparmor_parser parses one as the release's own parser reads it, and
+// stops there. With them, Ubuntu's German language pack, in which the system's tools say what
+// they say in German to whoever's desktop is; and strace, for the test that reads what the
+// script starts.
+const INSTALL_LAB = [
+  "RUN apt-get update && apt-get install -y --no-install-recommends sudo curl ca-certificates apparmor polkitd pkexec dbus",
+  "RUN groupadd --system kvm && useradd -m -s /bin/bash -G sudo tester && useradd -m -s /bin/bash other && echo 'tester ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/tester",
+  // In the system's own place, the system's parser kept beside it: the install runs the tools of the system's four folders, and no other.
+  `RUN mv /usr/sbin/apparmor_parser /usr/sbin/apparmor_parser.own && echo '#!/bin/sh' >/usr/sbin/apparmor_parser && echo 'said=$(/usr/sbin/apparmor_parser.own --skip-kernel-load "$@" 2>&1) || { echo "$said" >&2; exit 1; }' >>/usr/sbin/apparmor_parser && chmod 755 /usr/sbin/apparmor_parser`,
+  "RUN apt-get update && apt-get install -y --no-install-recommends language-pack-de strace",
+];
+
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, on Ubuntu ${release}`, { timeout: 600_000 }, () => {
-  // A desktop's baseline: sudo for its administrator, curl, AppArmor's parser, polkit, the system
-  // bus and the kvm group; and another user of the computer. The container cannot load a profile
-  // into the kernel, so its apparmor_parser parses one as the release's own parser reads it, and
-  // stops there. With them, Ubuntu's German language pack, in which the system's tools say what
-  // they say in German to whoever's desktop is; and strace, for the test that reads what the
-  // script starts.
-  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions, standing, swapped } = lab(release, [
-    "RUN apt-get update && apt-get install -y --no-install-recommends sudo curl ca-certificates apparmor polkitd pkexec dbus",
-    "RUN groupadd --system kvm && useradd -m -s /bin/bash -G sudo tester && useradd -m -s /bin/bash other && echo 'tester ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/tester",
-    // In the system's own place, the system's parser kept beside it: the install runs the tools of the system's four folders, and no other.
-    `RUN mv /usr/sbin/apparmor_parser /usr/sbin/apparmor_parser.own && echo '#!/bin/sh' >/usr/sbin/apparmor_parser && echo 'said=$(/usr/sbin/apparmor_parser.own --skip-kernel-load "$@" 2>&1) || { echo "$said" >&2; exit 1; }' >>/usr/sbin/apparmor_parser && chmod 755 /usr/sbin/apparmor_parser`,
-    "RUN apt-get update && apt-get install -y --no-install-recommends language-pack-de strace",
-  ], ["--network", "host"]);
+  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions, standing, swapped } = lab(release, INSTALL_LAB, ["--network", "host"]);
   let server: ChildProcess;
   let base: string;
   // What the base serves: desktop/install.sh, latest.json, and each release with its own manifest
@@ -2106,9 +2118,11 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   });
 
   it("refuses a computer it does not support before it changes anything, or asks for sudo, and a base that is no http or https URL", () => {
-    for (const args of ["--base", "--base ftp://elsewhere.example", `--base ${base} again`]) {
+    // A base that is no URL is said of --base; what no option takes, of the install's options.
+    for (const [args, usage] of [["--base", "--base <http or https URL>"], ["--base ftp://elsewhere.example", "--base <http or https URL>"],
+      [`--base ${base} again`, "[--base <url>] [--ca-cert <file>]"]] as const) {
       expect(as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- ${args}`), args)
-        .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: usage: install.sh --base <http or https URL>\n" });
+        .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: usage: install.sh ${usage}\n` });
     }
     // Nor a base with a user or a password in it, said as what it is, before sudo is asked: the
     // base is written where every user reads it, and the app takes no such base.
@@ -2333,7 +2347,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   });
 
   it("uninstalls for every user, and asks before deleting the user's own data, as that user, under the folders their session names", () => {
-    expect(root("/opt/surogate-test/install.sh --remove")).toMatchObject({ status: 1, stderr: "Surogate Desktop: usage: install.sh [--base <url>] [--version <x.y.z>] [--uninstall]\n" });
+    expect(root("/opt/surogate-test/install.sh --remove")).toMatchObject({ status: 1, stderr: "Surogate Desktop: usage: install.sh [--base <url>] [--ca-cert <file>] [--version <x.y.z>] [--uninstall]\n" });
     expect(root("/opt/surogate-test/install.sh --uninstall now")).toMatchObject({ status: 1, stderr: "Surogate Desktop: usage: install.sh --uninstall\n" });
     const folders = "XDG_CONFIG_HOME=/home/tester/cfg XDG_DATA_HOME=/home/tester/dat XDG_CACHE_HOME=/home/tester/cch";
     expect(as("tester", "mkdir -p cfg/autostart dat/surogate/electron cch/surogate/updates Surogate/agent/2026-10-08 && touch cfg/autostart/surogate.desktop Surogate/agent/2026-10-08/report.docx").status).toBe(0);
@@ -3319,5 +3333,245 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(asked.stdout).toContain("Surogate Desktop: also delete tester's sign-in, device token and browser profiles, in /home/tester/closed/dat/surogate? Chat folders stay. [y/N] ");
     expect(asked.stdout).toContain("Surogate Desktop: deleted tester's app data");
     expect(root("test ! -e /home/tester/closed/cch/surogate && test -d /home/tester/closed/cch").status).toBe(0);
+  });
+});
+
+for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's company CA, on Ubuntu ${release}`, { timeout: 600_000 }, () => {
+  // The install's own computer, behind a company's network that signs every site with its CA: the
+  // base is served over TLS with a certificate that CA signed, which this computer's roots do not trust.
+  const { it: box, docker, root, as, releaseOf, manifestOf, current } = lab(release, INSTALL_LAB, ["--network", "host"]);
+  let server: ChildProcess;
+  let base: string;
+  let certs: string;
+  const www = () => join(box.dir, "www");
+  // Release *version* on the base, as the release job sends one, signed by *key*: its tarball, its
+  // own manifest and signature beside it, and latest.json naming it.
+  const publish = (version: string, key?: KeyObject) => {
+    const tarball = releaseOf(version);
+    const manifest = manifestOf(version, tarball, {}, key);
+    const folder = join(www(), "desktop", "releases", version);
+    mkdirSync(folder, { recursive: true });
+    copyFileSync(tarball, join(folder, `surogate-desktop-${version}-linux-x64.tar.gz`));
+    copyFileSync(join(box.dir, "manifest.json"), join(folder, "manifest.json"));
+    copyFileSync(join(box.dir, "manifest.json.sig"), join(folder, "manifest.json.sig"));
+    writeFileSync(join(www(), "desktop", "latest.json"), manifest);
+  };
+  // The user fetches the script through the company's network, as their own curl trusts it.
+  const install = (args = "") => as("tester", `curl --cacert company.pem -fsSL ${base}/desktop/install.sh | bash -s -- --base ${base} ${args}`);
+  const kept = () => root("cat /etc/surogate/ca.pem").stdout;
+  // What a refused or failed run leaves in root's temp folder: nothing.
+  const leftovers = () => root("find /tmp -mindepth 1 -maxdepth 1 -name 'tmp.*'").stdout;
+  // The script's functions by themselves, as root's half has them when sudo ran it for tester: the
+  // script without its last line, then *lines*, with no install around them.
+  const alone = (lines: string) => root(`SUDO_UID=$(id -u tester) LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh); set -Eeuo pipefail; umask 022; settings; trap cleanup EXIT; ${lines}'`);
+  // How many certificates the app's own reader takes from *text*, as the kept file would hold it.
+  const appTakes = (text: string) => {
+    writeFileSync(join(certs, "as-kept.pem"), text);
+    return companyCertificates(join(certs, "as-kept.pem")).length;
+  };
+  // A certificate authority's certificate of the test's own, <name>.pem, with *extensions* beside
+  // its basicConstraints.
+  const authority = (name: string, ...extensions: string[]) => {
+    const made = spawnSync("openssl", ["req", "-x509", "-subj", `/CN=${name}`, "-addext", "basicConstraints=critical,CA:TRUE", ...extensions.flatMap((extension) => ["-addext", extension]),
+      "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", join(certs, `${name}.key`), "-out", join(certs, `${name}.pem`), "-days", "2"], { encoding: "utf8" });
+    expect(made.status, made.stderr).toBe(0);
+    return join(certs, `${name}.pem`);
+  };
+
+  beforeAll(async () => {
+    certs = mkdtempSync(join(box.dir, "certs-"));
+    const company = certificate(certs, "company");
+    const another = certificate(certs, "another");
+    // A certificate authority's file that is no CA of this network's.
+    certificate(certs, "it");
+    const site = certificate(certs, "site", "company");
+    // What the administrator hands the script: the company's CA with its key beside it, as a CA's own
+    // file holds it; both of the company's CAs in one file; a site's certificate, alone and before a
+    // CA's file with its key; and no certificate.
+    writeFileSync(join(certs, "company-with-key.pem"), readFileSync(company, "utf8") + readFileSync(join(certs, "company.key"), "utf8"));
+    writeFileSync(join(certs, "both.pem"), readFileSync(another, "utf8") + readFileSync(company, "utf8"));
+    writeFileSync(join(certs, "key-and-site.pem"), readFileSync(site, "utf8") + readFileSync(join(certs, "company-with-key.pem"), "utf8"));
+    writeFileSync(join(certs, "notes.txt"), "the company's CA is on the intranet\n");
+    // What the app takes for no certificate authority's, though it says it is one: a certificate
+    // whose key may sign no certificate. And one that says nothing of its key, which the app takes.
+    authority("signless", "keyUsage=critical,digitalSignature");
+    const bare = authority("bare");
+    writeFileSync(join(certs, "bare-and-company.pem"), readFileSync(bare, "utf8") + readFileSync(company, "utf8"));
+    // Under a megabyte as it is handed over, and over one as openssl writes it again: a certificate
+    // with a long comment in it, its base64 in one line, as many times as a megabyte holds.
+    const wordy = readFileSync(authority("wordy", `nsComment=${"x".repeat(60_000)}`), "utf8");
+    const unwrapped = `-----BEGIN CERTIFICATE-----\n${wordy.split("\n").filter((line) => line !== "" && !line.startsWith("-----")).join("")}\n-----END CERTIFICATE-----\n`;
+    const times = Math.floor(1_048_576 / unwrapped.length);
+    expect(times * wordy.length).toBeGreaterThan(1_048_576);
+    writeFileSync(join(certs, "wide.pem"), unwrapped.repeat(times));
+    // More certificates than a process may have files open, behind one that is no CA's.
+    writeFileSync(join(certs, "thousand.pem"), readFileSync(site, "utf8") + readFileSync(company, "utf8").repeat(1100));
+    for (const file of ["company.pem", "company-with-key.pem", "another.pem", "both.pem", "site.pem", "key-and-site.pem", "notes.txt", "it.pem", "signless.pem", "bare-and-company.pem", "wide.pem", "thousand.pem"]) {
+      expect(docker(["cp", join(certs, file), `${box.container}:/home/tester/${file}`]).status).toBe(0);
+    }
+    expect(root("chown -R tester /home/tester").status).toBe(0);
+    mkdirSync(join(www(), "desktop"), { recursive: true });
+    copyFileSync(join(box.dir, "install.sh"), join(www(), "desktop", "install.sh"));
+    publish("1.0.0");
+    server = spawn(process.execPath, ["-e", SERVE, www(), site, join(certs, "site.key")], { stdio: ["ignore", "pipe", "inherit"] });
+    const port = await new Promise<string>((resolve) => server.stdout!.once("data", (chunk: Buffer) => resolve(chunk.toString().trim())));
+    base = `https://127.0.0.1:${port}`;
+  }, 900_000);
+
+  afterAll(() => {
+    server.kill();
+  });
+
+  it("installs no release that no trusted key signed, whatever certificate authority it is given, and keeps no CA that came with one", () => {
+    // The network's own CA, and a release at its base that another's key signed.
+    publish("1.0.0", other.privateKey);
+    const unsigned = install("--ca-cert company.pem");
+    // Its downloads passed with the CA, and the last word is the signature's. apt's own lines stand before it at a first install.
+    expect(unsigned.status).toBe(1);
+    expect(unsigned.stderr).not.toContain("curl: (60)");
+    expect(unsigned.stderr.endsWith(`Surogate Desktop: ${base}/desktop/latest.json is not signed by Surogate's release key\n`), unsigned.stderr).toBe(true);
+    expect(root("test ! -e /etc/surogate/ca.pem && test ! -e /opt/surogate/current").status).toBe(0);
+    expect(leftovers()).toBe("");
+    publish("1.0.0");
+  });
+
+  it("installs the company's CA from --ca-cert for every user, and downloads the release through the network it signs", () => {
+    // Without it, the script's own downloads do not trust the company's network.
+    const untrusted = install();
+    expect(untrusted.status).toBe(1);
+    expect(untrusted.stderr).toContain("curl: (60) SSL certificate");
+    expect(untrusted.stderr).toContain(`Surogate Desktop: could not download ${base}/desktop/latest.json\n`);
+    expect(root("test ! -e /etc/surogate/ca.pem").status).toBe(0);
+    const installed = install("--ca-cert company-with-key.pem");
+    expect(installed.status, installed.stderr).toBe(0);
+    expect(installed.stdout).toContain("Surogate Desktop: every user's Surogate, and their Chrome, Edge and Brave, trust the company's certificate authority in /etc/surogate/ca.pem\n");
+    expect(installed.stdout).toContain("Surogate Desktop: 1.0.0 is installed\n");
+    expect(current()).toBe("/opt/surogate/versions/1.0.0");
+    // The certificate alone, as openssl writes it: never the key the file held beside it.
+    expect(kept()).toBe(rewritten(join(certs, "company.pem")));
+    expect(root("stat -c '%a %U' /etc/surogate/ca.pem").stdout).toBe("644 root\n");
+    // certutil, which the app adds the CA to each user's NSS database with.
+    expect(root("dpkg-query -W -f='${Status}\\n' libnss3-tools && test -x /usr/bin/certutil").stdout).toBe("install ok installed\n");
+    expect(leftovers()).toBe("");
+  });
+
+  it("keeps the company's CA when run again without --ca-cert, takes the next one in its place, and never one its downloads fail with", () => {
+    const again = install();
+    expect(again.status, again.stderr).toBe(0);
+    expect(kept()).toBe(rewritten(join(certs, "company.pem")));
+    // A certificate authority's file, but not this network's: the downloads fail with it, and the CA that works stays.
+    const wrong = install("--ca-cert it.pem");
+    expect(wrong.status).toBe(1);
+    expect(wrong.stderr).toContain("curl: (60) SSL certificate");
+    expect(wrong.stdout).not.toContain("trust the company's certificate authority");
+    expect(kept()).toBe(rewritten(join(certs, "company.pem")));
+    expect(leftovers()).toBe("");
+    // The kept CA is root's own word, as the install record is: one that another may write is handed to no download.
+    expect(root("chmod 666 /etc/surogate/ca.pem").status).toBe(0);
+    expect(install()).toMatchObject({ status: 1, stderr: "Surogate Desktop: /etc/surogate/ca.pem is not as Surogate Desktop's install leaves it: run its install script again with --ca-cert\n" });
+    // Given again, it is kept as the install leaves one.
+    const both = install("--ca-cert both.pem");
+    expect(both.status, both.stderr).toBe(0);
+    expect(kept()).toBe(rewritten(join(certs, "another.pem")) + rewritten(join(certs, "company.pem")));
+    expect(root("stat -c '%a %U' /etc/surogate/ca.pem").stdout).toBe("644 root\n");
+  });
+
+  it("refuses a file that holds no certificate authority's certificate, reads it as the user who asked and no further than a megabyte, and keeps the CA it had", () => {
+    const refused = (file: string, said: string) => expect(install(`--ca-cert ${file}`), file).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${said}\n` });
+    // Before it asks for sudo.
+    expect(install("--ca-cert missing.pem")).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: missing.pem: no such file\n" });
+    expect(install("--ca-cert")).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: usage: install.sh [--base <url>] [--ca-cert <file>]\n" });
+    refused("site.pem", "/home/tester/site.pem holds a certificate that is not a certificate authority's");
+    refused("notes.txt", "/home/tester/notes.txt holds no PEM certificate");
+    // A site's certificate before a CA's file with its key: nothing of it stays in root's temp folder, the key least of all.
+    refused("key-and-site.pem", "/home/tester/key-and-site.pem holds a certificate that is not a certificate authority's");
+    expect(leftovers()).toBe("");
+    // Read as the user who asked: a file only root reads is refused, though root's half could read it.
+    expect(root("mkdir -p /srv/secret && cp /home/tester/it.pem /srv/secret/ca.pem && chmod 600 /srv/secret/ca.pem").status).toBe(0);
+    refused("/srv/secret/ca.pem", "/srv/secret/ca.pem is no file that tester can read");
+    // A pipe in the file's place is refused at once, and never waited on; a file larger than a megabyte is not copied.
+    expect(as("tester", "mkfifo fifo.pem && truncate -s 512M big.pem").status).toBe(0);
+    refused("fifo.pem", "/home/tester/fifo.pem is no file that tester can read");
+    refused("big.pem", "/home/tester/big.pem holds more than a megabyte, and a file of certificate authorities holds far less");
+    expect(leftovers()).toBe("");
+    expect(kept()).toBe(rewritten(join(certs, "another.pem")) + rewritten(join(certs, "company.pem")));
+  });
+
+  it("takes no newer release that no trusted key signed, with the CA it keeps or with one it is given, and keeps the CA it had", () => {
+    publish("1.0.1", other.privateKey);
+    for (const args of ["", "--ca-cert company.pem"]) {
+      expect(install(args), args).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json${MISSED}\n` });
+    }
+    expect(current()).toBe("/opt/surogate/versions/1.0.0");
+    expect(kept()).toBe(rewritten(join(certs, "another.pem")) + rewritten(join(certs, "company.pem")));
+    expect(leftovers()).toBe("");
+    copyFileSync(join(www(), "desktop", "releases", "1.0.0", "manifest.json"), join(www(), "desktop", "latest.json"));
+  });
+
+  it("takes --ca-cert before --base as after it, and keeps every refusal of a base with a CA beside it", () => {
+    const script = `curl --cacert company.pem -fsSL ${base}/desktop/install.sh | bash -s --`;
+    // Each before sudo is asked, and as root's half would refuse it too.
+    for (const [args, said] of [
+      ["--ca-cert company.pem --base http://user:secret@127.0.0.1:9", "a base with a user or a password in it is not taken: it would be written where every user of this computer reads it. Name the server alone"],
+      ["--base https://user@surogate.example/ --ca-cert company.pem", "a base with a user or a password in it is not taken: it would be written where every user of this computer reads it. Name the server alone"],
+      ["--ca-cert company.pem --base ftp://elsewhere.example", "usage: install.sh --base <http or https URL>"],
+      ["--ca-cert company.pem --base http:///user:secret@127.0.0.1:9", "usage: install.sh --base <http or https URL>"],
+      ["--ca-cert company.pem --base", "usage: install.sh --base <http or https URL>"],
+      [`--base ${base} --ca-cert`, "usage: install.sh [--base <url>] [--ca-cert <file>]"],
+      ["--ca-cert ''", "usage: install.sh [--base <url>] [--ca-cert <file>]"],
+      ["--ca-cert company.pem --uninstall", "usage: install.sh [--base <url>] [--ca-cert <file>]"],
+    ] as const) {
+      for (const started of [as("tester", `${script} ${args}`), root(`cd /home/tester && /opt/surogate-test/install.sh ${args}`)]) {
+        expect(started, args).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${said}\n` });
+      }
+    }
+    const reversed = as("tester", `${script} --ca-cert both.pem --base ${base}`);
+    expect(reversed.status, reversed.stderr).toBe(0);
+    expect(reversed.stdout).toContain("Surogate Desktop: every user's Surogate, and their Chrome, Edge and Brave, trust the company's certificate authority in /etc/surogate/ca.pem\n");
+    expect(JSON.parse(root("cat /etc/surogate/install.json").stdout)).toEqual({ base, channel: "stable" });
+    expect(kept()).toBe(rewritten(join(certs, "another.pem")) + rewritten(join(certs, "company.pem")));
+  });
+
+  it("keeps no file that the app would then refuse: a certificate whose key may sign none, more than a megabyte once it is written again, and what it keeps the app takes", () => {
+    const refused = (file: string, said: string) => expect(alone(`company_ca /home/tester/${file}`), file).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${said}\n` });
+    // The app's own reader refuses each of the two as it would be kept.
+    expect(() => appTakes(rewritten(join(certs, "signless.pem")))).toThrow("holds a certificate that is not a certificate authority's");
+    refused("signless.pem", "/home/tester/signless.pem holds a certificate that is not a certificate authority's");
+    expect(() => appTakes(rewritten(join(certs, "wordy.pem")).repeat(13))).toThrow("holds more than a megabyte");
+    refused("wide.pem", "/home/tester/wide.pem holds more than a megabyte of certificates, and a file of certificate authorities holds far less");
+    // Each certificate is looked at, however many the file holds: the first here is a site's.
+    refused("thousand.pem", "/home/tester/thousand.pem holds a certificate that is not a certificate authority's");
+    // What it takes, the app takes: a CA that says nothing of its key, and every file kept so far.
+    const taken = alone('company_ca /home/tester/bare-and-company.pem; cat "$GIVEN_CA"');
+    expect(taken).toMatchObject({ status: 0, stderr: "", stdout: rewritten(join(certs, "bare.pem")) + rewritten(join(certs, "company.pem")) });
+    expect(appTakes(taken.stdout)).toBe(2);
+    expect(appTakes(kept())).toBe(2);
+    expect(leftovers()).toBe("");
+  });
+
+  it("puts a CA given again in the place of whatever stands there that the app refuses: a link, a folder, a pipe, a file of another's, and one that the app's users cannot read", () => {
+    const refusal = "Surogate Desktop: /etc/surogate/ca.pem is not as Surogate Desktop's install leaves it: run its install script again with --ca-cert\n";
+    expect(root("cp /home/tester/it.pem /srv/elsewhere.pem").status).toBe(0);
+    for (const [broken, handed] of [
+      ["ln -s /srv/elsewhere.pem /etc/surogate/ca.pem", false],
+      ["mkdir -p /etc/surogate/ca.pem/inside", false],
+      ["mkfifo /etc/surogate/ca.pem", false],
+      ["cp /home/tester/it.pem /etc/surogate/ca.pem && chown tester /etc/surogate/ca.pem", false],
+      // Root's own, so root's downloads read it, and no word of it is a certificate; in a folder closed to the app's users.
+      ["echo text >/etc/surogate/ca.pem && chmod 600 /etc/surogate/ca.pem && chmod 700 /etc/surogate", true],
+    ] as const) {
+      expect(root(`rm -rf /etc/surogate/ca.pem && ${broken}`).status, broken).toBe(0);
+      // Without --ca-cert, what is not root's own word is handed to no download, and none is asked of the base.
+      if (!handed) expect(alone(`fetch -fsS -o /dev/null ${base}/desktop/latest.json`), broken).toMatchObject({ status: 1, stdout: "", stderr: refusal });
+      expect(alone("GIVEN_CA=/home/tester/both.pem; keep_company_ca"), broken).toMatchObject({ status: 0, stderr: "" });
+      expect(root("stat -c '%F %a %U' /etc/surogate/ca.pem /etc/surogate").stdout, broken).toBe("regular file 644 root\ndirectory 755 root\n");
+      expect(kept(), broken).toBe(readFileSync(join(certs, "both.pem"), "utf8"));
+      expect(appTakes(kept()), broken).toBe(2);
+    }
+    // What the link named is as it was: the CA took the link's place, and was not written through it.
+    expect(root("cmp /srv/elsewhere.pem /home/tester/it.pem").status).toBe(0);
+    expect(root("ls -A /etc/surogate").stdout).toBe("ca.pem\ninstall.json\n");
+    const again = install();
+    expect(again.status, again.stderr).toBe(0);
   });
 });

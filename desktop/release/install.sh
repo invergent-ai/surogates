@@ -6,6 +6,7 @@
 #   curl -fsSL https://surogate.ai/desktop/install.sh | bash                      install, update or repair
 #   curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --uninstall    remove it
 #   install.sh --base <url>                                   install from another server (an enterprise's)
+#   install.sh --ca-cert <file>                               trust the company's CA, a PEM file, in every user's app
 #   curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --version <x.y.z>    roll back to that release
 #   surogate-apply-update --apply <manifest> <signature> <tarball>      as root: apply a downloaded release
 #
@@ -22,6 +23,11 @@ settings() {
   ENTRY=/usr/share/applications/surogate.desktop
   PROFILE=/etc/apparmor.d/surogate-desktop
   POLICY=/usr/share/polkit-1/actions/ai.invergent.surogate.update.policy
+  # The company's certificate authority, where an administrator gave one with --ca-cert: every
+  # user's app trusts it at its start, and so do this script's own downloads.
+  COMPANY_CA=/etc/surogate/ca.pem
+  # The one this run was given, checked and not kept yet: its downloads are made with it first.
+  GIVEN_CA=
   # The folder of the lock that one install, update or removal at a time holds: root's alone, and
   # outside /opt/surogate, so that it is there before the tree is made and after it is removed.
   LOCKS=/run/surogate-desktop
@@ -893,6 +899,88 @@ packages() {
   apt-get install -y -qq -o DPkg::Lock::Timeout=300 bubblewrap socat ripgrep virtiofsd uidmap zstd pkexec perl-base openssl jq curl desktop-file-utils \
     && apt-get install -y -qq -o DPkg::Lock::Timeout=300 --no-install-recommends qemu-system-x86 \
     || fail "could not install the packages it needs: ripgrep and virtiofsd are in Ubuntu's universe, which this computer's package sources must include"
+  # certutil, with which the app adds the company's CA to each user's NSS database: with --ca-cert
+  # ($1), and at any later run while the CA is kept, as a repair.
+  if [ -n "${1:-}" ] || [ -f "$COMPANY_CA" ]; then
+    apt-get install -y -qq -o DPkg::Lock::Timeout=300 libnss3-tools || fail "could not install libnss3-tools, which holds certutil"
+  fi
+}
+
+# The company's certificate authority, from --ca-cert's file $1: each certificate in it, every one a
+# CA's, written again by openssl. Nothing else of the file is kept, a key beside the certificates
+# least of all. The file is read once, as the user who asked, as an apply's files are (taken): root
+# may not see into a home another computer serves, and reads nothing that user could not. It is
+# never read through a link, a pipe in its place is refused at once, and no more than a megabyte of
+# it is copied, which holds hundreds of certificates. The copy is in a folder of this run's own, in
+# /tmp as a download's is, which goes however the run ends. What passes here is what the app then
+# takes (companyCertificates in src/shell/company-ca.ts), which stops trusting a CA whose file it
+# refuses: a certificate is a CA's as the app reads one, where it says so and its key, if it says
+# what the key is for, may sign certificates; and the certificates as they are written again are a
+# megabyte at most. They are this run's alone (GIVEN_CA) until its downloads have passed with
+# them: keep_company_ca then puts them where every user's app reads them.
+company_ca() {
+  local given="$1" file work cert said count=0
+  # Who reads here is who asked; root's own reads after this one stay root's.
+  local READER=("${READER[@]}")
+  asker
+  # Its whole path, as that user finds it, with no link left in it.
+  file="$(as_reader "$SMALL_WAIT" realpath -e -- "$given" 2>/dev/null)" \
+    && as_reader "$SMALL_WAIT" test -f "$file" && as_reader "$SMALL_WAIT" test -r "$file" \
+    || fail "$(named "$given") is no file that $(named "${READER[2]}") can read"
+  scratch work -p /tmp tmp.XXXXXXXXXX
+  taken "$file" "$work/given" 1048576 "$SMALL_WAIT" \
+    || fail "$(named "$file") holds more than a megabyte, and a file of certificate authorities holds far less"
+  # Each certificate into a file of its own, one open at a time: a megabyte holds more of them
+  # than a process may have files open.
+  awk -v dir="$work" '/-----BEGIN CERTIFICATE-----/ { if (file) close(file); file = sprintf("%s/cert-%04d.pem", dir, ++n) } file { print > file } /-----END CERTIFICATE-----/ { if (file) close(file); file = "" }' "$work/given"
+  for cert in "$work"/cert-*.pem; do
+    [ -e "$cert" ] || break
+    said="$(openssl x509 -in "$cert" -noout -ext basicConstraints,keyUsage 2>/dev/null)" || said=
+    [[ "$said" == *CA:TRUE* ]] && { [[ "$said" != *"X509v3 Key Usage"* ]] || [[ "$said" == *"Certificate Sign"* ]]; } \
+      || fail "$(named "$file") holds a certificate that is not a certificate authority's"
+    openssl x509 -in "$cert" >>"$work/ca.pem"
+    count=$((count + 1))
+  done
+  [ "$count" -gt 0 ] || fail "$(named "$file") holds no PEM certificate"
+  [ "$(stat -c %s "$work/ca.pem")" -le 1048576 ] \
+    || fail "$(named "$file") holds more than a megabyte of certificates, and a file of certificate authorities holds far less"
+  GIVEN_CA="$work/ca.pem"
+}
+
+# Keeps the company's certificate authority this run was given, once its downloads have passed with
+# it: a CA that is not this network's then never takes the place of the one that works. Replaced
+# whole, by one rename, whatever stands in its place: a link there is not written through, and a
+# folder, which no rename replaces, goes first. Its own folder is one that every user's app can
+# look into, as the script makes it.
+keep_company_ca() {
+  local folder
+  folder="$(dirname "$COMPANY_CA")"
+  mkdir -p "$folder"
+  chmod 0755 "$folder"
+  install -m 0644 "$GIVEN_CA" "$COMPANY_CA.new"
+  [ ! -d "$COMPANY_CA" ] || [ -L "$COMPANY_CA" ] || rm -rf -- "$COMPANY_CA"
+  mv -T "$COMPANY_CA.new" "$COMPANY_CA"
+  say "every user's Surogate, and their Chrome, Edge and Brave, trust the company's certificate authority in $COMPANY_CA"
+}
+
+# curl for a release's files, the install's and a rollback's: no curlrc, https or http alone, and
+# for no longer than a download may wait (TIMELY). curl reads its address's letters as UTF-8
+# (C.UTF-8, which has no language of its own): a server's name may have letters outside ASCII, as
+# the name the user fetched this script from may, and in a locale without them curl refuses the
+# name before it looks it up. With the company's CA beside curl's own roots where there is one,
+# through a network that signs every site with it, or from the company's own server: the CA this
+# run was given, else the one kept. The kept one is root's own word, as the install record is: a
+# file that anyone else may write names no certificate authority to root. The CA says whose
+# certificate a server may show, and no more: what is downloaded is a release only by its
+# signature (signed).
+fetch() {
+  local ca="$GIVEN_CA" trust=()
+  if [ -z "$ca" ] && { [ -e "$COMPANY_CA" ] || [ -L "$COMPANY_CA" ]; }; then
+    roots_alone "$COMPANY_CA" || fail "$COMPANY_CA is not as Surogate Desktop's install leaves it: run its install script again with --ca-cert"
+    ca="$COMPANY_CA"
+  fi
+  [ -z "$ca" ] || trust=(--cacert "$ca" --capath /etc/ssl/certs)
+  LC_ALL=C.UTF-8 curl -q --proto '=https,http' "${TIMELY[@]}" "${trust[@]}" "$@"
 }
 
 # Under Ubuntu's restriction of unprivileged user namespaces, the app's Electron gets them from a
@@ -929,21 +1017,18 @@ install_latest() {
   # is another's. Whoever owns a folder that TMPDIR named could put one of their own in this
   # one's name, and root's downloads would be written through whatever stood in it.
   scratch download -p /tmp tmp.XXXXXXXXXX
-  # curl reads its address's letters as UTF-8 (C.UTF-8, which has no language of its own): a
-  # server's name may have letters outside ASCII, as the name the user fetched this script from
-  # may, and in a locale without them curl refuses the name before it looks it up.
   # No download is longer than what it is for, whatever its server sends, into root's /tmp, which
   # may be memory: a manifest is a line of 4096 bytes at most, as an apply takes one; its signature
   # is Ed25519's 64 bytes, and one more shows one that is too long; and a tarball is the size its
   # signed manifest names.
-  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 4096 "${TIMELY[@]}" -o "$download/manifest.json" "$base/desktop/latest.json" \
+  fetch -fsSL --max-filesize 4096 -o "$download/manifest.json" "$base/desktop/latest.json" \
     || fail "could not download $base/desktop/latest.json"
   # Its signature is its release's own, at the release's place, which is sent before latest.json
   # names the release and never sent again: latest.json is then the one object that moves, and
   # no moment has a manifest beside another's signature. The version that names the place is the
   # manifest's own word, read before any key is asked of it, and a version is all it may be.
   named="$(named_version "$download/manifest.json")" || fail "$base/desktop/latest.json is not a release of Surogate Desktop for this computer"
-  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 65 "${TIMELY[@]}" -o "$download/manifest.json.sig" "$base/desktop/releases/$named/manifest.json.sig" \
+  fetch -fsSL --max-filesize 65 -o "$download/manifest.json.sig" "$base/desktop/releases/$named/manifest.json.sig" \
     || fail "could not download $base/desktop/releases/$named/manifest.json.sig"
   signed "$download/manifest.json" "$download/manifest.json.sig" \
     || unsigned "$base/desktop/latest.json" "$download/manifest.json" "$download/manifest.json.sig"
@@ -959,7 +1044,7 @@ install_latest() {
   if ! whole "$download/manifest.json" "$ROOT/versions/$version"; then
     say "downloading Surogate Desktop $version"
     tarball="$download/release.tar.gz"
-    LC_ALL=C.UTF-8 curl -q -fSL --proto '=https,http' --max-filesize "$size" "${TIMELY[@]}" -o "$tarball" "$base/desktop/$(jq -r .url "$download/manifest.json")" \
+    fetch -fSL --max-filesize "$size" -o "$tarball" "$base/desktop/$(jq -r .url "$download/manifest.json")" \
       || fail "could not download Surogate Desktop $version from $base"
   fi
   apply "$download/manifest.json" "$download/manifest.json.sig" "$tarball"
@@ -1081,11 +1166,14 @@ roll_back() {
   apply "$download/manifest.json" "$download/manifest.json.sig" "$tarball" older
 }
 
+# $1: the base. $2: the file --ca-cert named, or nothing.
 install_all() {
-  packages
+  packages "$2"
+  [ -z "$2" ] || company_ca "$2"
   apparmor_profile
   kvm_group
   install_latest "$1"
+  [ -z "$2" ] || keep_company_ca
   integrate
   record "$1"
   notes
@@ -1221,18 +1309,32 @@ main() {
       asker
       apply "$2" "$3" "$4"
       ;;
-    --base | "")
+    --base | --ca-cert | "")
       # What installs as root is the system's own tools, wherever its caller's PATH points, from
       # before it runs the first of them, as an apply's are: an openssl of another's there would
       # call any release signed.
       [ "$EUID" -ne 0 ] || export PATH=/usr/sbin:/usr/bin:/sbin:/bin
-      local base=https://surogate.ai
-      if [ "${1:-}" = --base ]; then
-        [ "$#" -eq 2 ] && http_url "$2" || fail "usage: install.sh --base <http or https URL>"
-        # Before sudo is asked, and before anything is written or downloaded.
-        nameless "$2" || fail "$CREDENTIALS"
-        base="${2%/}"
-      fi
+      local base=https://surogate.ai ca=
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --base)
+            [ "$#" -ge 2 ] && http_url "$2" || fail "usage: install.sh --base <http or https URL>"
+            # Before sudo is asked, and before anything is written or downloaded.
+            nameless "$2" || fail "$CREDENTIALS"
+            base="${2%/}"
+            ;;
+          --ca-cert)
+            [ "$#" -ge 2 ] && [ -n "$2" ] || fail "usage: install.sh [--base <url>] [--ca-cert <file>]"
+            # By its whole path, found by the user who names it, before sudo is asked: root's half reads
+            # it as that user, wherever sudo starts it. Root's half takes the path as it is handed.
+            if [ "$EUID" -ne 0 ]; then ca="$(realpath -e -- "$2" 2>/dev/null)" || fail "$(named "$2"): no such file"; else ca="$2"; fi
+            ;;
+          *)
+            fail "usage: install.sh [--base <url>] [--ca-cert <file>]"
+            ;;
+        esac
+        shift 2
+      done
       supported
       unlinked
       if [ "$EUID" -ne 0 ]; then
@@ -1241,11 +1343,13 @@ main() {
         # sudo resets the environment, so the proxy the user's shell names goes with them. The shell
         # that reads them is named by its whole path: a sudo with no secure_path looks for it on
         # its caller's PATH.
+        local again=(--base "$base")
+        [ -z "$ca" ] || again+=(--ca-cert "$ca")
         { declare -f; declare -p http_proxy https_proxy HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY 2>/dev/null || true; echo 'main "$@"'; } \
-          | sudo -- /bin/bash -s -- "$@" || exit "$?"
+          | sudo -- /bin/bash -s -- "${again[@]}" || exit "$?"
         return
       fi
-      install_all "$base"
+      install_all "$base" "$ca"
       ;;
     --version)
       # What rolls back as root is the system's own tools, wherever its caller's PATH points, from
@@ -1284,7 +1388,7 @@ main() {
       uninstall "$@"
       ;;
     *)
-      fail "usage: install.sh [--base <url>] [--version <x.y.z>] [--uninstall]"
+      fail "usage: install.sh [--base <url>] [--ca-cert <file>] [--version <x.y.z>] [--uninstall]"
       ;;
   esac
 }
