@@ -144,6 +144,10 @@ export const FORMS: Form[] = [
   ["with a field named twice in an object of its own", own('{"a":1,"a":2}'), false, false],
   ["with a field named twice in an object in a list of its own", own('[{"a":1,"a":2}]'), false, false],
   // One name in two objects is two fields.
+  // Two names that jq reads as one: it makes the replacement character of the second half of a
+  // pair that is escaped alone, in a name as in a value.
+  ["with two second halves of pairs escaped alone as two fields' names", own('{"\\udc00":1,"\\udc01":2}'), false, false],
+  ["with a second half escaped alone and the replacement character's escape as two fields' names", own('{"\\udc00":1,"\\ufffd":2}'), false, false],
   ["with a field of one name in two objects of its own", own('[{"a":1},{"a":2}]'), true, true],
   ["with a field of its own name inside it", own('{"note":{"note":1}}'), true, true],
   // Its other fields.
