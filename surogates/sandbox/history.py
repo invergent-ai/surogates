@@ -115,6 +115,9 @@ _PACKED = "# pack-refs with: peeled fully-peeled sorted \n"
 #: a routine's pickups not counted among them inside the window.
 PRUNE_DAYS = 90
 _PRUNE_LEAST = 20
+#: The most a history may hold for a routine's sake.  Over this, and over twice main's files, the
+#: cut goes on below the twenty that are no routine's pickup, down to main's last _PRUNE_LEAST.
+PRUNE_MOST = 2**30
 #: A project's history is pruned at most this often.
 _PRUNE_EVERY = 86_400
 #: The packs a pruning leaves when its caller names no fence: those of the
@@ -1020,7 +1023,9 @@ class History:
         Kept: ``main``'s commits of the last 90 days and never fewer than its
         last 20, cut further while the history is more than twice the size
         of ``main``'s files, never below those 20, which inside the 90 days
-        are its last 20 that are no routine's pickup; every ``main`` a thread's
+        are its last 20 that are no routine's pickup, unless the history is
+        then over ``PRUNE_MOST`` too: its oldest commits go until it fits,
+        never below its last 20 of any author; every ``main`` a thread's
         pod alive now may have opened on, those of a pod's deadline and the
         one before them; and the refs in *keep*, each live thread's branch
         and base, with their history inside the window.  Every other ref
@@ -1083,14 +1088,31 @@ class History:
             others = [n for n, m in enumerate(mains, 1) if not "".join(m[2:]).startswith("routine:")]
             twenty = others[_PRUNE_LEAST - 1] if len(others) >= _PRUNE_LEAST else len(mains)
             # A pod lives at most THREAD_POD_DEADLINE: the main it opened on is one of these, or the one before.
-            least = max(_PRUNE_LEAST, min(twenty, window), 1 + sum(t >= now - THREAD_POD_DEADLINE for t in times))
+            plain = max(_PRUNE_LEAST, 1 + sum(t >= now - THREAD_POD_DEADLINE for t in times))
+            least = max(plain, min(twenty, window))
             kept = max(least, window)
             size = sum(int(e.split()[3]) for e in git("ls-tree", "-r", "-l", MAIN).splitlines() if e.split()[1] == "blob")
+            ids = [m[0] for m in mains]
             while True:
-                packed = self._cut(git, work, mains=[m[0] for m in mains], kept=kept)
+                packed = self._cut(git, work, mains=ids, kept=kept)
                 if packed <= 2 * size or kept <= least:
                     break
                 kept = max(least, kept // 2)
+            # The twenty that are no routine's are kept for what they cost, up to a bound: over it, a
+            # routine's pickups have outgrown them, and the oldest commits go until the rest fits,
+            # never below the plain twenty.  Whoever a commit says it is by, it cannot hold more.
+            most = max(2 * size, PRUNE_MOST)
+            if packed > most and kept > plain:
+                low, high = plain, kept - 1
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    low, high = (middle, high) if self._would_hold(git, ids, middle) <= most else (low, middle - 1)
+                kept = low
+                packed = self._cut(git, work, mains=ids, kept=kept)
+                while packed > most and kept > plain:
+                    # The packs as they were told a little less than the one pack made of them.
+                    kept -= 1
+                    packed = self._cut(git, work, mains=ids, kept=kept)
             [name] = {p.stem for p in (work / "objects" / "pack").glob("pack-*.pack")}
             for kind in ("pack", "idx"):
                 self._put_durable(f"objects/pack/{name}.{kind}", work / "objects" / "pack" / f"{name}.{kind}")
@@ -1137,6 +1159,16 @@ class History:
         git("reflog", "expire", "--expire=now", "--all")
         git("gc", "-q", "--prune=now")
         return sum(p.stat().st_size for p in (work / "objects" / "pack").glob("pack-*.pack"))
+
+    @staticmethod
+    def _would_hold(git: Callable[..., str], mains: list[str], kept: int) -> int:
+        """What the history would hold cut to *mains*' newest *kept*, by its objects' sizes as they are packed now.
+
+        All that is newer than the oldest commit kept, and that commit's own files.
+        """
+        oldest = mains[kept - 1]
+        newer = git("rev-list", "--objects", "--disk-usage", "--all", f"^{oldest}")
+        return int(newer) + int(git("rev-list", "--objects", "--disk-usage", f"{oldest}^{{tree}}"))
 
     def _in(self, repo: Path, *args: str) -> str:
         """Git in the bare repository *repo*."""

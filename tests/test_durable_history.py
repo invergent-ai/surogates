@@ -2676,3 +2676,48 @@ def test_a_masters_pod_prunes_a_history_routines_alone_wrote_and_a_thread_opens_
     again = master.pickup(author=ROUTINE, trailers=[["Surogate-Saga", "saga:again"], ["Surogate-Kind", "pickup"]], push=True)
     assert [f["path"] for f in again["picked_up"]] == ["notes.txt"]
     assert git(durable, "fsck", "--no-dangling") == ""
+
+
+FORGED = {"name": "Draft A", "email": "routine:forged@surogate"}
+
+
+def a_routine_rewrites(tmp_path: Path, project: Path, times: int, author=ROUTINE) -> None:
+    """Five landings, then a routine that writes a file of 100 KB anew *times* times: no delta between its versions."""
+    for n in range(5):
+        history = a_pod(tmp_path, project)
+        (history.copy / f"l{n}.md").write_text(f"{n}")
+        land(history, f"saga:{n}")
+    master = a_masters_pod(tmp_path, project)
+    for n in range(times):
+        (project / "Model.bin").write_bytes(os.urandom(100_000))
+        master.pickup(author=author, trailers=[["Surogate-Saga", f"saga:r{n}"], ["Surogate-Kind", "pickup"]], push=True)
+
+
+@pytest.mark.parametrize("author", [ROUTINE, FORGED], ids=["a routine", "a forged address"])
+def test_a_history_over_its_bound_is_cut_below_the_twenty_that_are_no_routines_to_the_bound_exactly(tmp_path, project, monkeypatch, author):
+    monkeypatch.setattr(history_module, "PRUNE_MOST", 3_000_000)
+    a_routine_rewrites(tmp_path, project, 60, author)
+    durable = project / "_history"
+    out = a_pod(tmp_path, project).prune(keep=[], now=time.time() + LATER, spare=0)
+    # Six changes that are no routine's: without the bound all sixty-six commits stay, sixty times the file.
+    # With it the oldest pickups go until what stays fits: one version more would not.
+    assert out["pruned"] and 20 < out["commits"] < 66
+    assert out["size"] <= 3_000_000 < out["size"] + 102_000
+    assert git(durable, "rev-list", "--first-parent", "--count", "refs/heads/main") == str(out["commits"])
+    assert git(durable, "fsck", "--no-dangling") == ""
+
+
+def test_a_history_over_its_bound_is_never_cut_below_the_last_twenty_commits(tmp_path, project, monkeypatch):
+    monkeypatch.setattr(history_module, "PRUNE_MOST", 500_000)
+    a_routine_rewrites(tmp_path, project, 60)
+    out = a_pod(tmp_path, project).prune(keep=[], now=time.time() + LATER, spare=0)
+    assert (out["pruned"], out["commits"]) == (True, 20) and out["size"] > 500_000
+
+
+def test_a_history_over_its_bound_but_not_twice_its_files_keeps_the_twenty_that_are_no_routines(tmp_path, project, monkeypatch):
+    monkeypatch.setattr(history_module, "PRUNE_MOST", 3_000_000)
+    (project / "Annual report.pdf").write_bytes(os.urandom(8_000_000))  # the project itself is large
+    a_routine_rewrites(tmp_path, project, 60)
+    out = a_pod(tmp_path, project).prune(keep=[], now=time.time() + LATER, spare=0)
+    assert (out["pruned"], out["commits"]) == (True, 66) and 3_000_000 < out["size"] <= 2 * out["files"]
+
