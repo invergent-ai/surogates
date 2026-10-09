@@ -549,7 +549,8 @@ async def prune_after(
         # A pruning runs.  First, a life that fits one: the pod is a turn's, made to last a day, and in
         # no session's keeping now.  The longest its pruning can take, and room: a delete never
         # answered leaves it that long.  Asked only here: on a day already pruned the pod just goes.
-        life = _PRUNE_PATIENCE + _PRUNE_BOUND + _PRUNE_PER_GIB * packs / 2**30 + _PRUNING_POD_ROOM
+        # With the settle's longest wait before it: a keep's, where the landing rows cannot be read.
+        life = _PRUNE_PATIENCE + _life(saga_settings) + _PRUNE_BOUND + _PRUNE_PER_GIB * packs / 2**30 + _PRUNING_POD_ROOM
         try:
             await asyncio.wait_for(sandbox_pool.expire_released(sandbox_id, life), _LET_GO_BOUND)
         except Exception:

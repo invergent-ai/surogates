@@ -520,9 +520,10 @@ async def test_a_pruning_that_cannot_take_the_projects_lock_gives_the_day_up_and
     assert pool.let_go == [("pod-1", "t1", True)] and "Could not prune the history of project w1" in caplog.text
     assert not landing._PRUNINGS
     # Before anything else its pod was given a life that fits a pruning: the wait for the lock (cut to
-    # a fifth of a second here), the pod's own bound for a history of no size, and room.  A delete
-    # that never answers leaves it that long.
-    assert pool.ends_within == [("pod-1", 0.2 + 300 + 900)]
+    # a fifth of a second here), the longest the settle before it can wait where the landing rows
+    # cannot be read, the pod's own bound for a history of no size, and room.  A delete that never
+    # answers leaves it that long.
+    assert pool.ends_within == [("pod-1", 0.2 + 1204 + 300 + 900)]
 
 
 async def test_a_prunings_pod_is_given_longer_for_a_larger_history():
@@ -535,9 +536,9 @@ async def test_a_prunings_pod_is_given_longer_for_a_larger_history():
     await asyncio.sleep(0.05)
     pruning.cancel()
     await asyncio.wait([pruning], timeout=5)
-    # Ten minutes for the lock, five and three a GiB for the pod's call, fifteen of room: 42 minutes
-    # for 4 GiB, and half an hour for a history of no size.  Within the hour up to 10 GiB.
-    assert pool.ends_within == [("pod-1", 600 + 300 + 4 * 180 + 900)]
+    # Ten minutes for the lock, twenty for the settle's longest wait, five and three a GiB for the pod's
+    # call, fifteen of room: 62 minutes for 4 GiB, and 50 for a history of no size.
+    assert pool.ends_within == [("pod-1", 600 + 1204 + 300 + 4 * 180 + 900)]
 
 
 async def test_a_delete_that_does_not_answer_is_tried_again(monkeypatch, caplog):
