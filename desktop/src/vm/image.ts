@@ -79,7 +79,7 @@ export function installBase(path: string, rootOwned = false): string {
     const { code } = error as NodeJS.ErrnoException;
     if (code === undefined) throw error;
     if (code !== "ENOENT") throw new Error(`${path} could not be read: ${code}`);
-    throw new Error("Surogate was not installed by its install script, so it does not know where to download its sandbox from");
+    throw new Error("Surogate was not installed by its install script, so it does not know where it was installed from");
   }
   let base: unknown;
   try {
@@ -88,7 +88,12 @@ export function installBase(path: string, rootOwned = false): string {
     // Not JSON: it names no base.
   }
   const url = typeof base === "string" && URL.canParse(base) ? new URL(base) : null;
-  if (!url || !["https:", "http:"].includes(url.protocol)) throw new Error(`${path} names no web address to download the sandbox from`);
+  if (!url || !["https:", "http:"].includes(url.protocol)) throw new Error(`${path} names no web address that Surogate was installed from`);
+  // A user and a password in it would go out with every request, to every address a redirect names; and
+  // the app's own fetch refuses such an address in words of the system's. Refused here, in the app's own.
+  if (url.username !== "" || url.password !== "") {
+    throw new Error(`${path} names a web address with a user or a password in it, which Surogate does not send: run the install script again with a --base that has none`);
+  }
   return url.href.replace(/\/+$/, "");
 }
 

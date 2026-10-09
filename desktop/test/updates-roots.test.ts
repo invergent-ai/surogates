@@ -125,8 +125,8 @@ describe("what an installed app reads as root's own", () => {
     const records: Array<[string, () => void, string]> = [
       ["one its group may write", () => roots(base.record, 0o664), `${base.record} ${NOT_ROOTS}`],
       ["another user's", () => roots(base.record, 0o644, own), `${base.record} ${NOT_ROOTS}`],
-      ["one that names no base", () => writeFileSync(base.record, JSON.stringify({ channel: "stable" })), `${base.record} names no web address to download the sandbox from`],
-      ["one that is no JSON", () => writeFileSync(base.record, "<html>"), `${base.record} names no web address to download the sandbox from`],
+      ["one that names no base", () => writeFileSync(base.record, JSON.stringify({ channel: "stable" })), `${base.record} names no web address that Surogate was installed from`],
+      ["one that is no JSON", () => writeFileSync(base.record, "<html>"), `${base.record} names no web address that Surogate was installed from`],
       ["one that names no channel", () => writeFileSync(base.record, JSON.stringify({ base: base.url })), `${base.record} names no update channel`],
       ["one of another channel than the helper installs", () => writeFileSync(base.record, JSON.stringify({ base: base.url, channel: "beta" })), `${base.record} names the channel beta, and ${base.helper} installs stable`],
       ["none", () => (rmSync(base.record), told.paths.delete(base.record)), "Surogate was not installed by its install script"],
@@ -152,7 +152,7 @@ describe("what an installed app reads as root's own", () => {
     // /usr/bin/bash and /etc/passwd are root's, at the modes an install leaves its helper and its
     // record: by itself each passes as root's own.
     expect(() => releaseKeys("/usr/bin/bash", true)).toThrow("/usr/bin/bash trusts no release key");
-    expect(() => installBase("/etc/passwd", true)).toThrow("/etc/passwd names no web address to download the sandbox from");
+    expect(() => installBase("/etc/passwd", true)).toThrow("/etc/passwd names no web address that Surogate was installed from");
     const helper = join(base.dir, "linked-helper");
     const record = join(base.dir, "linked-record");
     symlinkSync("/usr/bin/bash", helper);
