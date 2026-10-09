@@ -454,6 +454,40 @@ async def test_a_routine_is_made_once_also_when_the_worker_dies_before_it_says_s
     assert len(await workers.routines()) == 2
 
 
+async def test_a_routine_the_session_made_for_another_prompt_is_not_taken_for_the_commands(workers):
+    from surogates.scheduled.schedule import parse_schedule
+
+    chat = await workers.chat()
+    await workers.says(chat, "/loop 1d Check the cash report")
+    # A turn under way makes a routine with its tool before the command's wake.
+    other = await ScheduledSessionStore(workers.api.app.state.session_factory).create_loop(
+        org_id=workers.api.org_id, user_id=workers.api.user_id, service_account_id=None, agent_id=AGENT_ID,
+        prompt="Check the stock report", schedule=parse_schedule("1d", timezone_name="UTC"), created_from_session_id=chat,
+    )
+
+    await workers.wake(chat)
+
+    made = [routine for routine in await workers.routines() if routine.id != other.id]
+    assert [routine.prompt for routine in made] == ["Check the cash report"]
+    assert (await workers.said(chat))[-1].startswith(f"Loop scheduled: `{made[0].id}`")
+
+
+async def test_a_goal_whose_queued_turn_a_request_has_read_does_not_keep_the_chat_from_resting(workers):
+    chat = await workers.chat()
+    await workers.types(chat, "/goal Ship the Q3 report")
+    await workers.wake(chat)
+    # The goal's next turn is taken up, the model is asked, and the user stops the chat.
+    await workers.store.emit_event(chat, EventType.HARNESS_WAKE, {"worker_id": "a-worker", "cursor": 0})
+    await workers.store.emit_event(chat, EventType.LLM_REQUEST, {})
+    stopped = await workers.api.client.post(f"/v1/sessions/{chat}/pause", headers=workers.api.auth())
+    assert stopped.status_code == 200, stopped.text
+
+    await workers.types(chat, "/goal status")
+
+    # The goal is still set, and nothing of it waits: the chat rests on the command's answer.
+    assert (await workers.status(chat), workers.ran) == ("completed", ["_handle_goal_command"] * 2)
+
+
 DIED = ["/compress", "/clear", "/goal status", "/mission status", "/code status", "/loop 1d Check the cash report"]
 
 
