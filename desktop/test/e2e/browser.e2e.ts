@@ -872,6 +872,68 @@ describe("a chat's browser taken over, and handed back", () => {
     expect((await navigating).error.type).toBe("denied");
   });
 
+  // The browser held from a chat that is gone, another chat here, and Settings open at Browser, offering its Hand back.
+  const heldFromGone = async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
+    expect(await operation("retire", {}, "retire", 0, CHAT)).toEqual({ ok: null });
+    await alsoBound(client, join(home, "second"));
+    expect(await atClick(client, "openSettings")).toBeNull();
+    let settings: Page | undefined;
+    await expect.poll(() => (settings = app!.windows().find((window) => window.url().includes("/settings.html"))) !== undefined, { timeout: 10_000 }).toBe(true);
+    await settings!.waitForSelector("#browser option", { state: "attached" });
+    await expect.poll(() => settings!.isVisible("#browser-held")).toBe(true);
+    const binding = () => client.evaluate((id) => window.surogateDesktop!.getBinding!(id), OTHER);
+    // Settings' own Hand back, as its page asks for it: what it is answered, or that it is not answered yet.
+    const asks = () => settings!.evaluate(() => Promise.race([
+      (window as unknown as { surogateSettings: { handBrowserBack(): Promise<boolean> } }).surogateSettings.handBrowserBack(),
+      new Promise<"asking">((done) => setTimeout(() => done("asking"), 1_000)),
+    ]));
+    return { client, settings: settings!, binding, asks };
+  };
+  const stays = async (shown: number) => {
+    await expect.poll(() => promptsShown(app!)).toBe(shown);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(await promptsShown(app!)).toBe(shown);
+  };
+
+  it("asks one hand back at a time from Settings: a second, asked while the first confirmation is up, is answered that nothing was handed back, and nothing waits behind the first", async () => {
+    const { settings, binding, asks } = await heldFromGone();
+    await settings.click("#browser-hand-back");
+    const asked = await prompted();
+    expect(await asks()).toBe(false);
+    expect(await asked.textContent("#prompt-waiting")).toBe("");
+    await press(asked, "keep");
+    await stays(0);
+    expect(await binding()).toMatchObject({ takenOver: "orphaned" });
+  });
+
+  it("closes Settings' hand back confirmation when Settings closes: nothing is handed back", async () => {
+    const { settings, binding } = await heldFromGone();
+    await settings.click("#browser-hand-back");
+    await prompted();
+    await app!.evaluate(({ webContents }) => webContents.getAllWebContents().find((contents) => contents.getURL().includes("/settings.html"))!.close());
+    await expect.poll(() => over("/settings.html"), { timeout: 10_000 }).toBe(false);
+    await stays(0);
+    expect(await binding()).toMatchObject({ takenOver: "orphaned" });
+  });
+
+  it("tells every chat's page when the browser is handed back from Settings", async () => {
+    const { client, settings, binding } = await heldFromGone();
+    await client.evaluate(() => {
+      const heard: string[] = [];
+      Object.assign(window, { heard });
+      window.surogateDesktop!.onBindingChanged!((chat) => heard.push(chat));
+    });
+    await settings.click("#browser-hand-back");
+    await press(await prompted(), "hand_back");
+    await expect.poll(() => client.evaluate(() => (window as unknown as { heard: string[] }).heard)).toEqual([OTHER]);
+    expect(await binding()).toMatchObject({ takenOver: false });
+  });
+
   it("tells the page nothing was handed back when the browser was taken over from another chat while the confirmation was up", async () => {
     const folder = join(home, "project");
     mkdirSync(folder);
