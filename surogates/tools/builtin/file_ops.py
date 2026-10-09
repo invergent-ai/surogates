@@ -543,7 +543,8 @@ async def _suggest_similar_files(wio: WorkspaceIO, path: str) -> list[str]:
 # ---------------------------------------------------------------------------
 from surogates.tools.utils.binary_extensions import has_binary_extension
 from surogates.tools.utils.tool_output_limits import get_max_bytes, get_max_lines
-from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+from surogates.tools.utils.workspace_sandbox import NUL_REFUSED, WorkspaceSandboxError
+from surogates.tools.utils.workspace_sandbox import holds_nul as _holds_nul
 
 
 # ---------------------------------------------------------------------------
@@ -1583,6 +1584,8 @@ async def _write_file_handler(
 
     if not path:
         return _tool_error("No path provided")
+    if _holds_nul(path):
+        return _tool_error(NUL_REFUSED)
 
     # Block writes to sensitive system/credential files
     refusal = await wio.check_write(path)
@@ -1685,6 +1688,8 @@ async def _patch_handler(
     # Check sensitive paths for both replace (explicit path) and V4A patch (extract paths)
     paths_to_check = patch_targets(arguments)
 
+    if _holds_nul(*paths_to_check):
+        return _tool_error(NUL_REFUSED)
     for p in paths_to_check:
         # Block writes to sensitive system/credential files
         refusal = await wio.check_write(p)

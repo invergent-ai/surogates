@@ -482,14 +482,13 @@ async def test_a_nul_in_a_path_or_a_pattern_is_refused_alike_by_every_file_tool(
         {"pattern": "*\x00", "target": "files"},
     ):
         assert await call(file_ops._search_files_handler, ws, **arguments) == {"error": f"Search failed: {NUL_REFUSED}"}
-    # A write's refusal is the handler's own failure, which its dispatcher reports.
+    # A write is refused as its other refusals are, not as a tool that failed.
     for handler, arguments in (
         (file_ops._write_file_handler, {"path": "a\x00b", "content": "x"}),
         (file_ops._patch_handler, {"mode": "replace", "path": "a\x00b", "old_string": "a", "new_string": "b"}),
+        (file_ops._patch_handler, {"mode": "patch", "patch": "*** Begin Patch\n*** Add File: a\x00b\n+x\n*** End Patch"}),
     ):
-        with pytest.raises(ValueError) as refused:
-            await raw_call(handler, ws, **arguments)
-        assert str(refused.value) == NUL_REFUSED
+        assert await call(handler, ws, **arguments) == {"error": NUL_REFUSED}
     assert os.listdir(ws.real) == []
 
 
@@ -512,12 +511,17 @@ class TestTerminal:
         assert "All commands must run within the workspace directory" in out["error"]
         assert time.monotonic() - started < 1.0
 
-    async def test_setup_failure_is_reported_at_once_not_retried(self, ws):
+    async def test_setup_failure_is_reported_at_once_not_retried(self, ws, monkeypatch):
+        class NoShell:
+            async def run(self, command, *, workdir, timeout):
+                raise RuntimeError("no shell on this host")
+
+        monkeypatch.setattr(terminal, "workspace_io_from", lambda kwargs: NoShell())
         started = time.monotonic()
-        out = await call(terminal._terminal_handler, ws, command="pwd", workdir="a\x00b")
+        out = await call(terminal._terminal_handler, ws, command="pwd")
         assert time.monotonic() - started < 1.0
         assert out["status"] == "error"
-        assert out["error"] == f"Failed to execute command: {NUL_REFUSED}"
+        assert out["error"] == "Failed to execute command: no shell on this host"
         assert "traceback" in out
 
     @pytest.mark.parametrize("arguments", [
@@ -525,12 +529,16 @@ class TestTerminal:
         {"command": "a\x00b", "workdir": "sub"},
         {"command": "a\x00b", "background": True},
         {"command": "true", "workdir": "a\x00b", "background": True},
-    ], ids=["command", "command in a folder", "background command", "background workdir"])
-    async def test_a_nul_in_a_command_or_its_folder_is_refused_alike(self, ws, arguments):
+        {"command": "pwd", "workdir": "a\x00b"},
+        {"command": "a\x00b", "workdir": "/etc"},
+    ], ids=["command", "command in a folder", "background command", "background workdir", "workdir", "command, workdir outside"])
+    async def test_a_nul_in_a_command_or_its_folder_is_refused_as_its_other_refusals_are(self, ws, arguments, caplog):
         (ws.real / "sub").mkdir()
-        out = await call(terminal._terminal_handler, ws, **arguments)
-        assert (out["status"], out["exit_code"]) == ("error", -1)
-        assert out["error"] == f"Failed to execute command: {NUL_REFUSED}"
+        with caplog.at_level("WARNING"):
+            out = await call(terminal._terminal_handler, ws, **arguments)
+        # The model's mistake, not the server's failure: no traceback for the model, nothing in the log.
+        assert out == {"output": "", "exit_code": -1, "error": NUL_REFUSED, "status": "blocked"}
+        assert caplog.records == []
 
     async def test_exit_code_meaning_for_grep(self, ws):
         (ws.real / "a.txt").write_text("x\n")

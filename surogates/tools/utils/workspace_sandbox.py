@@ -44,9 +44,14 @@ class WorkspaceSandboxError(Exception):
 NUL_REFUSED = "A path, a command or a search pattern cannot hold a NUL character"
 
 
+def holds_nul(*texts: object) -> bool:
+    """Whether one of *texts* is a string that holds a NUL."""
+    return any(isinstance(text, str) and "\0" in text for text in texts)
+
+
 def refuse_nul(*texts: str | None) -> None:
     """Raise ValueError(NUL_REFUSED) when one of *texts* holds a NUL."""
-    if any(isinstance(text, str) and "\0" in text for text in texts):
+    if holds_nul(*texts):
         raise ValueError(NUL_REFUSED)
 
 
