@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "digest"
+require "json"
 require "minitest/autorun"
 require "yaml"
 
@@ -460,6 +462,60 @@ class ReleaseWorkflowTest < Minitest::Test
     ]
     assert_equal "${{ github.event_name == 'workflow_dispatch' || (#{asked.join(" && ")}) }}", workflow.fetch("jobs").fetch("update-agent-images").fetch("if")
     assert File.exist?(".github/workflows/release.yml")
+  end
+
+  # *value* as one word: its keys in order of their names, whatever order the file has them in.
+  def held(value)
+    ordered = lambda do |part|
+      case part
+      when Hash then part.keys.map(&:to_s).sort.map { |key| [key, ordered.call(part.find { |name, _| name.to_s == key }[1])] }
+      when Array then part.map { |each| ordered.call(each) }
+      else part
+      end
+    end
+    Digest::SHA256.hexdigest(JSON.generate(ordered.call(value)))[0, 16]
+  end
+
+  def test_every_job_is_the_one_this_test_has_read_step_for_step_in_every_workflow_file
+    # A step needs no secret's name to send one away. In a job that holds one, a step before the
+    # one that is handed it can add a line to the script that step runs, the step's own lines can
+    # post what they were handed, a later step can send a file an earlier one wrote, and a
+    # container, another runner or a shell that traces has every step's. Every job here holds a
+    # secret, a token that may write, or makes the bytes that are signed or published. So each is
+    # held whole: its own keys (its runner, its needs, its permissions, its environment, its
+    # env, its container, its shell) as one word, and each of its steps as one, in order. A change
+    # to any of them fails here, and says the word to put in its place once the change is read:
+    # that reading is what this test asks for, of whoever changes a job that can leak.
+    read = {
+      "release.yml" => {
+        "wheel" => ["4cd0d0e26258996d", %w[dc15019acb8b0420 3f2828c5b55668e8 030b48177ef387aa c1168eec9dd8980f d127b8914f9e2775 89676bc6c688a2df]],
+        "images" => ["8ebea57277fdbb89", %w[87fcdec176307d16 0619e48968c28792 617ad6a92e3fd6a0 73c45f0486d37ee1 24a2521493be90fe d971c94aab8fd2bb]],
+        "npm" => ["3bb6071d27310db0", %w[87fcdec176307d16 def0caf4b753eb6e 8f8a53d795b99dc8 807dcbfaa4796d62 55af956a9b746fbb 5408cbb4d7c827a5]],
+        "desktop-vm-image" => ["891e383153375f2d", %w[87fcdec176307d16 1c8fad583502f38f c210483245b04521 04f76870922f0e0c 9cf23a5158e4d38d 4d2b3220158de0c1 b71b78b7115f448e]],
+        "desktop-vm-manifest" => ["f9c7e07cd29827c7", %w[e335da8090635b93 ba3ff68edbc5f647]],
+        "desktop-build" => ["e8efdf02c88621d5", %w[87fcdec176307d16 61e8fae8194d2d45 cf300593362c4da1 96ec46bd03bed893 18d2126a5450e6bd d8eb498da277e6b9 cc9cc27902be0c44 75ced9156be50298]],
+        "desktop-describe" => ["dcfde8aef5675336", %w[87fcdec176307d16 7f42edae9383c098 70dd0b5fb0038c24]],
+        "desktop-publish" => ["9ed0647b31c3b292", %w[87fcdec176307d16 7f42edae9383c098 d864dc15d699f950 f8b9a39c31acaab5]],
+        "release" => ["33f64af0592c0ef5", %w[dc15019acb8b0420 b2c42af94398cc27 04917607907da35f d088ed479c39da82 eda05a5d7a75fede]],
+      },
+      "update-images.yml" => {
+        "update-agent-images" => ["cb851a113f4b2089", %w[79f419cc70509398 17127a23ac6df9ec ee7d72f941971e8f 8ec0d2118169566d]],
+      },
+    }
+    found = workflows.to_h do |file, workflow|
+      [file, workflow.fetch("jobs").to_h { |name, job| [name, [held(job.reject { |key, _| key == "steps" }), job.fetch("steps", []).map { |step| held(step) }]] }]
+    end
+    found.each do |file, jobs|
+      assert_equal read.fetch(file).keys, jobs.keys, "#{file} has other jobs than this test has read"
+      jobs.each do |name, (keys, steps)|
+        assert_equal read.fetch(file).fetch(name)[0], keys, "#{file}: the keys of #{name} beside its steps are not the ones this test has read (#{keys})"
+        names = workflows.fetch(file).fetch("jobs").fetch(name).fetch("steps", []).map { |step| step["name"] || step["uses"] }
+        assert_equal read.fetch(file).fetch(name)[1].zip(names), steps.zip(names), "#{file}: a step of #{name} is not the one this test has read"
+      end
+    end
+    assert_equal read.keys, found.keys
+    # The build's bytes are the ones that are signed: made on the runner the other jobs trust.
+    assert_equal "blacksmith-4vcpu-ubuntu-2404", @workflow.fetch("jobs").fetch("desktop-build").fetch("runs-on")
   end
 
   def test_one_job_alone_runs_in_the_desktop_s_environment_in_every_workflow_file
