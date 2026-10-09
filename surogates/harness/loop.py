@@ -38,7 +38,7 @@ from surogates.harness.agent_resolver import (
 )
 from surogates.harness.connection_health import cleanup_dead_connections
 from surogates.harness.cost_tracker import SessionCostTracker
-from surogates.harness.device_replay import replay_unanswered, resumable
+from surogates.harness.device_replay import replay_unanswered, resumable, unanswered_calls
 from surogates.harness.error_classify import classify_harness_error
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.message_utils import (
@@ -1326,9 +1326,12 @@ class AgentHarness(
                 session_id, exclude_types=[EventType.LLM_DELTA],
             )
 
-            # 4. Check for pending events (events after the cursor).
+            # 4. Check for work: events after the cursor, or a call of the
+            # model's last response that was begun and never answered.  A
+            # worker that died after a sibling call's result moved the
+            # cursor past that call left nothing else to say so.
             pending = _actionable_pending_events(all_events, cursor)
-            if not pending and not resumable(session, all_events):
+            if not pending and not unanswered_calls(all_events):
                 logger.debug(
                     "Session %s: no actionable pending events after cursor %d",
                     session_id,
