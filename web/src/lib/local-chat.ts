@@ -502,13 +502,14 @@ export interface BrowserPane {
  * The server tells the chat of a take-over once, and of a hand back only after one. So each is
  * posted in its turn, the next once the last was answered:
  * - a take-over the desktop made (acquire);
- * - a hand back the desktop answered true (release), with the take-over posted again before it
- *   unless this page saw the server answer it: one that never arrived, one made before this page
- *   loaded, or one made from another chat. The server tells a chat no second time of a take-over
- *   it knows, so the chat is told both, in order. The release says it is a hand back only where
- *   its user confirmed one of the browser this chat held: the server then gives the agent a turn
- *   where it can, answers whether it did, and the pane says that. Made for a chat that is gone,
- *   it is a release like the next, and the agent is to be written to;
+ * - a hand back the desktop made (release). One its user confirmed, of the browser this chat held,
+ *   says so, with the take-over posted again before it unless this page saw the server answer it:
+ *   one that never arrived, or one made before this page loaded. The server tells a chat no second
+ *   time of a take-over it knows, so the chat is told both, in order; it then gives the agent a
+ *   turn where it can, answers whether it did, and the pane says that. Any other hand back (made
+ *   for a chat that is gone, or with nobody holding the browser) is a release like the next,
+ *   posted alone, and the agent is to be written to: a take-over posted before it with none made
+ *   would tell the chat its user holds the browser again, and take back a turn still to come;
  * - at the chat's load, where the computer says nobody holds the browser, a release, once: the app
  *   may have ended while its user held it, and the chat would still say they do. Nobody handed
  *   anything back, so it is no hand back, and wakes nobody. The server passes over a release with
@@ -552,7 +553,7 @@ export function browserPane(posts: BrowserPosts): BrowserPane {
     taken: () => inTurn(() => post("acquire")),
     handedBack: (confirmed) =>
       inTurn(async () => {
-        if (told !== "taken") {
+        if (confirmed && told !== "taken") {
           await post("acquire");
         }
         const answer = await post("release", confirmed);

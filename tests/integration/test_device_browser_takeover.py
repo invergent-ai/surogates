@@ -364,6 +364,28 @@ async def test_a_repeat_is_answered_that_nobody_goes_on_once_the_hand_backs_turn
     assert computer.wakes == [str(chat)]
 
 
+async def test_a_plain_release_posted_after_a_hand_back_leaves_its_turn_to_come_and_a_take_over_posted_first_does_not(computer):
+    # A second window of the chat, loaded while the browser was held: its Hand back, pressed once the
+    # first window had handed it back, is answered by the desktop that the browser was released.
+    alone, with_a_take_over = await computer.idle(), await computer.idle()
+    for chat in (alone, with_a_take_over):
+        await computer.control(chat, "acquire")
+        assert await computer.hands_back(chat) == GOES_ON
+
+    try:
+        # Its pane posts the release alone: passed over, and the turn is still the agent's.
+        assert await computer.control(alone, "release") == FOR_THE_PANE
+        assert await computer.work(alone) == ["session.resume"]
+        assert await computer.hands_back(alone) == GOES_ON
+        # Posted behind a take-over nobody made, as the pane used to, the turn was taken back for it.
+        await computer.control(with_a_take_over, "acquire")
+        assert await computer.control(with_a_take_over, "release") == FOR_THE_PANE
+        assert await computer.work(with_a_take_over) == []
+        assert await computer.hands_back(with_a_take_over) == FOR_THE_PANE
+    finally:
+        await computer.unqueue(alone, with_a_take_over)
+
+
 SINCE_THE_TAKE_OVER = [
     "nothing", "its agent met the pause", "a sub-agent of its met the pause", "its agent read a page that quotes the pause",
 ]

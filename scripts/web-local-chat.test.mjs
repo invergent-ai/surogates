@@ -470,7 +470,8 @@ test("posts a hand back as its user's confirmed one only of the browser this cha
     other.answers.handBack = async () => answer;
     const gone = browserPane(other.posts);
     await gone.press("handBack", "root-1", other.desktop);
-    assert.deepEqual(other.did, [["handBack", "root-1"], ["post", "acquire"], ["post", "release"]]);
+    // The release alone: a take-over posted with none made would take back a hand back's turn still to come.
+    assert.deepEqual(other.did, [["handBack", "root-1"], ["post", "release"]]);
     assert.deepEqual(gone.state(), { ...quiet(1), said: WRITE_TO_THE_AGENT });
   }
   // On the wire, only the confirmed hand back says it is one: any other release is posted as it always was.
@@ -696,6 +697,21 @@ test("sends a take-over the server never heard of again before its hand back, so
   const reloaded = browserDesk();
   await browserPane(reloaded.posts).press("handBack", "root-1", reloaded.desktop);
   assert.deepEqual(reloaded.did, [["handBack", "root-1"], ["post", "acquire"], ["post", "hand back"]]);
+  // Only before the hand back its user confirmed, of the browser this chat held. A second window of the
+  // chat, loaded while the browser was held and pressed once the first had handed it back, is answered by
+  // the desktop that it was released: it posts that alone, as does a pane whose take-over never arrived.
+  for (const before of [async () => {}, async (pane) => pane.loaded(true), async (pane, desk) => {
+    desk.answers.acquire = offline;
+    await pane.press("takeOver", "root-1", desk.desktop);
+    desk.did.length = 0;
+  }]) {
+    const second = browserDesk();
+    second.answers.handBack = async () => "released";
+    const stale = browserPane(second.posts);
+    await before(stale, second);
+    await stale.press("handBack", "root-1", second.desktop);
+    assert.deepEqual(second.did, [["handBack", "root-1"], ["post", "release"]]);
+  }
 });
 
 test("says what the server could not be told of a take-over and of a hand back", async () => {
