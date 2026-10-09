@@ -726,3 +726,35 @@ async def test_a_link_where_the_worker_marks_a_pruning_empties_no_file_and_stops
     # The file the link points to keeps its bytes; the history is hostile input, so the pruning is not run.
     assert (tmp_path / "b1" / "proj" / "Report.docx").read_bytes() == b"the report"
     assert asked == [] and "Could not prune the history of project w1" in caplog.text
+
+
+async def test_a_prunings_patience_is_for_the_lock_and_ends_once_the_lock_is_had(monkeypatch, caplog):
+    done = []
+
+    async def none(*_):
+        return []
+
+    class Pod:
+        async def execute_released(self, *args, **kwargs):
+            await asyncio.sleep(0.6)  # a pruning at work for longer than it would have waited for the lock
+            done.append("pruned")
+            return json.dumps({"pruned": True})
+
+    @contextlib.asynccontextmanager
+    async def the_lock(*_):
+        async def held():
+            return None
+
+        yield held
+
+    monkeypatch.setattr(landing, "kept_refs", none)
+    monkeypatch.setattr(landing, "running_landings", none)
+    monkeypatch.setattr(landing, "project_lock", the_lock)
+    monkeypatch.setattr(landing, "_PRUNE_PATIENCE", 0.2)
+    with caplog.at_level(logging.WARNING, logger=landing.__name__):
+        await landing.prune_after(
+            session_factory=None, sandbox_pool=Pod(), sandbox_id="pod-1", workstream="w1", packs=0, saga_settings=None,
+        )
+    # With the lock in hand its work has bounds of its own: it is not cut off in the middle by the
+    # time it would have waited for the lock.
+    assert done == ["pruned"] and "Could not prune" not in caplog.text
