@@ -1044,6 +1044,28 @@ async def test_a_worker_whose_lease_moved_does_not_answer_a_command_another_work
     assert (len(await workers.said(chat)), workers.requests) == (answers + 1, [])
 
 
+@pytest.mark.parametrize("command", ["/goal status", "/loop 1d Check the cash report"])
+async def test_a_worker_whose_lease_moved_before_it_reached_a_command_does_not_start_it(workers, command):
+    chat = await workers.chat()
+
+    async def its_lease_expires_and_another_worker_takes_the_chat():
+        async with workers.api.app.state.session_factory() as db:
+            await db.execute(
+                text("UPDATE session_leases SET expires_at = now() - interval '1 minute' WHERE session_id = :id"), {"id": chat},
+            )
+            await db.commit()
+        await workers.wake(chat)
+
+    await workers.says(chat, command)
+    slow = workers.worker(store=Meanwhile(workers.store, as_it_wakes=its_lease_expires_and_another_worker_takes_the_chat))
+    with pytest.raises(LeaseNotHeldError):
+        await slow.wake(chat)
+
+    # The handler ran once, in the worker that holds the session.
+    assert workers.ran == [ANSWERED[command]]
+    assert len(await workers.routines()) == (1 if command.startswith("/loop") else 0)
+
+
 async def test_a_chat_its_user_stopped_while_a_command_was_answered_stays_stopped(workers):
     chat = await workers.chat()
 

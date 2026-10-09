@@ -1610,6 +1610,12 @@ class AgentHarness(
                 written = all_events
                 if is_new:
                     self._answering = typed_at
+                    # Not where another worker has the session by now: the
+                    # command is that worker's.  What a handler does after
+                    # this is not written under the lease, so a lease that
+                    # moves once the handler has begun is caught only at
+                    # the answer.
+                    await self._store.renew_lease(session_id, lease.lease_token, ttl_seconds=_LEASE_TTL_SECONDS)
                     try:
                         if slash_block is not None:
                             await self._emit_loop_response(
