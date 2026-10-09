@@ -194,6 +194,13 @@ COPY_REMADE = (
     "Changes this thread made since its work was last saved are not in it. "
     "Check the files before making any of those changes again.]"
 )
+#: The same where the copy made again took up what this turn had handed to a helper: a pod lost in mid-turn.
+COPY_REMADE_HANDED_ON = (
+    "[This thread's copy of the project's files was made again. "
+    "What this thread handed to a helper in this turn is in it, with what helpers kept since. "
+    "Changes it made after that are not in it. "
+    "Check the files before making any of those changes again.]"
+)
 
 
 def _noted(content: str, note: str) -> str:
@@ -1990,7 +1997,10 @@ async def _run_single_tool(
         if sandbox_pool.copy_fresh(sandbox_session_key(session)) and await _copy_lost_work(
             store, session.id, _call_event_id, session_factory,
         ):
-            result_content = f"{COPY_REMADE}\n\n{result_content}"
+            from surogates.harness.landing import took_its_own
+
+            line = COPY_REMADE_HANDED_ON if await took_its_own(sandbox_pool, sandbox_session_key(session)) else COPY_REMADE
+            result_content = f"{line}\n\n{result_content}"
 
     spill_pool = device_call if device_call is not None else sandbox_pool
     if spill_pool is not None:

@@ -435,6 +435,15 @@ async def take_up(sandbox_pool: Any, owner: str) -> list[str]:
         return []
 
 
+async def took_its_own(sandbox_pool: Any, owner: str) -> bool:
+    """Whether a thread's copy, just made, took up a hand-off its own turn had made: what it handed on is in it."""
+    try:
+        return bool((await _call(sandbox_pool, owner, "opened"))["own"])
+    except Exception:
+        logger.warning("Could not ask what the copy of %s took up at its open", owner, exc_info=True)
+        return False
+
+
 def prune_later(
     *, session_factory: Any, sandbox_pool: Any, sandbox_id: str, session_id: str, workstream: Any, packs: int,
     saga_settings: Any, storage: Any = None, bucket: str | None = None, prefix: str = "",

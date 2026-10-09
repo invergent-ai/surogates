@@ -754,6 +754,8 @@ class History:
                 since = onto_none or since
             elif followed is not None and followed[3]:
                 since = followed[3]
+                # Its own turn's hand-off: the copy has what the turn handed on.
+                _replace(self.repo / "took-its-own", b"")
         if taken is None:
             # Nothing but another turn's own files: none of it is this copy's.
             self._main("update-ref", self.handed, durable)
@@ -766,6 +768,10 @@ class History:
         if not_taken:
             _replace(self.repo / "not-taken", json.dumps(sorted({*self._not_taken(), *not_taken})).encode())
         return {"not_taken": not_taken}
+
+    def opened(self) -> dict:
+        """What this copy's open took up: ``own``, whether a hand-off its own turn made, its pod gone since."""
+        return {"own": (self.repo / "took-its-own").exists()}
 
     def drop_hand_off(self, gave: Iterable[str] = ()) -> dict:
         """Take the stopped turn's own files off its hand-off, so they do not land later; what helpers kept stays.

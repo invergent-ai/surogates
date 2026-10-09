@@ -965,3 +965,28 @@ async def test_no_helpers_finished_work_is_lost_however_a_stop_falls_short(api, 
     # The helper that finished before the turn, and the one the turn started, which ended after the stop.
     assert (pods.project / "sources.md").read_text() == "an hour of work\n"
     assert (pods.project / "checked.md").read_text() == "checked\n"
+
+
+async def test_a_thread_whose_copy_was_made_again_after_it_handed_on_is_told_what_is_in_it_and_what_is_not(api, monkeypatch, pods):
+    thread = await a_coordinating_thread(api)
+    mine = SandboxPool(pods)
+
+    async def the_pod_goes(harness):
+        await mine.execute(str(thread.id), "terminal", json.dumps({"command": "echo after > after.md"}))  # after the hand-on
+        await pods.destroy(mine.sandbox_of(str(thread.id)))
+
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "echo draft > draft.md"})),
+        calling(("spawn_worker", {"goal": "Check the draft."})),
+        calling(("memory", {"action": "add", "content": "x"})),
+        calling(("terminal", {"command": "ls"})),
+        _final_response("Done."),
+    ], pool=mine, during=the_pod_goes), 120)
+    seen = json.loads((await results_of(api, thread, "terminal"))[-1].split("]\n\n", 1)[-1])["output"].split()
+    # What it handed to its helper is in the copy made again; what it wrote after is not.  The line says that.
+    assert "draft.md" in seen and "after.md" not in seen
+    assert (await results_of(api, thread, "terminal"))[-1].startswith(
+        "[This thread's copy of the project's files was made again. What this thread handed to a helper in this "
+        "turn is in it, with what helpers kept since. Changes it made after that are not in it. "
+        "Check the files before making any of those changes again.]\n\n"
+    )
