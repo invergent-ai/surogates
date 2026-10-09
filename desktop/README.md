@@ -87,15 +87,19 @@ test runner does, finds it. The agent is told where the file was saved, or why i
 (over 50 MiB, not finished, denied), with its next answer that says what the page did: a
 navigation's, the mouse's, the keyboard's or an upload's. One answer carries at most twenty
 notes of what its downloads came to and twenty of what else its pages did; more than that is
-not told. A download that begins and never ends is dropped, and told as not finished, once no
-byte of any download has come for a minute. One that keeps coming is stopped by what the
-temporary folder may hold while a download of the agent's is on its way: 400 MiB, eight files
-as large as one that can be saved. Past that, every download of the agent's still on its way
-is stopped and what it had staged removed. The browser does not say which of them was the
-large one, so all go, and the agent is told of each that the downloads together were too
-large to save, and that it may start again one that was not the large one. Your own
-downloads count toward the 400 MiB, and are never stopped by it. The folder is looked at
-once a second, so it can hold what comes in a second more.
+not told. A download of the agent's that begins and never ends is dropped, and told as not
+finished, once no byte of its own has come for a minute. That drops one whose site is silent
+for a minute part-way as well, though it would have gone on: a report that is made while it
+is sent meets this each time it is tried. One of the agent's that keeps coming is stopped by
+what the agent's own downloads may have staged together, those on their way and those that
+ended and wait to be saved: 400 MiB, eight files as large as one that can be saved. Past
+that, every download of the agent's still on its way is stopped and what it had staged
+removed, and one that ends then is not handed on; the agent is told of each that its own
+downloads were together too large to save, and that it may start again one that was not the
+large one. What is staged is looked at once a second, so the agent's own can pass the
+400 MiB by what comes in a second. A download of your own counts for nothing in any of this:
+it is never stopped for its size or its silence, and the agent is told nothing of it. One of
+yours with no end goes on until you stop it in the browser or the browser closes.
 
 While the agent drives, a page gets a file only when the agent uploads one: up to ten files
 of the chat's folder, 50 MiB in all, read through the chat's file host and given to the file
@@ -119,9 +123,11 @@ agent is then told that the page has them. While you have the browser:
 
 - a page's own questions wait for your answer;
 - a file input you click opens the browser's own file chooser; in a page the agent had open,
-  only once that page has been quiet for five seconds and answers: until then, in one that
-  keeps asking for a file by itself, and in one a frame of which is stuck, your click on a
-  file input opens nothing;
+  only once that page has answered and then been quiet for five seconds: until then, and in
+  one a frame of which is stuck, your click on a file input opens nothing. A page that keeps
+  asking for a file by itself is heard, and given nothing by that: it cannot keep what the
+  agent's last click gave it, and so opens no window, fills no screen and writes no
+  clipboard under your hand;
 - a download that comes in a chat's page is yours: you are asked before it is saved, in
   either mode, and the agent is told nothing of it. One you start that comes only after you
   have handed the browser back is not covered by this: the paragraph on the minute after a
@@ -137,9 +143,14 @@ after a take-over, and nothing bounds it in time while the site leaves the first
 open. It costs you that one download; a second click works.
 
 Hand back, in the pane, asks in a window of the desktop's own, "Hand the browser back to
-<agent>?". Keep control is its default, and Hand back takes no press in its first half
-second. The browser is handed back from the chat it was taken over from, or from any chat
-of the agent's once that one is deleted. Nothing the agent's page does by itself hands the
+<agent>?". Keep control is its default. Nothing answers it, Keep control neither, until half
+a second has passed since it showed and since the last key or press it received: what you
+were typing into the browser when it opened answers nothing and moves nothing, and a key
+held down never does. Every prompt of the desktop's is held back so, with each of its
+buttons and Escape. The browser is handed back from the chat it was taken over from, or
+from any chat of the agent's once that one is deleted; where that chat is gone, Settings →
+Browser says so and offers Hand back itself, through the same confirmation, since no chat
+may be left with a browser pane to hand it back in. Nothing the agent's page does by itself hands the
 browser back, shows it or opens Settings: each needs a click of yours in that page. It can
 take the browser over by itself, with no click of yours, and that does all your own
 take-over does, not only stop the agent: the agent's downloads on their way are dropped; no
