@@ -9,6 +9,8 @@ import pytest
 
 from surogates.session.models import Session
 from surogates.session.provisioning import (
+    before_a_child,
+    before_child,
     create_agent_session,
     create_child_session,
 )
@@ -519,15 +521,16 @@ async def test_create_child_session_of_a_cloud_parent_cannot_set_execution():
 
 
 @pytest.mark.asyncio
-async def test_a_project_threads_helpers_and_theirs_run_in_the_threads_copy_layout():
-    thread = _make_session(config={**_workspace_config(), "workstream_role": "thread"})
+async def test_a_project_threads_helpers_and_theirs_each_work_on_a_copy_of_the_threads_work():
+    thread = _make_session(config={**_workspace_config(), "workstream_role": "thread", "workstream_id": "w-1"})
     store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
     await create_child_session(store=store, parent=thread, channel="delegation")
     helper = _make_session(config=store.create_session.await_args.kwargs["config"], parent_id=thread.id)
-    # A helper's helper makes the thread's pod as the thread would, if it is first.
     await create_child_session(store=store, parent=helper, channel="delegation")
-    cfg = store.create_session.await_args.kwargs["config"]
-    assert (cfg["sandbox_root_thread"], cfg["sandbox_root_session_id"]) == (True, str(thread.id))
+    made = store.create_session.await_args.kwargs
+    # A helper's helper too: each on a copy of its own, in a pod of its own, of the thread's work.
+    assert (made["config"]["history_thread"], made["config"]["history_project"]) == (str(thread.id), "w-1")
+    assert made["config"]["sandbox_root_session_id"] == str(made["session_id"])
 
 
 @pytest.mark.asyncio
@@ -539,11 +542,86 @@ async def test_no_caller_names_a_session_a_threads_helper():
     )
     await create_agent_session(
         store=store, storage=storage, settings=SimpleNamespace(storage=SimpleNamespace(bucket="tenant-bucket")),
-        org_id=uuid4(), user_id=uuid4(), agent_id="a-1", channel="web", config={"sandbox_root_thread": True},
+        org_id=uuid4(), user_id=uuid4(), agent_id="a-1", channel="web", config={"history_thread": "t-1", "history_project": "w-1"},
     )
-    assert "sandbox_root_thread" not in store.create_session.await_args.kwargs["config"]
+    assert "history_thread" not in store.create_session.await_args.kwargs["config"]
     # Nor a child of a session that is no thread's.
     await create_child_session(
-        store=store, parent=_make_session(), channel="delegation", config={"sandbox_root_thread": True},
+        store=store, parent=_make_session(), channel="delegation", config={"history_thread": "t-1", "history_project": "w-1"},
     )
-    assert "sandbox_root_thread" not in store.create_session.await_args.kwargs["config"]
+    assert "history_thread" not in store.create_session.await_args.kwargs["config"]
+
+
+@pytest.mark.asyncio
+async def test_what_a_step_set_for_the_moment_before_it_starts_a_session_runs_once_the_session_is_sure_to_be_made():
+    order: list[str] = []
+
+    async def hands_on() -> None:
+        order.append("handed on")
+
+    async def made(**session):
+        order.append("made")
+        return SimpleNamespace(id=uuid4())
+
+    store = SimpleNamespace(create_session=made)
+    with before_a_child(hands_on):
+        # A parent this function refuses starts no session: nothing runs for it.
+        with pytest.raises(ValueError, match="missing required config fields"):
+            await create_child_session(store=store, parent=_make_session(config={}), channel="delegation")
+        assert order == []
+        # Before each session it does make, and before the session is there to be picked up.
+        await create_child_session(store=store, parent=_make_session(), channel="delegation")
+        await create_child_session(store=store, parent=_make_session(), channel="worker")
+        assert order == ["handed on", "made", "handed on", "made"]
+    # Outside the step nothing is set: a session made by a tick, or by another step, runs none of it.
+    await create_child_session(store=store, parent=_make_session(), channel="task")
+    assert order == ["handed on", "made", "handed on", "made", "made"]
+
+
+@pytest.mark.asyncio
+async def test_a_read_is_ended_before_what_a_step_set_runs_and_left_alone_when_nothing_is_set():
+    order: list[str] = []
+    reading = SimpleNamespace(rollback=AsyncMock(side_effect=lambda: order.append("read ended")))
+
+    async def hands_on() -> None:
+        order.append("handed on")
+
+    # What runs may wait for the project's lock: no transaction is left open through it.
+    with before_a_child(hands_on):
+        await before_child(reading)
+    assert order == ["read ended", "handed on"]
+    await before_child(reading)
+    assert order == ["read ended", "handed on"]
+
+
+@pytest.mark.asyncio
+async def test_every_session_under_a_project_thread_says_which_thread_and_no_caller_can_say_so_for_it():
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+    device = {"kind": "device", "device_id": str(uuid4())}
+    for thread in (
+        _make_session(config={**_workspace_config(), "workstream_role": "thread", "workstream_id": "w-1"}),
+        # On the user's computer a helper has no copy and names no thread to hand back to: it says this all the same.
+        _make_session(config={**_workspace_config(), "workstream_role": "thread", "workstream_id": "w-1", "execution": device}),
+    ):
+        await create_child_session(store=store, parent=thread, channel="delegation")
+        helper = _make_session(config=store.create_session.await_args.kwargs["config"], parent_id=thread.id)
+        await create_child_session(store=store, parent=helper, channel="worker")
+        its_own = store.create_session.await_args.kwargs["config"]
+        assert helper.config["under_thread"] == its_own["under_thread"] == str(thread.id)
+    # A child of any other session does not, whatever its caller passes.
+    await create_child_session(store=store, parent=_make_session(), channel="delegation", config={"under_thread": "t-1"})
+    assert "under_thread" not in store.create_session.await_args.kwargs["config"]
+
+
+@pytest.mark.asyncio
+async def test_no_caller_says_a_new_chat_is_under_a_project_thread():
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+    storage = SimpleNamespace(
+        create_bucket=AsyncMock(),
+        resolve_workspace_path=lambda bucket, sid: f"/workspace/{bucket}/{sid}",
+    )
+    await create_agent_session(
+        store=store, storage=storage, settings=SimpleNamespace(storage=SimpleNamespace(bucket="tenant-bucket")),
+        org_id=uuid4(), user_id=uuid4(), agent_id="a-1", channel="web", config={"under_thread": "t-1"},
+    )
+    assert "under_thread" not in store.create_session.await_args.kwargs["config"]

@@ -8,7 +8,7 @@ import { runInNewContext } from "node:vm";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { Failure, OUTPUT_CAP_CHARS, pyJsonLength, sandboxError } from "../src/files/answers.js";
+import { Failure, NUL_REFUSED, OUTPUT_CAP_CHARS, pyJsonLength, sandboxError } from "../src/files/answers.js";
 import type { Outcome } from "../src/link/protocol.js";
 import {
   APP_QUIT, MAX_PROCESSES, OUT_OF_MEMORY, type ProcessHandle, Processes, type ProcessesOptions, RUNNER_GONE, type Spawner, TOO_MANY,
@@ -304,21 +304,23 @@ describe("background processes", { timeout: 20_000 }, () => {
       },
     });
     expect(await answer("nope")).toEqual({ error: { type: "os", code: "ENOENT", message: `No such file or directory: '${base}/nope'` } });
-    expect(await answer(null, "a\0b")).toEqual({ error: { type: "value", message: "embedded null byte" } });
-    // Popen refuses the NUL before it looks at the cwd.
-    expect(await answer("nope", "a\0b")).toEqual({ error: { type: "value", message: "embedded null byte" } });
+    expect(await answer(null, "a\0b")).toEqual({ error: { type: "value", message: NUL_REFUSED } });
+    expect(await answer("a\0b")).toEqual({ error: { type: "value", message: NUL_REFUSED } });
+    // A NUL is refused before the workdir is looked at, in the command or in the workdir itself.
+    expect(await answer("nope", "a\0b")).toEqual({ error: { type: "value", message: NUL_REFUSED } });
+    expect(await answer("/etc", "a\0b")).toEqual({ error: { type: "value", message: NUL_REFUSED } });
+    expect(await answer("/etc/a\0b")).toEqual({ error: { type: "value", message: NUL_REFUSED } });
     // A refusal quotes the workdir as it came, lone surrogate and all.
     expect((await answer("/\ud800")).error?.message).toBe(
       `Blocked: Path traversal blocked: '/\ufffd' resolves to '/\ufffd' which is outside the workspace '${base}'. All commands must run within the workspace directory.`,
     );
-    expect((await answer("/etc", "a\0b")).error?.type).toBe("sandbox");
   });
 
   it("asks where its command runs before it starts, and answers that answer's refusal, or a cancel while it waits", async () => {
     let asked = 0;
     const refusal = { type: "interrupted", message: "interrupted: the runner went" };
     processes({ place: async () => { throw new Failure(refusal); }, runner: async () => { asked += 1; throw new Error("not wanted"); } });
-    expect(await ask("start", { command: "a\0b", workdir: null, task_id: "t", pty: false })).toEqual({ error: refusal });
+    expect(await ask("start", { command: "true", workdir: null, task_id: "t", pty: false })).toEqual({ error: refusal });
     processes({ place: () => new Promise(() => {}), runner: async () => { asked += 1; throw new Error("not wanted"); } });
     const controller = new AbortController();
     const starting = ask("start", { command: "true", workdir: null, task_id: "t", pty: false }, controller.signal);
@@ -528,7 +530,8 @@ describe("a registry's output together", () => {
 describe("a background process with a terminal", { timeout: 20_000 }, () => {
   it("gets a terminal of the cloud's size, and answers its exit code", async () => {
     processes();
-    const id = await start("tty; stty size; exit 7", { pty: true });
+    // The terminal's name through echo, which ends it with one newline: uutils' tty, Ubuntu 26.04's, ends it with none.
+    const id = await start('echo "$(tty)"; stty size; exit 7', { pty: true });
     const answer = (await ask("wait", { session_id: id, timeout: 10 })).ok;
     expect(answer.exit_code).toBe(7);
     expect(answer.output).toMatch(/^\/dev\/pts\/\d+\r\n30 120\r\n$/);

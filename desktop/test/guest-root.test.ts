@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { NUL_REFUSED } from "../src/files/answers.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { type ProcessHandle, RUNNER_GONE } from "../src/guest/processes.js";
 import type { HostUser, Share } from "../src/guest/protocol.js";
@@ -85,9 +86,10 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     expect(await op("run", { command: "true", workdir: null, timeout: 0 })).toEqual({
       error: { type: "value", message: "'timeout' must be a positive number" },
     });
-    expect(await op("run", { command: "a\0b", workdir: null, timeout: 10 })).toEqual({
-      ok: { output: "embedded null byte", returncode: -1, timed_out: false },
-    });
+    // A NUL is refused before the workdir is looked at, in the command or in the workdir itself.
+    for (const [command, workdir] of [["a\0b", null], ["true", "a\0b"], ["a\0b", "/etc"], ["true", "/etc/a\0b"]]) {
+      expect(await op("run", { command, workdir, timeout: 10 })).toEqual({ error: { type: "value", message: NUL_REFUSED } });
+    }
     expect(await op("run", { command: "true", workdir: "/etc", timeout: 10 })).toMatchObject({
       error: { type: "sandbox", message: expect.stringMatching(/^Blocked: .*All commands must run within the workspace directory\.$/) },
     });
@@ -604,7 +606,8 @@ describe("a root's background processes", { timeout: 20_000 }, () => {
     expect(await begin(roots, "root-1", "true", { workdir: "file" })).toEqual({
       error: { type: "os", code: "ENOTDIR", message: `Not a directory: '${join(base, "file")}'` },
     });
-    expect(await begin(roots, "root-1", "a\0b")).toEqual({ error: { type: "value", message: "embedded null byte" } });
+    expect(await begin(roots, "root-1", "a\0b")).toEqual({ error: { type: "value", message: NUL_REFUSED } });
+    expect(await begin(roots, "root-1", "true", { workdir: "a\0b" })).toEqual({ error: { type: "value", message: NUL_REFUSED } });
   });
 
   it("answers a start whose runner does not say where it would run as stopped by the sandbox, and loses the root", async () => {

@@ -44,6 +44,7 @@ export function createInitialAgentChatState(
     stopped: false,
     workspaceRefreshKey: 0,
     browser: null,
+    browserTabs: [],
     viewMode: options.viewMode ?? "simple",
     researchSources: [],
     deviceWait: null,
@@ -173,26 +174,74 @@ export function applyAgentChatEvent(
       return withMessages(nextState, [...nextState.messages, artifactMessage]);
     }
 
-    case "browser.provisioned":
-      return applyBrowserEvent(nextState, event, {
+    case "browser.provisioned": {
+      const tab = computerTab(event);
+      if (tab === null) {
+        return applyBrowserEvent(nextState, event, {
+          status: "live",
+          controlOwner: null,
+        });
+      }
+      const browserTabs = [...nextState.browserTabs.filter((open) => open !== tab), tab];
+      // Beside a tab the chat already has there, its own or a sub-agent's: its browser is as it was,
+      // and the chat says nothing new.
+      if (nextState.browserTabs.length > 0) {
+        const there = nextState.browser?.computer === true && nextState.browser.status !== "unavailable";
+        return {
+          ...nextState,
+          browserTabs,
+          browser: there ? nextState.browser : { status: "live", controlOwner: null, computer: true },
+        };
+      }
+      return applyBrowserEvent({ ...nextState, browserTabs }, event, {
         status: "live",
         controlOwner: null,
+        computer: true,
       });
+    }
 
+    case "browser.unavailable": {
+      // A call that found no supported browser there takes away its own session's tab, as its close
+      // does, and no other's: the chat's browser stays while a tab is left, as the server's state
+      // answers it, and the chat says there is none once no tab is.
+      const tab = computerTab(event);
+      const browserTabs = tab === null ? [] : nextState.browserTabs.filter((open) => open !== tab);
+      if (browserTabs.length > 0) return { ...nextState, browserTabs };
+      const none: AgentChatState = {
+        ...nextState,
+        browserTabs,
+        browser: { status: "unavailable", controlOwner: null, computer: true },
+      };
+      // Said once: an agent that tries the browser again and again adds no line for each try.
+      // By what the chat said last of its browser, not by its state: the server's answer sets
+      // that too, and at a reload it can come before this event is replayed.
+      if (saidLastOfBrowser(nextState.messages) === NO_BROWSER) return none;
+      return withMessages(none, [...none.messages, browserMarker(event)]);
+    }
+
+    // A take-over on the user's computer is told as the cloud's is: the browser stays the computer's.
     case "browser.control_granted":
       return applyBrowserEvent(nextState, event, {
         status: "user-control",
         controlOwner: stringValue(event.data.owner_user_id) || null,
+        ...onComputer(event),
       });
 
     case "browser.control_returned":
       return applyBrowserEvent(nextState, event, {
         status: "live",
         controlOwner: null,
+        ...onComputer(event),
       });
 
-    case "browser.destroyed":
-      return applyBrowserEvent(nextState, event, null);
+    case "browser.destroyed": {
+      const tab = computerTab(event);
+      const browserTabs = tab === null ? [] : nextState.browserTabs.filter((open) => open !== tab);
+      // Another tab of the chat's is open there still, its own or a sub-agent's: its browser stays,
+      // and nothing closed that the chat shows.
+      if (browserTabs.length > 0) return { ...nextState, browserTabs };
+      return applyBrowserEvent({ ...nextState, browserTabs }, event, null);
+    }
 
     case "device.waiting":
       return {
@@ -513,6 +562,31 @@ function parseUserMessageAttachments(
   return out.length > 0 ? out : undefined;
 }
 
+// A browser event of a local-folder chat, whose browser is on the user's computer.
+function onComputer(event: AgentChatRuntimeEvent): { computer?: true } {
+  return event.data.computer === true ? { computer: true } : {};
+}
+
+// The session whose tab on the user's computer a browser event tells of: the chat's own, or a
+// sub-agent's, whose events the server writes to its root chat's log too. Null for the cloud's
+// browser, which is one for its chat.
+function computerTab(event: AgentChatRuntimeEvent): string | null {
+  return event.data.computer === true ? stringValue(event.data.session_id) : null;
+}
+
+const NO_BROWSER = "No supported browser on the chat's computer.";
+
+// The chat's last line about its browser, if it has said one.
+function saidLastOfBrowser(messages: AgentChatMessage[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.systemKind === "browser_marker" || message.systemKind === "browser_marker_warning") {
+      return message.content;
+    }
+  }
+  return undefined;
+}
+
 function applyBrowserEvent(
   state: AgentChatState,
   event: AgentChatRuntimeEvent,
@@ -541,6 +615,10 @@ function browserMarker(event: AgentChatRuntimeEvent): AgentChatMessage {
     "browser.destroyed": {
       content: "Browser closed.",
       warning: false,
+    },
+    "browser.unavailable": {
+      content: NO_BROWSER,
+      warning: true,
     },
   };
   const label = labels[event.type] ?? {

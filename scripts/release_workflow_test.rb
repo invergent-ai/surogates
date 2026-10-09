@@ -6,8 +6,39 @@ require "minitest/autorun"
 require "yaml"
 
 class ReleaseWorkflowTest < Minitest::Test
+  ROLLOUT = ".github/workflows/update-images.yml"
+
   def setup
     @workflow = YAML.load_file(".github/workflows/release.yml")
+    @rollout = YAML.load_file(ROLLOUT)
+  end
+
+  # YAML 1.1 reads a workflow's `on` key as true.
+  def triggers(workflow)
+    workflow.fetch("on") { workflow.fetch(true) }
+  end
+
+  # The one job of the release that rolls the cluster out, by calling update-images.yml.
+  def rollout_job
+    names = @workflow.fetch("jobs").select { |_, job| job["uses"] == "./#{ROLLOUT}" }.keys
+
+    assert_equal 1, names.size, "one job of the release calls #{ROLLOUT}"
+    names.first
+  end
+
+  # Every job the named one waits for: its `needs`, and theirs.
+  def waits_for(name)
+    jobs = @workflow.fetch("jobs")
+    found = []
+    queue = Array(jobs.fetch(name).fetch("needs", []))
+    until queue.empty?
+      need = queue.shift
+      next if found.include?(need)
+
+      found << need
+      queue.concat(Array(jobs.fetch(need).fetch("needs", [])))
+    end
+    found
   end
 
   def test_the_release_runs_for_a_pushed_version_tag_and_for_nothing_else
@@ -61,6 +92,65 @@ class ReleaseWorkflowTest < Minitest::Test
     jobs.except("release").each_value do |job|
       refute job.fetch("steps", []).any? { |step| step["uses"].to_s.start_with?("softprops/action-gh-release@") }
     end
+  end
+
+  def test_the_cluster_s_rollout_waits_for_no_job_of_the_desktop_s
+    jobs = @workflow.fetch("jobs")
+    # By this rule, so that a desktop job added later is held too.
+    desktop = jobs.keys.select { |name| name.start_with?("desktop-") }
+
+    refute_empty desktop
+    assert_empty Array(jobs.fetch(rollout_job).fetch("needs", [])) & desktop
+    # Nor through a job it needs: a desktop job that fails, or waits for its reviewer, would skip
+    # or hold the rollout as surely from there.
+    assert_empty waits_for(rollout_job) & desktop
+  end
+
+  def test_the_cluster_s_rollout_waits_for_the_whole_of_the_cloud_s_release
+    # The nodes update to what the images job pushed. A tag whose npm packages, wheel or GitHub
+    # release fails rolls nothing out, as when the rollout waited for the whole run.
+    assert_equal %w[images npm release wheel], waits_for(rollout_job).sort
+    # always() or !cancelled() would roll out a release that failed.
+    refute @workflow.fetch("jobs").fetch(rollout_job).key?("if")
+  end
+
+  def test_the_cluster_s_rollout_holds_no_permission_on_the_repository
+    # It holds the cluster's SSH key and reads nothing of the repository's: without this it would
+    # take the workflow's contents: write and packages: write.
+    assert_equal({}, @workflow.fetch("jobs").fetch(rollout_job)["permissions"])
+    # A called workflow can narrow what its caller grants and never widen it: it asks for none.
+    refute @rollout.key?("permissions")
+    @rollout.fetch("jobs").each { |name, job| refute job.key?("permissions"), "#{name} asks for permissions of its own" }
+  end
+
+  def test_the_rollout_is_started_by_the_release_s_call_and_never_by_how_a_run_ended
+    on = triggers(@rollout)
+
+    refute on.key?("workflow_run"), "a failed desktop job fails the run, and the rollout would be skipped without a word"
+    assert on.key?("workflow_call")
+    # Called by the release, a job sees the tag's push as its event: a condition on the event
+    # skips it there, and a skipped job is no failure.
+    @rollout.fetch("jobs").each { |name, job| refute job.key?("if"), "#{name} has a condition of its own" }
+  end
+
+  def test_the_rollout_can_still_be_started_by_hand
+    assert triggers(@rollout).key?("workflow_dispatch")
+  end
+
+  def test_the_rollout_is_handed_each_secret_it_reads_by_name_and_no_other
+    jobs = @rollout.fetch("jobs").to_s
+    read = jobs.scan(/\bsecrets\.([A-Za-z_][A-Za-z0-9_]*)/).flatten.uniq.sort
+    declared = triggers(@rollout).dig("workflow_call", "secrets") || {}
+    handed = @workflow.fetch("jobs").fetch(rollout_job)["secrets"]
+
+    assert_equal %w[MASTER_HOST NODE_HOSTS SSH_KEY], read
+    # secrets['X'] or toJSON(secrets) would read a secret this test cannot name.
+    refute_match(/\bsecrets\b(?!\.[A-Za-z_])/, jobs)
+    # A called workflow reads only the secrets it declares and its caller hands it. Any other
+    # comes empty, and the job does not always fail on it: with no NODE_HOSTS it updates no node,
+    # restarts the pods and ends well.
+    assert_equal read, declared.keys.sort
+    assert_equal read.to_h { |name| [name, "${{ secrets.#{name} }}"] }, handed
   end
 
   def test_release_notes_are_generated_from_commit_messages
@@ -418,6 +508,8 @@ class ReleaseWorkflowTest < Minitest::Test
         ["desktop-vm-image", "Publish the image"] => r2,
         ["desktop-publish", "Sign its manifest"] => %w[DESKTOP_RELEASE_KEY],
         ["desktop-publish", "Publish the release"] => r2,
+        # The rollout hands the cluster's three to the workflow it calls, each by its name.
+        ["rollout", nil] => %w[NODE_HOSTS MASTER_HOST SSH_KEY],
       },
       "update-images.yml" => {
         ["update-agent-images", nil] => %w[NODE_HOSTS MASTER_HOST],
@@ -437,31 +529,16 @@ class ReleaseWorkflowTest < Minitest::Test
     end
     assert_equal allowed, read
     # And by no other way than its name: not by brackets, not all of them at once, and not handed
-    # on whole to a workflow that is called. Every use of the word is the word, a dot and a name.
+    # on whole to a workflow that is called. Every use of the word, outside a comment, is the word,
+    # a dot and a name; or it is the key of a list of names, each on a line of its own, as the
+    # release's rollout hands the cluster's three to the workflow it calls and that workflow
+    # declares them: never the key of one word, which would hand on every secret there is.
     Dir[".github/workflows/*"].sort.each do |file|
-      text = File.read(file)
-      assert_equal text.scan(/secrets/i).length, text.scan(/secrets\.[A-Za-z0-9_]+/).length, "#{file} reads a secret by another way than its name"
+      text = File.read(file).gsub(/^\s*#.*$/, "")
+      lists = text.scan(/^\s*secrets:\s*$/).length
+      assert_equal text.scan(/secrets/i).length, text.scan(/secrets\.[A-Za-z0-9_]+/).length + lists, "#{file} reads a secret by another way than its name"
       refute_match(/\binherit\b/, text, file)
     end
-  end
-
-  def test_the_cluster_s_update_runs_by_hand_or_after_this_repository_s_own_release_of_a_tag_and_after_no_other_run
-    # A workflow_run names a workflow by its name alone, and any workflow file may take that
-    # name: one a pull request adds, a fork's among them, or one pushed on a branch. This file
-    # then runs from the default branch, with the key to every node. So its one job asks the run
-    # that ended what makes it the release: that it ended well, that a push started it, that it
-    # ran this repository's own code, from the release's own file, for a version's tag.
-    workflow = workflows.fetch("update-images.yml")
-    assert_equal({ "workflow_run" => { "workflows" => ["Release"], "types" => ["completed"] }, "workflow_dispatch" => nil }, workflow.fetch(true))
-    assert_equal "Release", @workflow.fetch("name")
-    assert_equal ["update-agent-images"], workflow.fetch("jobs").keys
-    run = "github.event.workflow_run"
-    asked = [
-      "#{run}.conclusion == 'success'", "#{run}.event == 'push'", "#{run}.head_repository.full_name == github.repository",
-      "#{run}.path == '.github/workflows/release.yml'", "startsWith(#{run}.head_branch, 'v')",
-    ]
-    assert_equal "${{ github.event_name == 'workflow_dispatch' || (#{asked.join(" && ")}) }}", workflow.fetch("jobs").fetch("update-agent-images").fetch("if")
-    assert File.exist?(".github/workflows/release.yml")
   end
 
   # *value* as one word: its keys in order of their names, whatever order the file has them in.
@@ -497,9 +574,10 @@ class ReleaseWorkflowTest < Minitest::Test
         "desktop-describe" => ["dcfde8aef5675336", %w[87fcdec176307d16 7f42edae9383c098 70dd0b5fb0038c24]],
         "desktop-publish" => ["9ed0647b31c3b292", %w[87fcdec176307d16 7f42edae9383c098 d864dc15d699f950 f8b9a39c31acaab5]],
         "release" => ["33f64af0592c0ef5", %w[dc15019acb8b0420 b2c42af94398cc27 04917607907da35f d088ed479c39da82 eda05a5d7a75fede]],
+        "rollout" => ["8abafee06bb116dd", %w[]],
       },
       "update-images.yml" => {
-        "update-agent-images" => ["cb851a113f4b2089", %w[79f419cc70509398 17127a23ac6df9ec ee7d72f941971e8f 8ec0d2118169566d]],
+        "update-agent-images" => ["bce0913a43e4c4dc", %w[79f419cc70509398 17127a23ac6df9ec ee7d72f941971e8f 8ec0d2118169566d]],
       },
     }
     found = workflows.to_h do |file, workflow|
@@ -538,6 +616,13 @@ class ReleaseWorkflowTest < Minitest::Test
       workflow.fetch("jobs").each do |name, job|
         named = [job["uses"]] + job.fetch("steps", []).map { |step| step["uses"] }
         named.compact.each do |action|
+          # A job that is a workflow of this repository's own, by its path, runs the file of the
+          # commit that the run is of: nothing of it can be moved. It is asked like any other file here.
+          if action.start_with?("./")
+            assert_equal [name, "./.github/workflows/update-images.yml"], [job["uses"] && name, action], "#{file}: #{name} calls a file this test has not read"
+            assert File.file?(action), "#{file}: #{name} calls a workflow that is not there"
+            next
+          end
           assert_match(by_commit, action, "#{file}: #{name} runs an action that is not named by its commit")
           run[file] << action.split("@").first
         end
@@ -566,7 +651,7 @@ class ReleaseWorkflowTest < Minitest::Test
     kept = []
     taken = []
     @workflow.fetch("jobs").each do |name, job|
-      job.fetch("steps").each do |step|
+      job.fetch("steps", []).each do |step|
         uses = step["uses"].to_s
         kept << [name, step.fetch("with").fetch("name")] if uses.start_with?("actions/upload-artifact@")
         taken << [name, step.fetch("with").fetch("name")] if uses.start_with?("actions/download-artifact@")

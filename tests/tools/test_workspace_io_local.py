@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io import FileStat, LocalWorkspaceIO, RipgrepError, workspace_io_from
+from surogates.tools.workspace_io import NUL_REFUSED, FileStat, LocalWorkspaceIO, RipgrepError, workspace_io_from
 from surogates.tools.workspace_io import local as local_module
 
 
@@ -67,6 +67,51 @@ async def test_stat(wio, root):
     assert (await wio.stat(str(root / "d"))).is_dir
     assert await wio.stat(str(root / "missing")) is None
     assert await wio.stat(str(root / "nul\x00byte")) is None
+
+
+PAGE = {"encoding": "utf-8", "offset": 1, "limit": 10, "max_bytes": 100}
+STARTED = {"task_id": "nul", "pty": False, "notify_on_complete": False, "watcher_interval": None}
+
+# What the model wrote with a NUL in it, and a key that holds one: each reaches a system call of its own,
+# and Python words its refusal by the call and by its own release.
+WITH_A_NUL = {
+    "resolve": lambda io, root: io.resolve("a\0b"),
+    "check_write": lambda io, root: io.check_write("a\0b"),
+    "read": lambda io, root: io.read(f"{root}/a\0b"),
+    "read_lines": lambda io, root: io.read_lines(f"{root}/a\0b", **PAGE),
+    "write": lambda io, root: io.write(f"{root}/a\0b", b"x"),
+    "delete": lambda io, root: io.delete(f"{root}/a\0b"),
+    "list_dir": lambda io, root: io.list_dir(f"{root}/a\0b"),
+    "ripgrep key": lambda io, root: io.ripgrep(f"{root}/a\0b", mode="count", pattern="x"),
+    "ripgrep pattern": lambda io, root: io.ripgrep(str(root), mode="count", pattern="a\0"),
+    "ripgrep glob": lambda io, root: io.ripgrep(str(root), mode="count", pattern="x", glob="*\0"),
+    "run command": lambda io, root: io.run("a\0b", workdir=None, timeout=10),
+    "run workdir": lambda io, root: io.run("pwd", workdir="a\0b", timeout=10),
+    "start command": lambda io, root: io.start("a\0b", workdir=None, **STARTED),
+    "start workdir": lambda io, root: io.start("true", workdir="a\0b", **STARTED),
+}
+
+
+@pytest.mark.parametrize("bound", [True, False], ids=["in a workspace", "unbound"])
+@pytest.mark.parametrize("call", WITH_A_NUL.values(), ids=WITH_A_NUL)
+async def test_a_nul_is_refused_in_one_sentence_whatever_python_says_of_it(call, bound, root, monkeypatch):
+    monkeypatch.chdir(root)
+    with pytest.raises(ValueError) as refused:
+        await call(LocalWorkspaceIO(workspace_path=str(root) if bound else None), root)
+    assert str(refused.value) == NUL_REFUSED
+    # Nothing was made on the way to the refusal.
+    assert os.listdir(root) == []
+
+
+async def test_a_nul_is_refused_before_anything_else_is_looked_at(wio):
+    # A working folder outside the workspace is a refusal of its own: the NUL comes first, in either.
+    for command, workdir in [("a\0b", "/etc"), ("pwd", "/etc/a\0b")]:
+        with pytest.raises(ValueError) as refused:
+            await wio.run(command, workdir=workdir, timeout=10)
+        assert str(refused.value) == NUL_REFUSED
+        with pytest.raises(ValueError) as refused:
+            await wio.start(command, workdir=workdir, **STARTED)
+        assert str(refused.value) == NUL_REFUSED
 
 
 async def test_a_revision_changes_with_the_file_even_when_its_size_and_mtime_are_put_back(wio, root):

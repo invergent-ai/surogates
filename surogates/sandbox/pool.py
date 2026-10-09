@@ -126,7 +126,7 @@ class SandboxPool:
             )
             return sandbox_id
 
-    async def execute(self, session_id: str, name: str, input: str) -> str:
+    async def execute(self, session_id: str, name: str, input: str, *, timeout: float | None = None) -> str:
         """Execute a command in the sandbox belonging to *session_id*.
 
         The session lock is held only while resolving the sandbox id —
@@ -136,6 +136,8 @@ class SandboxPool:
         ``destroy_for_session`` racing an in-flight call makes that call
         fail exactly like a pod dying mid-execution, which the caller
         already handles.
+
+        *timeout* bounds this call in place of the sandbox's own.
 
         Raises :class:`ValueError` if the session has no associated sandbox.
         """
@@ -152,7 +154,7 @@ class SandboxPool:
             raise ValueError(
                 f"No sandbox provisioned for session {session_id}"
             )
-        return await self._backend.execute(sandbox_id, name, input)
+        return await self._backend.execute(sandbox_id, name, input, timeout=timeout)
 
     def copy_fresh(self, session_id: str) -> bool:
         """Whether this pool has just made *session_id*'s copy from the real files; asked once."""
@@ -190,20 +192,45 @@ class SandboxPool:
             self._fresh.discard(session_id)
             return self._mapping.pop(session_id, None)
 
+    async def execute_released(self, sandbox_id: str, name: str, input: str, *, timeout: float | None = None) -> str:
+        """Execute a command in a sandbox :meth:`release_for_session` detached, before it is destroyed.
+
+        No session resolves to it any more, so no turn's step runs beside
+        this one: its last work, such as the day's pruning of a project's
+        history, done after its turn has reported.
+        """
+        return await self._backend.execute(sandbox_id, name, input, timeout=timeout)
+
+    async def expire_released(self, sandbox_id: str, seconds: float) -> None:
+        """Have a sandbox :meth:`release_for_session` detached end by itself within *seconds*, where the backend can.
+
+        For one at its last work in no session's keeping: a delete that is
+        never answered then leaves it that long, not the life it was made with.
+        """
+        expire = getattr(self._backend, "expire", None)
+        if expire is not None:
+            await expire(sandbox_id, seconds)
+
     async def destroy_released(
-        self, sandbox_id: str | None, session_id: str,
+        self, sandbox_id: str | None, session_id: str, *, alone: bool = False,
     ) -> None:
         """Tear down a sandbox already detached by :meth:`release_for_session`.
 
         This is the slow half -- deleting a pod is a round trip to the
         cluster -- and it no longer needs the session lock, because the
         mapping is gone and nothing can resolve to this sandbox any more.
+
+        *alone* destroys that sandbox and nothing else of its session's:
+        for one that outlived its wake, whose session may hold another
+        sandbox, and its lock, by now.
         """
         if sandbox_id is not None:
             await self._backend.destroy(sandbox_id)
             logger.info(
                 "Destroyed sandbox %s for session %s", sandbox_id, session_id,
             )
+        if alone:
+            return
 
         # Optional backend-level reap (label-based), independent of the
         # mapping above.

@@ -706,7 +706,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     expect(await operation("run", { command: "echo resumed", workdir: null, timeout: 30 })).toEqual({
       error: { type: "unavailable", message: `This computer's sandbox could not be downloaded: ${stopped}` },
     });
-    expect(await page.textContent("#sandbox-text")).toBe(`Surogate could not download its sandbox: ${stopped}`);
+    // The sidebar's line is drawn from the page's next state, after the agent has its answer.
+    await expect.poll(() => page.textContent("#sandbox-text")).toBe(`Surogate could not download its sandbox: ${stopped}`);
     served.release();
     await page.click("#sandbox-retry");
     await expect.poll(() => page.isHidden("#sandbox"), { timeout: 60_000 }).toBe(true);
@@ -777,7 +778,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     expect(await operation("run", { command: "echo slow", workdir: null, timeout: 60 })).toEqual(ran(`slow\n\n${EMULATED_NOTICE}`));
     expect(await operation("run", { command: "echo slow", workdir: null, timeout: 60 })).toEqual(ran("slow\n"));
     const page = await shellPage(app!);
-    expect(await page.textContent("#sandbox-text")).toBe(NO_KVM);
+    await expect.poll(() => page.textContent("#sandbox-text")).toBe(NO_KVM);
     expect([await page.isHidden("#sandbox-log"), await page.isHidden("#sandbox-retry")]).toEqual([true, true]);
     await page.click("#open-settings");
     expect(await (await thisComputer(app!)).textContent("#sandbox")).toBe(NO_KVM);

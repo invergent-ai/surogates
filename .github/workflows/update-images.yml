@@ -1,29 +1,30 @@
 name: Update agent images
 
 on:
-  workflow_run:
-    workflows: ["Release"]
-    types:
-      - completed
+  # The Release workflow's rollout job calls it once the cloud's release is out. It is not
+  # started by how a Release run ended: that run holds the desktop's jobs too.
+  workflow_call:
+    # A called workflow reads only the secrets it declares here and its caller hands it. None is
+    # marked required: a secret the organisation lacks comes empty, as on a manual run.
+    secrets:
+      NODE_HOSTS:
+        description: The cluster's nodes, separated by spaces.
+      MASTER_HOST:
+        description: The node the agent pods are restarted from.
+      SSH_KEY:
+        description: The private key root accepts over SSH on each of them.
   workflow_dispatch:
 
 jobs:
   update-agent-images:
     name: Update agent images on cluster nodes
-    # Run after a successful Release, or on manual dispatch. "Release" above is a name, and any
-    # workflow file may take it, one that a pull request or a pushed branch adds too; this file
-    # would then run from the default branch with the cluster's key. So the run that ended is
-    # asked what makes it the release: that it ended well, that a push started it, that it ran
-    # this repository's own code, from the release's own file, for a version's tag.
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.path == '.github/workflows/release.yml' && startsWith(github.event.workflow_run.head_branch, 'v')) }}
+    # No condition of its own: called by the release it sees the tag's push as its event, and a
+    # condition on the event would skip it there without a word.
     runs-on: blacksmith-4vcpu-ubuntu-2404
     env:
       REMOTE_SCRIPT: /root/update-agent-images.sh
       NODE_HOSTS: ${{ secrets.NODE_HOSTS }}
       MASTER_HOST: ${{ secrets.MASTER_HOST }}
-    # This job holds the key to every node of the cluster and runs no action, only its own
-    # steps. One added here is named by its commit, as in release.yml: a tag can be moved.
-    # scripts/release_workflow_test.rb holds the file to it.
     steps:
       # These hosts must accept SSH on 22022 from GitHub's egress ranges
       # (see https://api.github.com/meta -> .actions). Check first so a

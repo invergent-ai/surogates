@@ -429,6 +429,13 @@ def render_offline(scape: Soundscape, cues: Iterable[tuple[float, str, Any]], se
     return np.concatenate(out)[:total]
 
 
+# DTX off: with it (LiveKit's default) Opus takes a quiet room for silence and stops sending it, so the
+# caller heard the room 11 dB under its level and patchy (measured 2026-10-09).
+def publish_options():
+    from livekit import rtc  # here, not at the top: ops renders previews with this module and no LiveKit
+    return rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE, dtx=False)
+
+
 class SoundscapePlayer:
     """Puts a soundscape on its own track in the call's room. A short queue (100 ms) so a cut sound
     stops for the caller almost at once; LiveKit's background player buffers half a second."""
@@ -444,8 +451,7 @@ class SoundscapePlayer:
         self._room = room
         self._source = rtc.AudioSource(self.scape.rate, 1, queue_size_ms=100)
         self._track = rtc.LocalAudioTrack.create_audio_track("background", self._source)
-        await room.local_participant.publish_track(
-            self._track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE))
+        await room.local_participant.publish_track(self._track, publish_options())
         self._task = asyncio.create_task(self._run(rtc))
 
     async def _run(self, rtc: Any) -> None:

@@ -130,6 +130,18 @@
             <select class="choice" id="browser" aria-label="Agent's browser"></select>
           </div>
           <p class="row-note" id="browser-note" hidden></p>
+          <!-- Shown only while the browser is held from a chat that is gone. Around the row: the search shows and hides rows itself. -->
+          <div id="browser-held" hidden>
+            <div class="row" data-label="Taken over">
+              <div class="label">
+                <span>Taken over</span>
+                <span class="desc">You took the agent's browser over from a chat that is gone. Until you hand it back, the agent's browser waits in every chat.</span>
+              </div>
+              <button class="link" id="browser-hand-back" type="button">Hand back</button>
+            </div>
+          </div>
+          <!-- After a hand back from here: no chat's agent is given a turn for it. -->
+          <p class="row-note" id="browser-handed-back" hidden>The browser is the agent's again. The agent does not go on by itself: write to it in a chat to go on.</p>
         </section>
         <section data-section="folders" hidden>
           <h2>Folders and permissions</h2>

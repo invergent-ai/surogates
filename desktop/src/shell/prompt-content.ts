@@ -39,9 +39,8 @@ export interface PromptContent {
   notes: string[]; // what the user should know before answering
   choice: PromptChoice | null;
   buttons: PromptButton[]; // left to right; the last is drawn as the main one
-  focus: string; // the button focused as it opens, or "choice": the option chosen
+  focus: string; // the button focused as it opens
   cancel: string; // Escape's, and a window closed some other way
-  enter: string | null; // what Enter does from anywhere but a button
   height: number; // the window's, in px
 }
 
@@ -92,9 +91,9 @@ export function folderSheet(sheet: FolderSheet): PromptContent {
       notes: [],
       choice: null,
       buttons: [button("cancel", "Cancel"), button("change", "Change…")],
-      focus: "change",
+      // Change opens the system's folder dialog over the app: Cancel is the one that does nothing.
+      focus: "cancel",
       cancel: "cancel",
-      enter: null,
       height: 280 + room,
     };
   }
@@ -105,10 +104,10 @@ export function folderSheet(sheet: FolderSheet): PromptContent {
     notes: sheet.links ? [linked(sheet.links)] : [],
     choice: { ...MODES, value: sheet.mode },
     buttons: [button("cancel", "Cancel"), button("change", "Change…"), button("accept", "Use this folder", true)],
-    // On the mode, not on Use this folder: a space typed as the sheet opens only picks the mode already picked.
-    focus: "choice",
+    // On Cancel, as every prompt starts on the button that changes nothing: a Return of a person who was typing
+    // elsewhere binds no folder. The mode is theirs to pick, and Use this folder theirs to walk to.
+    focus: "cancel",
     cancel: "cancel",
-    enter: "accept",
     height: (sheet.links ? 550 : 490) + room,
   };
 }
@@ -144,7 +143,6 @@ const OPERATION = {
   buttons: [button("deny", "Deny"), button("stop_asking", "Allow and stop asking", true), button("allow", "Allow once", true)],
   focus: "deny",
   cancel: "deny",
-  enter: null,
 };
 
 /** The prompt for one operation or network destination (spec, Section 4): its buttons' ids are the answers. */
@@ -172,6 +170,23 @@ export function approval(request: ApprovalRequest): PromptContent {
     const content: PromptDetail = preview === null
       ? { label: `New content, ${sizeOf(bytes)}`, value: "Not text.", code: false, keep: "" }
       : code(preview.cut ? `The first ${sizeOf(PREVIEW_BYTES)} of ${sizeOf(bytes)}` : `New content, ${sizeOf(bytes)}`, preview.text, "\n\t");
+    if (request.download) {
+      // A download's save says where the file came from: no tool of the agent's wrote it.
+      const own = request.download === "user";
+      return {
+        ...OPERATION,
+        // Its user's own asks in either mode, so there is no asking to stop.
+        ...(own ? { buttons: [button("deny", "Deny"), button("allow", "Save", true)] } : {}),
+        title: `Save ${named(request.path)}?`,
+        // One taken for its user's says when it came, not who clicked: a page can start one by itself under their
+        // hand, and one that comes just after they handed the browser back may have been asked for before.
+        lead: own
+          ? `This file was downloaded while you had control of ${chat.agent}'s browser, or just after you handed it back, ${sizeOf(bytes)}. Save it${where}? ${chat.agent} can read what is saved there.`
+          : `A page in ${chat.agent}'s browser downloaded this file, ${sizeOf(bytes)}. Save it${where}?`,
+        details: [file, content],
+        height: 420,
+      };
+    }
     return {
       ...OPERATION, title: `Write ${named(request.path)}?`, lead: `${asker(chat)} wants to write ${sizeOf(bytes)} to this file${where}.`, details: [file, content], height: 420,
     };
@@ -200,7 +215,6 @@ export function approval(request: ApprovalRequest): PromptContent {
     buttons: [button("deny", "Deny"), button("allow_session", "Allow all its ports for this chat", true), button("allow", "Allow", true)],
     focus: "deny",
     cancel: "deny",
-    enter: null,
     // Tall enough to show the title, the lead, the warning and the whole address as it opens: a title past
     // 30 characters wraps to three lines of 25 px, and a line of 19 px in the address's block holds about 40.
     height: 245 + (title.length > 30 ? 75 : 25) + (request.privateNetwork ? 70 : 0) + Math.ceil(address.length / 40) * 19,
@@ -227,6 +241,7 @@ const BROWSER_ACTS: Record<Exclude<BrowserAction, "use" | "open">, { title: stri
   type: { title: "Type into", does: "wants to type this into the page open in its browser.", label: "Text" },
   press: { title: "Press keys in", does: "wants to press these keys in the page open in its browser.", label: "Keys" },
   drag: { title: "Drag in", does: "wants to drag along these points in the page open in its browser.", label: "Path" },
+  upload: { title: "Upload to", does: "wants to give these files to the page open in its browser. The site gets what they hold.", label: "File" },
   other: { title: "Act in", does: "wants to act in the page open in its browser.", label: "Operation" },
 };
 
@@ -235,6 +250,9 @@ const siteOf = (page: string | null | undefined): string => {
   if (!page || !/^https?:/.test(page)) return "the page";
   return ending(hostOf(page));
 };
+
+// The most a prompt's window is tall: what it shows past that scrolls in it.
+const MAX_HEIGHT = 720;
 
 /** The browser's prompts (spec, Section 5): its first use in a chat, and each act in a chat that asks every time. */
 function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): PromptContent {
@@ -252,7 +270,6 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
       buttons: [button("deny", "Deny"), button("allow_session", "Allow for this chat", true)],
       focus: "deny",
       cancel: "deny",
-      enter: null,
       height: 380,
     };
   }
@@ -273,14 +290,68 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
     ? []
     : [request.page === null ? { label: "Page", value: "Not known: the browser did not say in time", code: false, keep: "" } : code("Page", request.page)];
   const title = `${act.title} ${siteOf(request.page)}?`;
+  const room = (title.length > 30 ? 50 : 0)
+    + (request.page ? 25 + Math.min(Math.ceil(request.page.length / 40), MAX_ADDRESS_LINES) * 19 : request.page === null ? 45 : 0);
+  if (request.action === "upload") {
+    // Each file is a field of its own, counted, with no special character of its path shown as itself, as a
+    // download's File field: so a name cannot be made to read as two files, or as another's.
+    const files = request.files ?? [];
+    const fields = files.map((path, at) => code(files.length === 1 ? act.label : `${act.label} ${at + 1} of ${files.length}`, path));
+    return {
+      ...OPERATION,
+      title,
+      lead: `${asker(chat)} ${act.does}`,
+      details: [...page, ...(fields.length > 0 ? fields : [plain("Files", "None")])],
+      // Room for each path's lines, three at most: the window stays one a screen holds, and the rest scrolls in it.
+      height: Math.min(MAX_HEIGHT, 280 + room + files.reduce((all, path) => all + 62 + Math.min(Math.ceil(path.length / 40), 3) * 19, 0)),
+    };
+  }
   return {
     ...OPERATION,
     title,
     lead: `${asker(chat)} ${act.does}`,
     // A script's lines are shown as they are, with how many there are: what follows its first can be out of view.
     details: [...page, request.action === "script" ? code(lined(act.label, request.detail), request.detail, "\n\t") : code(act.label, request.detail)],
-    height: (request.action === "script" ? 420 : 340) + (title.length > 30 ? 50 : 0)
-      + (request.page ? 25 + Math.min(Math.ceil(request.page.length / 40), MAX_ADDRESS_LINES) * 19 : request.page === null ? 45 : 0),
+    height: (request.action === "script" ? 420 : 340) + room,
+  };
+}
+
+// What the hand back's confirmation is asked about.
+export interface HandBackRequest {
+  agent: string;
+  // The chat the browser was taken over from is gone: deleted, or its folder forgotten on this computer.
+  gone: boolean;
+  // That chat's title, as the agent named it: null for one it names not, or did not name in time.
+  title: string | null;
+}
+
+// The most of a chat's title its field shows, in characters: the agent's own words, cut at their end.
+const TITLE_CHAT = 60;
+const cut = (title: string): string => {
+  const characters = [...title];
+  return characters.length > TITLE_CHAT ? `${characters.slice(0, TITLE_CHAT - 1).join("")}…` : title;
+};
+
+/**
+ * The desktop's own confirmation before the agent drives its browser again (spec, Section 5). Keep
+ * control first and focused, and what Escape and a closed window answer; Hand back is held back until
+ * the input protection has passed, so a press its user began for the page answers nothing here.
+ */
+export function handBack(request: HandBackRequest): PromptContent {
+  // The chat's title is the agent's words: in a field of its own, cut short, never among the prompt's own.
+  const details = request.gone || request.title === null ? [] : [code("Chat", cut(request.title))];
+  return {
+    title: `Hand the browser back to ${request.agent}?`,
+    // The browser is one for every chat of the agent's here: what is handed back is every chat's.
+    lead: `It will act in its browser on this computer again, in every chat. ${request.gone ? "The chat it was taken over from is gone." : "It was taken over from this chat."}`,
+    details,
+    notes: [],
+    choice: null,
+    buttons: [button("keep", "Keep control"), button("hand_back", "Hand back", true)],
+    focus: "keep",
+    cancel: "keep",
+    // With room for the field's two lines, which the longest title it shows takes: one size for any title.
+    height: details.length > 0 ? 300 : 230,
   };
 }
 
@@ -295,7 +366,6 @@ export function freeMode(chat: ChatLabel): PromptContent {
     buttons: [button("keep", "Keep asking"), button("free", "Work freely", true)],
     focus: "keep",
     cancel: "keep",
-    enter: null,
     height: 300,
   };
 }

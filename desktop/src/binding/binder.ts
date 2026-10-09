@@ -16,7 +16,7 @@ import type { Binding, Bindings, Mode } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
 import { report } from "../report.js";
-import { type ApprovalPrompts, Approvals } from "./approvals.js";
+import { type ApprovalPrompts, Approvals, type DownloadBy } from "./approvals.js";
 import { BOOT_ID, checkFolder, confirmedFolder, type FolderGuards } from "./folder.js";
 import { type LinkSummary, scanLinks } from "./links.js";
 
@@ -89,7 +89,10 @@ export interface BinderOptions {
   hosts: Executor; // runs everything but the binding
   refusal?(operation: Operation): Outcome | null; // what the hosts refuse anyway, before anyone is asked
   retired?(root: string): void; // a deleted chat's root: the hosts let go of what they keep for it
-  address?(session: string): Promise<string>; // the page a session's next browser operation acts in, for its prompt
+  // The page a session's next browser operation acts in, for its prompt; for an upload, the frame of the file input
+  // that asked, *of* being the upload's operation; *root*, the chat that asks.
+  address?(session: string, upload?: boolean, of?: string, root?: string): Promise<string | { refused: string }>;
+  notComing?(of: string): void; // an upload the browser was asked about, by its operation, that got no leave
   // The user is asked about every other operation first in a chat that asks every time,
   // and about a network destination off the package hosts in either mode.
   approvalPrompts: ApprovalPrompts;
@@ -172,7 +175,8 @@ export class Binder implements Executor {
 
   constructor(private readonly options: BinderOptions) {
     this.approvals = new Approvals({
-      bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, address: options.address, onError: options.onError,
+      bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, address: options.address,
+      notComing: options.notComing, refusal: options.refusal, onError: options.onError,
     });
   }
 
@@ -324,12 +328,13 @@ export class Binder implements Executor {
   // when the server sends the operation again. It touches no file: the host checks
   // the folder against the binding's identity before any work. A bind waits on
   // nothing, so it settles at once, an aborted one too: suspend waits for it. Every
-  // other operation is the approvals', which settle once the signal aborts.
-  async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
+  // other operation is the approvals', which settle once the signal aborts. *download*: a write
+  // the desktop makes itself to save one, and whose it is (browser/downloads.ts).
+  async admit(operation: Operation, signal: AbortSignal, download?: DownloadBy): Promise<Outcome | null> {
     if (operation.kind === "retire") return this.retire(operation);
     // What the tools refuse anyway (no browser on this computer, say) is refused before anyone is
     // asked; in the same tick, so a chat's bind in the same burst cannot slip in before the approvals look.
-    if (operation.kind !== "bind") return this.options.refusal?.(operation) ?? this.approvals.admit(operation, signal);
+    if (operation.kind !== "bind") return this.options.refusal?.(operation) ?? this.approvals.admit(operation, signal, download);
     const root = operation.sessionId;
     const { folder, nonce } = operation.args;
     const own = operation.callingSessionId === root && operation.invocationId === "bind" && operation.ordinal === 0;

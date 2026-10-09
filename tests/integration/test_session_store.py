@@ -10,9 +10,9 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
-from surogates.db.models import InboxItem
+from surogates.db.models import DeliveryOutbox, Event, InboxItem
 from surogates.session.events import EventType
-from surogates.session.store import LeaseNotHeldError, SessionNotFoundError
+from surogates.session.store import LeaseNotHeldError, SessionNotFoundError, SessionStore
 
 from .conftest import create_org, create_user, issue_service_account_token
 
@@ -1107,3 +1107,52 @@ async def test_a_session_tree_holds_the_session_and_everything_under_it(session_
     other = await session_store.create_session(user_id=user_id, org_id=org_id, agent_id="test-agent")
     assert set(await session_store.session_tree_ids(root.id)) == {root.id, child.id, grandchild.id}
     assert await session_store.session_tree_ids(other.id) == [other.id]
+
+
+# ---------------------------------------------------------------------------
+# What follows an event's commit: its announcement, and its delivery
+# ---------------------------------------------------------------------------
+
+
+async def test_an_event_is_announced_only_once_whoever_hears_of_it_can_read_it(session_factory):
+    """A listener told of an event reads it at once, on a connection of its own."""
+    found: list[tuple[str, bool]] = []
+
+    class Listening:
+        async def publish(self, channel: str, message: str) -> None:
+            event_id, kind = message.split(":", 1)
+            async with session_factory() as db:
+                read = await db.scalar(select(Event.id).where(Event.id == int(event_id)))
+            found.append((kind, read is not None))
+
+    org_id = await create_org(session_factory)
+    store = SessionStore(session_factory, redis=Listening())
+    session = await store.create_session(
+        user_id=await create_user(session_factory, org_id), org_id=org_id, agent_id="test-agent",
+    )
+
+    await store.emit_event(session.id, EventType.USER_MESSAGE, {"content": "Hello"})
+
+    assert found == [(EventType.USER_MESSAGE.value, True)]
+
+
+async def test_an_answer_in_a_channel_with_an_adapter_is_queued_for_delivery_and_one_on_the_web_is_not(
+    session_store, session_factory,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    answer = {"message": {"role": "assistant", "content": "It is done."}}
+
+    async def queued(channel: str, **config) -> list[tuple[int, str, str, dict]]:
+        session = await session_store.create_session(
+            user_id=user_id, org_id=org_id, agent_id="test-agent", channel=channel, config=config,
+        )
+        event_id = await session_store.emit_event(session.id, EventType.LLM_RESPONSE, answer)
+        async with session_factory() as db:
+            rows = (await db.execute(select(DeliveryOutbox).where(DeliveryOutbox.session_id == session.id))).scalars().all()
+        return [(row.event_id - event_id, row.channel, row.status, row.destination) for row in rows]
+
+    # Queued under the event's own id, which the outbox's row points at: only once the event is written.
+    [(off_by, channel, status, destination)] = await queued("slack", slack_channel_id="C-1")
+    assert (off_by, channel, status, destination["channel_id"]) == (0, "slack", "pending", "C-1")
+    assert await queued("web") == []

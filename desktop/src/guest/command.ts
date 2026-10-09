@@ -6,7 +6,7 @@
 import { accessSync, constants, statSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 
-import { Failure, MAX_MESSAGE_CHARS, osError, sandboxError, valueError } from "../files/answers.js";
+import { Failure, MAX_MESSAGE_CHARS, NUL_REFUSED, osError, sandboxError, valueError } from "../files/answers.js";
 import { resolveInFolder } from "../files/paths.js";
 import type { Outcome } from "../link/protocol.js";
 import { commandOutput, Window } from "./output.js";
@@ -58,15 +58,16 @@ export async function answered(run: () => Promise<Outcome>): Promise<Outcome> {
   }
 }
 
-// run's arguments, checked in the cloud's order, or the answer when the command cannot run.
-export function runArgs(args: Record<string, unknown>): { command: string; workdir: string | null; timeout: number } | Outcome {
+// run's arguments, checked in the cloud's order.
+export function runArgs(args: Record<string, unknown>): { command: string; workdir: string | null; timeout: number } {
   const { command, workdir, timeout } = args;
   if (typeof command !== "string") throw valueError("'command' must be a string");
   if (workdir !== null && typeof workdir !== "string") throw valueError("'workdir' must be a string or null");
   if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) {
     throw valueError("'timeout' must be a positive number");
   }
-  if (command.includes("\0")) return ran("embedded null byte", -1);
+  // Before the workdir is looked at, as the cloud refuses it: a NUL in either is one refusal.
+  if (command.includes("\0") || workdir?.includes("\0")) throw valueError(NUL_REFUSED);
   return { command, workdir, timeout };
 }
 

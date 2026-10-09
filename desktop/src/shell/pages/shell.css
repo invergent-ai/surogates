@@ -1405,7 +1405,17 @@ body.prompt-page {
   color: var(--centre);
 }
 
-.prompt .actions .btn[aria-disabled="true"] {
+/* Read by a screen reader, and drawn nowhere: the prompt's size is its content's. */
+.prompt .unseen {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.prompt .actions[data-armed="false"] .btn {
   opacity: 0.5;
   cursor: default;
 }
