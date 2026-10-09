@@ -1663,6 +1663,9 @@ async def test_a_project_over_the_cap_has_no_history_and_its_threads_work_on_the
     # The plain layout: the real files at /workspace, no copy, nothing to land.
     spec = await _build_session_sandbox_spec(over, tenant, str(thread.id))
     assert "PROJECT_DIR" not in spec.env and [r.mount_path for r in spec.resources] == ["/workspace"]
+    # Nor a history of them: only the master's own pod keeps one, for its routine runs.
+    assert "HISTORY_MAIN" not in spec.env
+    assert "HISTORY_MAIN" in (await _build_session_sandbox_spec(master, tenant, str(master.id))).env
     pool = SandboxPool(pods)
     await pool.ensure(str(thread.id), spec)
     assert not pool.holds_copy(str(thread.id))

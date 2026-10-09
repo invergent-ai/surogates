@@ -34,6 +34,7 @@ import re
 import time
 from functools import partial
 from typing import Any
+from uuid import UUID
 
 from surogates.governance.saga import SagaOrchestrator, SagaState, SagaStep, StepState, compensate_step
 from surogates.governance.saga.compensator import compensate_history
@@ -48,18 +49,21 @@ from surogates.sandbox.history import (
     step_result,
 )
 from surogates.sandbox.pool import sandbox_session_key
+from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session.events import EventType
 from surogates.workstreams import is_project_thread
 from surogates.workstreams.history import (
     drop_landing,
     kept_refs,
     project_lock,
+    record_pickup,
     running_landings,
     saga_of,
     save_landing,
     start_landing,
     touch_landing,
 )
+from surogates.workstreams.stream import project_of
 
 logger = logging.getLogger(__name__)
 
@@ -1224,3 +1228,129 @@ def waiting_on_you(paths: list[str], *, escalated: bool) -> dict:
         # For the thread, which reads the wait as news, and for a later landing, which ends a wait whose files landed.
         "files": list(paths), "escalated": escalated,
     }
+
+
+def routine_project(session: Any) -> str | None:
+    """The project whose master *session* is a routine run of, in the master's pod over the real files; else None.
+
+    A thread's routine runs are its helpers, on copies of their own.
+    """
+    config = session.config or {}
+    if session.channel != "scheduled" or not config.get("scheduled_session_id") or config.get("history_thread"):
+        return None
+    return project_of(config.get("workspace_boundary"))
+
+
+async def routines_at_work(session_factory: Any, session: Any) -> bool:
+    """Whether another routine run of *session*'s master has called a tool and not ended: a change to the real files may be its."""
+    from sqlalchemy import exists, select
+
+    from surogates.db.models import Event
+    from surogates.db.models import Session as SessionRow
+
+    async with session_factory() as db:
+        return bool(await db.scalar(select(exists().where(
+            SessionRow.parent_id == session.parent_id, SessionRow.channel == "scheduled",
+            SessionRow.status == "active", SessionRow.id != session.id,
+            exists().where(Event.session_id == SessionRow.id, Event.type == EventType.TOOL_CALL.value),
+        ))))
+
+
+async def _prune_after_pickup(
+    *, session_factory: Any, sandbox_pool: Any, owner: str, workstream: Any, saga_settings: Any, held: Any,
+    packs: int, storage: Any, bucket: str | None, prefix: str,
+) -> None:
+    """The day's pruning after a pickup pushed alone, through the master's pod, under the pickup's own lock.
+
+    A project where routines run and no thread lands is pruned by no
+    landing: each pickup would leave its pack for good, and every new pod
+    copies them all.  Due as after a landing, by the mark the last pruning
+    left, and by a landing's rule: its bound, its fence, the packs the
+    bucket itself dates older.  The landings left running were settled
+    before the pickup.  It never fails its caller: the pickup stands, and
+    the history is pruned on a later day.
+    """
+    try:
+        if storage is not None and not await _due(storage, bucket, prefix):
+            return
+        old = await _old_packs(storage, bucket, prefix, _fence(saga_settings)) if storage is not None else None
+        request = {
+            "action": "prune", "keep": await kept_refs(session_factory, workstream), "now": time.time(),
+            "spare": _fence(saga_settings), **({"old": old} if old is not None else {}),
+        }
+        await held()
+        step_result(await sandbox_pool.execute(
+            owner, "_history", json.dumps(request), timeout=_PRUNE_BOUND + _PRUNE_PER_GIB * packs / 2**30,
+        ))
+    except Exception:
+        logger.warning("Could not prune the history of project %s", workstream, exc_info=True)
+
+
+async def pick_up_routine(
+    *, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any, yours: bool = False,
+    storage: Any = None, bucket: str | None = None, prefix: str = "",
+) -> dict | None:
+    """Record what a master's routine run changed in the real files as the routine's: its pickup, or None.
+
+    A pickup alone, pushed under the project's lock in the master's pod the
+    run worked in, once the landings a killed worker left running are
+    settled: what they applied is put back first, so it is no change of
+    the routine's.  One try: a pickup that fails, and one in a project
+    with no history yet, record nothing, and the next landing picks the
+    changes up as yours.
+
+    With *yours*, before the run's first call: what the real files changed
+    up to here is recorded by you, as a landing's pickup records it, so
+    the run's own pickup holds what changed while it worked and no more.
+    Not while another routine run of the project is at work: a change may
+    be its, and is left for a routine's pickup.
+
+    A pickup that pushed leaves the day's pruning, when it is due, to the
+    same pod under the same lock, its row written first: *storage* is
+    asked whether it is, and which packs are old, where the project's
+    files are under *prefix* of *bucket*.
+    """
+    workstream = routine_project(session)
+    owner = sandbox_session_key(session)
+    if workstream is None:
+        return None
+    if yours:
+        author = {"name": str(session.user_id), "email": f"user:{session.user_id}@surogate"}
+    else:
+        schedule = UUID(session.config["scheduled_session_id"])
+        try:
+            name = (await ScheduledSessionStore(session_factory).get(schedule)).name
+        except KeyError:
+            name = "A routine"
+        author = {"name": name, "email": f"routine:{schedule}@surogate"}
+    orchestrator = _orchestrator(saga_settings)
+    saga = orchestrator.create_saga(session.id, kind="landing")
+    pickup = orchestrator.add_step(
+        saga.saga_id, tool_name="history.pickup", tool_call_id="", max_retries=0, arguments={
+            "author": author, "push": True,
+            "trailers": [
+                ["Surogate-Project", workstream], ["Surogate-Agent", str(session.agent_id)],
+                ["Surogate-User", str(session.user_id)], ["Surogate-Saga", saga.saga_id], ["Surogate-Kind", "pickup"],
+            ],
+        },
+    )
+    async with project_lock(session_factory, workstream) as held:
+        await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
+        if yours and await routines_at_work(session_factory, session):
+            return None
+        await held()
+        picked = await orchestrator.execute_step(
+            saga.saga_id, pickup.step_id, lambda: _call(sandbox_pool, owner, "pickup", **pickup.arguments),
+        )
+        if picked["commit"] is None:
+            return None
+        saga.transition(SagaState.COMPLETED)
+        await record_pickup(
+            session_factory, saga, workstream_id=workstream, commit=picked["commit"], picked_up=picked["picked_up"],
+            agent_id=str(session.agent_id), user_id=session.user_id,
+        )
+        await _prune_after_pickup(
+            session_factory=session_factory, sandbox_pool=sandbox_pool, owner=owner, workstream=workstream,
+            saga_settings=saga_settings, held=held, packs=picked["packs"], storage=storage, bucket=bucket, prefix=prefix,
+        )
+    return picked
