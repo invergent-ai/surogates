@@ -309,6 +309,12 @@ export async function getBrowserPreviewSnapshot(
   return await response.blob();
 }
 
+// A post the control route did not make, with how it answered: a chat's pane on the user's
+// computer posts again what was answered busy (503).
+function notMade(message: string, response: Response): Error {
+  return Object.assign(new Error(message), { status: response.status });
+}
+
 export async function acquireBrowserControl(
   sessionId: string,
 ): Promise<BrowserControlResponse> {
@@ -320,7 +326,7 @@ export async function acquireBrowserControl(
       body: JSON.stringify({ action: "acquire" }),
     },
   );
-  if (!response.ok) throw new Error("Failed to acquire browser control");
+  if (!response.ok) throw notMade("Failed to acquire browser control", response);
   return (await response.json()) as BrowserControlResponse;
 }
 
@@ -338,7 +344,7 @@ export async function releaseBrowserControl(
       body: JSON.stringify(browserRelease(handedBack)),
     },
   );
-  if (!response.ok) throw new Error("Failed to release browser control");
+  if (!response.ok) throw notMade("Failed to release browser control", response);
   return (await response.json()) as BrowserReleaseResponse;
 }
 

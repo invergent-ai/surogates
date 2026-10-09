@@ -456,7 +456,10 @@ export function browserRelease(handedBack: boolean): {
     : { action: "release" };
 }
 
-/** The chat's control route, as the pane posts to it (POST …/browser/control). */
+/**
+ * The chat's control route, as the pane posts to it (POST …/browser/control). A post the server
+ * did not make rejects with an error whose `status` is the server's answer.
+ */
 export interface BrowserPosts {
   acquire(): Promise<unknown>;
   /**
@@ -515,7 +518,23 @@ export interface BrowserPane {
  *   anything back, so it is no hand back, and wakes nobody. The server passes over a release with
  *   no take-over standing.
  */
-export function browserPane(posts: BrowserPosts): BrowserPane {
+/**
+ * How long the pane waits before each time it posts again what the server answered busy (503):
+ * another post for the chat's browser was being told for longer than the server waits for it, and
+ * nothing was told. Nobody else posts it again, and a hand back left so would never give its turn:
+ * the chat's next opening posts a release, which gives none. Twice, a moment apart, and then the
+ * pane says the chat could not be told.
+ */
+export const BUSY_WAITS_MS: readonly number[] = [400, 800];
+
+const answeredBusy = (error: unknown): boolean =>
+  (error as { status?: unknown } | null | undefined)?.status === 503;
+
+export function browserPane(
+  posts: BrowserPosts,
+  wait: (ms: number) => Promise<void> = (ms) =>
+    new Promise((done) => setTimeout(done, ms)),
+): BrowserPane {
   let state: BrowserPaneState = {
     asking: false,
     failure: null,
@@ -542,10 +561,21 @@ export function browserPane(posts: BrowserPosts): BrowserPane {
   };
   const post = async (action: "acquire" | "release", handedBack = false) => {
     told = "unknown";
-    const answer =
-      action === "acquire"
-        ? await posts.acquire()
-        : await posts.release(handedBack);
+    const send = () =>
+      action === "acquire" ? posts.acquire() : posts.release(handedBack);
+    let answer: unknown;
+    for (let posted = 0; ; posted += 1) {
+      try {
+        answer = await send();
+        break;
+      } catch (error) {
+        // Any other failure may be of a post the server made: it is said, and not posted twice.
+        if (!answeredBusy(error) || posted === BUSY_WAITS_MS.length) {
+          throw error;
+        }
+        await wait(BUSY_WAITS_MS[posted]);
+      }
+    }
     told = action === "acquire" ? "taken" : "free";
     return answer;
   };

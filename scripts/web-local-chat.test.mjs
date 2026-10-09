@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  AGENT_GOES_ON, actOnBrowser, browserPane, browserPanes, browserRelease, computerBrowser, createChat, desktopSessionsOf, folderCalls, localChatOf,
+  AGENT_GOES_ON, actOnBrowser, BUSY_WAITS_MS, browserPane, browserPanes, browserRelease, computerBrowser, createChat, desktopSessionsOf, folderCalls, localChatOf,
   NO_FOLDER, newChatPlace, saidBy, saidOfHandBack, switchMode, WRITE_TO_THE_AGENT,
 } from "../web/src/lib/local-chat.ts";
 
@@ -561,6 +561,55 @@ test("says of each hand back what the server answered of the agent, in the same 
     const pane = browserPane(desk.posts);
     await pane.press("handBack", "root-1", desk.desktop);
     assert.deepEqual(pane.state(), { ...quiet(1), said: words }, `${handed} ${JSON.stringify(answer)}`);
+  }
+});
+
+// As the control route's post rejects where the server answered *status*.
+const answered = (status) => Object.assign(new Error("Failed to release browser control"), { status });
+
+test("posts again, a few times and after a short wait, what the server answered busy, before it says the chat could not be told", async () => {
+  // Another post for the chat's browser was being told for longer than the server waits (503): nothing
+  // was told. Nobody else posts a hand back again, and the next opening posts a release that gives no turn.
+  const desk = browserDesk();
+  const waits = [];
+  const pane = browserPane(desk.posts, async (ms) => void waits.push(ms));
+  await pane.press("takeOver", "root-1", desk.desktop);
+  let busy = 2;
+  desk.answers.release = async (handedBack) => {
+    if (busy-- > 0) throw answered(503);
+    return { outcome: "released", resumes: handedBack };
+  };
+  await pane.press("handBack", "root-1", desk.desktop);
+  // Posted as the same confirmed hand back each time, with no take-over posted between.
+  assert.deepEqual(desk.did.slice(2), [["handBack", "root-1"], ["post", "hand back"], ["post", "hand back"], ["post", "hand back"]]);
+  assert.deepEqual(waits, BUSY_WAITS_MS.slice(0, 2));
+  assert.deepEqual(pane.state(), { ...quiet(2), said: AGENT_GOES_ON });
+
+  // Busy every time: posted once and once more after each wait, and then the pane says what is missing.
+  for (const [action, post, words] of [["handBack", "hand back", UNTOLD_HANDED_BACK], ["takeOver", "acquire", UNTOLD_TAKEN]]) {
+    const always = browserDesk();
+    const waited = [];
+    const giving_up = browserPane(always.posts, async (ms) => void waited.push(ms));
+    if (action === "handBack") await giving_up.press("takeOver", "root-1", always.desktop);
+    always.did.length = 0;
+    always.answers.release = always.answers.acquire = async () => Promise.reject(answered(503));
+    await giving_up.press(action, "root-1", always.desktop);
+    assert.deepEqual(always.did, [[action, "root-1"], ...Array.from({ length: BUSY_WAITS_MS.length + 1 }, () => ["post", post])]);
+    assert.deepEqual(waited, BUSY_WAITS_MS);
+    assert.equal(giving_up.state().failure, words);
+  }
+  assert.ok(BUSY_WAITS_MS.length >= 1 && BUSY_WAITS_MS.length <= 3 && BUSY_WAITS_MS.every((ms) => ms > 0 && ms <= 1000));
+
+  // Any other failure is said at once: the server may have made the post, and is not asked twice.
+  for (const failure of [answered(500), answered(502), new Error("offline"), undefined]) {
+    const once = browserDesk();
+    const waited = [];
+    const failing = browserPane(once.posts, async (ms) => void waited.push(ms));
+    await failing.press("takeOver", "root-1", once.desktop);
+    once.answers.release = async () => Promise.reject(failure);
+    await failing.press("handBack", "root-1", once.desktop);
+    assert.deepEqual([once.did.slice(3), waited], [[["post", "hand back"]], []]);
+    assert.equal(failing.state().failure, UNTOLD_HANDED_BACK);
   }
 });
 
