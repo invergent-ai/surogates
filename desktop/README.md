@@ -151,7 +151,8 @@ Hand back, in the pane, asks in a window of the desktop's own, "Hand the browser
 a second has passed since it showed, and no key or press answers it that comes within half
 a second of the one before: what you were typing into the browser when it opened answers
 nothing and changes no choice, and a key held down since before it opened never does. Tab
-and Shift+Tab move the keyboard at any time, a modifier by itself holds nothing back, and a
+and Shift+Tab move nothing in that first half second, so the keyboard stays on the button
+that changes nothing, and move it freely after; a modifier by itself holds nothing back, and a
 key you press on a button and hold answers when you let it go. A button pressed with no key
 and no press, as a screen reader presses one, answers once half a second has passed with no
 key and no press at all; no button is marked unavailable meanwhile. Only the confirmation's

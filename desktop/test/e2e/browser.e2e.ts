@@ -551,7 +551,7 @@ describe("a chat's browser taken over, and handed back", () => {
     const answer = await clicked(client, "handBack");
     const asked = await prompted();
     expect(await asked.getAttribute("#prompt-buttons", "data-held")).toBe("true");
-    // As it opens. Tab then Space, as a form invites: Tab moves the keyboard, as in any window, and nothing is pressed.
+    // As it opens. Tab then Space, as a form invites: the keyboard does not reach Hand back, and nothing is pressed.
     await asked.keyboard.press("Tab");
     await asked.keyboard.press(" ");
     // A click where Hand back is.
@@ -559,6 +559,7 @@ describe("a chat's browser taken over, and handed back", () => {
     // And the prompt's own page saying it was pressed, right after those: the main process goes by its own count.
     expect(await asked.evaluate(() =>
       (window as unknown as { surogatePrompt: { answer(button: string, choice: string | null): Promise<boolean> } }).surogatePrompt.answer("hand_back", null))).toBe(false);
+    expect(await asked.evaluate(() => (document.activeElement as HTMLElement).dataset.id)).toBe("keep");
     // Nothing came of any: the confirmation is up still, the browser its user's, and the page not answered.
     await expect.poll(() => asked.getAttribute("#prompt-buttons", "data-held"), { timeout: 10_000 }).toBe("false");
     expect(await promptsShown(app!)).toBe(1);

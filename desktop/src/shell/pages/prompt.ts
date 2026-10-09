@@ -3,7 +3,8 @@
 // code point. The buttons answer the main process, which takes no answer before the
 // input protection has passed, nor one from a key or a press that came sooner than
 // that after the one before it; the page holds the same keys and presses back, and a
-// key held back does nothing here but move the keyboard. A button pressed with no key
+// key held back does nothing here, but that Tab moves the keyboard once the prompt has
+// been shown that long. A button pressed with no key
 // and no press, as assistive technology presses one, answers once none has come for
 // that long.
 
@@ -112,14 +113,16 @@ function up(event: Event): void {
   lastInput = performance.now();
 }
 // What a key or a press that does not act would do next does not happen either: its key coming up, its click.
-// A key changes nothing and answers nothing: keys are what a person typing elsewhere sends here. But for Tab,
-// which moves the keyboard as in any window, and for the clipboard's and the selection's own keys: what a
-// prompt shows can be read and copied at any time. A press of the mouse is made where it lands, and one that
+// A key changes nothing and answers nothing: keys are what a person typing elsewhere sends here. But for Tab
+// once the prompt is armed, which moves the keyboard as in any window, however soon after another key; and
+// for the clipboard's and the selection's own keys: what a prompt shows can be read and copied at any time.
+// A Tab that comes before the prompt is armed is a typing person's like any other, and moves nothing: the
+// keyboard stays on the button that changes nothing, where the prompt put it. A press of the mouse is made where it lands, and one that
 // does not act is held back from the buttons alone: a choice it lands on is taken.
 const CLIPBOARD = new Set(["a", "c", "v", "x"]);
 function still(event: Event): void {
   if (event instanceof KeyboardEvent) {
-    if (event.key === "Tab") return;
+    if (event.key === "Tab" && armed) return;
     if ((event.ctrlKey || event.metaKey) && !event.altKey && CLIPBOARD.has(event.key.toLowerCase())) return;
   } else if (!(event.target instanceof Element && event.target.closest("#prompt-buttons"))) return;
   event.preventDefault();

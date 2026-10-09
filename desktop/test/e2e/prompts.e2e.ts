@@ -740,6 +740,50 @@ describe("a prompt's answer, with a key or a press behind it and with none", () 
     expect(await prepared).toBeNull();
   });
 
+  it("moves nothing at a Tab or a Shift+Tab that comes before the input protection has passed since the prompt showed: the keyboard stays where the prompt put it, on the button that changes nothing, and a key after a pause answers that one; once it has passed, Tab and Shift+Tab walk every button and Space answers the one the keyboard is on", async () => {
+    const client = await signedIn();
+    await bound(client, folder);
+    // An approval starts on Deny. Tab, Tab and Shift+Tab as it shows, as of a person typing in a form elsewhere.
+    let id = write("a.txt", "a");
+    let asked = await prompt(app!);
+    expect([await heldBack(asked), await active(asked)]).toEqual([true, "deny"]);
+    for (const name of ["Tab", "Tab", "Shift+Tab"]) await asked.keyboard.press(name);
+    expect([await heldBack(asked), await active(asked)]).toEqual([true, "deny"]);
+    // They stop, and press Return: it is Deny's.
+    await pause();
+    await asked.keyboard.press("Enter").catch(() => {});
+    expect(await outcome(id)).toHaveProperty("error");
+    await gone();
+    // Work freely starts on Keep asking: the same.
+    const kept = client.evaluate((chat) => window.surogateDesktop!.requestFreeMode(chat), CHAT);
+    asked = await prompt(app!);
+    await asked.keyboard.press("Tab");
+    expect(await active(asked)).toBe("keep");
+    await pause();
+    await asked.keyboard.press(" ").catch(() => {});
+    expect(await kept).toBe(false);
+    await gone();
+    // Once the protection has passed, Tab walks every button, one after the other however soon, and Shift+Tab walks back.
+    id = write("a.txt", "a");
+    asked = await prompt(app!);
+    await expect.poll(() => heldBack(asked)).toBe(false);
+    const buttons = await asked.$$eval("#prompt-buttons button", (all) => all.map((button) => (button as HTMLElement).dataset.id!));
+    const walked = [await active(asked)];
+    for (let n = 1; n < buttons.length; n += 1) {
+      await asked.keyboard.press("Tab");
+      walked.push(await active(asked));
+    }
+    expect([...walked].sort()).toEqual([...buttons].sort());
+    for (let n = 1; n < buttons.length; n += 1) await asked.keyboard.press("Shift+Tab");
+    expect(await active(asked)).toBe("deny");
+    // Onto Allow, and Space there a pause after: allowed.
+    for (let n = 0; n < buttons.length && (await active(asked)) !== "allow"; n += 1) await asked.keyboard.press("Tab");
+    expect(await active(asked)).toBe("allow");
+    await pause();
+    await asked.keyboard.press(" ").catch(() => {});
+    expect(await outcome(id)).toEqual({ ok: null });
+  });
+
   it("takes a key that acts however long it is held: Space on a button, held until it repeats and then let go, answers", async () => {
     await bound(await signedIn(), folder);
     const id = write("a.txt", "a");
@@ -754,8 +798,9 @@ describe("a prompt's answer, with a key or a press behind it and with none", () 
 
   it("is answered by a person with a keyboard alone, a key at a time: the folder's sheet with another mode chosen, an approval allowed, and Work freely confirmed", async () => {
     const client = await signedIn();
-    // To *button*, by Tab, and one key on it once the protection has passed since the last.
+    // To *button*, by Tab once the prompt takes keys, and one key on it once the protection has passed since the last.
     const reach = async (asked: Page, button: string, with_: string) => {
+      await expect.poll(() => heldBack(asked)).toBe(false);
       for (let n = 0; n < 8 && (await active(asked)) !== button; n += 1) await asked.keyboard.press("Tab");
       expect(await active(asked)).toBe(button);
       await pause();
