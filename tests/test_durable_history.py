@@ -2121,7 +2121,10 @@ def test_a_stop_takes_back_every_hand_off_of_its_turn_also_one_made_by_a_pod_mad
     (again.copy / "more.md").write_text("more of the stopped turn")
     again.hand_off(author=A, trailers=KEPT)
     assert again.drop_hand_off() == {"dropped": True}
-    assert names_in(a_pod(tmp_path, project, turn="turn-3")) == ["Report.docx", "notes.txt", "outline.md", "sources.md"]
+    # The hand-off itself is back to the helper's work the turn found, none of the turn's hand-offs under it:
+    # the stop's own doing, whatever the next open would leave out.
+    assert git(project / "_history", "log", "--format=%s", "refs/handoff/t1").splitlines()[:1] == ["Kept"]
+    assert names_in(a_pod(tmp_path, project)) == ["Report.docx", "notes.txt", "outline.md", "sources.md"]
     assert first.turn == "turn-2"
 
 
