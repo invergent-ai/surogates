@@ -212,7 +212,8 @@ async def land_turn(
     project, so a landing that starts after another sees its files as
     changed rather than rolling back over them.  The lock frees itself if
     its connection drops, so the landing asks it before each apply and the
-    record, and stops when it is gone.  The landings a killed worker left
+    record, and stops when it is gone.  A landing put back whole is tried
+    once more, at once, as a new saga.  The landings a killed worker left
     running are settled first; this thread's own, if one had pushed, is
     reported with this turn's files.
     """
@@ -231,6 +232,12 @@ async def land_turn(
             settled = await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held, waited=waited)
             began = True
             outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
+            if outcome["state"] == "compensated":
+                # Put back whole: a file changed between the pickup and its
+                # apply, or a step failed.  Tried once more, at once, as a new
+                # saga, whose pickup sees the change: never with the lock lost.
+                await held()
+                outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
     except Exception as exc:
         if _cancelling():
             # The lock's dead connection failed the block's exit: the cancel goes on.

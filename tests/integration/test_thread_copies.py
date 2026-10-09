@@ -223,25 +223,29 @@ async def test_a_landing_is_a_merge_of_the_turn_carrying_who_made_it(api, monkey
     assert not (pods.copies[str(thread.id)] / ".git").exists()
 
 
+def the_disk_refuses(path_refused: str):
+    """``History.apply``, as a disk that refuses one file's write, every time."""
+    apply = History.apply
+
+    def refusing(self, path, before, after):
+        if path == path_refused:
+            raise OSError(28, "No space left on device")
+        return apply(self, path, before, after)
+
+    return refusing
+
+
 async def test_an_apply_that_fails_on_the_third_of_five_files_puts_the_first_two_back(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
-    apply = History.apply
-
-    def a_save_lands_first(self, path, before, after):
-        if path == "c.md":
-            (self.project / "c.md").write_text("saved by you just now")
-        return apply(self, path, before, after)
-
     # The pod forks a child per call, which inherits this.
-    monkeypatch.setattr(History, "apply", a_save_lands_first)
+    monkeypatch.setattr(History, "apply", the_disk_refuses("c.md"))
     await a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "for f in a b c d e; do echo $f > $f.md; done"})),
         _final_response("Wrote five notes."),
     ], pool=SandboxPool(pods), saga_settings=QUICK)
-    # All or nothing: the real files are as they were before the landing.
-    assert pods.real_names() == ["Report.docx", "c.md", "notes.txt"]
-    assert (pods.project / "c.md").read_text() == "saved by you just now"
+    # All or nothing, and again on its one retry: the real files are as they were before the landing.
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
     [report] = await reports(api, master)
     assert report["landing"] == "compensated"
     assert {f["landing"] for f in report["files"]} == {"not_merged"}
@@ -257,19 +261,12 @@ async def test_a_rolled_back_landing_takes_away_the_folders_it_made_and_leaves_t
     (pods.project / "Reports").mkdir()  # the user's, still empty
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
-    apply = History.apply
-
-    def a_save_lands_first(self, path, before, after):
-        if path == "c.md":
-            (self.project / "c.md").write_text("saved by you just now")
-        return apply(self, path, before, after)
-
-    monkeypatch.setattr(History, "apply", a_save_lands_first)
+    monkeypatch.setattr(History, "apply", the_disk_refuses("c.md"))
     await a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "mkdir -p Drafts/2026 Reports && echo a > Drafts/2026/a.md && echo q > Reports/q1.md && echo c > c.md"})),
         _final_response("Wrote three notes."),
     ], pool=SandboxPool(pods), saga_settings=QUICK)
-    assert pods.real_names() == ["Report.docx", "Reports", "c.md", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "Reports", "notes.txt"]
     assert not any((pods.project / "Reports").iterdir())
 
 
@@ -954,16 +951,9 @@ async def test_a_thread_is_told_only_of_work_since_its_last_landed_turn(api, mon
 
 
 async def a_rolled_back_turn(api, monkeypatch, thread, pool) -> None:
-    """*thread*'s turn writes a.md, b.md and c.md, and its landing rolls back: the user saved c.md first."""
-    apply = History.apply
-
-    def a_save_lands_first(self, path, before, after):
-        if path == "c.md":
-            (self.project / "c.md").write_text("saved by you just now")
-        return apply(self, path, before, after)
-
+    """*thread*'s turn writes a.md, b.md and c.md, and its landing rolls back, retry and all: c.md cannot be written."""
     with monkeypatch.context() as patch:
-        patch.setattr(History, "apply", a_save_lands_first)
+        patch.setattr(History, "apply", the_disk_refuses("c.md"))
         await a_turn(api, monkeypatch, thread, [
             calling(("terminal", {"command": "for f in a b c; do echo $f > $f.md; done"})),
             _final_response("Wrote three notes."),
@@ -1005,10 +995,10 @@ async def test_a_turn_after_a_landing_that_rolled_back_has_that_work_and_is_not_
     await a_turn(api, monkeypatch, thread, [
         calling(("write_file", {"path": "x.md", "content": "x"})), _final_response("Done."),
     ], pool=pool)
-    # Its commit step kept the turn on the branch: the next copy has it, and lands it, your c.md aside.
+    # Its commit step kept the turn on the branch: the next copy has it, and lands it, c.md with it.
     assert not (await last_writes(store, thread))[-1].startswith("[This thread's copy")
     assert pods.real_names() == ["Report.docx", "a.md", "b.md", "c.md", "notes.txt", "x.md"]
-    assert (pods.project / "c.md").read_text() == "saved by you just now"
+    assert (pods.project / "c.md").read_text() == "c\n"
 
 
 async def test_a_threads_code_command_runs_no_coding_agent_on_a_copy_never_landed(api, monkeypatch, pods):

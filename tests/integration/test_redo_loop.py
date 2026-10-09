@@ -12,6 +12,7 @@ from surogates.harness import loop_artifact_completion
 from surogates.harness.loop_context_replay import unread_reports, worker_note
 from surogates.harness.loop_pending import NAMES_ANSWERS
 from surogates.runtime import SlashCommandConfig
+from surogates.sandbox.history import History
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
 from tests.test_steer_loop import _final_response, _make_loop_harness
@@ -27,6 +28,7 @@ from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
     turn_ends,
 )
 from .test_thread_copies import (  # noqa: F401  (pods is a fixture)
+    QUICK,
     a_thread,
     a_waking_thread_harness,
     git,
@@ -154,8 +156,10 @@ async def test_a_landing_whose_pickup_failed_keeps_the_turn_on_its_branch(api, m
     assert git(pods.project / "_history", "show", f"refs/heads/threads/{thread.id}:a.md") == "a"
     assert [done["saved"] for done in await turn_ends(api, thread)] == [True]
     assert pods.real_names() == ["Report.docx", "notes.txt"]
-    [row] = await rows(api, thread)
-    assert (row.saga_state, [(s["tool_name"], s["state"]) for s in row.steps]) == ("compensated", [("history.pickup", "failed")])
+    # And again on its one retry.
+    assert [(row.saga_state, [(s["tool_name"], s["state"]) for s in row.steps]) for row in await rows(api, thread)] == [
+        ("compensated", [("history.pickup", "failed")]),
+    ] * 2
     # The landing answered, as one whose commit step failed does: nothing of it reached the real files.
     assert [report["landing"] for report in await reports(api, master)] == ["compensated"]
     await ends(api, SandboxPool(pods), thread)  # its next turn, with no tool
@@ -470,3 +474,33 @@ async def test_a_redo_note_names_who_changed_each_file_and_no_one_for_a_file_hel
         "- notes.txt: it goes with a change that was not applied\n"
         "Re-apply your change to the current version of each.]"
     )}
+
+
+async def test_a_file_changed_between_the_pickup_and_its_apply_is_retried_as_an_overlap(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    apply, saved = History.apply, pods.root / "saved"
+
+    def your_save_lands_first(self, path, before, after):
+        # Once: the pod forks a child per call, which inherits this.
+        if path == "c.md" and not saved.exists():
+            saved.touch()
+            (self.project / "c.md").write_text("saved by you just now")
+        return apply(self, path, before, after)
+
+    monkeypatch.setattr(History, "apply", your_save_lands_first)
+    await a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "for f in a b c d e; do echo $f > $f.md; done"})),
+        _final_response("Wrote five notes."),
+    ], pool=SandboxPool(pods), saga_settings=QUICK)
+    # Rolled back whole, then tried once more: your c.md stays, the other four land.
+    assert pods.real_names() == ["Report.docx", "a.md", "b.md", "c.md", "d.md", "e.md", "notes.txt"]
+    assert (pods.project / "c.md").read_text() == "saved by you just now"
+    put_back, retried = await rows(api, thread)
+    assert (put_back.saga_state, retried.saga_state) == ("compensated", "completed")
+    # Your save is the retry's pickup, by you.
+    assert [f["path"] for f in retried.picked_up] == ["c.md"]
+    [report] = await reports(api, master)
+    assert "landing" not in report and {f["ref"]: f["landing"] for f in report["files"]}["c.md"] == "redoing"
+    [redo] = await api.app.state.session_store.get_events(thread.id, types=[EventType.HISTORY_REDO])
+    assert redo.data["files"] == [{"path": "c.md", "reason": "changed", "by": {"kind": "you"}}]
