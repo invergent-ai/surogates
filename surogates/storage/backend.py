@@ -14,6 +14,7 @@ based on :class:`~surogates.storage.settings.StorageSettings`.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -24,6 +25,13 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
+
+#: How much of an object a streamed read holds at once.
+_CHUNK = 1 << 20
+
+
+class TooLarge(ValueError):
+    """An object holds more than its reader said it would take."""
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +84,15 @@ class StorageBackend(Protocol):
         what is stored is not its own to trust: never through a link, at
         the key or at a folder above it, and over nothing but a plain
         file.  Raises ``ValueError`` for a key it will not write.
+        """
+        ...
+
+    async def download(self, bucket: str, key: str, target: Path, *, limit: int | None = None) -> int:
+        """Read an object into the file *target*, a piece at a time; its size.
+
+        For an object that may be large: none of it is held whole.  Raises
+        ``KeyError`` if not found, and :class:`TooLarge`, with *target*
+        removed, once it holds more than *limit* bytes.
         """
         ...
 
@@ -247,6 +264,12 @@ class LocalBackend:
         finally:
             for fd in reversed(opened):
                 os.close(fd)
+
+    async def download(self, bucket: str, key: str, target: Path, *, limit: int | None = None) -> int:
+        path = self._resolve(bucket, key)
+        if not path.is_file():
+            raise KeyError(f"{bucket}/{key}")
+        return await asyncio.to_thread(_copy, path, target, limit, f"{bucket}/{key}")
 
     async def exists(self, bucket: str, key: str) -> bool:
         return self._resolve(bucket, key).is_file()
@@ -441,6 +464,32 @@ class S3Backend:
     ) -> None:
         await self.write(bucket, key, text.encode(encoding))
 
+    async def download(self, bucket: str, key: str, target: Path, *, limit: int | None = None) -> int:
+        async with self._client() as s3:
+            try:
+                resp = await s3.get_object(Bucket=bucket, Key=key)
+            except s3.exceptions.NoSuchKey:
+                raise KeyError(f"{bucket}/{key}")
+            except Exception as exc:
+                if "NoSuchKey" in str(exc) or "404" in str(exc):
+                    raise KeyError(f"{bucket}/{key}") from exc
+                raise
+            written, body = 0, resp["Body"]
+            try:
+                with open(target, "wb") as out:
+                    async for chunk in body.iter_chunks(_CHUNK):
+                        written += len(chunk)
+                        if limit is not None and written > limit:
+                            raise TooLarge(f"{bucket}/{key}")
+                        await asyncio.to_thread(out.write, chunk)
+            except BaseException:
+                Path(target).unlink(missing_ok=True)
+                raise
+            finally:
+                # Let go whatever ended the read: an object past its limit is not read to its end.
+                body.close()
+            return written
+
     async def exists(self, bucket: str, key: str) -> bool:
         async with self._client() as s3:
             try:
@@ -588,6 +637,22 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         except OSError:
             pass
         raise
+
+
+def _copy(source: Path, target: Path, limit: int | None, name: str) -> int:
+    """Copy *source* to *target* a piece at a time; its size.  :class:`TooLarge`, with *target* removed, past *limit*."""
+    written = 0
+    try:
+        with open(source, "rb") as src, open(target, "wb") as out:
+            while chunk := src.read(_CHUNK):
+                written += len(chunk)
+                if limit is not None and written > limit:
+                    raise TooLarge(name)
+                out.write(chunk)
+    except BaseException:
+        Path(target).unlink(missing_ok=True)
+        raise
+    return written
 
 
 def _atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
