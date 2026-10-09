@@ -1791,6 +1791,41 @@ def test_a_pruning_keeps_every_ref_under_a_kept_name_ending_in_a_slash(tmp_path,
     assert git(durable, "fsck", "--no-dangling") == ""
 
 
+def test_a_helpers_version_the_thread_did_not_take_stays_in_the_history_when_the_turn_changed_nothing_else(tmp_path, project):
+    durable = project / "_history"
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first, "saga:1")
+    untaken, kept = "refs/helpers/t1/not-taken", ["refs/heads/threads/t1", "refs/bases/t1", "refs/handoff/t1", "refs/handoff-from/t1", "refs/helpers/t1/"]
+    handed_back = []
+    for day, yours in enumerate((b"PK\x03\x04 report v2, saved by you", b"PK\x03\x04 report v3, saved by you")):
+        (project / "Report.docx").write_bytes(yours)
+        run = a_helper(tmp_path, project, f"h{day}")  # a helper with no hand-off: it starts at its thread's branch
+        (run.copy / "Report.docx").write_bytes(b"PK\x03\x04 report v1 + numbers of day %d" % day)
+        handed_back.append(run.hand_back(author=A, trailers=KEPT)["commit"])
+        # The thread's next turn takes the helper's work up, your version stays, and it changes nothing itself.
+        turn = a_pod(tmp_path, project).commit_turn(author=A, trailers=TURN)
+        assert (turn["commit"], turn["not_taken"]) == (None, ["Report.docx"])
+        # No turn was pushed to name the hand-off, and the hand-off went as taken up: a ref of the thread's names it.
+        refs = git(durable, "for-each-ref", "--format=%(refname)").splitlines()
+        assert untaken in refs and not [ref for ref in refs if "handoff" in ref]
+        assert set(handed_back) <= set(git(durable, "rev-list", untaken).split())
+    # The second day's ref names both days' hand-offs: the first is not let go for the second.
+    assert [git(durable, "show", f"{commit}:Report.docx") for commit in handed_back] == [
+        "PK\x03\x04 report v1 + numbers of day 0", "PK\x03\x04 report v1 + numbers of day 1",
+    ]
+    # A pruning that spares no pack for its age keeps them, with the thread's other refs.
+    assert a_pod(tmp_path, project, "t2").prune(keep=kept, now=time.time(), spare=0)["pruned"] is True
+    assert [git(durable, "show", f"{commit}:Report.docx") for commit in handed_back] == [
+        "PK\x03\x04 report v1 + numbers of day 0", "PK\x03\x04 report v1 + numbers of day 1",
+    ]
+    assert git(durable, "fsck", "--no-dangling") == ""
+    # A turn with nothing left out writes no such ref, and moves none.
+    named = git(durable, "rev-parse", untaken)
+    assert a_pod(tmp_path, project).commit_turn(author=A, trailers=TURN)["not_taken"] == []
+    assert git(durable, "rev-parse", untaken) == named
+
+
 def test_a_pod_made_again_drops_the_hand_off_its_stopped_turn_made_and_no_other_turns(tmp_path, project):
     durable = project / "_history"
     thread = a_pod(tmp_path, project)

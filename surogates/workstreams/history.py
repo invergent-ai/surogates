@@ -224,7 +224,9 @@ async def over_history_cap(storage: Any, session: Any) -> bool:
 async def kept_refs(session_factory: Any, workstream_id: UUID | str) -> list[str]:
     """The refs a pruning keeps: each live thread's, and each resolved within the window.
 
-    A thread's branch and base, its hand-off, and its helpers' copies kept apart.
+    A thread's branch and base, its hand-off, and under its helpers' name
+    their copies kept apart and the hand-offs whose versions its copy left
+    out in a turn that changed nothing else.
     """
     ended = WorkstreamThread.resolved_at > func.now() - timedelta(days=PRUNE_DAYS)
     async with session_factory() as db:

@@ -244,6 +244,14 @@ class History:
         """A failed helper's copy, kept in history beside its thread's and merged onto nothing."""
         return f"refs/helpers/{self.thread}/{self.helper}"
 
+    @property
+    def untaken(self) -> str:
+        """The hand-offs whose helpers' versions the thread's copy left out, when no turn of the thread names them.
+
+        Among the thread's helpers' refs, which a pruning keeps while it keeps the thread's.
+        """
+        return f"refs/helpers/{self.thread}/not-taken"
+
     # ------------------------------------------------------------------
     # The copy
     # ------------------------------------------------------------------
@@ -414,6 +422,13 @@ class History:
         refs = self._durable_refs()
         if not self._copy("diff", "--cached", "--name-only", base):
             taken = self._taken_up(refs)
+            behind = self._behind(base)
+            if left_out["not_taken"] and behind:
+                # A helper's version this copy left out is told as kept.  No turn is pushed to name the
+                # hand-off behind it, so a ref among the thread's helpers' names it, with what it named before.
+                earlier = refs.get(self.untaken)
+                named = [*behind, *([earlier] if earlier and earlier not in behind else [])]
+                taken[self.untaken] = named[0] if len(named) == 1 else self._folded(named)
             if any(refs.get(ref) != to for ref, to in taken.items()):
                 # What it took up and threw away stays away: no later take-up, and no later helper, starts from it.
                 self._push(taken, expect={})
