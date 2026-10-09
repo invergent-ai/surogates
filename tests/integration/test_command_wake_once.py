@@ -683,6 +683,9 @@ async def test_compress_typed_before_a_question_compresses_the_conversation_as_i
     [conversation] = workers.compressed
     assert [message["content"] for message in conversation if message["role"] == "user"] == [asked for asked, _ in TALK]
 
+    await workers.wake(chat)
+    assert workers.requests[0][-1] == {"role": "user", "content": "And Q1?"}
+
 
 async def test_a_command_refused_by_its_users_limit_is_run_at_the_retry_also_when_the_retrys_first_wake_crashes(api, workers):
     master = await master_of(api, await create(api))
@@ -914,22 +917,76 @@ async def test_a_second_command_sent_as_the_first_ones_wake_begins_is_run_and_no
     assert workers.requests[0][-1] == {"role": "user", "content": "Ship the Q3 report"}
 
 
-async def test_a_question_asked_before_a_command_gets_its_turn_after_it(workers):
+SAID = [message for asked, said in TALK for message in ({"role": "user", "content": asked}, {"role": "assistant", "content": said})]
+
+
+async def test_a_question_asked_before_a_command_is_answered_first_and_the_model_is_not_shown_the_command(workers):
     chat = await workers.chat()
     await workers.says(chat, "And Q1?")
     await workers.says(chat, "/goal status")
     await workers.nobody_is_queued()
 
     await workers.wake(chat)
-    # The command is answered; the chat does not rest over the question, and is queued for it.
-    assert (workers.ran, workers.requests, await workers.status(chat)) == (["_handle_goal_command"], [], "active")
-    assert not await workers.nothing_waits(chat)
+    # The log's order: the question's turn first.  The model is asked with the question last, and
+    # the command, which is not its to read, is not in what it is sent.
+    assert workers.requests == [SAID + [{"role": "user", "content": "And Q1?"}]]
+    assert (workers.ran, await workers.status(chat)) == ([], "completed")
     assert await queued(workers.api, await workers.session(chat))
 
     await workers.wake(chat)
+    assert (workers.ran, len(workers.requests), await workers.status(chat)) == (["_handle_goal_command"], 1, "completed")
+    assert (await workers.said(chat))[-2:] == ["Noted.", "No active outcome. Set one with /goal <text>."]
+
+
+async def test_a_question_asked_after_compress_reaches_the_model_after_the_compressed_conversation(workers):
+    chat = await workers.chat()
+    await workers.says(chat, "/compress")
+    await workers.says(chat, "And Q1?")
+    for _ in range(2):
+        await workers.wake(chat)
+
+    assert workers.requests == [[
+        {"role": "user", "content": "Thanks."}, {"role": "assistant", "content": "Any time."},
+        {"role": "assistant", "content": "Context compressed: 9 → 2 messages (7 removed). Strategy: summary."},
+        {"role": "user", "content": "And Q1?"},
+    ]]
+    assert (workers.ran, await workers.status(chat)) == (["_handle_compress_command"], "completed")
+
+
+async def test_a_question_asked_before_a_commands_answer_was_written_is_asked_after_that_answer(workers):
+    chat = await workers.chat()
+
+    async def the_user_goes_on():
+        await workers.says(chat, "And Q1?")
+
+    await workers.says(chat, "/goal status")
+    await workers.worker(store=Meanwhile(workers.store, before=the_user_goes_on)).wake(chat)
+    await workers.wake(chat)
+
+    # The answer belongs with its command, wherever in the log it was written.
+    assert workers.requests == [SAID + [
+        {"role": "user", "content": "/goal status"},
+        {"role": "assistant", "content": "No active outcome. Set one with /goal <text>."},
+        {"role": "user", "content": "And Q1?"},
+    ]]
+
+
+async def test_clear_typed_during_a_turn_that_was_cut_off_waits_for_the_turn_and_then_clears(workers):
+    chat = await workers.chat()
+    await a_turn_cut_off(workers, chat, at="in the call", command="/clear")
+    assert await workers.swept(chat)
+
+    await workers.wake(chat)
+    # The turn is resumed as it was left: the command is not in what the model is sent.
     [conversation] = workers.requests
-    assert {"role": "user", "content": "And Q1?"} in conversation
-    assert (workers.ran, (await workers.said(chat))[-1], await workers.status(chat)) == (["_handle_goal_command"], "Noted.", "completed")
+    assert conversation[:len(SAID) + 1] == SAID + [{"role": "user", "content": "Open the report."}]
+    assert all(message.get("content") not in ("/clear", "Conversation cleared.") for message in conversation)
+    assert workers.ran == []
+
+    await workers.wake(chat)
+    await workers.wake(chat)
+    # Then the conversation is cleared, and the model is asked nothing over the cleared chat.
+    assert (workers.ran, len(workers.requests), await workers.status(chat)) == (["_handle_clear_command"], 1, "completed")
 
 
 async def test_a_question_and_a_command_sent_while_a_command_is_answered_are_each_taken_up(workers):
@@ -972,17 +1029,19 @@ async def a_turn_cut_off(workers: Workers, chat: UUID, *, at: str, command: str 
 
 
 @pytest.mark.parametrize("at", ["in the call", "after the call's result"])
-async def test_a_turn_cut_off_with_a_command_waiting_is_resumed_once_the_command_is_run(workers, at):
+async def test_a_turn_cut_off_with_a_command_waiting_is_resumed_and_the_command_run_after_it(workers, at):
     chat = await workers.chat()
     await a_turn_cut_off(workers, chat, at=at, command="/goal status")
     assert await workers.swept(chat)
 
     await workers.wake(chat)
-    # The command first, and the chat does not rest over the turn that was cut off.
-    assert (workers.ran, workers.requests, await workers.status(chat)) == (["_handle_goal_command"], [], "active")
+    # The turn first, as the same death with no command: the command waits for its end.
+    assert (workers.ran, len(workers.requests), await workers.status(chat)) == ([], 1, "completed")
 
     await workers.wake(chat)
-    assert (workers.ran, len(workers.requests), (await workers.said(chat))[-1]) == (["_handle_goal_command"], 1, "Noted.")
+    assert (workers.ran, len(workers.requests), (await workers.said(chat))[-1]) == (
+        ["_handle_goal_command"], 1, "No active outcome. Set one with /goal <text>.",
+    )
     assert (await workers.status(chat), EventType.SESSION_FAIL.value in await workers.log(chat)) == ("completed", False)
 
 

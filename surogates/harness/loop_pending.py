@@ -144,24 +144,44 @@ _TURN_END_EVENT_TYPES = frozenset({
 
 
 def _turn_cut_off(events: list[Any]) -> bool:
-    """Return True if *events* end in a turn of the model's that its worker's death cut off.
+    """Return True if *events* end in a turn of the model's that its worker's death cut off."""
+    return _cut_off_at(events) is not None
+
+
+def _cut_off_at(events: list[Any]) -> int | None:
+    """Return where the turn of the model's that *events* end in was cut off, as the id of its last
+    request or answer; None when they end in no such turn.
 
     The model was asked and has not answered, or its last answer called
     tools: the turn is to be gone on with.  An answer of the harness's to a
     command is no word of the model's and leaves the turn as it was.
     """
-    cut_off = False
+    at: int | None = None
     for event in events:
         event_type = _event_type(event)
         if event_type == EventType.LLM_REQUEST.value:
-            cut_off = True
+            at = event.id
         elif event_type == EventType.LLM_RESPONSE.value:
             data = getattr(event, "data", None) or {}
             if "answers" not in data:
-                cut_off = bool((data.get("message") or {}).get("tool_calls"))
+                at = event.id if (data.get("message") or {}).get("tool_calls") else None
         elif event_type in _TURN_END_EVENT_TYPES:
-            cut_off = False
-    return cut_off
+            at = None
+        elif event_type == EventType.CONTEXT_COMPACT.value and (getattr(event, "data", None) or {}).get("strategy") == "clear":
+            # The user cleared the conversation: the turn that was in it is not one to go on with.
+            at = None
+    return at
+
+
+def _first_plain_message_unread(events: list[Any], *, is_plain_message: Any) -> int | None:
+    """Return the id of the first message the user wrote themselves, and no command, that no model request came after."""
+    first: int | None = None
+    for event in events:
+        if _event_type(event) == EventType.LLM_REQUEST.value:
+            first = None
+        elif first is None and is_plain_message(event):
+            first = event.id
+    return first
 
 
 def _gives_a_goal_its_turn(event: Any) -> bool:
@@ -184,10 +204,35 @@ def _goal_turn_waits(events: list[Any]) -> bool:
 
 def _plain_message_unread(events: list[Any], *, is_plain_message: Any) -> bool:
     """Return True if a message the user wrote themselves, and no command, is in *events* with no model request after it."""
-    unread = False
+    return _first_plain_message_unread(events, is_plain_message=is_plain_message) is not None
+
+
+def _in_typed_order(events: list[Any]) -> list[Any]:
+    """Return *events* with each thing the harness wrote for a command right after the command's message.
+
+    A command's answer, and the compaction ``/compress`` or ``/clear``
+    writes, name the message they answer.  They are written when the
+    command's wake runs, which can be after its user has said more.  The
+    conversation the model is shown keeps them with their command: what was
+    said after the command is said after its answer, and is not swallowed
+    by its compaction.
+    """
+    named: dict[Any, list[Any]] = {}
     for event in events:
-        if _event_type(event) == EventType.LLM_REQUEST.value:
-            unread = False
-        elif is_plain_message(event):
-            unread = True
-    return unread
+        answers = (getattr(event, "data", None) or {}).get("answers")
+        if answers is not None and _event_type(event) in (EventType.LLM_RESPONSE.value, EventType.CONTEXT_COMPACT.value):
+            named.setdefault(answers, []).append(event)
+    if not named:
+        return events
+    moved = {id(event) for group in named.values() for event in group}
+    ordered: list[Any] = []
+    for event in events:
+        if id(event) in moved:
+            continue
+        ordered.append(event)
+        if _event_type(event) == EventType.USER_MESSAGE.value:
+            ordered.extend(named.pop(event.id, ()))
+    # An answer whose message is not among the events stays where it was written.
+    for group in named.values():
+        ordered.extend(group)
+    return ordered

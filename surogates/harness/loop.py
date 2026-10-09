@@ -179,6 +179,8 @@ from surogates.harness.loop_pending import (
     _actionable_pending_events,
     _aware,
     _command_answered,
+    _cut_off_at,
+    _first_plain_message_unread,
     _first_unread,
     _goal_turn_waits,
     _left_behind,
@@ -829,8 +831,24 @@ class AgentHarness(
         )
 
     def _waiting_command(self, session: Session, events: list) -> Any | None:
-        """The oldest message of the user's in *events* that is a command
-        of the harness's no wake has answered; None when there is none.
+        """The oldest of ``_waiting_commands``; None when there is none."""
+        return next(iter(self._waiting_commands(session, events)), None)
+
+    def _model_goes_first(self, session: Session, events: list, command: Any) -> bool:
+        """Whether a turn of the model's comes before *command* in the
+        log's order: a message of the user's own before it that no request
+        has read, or a turn before it that a dead worker cut off.  The
+        command then waits for that turn's end, as one typed during a turn
+        under way does."""
+        cut_off = _cut_off_at(events)
+        unread = _first_plain_message_unread(
+            events, is_plain_message=lambda event: self._is_plain_message(session, event),
+        )
+        return (cut_off is not None and cut_off < command.id) or (unread is not None and unread < command.id)
+
+    def _waiting_commands(self, session: Session, events: list) -> list:
+        """The messages of the user's in *events* that are commands of the
+        harness's no wake has answered, oldest first.
         Every command a user typed is run, once, in the order typed,
         however many arrived before or during a wake.  One that waits is
         work for a wake whatever the cursor says, and whatever the session
@@ -838,16 +856,16 @@ class AgentHarness(
         end older than the sweeper's own window for doing again what a
         user asked for (``RERUN_WINDOW``)."""
         now = datetime.now(timezone.utc)
-        for event in events:
+        return [
+            event for event in events
             if (
                 event.type == EventType.USER_MESSAGE.value
                 and not (event.data or {}).get("synthetic")
                 and self._answers_itself(_user_event_text(event.data), session)
                 and not _command_answered(events, event.id)
                 and not _left_behind(events, event.id, now=now, window=RERUN_WINDOW)
-            ):
-                return event
-        return None
+            )
+        ]
 
     async def _has_waiting_command(self, session: Session) -> bool:
         """Whether a command typed during the turn that ended this session
@@ -1485,8 +1503,17 @@ class AgentHarness(
                     logger.debug("Memory manager initialization failed", exc_info=True)
 
             # 6. Rebuild the message list from the full event history.
+            # A command that waits is the harness's to answer and never the
+            # model's to read: a turn of the model's is not shown it.  The
+            # wake that runs the command keeps it, for /compress to find.
+            waiting = self._waiting_command(session, all_events)
+            model_first = waiting is not None and self._model_goes_first(session, all_events, waiting)
+            shown = all_events
+            if waiting is None or model_first:
+                unanswered = {id(event) for event in self._waiting_commands(session, all_events)}
+                shown = [event for event in all_events if id(event) not in unanswered]
             messages = self._rebuild_messages(
-                all_events,
+                shown,
                 workspace_path=(session.config or {}).get("workspace_path"),
             )
 
@@ -1575,7 +1602,9 @@ class AgentHarness(
             # it open, and goes on to the model's turn only where the
             # session works between its user's messages, as a mission's
             # coordinator does.
-            waiting = self._waiting_command(session, all_events)
+            if model_first:
+                # The log's order: the turn before the command goes first.
+                waiting = None
             typed_at = _latest_user_event_id(all_events) or 0
             if waiting is not None:
                 typed_at, last_user_content = waiting.id, _user_event_text(waiting.data)
@@ -1725,6 +1754,15 @@ class AgentHarness(
 
             # 11. Run the core LLM loop.
             await self._run_loop(session, messages, system_prompt, lease, cost_tracker=cost_tracker, all_events=all_events)
+
+            # 12. The command that waited for this turn gets its wake.
+            if model_first and self._redis is not None:
+                from surogates.config import enqueue_session
+
+                await enqueue_session(
+                    self._redis, org_id=str(session.org_id),
+                    agent_id=session.agent_id, session_id=session.id,
+                )
 
         except Exception as _harness_exc:
             cut_off = True
@@ -4996,6 +5034,7 @@ class AgentHarness(
             session.id,
             EventType.CONTEXT_COMPACT,
             {
+                **self._names_its_message(),
                 "compacted_messages": [],
                 "strategy": "clear",
                 "original_message_count": 0,
@@ -5255,6 +5294,7 @@ class AgentHarness(
             session.id,
             EventType.CONTEXT_COMPACT,
             {
+                **self._names_its_message(),
                 **summary_data,
                 "compacted_messages": compressed,
             },

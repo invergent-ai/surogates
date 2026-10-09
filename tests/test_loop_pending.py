@@ -5,7 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from surogates.harness.loop_pending import _actionable_pending_events, _command_answered, _left_behind
+from surogates.harness.loop_pending import (
+    _actionable_pending_events, _command_answered, _cut_off_at, _in_typed_order, _left_behind,
+)
 from surogates.session.events import EventType
 
 
@@ -114,3 +116,30 @@ def test_a_command_is_left_behind_once_the_turns_end_after_it_is_older_than_the_
     assert _left_behind(ended(timedelta(days=40)), 2, now=now, window=hour) is False
     old = SimpleNamespace(id=2, type=EventType.LLM_RESPONSE.value, data={}, created_at=now - timedelta(days=40))
     assert _left_behind([event(1, EventType.USER_MESSAGE), old], 1, now=now, window=hour) is False
+
+
+def test_what_the_harness_wrote_for_a_command_is_replayed_right_after_the_command():
+    events = [
+        event(1, EventType.USER_MESSAGE), event(2, EventType.USER_MESSAGE), event(3, EventType.USER_MESSAGE),
+        event(4, EventType.HARNESS_WAKE), event(5, EventType.CONTEXT_COMPACT, answers=1), event(6, EventType.LLM_RESPONSE, answers=1),
+        event(7, EventType.LLM_RESPONSE, answers=3), event(8, EventType.LLM_RESPONSE, answers=99), event(9, EventType.LLM_RESPONSE),
+    ]
+    # Each with its own command, in the order written; one whose command is not here, and the
+    # model's own words, stay where they are.
+    assert [e.id for e in _in_typed_order(events)] == [1, 5, 6, 2, 3, 7, 4, 9, 8]
+    assert _in_typed_order(events[:4]) == events[:4]
+
+
+def test_where_a_turn_was_cut_off():
+    asked = event(2, EventType.LLM_REQUEST)
+    calls = event(3, EventType.LLM_RESPONSE, message={"tool_calls": [{"id": "call_1"}]})
+    said = event(3, EventType.LLM_RESPONSE, message={"content": "Done."})
+    assert _cut_off_at([event(1, EventType.USER_MESSAGE), asked]) == 2
+    assert _cut_off_at([asked, calls, event(4, EventType.TOOL_RESULT)]) == 3
+    assert _cut_off_at([asked, said]) is None
+    # A command's answer is no word of the model's; a turn's end, a stop and a clear close the turn.
+    assert _cut_off_at([asked, event(3, EventType.LLM_RESPONSE, answers=1, message={"content": "No active outcome."})]) == 2
+    for end in (EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, EventType.SESSION_PAUSE, EventType.SESSION_STOPPED):
+        assert _cut_off_at([asked, event(3, end)]) is None
+    assert _cut_off_at([asked, event(3, EventType.CONTEXT_COMPACT, strategy="clear")]) is None
+    assert _cut_off_at([asked, event(3, EventType.CONTEXT_COMPACT, strategy="summary")]) == 2

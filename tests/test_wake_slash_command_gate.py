@@ -80,7 +80,7 @@ def _stub_store(session: Session, events: list[Any]) -> AsyncMock:
     )
     store.release_lease = AsyncMock(return_value=None)
     store.get_harness_cursor = AsyncMock(return_value=0)
-    store.get_events = AsyncMock(return_value=events)
+    store.get_events = AsyncMock(side_effect=lambda *_, **__: list(events))
 
     async def emit_event(session_id, event_type, data, **_):
         # As the real store: what a wake writes, its later reads find.
