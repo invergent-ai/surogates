@@ -1093,10 +1093,16 @@ class SessionStore:
         data: dict,
         *,
         lease_token: UUID | None = None,
+        status: str | None = None,
     ) -> int:
         """Append an event and atomically update session counters.
 
         Returns the newly assigned event id (``BIGSERIAL``).
+
+        With *status*, the session's status is set in the same transaction:
+        an event that says a session is paused and the status that makes it
+        so are both there or neither.  ``archived`` is final, as for
+        :meth:`update_session_status`.
 
         With *lease_token*, the event is committed only while that token is
         the session's lease: a worker that lost the session must not answer
@@ -1179,6 +1185,9 @@ class SessionStore:
             # seconds is as good as a bump per token: the guard makes the
             # statement match no row and write nothing the rest of the time.
             params: dict[str, Any] = {"id": session_id}
+            if status is not None:
+                counter_clause += ", status = CASE WHEN status = 'archived' THEN status ELSE :status END"
+                params["status"] = status
             touch_guard = ""
             if event_type == EventType.LLM_DELTA:
                 touch_guard = (
@@ -1576,12 +1585,12 @@ class SessionStore:
         return events
 
     async def last_event(
-        self, session_id: UUID, type: EventType, *, containing: dict[str, Any] | None = None,
+        self, session_id: UUID, *types: EventType, with_key: str | None = None,
     ) -> Event | None:
-        """The session's latest *type* event whose data holds *containing*; None when it has none."""
-        stmt = select(EventRow).where(EventRow.session_id == session_id, EventRow.type == type.value)
-        if containing:
-            stmt = stmt.where(EventRow.data.contains(containing))
+        """The session's latest event of one of *types* whose data has the key *with_key*; None when it has none."""
+        stmt = select(EventRow).where(EventRow.session_id == session_id, EventRow.type.in_([t.value for t in types]))
+        if with_key is not None:
+            stmt = stmt.where(EventRow.data.has_key(with_key))
         stmt = stmt.order_by(EventRow.id.desc()).limit(1)
         async with self._sf() as db:
             row = (await db.execute(stmt)).scalars().first()

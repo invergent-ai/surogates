@@ -115,6 +115,7 @@ async def notify_parent_on_completion(
     session_factory: Any | None = None,
     files: list[dict[str, Any]] | None = None,
     landing: dict[str, Any] | None = None,
+    unkept: dict[str, Any] | None = None,
 ) -> None:
     """Emit a ``WORKER_COMPLETE`` event into the parent session and re-enqueue it.
 
@@ -145,8 +146,12 @@ async def notify_parent_on_completion(
     not written, has None, so its report lists no files rather than
     claiming none.  A thread whose turn landed reports its *landing*'s
     files instead, each landed or not merged, the excluded files it made,
-    the folders inside a git repository it wrote into, and the landing's
-    state when it did not complete.
+    the folders inside a git repository it wrote into, the helpers' files
+    its copy did not take up, and the landing's state when it did not
+    complete.
+
+    A thread's helper whose hand-back failed reports *unkept*: ``kept``
+    false, and ``left``, the files kept apart, which its thread's copy lacks.
     """
     try:
         from surogates.harness.message_utils import extract_final_response
@@ -157,6 +162,7 @@ async def notify_parent_on_completion(
         payload: dict[str, Any] = {
             "worker_id": str(worker_session_id),
             "result": final_response[:_MAX_RESULT_CHARS],
+            **(unkept or {}),
         }
         if task_id is not None:
             payload["task_id"] = str(task_id)
@@ -191,14 +197,17 @@ async def notify_parent_on_completion(
             payload["title"] = title
             if files is not None:
                 payload["files"] = files
-            for key in ("excluded", "repositories") if landing is not None else ():
-                if landing[key]:
+            for key in ("excluded", "repositories", "not_taken") if landing is not None else ():
+                if landing.get(key):
                     # At most this many names, and how many there are in all.
                     payload[key] = landing[key][:_MAX_LEFT_OUT_NAMED]
                     if len(landing[key]) > _MAX_LEFT_OUT_NAMED:
                         payload[f"{key}_count"] = len(landing[key])
             if landing is not None and landing["state"] != "completed":
                 payload["landing"] = landing["state"]
+                if landing.get("saved"):
+                    # Not landed, and not lost: the turn is on the thread's branch.
+                    payload["saved"] = True
 
         await session_store.emit_event(
             parent_session_id,
@@ -234,6 +243,7 @@ async def notify_parent_on_failure(
     redis: Redis | None = None,
     task_id: UUID | None = None,
     session_factory: Any | None = None,
+    not_taken: list[str] | None = None,
 ) -> None:
     """Emit a ``WORKER_FAILED`` event into the parent session and re-enqueue it.
 
@@ -242,6 +252,10 @@ async def notify_parent_on_failure(
 
     ``task_id`` is included in the event payload when this worker session
     was running for a subagent task; ``None`` for plain spawn_worker.
+
+    A project's thread whose failed turn was kept also reports
+    *not_taken*, the helpers' files its copy did not take up, as a landing
+    reports them.
     """
     try:
         payload: dict[str, Any] = {
@@ -253,6 +267,11 @@ async def notify_parent_on_failure(
         title = await _thread_title(session_factory, worker_session_id)
         if title is not None:
             payload["title"] = title
+            if not_taken:
+                # At most this many names, and how many there are in all.
+                payload["not_taken"] = not_taken[:_MAX_LEFT_OUT_NAMED]
+                if len(not_taken) > _MAX_LEFT_OUT_NAMED:
+                    payload["not_taken_count"] = len(not_taken)
 
         await session_store.emit_event(
             parent_session_id,

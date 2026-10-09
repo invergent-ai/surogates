@@ -16,6 +16,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -85,16 +86,24 @@ class SagaOrchestrator:
         self._default_max_retries = default_max_retries
         self._retry_delay = retry_delay
 
+    @property
+    def settings(self) -> SimpleNamespace:
+        """The bounds its steps run with, as the settings it was made from name them: a fence is counted from these."""
+        return SimpleNamespace(
+            default_step_timeout=self._default_step_timeout, default_max_retries=self._default_max_retries,
+            retry_delay=self._retry_delay,
+        )
+
     # ------------------------------------------------------------------
     # Saga lifecycle
     # ------------------------------------------------------------------
 
-    def create_saga(self, session_id: UUID) -> Saga:
+    def create_saga(self, session_id: UUID, kind: str = "tools") -> Saga:
         """Create a new saga for *session_id*."""
-        saga = Saga(
-            saga_id=f"saga:{uuid.uuid4()}",
-            session_id=session_id,
-        )
+        return self.adopt(Saga(saga_id=f"saga:{uuid.uuid4()}", session_id=session_id, kind=kind))
+
+    def adopt(self, saga: Saga) -> Saga:
+        """Take over *saga*, rebuilt from its record, to go on with it or compensate it."""
         self._sagas[saga.saga_id] = saga
         return saga
 
@@ -207,6 +216,23 @@ class SagaOrchestrator:
         if last_error:
             raise last_error
         raise SagaStateError("Step execution failed with no error captured")
+
+    async def attempt(self, executor: Callable[..., Any], *, least: int = 1) -> Any:
+        """Run *executor* as a step is tried, with a step's timeout, retries and waits, outside any saga.
+
+        For a call that changes nothing and is safe to repeat: a look that
+        a saga's settling needs.  Raises the last try's error.  It is
+        tried *least* times at least, where a step's retries are fewer.
+        """
+        attempts = max(least, 1 + self._default_max_retries)
+        for attempt in range(attempts):
+            try:
+                return await asyncio.wait_for(executor(), timeout=self._default_step_timeout)
+            except Exception:
+                if attempt == attempts - 1:
+                    raise
+                await asyncio.sleep(self._retry_delay * (attempt + 1))
+        raise SagaStateError("No try was made")
 
     # ------------------------------------------------------------------
     # Compensation (rollback)
@@ -321,6 +347,8 @@ class SagaOrchestrator:
                 saga = Saga(
                     saga_id=data["saga_id"],
                     session_id=UUID(data["session_id"]),
+                    # A log written before sagas had kinds holds tool sagas only.
+                    kind=data.get("kind", "tools"),
                 )
                 self._sagas[saga.saga_id] = saga
 

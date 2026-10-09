@@ -73,7 +73,11 @@ _MAX_READ_TIMESTAMPS = 1024
 _READ_TOOL_NAMES = frozenset({"read_file", "write_file", "patch"})
 
 # A landing's steps, as ``_history`` actions, and the History method each runs.
-_HISTORY_STEPS = {"commit": "commit_turn", "apply": "apply", "unapply": "unapply", "record": "record"}
+_HISTORY_STEPS = {
+    "fetch": "fetch", "commit": "commit_turn", "apply": "apply", "unapply": "unapply", "record": "record",
+    "keep": "keep", "prune": "prune", "hand_off": "hand_off", "hand_back": "hand_back",
+    "keep_apart": "keep_apart", "take_up": "take_up", "drop_hand_off": "drop_hand_off", "opened": "opened",
+}
 
 
 def _record_read(name: str, args: dict, workspace: str, result: str) -> None:
@@ -550,10 +554,14 @@ def main() -> None:
         if not user:
             logger.error("USER_ID is required in a thread's pod: the project's history is made as its user")
             sys.exit(1)
+        helper = os.environ.get("HISTORY_HELPER")
+        if not helper and not os.environ.get("HISTORY_TURN"):
+            logger.error("HISTORY_TURN is required in a thread's pod: its copy is opened for a turn of the thread")
+            sys.exit(1)
         history = History(
             repo=_shadow_repo_path(project, base=Path.home() / ".surogates" / "history"),
             project=Path(project), copy=Path(workspace),
-            thread=os.environ["HISTORY_THREAD"], user=user,
+            thread=os.environ["HISTORY_THREAD"], user=user, helper=helper, turn=os.environ.get("HISTORY_TURN"),
         )
 
     logger.info("Loading tool registry...")

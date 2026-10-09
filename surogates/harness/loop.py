@@ -80,7 +80,7 @@ from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.sandbox.pool import sandbox_session_key
-from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal
+from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
@@ -362,10 +362,35 @@ _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
     "goal", "mission", "auto-research", "code", "deep-research",
 })
 
-# The commands a project's thread refuses: a routine's runs, a mission's
-# tasks, a research's experiments and helpers would all edit a copy the
-# thread never lands, and so would a coding agent, whose turn never lands.
-_PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "mission", "auto-research", "deep-research", "code"})
+#: How long a stop waits to take back what its turn handed on: the pod, the project's lock and the
+#: pod's answer together.  Past it the stop goes on, and the hand-off stays as the turn left it.
+_STOP_HAND_OFF_BOUND = 60.0
+#: The threads whose stopped turn this worker could not write a turn-ending event for, each with the
+#: stopped turn's name and the event: written before the thread's next turn starts here, unless the
+#: thread has a later turn end by then.
+_STOPS_NOT_WRITTEN: dict[Any, tuple[int, dict[str, Any]]] = {}
+#: How many of them a worker keeps: the oldest goes for one more.
+_STOPS_KEPT = 1024
+
+
+def _keep_to_write(session_id: Any, turn: int, said: dict[str, Any]) -> None:
+    """Keep the stop of *session_id*'s turn *turn*, which could not be written, for the thread's next turn here."""
+    _STOPS_NOT_WRITTEN.pop(session_id, None)
+    _STOPS_NOT_WRITTEN[session_id] = (turn, said)
+    while len(_STOPS_NOT_WRITTEN) > _STOPS_KEPT:
+        oldest = next(iter(_STOPS_NOT_WRITTEN))
+        del _STOPS_NOT_WRITTEN[oldest]
+        logger.warning("Let go of the stop of thread %s that could not be written: too many are kept", oldest)
+
+# The commands a project's thread refuses.  A routine's runs would start from
+# old files, and their work would land only when someone next speaks to the
+# thread.  A coding agent's turn ends outside the thread's landing, so its
+# edits would stay in a copy never landed.  A deep research's writer works on
+# a copy of its own, where it finds none of the evidence its planner kept.
+# An auto-research run works on a git repository, and a copy holds none.
+# A mission's tasks each work on a copy of their own, handed back to the
+# thread: that one runs.
+_PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "auto-research", "deep-research", "code"})
 
 # The commands a chat on a local folder refuses: a research run's
 # experiments need the cloud's coding sandbox and a /workspace repository.
@@ -901,6 +926,11 @@ class AgentHarness(
         returning from the loop.
         """
         reason_msg = self._interrupt_message or "interrupted"
+        # A project thread's turn that is stopped is over from here on, whatever becomes of this worker.
+        # One taken at the wake, before its loop named a turn, has made no pod and handed nothing on:
+        # there is no turn of this wake to write an end for.
+        named = is_project_thread(session.config) and session.config.get("turn_after") is not None
+        stop_written = named and await self._write_that_the_turn_was_stopped(session, reason_msg)
         if saga is not None and saga.active_sagas:
             await self._compensate_sagas(saga, session, "interrupt")
         # A project's stopped turn spent what it spent: settle its holds now,
@@ -913,6 +943,7 @@ class AgentHarness(
                 self._settle_allowance_reservation(session, cost_tracker),
             )
         if self._sandbox_pool is not None:
+            await self._take_back_what_the_turn_handed_on(session)
             try:
                 await self._sandbox_pool.destroy_for_session(str(session.id))
             except Exception:
@@ -928,7 +959,7 @@ class AgentHarness(
         # and leave the client's terminal flag stuck on, suppressing
         # the running indicator for the new turn's deltas.
         current = await self._store.get_session(session.id)
-        if current.status == "paused":
+        if current.status == "paused" and not stop_written:
             await self._store.emit_event(
                 session.id,
                 EventType.SESSION_PAUSE,
@@ -950,6 +981,126 @@ class AgentHarness(
                 {"reason": "channel_stop", "worker_id": self._worker_id},
             )
         self._clear_interrupt()
+
+    async def _take_back_what_the_turn_handed_on(self, session: Session) -> None:
+        """Take a thread's stopped turn's own files off the hand-off it made for its helpers, before its pod goes.
+
+        A stopped turn lands nothing.  Its branch never had its work, but a
+        step that started a helper put its copy on the hand-off.  The pod
+        that made the hand-off knows it; where that pod went under the turn,
+        one is opened in its place.  As best it can, and within a bound.
+
+        Where it is not carried out, the log says so and why: the worker did
+        not hand the copy on itself (the turn was cut off and taken up
+        again), the pod or the project's lock was not had in time, or the
+        pod failed.  The stopped turn's files stay out all the same: the
+        hand-off names its turn, and the open of the next turn's copy
+        leaves another turn's own files out, keeping what helpers kept.
+
+        A turn that handed nothing on, as every turn of a session that is no
+        thread with a copy, is done here at once: no pod is asked, and none
+        opened.
+        """
+        from surogates.harness.landing import drop_hand_off, handed_on, turn_ended
+        from surogates.sandbox.pool import sandbox_session_key
+
+        left = "The thread's next copy leaves the stopped turn's own files out, and keeps its helpers' work."
+        if not handed_on(session):
+            named = is_project_thread(session.config) and session.config.get("turn_after") is not None
+            if named and await self._turn_started_a_helper(session):
+                logger.warning(
+                    "The stop of thread %s's turn was not carried out on its hand-off: this worker did not hand the "
+                    "copy on itself, the turn having been cut off and taken up again. %s", session.id, left,
+                )
+            return
+        try:
+            from surogates.harness.tool_exec import _build_session_sandbox_spec
+
+            # The turn's pod, or one in its place where it is gone: a pod made now is told which
+            # hand-offs the turn made.
+            owner = sandbox_session_key(session)
+
+            async def taken_back() -> None:
+                spec = await _build_session_sandbox_spec(session, self._tenant, owner, credential_vault=self._credential_vault)
+                await self._sandbox_pool.ensure(owner, spec)
+                await drop_hand_off(
+                    session_factory=self._session_factory, sandbox_pool=self._sandbox_pool, session=session,
+                    saga_settings=self._saga_settings,
+                )
+
+            # A stop stops: behind another thread's landing or the day's pruning the lock is minutes away.
+            await asyncio.wait_for(taken_back(), _STOP_HAND_OFF_BOUND)
+        except TimeoutError:
+            logger.warning(
+                "The stop of thread %s's turn was not carried out on its hand-off: its pod, the project's lock and "
+                "the pod's answer were not had within %d s. %s", session.id, _STOP_HAND_OFF_BOUND, left,
+            )
+        except Exception as exc:
+            logger.warning(
+                "The stop of thread %s's turn was not carried out on its hand-off: %s. %s", session.id, exc, left,
+                exc_info=True,
+            )
+        finally:
+            turn_ended(session)
+
+    async def _name_the_turn(self, session: Session) -> None:
+        """Before a thread's turn makes any pod: the name its pods are told (see :func:`landing.name_turn`).
+
+        A stop this worker could not write down for the thread is written
+        first, so the turn starting now comes after it; unless the thread
+        has had a turn end since, when it is only let go.
+        """
+        from surogates.harness.landing import TURN_ENDS, name_turn
+
+        kept = _STOPS_NOT_WRITTEN.get(session.id)
+        if kept is not None:
+            stopped, said = kept
+            ended = await self._store.last_event(session.id, *TURN_ENDS)
+            if (ended.id if ended else 0) == stopped:
+                await self._store.emit_event(session.id, EventType.SESSION_PAUSE, said)
+            # With a later turn end, written elsewhere since, the stopped turn is over already.
+            del _STOPS_NOT_WRITTEN[session.id]
+        await name_turn(self._store, session)
+
+    async def _write_that_the_turn_was_stopped(self, session: Session, reason: str) -> bool:
+        """Have a turn-ending event after a thread's turn that is stopped here, before anything else of the stop.
+
+        The user's own stop has one already, written by its route.  Any
+        other interrupt gets one now, so the thread's next turn is another
+        turn whatever becomes of this worker.  Whether one was written
+        here.  Where it cannot be, the log says so, and this worker writes
+        it before the thread's next turn starts here; a turn taken by
+        another worker first takes this turn's hand-off for its own, if
+        the stop could not take it back either.
+        """
+        from surogates.harness.landing import TURN_ENDS
+
+        said = {"reason": "interrupted", "message": reason, "worker_id": self._worker_id}
+        try:
+            ended = await self._store.last_event(session.id, *TURN_ENDS)
+            if (ended.id if ended else 0) != session.config.get("turn_after"):
+                return False
+            await self._store.emit_event(session.id, EventType.SESSION_PAUSE, said)
+            return True
+        except Exception:
+            _keep_to_write(session.id, session.config.get("turn_after") or 0, said)
+            logger.warning(
+                "Could not write that the turn of thread %s was stopped: it is written before the thread's next turn "
+                "here. Until then a turn another worker starts takes this turn's hand-off for its own, where the "
+                "stop did not take it back.", session.id, exc_info=True,
+            )
+            return False
+
+    async def _turn_started_a_helper(self, session: Session) -> bool:
+        """Whether a step of the thread's turn now ending called a tool that starts a helper, by its log."""
+        from surogates.harness.tool_exec import HELPER_STARTING_TOOLS
+
+        try:
+            # Since the turn-ending event the turn is named by: its own calls, a cut-off part of it included.
+            calls = await self._store.get_events(session.id, after=session.config.get("turn_after") or 0, types=[EventType.TOOL_CALL])
+        except Exception:
+            return False
+        return any(call.data.get("name") in HELPER_STARTING_TOOLS for call in calls)
 
     # ------------------------------------------------------------------
     # Lease renewal (background task)
@@ -1033,6 +1184,22 @@ class AgentHarness(
             return capability_allowed(session.config, name)
         return True
 
+    async def _with_history_cap(self, session: Session) -> Session:
+        """A project's thread, or a thread's helper, marked ``history_off`` while the project has more files than history keeps.
+
+        Its pod then has the plain layout, the real files at ``/workspace``:
+        it works on them, as before projects had history, and lands nothing.
+        A thread on the user's computer is never counted: it works in the folder there.
+        """
+        config = session.config or {}
+        if self._storage is None or not config.get("storage_bucket") or device_of(config) is not None or not (
+            is_project_thread(config) or config.get("history_thread")
+        ):
+            return session
+        from surogates.workstreams.history import over_history_cap
+
+        return session.model_copy(update={"config": {**config, "history_off": await over_history_cap(self._storage, session)}})
+
     def _overlay_repos(self, session: Session) -> Session:
         """Overlay the agent's configured repos + ssh targets onto a wake-local session.
 
@@ -1073,7 +1240,8 @@ class AgentHarness(
         if (
             name in _PROJECT_THREAD_REFUSED_COMMANDS
             and session is not None
-            and is_project_thread(session.config)
+            # A thread's helper too, and a helper's: its goal is read as its first message.
+            and under_a_thread(session.config)
         ):
             return thread_refusal(f"/{name}")
         if (
@@ -1184,6 +1352,7 @@ class AgentHarness(
             # /code and the coding tool can resolve them (the fetched row does
             # not carry them).
             session = self._overlay_repos(session)
+            session = await self._with_history_cap(session)
             # From here every sandbox request for this session, whoever
             # makes it, goes through its device or is refused.
             device_token = enter_device_session(session)
@@ -1622,13 +1791,20 @@ class AgentHarness(
             raise
         finally:
             leave_device_session(device_token)
+            if cut_off and session is not None:
+                # What this worker knew of the hand-offs of a turn it no longer runs is let go: a stop
+                # of a later turn here is not that turn's.
+                from surogates.harness.landing import turn_ended
 
-            # A thread's turn cut off outside its landing, by a cancel or a
-            # crash, leaves a copy that never landed: its pod goes, so no
-            # later turn on this worker goes on with that copy.
+                turn_ended(session)
+
+            # A thread's turn, or its helper's, cut off outside its landing, by
+            # a cancel or a crash, leaves a copy that was never kept: its pod
+            # goes, so no later turn on this worker goes on with that copy,
+            # and none waits out its pod's deadline.
             if (
-                cut_off and session is not None
-                and is_project_thread(session.config) and self._sandbox_pool is not None
+                cut_off and session is not None and self._sandbox_pool is not None
+                and (is_project_thread(session.config) or session.config.get("history_thread"))
             ):
                 from surogates.harness.landing import putting_back
 
@@ -1789,6 +1965,8 @@ class AgentHarness(
         - Per-session cost tracking
         """
         self._turn_after_event_id = max((e.id for e in all_events or []), default=0)
+        if is_project_thread(session.config):
+            await self._name_the_turn(session)
         # --- Saga orchestrator ---
         saga = None
         # A project's thread always runs one: its steps are undone in its copy.
@@ -1820,7 +1998,7 @@ class AgentHarness(
                 await self._store.emit_event(
                     session.id,
                     EventType.SAGA_START,
-                    saga_start_event(new_saga.saga_id, str(session.id)),
+                    saga_start_event(new_saga.saga_id, str(session.id), new_saga.kind),
                 )
 
         # One stable turn_id per user turn. The wake() body services
