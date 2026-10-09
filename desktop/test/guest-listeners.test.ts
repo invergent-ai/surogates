@@ -393,6 +393,47 @@ describe("a connection into the root", () => {
     }
   });
 
+  it("tries the family it is told first, then the other", async () => {
+    // Two servers of the root's on one port, one on each family of its loopback, and which of them took each connection.
+    const took: string[] = [];
+    const serving = (name: string) => createServer((socket) => {
+      took.push(name);
+      socket.on("error", () => {});
+      socket.resume().end();
+    });
+    let four = serving("127.0.0.1");
+    let six = serving("::1");
+    for (;;) {
+      await new Promise<void>((done) => six.listen(0, "::1", done));
+      // The port IPv6 gave may be taken on IPv4: another is tried.
+      if (await new Promise<boolean>((done) => four.once("error", () => done(false)).listen(portOf(six), "127.0.0.1", () => done(true)))) break;
+      await new Promise<void>((done) => six.close(() => done()));
+      [four, six] = [serving("127.0.0.1"), serving("::1")];
+    }
+    const port = portOf(six);
+    const dial = async (first?: 4 | 6) => {
+      brought.length = 0;
+      took.length = 0;
+      await carryIn(path, ID, port, first);
+      await vi.waitFor(() => expect(brought).toEqual([`/in/${ID}`]));
+      return took.join();
+    };
+    expect([await dial(4), await dial(6), await dial()]).toEqual(["127.0.0.1", "::1", "127.0.0.1"]);
+    // With one of them gone, either order brings the other.
+    await new Promise<void>((done) => four.close(() => done()));
+    expect([await dial(4), await dial(6)]).toEqual(["::1", "::1"]);
+    await new Promise<void>((done) => four.listen(port, "127.0.0.1", done));
+    await new Promise<void>((done) => six.close(() => done()));
+    expect([await dial(4), await dial(6)]).toEqual(["127.0.0.1", "127.0.0.1"]);
+    // A family that is neither is dialed on neither.
+    brought.length = 0;
+    took.length = 0;
+    for (const none of [5, 0, "6", null]) await carryIn(path, ID, port, none as unknown as 4);
+    await vi.waitFor(() => expect(brought).toEqual([`/in/${ID} EINVAL`]));
+    expect(took).toEqual([]);
+    await new Promise<void>((done) => four.close(() => done()));
+  });
+
   it("says why when nothing on the root's loopback takes the connection, and reaches nothing else", async () => {
     const closed = createServer();
     await new Promise<void>((done) => closed.listen(0, "127.0.0.1", done));

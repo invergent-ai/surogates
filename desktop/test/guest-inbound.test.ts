@@ -11,8 +11,8 @@ const ROOT = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
 let server: Server;
 let port: number;
 let host: ClientHttp2Session;
-// Each root and port the agent was asked to reach, and what each reach answers: a socket to the server here unless told.
-let reached: Array<[string, number]>;
+// Each root and port the agent was asked to reach, with the family to try first, and what each reach answers: a socket to the server here unless told.
+let reached: Array<[string, number, 4 | 6]>;
 let reach: (root: string, port: number) => Promise<Socket | string>;
 // The server's end of each connection it took.
 let taken: Socket[];
@@ -33,7 +33,7 @@ beforeEach(async () => {
     socket.once("connect", () => done(socket));
   });
   const [ours, guests] = duplexPair();
-  new Inbound(guests, (root, to) => (reached.push([root, to]), reach(root, to)));
+  new Inbound(guests, (root, to, first) => (reached.push([root, to, first]), reach(root, to)));
   host = connectH2("http://guest", { createConnection: () => ours });
   host.on("error", () => {});
 });
@@ -61,16 +61,22 @@ describe("the agent's door for connections into a root", () => {
     expect(status).toBe(200);
     stream.write("get /");
     expect(await new Promise<string>((done) => stream.once("data", (chunk: Buffer) => done(chunk.toString())))).toBe("GET /");
-    expect(reached).toEqual([[ROOT, 3000]]);
+    expect(reached).toEqual([[ROOT, 3000, 4]]);
     // The host's end ends the server's connection.
     stream.close();
     await new Promise<void>((done) => taken[0]?.once("close", () => done()));
   });
 
-  it("reaches nothing but 127.0.0.1 and a port, for a root named as one, whatever the host asks", async () => {
+  it("reaches nothing but the root's own loopback and a port, for a root named as one, whatever the host asks", async () => {
+    // The family the browser's address named is the one tried first.
+    const { status, stream } = await into("[::1]:3000");
+    expect([status, reached]).toEqual([200, [[ROOT, 3000, 6]]]);
+    stream.close();
+    reached = [];
     for (const authority of [
-      "localhost:3000", "127.0.0.2:3000", "[::1]:3000", "10.0.0.5:80", "example.com:443", "127.0.0.1", "127.0.0.1:0", "127.0.0.1:65536",
-      "127.0.0.1:03000", "0x7f.1:3000", "2130706433:3000",
+      "localhost:3000", "127.0.0.2:3000", "10.0.0.5:80", "example.com:443", "127.0.0.1", "127.0.0.1:0", "127.0.0.1:65536",
+      "127.0.0.1:03000", "0x7f.1:3000", "2130706433:3000", "[::]:3000", "[::ffff:127.0.0.1]:3000", "[::1]", "[::1]:0", "[::1]:65536", "::1:3000",
+      "[0:0:0:0:0:0:0:1]:3000",
     ]) {
       expect(await into(authority), authority).toMatchObject({ status: 400, reason: "invalid" });
     }
@@ -100,7 +106,7 @@ describe("the agent's door for connections into a root", () => {
     const stream = host.request({ ":method": "CONNECT", ":authority": "127.0.0.1:3000", "surogate-root": ROOT });
     stream.on("error", () => {});
     // Given up once the agent has asked its root's runner, and before the runner brings anything.
-    await vi.waitFor(() => expect(reached).toEqual([[ROOT, 3000]]));
+    await vi.waitFor(() => expect(reached).toEqual([[ROOT, 3000, 4]]));
     const gone = new Promise<void>((done) => stream.once("close", () => done()));
     stream.close();
     await gone;

@@ -253,7 +253,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.type === "dial") {
     // A connection the browser makes to a server of this root's: dialed in here, so in the root's own
     // network namespace, and brought to the agent on the root's socket. A runner started bare has none.
-    if (TUNNEL && typeof message.id === "string") void carryIn(TUNNEL, message.id, message.port);
+    if (TUNNEL && typeof message.id === "string") void carryIn(TUNNEL, message.id, message.port, message.first);
   } else if (message.type === "stdin") {
     // Each is answered, in order: the host waits to know whether it was taken.
     const stdin = children.get(message.id)?.proc.stdin;

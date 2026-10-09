@@ -739,17 +739,18 @@ export class Roots {
   }
 
   /**
-   * A connection into *root* (spec, Section 5): to *port* of the root's own loopback, made by its
-   * runner inside the root's namespaces, which can reach no other root's. The socket, or why there
+   * A connection into *root* (spec, Section 5): to *port* of the root's own loopback, the family
+   * *first* names tried before the other, made by its runner inside the root's namespaces, which
+   * can reach no other root's. The socket, or why there
    * is none: "sandbox" for a root not set up here, else what its runner or the agent's network said.
    * Asked under an id of 128 random bits, which names that one connection on the root's socket.
    */
-  async reach(root: string, port: number): Promise<Socket | string> {
+  async reach(root: string, port: number, first: 4 | 6 = 4): Promise<Socket | string> {
     const target = this.roots.get(root);
     if (!target || target.runner.went || !this.options.arrivals) return "sandbox";
     const id = randomBytes(16).toString("hex");
     const arriving = this.options.arrivals(root, id);
-    target.runner.dial(id, port);
+    target.runner.dial(id, port, first);
     return arriving;
   }
 

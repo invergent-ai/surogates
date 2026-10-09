@@ -489,10 +489,11 @@ describe("a root's socket to the host proxy", { timeout: 20_000 }, () => {
     expect(await reaching.reach("root-2", 3000)).toBe("sandbox");
     await reaching.setup("root-2", base, R1, user);
     expect(await reaching.reach("root-2", 3000)).toBe("ECONNREFUSED");
-    expect(await reaching.reach("root-2", 8000)).toBe("ETIMEDOUT");
+    expect(await reaching.reach("root-2", 8000, 6)).toBe("ETIMEDOUT");
     await until(() => spawnSync("cat", [asked], { encoding: "utf8" }).stdout.split("\n").length === 3);
-    const dials = spawnSync("cat", [asked], { encoding: "utf8" }).stdout.trim().split("\n").map((line) => JSON.parse(line) as { type: string; id: string; port: number });
-    expect(dials.map(({ type, port }) => [type, port])).toEqual([["dial", 3000], ["dial", 8000]]);
+    const dials = spawnSync("cat", [asked], { encoding: "utf8" }).stdout.trim().split("\n").map((line) => JSON.parse(line) as { type: string; id: string; port: number; first: number });
+    // With the family to try first: IPv4's unless whoever asks names IPv6's.
+    expect(dials.map(({ type, port, first }) => [type, port, first])).toEqual([["dial", 3000, 4], ["dial", 8000, 6]]);
     // Each under the id the network waits on, 128 bits no command could guess, never used twice.
     expect(dials.map(({ id }) => id)).toEqual(awaited.map(([, id]) => id));
     expect(awaited.map(([root]) => root)).toEqual(["root-2", "root-2"]);

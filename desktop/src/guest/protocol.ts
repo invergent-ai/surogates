@@ -88,9 +88,10 @@ export type ToRunner =
   | { type: "place"; id: string; folder: string; home: string; workdir: string | null }
   // shutil.which, in the commands' environment.
   | { type: "which"; id: string; name: string; cwd: string }
-  // A connection into the root (spec, Section 5): the runner connects to *port* of its own loopback, and
-  // brings the connection, or why it has none, to the agent on the root's socket (INBOUND_LINE).
-  | { type: "dial"; id: string; port: number };
+  // A connection into the root (spec, Section 5): the runner connects to *port* of its own loopback, the
+  // family *first* names before the other, and brings the connection, or why it has none, to the agent on
+  // the root's socket (INBOUND_LINE).
+  | { type: "dial"; id: string; port: number; first: 4 | 6 };
 
 export type FromRunner =
   | { type: "started"; id: string; pid: number }
