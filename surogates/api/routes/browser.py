@@ -196,7 +196,8 @@ async def _computer_browser_state(app_state: Any, session_id: UUID) -> BrowserSt
 
     Open while a tab is: the session's own, or a sub-agent's, whose events the worker writes to its
     root chat's log too, each naming the session whose tab it is (surogates.devices.browser.tell_pane).
-    A computer with no supported browser has no tab either, whoever's call found it so.
+    A call that found no supported browser takes away its own session's tab, as its close does, and
+    no other's: the chat says there is no browser only once no tab is left.
 
     The browser is on the user's computer, which the server does not watch: a tab the
     user closed there is still open here until the agent's next browser call says.
@@ -207,10 +208,8 @@ async def _computer_browser_state(app_state: Any, session_id: UUID) -> BrowserSt
         of = str((event.data or {}).get("session_id") or session_id)
         if event.type == EventType.BROWSER_PROVISIONED.value:
             tabs.add(of)
-        elif event.type == EventType.BROWSER_DESTROYED.value:
-            tabs.discard(of)
         else:
-            tabs.clear()
+            tabs.discard(of)
     if tabs:
         status = "live"
     elif events and events[-1].type == EventType.BROWSER_UNAVAILABLE.value:

@@ -281,9 +281,34 @@ class TestStateEndpoint:
             # The last of them closed: no browser for the chat.
             store.events[sid].append(("browser.destroyed", another))
             assert await status() == 404
-            # A sub-agent's call found no supported browser there: no tab is open either, whoever's it was.
-            store.events[sid] += ["browser.provisioned", ("browser.unavailable", child)]
+
+    async def test_a_call_that_found_no_browser_takes_away_its_own_sessions_tab_and_no_other(self, app_factory) -> None:
+        build, _resolver, _control = app_factory
+        sid, child, another = uuid4(), uuid4(), uuid4()
+        store = StubSessions()
+        store.sessions[sid] = SimpleNamespace(
+            org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
+        )
+        app = build()
+        app.state.session_store = store
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            async def status() -> str | int:
+                response = await client.get(f"/v1/sessions/{sid}/browser/state")
+                return response.json()["status"] if response.status_code == 200 else response.status_code
+
+            # A sub-agent's call found no supported browser while the chat's own tab is open: the chat's is as it was.
+            store.events[sid] = ["browser.provisioned", ("browser.unavailable", child)]
+            assert await status() == "live"
+            # The sub-agent's own tab goes with its call; another sub-agent's stays.
+            store.events[sid] = [("browser.provisioned", child), ("browser.provisioned", another), ("browser.unavailable", child)]
+            assert await status() == "live"
+            # That one's call finds none too: no tab is left, and the chat's last word of its browser is that there is none.
+            store.events[sid].append(("browser.unavailable", another))
             assert await status() == "unavailable"
+            # The chat's own call takes its own tab the same way, and leaves a sub-agent's.
+            store.events[sid] = [("browser.provisioned", child), "browser.provisioned", "browser.unavailable"]
+            assert await status() == "live"
 
     async def test_a_token_that_does_not_cover_a_root_chat_reads_nothing_of_its_sub_agents_browser(self, app_factory) -> None:
         build, _resolver, _control = app_factory
