@@ -17,6 +17,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 
 from surogates.db.models import WorkstreamHistory
+import surogates.harness.loop as loop_module
 from surogates.governance.saga import SagaOrchestrator
 from surogates.harness import landing as landing_module
 from surogates.harness import loop_artifact_completion
@@ -2330,4 +2331,23 @@ async def test_a_stop_of_a_turn_whose_pod_is_gone_opens_one_to_drop_what_the_tur
     # so nothing else has made the pod again.
     await harness._take_back_what_the_turn_handed_on(thread)
     assert not [ref for ref in git(pods.project / "_history", "for-each-ref", "--format=%(refname)").splitlines() if "handoff" in ref]
+    assert not landing_module.handed_on(thread)
+
+
+async def test_a_turn_cut_off_leaves_no_hand_off_of_its_for_a_later_stop_to_take_back(api, monkeypatch, pods):
+    from .test_thread_copies import a_waking_thread_harness
+
+    thread = await a_thread(api)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Draft the outline."})
+
+    async def hands_on_then_is_cut_off(session, *_, **__):
+        await edited(pool, session, "echo outline > outline.md")
+        await handed_off(api, pool, session)
+        raise RuntimeError("the turn's lease went to another worker")
+
+    harness = a_waking_thread_harness(api, monkeypatch, pool, hands_on_then_is_cut_off)
+    with pytest.raises(RuntimeError):
+        await harness.wake(thread.id)
+    # The worker lets go of what it knew of that turn: a later turn's stop here is not this one's.
     assert not landing_module.handed_on(thread)

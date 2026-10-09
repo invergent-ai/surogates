@@ -1678,6 +1678,12 @@ class AgentHarness(
             raise
         finally:
             leave_device_session(device_token)
+            if cut_off and session is not None:
+                # What this worker knew of the hand-offs of a turn it no longer runs is let go: a stop
+                # of a later turn here is not that turn's.
+                from surogates.harness.landing import turn_ended
+
+                turn_ended(session)
 
             # A thread's turn, or its helper's, cut off outside its landing, by
             # a cancel or a crash, leaves a copy that was never kept: its pod
