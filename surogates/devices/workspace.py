@@ -163,6 +163,7 @@ from surogates.tools.workspace_io.base import (
     RipgrepMode,
     RunResult,
     Walk,
+    refuse_nul,
 )
 
 MAX_PAYLOAD_BYTES = 1024 * 1024
@@ -276,13 +277,22 @@ class DeviceWorkspaceIO:
 
     # -- files -----------------------------------------------------------
 
+    # A NUL is refused here, before the operation is recorded: the computer
+    # refuses it in the same sentence, but it may be away, and in a chat that
+    # asks every time its user would first be asked about what can never run.
+
     async def resolve(self, path: str) -> str:
+        refuse_nul(path)
         return await self._call("resolve", path=path)
 
     async def check_write(self, path: str) -> str | None:
+        refuse_nul(path)
         return await self._call("check_write", path=path)
 
     async def stat(self, key: str) -> FileStat | None:
+        if isinstance(key, str) and "\0" in key:
+            # Nothing is there, as the computer and the cloud's own workspace answer it.
+            return None
         value = await self._call("stat", key=key)
         if value is None:
             return None
@@ -292,6 +302,7 @@ class DeviceWorkspaceIO:
         return FileStat(**value)
 
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:
+        refuse_nul(key)
         data = await self._call("read", key=key, max_bytes=max_bytes)
         if isinstance(data, bytes):
             # A transfer's data, which the journal's runner fetched and checked.
@@ -306,6 +317,7 @@ class DeviceWorkspaceIO:
     async def read_lines(
         self, key: str, *, encoding: str, offset: int, limit: int, max_bytes: int,
     ) -> LinePage:
+        refuse_nul(key)
         # At most one frame's data, so a page is always the ok value itself.
         asked = min(max_bytes, MAX_PAYLOAD_BYTES)
         value = await self._call(
@@ -327,6 +339,7 @@ class DeviceWorkspaceIO:
         raise DeviceOperationError("The computer returned an invalid page")
 
     async def write(self, key: str, data: bytes, *, expected_revision: str | None = None) -> None:
+        refuse_nul(key)
         # Only when there is one: a write that expects nothing asks for what it always did.
         expected = {} if expected_revision is None else {"expected_revision": expected_revision}
         if len(data) <= MAX_PAYLOAD_BYTES:
@@ -341,9 +354,11 @@ class DeviceWorkspaceIO:
         await self._call("write", payload=data, key=key, transfer=transfer, **expected)
 
     async def delete(self, key: str) -> None:
+        refuse_nul(key)
         await self._call("delete", key=key)
 
     async def list_dir(self, key: str) -> list[str]:
+        refuse_nul(key)
         return await self._call("list_dir", key=key)
 
     async def walk(
@@ -353,6 +368,7 @@ class DeviceWorkspaceIO:
         if isinstance(skip, str) or isinstance(skip_top, str):
             # A string is a collection of its characters: sorted, it would skip every one-letter folder.
             raise TypeError("skip and skip_top take folder names, not one string")
+        refuse_nul(key)
         value = await self._call(
             "walk", key=key, skip=sorted(skip), skip_top=sorted(skip_top), skip_hidden=skip_hidden, since=since,
         )
@@ -394,6 +410,7 @@ class DeviceWorkspaceIO:
         glob: str | None = None,
         context: int = 0,
     ) -> str:
+        refuse_nul(key, pattern, glob)
         return await self._call(
             "ripgrep", key=key, mode=mode, pattern=pattern, glob=glob, context=context,
         )
@@ -404,6 +421,7 @@ class DeviceWorkspaceIO:
     # -- commands and background processes -------------------------------
 
     async def run(self, command: str, *, workdir: str | None, timeout: int) -> RunResult:
+        refuse_nul(command, workdir)
         value = await self._call("run", command=command, workdir=workdir, timeout=timeout)
         return RunResult(**value)
 
@@ -417,6 +435,7 @@ class DeviceWorkspaceIO:
         notify_on_complete: bool,
         watcher_interval: int | None,
     ) -> dict[str, Any]:
+        refuse_nul(command, workdir)
         return await self._call(
             "start",
             command=command,

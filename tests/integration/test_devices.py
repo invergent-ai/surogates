@@ -70,7 +70,7 @@ from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
 from surogates.tools.runtime import ToolRuntime
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io import LocalWorkspaceIO
+from surogates.tools.workspace_io import NUL_REFUSED, LocalWorkspaceIO
 from tests.fake_laptop import FakeLaptop, perform
 from tests.test_turn_slots import as_tool_call, held_turn
 
@@ -1669,6 +1669,51 @@ async def _first_op(ws) -> dict:
         frame = await receive(ws)
         if frame["type"] == "op":
             return frame
+
+
+_PAGE = {"encoding": "utf-8", "offset": 1, "limit": 10, "max_bytes": 100}
+_STARTED = {"task_id": "nul", "pty": False, "notify_on_complete": False, "watcher_interval": None}
+# Each operation that hands a text of the model's, or a key, to the computer, with a NUL in it.
+WITH_A_NUL = {
+    "resolve": lambda io: io.resolve("a\0b"),
+    "check_write": lambda io: io.check_write("a\0b"),
+    "read": lambda io: io.read("/f/a\0b"),
+    "read_lines": lambda io: io.read_lines("/f/a\0b", **_PAGE),
+    "write": lambda io: io.write("/f/a\0b", b"x"),
+    "a large write": lambda io: io.write("/f/a\0b", b"x" * (workspace_module.MAX_PAYLOAD_BYTES + 1)),
+    "delete": lambda io: io.delete("/f/a\0b"),
+    "list_dir": lambda io: io.list_dir("/f/a\0b"),
+    "walk": lambda io: io.walk("/f/a\0b", skip=()),
+    "local_file": lambda io: io.local_file("/f/a\0b").__aenter__(),
+    "ripgrep key": lambda io: io.ripgrep("/f/a\0b", mode="count", pattern="x"),
+    "ripgrep pattern": lambda io: io.ripgrep("/f", mode="count", pattern="a\0"),
+    "ripgrep glob": lambda io: io.ripgrep("/f", mode="count", pattern="x", glob="*\0"),
+    "run command": lambda io: io.run("a\0b", workdir=None, timeout=10),
+    "run workdir": lambda io: io.run("pwd", workdir="a\0b", timeout=10),
+    "start command": lambda io: io.start("a\0b", workdir=None, **_STARTED),
+    "start workdir": lambda io: io.start("true", workdir="a\0b", **_STARTED),
+}
+
+
+@pytest.mark.parametrize("call", WITH_A_NUL.values(), ids=WITH_A_NUL)
+async def test_a_nul_is_refused_at_once_with_the_computer_away_and_nothing_is_asked_of_it(laptop_rig, session_factory, call):
+    rig = laptop_rig
+    wio = device_io(rig.ops, rig.device_id, rig.root, rig.folder)
+    before = len(await operation_rows(session_factory, rig.device_id))
+    # The computer is away: an operation recorded for it would wait until it is back, and
+    # in a chat that asks every time its user would be asked about what can never run.
+    with pytest.raises(ValueError) as refused:
+        await asyncio.wait_for(call(wio), 3.0)
+    assert str(refused.value) == NUL_REFUSED
+    assert len(await operation_rows(session_factory, rig.device_id)) == before
+
+
+async def test_a_stat_of_a_key_with_a_nul_finds_nothing_with_the_computer_away(laptop_rig, session_factory):
+    rig = laptop_rig
+    wio = device_io(rig.ops, rig.device_id, rig.root, rig.folder)
+    before = len(await operation_rows(session_factory, rig.device_id))
+    assert await asyncio.wait_for(wio.stat("/f/a\0b"), 3.0) is None
+    assert len(await operation_rows(session_factory, rig.device_id)) == before
 
 
 async def test_operations_run_on_the_laptop(laptop_rig):
