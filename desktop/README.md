@@ -99,7 +99,8 @@ downloads were together too large to save, and that it may start again one that 
 large one. What is staged is looked at once a second, so the agent's own can pass the
 400 MiB by what comes in a second. A download of your own counts for nothing in any of this:
 it is never stopped for its size or its silence, and the agent is told nothing of it. One of
-yours with no end goes on until you stop it in the browser or the browser closes.
+yours with no end goes on until you stop it in the browser or the browser closes. The one
+download that may be either's, in the minute after a hand back, is said below.
 
 While the agent drives, a page gets a file only when the agent uploads one: up to ten files
 of the chat's folder, 50 MiB in all, read through the chat's file host and given to the file
@@ -180,7 +181,13 @@ a click of yours would: no page can open a window, fill the screen or ask for a 
 For a minute after a hand back, a download the browser shows no request for (a `download`
 link to its page's own site, a `blob:` or a `data:` address) is still asked about as yours,
 since you may have started it; the agent is told where it was saved, or only that it was
-not. In a tab you opened yourself, a download that is yours by these rules is saved, asked
+not. Until the agent has acted again after the hand back, such a download cannot be its
+own: it is yours, counted nowhere and never stopped. Once the agent has acted again, nothing
+tells one you start from one the agent's own script or click starts, so it is counted and
+timed as the agent's are, from its first byte: stopped with the agent's past 400 MiB, or
+after a minute with no byte, and the agent told only that it was not saved. A download you
+start in the agent's browser in that minute, while the agent works in it, can so be stopped;
+take the browser over first, and it is yours whatever its size. In a tab you opened yourself, a download that is yours by these rules is saved, asked
 the same way, in the chat you took the browser over from, unless that chat was deleted; any
 other download there is cancelled.
 

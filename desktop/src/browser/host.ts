@@ -619,8 +619,11 @@ export class BrowserHost {
   private readonly prompted = new Set<string>();
   // Where this host stages downloads, once it has launched a browser: its own folder, until it closes.
   private staging: string | null = null;
-  // The agent's downloads on their way, until each is handed on or dropped: a take-over stops them all.
+  // The downloads on their way that are counted and timed, until each is handed on or dropped: the agent's,
+  // which a take-over stops; and, among them, the *doubted*, which may be the agent's or its user's and which
+  // no take-over stops (whose).
   private readonly arriving = new Set<Download>();
+  private readonly doubted = new Set<Download>();
   // The look at what is staged, while a download of the agent's is on its way (watch); for each of those, its
   // own bytes at the last look and when they last grew; and the downloads dropped for none having come.
   private watching: NodeJS.Timeout | null = null;
@@ -639,7 +642,8 @@ export class BrowserHost {
   // The downloads stopped because more was staged than may be.
   private readonly overfull = new WeakSet<Download>();
   // The chat that last handed the browser back, and when.
-  private handed: { by: string; at: number } | null = null;
+  // *acted*: whether an operation of the agent's has had its turn since.
+  private handed: { by: string; at: number; acted: boolean } | null = null;
   // When each navigation's request began, for as long as the browser keeps the request: a redirect's next
   // request takes its beginning from the one it follows.
   private readonly begun = new WeakMap<Request, Begun>();
@@ -766,7 +770,7 @@ export class BrowserHost {
     if (!paused) {
       if (this.held !== root) return;
       this.held = null;
-      this.handed = { by: root, at: this.now() };
+      this.handed = { by: root, at: this.now(), acted: false };
       // The agent drives again: a file its pages ask for is heard, and opens no chooser of the browser's own,
       // also where it was handed back before they were let be.
       for (const [page, kept] of this.hearing) {
@@ -796,7 +800,7 @@ export class BrowserHost {
     this.named.clear();
     for (const chooser of new Set(kept)) this.release(chooser);
     // The agent's downloads on their way stop where they are: each is dropped once it has ended.
-    for (const download of this.arriving) void download.cancel().catch(() => {});
+    for (const download of this.arriving) if (!this.doubted.has(download)) void download.cancel().catch(() => {});
     // A button the agent pressed and holds, in any session's page, comes up: not left down under its user's hand.
     for (const pages of this.tabs.values()) for (const page of pages) void letGo(page);
     // A navigation of the agent's that this take-over itself stopped answers nothing: its request is forgotten.
@@ -893,6 +897,8 @@ export class BrowserHost {
     launch: Launch, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, stop: AbortSignal, id: string | undefined,
   ): Promise<Outcome> {
     if (signal.aborted) return CANCELLED;
+    // The agent acts again: from here on a download nobody is known to have asked for may be its own (whose).
+    if (this.held === null && this.handed !== null) this.handed.acted = true;
     if (kind === "browser.set_input_files") return this.upload(session, args, signal, stop, id);
     // Its agent acted since an upload's prompt named an input: that prompt's upload is not coming, or, allowed
     // and still having its files read, comes to nothing (upload).
@@ -1381,8 +1387,12 @@ export class BrowserHost {
   // they hold it, or in the time after in which it may have been asked for under their hand; and, in doubt
   // between two requests of one address, either. *after*: theirs for that last reason alone, the time
   // after a hand back. Such a one may be the agent's own, and the agent is told what came of it; of one
-  // that is theirs outright, held now or by its request, never, whatever the clock says.
-  private whose(download: Download): { by: string; after?: true } | { stop: AbortSignal } {
+  // that is theirs outright, held now or by its request, never, whatever the clock says. *doubted*: one of
+  // those that comes once the agent has acted again since the hand back. Nothing tells it from the agent's
+  // own, which a `download` link or a script of the agent's starts with no request either: so it is counted
+  // and timed as the agent's are, from its first byte, and saved as theirs where it ends. Before the agent
+  // has acted again, it cannot be the agent's: it is counted nowhere, and never stopped.
+  private whose(download: Download): { by: string; after?: true; doubted?: true } | { stop: AbortSignal } {
     this.swept();
     const address = bare(download.url());
     const known = [...this.open].filter(([request]) => bare(request.url()) === address);
@@ -1392,7 +1402,9 @@ export class BrowserHost {
       return begun.by !== null ? { by: begun.by } : { stop: begun.stop };
     }
     if (this.held !== null) return { by: this.held };
-    if (this.handed !== null && this.now() - this.handed.at <= AFTER_HAND_BACK_MS) return { by: this.handed.by, after: true };
+    if (this.handed !== null && this.now() - this.handed.at <= AFTER_HAND_BACK_MS) {
+      return { by: this.handed.by, after: true, ...(this.handed.acted ? { doubted: true as const } : {}) };
+    }
     return { stop: this.interrupt.signal };
   }
 
@@ -1407,7 +1419,7 @@ export class BrowserHost {
     if (session !== undefined) {
       return "stop" in whose
         ? this.stage(download, { root: this.roots.get(session), session }, whose.stop)
-        : this.stage(download, { root: this.roots.get(session), session, after: whose.after === true }, null);
+        : this.stage(download, { root: this.roots.get(session), session, after: whose.after === true, doubted: whose.doubted === true }, null);
     }
     // In a tab no chat owns no agent acts: one there is its user's outright, in the time after a hand back too.
     if ("stop" in whose || this.forgets.has(whose.by)) return this.discard(download);
@@ -1573,13 +1585,16 @@ export class BrowserHost {
   // session's next answer. One handed on before the take-over is the chat's to save, as a write of the
   // chat's that waits or asks goes on.
   private async stage(
-    download: Download, of: { root: string | undefined; session: string; after?: boolean }, stop: AbortSignal | null,
+    download: Download, of: { root: string | undefined; session: string; after?: boolean; doubted?: boolean }, stop: AbortSignal | null,
   ): Promise<void> {
     const name = download.suggestedFilename();
     const { root, session } = of;
     const user = stop === null;
+    // Counted toward what may be staged, and timed by its own bytes: the agent's, and one that may be.
+    const counted = !user || of.doubted === true;
     this.name(download);
-    if (stop) {
+    if (counted) {
+      if (user) this.doubted.add(download);
       this.arriving.add(download);
       this.grew.set(download, { bytes: -1, at: this.now() });
       this.watch();
@@ -1613,15 +1628,16 @@ export class BrowserHost {
       }
       // One of the agent's that ends is handed on only where the agent's own, with it, are no more than may be staged.
       const bound = this.options.stagedBytes ?? STAGED_MOST_BYTES;
-      if (!user && (await this.staged({ download, path })).own + size > bound) {
+      if (counted && (await this.staged({ download, path })).own + size > bound) {
         tell(tooMuch(name, bound));
         await download.delete().catch(() => {});
         return;
       }
-      if (!user) this.waiting.add(path);
+      if (counted) this.waiting.add(path);
       this.options.downloaded({ root, session, name, path, user, ...(user && of.after === true ? { afterHandBack: true as const } : {}) });
     } finally {
       this.arriving.delete(download);
+      this.doubted.delete(download);
       this.grew.delete(download);
       this.nameless(download);
       if (this.arriving.size === 0) this.unwatch();
