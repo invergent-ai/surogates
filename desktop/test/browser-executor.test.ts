@@ -104,7 +104,7 @@ function rig(launch: Launch | null = LAUNCH, bound = true, reads?: (operation: O
     bindingOf: (root) => (chats.has(root) ? {} : undefined),
     launch: () => launch,
     staging,
-    vm: { listening: (root, port) => (probed.push([root, port]), Promise.resolve(port === 3000)) },
+    vm: { listening: (root, port) => (probed.push([root, port]), Promise.resolve(port === 7000 ? "busy" : port === 3000)) },
   });
   return { browsing, ran, browsed, stopped, forgotten, paused, shown, chats, answers, reading, files, unasked, probed, stage: (download: StagedDownload) => staged(download) };
 }
@@ -625,9 +625,9 @@ describe("the browser's kinds beside the tools", () => {
 
   it("asks the sandbox whether a chat listens on a port of its own, and answers as it does", async () => {
     const { browsing, probed, browsed, ran } = rig();
-    expect([await browsing.listening(ROOT, 3000), await browsing.listening(OTHER, 9)]).toEqual([true, false]);
+    expect([await browsing.listening(ROOT, 3000), await browsing.listening(OTHER, 9), await browsing.listening(ROOT, 7000)]).toEqual([true, false, "busy"]);
     // The sandbox's own question: nothing of the browser's or the tools' is run for it.
-    expect([probed, browsed, ran]).toEqual([[[ROOT, 3000], [OTHER, 9]], [], []]);
+    expect([probed, browsed, ran]).toEqual([[[ROOT, 3000], [OTHER, 9], [ROOT, 7000]], [], []]);
   });
 
   it("tells the browser of an upload that ends before it reaches it, whatever it ends on, and of one the approvals say got no leave: the browser keeps nothing for either", async () => {

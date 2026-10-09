@@ -255,8 +255,8 @@ export class Browsing implements ToolLayer {
     this.options.browser.notComing(of);
   }
 
-  /** Whether something in *root*'s sandbox listens on *port* of its own loopback now: no sandbox is started to ask. */
-  listening(root: string, port: number): Promise<boolean> {
+  /** Whether something in *root*'s sandbox listens on *port* of its own loopback now, or "busy" where it could not be asked: no sandbox is started to ask. */
+  listening(root: string, port: number): Promise<boolean | "busy"> {
     return this.options.vm.listening(root, port);
   }
 

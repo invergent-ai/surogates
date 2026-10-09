@@ -1099,6 +1099,15 @@ describe("the browser on this computer", () => {
       // Nor does one whose answer is no yes.
       approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant", listening: () => Promise.resolve("yes" as unknown as boolean) });
       expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(NOT_LISTENING(3000));
+      // A sandbox that holds every connection it takes from the browser could not be asked: the agent is told that, not that nothing listens.
+      approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant", listening: () => Promise.resolve("busy") });
+      expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual({
+        error: {
+          type: "browser",
+          message: "This chat's sandbox holds as many connections from the agent's browser as it takes, so it could not say whether port 3000 listens. "
+            + "Close a page of this chat's servers in the browser, then open http://localhost:3000/ again.",
+        },
+      });
       // Not even for the navigation, in a chat that asks every time; and nothing is kept.
       expect([user.asked, probed, journal.bindings.forwards()]).toEqual([[], [[ROOT, 8000]], []]);
     });

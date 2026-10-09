@@ -256,6 +256,8 @@ require("node:http").createServer((req, res) => res.end(JSON.stringify(seen))).l
       expect(await said(ROOT, judged)).toMatch(/^403/);
       // And another chat's port still opens.
       expect(await get(8005)).toBe("200 second chat /");
+      // Whether the chat listens elsewhere cannot be asked now: the sandbox says so, and not that nothing listens.
+      expect([await manager.listening(ROOT, 8000), await manager.listening(OTHER, 8005)]).toEqual(["busy", true]);
       // Forty more, one after another and then at once: each is carried, and each of the forty held longest is ended for one.
       for (let n = 0; n < 20; n += 1) more.push(await hold(8006));
       more.push(...await Promise.all(Array.from({ length: 20 }, () => hold(8006))));

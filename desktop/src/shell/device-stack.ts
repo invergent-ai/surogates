@@ -59,7 +59,7 @@ export interface ToolLayer extends Executor {
   // download's chat is deleted.
   saveDownloadsWith?(save: (download: StagedDownload, stop: AbortSignal) => Promise<string>): void;
   // Whether something in a chat's sandbox listens on a port of its own loopback now.
-  listening?(root: string, port: number): Promise<boolean>;
+  listening?(root: string, port: number): Promise<boolean | "busy">;
 }
 
 export interface DeviceStackOptions {

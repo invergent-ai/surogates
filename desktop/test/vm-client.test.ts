@@ -361,11 +361,15 @@ describe("the VM manager's process", { timeout: 20_000 }, () => {
     const last = sent.at(-1) as { id: string };
     tell({ type: "result", id: last.id, outcome: { ok: "yes" } });
     expect(await odd).toBe(false);
+    // But for a sandbox that could not be asked, which is neither.
+    const full = vm.listening("root-1", 9000);
+    tell({ type: "result", id: (sent.at(-1) as { id: string }).id, outcome: { ok: "busy" } });
+    expect(await full).toBe("busy");
     // A manager that never says is given up on, past the bound it has itself for its guest's agent.
     vi.useFakeTimers();
     try {
       const silent = vm.listening("root-1", 9000);
-      let answered: boolean | undefined;
+      let answered: boolean | "busy" | undefined;
       void silent.then((answer) => {
         answered = answer;
       });

@@ -80,7 +80,8 @@ export type ToManager =
   | { type: "answer"; id: number; allow: boolean }
   // What the browser of the device that knocks with *key* may open: each port of a chat's own servers, and the chat's root.
   | { type: "forwards"; key: string; ports: Array<[number, string]> }
-  // Whether something in a root listens on a port of its own loopback now. Answered as a result, its ok true or false.
+  // Whether something in a root listens on a port of its own loopback now. Answered as a result, its ok true or false,
+  // or "busy" for a root that could not be asked.
   | { type: "listening"; id: string; root: string; port: number }
   // The keepalive, answered by a pong.
   | { type: "ping" }
@@ -260,9 +261,10 @@ export class VmClient {
 
   /**
    * Whether something in *root* listens on *port* of its own loopback now. False where no manager
-   * runs, which none is started to ask, and when it does not say within the agent's own bound. Never rejects.
+   * runs, which none is started to ask, and when it does not say within the agent's own bound; "busy"
+   * for a root that takes no more of the browser's connections now, and so could not be asked. Never rejects.
    */
-  listening(root: string, port: number): Promise<boolean> {
+  listening(root: string, port: number): Promise<boolean | "busy"> {
     const manager = this.manager;
     if (!manager || this.stopping) return Promise.resolve(false);
     const id = `listening-${(this.probes += 1)}`;
@@ -271,7 +273,7 @@ export class VmClient {
       const answer = (outcome: Outcome) => {
         clearTimeout(timer);
         this.pending.delete(id);
-        resolve("ok" in outcome && outcome.ok === true);
+        resolve("ok" in outcome && (outcome.ok === true || outcome.ok === "busy") ? outcome.ok : false);
       };
       this.pending.set(id, answer);
       manager.send({ type: "listening", id, root, port });

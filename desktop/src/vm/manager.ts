@@ -452,10 +452,13 @@ export class Guest {
     return this.up.has(root) && !this.ended ? this.carrier.open(root, port, first) : Promise.resolve("sandbox");
   }
 
-  /** Whether something in *root* takes a connection on *port* of its own loopback now: one is made, and let go. */
-  async listening(root: string, port: number): Promise<boolean> {
+  /**
+   * Whether something in *root* takes a connection on *port* of its own loopback now: one is made, and let go.
+   * "busy" for a root that has every connection it takes from the browser already, which says nothing of the port.
+   */
+  async listening(root: string, port: number): Promise<boolean | "busy"> {
     const reached = await this.reach(root, port);
-    if (typeof reached === "string") return false;
+    if (typeof reached === "string") return reached === "EMFILE" ? "busy" : false;
     letGo(reached);
     return true;
   }
@@ -608,7 +611,7 @@ export class VmManager {
   }
 
   /** Whether something in *root* listens on *port* of its own loopback now, in the guest that runs: none is booted to ask. Never rejects. */
-  async listening(root: string, port: number): Promise<boolean> {
+  async listening(root: string, port: number): Promise<boolean | "busy"> {
     const guest = await this.guest?.catch(() => null);
     return guest ? guest.listening(root, port).catch(() => false) : false;
   }

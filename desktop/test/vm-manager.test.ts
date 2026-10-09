@@ -645,6 +645,8 @@ describe("whether a chat's own server listens, asked through the guest's inbound
     // Root 1 listens on 3000, and on its own proxies' ports as every root does; nothing else listens.
     reach = (root, to) => {
       reached.push([root, to]);
+      // On 7000 the root has every connection it takes from the browser already.
+      if (to === 7000) return Promise.resolve("EMFILE");
       return root === "root-1" && [3000, 3128, 1080].includes(to) ? dial() : Promise.resolve("ECONNREFUSED");
     };
   });
@@ -667,6 +669,8 @@ describe("whether a chat's own server listens, asked through the guest's inbound
     // The root's own proxies for its commands are no server of the chat's, though they listen: its runner is asked for neither.
     reached = [];
     expect([await manager.listening("root-1", 3128), await manager.listening("root-1", 1080), reached]).toEqual([false, false, []]);
+    // A root that takes no more connections could not be asked: that is said, and is not that nothing listens.
+    expect(await manager.listening("root-1", 7000)).toBe("busy");
     await manager.stop();
     expect(await manager.listening("root-1", 3000)).toBe(false);
   });

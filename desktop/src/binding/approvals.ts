@@ -117,8 +117,9 @@ export interface ApprovalsOptions {
   notComing?: (of: string) => void;
   // What the tools refuse anyway, asked again when a browser operation's turn comes: its user may have taken the browser over meanwhile.
   refusal?: (operation: Operation) => Outcome | null;
-  // Whether something in a chat's sandbox listens on a port of its own loopback now: a port nothing listens on is asked of nobody.
-  listening?: (root: string, port: number) => Promise<boolean>;
+  // Whether something in a chat's sandbox listens on a port of its own loopback now: a port nothing listens on is asked of
+  // nobody. "busy": the sandbox holds every connection it takes from the browser, and could not be asked.
+  listening?: (root: string, port: number) => Promise<boolean | "busy">;
   onError?: (error: unknown) => void; // a choice that could not be recorded, or a network prompt that failed, and why
 }
 
@@ -144,6 +145,10 @@ const portDenied = (port: number): string => `The user did not let the agent's b
 const noPort = (message: string): Outcome => ({ error: { type: "browser", message } });
 const NOT_LISTENING = (port: number): Outcome => noPort(
   `Nothing listens on port ${port} in this chat's sandbox. Start the server there as a background command, then open http://localhost:${port}/ again.`,
+);
+const SANDBOX_BUSY = (port: number): Outcome => noPort(
+  `This chat's sandbox holds as many connections from the agent's browser as it takes, so it could not say whether port ${port} listens. `
+    + `Close a page of this chat's servers in the browser, then open http://localhost:${port}/ again.`,
 );
 const SANDBOX_PROXY = (port: number): Outcome => noPort(
   `Port ${port} is the sandbox's own proxy for this chat's commands, which the agent's browser does not open`,
@@ -428,6 +433,7 @@ export class Approvals {
     if (SANDBOX_PORTS.has(port)) return SANDBOX_PROXY(port);
     const listening = await settled(Promise.resolve().then(() => this.options.listening?.(root, port) ?? false).catch(() => false), asking);
     if (asking.aborted) return browserDenied(BROWSER_DENIED.act);
+    if (listening === "busy") return SANDBOX_BUSY(port);
     if (listening !== true) return NOT_LISTENING(port);
     let held: string | undefined;
     try {
