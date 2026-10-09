@@ -32,7 +32,7 @@ import time
 from dataclasses import dataclass, field
 from itertools import takewhile
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NoReturn
 
 from surogates.sandbox.history import (
     _ATTRIBUTES,
@@ -57,11 +57,13 @@ from surogates.sandbox.history import (
 #: whole copy, which its next open makes; a file whose name history cannot record, which
 #: nothing lands past until it is renamed; a request that is none this history takes; and a
 #: landing the history holds whose copy could not be made its files, so that nothing is read
-#: from the copy.  Whoever asked goes by the code, never by the words.
+#: from the copy; and a landing neither recorded nor put back, whose kept files are not to be
+#: forgotten.  Whoever asked goes by the code, never by the words.
 NO_WHOLE_COPY = "no_whole_copy"
 NAME_NOT_UTF8 = "name_not_utf8"
 NOT_A_REQUEST = "not_a_request"
 RECORD_UNFINISHED = "record_unfinished"
+LANDING_UNSETTLED = "landing_unsettled"
 
 #: On a folder of the user's these are the platform's: the whiteboard's
 #: canvas, the harness's own files, and where a coding tool checks a
@@ -123,6 +125,7 @@ _ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "commit": ("commit_turn", frozenset({"author", "trailers", "pickup"})),
     "record": ("record", frozenset({"turn", "applied", "author", "trailers", "main", "pickup"})),
     "keep": ("keep", frozenset({"author", "trailers", "base"})),
+    "forget": ("forget", frozenset({"saga"})),
 }
 
 
@@ -419,6 +422,61 @@ class LocalHistory(History):
         note.unlink()
         return said
 
+    def forget(self, *, saga: str) -> dict:
+        """Whether what the landing of *saga* kept of the folder's files may be forgotten; refused while it may not.
+
+        The file helper keeps each file a landing replaces until the landing
+        is settled, for its put-back, and cannot tell when that is.  The
+        history can: ``landing`` is the landing where ``main`` holds it,
+        recorded, so that each replaced file is a version under it; or None
+        where the landing was put back whole, no file its turn wrote or
+        deleted being as the turn left it in the folder.  Asked before
+        either, or of a saga the history holds no turn of, it is refused,
+        and whoever asked forgets nothing.  It reads, and writes nothing.
+
+        The turn is the thread's branch as the history has it, pushed before
+        the landing's first apply, or the thread's own commit of it, where a
+        turn kept since has moved the branch.  A file already as the turn
+        left it before the landing, which the landing never wrote, counts as
+        written: the kept files then stay until the landing is recorded.
+        """
+        if not (isinstance(saga, str) and saga):
+            _refuse("it names no saga")
+        said = f"Surogate-Saga: {saga}"
+        self._init()
+        refs = self._take()
+        if (main := refs.get(MAIN)) is not None:
+            # Each commit of main's, its title and its trailers: a landing's own pickup carries its saga too.
+            log = self._git(
+                ["log", "--first-parent", "--format=%x01%H%x00%B", main], env={"GIT_DIR": str(self._taken)}, cwd=self._taken,
+            )
+            for commit in log.split("\x01")[1:]:
+                landing, _, message = commit.partition("\0")
+                if message.splitlines()[:1] == ["Landing"] and said in message.splitlines():
+                    return {"landing": landing}
+        pushed, base = refs.get(self.branch), refs.get(self.base)
+        self._fetch(pushed, base)
+        if not (pushed and base and self._message(pushed)[:1] == ["Turn"] and said in self._message(pushed)):
+            pushed, base = None, self._ref(self.base)
+            own = self._main("log", "--first-parent", "--format=%x01%H%x00%B", f"{self.base}..{self.branch}") if base and self._ref(self.branch) else ""
+            for commit in own.split("\x01")[1:]:
+                turn, _, message = commit.partition("\0")
+                if message.splitlines()[:1] == ["Turn"] and said in message.splitlines():
+                    pushed = turn
+                    break
+        if pushed is None:
+            raise HistoryError(
+                "refused the request: the history holds neither this landing nor its turn, and cannot tell what it wrote",
+                code=LANDING_UNSETTLED,
+            )
+        versions, _ = self._diff(base, pushed)
+        if any(self._real(path) == after for path, (_, after) in versions.items()):
+            raise HistoryError(
+                "refused the request: this landing was neither recorded nor put back: a file is in the folder as "
+                "it left it, and what it replaced is kept for its put-back", code=LANDING_UNSETTLED,
+            )
+        return {"landing": None}
+
     def _to_main(self) -> bool:
         """Move a copy with nothing unlanded, and its base, to ``main`` as the folder is now; whether it moved."""
         tip = self.snapshot("before a turn")
@@ -525,6 +583,11 @@ class LocalHistory(History):
                 if os.path.lexists(self._admin / "config.worktree"):
                     _removed(self._admin / "config.worktree")
         self.pinned.append(True)
+
+
+def _refuse(why: str) -> NoReturn:
+    """Refuse a request that is none this history takes, in words."""
+    raise HistoryError(f"refused the request: {why}", code=NOT_A_REQUEST)
 
 
 def _utf8(name: str) -> bool:

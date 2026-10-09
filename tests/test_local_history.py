@@ -1000,3 +1000,69 @@ def test_a_copy_that_is_gone_after_a_record_cut_after_its_push_is_made_again_as_
     opened = LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").open()
     assert opened == {"copy": "moved", "finished": {"landing": cut["landing"], "set_aside": None}}
     assert files_of(again.copy) == files_of(folder)
+
+
+def a_landing_applied_and_not_recorded(tmp_path: Path, folder: Path) -> tuple[LocalHistory, dict, dict]:
+    """A thread's landing with its files applied and no record yet; the turn, and the folder's files it replaced."""
+    one = a_copy(tmp_path, folder)
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    (one.copy / "Summary.md").write_text("summary\n")
+    (one.copy / "Report.docx").unlink()
+    saga = [["Surogate-Saga", "saga:1"]]
+    picked = one.pickup(author=YOURS, trailers=saga)
+    turn = one.commit_turn(author=A, trailers=[*saga, ["Surogate-Kind", "turn"]], pickup=picked["commit"])
+    replaced = {name: (folder / name).read_bytes() for name in ("notes.txt", "Report.docx")}
+    shutil.copyfile(one.copy / "notes.txt", folder / "notes.txt")
+    shutil.copyfile(one.copy / "Summary.md", folder / "Summary.md")
+    (folder / "Report.docx").unlink()
+    turn["step"] = {"turn": turn["commit"], "applied": turn["changes"], "author": A, "trailers": saga, "main": picked["main"], "pickup": picked["commit"]}
+    return one, turn, replaced
+
+
+def test_what_a_landing_kept_is_forgotten_only_once_it_was_recorded(tmp_path, folder):
+    one, turn, _ = a_landing_applied_and_not_recorded(tmp_path, folder)
+    # Not recorded, and its files are in the folder: what it replaced is all its put-back has.
+    with refused("landing_unsettled", "refused the request: this landing was neither recorded nor put back"):
+        one.forget(saga="saga:1")
+    recorded = one.record(**turn["step"])
+    assert one.forget(saga="saga:1") == {"landing": recorded["commit"]}
+    # And for good: wherever main is by then, and whatever the thread has pushed since.
+    two = a_copy(tmp_path, folder, "t2")
+    (two.copy / "B.md").write_text("B's own\n")
+    land(two, "saga:2", B)
+    (one.copy / "Draft.md").write_text("a failed turn's, kept\n")
+    one.keep(author=A, trailers=[["Surogate-Kind", "turn"]], base=True)
+    assert LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").forget(saga="saga:1") == {"landing": recorded["commit"]}
+    # A saga the history holds neither a landing nor a turn of: it cannot tell what that one wrote.
+    with refused("landing_unsettled", "refused the request: the history holds neither this landing nor its turn"):
+        one.forget(saga="saga:none")
+    # The landing's own pickup, which carries its saga on main too, is not its record.
+    assert one.forget(saga="saga:2") == {"landing": git(tmp_path / "store" / "history.git", "rev-parse", "refs/heads/threads/t2")}
+
+
+@pytest.mark.parametrize("kept_since", [False, True])
+def test_what_a_landing_kept_is_forgotten_once_it_was_put_back_whole(tmp_path, folder, kept_since):
+    one, turn, replaced = a_landing_applied_and_not_recorded(tmp_path, folder)
+    # Put back in part: a file the landing wrote, and the one it deleted, are as it left them.
+    (folder / "Summary.md").unlink()
+    with refused("landing_unsettled"):
+        one.forget(saga="saga:1")
+    (folder / "notes.txt").write_bytes(replaced["notes.txt"])
+    with refused("landing_unsettled"):
+        one.forget(saga="saga:1")
+    (folder / "Report.docx").write_bytes(replaced["Report.docx"])
+    if kept_since:
+        # The failed turn kept on its branch, which is no longer the landing's turn in the history.
+        one.keep(author=A, trailers=[["Surogate-Kind", "turn"]], base=True)
+    again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
+    assert again.forget(saga="saga:1") == {"landing": None}
+    assert sorted(p.name for p in folder.iterdir()) == ["Report.docx", "notes.txt"]
+
+
+def test_a_request_to_forget_is_one_the_agent_runs_and_names_a_saga(tmp_path, folder, tree):
+    place = {"store": str(tmp_path / "store"), "folder": str(folder), "thread": THREAD, "user": "u1"}
+    assert ask(tree, {**place, "action": "open", "args": {}}) == {"copy": "made"}
+    for saga in (None, 7, "", ["saga:1"]):
+        answer = ask(tree, {**place, "action": "forget", "args": {"saga": saga}})
+        assert answer == {"error": {"code": "not_a_request", "message": "refused the request: it names no saga"}}, saga
+    assert ask(tree, {**place, "action": "forget", "args": {"saga": "saga:1"}})["error"]["code"] == "landing_unsettled"
