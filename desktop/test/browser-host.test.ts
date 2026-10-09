@@ -1472,6 +1472,7 @@ describe("a page's download, as the host stages it", () => {
       state().keep(SESSION, "A download was saved");
       expect(await uploads("op-6")).toEqual({ ok: { files: 1, notices: ["A download was saved"] } });
       host.unanswered("op-6");
+      host.unanswered("op-6");
       expect(state().unseen.get(SESSION)).toEqual(["A download was saved"]);
       // An upload cancelled while its files are given takes nothing with it either.
       const slow: { takes?: (came: string) => void } = {};
