@@ -261,8 +261,9 @@ async def keep_copy(
     refs and reads no real file, so a settle that fails does not stop it.
     It writes the history's refs all the same, so it then waits out the
     fence first, as the settle would have: no landing that lost the lock
-    unseen is still writing them.  *waited* are the rows a settle before
-    this one already found quiet for the fence.
+    unseen is still writing them.  With the rows unreadable it waits the
+    whole fence, and keeps.  *waited* are the rows a settle before this
+    one already found quiet for the fence.
     """
     owner = sandbox_session_key(session)
     if not sandbox_pool.holds_copy(owner):
@@ -400,12 +401,23 @@ async def _fenced(session_factory: Any, workstream_id: Any, saga_settings: Any, 
     For a lock holder that writes the history's refs without having
     settled the landings left running.  A row in *waited* was found quiet
     for the fence before, and is written since only by who settles it.
-    The rows are read as a step is tried; unread, the caller does not go on.
+    The rows are read as a step is tried.  Unread through those tries, the
+    whole fence is waited out: a landing alive when this lock was taken
+    lost its own before, and ends within a fence of that, asked or not.
+    The caller then asks its lock, as after any wait.
     """
     fence = _fence(saga_settings)
     orchestrator = _orchestrator(saga_settings)
     while True:
-        rows = await orchestrator.attempt(partial(running_landings, session_factory, workstream_id))
+        try:
+            rows = await orchestrator.attempt(partial(running_landings, session_factory, workstream_id))
+        except Exception:
+            logger.warning(
+                "Could not read the landings running in project %s: waiting the whole fence out", workstream_id,
+                exc_info=True,
+            )
+            await asyncio.sleep(fence)
+            return
         waited.update(row.id for row, quiet in rows if quiet >= fence)
         alive = [quiet for row, quiet in rows if row.id not in waited]
         if not alive:

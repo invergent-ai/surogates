@@ -1764,8 +1764,9 @@ async def test_the_days_pruning_waits_for_another_landing_while_one_is_still_run
     assert asked == ["prune"] and (pods.project / "_history" / "pruned").exists()
 
 
+@pytest.mark.parametrize("unreadable", ["once", "at every try"])
 @pytest.mark.parametrize("failed", [False, True], ids=["a turn whose landing could not start", "a failed turn"])
-async def test_a_keep_whose_settle_failed_waits_out_the_fence_before_it_writes(api, monkeypatch, pods, failed):
+async def test_a_keep_whose_settle_failed_waits_out_the_fence_before_it_writes(api, monkeypatch, pods, failed, unreadable):
     slow = SimpleNamespace(default_step_timeout=3, default_max_retries=0, retry_delay=0)  # a fence of four seconds
     master = await master_of(api, await create(api))
     first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
@@ -1775,8 +1776,8 @@ async def test_a_keep_whose_settle_failed_waits_out_the_fence_before_it_writes(a
     await edited(pool, second, "echo by B > B.md")
     running, call, unread, quiet_at_the_keep = rows_module.running_landings, landing_module._call, [], []
 
-    async def the_rows_cannot_be_read_once(session_factory, workstream_id):
-        if not unread:
+    async def the_rows_cannot_be_read(session_factory, workstream_id):
+        if unreadable == "at every try" or not unread:
             unread.append(True)
             raise ConnectionError("the database did not answer")
         return await running(session_factory, workstream_id)
@@ -1786,13 +1787,49 @@ async def test_a_keep_whose_settle_failed_waits_out_the_fence_before_it_writes(a
             quiet_at_the_keep.extend(quiet for _, quiet in await running(factory, first.config["workstream_id"]))
         return await call(sandbox_pool, owner, action, **arguments)
 
-    monkeypatch.setattr(landing_module, "running_landings", the_rows_cannot_be_read_once)
+    monkeypatch.setattr(landing_module, "running_landings", the_rows_cannot_be_read)
     monkeypatch.setattr(landing_module, "_call", watched)
     await ends(api, pool, second, failed=failed, settings=slow)
     # B's turn is kept, and its push went out only once A's landing had been quiet for the fence:
-    # a landing still alive would have marked its row within it.
+    # a landing still alive would have marked its row within it.  With the rows unread at every try,
+    # the whole fence is waited out, which every landing alive when the lock was taken has ended in.
     assert git(pods.project / "_history", "show", f"refs/heads/threads/{second.id}:B.md") == "by B"
     assert len(quiet_at_the_keep) == 1 and quiet_at_the_keep[0] >= landing_module._fence(slow)
+    [end] = await turn_ends(api, second) if not failed else [
+        e.data for e in await api.app.state.session_store.get_events(second.id, types=[EventType.SESSION_FAIL])
+    ]
+    assert end["saved"] is True
+
+
+@pytest.mark.parametrize("failed", [False, True], ids=["a turn whose landing could not start", "a failed turn"])
+async def test_a_keep_that_cannot_wait_its_fence_out_under_the_lock_is_not_made_and_the_turn_says_not_saved(api, monkeypatch, pods, failed):
+    quick = SimpleNamespace(default_step_timeout=1, default_max_retries=0, retry_delay=0)
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md")
+    call, unread, keeps = landing_module._call, [], []
+
+    async def the_rows_cannot_be_read(session_factory, workstream_id):
+        unread.append(True)
+        if len(unread) > 1 or failed:
+            await lose_the_lock(api, thread)  # and the lock goes while the keep waits its fence out
+        raise ConnectionError("the database did not answer")
+
+    async def watched(sandbox_pool, owner, action, **arguments):
+        if action == "keep":
+            keeps.append(owner)
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    monkeypatch.setattr(landing_module, "running_landings", the_rows_cannot_be_read)
+    monkeypatch.setattr(landing_module, "_call", watched)
+    await ends(api, pool, thread, failed=failed, settings=quick)
+    # Nothing was written without the lock, and the turn's end says the work was not saved.
+    assert keeps == [] and not (pods.project / "_history" / "packed-refs").exists()
+    [end] = await turn_ends(api, thread) if not failed else [
+        e.data for e in await api.app.state.session_store.get_events(thread.id, types=[EventType.SESSION_FAIL])
+    ]
+    assert end["saved"] is False
 
 
 async def a_helper(api, thread, *, channel="delegation"):
