@@ -22,14 +22,14 @@ from surogates.tools.utils.checkpoint_manager import _shadow_repo_path
 class ThreadPods:
     """A sandbox backend whose pods are thread pods."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, project: Path | None = None) -> None:
         if executor_server._REGISTRY is None:
             executor_server.init_registry()
         self.root = root
-        self.project = root / "project"
+        self.project = project or root / "project"
         self.project.mkdir(parents=True, exist_ok=True)
         self.pods: dict[str, httpx.AsyncClient] = {}
-        #: Each thread's latest copy, kept after its pod goes.
+        #: Each pod owner's latest copy, a thread's or a helper's, kept after its pod goes.
         self.copies: dict[str, Path] = {}
 
     async def provision(self, spec: SandboxSpec) -> str:
@@ -41,23 +41,24 @@ class ThreadPods:
             return sandbox_id
         copy = self.root / sandbox_id / "workspace"
         copy.mkdir(parents=True)
-        thread = spec.env["HISTORY_THREAD"]
+        thread, helper = spec.env["HISTORY_THREAD"], spec.env.get("HISTORY_HELPER")
         history = History(
             repo=_shadow_repo_path(str(self.project), base=self.root / sandbox_id / "home" / ".surogates" / "history"),
-            project=self.project, copy=copy, thread=thread, user=spec.env.get("USER_ID", ""),
+            project=self.project, copy=copy, thread=thread, user=spec.env.get("USER_ID", ""), helper=helper,
+            turn=None if helper else spec.env["HISTORY_TURN"],
         )
         app = executor_server.create_app(token="t", workspace=str(copy), require_fuse=False, history=history)
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://pod")
         ready = await client.get("/healthz")
         assert ready.status_code == 200, ready.text
         self.pods[sandbox_id] = client
-        self.copies[thread] = copy
+        self.copies[helper or thread] = copy
         return sandbox_id
 
-    async def execute(self, sandbox_id: str, name: str, input: str) -> str:
+    async def execute(self, sandbox_id: str, name: str, input: str, *, timeout: float | None = None) -> str:
         response = await self.pods[sandbox_id].post(
             "/execute",
-            json={"name": name, "args": json.loads(input or "{}"), "timeout": 60},
+            json={"name": name, "args": json.loads(input or "{}"), "timeout": timeout or 60},
             headers={"Authorization": "Bearer t"},
         )
         return response.text
@@ -67,6 +68,10 @@ class ThreadPods:
         client = self.pods.pop(sandbox_id, None)
         if client is not None:
             await client.aclose()
+
+    def real_names(self) -> list[str]:
+        """The names in the project's folder, its history aside."""
+        return sorted(p.name for p in self.project.iterdir() if p.name != "_history")
 
     async def status(self, sandbox_id: str) -> SandboxStatus:
         return SandboxStatus.RUNNING if sandbox_id in self.pods else SandboxStatus.TERMINATED

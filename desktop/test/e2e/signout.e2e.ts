@@ -52,7 +52,9 @@ async function signedIn(): Promise<{ shell: ElectronApplication; page: Page; cli
   app = shell;
   await stubNative(shell);
   const page = await shellPage(shell);
-  if (await page.isVisible("#first-run")) await connect(page, origin);
+  // The first run, or the sign-in of an agent kept, once the page has drawn its first state.
+  const first = await page.waitForSelector("#first-run:not([hidden]), #sign-in:not([hidden])");
+  if (await first.getAttribute("id") === "first-run") await connect(page, origin);
   await signedInAndAdded(shell, page, agent);
   const client = await webClient(shell, origin);
   await client.evaluate(() => localStorage.setItem("surogates_auth_token", "the page's own session"));
@@ -93,7 +95,7 @@ describe("logging out", () => {
     await logOut(again.page);
     await expect.poll(() => again.page.isVisible("#sign-in")).toBe(true);
     expect(await confirmation(again.shell, `Log out of ${host}?`)).toMatchObject({ checkboxLabel: expect.stringMatching(FORGET), checkboxChecked: false });
-    expect(existsSync(profiles)).toBe(false);
+    await expect.poll(() => existsSync(profiles)).toBe(false);
   });
 
   it("keeps the agent's browser sign-ins at a log out its user did not tick", async () => {

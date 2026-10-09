@@ -46,7 +46,7 @@ describe("the shell", () => {
   it("opens its window in its sandbox, with its state under one root", async () => {
     app = await launch(home);
     const page = await app.firstWindow();
-    expect(await page.title()).toBe("Surogate");
+    await expect.poll(() => page.title()).toBe("Surogate");
     expect(await app.evaluate(({ app: shell }) => [
       shell.getName(), shell.getPath("userData"), shell.commandLine.hasSwitch("no-sandbox"),
     ])).toEqual(["Surogate", join(home, "surogate", "electron"), false]);

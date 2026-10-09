@@ -3766,6 +3766,8 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     await op(a, "browser.navigate", { url: "http://fixture.test/" });
     for (const { pid } of processes().filter(({ args }) => !args.some((arg) => arg.startsWith("--type=")))) process.kill(Number(pid), "SIGTERM");
     await expect.poll(() => processes().length, { timeout: 10_000 }).toBe(0);
+    // The host hears of the close a turn of the event loop after the processes are gone: until then the next navigation goes to the dead page.
+    await expect.poll(() => (host as unknown as { tabs: Map<string, unknown[]> }).tabs.size, { timeout: 10_000 }).toBe(0);
     expect((await op(a, "browser.navigate", { url: "http://fixture.test/second" })).ok).toMatchObject({ title: "Second", opened: true });
   });
 
@@ -3819,20 +3821,26 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     expect(await op(a, "browser.evaluate", { code: "while (true) {}" })).toEqual({
       error: { type: "browser", message: "The page did not answer within 2 s, so it was closed" },
     });
-    expect(performance.now() - started).toBeLessThan(5_000);
+    // The bound, then the page's close, which the host does not bound: an endless script unbounded never answers.
+    expect(performance.now() - started).toBeLessThan(15_000);
     expect((await op(a, "browser.navigate", { url: "http://fixture.test/" })).ok?.opened).toBe(true);
-    // A close goes past the one stuck in its line.
+    // A close goes past the one stuck in its line, which a bound far longer than any close holds there.
+    await host.close();
+    host = hostWith({ boundMs: 30_000 });
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
+    await op(b, "browser.navigate", { url: "http://fixture.test/second" });
     const stuck = op(a, "browser.evaluate", { code: "while (true) {}" });
     await new Promise((done) => setTimeout(done, 300));
     const closing = performance.now();
     expect(await op(a, "browser.close")).toEqual({ ok: { closed: true } });
-    expect(performance.now() - closing).toBeLessThan(1_500);
+    // Behind the stuck one, it would answer once the bound let that one go, 30 s after it began.
+    expect(performance.now() - closing).toBeLessThan(10_000);
     expect((await stuck).error?.type).toBe("browser");
     expect(await script(b, "return document.title;")).toBe("Second");
     // The browser goes with its last tab, and the next operation launches it again.
     expect(await op(b, "browser.close")).toEqual({ ok: { closed: true } });
     expect((await op(a, "browser.navigate", { url: "http://fixture.test/" })).ok?.opened).toBe(true);
-  });
+  }, 60_000);
 
   it("opens a tab in a fresh browser for an operation that comes while the browser closes with its last tab", async () => {
     const [a, b] = [session(), session()];
@@ -3854,14 +3862,18 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     await host.close();
     host = hostWith({ boundMs: 2_000 });
     const a = session();
+    // The browser launched first: its launch is bounded apart.
+    await op(a, "browser.navigate", { url: "http://fixture.test/" });
     const started = performance.now();
     expect(await op(a, "browser.navigate", { url: "http://fixture.test/hang" })).toEqual({
       error: { type: "browser", message: "The page did not answer within 2 s, so it was closed" },
     });
-    expect(performance.now() - started).toBeLessThan(5_000);
+    // The bound, then the browser's close with its only page, which the host gives 6 s before it kills it:
+    // short of the 50 s the navigation's own time-out would take.
+    expect(performance.now() - started).toBeLessThan(20_000);
     // The session's next operation runs, in a tab of its own again.
     expect((await op(a, "browser.navigate", { url: "http://fixture.test/second" })).ok).toMatchObject({ title: "Second", opened: true });
-  });
+  }, 60_000);
 
   it("closes a page stuck in its own code under a labelled shot, so the shot answers within the bound too", async () => {
     await host.close();

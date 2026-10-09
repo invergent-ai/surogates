@@ -27,7 +27,14 @@ from surogates.tools.utils.workspace_sandbox import (
     validate_path,
     validate_workdir,
 )
-from surogates.tools.workspace_io.base import FileStat, LinePage, RipgrepError, RipgrepMode, RunResult
+from surogates.tools.workspace_io.base import (
+    FileStat,
+    LinePage,
+    RipgrepError,
+    RipgrepMode,
+    RunResult,
+    refuse_nul,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -574,12 +581,18 @@ class LocalWorkspaceIO:
     def __init__(self, workspace_path: str | None = None) -> None:
         self.root = workspace_path or None
 
+    # A NUL is refused first in every method that hands its text to the system,
+    # in Surogate's own sentence: what Python says of one depends on the call
+    # that meets it and on Python's release.
+
     async def resolve(self, path: str) -> str:
+        refuse_nul(path)
         if self.root:
             return validate_path(self.root, path)
         return str(Path(os.path.expanduser(path)).resolve())
 
     async def check_write(self, path: str) -> str | None:
+        refuse_nul(path)
         if _is_write_denied(path):
             return f"Write denied: '{path}' is a protected system/credential file."
         return _check_sensitive_path(path)
@@ -588,6 +601,7 @@ class LocalWorkspaceIO:
         try:
             st = os.stat(key)
         except (OSError, ValueError):
+            # A key with a NUL too: nothing is there, as for any key that cannot be stat'ed.
             return None
         return FileStat(
             is_dir=stat_module.S_ISDIR(st.st_mode), size=st.st_size, mtime=st.st_mtime,
@@ -596,16 +610,19 @@ class LocalWorkspaceIO:
         )
 
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:
+        refuse_nul(key)
         with open(key, "rb") as fh:
             return fh.read(-1 if max_bytes is None else max_bytes)
 
     async def read_lines(
         self, key: str, *, encoding: str, offset: int, limit: int, max_bytes: int,
     ) -> LinePage:
+        refuse_nul(key)
         with open(key, "rb") as fh:
             return _page(fh, encoding, offset, limit, max_bytes)
 
     async def write(self, key: str, data: bytes, *, expected_revision: str | None = None) -> None:
+        refuse_nul(key)
         # expected_revision is not checked: cloud behaviour does not change.
         os.makedirs(os.path.dirname(key) or ".", exist_ok=True)
         tmp = key + ".tmp"
@@ -621,9 +638,11 @@ class LocalWorkspaceIO:
             raise
 
     async def delete(self, key: str) -> None:
+        refuse_nul(key)
         os.unlink(key)
 
     async def list_dir(self, key: str) -> list[str]:
+        refuse_nul(key)
         return os.listdir(key)
 
     @contextlib.asynccontextmanager
@@ -642,6 +661,7 @@ class LocalWorkspaceIO:
         glob: str | None = None,
         context: int = 0,
     ) -> str:
+        refuse_nul(key, pattern, glob)
         # ``--no-ignore`` keeps the legacy behaviour of NOT respecting
         # .gitignore; hidden files/dirs are skipped (rg default).
         if _RIPGREP_PATH is None:
@@ -710,6 +730,8 @@ class LocalWorkspaceIO:
         return workdir
 
     async def run(self, command: str, *, workdir: str | None, timeout: int) -> RunResult:
+        # Before the working folder is looked at: a NUL in either is one refusal.
+        refuse_nul(command, workdir)
         cwd = self._workdir(workdir)
         env = _build_child_env()
 
@@ -755,6 +777,7 @@ class LocalWorkspaceIO:
         notify_on_complete: bool,
         watcher_interval: int | None,
     ) -> dict[str, Any]:
+        refuse_nul(command, workdir)
         cwd = self._workdir(workdir)
         env = _build_child_env()
         if self.root:

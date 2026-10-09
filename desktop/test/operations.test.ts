@@ -145,8 +145,12 @@ describe("stat", () => {
 
   it("answers the revision as the cloud makes it: dev, inode, size, and mtime and ctime in nanoseconds", async () => {
     const key = join(folder, "a.txt");
-    const shown = execFileSync("stat", ["-c", "%d:%i:%s:%.9Y:%.9Z", key], { env: { ...process.env, LC_ALL: "C" } });
-    expect(await revision(key)).toBe(shown.toString().trim().replaceAll(".", ""));
+    // LocalWorkspaceIO.stat's own line (surogates/tools/workspace_io/local.py), run by CPython, where each time is a
+    // whole count of nanoseconds. stat(1) cannot be asked: uutils' %.9Y, Ubuntu 26.04's, prints the seconds from a
+    // double, and doubles this far from 1970 are 238 ns apart.
+    const cloud = "import os, sys; st = os.stat(sys.argv[1]); "
+      + "sys.stdout.write(f'{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}')";
+    expect(await revision(key)).toBe(execFileSync("python3", ["-I", "-c", cloud, key], { encoding: "utf8" }));
   });
 
   it("answers another revision once the file changes, even with its size and mtime put back", async () => {

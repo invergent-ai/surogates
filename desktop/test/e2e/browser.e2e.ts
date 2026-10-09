@@ -9,7 +9,7 @@
 // X events on that run's own display (x-user.py: python3 and libXtst), in the window xwininfo finds.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -422,6 +422,8 @@ async function browserSettings(): Promise<Page> {
     settings = app!.windows().find((window) => window.url().endsWith("/settings.html"));
     return settings !== undefined;
   }).toBe(true);
+  // Its nav is in its HTML: its script, which hears the click, has run once the page has loaded.
+  await settings!.waitForLoadState();
   await settings!.waitForSelector('.settings-nav [data-section="browser"]');
   await settings!.click('.settings-nav [data-section="browser"]');
   return settings!;
@@ -448,9 +450,11 @@ describe.skipIf(!run)("Custom… in Settings → Browser", () => {
       await app!.evaluate((_electron, picked) => Object.assign(globalThis, { folder: picked }), path);
       await settings.selectOption("#browser", "pick");
     };
-    // A program that does not launch as a browser, within its launch's bound.
+    // A program that does not launch as a browser, within its launch's bound: named where its path leads,
+    // which is /usr/bin/gnutrue where the system's true is a link to GNU's.
     await pick("/bin/true");
-    await expect.poll(() => settings.textContent("#browser-note"), { timeout: 40_000 }).toMatch(/^\/(usr\/)?bin\/true did not start as a browser Surogate can drive: /);
+    const refused = `${realpathSync("/bin/true")} did not start as a browser Surogate can drive: `;
+    await expect.poll(async () => (await settings.textContent("#browser-note"))?.slice(0, refused.length), { timeout: 40_000 }).toBe(refused);
     expect(kept()).not.toContain("custom");
     // A path that leads nowhere.
     await pick(join(home, "gone"));
@@ -460,7 +464,7 @@ describe.skipIf(!run)("Custom… in Settings → Browser", () => {
     await pick(BROWSER!.executable);
     await expect.poll(kept, { timeout: 40_000 }).toContain('"choice": "custom"');
     expect(JSON.parse(kept()).executable).toBe(BROWSER!.executable);
-    expect(await settings.textContent("#browser-note")).not.toMatch(/cannot use|did not start/);
+    await expect.poll(() => settings.textContent("#browser-note")).not.toMatch(/cannot use|did not start/);
   }, 120_000);
 });
 

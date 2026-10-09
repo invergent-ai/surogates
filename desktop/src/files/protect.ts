@@ -7,7 +7,7 @@
 
 import { join } from "node:path";
 
-import { valueError } from "./answers.js";
+import { NUL_REFUSED, valueError } from "./answers.js";
 import { expandUser, inside, realpath } from "./paths.js";
 
 const HOME_FILES = [
@@ -47,7 +47,7 @@ const real = (path: string) => realpath(path).path;
 
 // check_write: a refusal for the model, or null. *path* is as the model wrote it.
 export function checkWrite(folder: string, home: string, path: string): string | null {
-  if (path.includes("\0")) throw valueError("embedded null byte");
+  if (path.includes("\0")) throw valueError(NUL_REFUSED);
   const expanded = expandUser(path, home);
   const resolved = real(expanded.startsWith("/") ? expanded : `${folder}/${expanded}`);
   const files = new Set([...HOME_FILES.map((file) => real(join(home, file))), ...SYSTEM_FILES.map(real)]);

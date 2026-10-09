@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -117,7 +118,7 @@ async def test_stopping_a_thread_puts_its_copy_back_and_leaves_the_real_files(ap
     assert (copy / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
     assert not (copy / "threads" / "Draft A" / "outline.md").exists()
     # The real files never changed.
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
     *_, (kind, done) = await saga_events(api, thread.id)
     assert (kind, done["status"]) == (EventType.SAGA_COMPLETE.value, "completed")
@@ -134,6 +135,8 @@ async def open_pod(pool, thread) -> None:
     """*thread*'s pod, opened now: its copy is the real files as they are."""
     tenant = SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id)
     owner = sandbox_session_key(thread)
+    # Outside a turn of its own, a pod opened here is the thread's first turn's unless its session says another.
+    thread.config.setdefault("turn_after", 0)
     await pool.ensure(owner, await _build_session_sandbox_spec(thread, tenant, owner))
 
 
@@ -236,14 +239,16 @@ async def test_an_apply_that_fails_on_the_third_of_five_files_puts_the_first_two
         _final_response("Wrote five notes."),
     ], pool=SandboxPool(pods), saga_settings=QUICK)
     # All or nothing: the real files are as they were before the landing.
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "c.md", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "c.md", "notes.txt"]
     assert (pods.project / "c.md").read_text() == "saved by you just now"
     [report] = await reports(api, master)
     assert report["landing"] == "compensated"
     assert {f["landing"] for f in report["files"]} == {"not_merged"}
+    # The master hears that nothing landed, and that the turn's work is not lost for it.
     assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
         "Files: none\n"
-        "Not landed, and the project's files are as they were: a.md, b.md, c.md, d.md, e.md"
+        "Not landed, and the project's files are as they were: a.md, b.md, c.md, d.md, e.md\n"
+        "The thread's work is kept, and lands with its next turn"
     )
 
 
@@ -263,7 +268,7 @@ async def test_a_rolled_back_landing_takes_away_the_folders_it_made_and_leaves_t
         calling(("terminal", {"command": "mkdir -p Drafts/2026 Reports && echo a > Drafts/2026/a.md && echo q > Reports/q1.md && echo c > c.md"})),
         _final_response("Wrote three notes."),
     ], pool=SandboxPool(pods), saga_settings=QUICK)
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "Reports", "c.md", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "Reports", "c.md", "notes.txt"]
     assert not any((pods.project / "Reports").iterdir())
 
 
@@ -286,7 +291,7 @@ async def test_an_apply_whose_reply_is_lost_is_put_back(api, monkeypatch, pods):
         _final_response("Wrote three notes."),
     ], pool=LosesAReply(pods), saga_settings=QUICK)
     # The pod wrote b.md, but the landing never heard: it is put back with a.md.
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
     [report] = await reports(api, master)
     assert report["landing"] == "compensated"
 
@@ -334,7 +339,7 @@ async def test_a_put_back_a_cancel_reaches_still_finishes(api, monkeypatch, pods
     ], pool=pool, saga_settings=QUICK))
     with pytest.raises(asyncio.CancelledError):
         await turn
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "c.md", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "c.md", "notes.txt"]
     # Its pod goes: no later turn takes up the copy whose writes were put back.
     assert (pool.holds_copy(str(thread.id)), pods.pods) == (False, {})
 
@@ -349,7 +354,7 @@ async def test_a_cancelled_landing_puts_its_files_back(api, monkeypatch, pods):
     with pytest.raises(asyncio.CancelledError):
         await turn
     # a.md and b.md were applied, and c.md written before its reply was read: all go back.
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
     assert pods.pods == {}
 
 
@@ -377,7 +382,10 @@ async def landing_told(api, monkeypatch, pool) -> tuple[dict, str]:
 async def test_a_landing_that_never_knew_its_files_still_tells_the_master(api, monkeypatch, pods):
     report, note = await landing_told(api, monkeypatch, FailsToCommit(pods))
     assert report["landing"] == "compensated"
-    assert note.endswith("Files: none\nNot landed, and the project's files are as they were: a.md")
+    assert note.endswith(
+        "Files: none\nNot landed, and the project's files are as they were: a.md\n"
+        "The thread's work is kept, and lands with its next turn"
+    )
     assert not (pods.project / "a.md").exists()
 
 
@@ -400,7 +408,7 @@ async def test_an_excluded_file_a_turn_made_is_named_in_its_report(api, monkeypa
         _final_response("Kept a note."),
     ], pool=SandboxPool(pods))
     # The deletion waits: the turn wrote files history leaves out, and it may be a move into one.
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "kept.md", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "kept.md", "notes.txt"]
     [report] = await reports(api, master)
     assert report["excluded"] == ["node_modules/", "notes.tmp"]
     assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
@@ -417,7 +425,7 @@ async def test_a_landed_deletion_is_named_apart_in_its_report(api, monkeypatch, 
         calling(("terminal", {"command": "echo kept > kept.md && rm notes.txt"})),
         _final_response("Kept a note."),
     ], pool=SandboxPool(pods))
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "kept.md"]
+    assert pods.real_names() == ["Report.docx", "kept.md"]
     [report] = await reports(api, master)
     # A deletion is named apart: the master must not read it as a file to open.
     assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
@@ -432,7 +440,7 @@ async def test_a_folder_inside_a_git_repository_a_turn_wrote_into_is_named_as_no
         calling(("terminal", {"command": "git init -q clone && echo x > clone/x.md && echo kept > kept.md"})),
         _final_response("Kept a note."),
     ], pool=SandboxPool(pods))
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "kept.md", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "kept.md", "notes.txt"]
     [report] = await reports(api, master)
     assert (report["repositories"], "excluded" in report) == (["clone/"], False)
     assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
@@ -490,18 +498,29 @@ async def test_two_landings_at_once_take_turns(api, monkeypatch, pods):
     async def the_first_is_landing():
         return (pods.root / f"commit {first.id}").exists()
 
-    async def the_second_waits_for_the_lock():
+    async def project_locks() -> tuple[int, int]:
+        """The project's lock as Postgres has it: held, and waited for."""
         async with api.app.state.session_factory() as db:
-            waiting = await db.execute(text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"))
-            return waiting.scalar() > 0
+            held = await db.execute(text(
+                "SELECT count(*) FILTER (WHERE granted), count(*) FILTER (WHERE NOT granted) FROM pg_locks "
+                "WHERE locktype = 'advisory' AND objid::text::bigint = (hashtext(:key)::bigint & 4294967295)"
+            ), {"key": f"workstream:{first.config['workstream_id']}"})
+            return tuple(held.one())
 
     monkeypatch.setattr(History, "commit_turn", the_first_holds_its_commit)
     landing = asyncio.create_task(turn_end(api, pool, first))
     await until(the_first_is_landing)
     waiting = asyncio.create_task(turn_end(api, pool, second))
     try:
-        await until(the_second_waits_for_the_lock)
+        engine, checked_out = api.app.state.session_factory.kw["bind"], []
+        for _ in range(40):  # four tries for the lock
+            checked_out.append(engine.pool.checkedout())
+            await asyncio.sleep(0.05)
         assert not (pods.root / f"commit {second.id}").exists()
+        # The second tries the lock and waits on no connection: none sits blocked in Postgres,
+        # and between its tries the pool lends out the holder's alone.
+        assert await project_locks() == (1, 0)
+        assert checked_out.count(1) > len(checked_out) // 2, checked_out
     finally:
         release.touch()
     await asyncio.gather(landing, waiting)
@@ -571,16 +590,35 @@ async def test_a_thread_never_works_on_or_restores_its_real_files(api, monkeypat
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
 
 
-async def test_a_threads_helper_on_another_worker_makes_the_threads_own_copy(api, pods):
+async def test_a_threads_helper_on_any_worker_makes_a_copy_of_its_own_from_the_threads_hand_off(api, pods):
     thread = await a_thread(api)
     store = api.app.state.session_store
     helper = await create_child_session(store=store, parent=thread, channel="api")
     owner = sandbox_session_key(helper)
     spec = await _build_session_sandbox_spec(helper, SimpleNamespace(org_id=helper.org_id, user_id=helper.user_id), owner)
-    # The pod follows its root, the thread: whoever provisions it, it holds the thread's copy.
+    # Its own pod and copy, on whichever worker: of its thread's work, as the history has it.
     other_worker = SandboxPool(pods)
     await other_worker.ensure(owner, spec)
-    assert (owner, other_worker.holds_copy(owner), spec.env["HISTORY_THREAD"]) == (str(thread.id), True, str(thread.id))
+    assert (owner, other_worker.holds_copy(owner)) == (str(helper.id), True)
+    assert (spec.env["HISTORY_THREAD"], spec.env["HISTORY_HELPER"]) == (str(thread.id), str(helper.id))
+
+
+async def test_a_helpers_turn_cut_off_lets_its_copy_go(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    helper = await create_child_session(store=store, parent=thread, channel="delegation")
+    await store.emit_event(helper.id, EventType.USER_MESSAGE, {"content": "Summarise the report."})
+    harness = a_waking_thread_harness(api, monkeypatch, pool, None)
+
+    async def a_turn_cut_off(session, *_, **__):
+        await open_pod(pool, session)
+        raise RuntimeError("the turn's lease went to another worker")
+
+    harness._run_loop = a_turn_cut_off
+    with pytest.raises(RuntimeError):
+        await harness.wake(helper.id)
+    # Not left for a day: its pod goes as a thread's does.
+    assert (pool.holds_copy(str(helper.id)), pods.pods) == (False, {})
 
 
 async def test_a_thread_whose_pod_was_remade_mid_turn_is_told_its_edits_are_gone(api, monkeypatch, pods):
@@ -601,11 +639,11 @@ async def test_a_thread_whose_pod_was_remade_mid_turn_is_told_its_edits_are_gone
     # It says what is known, not why the copy was made again.
     assert second.startswith(
         "[This thread's copy of the project's files was made again from the project's files. "
-        "Changes this thread made after its last landed turn are not in it. "
+        "Changes this thread made since its work was last saved are not in it. "
         "Check the files before making any of those changes again.]\n\n"
     ), second
     # What it wrote before is gone with the old copy; what it wrote after lands.
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "b.md", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "b.md", "notes.txt"]
 
 
 async def test_a_reports_excluded_files_are_capped_in_its_payload_and_counted(api, monkeypatch, pods):
@@ -621,24 +659,25 @@ async def test_a_reports_excluded_files_are_capped_in_its_payload_and_counted(ap
     assert note.endswith(", n010.tmp, and 240 more")
 
 
-async def test_a_thread_cannot_hand_work_to_a_helper_yet(api, monkeypatch, pods):
+async def test_a_helper_starting_call_the_allow_list_refuses_takes_no_snapshot_and_hands_nothing_on(api, monkeypatch, pods):
     thread = await a_thread(api)
+    store = api.app.state.session_store
+    await store.update_session_config_key(thread.id, "tool_allow_list", ["terminal"])
     # Bounded: a delegation let through waits on its helper, and would hang the test.
-    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+    await asyncio.wait_for(a_turn(api, monkeypatch, await store.get_session(thread.id), [
         calling(("delegate_task", {"goal": "Summarise the report."})),
         _final_response("Summarised it myself."),
     ], pool=SandboxPool(pods)), 60)
-    store = api.app.state.session_store
     [answer] = [json.loads(e.data["content"]) for e in await store.get_events(thread.id, types=[EventType.TOOL_RESULT])
                 if e.data["name"] == "delegate_task"]
-    assert answer == {"error": "A thread can't start delegate_task yet: do this step in the thread itself."}
+    assert answer == {"error": "Tool 'delegate_task' is not in this session's allow-list. Allowed: ['terminal']"}
     # A call that never runs takes no snapshot of the copy.
     [call] = await store.get_events(thread.id, types=[EventType.TOOL_CALL])
     assert "checkpoint_hash" not in call.data
-    # No helper started, and no pod was set up for a call that never ran.
+    # No helper started, no pod was set up for a call that never ran, and no copy was handed on.
     async with api.app.state.session_factory() as db:
         helpers = (await db.execute(text("SELECT count(*) FROM sessions WHERE parent_id = :id"), {"id": thread.id})).scalar()
-    assert (helpers, pods.pods) == (0, {})
+    assert (helpers, pods.pods) == (0, {}) and not (pods.project / "_history").exists()
 
 
 @pytest.mark.parametrize("cut", [asyncio.CancelledError, RuntimeError])
@@ -708,12 +747,28 @@ async def test_a_crashed_turns_retry_is_told_its_copy_was_made_fresh(api, monkey
     assert first.startswith("[This thread's copy of the project's files was made again"), first
 
 
-async def test_a_thread_refuses_every_tool_that_starts_a_session():
-    from surogates.harness.tool_exec import SESSION_STARTING_TOOLS, THREAD_REFUSED_TOOLS
+async def test_every_tool_that_starts_a_session_is_named_as_handing_a_threads_copy_on_or_not():
+    from surogates.harness.tool_exec import (
+        HELPER_STARTING_TOOLS, SESSION_STARTING_TOOLS, THREAD_REFUSED_TOOLS, refused_in_a_thread,
+    )
 
-    # Derived from the harness's own list: a new spawning tool is refused by default.
-    assert THREAD_REFUSED_TOOLS == SESSION_STARTING_TOOLS - {"send_worker_message", "unblock_task", "message_thread"}
-    assert {"delegate_task", "spawn_worker", "spawn_task", "dispatch_experiments", "cron_create"} <= THREAD_REFUSED_TOOLS
+    # The tools whose step puts a thread's copy on its hand-off first, for the helper they start.
+    assert HELPER_STARTING_TOOLS == {"delegate_task", "spawn_worker", "spawn_task"}
+    # A thread schedules no routine: its runs would work on old files, and land only at the thread's next turn.
+    # Nor does it dispatch a research run's experiments: its copy holds no repository to bundle for them.
+    assert THREAD_REFUSED_TOOLS == {"cron_create", "dispatch_experiments"}
+    # Every other tool that starts a session is named, with why the thread's rule leaves it: it reaches a
+    # session that exists already, or it answers a thread itself.
+    assert SESSION_STARTING_TOOLS - HELPER_STARTING_TOOLS - THREAD_REFUSED_TOOLS == {
+        "send_worker_message", "unblock_task", "message_thread", "start_thread", "propose_threads",
+    }
+    assert HELPER_STARTING_TOOLS <= SESSION_STARTING_TOOLS and THREAD_REFUSED_TOOLS <= SESSION_STARTING_TOOLS
+    # A new tool that starts a session is refused in a thread by the code itself, until it is placed: it never
+    # runs there with no hand-off because nobody thought of threads.  Do not loosen this.
+    assert refused_in_a_thread(SESSION_STARTING_TOOLS | {"start_something_new"}) == {
+        "cron_create", "dispatch_experiments", "start_something_new",
+    }
+    assert THREAD_REFUSED_TOOLS == refused_in_a_thread(SESSION_STARTING_TOOLS)
 
 
 async def test_a_threads_loop_starts_no_run_to_edit_a_copy_never_landed(api, monkeypatch, pods):
@@ -807,7 +862,7 @@ async def test_a_cut_off_turns_slow_put_back_finishes_before_its_pod_goes(api, m
         while landing_module._PUTTING_BACK or landing_module._TEARDOWNS:
             await asyncio.sleep(0.1)
     # Every applied file was put back: no half-landed turn, and then the pod went.
-    assert sorted(p.name for p in pods.project.iterdir()) == ["Report.docx", "notes.txt"]
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
     assert pods.pods == {}
 
 
@@ -883,7 +938,7 @@ async def test_a_thread_is_told_only_of_work_since_its_last_landed_turn(api, mon
         calling(("write_file", {"path": "d.md", "content": "d"})),
         _final_response("Done."),
     ], pool=pool, during=the_pod_goes_once)
-    # Its first step lost nothing the last landed turn did not hold; its step after the pod went did.
+    # Its first step lost nothing the last turn end did not save; its step after the pod went did.
     first, after_the_pod_went = (await last_writes(store, thread))[-2:]
     assert not first.startswith("[This thread's copy") and after_the_pod_went.startswith("[This thread's copy")
 
@@ -905,11 +960,21 @@ async def a_rolled_back_turn(api, monkeypatch, thread, pool) -> None:
         ], pool=pool, saga_settings=QUICK)
 
 
-async def test_a_turn_that_never_used_its_pod_does_not_count_as_landed(api, monkeypatch, pods):
+@asynccontextmanager
+async def a_dropped_lock(*_):
+    raise RuntimeError("the lock's connection dropped")
+    yield
+
+
+async def test_a_turn_that_never_used_its_pod_is_no_turn_end_that_saved(api, monkeypatch, pods):
     thread = await a_thread(api)
     store, pool = api.app.state.session_store, SandboxPool(pods)
-    await a_rolled_back_turn(api, monkeypatch, thread, pool)
-    # A question in between, answered with no tools: it lands nothing, so it is no landed turn.
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "project_lock", a_dropped_lock)
+        await a_turn(api, monkeypatch, thread, [
+            calling(("write_file", {"path": "a.md", "content": "a"})), _final_response("Done."),
+        ], pool=pool)
+    # A question in between, answered with no tools: it saves nothing, and the work before it is still gone.
     await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Which file did you start with?"})
     await a_turn(api, monkeypatch, thread, [_final_response("It was a.md.")], pool=pool)
     await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Try again."})
@@ -919,7 +984,7 @@ async def test_a_turn_that_never_used_its_pod_does_not_count_as_landed(api, monk
     assert (await last_writes(store, thread))[-1].startswith("[This thread's copy")
 
 
-async def test_a_turn_after_a_landing_that_rolled_back_is_told_its_copy_lacks_that_work(api, monkeypatch, pods):
+async def test_a_turn_after_a_landing_that_rolled_back_has_that_work_and_is_not_told_it_is_gone(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
     store, pool = api.app.state.session_store, SandboxPool(pods)
@@ -930,7 +995,10 @@ async def test_a_turn_after_a_landing_that_rolled_back_is_told_its_copy_lacks_th
     await a_turn(api, monkeypatch, thread, [
         calling(("write_file", {"path": "x.md", "content": "x"})), _final_response("Done."),
     ], pool=pool)
-    assert (await last_writes(store, thread))[-1].startswith("[This thread's copy")
+    # Its commit step kept the turn on the branch: the next copy has it, and lands it, your c.md aside.
+    assert not (await last_writes(store, thread))[-1].startswith("[This thread's copy")
+    assert pods.real_names() == ["Report.docx", "a.md", "b.md", "c.md", "notes.txt", "x.md"]
+    assert (pods.project / "c.md").read_text() == "saved by you just now"
 
 
 async def test_a_threads_code_command_runs_no_coding_agent_on_a_copy_never_landed(api, monkeypatch, pods):
@@ -972,15 +1040,11 @@ async def test_a_turn_after_a_held_landing_is_told_its_copy_lacks_that_work(api,
     assert (await last_writes(store, second))[-1].startswith("[This thread's copy")
 
 
-async def test_a_turn_after_a_landing_that_failed_is_told_its_copy_lacks_that_work(api, monkeypatch, pods):
+async def test_a_turn_after_a_landing_that_failed_before_its_commit_is_told_its_copy_lacks_that_work(api, monkeypatch, pods):
     thread = await a_thread(api)
     store, pool = api.app.state.session_store, SandboxPool(pods)
-
-    async def raising(**_):
-        raise RuntimeError("the lock's connection dropped")
-
     with monkeypatch.context() as patch:
-        patch.setattr(loop_artifact_completion, "land_turn", raising)
+        patch.setattr(landing_module, "project_lock", a_dropped_lock)
         await a_turn(api, monkeypatch, thread, [
             calling(("write_file", {"path": "a.md", "content": "a"})), _final_response("Done."),
         ], pool=pool)
@@ -989,3 +1053,5 @@ async def test_a_turn_after_a_landing_that_failed_is_told_its_copy_lacks_that_wo
         calling(("write_file", {"path": "b.md", "content": "b"})), _final_response("Done."),
     ], pool=pool)
     assert (await last_writes(store, thread))[-1].startswith("[This thread's copy")
+    # Nothing of it reached the history: its work went with its pod.
+    assert pods.real_names() == ["Report.docx", "b.md", "notes.txt"]

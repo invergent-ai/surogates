@@ -40,13 +40,13 @@ def calling(*calls: tuple[str, dict]) -> tuple[dict, dict]:
     )
 
 
-async def a_turn(
+def a_looping_harness(
     api, monkeypatch, session, replies, *, saga: bool = True, pool: Any = None, during=None,
     saga_settings: Any = None,
 ) -> AgentHarness:
-    """One real turn of *session*, against a model that gives *replies* in
-    order, its turn ending as a worker ends it.  The ``memory`` tool runs
-    *during* (with the harness) instead of writing memory.  Returns the harness."""
+    """A harness whose loop runs *session*'s turn for real, against a model that gives *replies* in
+    order, its turn ending as a worker ends it.  The ``memory`` tool runs *during* (with the
+    harness) instead of writing memory."""
     store = api.app.state.session_store
     registry = ToolRegistry()
     ToolRuntime(registry).register_builtins()
@@ -80,6 +80,20 @@ async def a_turn(
         return message, usage
 
     monkeypatch.setattr(loop_module, "call_llm_with_retry", model)
+    return harness
+
+
+async def a_turn(
+    api, monkeypatch, session, replies, *, saga: bool = True, pool: Any = None, during=None,
+    saga_settings: Any = None,
+) -> AgentHarness:
+    """One real turn of *session*, against a model that gives *replies* in
+    order, its turn ending as a worker ends it.  The ``memory`` tool runs
+    *during* (with the harness) instead of writing memory.  Returns the harness."""
+    store = api.app.state.session_store
+    harness = a_looping_harness(
+        api, monkeypatch, session, replies, saga=saga, pool=pool, during=during, saga_settings=saga_settings,
+    )
     lease = await store.try_acquire_lease(session.id, "worker-sagas", ttl_seconds=60)
     events = await store.get_events(session.id)
     session = await store.get_session(session.id)
@@ -181,7 +195,7 @@ async def test_a_failed_turn_completes_its_saga(api, monkeypatch):
 async def a_saga_left_open(api, chat, *, compensating: bool) -> str:
     """A turn's saga with one step done, that nothing closed; its id."""
     store, saga_id = api.app.state.session_store, f"saga:{uuid4()}"
-    await store.emit_event(chat.id, EventType.SAGA_START, saga_start_event(saga_id, str(chat.id)))
+    await store.emit_event(chat.id, EventType.SAGA_START, saga_start_event(saga_id, str(chat.id), "tools"))
     for kind, state in ((EventType.SAGA_STEP_BEGIN, "executing"), (EventType.SAGA_STEP_COMMITTED, "committed")):
         await store.emit_event(chat.id, kind, saga_step_event(saga_id, "step-1", "memory", state))
     if compensating:

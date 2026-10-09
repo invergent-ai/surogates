@@ -147,8 +147,8 @@ class Sandbox(Protocol):
         """Create a new sandbox and return its unique identifier."""
         ...
 
-    async def execute(self, sandbox_id: str, name: str, input: str) -> str:
-        """Run *name* inside the sandbox with *input*, returning a JSON result."""
+    async def execute(self, sandbox_id: str, name: str, input: str, *, timeout: float | None = None) -> str:
+        """Run *name* inside the sandbox with *input*, returning a JSON result; *timeout* in place of the spec's."""
         ...
 
     async def destroy(self, sandbox_id: str) -> None:

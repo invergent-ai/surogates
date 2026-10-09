@@ -88,7 +88,7 @@ class ProcessSandbox:
         logger.info("Provisioned process sandbox %s at %s", sandbox_id, workdir)
         return sandbox_id
 
-    async def execute(self, sandbox_id: str, name: str, input: str) -> str:
+    async def execute(self, sandbox_id: str, name: str, input: str, *, timeout: float | None = None) -> str:
         """Run *name* as a subprocess inside the sandbox directory.
 
         Internal commands (prefixed with ``_``) are handled in-process
@@ -149,7 +149,7 @@ class ProcessSandbox:
         try:
             raw_stdout, raw_stderr = await asyncio.wait_for(
                 proc.communicate(input=input.encode()),
-                timeout=entry.spec.timeout,
+                timeout=timeout or entry.spec.timeout,
             )
         except asyncio.TimeoutError:
             timed_out = True

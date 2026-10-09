@@ -19,6 +19,10 @@ export default defineConfig({
     environment: "node",
     testTimeout: 60_000,
     hookTimeout: 60_000,
+    // What a poll waits for takes seconds on a machine that runs other suites beside this one: a page's
+    // load, a window, a link's handshake, an OAuth round trip, Settings' first state, DevTools. A poll
+    // asserts the same value however long it waits; it only fails later.
+    expect: { poll: { timeout: 10_000 } },
     fileParallelism: false,
     globalSetup: ["test/srt-tmp.ts"],
   },

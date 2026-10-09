@@ -338,6 +338,12 @@ class ResearchStore:
                 node.status = "pruned"
                 tag = f"[Pruned: {reason}]"
                 node.insight = f"{node.insight}\n{tag}" if node.insight else tag
+                # One statement a node, never all of them left to the commit: those
+                # go as one statement of many rows, which the driver writes in parts
+                # once the insights reach 128 KiB together.  A stop that comes between
+                # two parts is lost there, and the call waits for ever on a statement
+                # it never finished sending, keeping its connection.
+                await db.flush()
             await db.commit()
             return doomed
 

@@ -24,7 +24,6 @@ import { revokeDevice, verifyDevice } from "../device.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmEnv, vmOptions } from "../vm/client.js";
-import { VmExecutor } from "../vm/executor.js";
 import { type Delivery, ImageDelivery, installBase, readManifest } from "../vm/image.js";
 import { missingTools, toolsMissing } from "../vm/linux.js";
 import type { Boot } from "../vm/manager.js";
@@ -48,6 +47,7 @@ import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { type BrowserPrompts, desktopPrompts } from "./prompts.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
+import { appTools } from "./tools.js";
 import { asShown } from "./pages/ui.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
@@ -56,6 +56,13 @@ import { type Bounds, WindowStates } from "./window-state.js";
 // RunAsNode fuse off, ignores it but keeps it, and what the app starts would take it: the VM manager's
 // QEMU and virtiofsd, the system browser, every spawn. It goes before anything is started.
 delete process.env.ELECTRON_RUN_AS_NODE;
+// No fuse covers Chromium's remote debugging, and on the app's fuses --remote-debugging-port still opens
+// CDP: any process of the user's could drive the app's pages, its bridge among them. The installed app
+// refuses both switches; this package's own Electron keeps them, for the tests.
+if (app.isPackaged && ["remote-debugging-port", "remote-debugging-pipe"].some((name) => app.commandLine.hasSwitch(name))) {
+  console.error("Surogate does not start with remote debugging (--remote-debugging-port or --remote-debugging-pipe).");
+  process.exit(1);
+}
 
 const PAGES = join(import.meta.dirname, "pages");
 const PAGES_PRELOAD = join(import.meta.dirname, "pages-preload.cjs");
@@ -664,7 +671,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the
     // VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
     tools: (bindings, network, changed) => new Browsing({
-      tools: new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(), changed }),
+      tools: appTools({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(), changed }),
       browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
       staging: browserTemp(profilesOf(root, credential)),
       bindingOf: (bound) => bindings.get(bound),

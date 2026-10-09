@@ -41,7 +41,7 @@ class RecordingBackend:
         self.calls.append("provision")
         return "sb-1"
 
-    async def execute(self, sandbox_id: str, name: str, input: str) -> str:
+    async def execute(self, sandbox_id: str, name: str, input: str, *, timeout: float | None = None) -> str:
         self.calls.append(f"execute:{name}")
         return '{"ok": true}'
 

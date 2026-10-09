@@ -32,10 +32,38 @@ def is_project_thread(config: dict[str, Any] | None) -> bool:
     return (config or {}).get("workstream_role") == THREAD
 
 
+def under_a_thread(config: dict[str, Any] | None) -> bool:
+    """Whether a session is a project's thread, or works under one: its helper, or a helper's helper.
+
+    What a thread may not start, none of them may: a helper's goal is the
+    model's to write, and is read as its first message, a command included.
+    """
+    return is_project_thread(config) or bool((config or {}).get("under_thread"))
+
+
+#: What a thread has no other way to do: its words must not send the model to do it "in the thread itself".
+_NO_OTHER_WAY = frozenset({"/deep-research", "/auto-research", "dispatch_experiments"})
+#: The sub-agents that are a deep research's or a research run's own: a thread starts none of them by type.
+THREAD_REFUSED_AGENT_TYPES = frozenset({"deep-research", "research-writer", "arbor-executor"})
+
+
+def sub_agent(kind: str) -> str:
+    """How a refusal names the sub-agent *kind*."""
+    return f'the "{kind}" sub-agent'
+
+
 def thread_refusal(name: str) -> str:
-    """What a project's thread answers to a command (``/name``) or tool *name*
-    it cannot start yet: a helper's, a routine's or a coding agent's edits
-    would stay in a copy the thread never lands."""
+    """What a project's thread, or a session under one, answers to a command
+    (``/name``), a tool or a sub-agent *name* it cannot start yet.  A
+    routine's runs would work on old files, and their work would land only
+    when someone next speaks to the thread; a coding agent's turn ends
+    outside the thread's landing, so its edits would stay in a copy never
+    landed.  A deep research's writer would find no evidence on a copy of
+    its own, and a research run's experiments need a git repository, which
+    a copy does not hold: for those the thread has no other way, and the
+    answer says so rather than send the model to delegate it by hand."""
+    if name in _NO_OTHER_WAY or name in map(sub_agent, THREAD_REFUSED_AGENT_TYPES):
+        return f"A thread can't start {name} yet, and has no other way to do it: tell the user it cannot be done in a project's thread."
     return f"A thread can't start {name} yet: do this step in the thread itself."
 
 

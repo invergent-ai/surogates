@@ -187,12 +187,35 @@ _NOT_LANDED = {
     "escalated": "Could not finish landing these; check them",
     "failed": "Not saved, because the landing failed",
 }
+#: What a report adds of a landing left running whose versions from before the history had lost.
+_NONE_PUT_BACK = "The project's history no longer has their versions from before the landing, so none could be put back"
+#: A landing that failed with the turn's work kept all the same.
+_FAILED_KEPT = "Not landed, because the landing failed"
+#: What a report adds when the work that did not land is in the history, on the thread's branch.
+WORK_KEPT = "The thread's work is kept, and lands with its next turn"
 #: What a report says of a thread's files a landing left out, by why it left them out.
 _NOT_MERGED = {
     "changed": "Not merged, because the project's file changed after the thread started (the newer file was kept)",
     "shape": "Not merged, because the project has a folder where the thread made a file, or a file where it made a folder",
     "with": "Not merged, because they go with a change that was not merged (a move lands whole or not at all)",
+    "kept": "Not kept, because the thread or another helper changed them first (their version stays)",
 }
+
+
+def not_handed_back(data: dict, *, copy: str = "the thread's copy") -> str:
+    """What a helper's completion says of a hand-back that failed; nothing when its work was handed back.
+
+    Its changes are then on no hand-off, and land with no turn of its
+    thread: kept apart in the project's history when ``left`` names them,
+    else gone with its pod.
+    """
+    if data.get("kept") is not False:
+        return ""
+    left = data.get("left")
+    if isinstance(left, list) and left:
+        named = _listed([{"label": name} for name in left if isinstance(name, str)], limit=_MAX_LISTED_LEFT_OUT)
+        return f"Its work could not be handed back: its changes to {named} were kept apart, not brought into {copy}"
+    return f"Its work could not be handed back, and its changes are not in {copy}"
 
 
 def _landing_lines(data: dict, kept: list, deleted: list) -> str:
@@ -203,21 +226,38 @@ def _landing_lines(data: dict, kept: list, deleted: list) -> str:
     if data.get("landing") in _NOT_LANDED:
         # Said even when no file is known: the master must hear the turn did not land.
         named = _listed(kept) if kept else "the turn's files could not be read"
-        lines += f"\n{_NOT_LANDED[data['landing']]}: {named}"
+        saved = data.get("saved") is True and data["landing"] != "escalated"
+        words = _FAILED_KEPT if saved and data["landing"] == "failed" else _NOT_LANDED[data["landing"]]
+        # And that nothing is lost for it, when the turn is on the thread's branch.
+        lines += f"\n{words}: {named}" + (f"\n{WORK_KEPT}" if saved else "")
     elif kept:
         # A report from before reasons were given says the file changed.
         why: dict[str, list] = {reason: [] for reason in _NOT_MERGED}
         for f in kept:
             why[f.get("reason") if f.get("reason") in _NOT_MERGED else "changed"].append(f)
         lines += "".join(f"\n{_NOT_MERGED[reason]}: {_listed(named)}" for reason, named in why.items() if named)
-    for key, words in (
-        ("excluded", "Not saved, because the project's history leaves them out"),
-        ("repositories", "Not landed, because they are inside a git repository"),
-    ):
+    return lines + _left_out_lines(data, "excluded", "repositories", "not_taken")
+
+
+#: What a report says of the files a turn made that are in no landing, by where they were left.
+_LEFT_OUT = {
+    "excluded": "Not saved, because the project's history leaves them out",
+    "repositories": "Not landed, because they are inside a git repository",
+    "not_taken": (
+        "Not taken up from a helper, because the file changed after the helper started "
+        "(the helper's version is kept in the project's history)"
+    ),
+}
+
+
+def _left_out_lines(data: dict, *keys: str) -> str:
+    """A report's lines on the files named under each of *keys*, a line a key that names any."""
+    lines = ""
+    for key in keys:
         named = data.get(key)
         if isinstance(named, list) and named:
             names = [{"label": name} for name in named if isinstance(name, str)]
-            lines += f"\n{words}: {_listed(names, limit=_MAX_LISTED_LEFT_OUT, total=data.get(f'{key}_count'))}"
+            lines += f"\n{_LEFT_OUT[key]}: {_listed(names, limit=_MAX_LISTED_LEFT_OUT, total=data.get(f'{key}_count'))}"
     return lines
 
 
@@ -234,12 +274,15 @@ def worker_note(event_type: str, data: dict) -> dict:
     if title is None and failed:
         content = f"[Worker {worker_id} failed: {data.get('error', 'unknown error')}]"
     elif title is None:
-        content = f"[Worker {worker_id} completed]\n{data.get('result', '')}"
+        # Said in the harness's own line, before the worker's words.
+        unkept = not_handed_back(data)
+        content = f"[Worker {worker_id} completed{f'. {unkept}' if unkept else ''}]\n{data.get('result', '')}"
     else:
         # A title is one line, but it can hold a quote.
         named = f"[Thread {json.dumps(title, ensure_ascii=False)} ({worker_id})"
         if failed:
-            content = f"{named} failed: {data.get('error', 'unknown error')}]"
+            # A failed turn that was kept names what its take-ups left out, as a landing does.
+            content = f"{named} failed: {data.get('error', 'unknown error')}]" + _left_out_lines(data, "not_taken")
         else:
             files = data.get("files")
             # A thread's files that did not land, and the ones it deleted,
@@ -249,11 +292,19 @@ def worker_note(event_type: str, data: dict) -> dict:
                 landing, change = (f.get("landing"), f.get("change")) if isinstance(f, dict) else (None, None)
                 (kept if landing == "not_merged" else deleted if change == "deleted" else made).append(f)
             listed = _listed(made) if isinstance(files, list) else "not listed (the turn ended early)"
-            content = (
-                f"{named} reported]\n"
-                f"{_REPORT_BEGIN}\n{_thread_words(str(data.get('result') or ''))}\n{_REPORT_END}\n"
-                f"Files: {listed}"
-            ) + _landing_lines(data, kept, deleted)
+            if data.get("recovered"):
+                # No turn of the thread ended: a later lock holder settled what its lost worker left, and
+                # the harness alone speaks.
+                content = (
+                    f"{named}: a landing its worker left unfinished was settled]" + _landing_lines(data, kept, deleted)
+                    + (f"\n{_NONE_PUT_BACK}" if data.get("gone") else "")
+                )
+            else:
+                content = (
+                    f"{named} reported]\n"
+                    f"{_REPORT_BEGIN}\n{_thread_words(str(data.get('result') or ''))}\n{_REPORT_END}\n"
+                    f"Files: {listed}"
+                ) + _landing_lines(data, kept, deleted)
     return {"role": "user", "content": content}
 
 

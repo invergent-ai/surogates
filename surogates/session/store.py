@@ -1246,10 +1246,16 @@ class SessionStore:
         data: dict,
         *,
         lease_token: UUID | None = None,
+        status: str | None = None,
     ) -> int:
         """Append an event and atomically update session counters.
 
         Returns the newly assigned event id (``BIGSERIAL``).
+
+        With *status*, the session's status is set in the same transaction:
+        an event that says a session is paused and the status that makes it
+        so are both there or neither.  ``archived`` is final, as for
+        :meth:`update_session_status`.
 
         With *lease_token*, the event is committed only while that token is
         the session's lease: a worker that lost the session must not answer
@@ -1278,7 +1284,7 @@ class SessionStore:
                     raise LeaseNotHeldError(
                         f"Session {session_id}: lease {lease_token} is no longer held"
                     )
-            await self._write_event(db, event)
+            await self._write_event(db, event, status=status)
             await db.commit()
         await self._announce_event(event)
         return event.id
@@ -1328,8 +1334,8 @@ class SessionStore:
             inbox_row=None if suppress_for_viewer else inbox_row,
         )
 
-    async def _write_event(self, db: AsyncSession, event: _EventWrite) -> None:
-        """Write a ready event in *db*'s transaction, which the caller commits."""
+    async def _write_event(self, db: AsyncSession, event: _EventWrite, *, status: str | None = None) -> None:
+        """Write a ready event in *db*'s transaction, which the caller commits; with *status*, set the session's status with it."""
         session_id, event_type = event.session_id, event.event_type
         db.add(event.row)
         await db.flush()  # assigns row.id via BIGSERIAL
@@ -1347,6 +1353,9 @@ class SessionStore:
         # statement match no row and write nothing the rest of the time.
         counter_clause = _build_counter_update_clause(event_type, event.data)
         params: dict[str, Any] = {"id": session_id}
+        if status is not None:
+            counter_clause += ", status = CASE WHEN status = 'archived' THEN status ELSE :status END"
+            params["status"] = status
         touch_guard = ""
         if event_type == EventType.LLM_DELTA:
             touch_guard = (
@@ -1744,12 +1753,12 @@ class SessionStore:
         return events
 
     async def last_event(
-        self, session_id: UUID, type: EventType, *, containing: dict[str, Any] | None = None,
+        self, session_id: UUID, *types: EventType, with_key: str | None = None,
     ) -> Event | None:
-        """The session's latest *type* event whose data holds *containing*; None when it has none."""
-        stmt = select(EventRow).where(EventRow.session_id == session_id, EventRow.type == type.value)
-        if containing:
-            stmt = stmt.where(EventRow.data.contains(containing))
+        """The session's latest event of one of *types* whose data has the key *with_key*; None when it has none."""
+        stmt = select(EventRow).where(EventRow.session_id == session_id, EventRow.type.in_([t.value for t in types]))
+        if with_key is not None:
+            stmt = stmt.where(EventRow.data.has_key(with_key))
         stmt = stmt.order_by(EventRow.id.desc()).limit(1)
         async with self._sf() as db:
             row = (await db.execute(stmt)).scalars().first()

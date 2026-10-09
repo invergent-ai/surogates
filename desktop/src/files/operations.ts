@@ -19,7 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { isBase64, type Outcome } from "../link/protocol.js";
 import {
   conflict, Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WALK_FILES,
-  MAX_WALK_DEPTH, MAX_WALK_LOOKS, MAX_WRITE_BYTES, OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE,
+  MAX_WALK_DEPTH, MAX_WALK_LOOKS, MAX_WRITE_BYTES, NUL_REFUSED, OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE,
   sandboxError, SHOWN_DOT_FOLDERS, valueError, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "./answers.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
@@ -612,7 +612,7 @@ async function ripgrep(args: Record<string, unknown>, { env, folder }: Context, 
   const pattern = text(args, "pattern");
   const glob = textOrNull(args, "glob");
   const lines = whole(args, "context");
-  if (pattern.includes("\0") || glob?.includes("\0")) throw valueError("embedded null byte");
+  if (pattern.includes("\0") || glob?.includes("\0")) throw valueError(NUL_REFUSED);
   const rg = findOnPath("rg", env.PATH, folder);
   if (!rg) throw new Failure({ type: "ripgrep", message: RG_MISSING });
   const argv = ["--no-ignore"];

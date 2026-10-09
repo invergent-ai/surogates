@@ -68,6 +68,61 @@ class TestDestroy:
         )
         assert "abc" not in sandbox._pods
 
+    async def test_a_delete_that_was_never_answered_can_be_asked_again(self, sandbox: K8sSandbox):
+        api, asked = MagicMock(), []
+
+        async def delete(name, namespace, **kwargs):
+            asked.append(name)
+            if len(asked) == 1:
+                await asyncio.Event().wait()  # the cluster does not answer
+
+        api.delete_namespaced_pod = delete
+        api.delete_namespaced_secret = AsyncMock()
+        sandbox._api = api
+        sandbox._pods["abc"] = _PodEntry(sandbox_id="abc", pod_name="sandbox-abc", secret_name="secret-abc", namespace="test-ns", spec=SandboxSpec())
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(sandbox.destroy("abc"), 0.1)
+        # Not forgotten while its pod may still be there: the second delete reaches the cluster.
+        assert "abc" in sandbox._pods
+        await sandbox.destroy("abc")
+        assert asked == ["sandbox-abc", "sandbox-abc"] and "abc" not in sandbox._pods
+
+
+class TestExpire:
+    """A pod at its last work is given a deadline of its own, so one left behind does not live its day."""
+
+    @staticmethod
+    def a_pod(sandbox: K8sSandbox, *, lived: float, deadline: int | None):
+        from datetime import datetime, timedelta, timezone
+
+        api = MagicMock()
+        pod = MagicMock()
+        pod.status.start_time = datetime.now(timezone.utc) - timedelta(seconds=lived)
+        pod.spec.active_deadline_seconds = deadline
+        api.read_namespaced_pod = AsyncMock(return_value=pod)
+        api.patch_namespaced_pod = AsyncMock()
+        sandbox._api = api
+        sandbox._pods["abc"] = _PodEntry(sandbox_id="abc", pod_name="sandbox-abc", secret_name="secret-abc", namespace="test-ns", spec=SandboxSpec())
+        return api
+
+    async def test_its_deadline_is_brought_down_to_what_it_has_lived_and_the_time_given(self, sandbox: K8sSandbox):
+        api = self.a_pod(sandbox, lived=5000, deadline=86_400)
+        await sandbox.expire("abc", 1800)
+        [(name, namespace, body)] = [call.args for call in api.patch_namespaced_pod.await_args_list]
+        # Counted from the pod's start, as the cluster counts it.
+        assert (name, namespace) == ("sandbox-abc", "test-ns") and list(body) == ["spec"]
+        assert 6800 <= body["spec"]["activeDeadlineSeconds"] <= 6810
+
+    async def test_a_deadline_is_never_raised(self, sandbox: K8sSandbox):
+        api = self.a_pod(sandbox, lived=3000, deadline=3600)
+        await sandbox.expire("abc", 1800)
+        api.patch_namespaced_pod.assert_not_awaited()
+
+    async def test_a_pod_it_does_not_know_is_asked_nothing(self, sandbox: K8sSandbox):
+        api = self.a_pod(sandbox, lived=10, deadline=86_400)
+        await sandbox.expire("another", 1800)
+        api.read_namespaced_pod.assert_not_awaited()
+
 
 class TestStatusReadFailures:
     """``status()`` must not flap to FAILED on transient API errors --
@@ -411,6 +466,27 @@ class TestThreadPodLayout:
         assert (manifest.spec.termination_grace_period_seconds or 0) == grace
         assert api.delete_namespaced_pod.await_args.kwargs["grace_period_seconds"] == grace
 
+    @pytest.mark.parametrize(("env", "mount_path", "deadline", "ready"), [
+        ({"PROJECT_DIR": "/project"}, "/project", 86_400, 600),
+        ({}, "/workspace", 3600, 5),  # the fixture's pod_ready_timeout
+    ])
+    async def test_a_thread_pod_outlasts_any_turn_and_has_ten_minutes_to_open(self, sandbox, env, mount_path, deadline, ready):
+        api = MagicMock()
+        api.create_namespaced_pod = AsyncMock()
+        pod = MagicMock()
+        pod.status.pod_ip = "10.42.0.7"
+        api.read_namespaced_pod = AsyncMock(return_value=pod)
+        spec = SandboxSpec(
+            resources=[Resource(source_ref="s3://bucket/boundaries/w/workspace/", mount_path=mount_path)], env=env,
+        )
+        wait = AsyncMock()
+        with patch.object(sandbox, "_get_api", AsyncMock(return_value=api)), \
+             patch.object(sandbox, "_create_s3_secret", AsyncMock()), \
+             patch.object(sandbox, "_wait_for_ready", wait):
+            await sandbox.provision(spec)
+        assert api.create_namespaced_pod.await_args.args[1].spec.active_deadline_seconds == deadline
+        assert wait.await_args.args[2] == ready
+
     async def test_any_other_pod_mounts_the_files_at_workspace(self, sandbox):
         main, s3fs, env, volumes = await self.manifest(sandbox, "/workspace")
         assert main == {"/workspace": "workspace"}
@@ -443,4 +519,4 @@ class TestWaitForReady:
 
         with patch("surogates.sandbox.kubernetes.watch.Watch", Watch), \
              pytest.raises(RuntimeError, match="exited with 1: copy not made: the project's files could not be read$"):
-            await sandbox._wait_for_ready(MagicMock(), "sandbox-x")
+            await sandbox._wait_for_ready(MagicMock(), "sandbox-x", 60)

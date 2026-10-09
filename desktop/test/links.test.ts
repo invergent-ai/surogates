@@ -193,12 +193,14 @@ describe("the files in a folder linked from elsewhere", () => {
     for (let i = 0; i < 50_000; i += 1) writeFileSync(join(folder, `f${i}`), "");
     const delay = monitorEventLoopDelay({ resolution: 10 });
     delay.enable();
-    expect(await scanLinks(folder)).toBeNull();
+    // The whole look, however busy the machine: the app's own deadline cuts it short there (a test
+    // below pins that deadline), and a look cut short would measure only part of the walk.
+    expect(await scanLinks(folder, { deadlineMs: 45_000 })).toBeNull();
     // The monitor records a stall when its next timer runs, after it.
     await new Promise((resolve) => setTimeout(resolve, 20));
     delay.disable();
     expect(delay.max / 1e6).toBeLessThan(100);
-  });
+  }, 60_000);
 
   it("stop at their deadline when a look at a file never returns, with what they found", async () => {
     linkedIn("a.txt");
