@@ -91,6 +91,21 @@ setInterval(() => {
 }, 25);
 </script>`;
 
+// A page that says, to its own site, each time what a click of its user's gives it comes or goes; one of them frames
+// another of its own site and one of another's.
+const ACTS = (framing: boolean) => `<!doctype html><title>ACTS</title>
+${framing ? `<iframe src="/acts?same"></iframe><iframe src="http://other.test/acts?third"></iframe>` : ""}
+<script>
+const say = (what) => navigator.sendBeacon("/said", what);
+let had = false;
+setInterval(() => {
+  const has = navigator.userActivation.isActive;
+  if (has !== had) say(has ? "active" : "inactive");
+  had = has;
+}, 25);
+say("ready");
+</script>`;
+
 let site: Server;
 let canary: Server;
 let ports: { site: number; canary: number };
@@ -120,10 +135,12 @@ beforeEach(async () => {
       let what = "";
       req.on("data", (chunk) => (what += chunk));
       return void req.on("end", () => {
-        said.push({ host: String(req.headers.host), from: new URL(String(req.headers.referer ?? "http://unknown/")).pathname, what });
+        const from = new URL(String(req.headers.referer ?? "http://unknown/"));
+        said.push({ host: String(req.headers.host), from: from.pathname + from.search, what });
         res.writeHead(204).end();
       });
     }
+    if (req.url?.startsWith("/acts")) return void res.writeHead(200, { "content-type": "text/html" }).end(ACTS(req.url === "/acts?framing"));
     if (req.url === "/stuck") return void res.writeHead(200, { "content-type": "text/html" }).end(STUCK);
     if (req.url === "/gate") {
       return void (gate = (ms, first = false) => res.writeHead(200, { "content-type": "text/plain" }).end(first ? `${ms} first` : String(ms)));
@@ -3229,28 +3246,25 @@ await navigator.serviceWorker.ready;`);
     expect(await page.evaluate(() => [...(document.getElementById("top") as HTMLInputElement).files!].map((file) => file.name))).toEqual(["report.pdf"]);
   }, 60_000);
 
-  it("counts a page's quiet from the end of this host's own reading of it too: handed back and taken over again at once, a busy page that the reading gives leave to ask opens no chooser of the browser's own", async () => {
-    const a = session();
-    await op(a, "browser.navigate", { url: "http://fixture.test/asks/armed" }, "chat-1");
-    const page = tabs().get(a)![0]!;
-    const asked = () => within(500, page.evaluate(() => (window as unknown as { asked: number }).asked));
-    // The page has asked on the leave its opening gave it, and that leave has run out.
-    await expect.poll(asked, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+  it("gives no page what a click of its user's gives it at a hand back: not the page handed back, a frame of its own site in it nor one of another's, nor another chat's tab that nobody touched", async () => {
+    const [a, b] = [session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/acts?framing" }, "chat-1");
+    await op(b, "browser.navigate", { url: "http://fixture.test/acts?idle" }, "chat-2");
+    const saying = (what: string) => said.filter((entry) => entry.what === what).map(({ host, from }) => host + from).sort();
+    const each = ["fixture.test/acts?framing", "fixture.test/acts?idle", "fixture.test/acts?same", "other.test/acts?third"];
+    await expect.poll(() => saying("ready"), { timeout: 10_000 }).toEqual(each);
+    // Whatever opening them gave them has run out. No test reads these pages: a reading is what gives it.
     await new Promise((done) => setTimeout(done, 6_000));
-    const before = (await asked()) as number;
-    // Busy three seconds, by now. Handed back meanwhile, it is asked to answer for what came before: that reading
-    // reaches it only once it is free, and gives it leave anew. Its user has taken the browser over again by then.
-    await page.evaluate("void setTimeout(() => { const until = Date.now() + 3000; while (Date.now() < until) {} }, 0)");
-    await new Promise((done) => setTimeout(done, 100));
     host.pause("chat-1", true);
+    await new Promise((done) => setTimeout(done, 1_000));
+    said.length = 0;
     host.pause("chat-1", false);
-    host.pause("chat-1", true);
-    const taken = performance.now();
-    // It asks 3.5 s after the reading reached it: more than five seconds after the take-over.
-    await expect.poll(async () => typeof (await asked()) === "number" && ((await asked()) as number) > before, { timeout: 20_000 }).toBe(true);
-    expect(performance.now() - taken).toBeGreaterThan(OWN_CHOOSER_MS);
-    await new Promise((done) => setTimeout(done, 1_500));
-    expect(ownChoosers()).toEqual([]);
+    await new Promise((done) => setTimeout(done, 3_000));
+    expect(said).toEqual([]);
+    // Each says so when it is given: the agent's click in the page, which is its user's as far as a page can tell.
+    // The browser gives it to the page clicked and to the frames of its own site in it.
+    await op(a, "browser.mouse", { action: "click", x: 5, y: 5, button: "left", clicks: 1 }, "chat-1");
+    await expect.poll(() => saying("active"), { timeout: 5_000 }).toEqual(["fixture.test/acts?framing", "fixture.test/acts?same"]);
   }, 60_000);
 
   // The fixture's stuck page, opened for a new session of chat-1's; and what the display shows of the browser's own

@@ -886,7 +886,7 @@ export class BrowserHost {
     kept.heard = null;
   }
 
-  // *page* is asked to answer, in each of its frames, twice over, now that the browser is handed back.
+  // *page* is asked to answer, twice over, now that the browser is handed back (read).
   // Playwright says a page asked for a file only once it has read the input, which a busy page keeps
   // waiting: so what a page asked for while its user held the browser, or before they took it, can be
   // heard of only after the hand back. That reading was sent before these, so it is heard of before they
@@ -895,16 +895,36 @@ export class BrowserHost {
   // on it, is heard of before the second answers. And for SETTLE_MS at most: a page one of whose frames is
   // stuck is the agent's again then, and what it asked for before, if it says so only after, is kept.
   private settle(page: Page): void {
-    const read = () => Promise.allSettled(page.frames().map((frame) => frame.evaluate("1")));
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<void>((resolve) => {
       timer = setTimeout(resolve, SETTLE_MS);
     });
-    const settled: Promise<void> = Promise.race([this.doing(page, read().then(read)), late]).then(() => {
+    const settled: Promise<void> = Promise.race([this.read(page).then(() => this.read(page)), late]).then(() => {
       clearTimeout(timer);
       if (this.settling.get(page) === settled) this.settling.delete(page);
     });
     this.settling.set(page, settled);
+  }
+
+  // *page* is asked to answer, wherever its frames run: the page, and each frame of it that a process of
+  // its own draws, the rest sharing a thread with one of those. Settled once each has answered, or cannot.
+  // Asked over a line of this host's own to the browser, and not through Playwright: Playwright sends
+  // every reading of a page as its user's own act, which gives the frame what a click of theirs gives it
+  // for five seconds: leave to open a window, fill the screen, write the clipboard, ask for a file, send
+  // the tab elsewhere from a frame. This reading is the host's own, of every page there is, at moments the
+  // agent did not choose, so it gives a page nothing, and tells it nothing: it runs none of the page's code.
+  private read(page: Page, framed = true): Promise<unknown> {
+    const targets = [page, ...(framed ? page.frames().filter((frame) => frame !== page.mainFrame()) : [])];
+    return Promise.allSettled(targets.map(async (target) => {
+      // None for a frame its page's own process draws, nor for a page that is gone.
+      const line = await page.context().newCDPSession(target).catch(() => null);
+      if (line === null) return;
+      try {
+        await line.send("Runtime.evaluate", { expression: "1" });
+      } finally {
+        void line.detach().catch(() => {});
+      }
+    }));
   }
 
   // *page*, held and heard, is let be OWN_CHOOSER_MS from now, unless it is heard of again before.
@@ -1192,10 +1212,11 @@ export class BrowserHost {
   }
 
   // Whether *page* answers now. One with a question open answers nothing until it is answered: so a page
-  // that answers has had its question answered since, and is its agent's again.
+  // that answers has had its question answered since, and is its agent's again. Asked as this host asks
+  // (read), which gives the page nothing: it is asked before each thing the agent would do there.
   private async answers(page: Page): Promise<boolean> {
     let timer: NodeJS.Timeout | undefined;
-    const answered = await Promise.race([this.doing(page, page.evaluate("1").then(() => true, () => true)), new Promise<false>((resolve) => {
+    const answered = await Promise.race([this.read(page, false).then(() => true), new Promise<false>((resolve) => {
       timer = setTimeout(() => resolve(false), ASKING_MS);
     })]);
     clearTimeout(timer);
