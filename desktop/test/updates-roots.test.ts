@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { releaseKeys, updateLine } from "../src/shell/updates.js";
 import { installBase } from "../src/vm/image.js";
+import { HELPER_MODES } from "./helper-modes.js";
 import { helperWith, keys, servedBase } from "./updates-base.js";
 
 const told = vi.hoisted(() => ({
@@ -40,21 +41,18 @@ const roots = (path: string, mode: number, uid = 0) => void told.paths.set(path,
 describe("what an installed app reads as root's own", () => {
   it("takes the release keys of a helper that root owns, that no other may write and that can be run, at whatever mode", () => {
     expect(() => releaseKeys(base.helper, true)).toThrow(`${base.helper} ${NOT_ROOTS}`);
-    // Root's alone to write, and a program: as an install leaves it, read-only, root's alone to run, with a set-id bit;
-    // and one that only its group may run, or only others: root, whom pkexec runs it as, runs what anyone may.
-    for (const mode of [0o755, 0o555, 0o700, 0o500, 0o744, 0o711, 0o4755, 0o610, 0o601]) {
+    // Every mode of the list that the install script's own rule is asked with (helper-modes.ts),
+    // with each set-id and sticky bit: who may write it and whether it is a program, and no more.
+    expect(HELPER_MODES).toHaveLength(100);
+    for (const [mode, answer] of HELPER_MODES) {
       roots(base.helper, mode);
-      expect(releaseKeys(base.helper, true), mode.toString(8)).toHaveLength(1);
+      if (answer === "taken") expect(releaseKeys(base.helper, true), mode.toString(8)).toHaveLength(1);
+      else expect(() => releaseKeys(base.helper, true), mode.toString(8)).toThrow(`${base.helper} ${answer === "written" ? NOT_ROOTS : NOT_RUN}`);
     }
-    // Root's, and its group may write it; root's, and anyone may; and another's that none but its owner may.
-    for (const [mode, uid] of [[0o775, 0], [0o757, 0], [0o777, 0], [0o755, own], [0o700, own]] as const) {
-      roots(base.helper, mode, uid);
-      expect(() => releaseKeys(base.helper, true), `${mode.toString(8)} ${uid}`).toThrow(`${base.helper} ${NOT_ROOTS}`);
-    }
-    // Root's alone to write, and no program: pkexec could not run it.
-    for (const mode of [0o644, 0o444, 0o600, 0o400]) {
-      roots(base.helper, mode);
-      expect(() => releaseKeys(base.helper, true), mode.toString(8)).toThrow(`${base.helper} ${NOT_RUN}`);
+    // Another's, that none but its owner may write.
+    for (const mode of [0o755, 0o700, 0o4755]) {
+      roots(base.helper, mode, own);
+      expect(() => releaseKeys(base.helper, true), mode.toString(8)).toThrow(`${base.helper} ${NOT_ROOTS}`);
     }
     // A development build's helper is its test's own.
     expect(releaseKeys(base.helper)).toHaveLength(1);

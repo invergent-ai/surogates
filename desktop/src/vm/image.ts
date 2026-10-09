@@ -54,7 +54,9 @@ export function readManifest(path: string): ImageManifest {
 /**
  * Throws unless *path* is root's own word: root's, with no other who may write it, and a file and
  * no link, wherever one leads. At whatever mode: an administrator may keep one read-only. With
- * *run*, as the helper must be, it is a program too: pkexec could run no other.
+ * *run*, as the helper must be, it is a program too: pkexec could run no other. A set-id or a
+ * sticky bit is not looked at, as the install script looks at none on its helper (roots_program in
+ * release/install.sh): neither changes who may write the file, and no script is run as its owner.
  */
 export function rootsOwn(path: string, run = false): void {
   const found = lstatSync(path);

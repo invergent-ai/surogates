@@ -17,6 +17,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 import { AS_ROOT } from "../src/shell/updates.js";
 
+import { HELPER_MODES } from "./helper-modes.js";
+
 const SCRIPT = fileURLToPath(new URL("../release/install.sh", import.meta.url));
 const PUBLISH = fileURLToPath(new URL("../release/publish.sh", import.meta.url));
 const RELEASES = ["24.04", "26.04"] as const;
@@ -999,11 +1001,16 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     // word, as it is to the app, which offers an update by the same rule: an administrator may
     // have closed it to others. The same release again is applied, and the helper is as an apply
     // leaves one.
-    for (const mode of ["555", "700", "744", "511", "4755"]) {
-      expect(root(`chmod ${mode} ${helper}`).status, mode).toBe(0);
-      expect(root(`/opt/surogate-test/install.sh --apply ${files()}`), mode).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
-      expect(root(`stat -c '%a %U' ${helper}`).stdout, mode).toBe("755 root\n");
-    }
+    // Every mode of the list that the app's own rule is asked with (helper-modes.ts), with each
+    // set-id and sticky bit, in one run of the container: who may write the helper and whether
+    // it is a program, and no more.
+    const asked = HELPER_MODES.map(([mode]) => mode.toString(8));
+    const answers = root(`for mode in ${asked.join(" ")}; do chmod 755 ${helper} && chmod "$mode" ${helper} || exit 9; [ "$(stat -c %a ${helper})" = "$mode" ] || exit 8; /opt/surogate-test/install.sh --apply ${files()} >/tmp/said 2>&1; echo "$mode $? $(cat /tmp/said) $(stat -c '%a %U' ${helper})"; done`);
+    expect(answers.status, answers.stderr).toBe(0);
+    const NOT_LEFT = `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again`;
+    expect(answers.stdout.trimEnd().split("\n")).toEqual(HELPER_MODES.map(([mode, answer]) =>
+      answer === "taken" ? `${mode.toString(8)} 0 Surogate Desktop: 1.0.0 is installed 755 root` : `${mode.toString(8)} 1 ${NOT_LEFT} ${mode.toString(8)} root`));
+    expect(root(`chmod 755 ${helper}`).status).toBe(0);
     // Nor is a link to nothing no helper where the release it is of is asked by itself, from the
     // script's functions without its last line: it is a helper, and here one with no mark.
     expect(root(`rm ${helper} /opt/surogate/bin/release.json && ln -s /nowhere ${helper} && bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && helper_release'`))
