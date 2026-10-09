@@ -7,6 +7,7 @@ import asyncio
 import pytest
 
 import surogates.harness.loop as loop_module
+from surogates.config import SHARED_WORK_QUEUE_KEY
 from surogates.harness import landing as landing_module
 from surogates.harness import loop_artifact_completion
 from surogates.harness.loop_context_replay import unread_reports, worker_note
@@ -15,6 +16,7 @@ from surogates.runtime import SlashCommandConfig
 from surogates.sandbox.history import History
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
+from surogates.workstreams.stream import STREAM_TYPES
 from tests.test_steer_loop import _final_response, _make_loop_harness
 
 from .test_command_wake_once import DiesWriting, workers  # noqa: F401  (workers is a fixture)
@@ -224,8 +226,10 @@ async def test_your_edit_then_a_landing_tells_the_thread_to_redo_and_the_redo_la
 async def test_a_redo_wakes_its_finished_thread(api, monkeypatch, pods):
     thread = await a_thread(api, "Draft A", await master_of(api, await create(api)))
     store, pool = api.app.state.session_store, SandboxPool(pods)
+    await api.app.state.redis.delete(SHARED_WORK_QUEUE_KEY)
     await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v2 by you")
-    assert (await store.get_session(thread.id)).status == "completed"
+    # Queued by its redo, as a report queues its master.
+    assert (await store.get_session(thread.id)).status == "completed" and await queued(api, thread)
     ran: list = []
 
     async def the_redo_turn(session, *_, **__):
@@ -520,3 +524,28 @@ async def test_a_file_whose_author_a_prunings_cut_hides_is_not_redone():
     landing_module._tell(outcome)
     assert outcome["redo"] == [{"path": "Report.docx", "reason": "changed", "by": {"kind": "you"}}]
     assert ([f["landing"] for f in outcome["files"]], outcome["saved"]) == (["not_merged", "redoing"], False)
+
+
+async def test_a_redo_takes_the_files_held_with_a_clash_and_only_a_landing_that_completed_tells_of_one():
+    held = [
+        {"path": "Draft.docx", "reason": "changed", "by": {"kind": "thread", "id": "t2", "title": "Draft B"}},
+        {"path": "Final.docx", "reason": "with"},
+    ]
+    files = [{"ref": "Draft.docx", "landing": "not_merged"}, {"ref": "Final.docx", "landing": "not_merged"}]
+    # A move whose old name changed meanwhile: both names are redone, and the turn's end saved its work.
+    outcome = {"state": "completed", "saved": False, "overlapped": held, "files": [dict(f) for f in files]}
+    landing_module._tell(outcome)
+    assert outcome["redo"] == [
+        {"path": "Draft.docx", "reason": "changed", "by": {"kind": "thread", "id": "t2", "title": "Draft B"}},
+        {"path": "Final.docx", "reason": "with"},
+    ]
+    assert ([f["landing"] for f in outcome["files"]], outcome["saved"]) == (["redoing", "redoing"], True)
+    # A landing put back for good applied nothing: its turn is on its branch, and lands whole with the next.
+    put_back = {"state": "compensated", "saved": True, "overlapped": held, "files": [dict(f) for f in files]}
+    landing_module._tell(put_back)
+    assert "redo" not in put_back and [f["landing"] for f in put_back["files"]] == ["not_merged", "not_merged"]
+    landing_module._tell(None)
+
+
+async def test_a_projects_stream_carries_a_redo():
+    assert EventType.HISTORY_REDO in STREAM_TYPES

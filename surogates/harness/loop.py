@@ -1864,9 +1864,7 @@ class AgentHarness(
             # Nor has the turn a redo gives a project's thread, which reads
             # its redo: in a thread the redo's own wake left active, its
             # worker dead before the model was asked, as in a finished one.
-            for_redo = revived_by == "history_redo" or _turn_for_a_redo(
-                all_events, is_command=lambda event: self._is_command(session, event),
-            )
+            for_redo = _turn_for_a_redo(all_events, is_command=lambda event: self._is_command(session, event))
             last_user_content = "" if for_news or for_redo else _latest_user_event_text(all_events)
 
             # 10a. A command the harness answers itself, with no model
