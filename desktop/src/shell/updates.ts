@@ -19,6 +19,43 @@ import { download, type Fetch, hashOf, sizeOf } from "../download.js";
 import { installBase, rootsOwn } from "../vm/image.js";
 
 export const CHECK_MS = 6 * 60 * 60 * 1000;
+// A check that failed is tried again sooner: after a minute, and each time it fails again after
+// twice as long, to the six hours of any other. The network that comes up after the app, a
+// download a sleep cut, and a base asked between a release's two uploads are each a failure.
+const RETRY_MS = 60 * 1000;
+
+/** How long after a check the next is due, *failed* being how many have failed in a row. */
+export function nextCheckIn(failed: number): number {
+  return failed === 0 ? CHECK_MS : Math.min(CHECK_MS, RETRY_MS * 2 ** (failed - 1));
+}
+
+/**
+ * *updates* checked now, and again whenever the next check is due (nextCheckIn), until *signal*,
+ * the app's quit. A check that takes none says why to *report*; one the quit cut short says
+ * nothing. What it returns checks at once, as when the computer wakes: a wait counts no time asleep.
+ */
+export function keepChecked(updates: { check(): Promise<void> }, signal: AbortSignal, report: (error: unknown) => void): () => void {
+  let failed = 0;
+  let due: NodeJS.Timeout | undefined;
+  let running = false;
+  const check = (): void => {
+    clearTimeout(due);
+    if (signal.aborted || running) return;
+    running = true;
+    void updates.check().then(() => {
+      failed = 0;
+    }, (error: unknown) => {
+      failed += 1;
+      if (!signal.aborted) report(error);
+    }).finally(() => {
+      running = false;
+      if (!signal.aborted) due = setTimeout(check, nextCheckIn(failed)).unref();
+    });
+  };
+  signal.addEventListener("abort", () => clearTimeout(due), { once: true });
+  check();
+  return check;
+}
 // How a tarball begins: a gzip member's magic number.
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
 // A manifest is one short line, and its signature Ed25519's 64 bytes: anything longer is not one.

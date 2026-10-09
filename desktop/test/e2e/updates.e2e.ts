@@ -120,6 +120,14 @@ describe("updates, through the app", () => {
     expect(readFileSync(join(home, "k", "surogate", "updates", "0.0.1", "release.tar.gz")).equals(tarball)).toBe(true);
   });
 
+  it("tries again after a minute a check that failed at its start, where the base had no release yet, and finds the one published since", { timeout: 180_000 }, async () => {
+    const page = await launched();
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(await page.textContent("#update-text")).toBe("");
+    publish("0.0.1");
+    await expect.poll(() => page.textContent("#update-text"), { timeout: 100_000, interval: 1_000 }).toBe("Update available: Surogate 0.0.1");
+  });
+
   it("installs the update by its root helper at Restart to update, then quits as the app quits and starts again from its launcher", async () => {
     publish("0.0.1");
     const page = await launched();

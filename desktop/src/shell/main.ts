@@ -51,7 +51,7 @@ import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { appTools, BWRAP } from "./tools.js";
 import { asShown } from "./text.js";
-import { CHECK_MS, helperRun, installedUpdates, ROOT_RECORD, updateLine, Updates, type UpdatesOptions } from "./updates.js";
+import { helperRun, installedUpdates, keepChecked, ROOT_RECORD, updateLine, Updates, type UpdatesOptions } from "./updates.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
@@ -344,10 +344,9 @@ function startUpdates(): void {
   }
   // Whichever build: all that a helper said of an install that did not end well goes to the log.
   updates = new Updates({ ...options, log: report }, changed);
-  // A check that finds none it can take is said in the log, and tried again at the next.
-  const check = () => void updates?.check().catch(report);
-  check();
-  setInterval(check, CHECK_MS).unref();
+  // Checked at the start and every six hours; sooner after a check that failed; and when the
+  // computer wakes. A quit in the middle of one is no failure to say.
+  powerMonitor.on("resume", keepChecked(updates, stopDelivery.signal, report));
 }
 
 // The update line's button: the update downloaded installed by the root helper, then the app restarted

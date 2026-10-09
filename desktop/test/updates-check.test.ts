@@ -7,9 +7,9 @@ import { existsSync, lstatSync, readFileSync, statSync, writeFileSync } from "no
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { CHECK_MS, KEY_CHANGED, listedKeys, signedRelease, updateLine } from "../src/shell/updates.js";
+import { CHECK_MS, KEY_CHANGED, keepChecked, listedKeys, nextCheckIn, signedRelease, updateLine } from "../src/shell/updates.js";
 import { helperWith, keys, next, ranged, servedBase, sha256 } from "./updates-base.js";
 
 const base = servedBase();
@@ -288,5 +288,38 @@ describe("a check", () => {
 
   it("is made every 6 hours", () => {
     expect(CHECK_MS).toBe(6 * 60 * 60 * 1000);
+    expect([0, 1, 2, 3, 4, 9, 10, 11, 40].map((failed) => nextCheckIn(failed) / 60_000)).toEqual([360, 1, 2, 4, 8, 256, 360, 360, 360]);
+  });
+
+  it("is made at the app's start and six hours after each that ends well; one that fails is tried again after a minute, then two, then four, to six hours; and at once when the computer wakes", async () => {
+    vi.useFakeTimers();
+    try {
+      let fails = true;
+      let checks = 0;
+      const said: unknown[] = [];
+      const quit = new AbortController();
+      const now = keepChecked({ check: () => (checks += 1, fails ? Promise.reject(new Error("could not reach the base")) : Promise.resolve()) }, quit.signal, (error) => said.push(String(error)));
+      const after = async (minutes: number) => (await vi.advanceTimersByTimeAsync(minutes * 60_000), checks);
+      expect(await after(0)).toBe(1);
+      // Each failure is said, and the wait doubles from a minute.
+      expect([await after(0.99), await after(0.01), await after(1.99), await after(0.01), await after(4)]).toEqual([1, 2, 2, 3, 4]);
+      expect(said).toEqual(Array.from({ length: 4 }, () => "Error: could not reach the base"));
+      // One that ends well is followed six hours later, and a failure after it waits a minute again.
+      fails = false;
+      expect([await after(8), await after(359), await after(1)]).toEqual([5, 5, 6]);
+      fails = true;
+      expect([await after(360), await after(1), await after(1.9)]).toEqual([7, 8, 8]);
+      // Awake again: checked at once, whatever was left of the wait, and no second check comes of the wait.
+      fails = false;
+      now();
+      expect([await after(0), await after(0.2), await after(359.7), await after(0.1)]).toEqual([9, 9, 9, 10]);
+      // The app's quit ends it: a check it cut short is no failure to say, and none follows.
+      fails = true;
+      const before = said.length;
+      quit.abort(new Error("Surogate quit"));
+      expect([await after(360), await after(360), said.length]).toEqual([10, 10, before]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
