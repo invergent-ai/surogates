@@ -360,14 +360,17 @@ describe("Settings → Folders and permissions", () => {
   it("keeps the keyboard on its Take back or Stop as the list is drawn again, and gives it to the next once its line goes", async () => {
     const { shell, page } = await signedIn();
     const settings = await foldersSettings(shell, page);
-    // The list as the main process would answer it, the test's own: a chat with two hosts and a process.
+    // The list as the main process would answer it, the test's own: a chat with two hosts, the browser and a process.
     await shell.evaluate(({ webContents }, folder) => {
       const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
-      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com", "example.org"], processes: [{ id: "p-1", command: "npm run serve" }] };
-      for (const channel of ["settings:folders", "settings:take-back", "settings:stop"]) contents.ipc.removeHandler(channel);
+      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com", "example.org"], browser: true, processes: [{ id: "p-1", command: "npm run serve" }] };
+      for (const channel of ["settings:folders", "settings:take-back", "settings:take-back-browser", "settings:stop"]) contents.ipc.removeHandler(channel);
       contents.ipc.handle("settings:folders", () => [{ folder, chats: [chat] }]);
       contents.ipc.handle("settings:take-back", (_event, _root, host) => {
         chat.hosts = chat.hosts.filter((found) => found !== host);
+      });
+      contents.ipc.handle("settings:take-back-browser", () => {
+        chat.browser = false;
       });
       contents.ipc.handle("settings:stop", (_event, _root, id) => {
         chat.processes = chat.processes.filter((found) => found.id !== id);
@@ -385,12 +388,15 @@ describe("Settings → Folders and permissions", () => {
     expect(await focused()).toBe("Take back example.org");
     // Taken back, with Enter held: the line under it takes its place, and the key's repeats stop nothing.
     await settings.keyboard.down("Enter");
-    await expect.poll(focused).toBe("Stop npm run serve");
+    await expect.poll(focused).toBe("Take back the browser on this computer");
     await settings.keyboard.down("Enter");
     await settings.keyboard.down("Enter");
     await settings.keyboard.up("Enter");
     await new Promise((resolve) => setTimeout(resolve, 500));
-    expect(await focused()).toBe("Stop npm run serve");
+    expect(await focused()).toBe("Take back the browser on this computer");
+    // The browser's line is one of them: taken back, the line under it takes its place.
+    await settings.keyboard.press("Enter");
+    await expect.poll(focused).toBe("Stop npm run serve");
     // The last line's place is the one before it.
     await settings.keyboard.press("Enter");
     await expect.poll(focused).toBe("Take back example.com");
