@@ -2473,6 +2473,9 @@ async def _search_files_handler(
     context = arguments.get("context", 0)
     task_id = _tracker_of(kwargs)
     wio = workspace_io_from(kwargs)
+    if _holds_nul(pattern, path, file_glob):
+        # Before the path is resolved: on a folder that is on a computer that asks the computer.
+        return _tool_error(f"Search failed: {NUL_REFUSED}")
 
     # Map legacy target names
     target_map = {"grep": "content", "find": "files"}

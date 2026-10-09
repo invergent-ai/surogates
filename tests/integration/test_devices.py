@@ -67,6 +67,7 @@ from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.credentials import CredentialVault
 from surogates.tools.builtin import file_ops
+from surogates.tools.utils import process_registry
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
 from surogates.tools.runtime import ToolRuntime
@@ -1717,6 +1718,72 @@ async def test_a_stat_of_a_key_with_a_nul_finds_nothing_with_the_computer_away(l
     before = len(await operation_rows(session_factory, rig.device_id))
     assert await asyncio.wait_for(wio.stat("/f/a\0b"), 3.0) is None
     assert len(await operation_rows(session_factory, rig.device_id)) == before
+
+
+@pytest.mark.parametrize("arguments", [
+    {"pattern": "a\0"},
+    {"pattern": "x", "file_glob": "*\0"},
+    {"pattern": "a\0", "path": "missing"},
+    {"pattern": "*\0", "target": "files"},
+    {"pattern": "x", "path": "a\0b"},
+], ids=["pattern", "glob", "pattern, path missing", "file pattern", "path"])
+async def test_a_search_with_a_nul_is_refused_at_once_with_the_computer_away(laptop_rig, session_factory, arguments):
+    rig = laptop_rig
+    wio = device_io(rig.ops, rig.device_id, rig.root, rig.folder)
+    before = len(await operation_rows(session_factory, rig.device_id))
+    # Before the path is resolved, which asks the computer: nothing waits for it.
+    answer = await asyncio.wait_for(file_ops._search_files_handler(arguments, workspace_io=wio), 3.0)
+    assert json.loads(answer) == {"error": f"Search failed: {NUL_REFUSED}"}
+    assert len(await operation_rows(session_factory, rig.device_id)) == before
+
+
+@pytest.mark.parametrize("action", ["poll", "log", "wait", "kill", "write", "submit"])
+async def test_a_process_named_with_a_nul_is_unknown_at_once_with_the_computer_away(laptop_rig, session_factory, action):
+    rig = laptop_rig
+    wio = device_io(rig.ops, rig.device_id, rig.root, rig.folder)
+    before = len(await operation_rows(session_factory, rig.device_id))
+    # No process has such a name: said as the tool says it of any it does not know, without asking the computer.
+    answer = await asyncio.wait_for(
+        process_registry._handle_process({"action": action, "session_id": "proc_\0", "data": "x"}, workspace_io=wio), 3.0,
+    )
+    assert json.loads(answer) == {"status": "not_found", "error": "No process with ID proc_\0"}
+    assert len(await operation_rows(session_factory, rig.device_id)) == before
+
+
+async def test_a_nul_in_what_a_process_is_sent_or_a_browser_is_told_reaches_the_computer(laptop_rig):
+    """Content, not a name: recorded as given while the computer is away, and delivered when it is back."""
+    rig = laptop_rig
+    heard: list[tuple[str, dict]] = []
+    rig.laptop.browser = lambda kind, args: heard.append((kind, args)) or {"ok": {"value": None}}
+    wio = device_io(rig.ops, rig.device_id, rig.root, rig.folder)
+    client = DeviceBrowserClient(JournalRunner(
+        rig.ops, device_id=rig.device_id, root_session_id=rig.root, calling_session_id=rig.root,
+        invocation_id=f"call-{uuid.uuid4()}",
+    ))
+    calls = [
+        asyncio.create_task(wio.write_stdin("proc_000000000000", "a\0b")),
+        asyncio.create_task(client.evaluate("return 'a\0b'")),
+        asyncio.create_task(client.type_text("a\0b")),
+        asyncio.create_task(client.navigate("https://example.org/a\0b")),
+    ]
+    try:
+        async def all_recorded() -> bool:
+            return len(await rig.ops.pending(rig.device_id, 1)) == len(calls)
+
+        await eventually(all_recorded)
+        recorded = {op.kind: op.args for op in await rig.ops.pending(rig.device_id, 1)}
+        assert recorded["write_stdin"] == {"session_id": "proc_000000000000", "data": "a\0b"}
+        assert all("a\\u0000b" in json.dumps(args) for args in recorded.values()), recorded
+        await rig.laptop.connect()
+        # Every one is answered by the computer, whatever it answers.
+        done, pending = await asyncio.wait(calls, timeout=10.0)
+        assert not pending
+        assert sorted(rig.laptop.ran) == sorted(recorded)
+        assert all("a\\u0000b" in json.dumps(args) for _, args in heard) and len(heard) == 3
+    finally:
+        for call in calls:
+            call.cancel()
+        await asyncio.gather(*calls, return_exceptions=True)
 
 
 async def test_operations_run_on_the_laptop(laptop_rig):
