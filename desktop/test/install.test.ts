@@ -2522,6 +2522,10 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       ["a folder", `rm ${record} && mkdir ${record}`],
     ] as const) refused(what, made, notRoots);
     refused("no record", `rm ${record}`, "Surogate Desktop is not installed: run its install script first");
+    // Nor is a computer with a record and no version one that has an installed version's state to
+    // compare: it is told the same, and not that a version with no name names no schema.
+    expect(rolled("1.6.0", "mv -T /opt/surogate/current /root/current", "mv -T /root/current /opt/surogate/current")).toBe("1 0 Surogate Desktop: Surogate Desktop is not installed: run its install script first\n");
+    expect(standing()).toBe(installed);
     // The installed version's mark says what it keeps for its users, and so which releases read
     // it: one that is not root's own file says nothing. Here each would have a release of an
     // earlier state schema taken.
