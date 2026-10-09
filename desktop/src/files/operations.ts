@@ -22,6 +22,7 @@ import {
   MAX_WALK_DEPTH, MAX_WALK_LOOKS, MAX_WRITE_BYTES, NUL_REFUSED, OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE,
   sandboxError, SHOWN_DOT_FOLDERS, valueError, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "./answers.js";
+import { land } from "./land.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
 
@@ -29,6 +30,9 @@ export interface Context {
   folder: string; // resolved
   home: string;
   env: Record<string, string | undefined>;
+  // A landing's helper alone (land.ts): the thread's copy its files come from, and where the files it
+  // replaces are kept until the landing is recorded. The app's own paths, never a request's.
+  landing?: { copy: string; kept: string };
 }
 
 type Kind = (args: Record<string, unknown>, context: Context, signal: AbortSignal) => unknown;
@@ -44,6 +48,7 @@ const KINDS: Record<string, Kind> = {
   list_dir: listDir,
   walk,
   ripgrep,
+  land,
 };
 
 const WRITE_EFBIG = new Failure({ type: "os", code: "EFBIG", message: WRITE_TOO_LARGE });
