@@ -86,6 +86,22 @@ describe("a chat's folder", () => {
     expect(checkFolder(join(base, "disk", "cache"), guards)).toMatchObject({ ok: false, missing: false });
   });
 
+  it("may not hold a link that the way to the app's cache or its data goes through, wherever that link leads now: a command could point it elsewhere", () => {
+    // The cache home a link to a folder that is reached through a second link, in a folder beside both.
+    mkdirSync(join(base, "b", "real", "cache"), { recursive: true });
+    mkdirSync(join(base, "a"));
+    symlinkSync(join(base, "b", "real"), join(base, "a", "link"));
+    symlinkSync(join(base, "a", "link", "cache"), join(base, "home", ".cache"));
+    const checked = checkFolder(join(base, "a"), guards);
+    expect(checked).toMatchObject({ ok: false, missing: false });
+    expect(!checked.ok && checked.message).toMatch(/home folder or the app's own data/);
+    // A folder beside the link, and one the way does not go through, may be a chat's.
+    mkdirSync(join(base, "a2"));
+    mkdirSync(join(base, "b", "other"));
+    expect(checkFolder(join(base, "a2"), guards)).toMatchObject({ ok: true });
+    expect(checkFolder(join(base, "b", "other"), guards)).toMatchObject({ ok: true });
+  });
+
   it("may not be where a credential folder's link leads", () => {
     mkdirSync(join(base, "dotfiles"));
     symlinkSync(join(base, "dotfiles"), join(base, "home", ".ssh"));
