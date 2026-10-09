@@ -23,6 +23,7 @@ from surogates.browser.shell import ShellSession
 from surogates.devices.binding import device_of, is_binding_root
 from surogates.harness.loop_pending import _hand_back_unread
 from surogates.session.events import EventType
+from surogates.session.store import BrowserControlBusy
 from surogates.tenant.auth.oauth import OAuthTokens
 from surogates.tenant.auth.middleware import (
     authenticate_websocket_tenant,
@@ -318,6 +319,22 @@ async def _computer_browser_state(app_state: Any, session_id: UUID) -> BrowserSt
     return BrowserStateResponse(status=status, control_owner=None, live_view_path="", computer=True)
 
 
+async def _tell(store: Any, chat_id: UUID, event_type: EventType, data: dict, **how: Any) -> bool | None:
+    """Tell a chat of a take-over or a hand back, as its store does.
+
+    One kept waiting behind another telling for the chat for longer than the store waits is
+    answered 503, to be posted again: nothing was told, whatever the one ahead of it tells.  The
+    browser is held, or the agent's again, on the computer all the same, and the pane says of a
+    failed post that the chat could not be told.
+    """
+    try:
+        return await store.tell_browser_control(chat_id, event_type, data, **how)
+    except BrowserControlBusy:
+        raise HTTPException(
+            status_code=503, detail="The chat is being told of its browser by another request. Post it again.",
+        )
+
+
 # What tells a local-folder chat that its user took its browser over on the computer, and handed it back.
 _COMPUTER_CONTROL = [EventType.BROWSER_CONTROL_GRANTED, EventType.BROWSER_CONTROL_RETURNED]
 
@@ -457,7 +474,7 @@ async def post_browser_control(
         sid = str(chat.id)
         if body.action == "acquire":
             taken_over = {"session_id": sid, "owner_user_id": owner_user_id, "computer": True}
-            if await store.tell_browser_control(chat.id, EventType.BROWSER_CONTROL_GRANTED, taken_over) is None:
+            if await _tell(store, chat.id, EventType.BROWSER_CONTROL_GRANTED, taken_over) is None:
                 return {"outcome": "refreshed", "owner_user_id": owner_user_id}
             return {"outcome": "granted", "owner_user_id": owner_user_id}
         # A release answers whether the agent goes on by itself: only at a hand back its user
@@ -469,9 +486,7 @@ async def post_browser_control(
         # The turn is given with the telling, or not at all: the chat is made active as a typed
         # message makes one whose turn had ended, and the resume written is the turn, and what the
         # agent reads the hand back from.
-        goes_on = await store.tell_browser_control(
-            chat.id, EventType.BROWSER_CONTROL_RETURNED, told, gives_a_turn=confirmed,
-        )
+        goes_on = await _tell(store, chat.id, EventType.BROWSER_CONTROL_RETURNED, told, gives_a_turn=confirmed)
         if goes_on is None:
             # Another post handed it back meanwhile: that one told the chat, and gave what it gave.
             return {"outcome": "released", RESUMES: body.handed_back and await _goes_on_already(request.app.state, chat.id)}

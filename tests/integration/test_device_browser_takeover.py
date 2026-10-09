@@ -19,7 +19,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import surogates.harness.loop as loop_module
@@ -36,7 +36,7 @@ from surogates.harness.slash_skill import build_expanded_message
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.runtime import SLASH_COMMAND_IDS, SlashCommandConfig
 from surogates.session.events import EventType
-from surogates.session.store import SessionStore
+from surogates.session.store import CONTROL_LOCK_WAIT_MS, SessionStore
 from surogates.tenant.auth.jwt import create_access_token, create_service_account_session_token
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.auth.oauth import OAuthTokens
@@ -212,7 +212,7 @@ class Computer:
 
     async def control(
         self, chat: UUID, action: str, *, token_of: UUID | None = None, handed_back: bool | None = None,
-        answered: int = 200, **who,
+        answered: int = 200, leaves: bool = True, **who,
     ) -> dict:
         """Post *action* to the chat's control route, as the web client in the desktop's window on this
         computer posts it, unless *who* gives another ``sign_in`` (None: a browser's, the desktop's
@@ -227,8 +227,9 @@ class Computer:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post(path, json=said)
         assert response.status_code == answered, response.text
-        # Its events bumped the chat's clock: it is left alone again since.
-        await self.left(chat)
+        # Its events bumped the chat's clock: it is left alone again since, unless a test *leaves* it as it is.
+        if leaves:
+            await self.left(chat)
         return response.json()
 
     async def hands_back(self, chat: UUID, **who) -> dict:
@@ -658,6 +659,51 @@ async def test_as_many_hand_backs_of_one_chat_at_once_as_the_pool_is_wide_give_i
         assert narrow.wakes == [str(chat)]
     finally:
         await narrow.unqueue(chat)
+
+
+BUSY = {"detail": "The chat is being told of its browser by another request. Post it again."}
+
+
+HELD = {
+    "its lock": select(func.pg_advisory_xact_lock(func.hashtext(text("'browser-control:' || :chat")))),
+    "its row": text("SELECT 1 FROM sessions WHERE id = CAST(:chat AS uuid) FOR UPDATE"),
+}
+
+
+@pytest.mark.parametrize("held", HELD)
+@pytest.mark.parametrize("posted", ["acquire", "release"])
+async def test_posts_kept_waiting_for_one_chats_lock_are_answered_busy_and_leave_the_pool_its_connections(
+    pg_url, session_factory, redis_client, posted, held,
+):
+    async with pooled(pg_url, session_factory, redis_client, 2) as narrow:
+        chat, other = await (narrow.idle() if posted == "acquire" else narrow.told_taken_over()), await narrow.idle()
+        before = await narrow.log(chat)
+        said = {"handed_back": True} if posted == "release" else {}
+        # Whatever holds the chat's lock, or the row a telling writes to under it, holds it for longer
+        # than a telling takes: here, from outside.
+        async with session_factory() as holder:
+            await holder.execute(HELD[held], {"chat": str(chat)})
+            started = time.monotonic()
+            # As many posts for that chat as the pool is wide: each waits on a connection of its own.
+            answers = await asyncio.wait_for(
+                asyncio.gather(*(narrow.control(chat, posted, answered=503, leaves=False, **said) for _ in range(2))), 10.0,
+            )
+            waited = time.monotonic() - started
+            # They give up, are answered that nothing was told, and the pool has its connections back
+            # while the lock is still held: a read of another chat is not kept waiting. Each waited its
+            # time for the lock, and the one that got it for the row.
+            assert answers == [BUSY, BUSY]
+            assert CONTROL_LOCK_WAIT_MS / 1000 <= waited < 2 * CONTROL_LOCK_WAIT_MS / 1000 + 1
+            await asyncio.wait_for(narrow.store.get_session(other), 1.0)
+            await holder.rollback()
+        try:
+            # Nothing was told, and no turn given. Posted again, it is.
+            assert await narrow.log(chat) == before
+            assert narrow.wakes == []
+            again = await narrow.control(chat, posted, **said)
+            assert again == (GOES_ON if posted == "release" else {"outcome": "granted", "owner_user_id": str(narrow.user_id)})
+        finally:
+            await narrow.unqueue(chat)
 
 
 async def test_two_hand_backs_posted_together_tell_the_chat_one_and_give_its_agent_one_turn(computer, monkeypatch):

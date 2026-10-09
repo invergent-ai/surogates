@@ -19,7 +19,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, case, not_, select, text, true, update, delete, func, or_, tuple_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
@@ -89,6 +89,23 @@ class _EventWrite:
     id: int = 0
     stamped: Any = None
     inbox_publish: tuple[int, str, UUID] | None = None
+
+
+class BrowserControlBusy(Exception):
+    """A take-over or a hand back was not told: the chat's lock, or its row,
+    was held for longer than a telling waits (``CONTROL_LOCK_WAIT_MS``)."""
+
+
+#: How long the telling of a take-over or a hand back waits for its chat's
+#: lock, and then for the chat's row.  What holds either is another telling
+#: for the same chat, whose work is a read, two inserts and two updates:
+#: milliseconds.  Two seconds is far past any wait that is one of those, and
+#: far short of the pool's own wait for a connection: each post waiting holds
+#: one, so posts left to wait without end for one chat would leave none for
+#: any other request.
+CONTROL_LOCK_WAIT_MS = 2000
+#: Postgres's ``lock_not_available``, raised when ``lock_timeout`` runs out.
+_LOCK_NOT_AVAILABLE = "55P03"
 
 
 class LeaseNotHeldError(Exception):
@@ -2623,40 +2640,51 @@ class SessionStore:
         never says of a turn that it was given when it was not, nor the
         reverse.
 
+        A telling kept waiting for the chat's lock, or for its row, gives
+        up after ``CONTROL_LOCK_WAIT_MS`` and raises
+        :class:`BrowserControlBusy`, with nothing told: its connection goes
+        back to the pool.
+
         Returns None when there was nothing to tell; otherwise whether the
         chat's agent was given a turn.
         """
         handing_back = event_type is EventType.BROWSER_CONTROL_RETURNED
         written: list[_EventWrite] = []
-        async with self._sf() as db:
-            await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"browser-control:{session_id}"))))
-            last = (await db.execute(
-                select(EventRow.type)
-                .where(
-                    EventRow.session_id == session_id,
-                    EventRow.type.in_((
-                        EventType.BROWSER_CONTROL_GRANTED.value,
-                        EventType.BROWSER_CONTROL_RETURNED.value,
-                    )),
-                )
-                .order_by(EventRow.id.desc())
-                .limit(1)
-            )).scalar_one_or_none()
-            if (last == EventType.BROWSER_CONTROL_GRANTED.value) is not handing_back:
-                return None
-            resumes = handing_back and gives_a_turn and (await db.execute(
-                update(SessionRow)
-                .where(SessionRow.id == session_id, SessionRow.status.in_(("active", "completed")))
-                .values(status="active", updated_at=func.now())
-            )).rowcount == 1
-            telling = [(event_type, {**data, RESUMES: True} if resumes else data)]
-            if resumes:
-                telling.append((EventType.SESSION_RESUME, {"source": BROWSER_HAND_BACK}))
-            # Neither is for an inbox, so making them ready here asks nothing of Redis under the lock.
-            for kind, said in telling:
-                written.append(await self._ready_event(session_id, kind, said))
-                await self._write_event(db, written[-1])
-            await db.commit()
+        try:
+            async with self._sf() as db:
+                await db.execute(text(f"SET LOCAL lock_timeout = {CONTROL_LOCK_WAIT_MS}"))
+                await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"browser-control:{session_id}"))))
+                last = (await db.execute(
+                    select(EventRow.type)
+                    .where(
+                        EventRow.session_id == session_id,
+                        EventRow.type.in_((
+                            EventType.BROWSER_CONTROL_GRANTED.value,
+                            EventType.BROWSER_CONTROL_RETURNED.value,
+                        )),
+                    )
+                    .order_by(EventRow.id.desc())
+                    .limit(1)
+                )).scalar_one_or_none()
+                if (last == EventType.BROWSER_CONTROL_GRANTED.value) is not handing_back:
+                    return None
+                resumes = handing_back and gives_a_turn and (await db.execute(
+                    update(SessionRow)
+                    .where(SessionRow.id == session_id, SessionRow.status.in_(("active", "completed")))
+                    .values(status="active", updated_at=func.now())
+                )).rowcount == 1
+                telling = [(event_type, {**data, RESUMES: True} if resumes else data)]
+                if resumes:
+                    telling.append((EventType.SESSION_RESUME, {"source": BROWSER_HAND_BACK}))
+                # Neither is for an inbox, so making them ready here asks nothing of Redis under the lock.
+                for kind, said in telling:
+                    written.append(await self._ready_event(session_id, kind, said))
+                    await self._write_event(db, written[-1])
+                await db.commit()
+        except DBAPIError as error:
+            if getattr(error.orig, "sqlstate", None) == _LOCK_NOT_AVAILABLE:
+                raise BrowserControlBusy(f"session {session_id}") from error
+            raise
         for event in written:
             await self._announce_event(event)
         return resumes
