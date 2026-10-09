@@ -39,7 +39,7 @@ from surogates.harness.slash_skill import build_expanded_message
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.runtime import SLASH_COMMAND_IDS, SlashCommandConfig
 from surogates.session.events import EventType
-from surogates.session.store import CONTROL_LOCK_WAIT_MS, SessionStore, browser_control_lock
+from surogates.session.store import CONTROL_LOCK_WAIT_MS, BrowserControlBusy, SessionStore, browser_control_lock
 from surogates.tenant.auth.jwt import create_access_token, create_service_account_session_token
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.auth.oauth import OAuthTokens
@@ -856,6 +856,119 @@ async def test_posts_kept_waiting_for_one_chats_lock_are_answered_busy_and_leave
             await narrow.unqueue(chat)
 
 
+async def test_a_tellings_wait_for_its_lock_is_its_own_and_does_not_stay_on_the_pools_connection(
+    pg_url, session_factory, redis_client,
+):
+    # A pool of one: every statement of the API's is made on the connection a telling used.
+    async with pooled(pg_url, session_factory, redis_client, 1) as single:
+        chat = await single.idle()
+
+        async def lock_timeout() -> str:
+            async with single.pool() as db:
+                return (await db.execute(text("SHOW lock_timeout"))).scalar()
+
+        default = await lock_timeout()
+        tell, taken_over = single.store.tell_browser_control, {"computer": True}
+        # After a telling that committed, one with nothing to tell, and one answered busy.
+        assert (await tell(chat, EventType.BROWSER_CONTROL_GRANTED, taken_over)).told
+        assert await lock_timeout() == default
+        assert not (await tell(chat, EventType.BROWSER_CONTROL_GRANTED, taken_over)).told
+        assert await lock_timeout() == default
+        async with session_factory() as holder:
+            await hold_from_outside(holder, "its lock", single.store, chat)
+            with pytest.raises(BrowserControlBusy):
+                await tell(chat, EventType.BROWSER_CONTROL_RETURNED, taken_over)
+            await holder.rollback()
+        assert await lock_timeout() == default
+        # And after the reading of whether a hand back's turn stands, which waits behind the same lock.
+        await single.store.hand_backs_turn_stands(chat)
+        assert await lock_timeout() == default
+
+
+async def test_whether_a_hand_backs_turn_stands_is_read_behind_a_telling_under_way_unless_asked_not_to_wait(
+    computer, session_factory,
+):
+    chat = await computer.idle()
+    await computer.control(chat, "acquire")
+    assert await computer.hands_back(chat) == GOES_ON
+    await computer.unqueue(chat)
+    stands, taken = computer.store.hand_backs_turn_stands, asyncio.Event()
+
+    async def a_telling_under_way(for_s: float) -> None:
+        async with session_factory() as holder:
+            await hold_from_outside(holder, "its lock", computer.store, chat)
+            taken.set()
+            await asyncio.sleep(for_s)
+            await holder.rollback()
+
+    async def read(**how) -> tuple[bool, float]:
+        started = time.monotonic()
+        return await stands(chat, **how), time.monotonic() - started
+
+    # Behind one that ends in time: read once it has. Asked not to wait, read as the log stands.
+    telling = asyncio.create_task(a_telling_under_way(0.6))
+    await taken.wait()
+    at_once, took = await read(behind_tellings=False)
+    assert (at_once, took < 0.3) == (True, True)
+    behind, took = await read()
+    assert (behind, 0.3 < took < CONTROL_LOCK_WAIT_MS / 1000) == (True, True)
+    await telling
+    # Behind one that does not: read as the log stands once the wait is up, and not refused.
+    taken.clear()
+    telling = asyncio.create_task(a_telling_under_way(CONTROL_LOCK_WAIT_MS / 1000 + 1))
+    await taken.wait()
+    behind, took = await read()
+    assert (behind, took >= CONTROL_LOCK_WAIT_MS / 1000) == (True, True)
+    await telling
+
+
+async def test_a_release_that_is_no_confirmed_hand_back_and_lost_the_telling_to_one_is_answered_that_nobody_goes_on_for_it(
+    computer, monkeypatch,
+):
+    chat = await computer.idle()
+    await computer.control(chat, "acquire")
+    tell = computer.store.tell_browser_control
+
+    # As this release is about to be told, a confirmed hand back posted at once is told first, and gives the turn.
+    async def a_confirmed_one_first(session_id, event_type, *args, **kwargs):
+        if event_type is EventType.BROWSER_CONTROL_RETURNED:
+            assert (await tell(session_id, event_type, {"session_id": str(session_id), "computer": True}, gives_a_turn=True)).turn
+        return await tell(session_id, event_type, *args, **kwargs)
+
+    monkeypatch.setattr(computer.store, "tell_browser_control", a_confirmed_one_first)
+
+    # The agent goes on, for the hand back its user confirmed: this release handed nothing back.
+    assert await computer.control(chat, "release") == FOR_THE_PANE
+    monkeypatch.undo()
+    assert await computer.hands_back(chat) == GOES_ON
+    log = await computer.log(chat)
+    assert (log.count("browser.control_returned"), log.count("session.resume")) == (1, 1)
+
+
+async def test_the_agents_other_chats_are_told_of_a_hand_back_whose_wake_could_not_be_queued(computer, monkeypatch):
+    chat, another = await computer.idle(), await computer.told_taken_over()
+    await computer.control(chat, "acquire")
+    served = computer.served
+
+    def with_the_queue_away(**who) -> FastAPI:
+        app = served(**who)
+
+        async def no_queue(session_id: str) -> None:
+            raise RuntimeError("the queue is away")
+
+        app.state.session_wake = no_queue
+        return app
+
+    monkeypatch.setattr(computer, "served", with_the_queue_away)
+    with pytest.raises(RuntimeError, match="the queue is away"):
+        await computer.hands_back(chat)
+
+    # The wake is the last thing the route does: what its failing loses is the wake alone, which the
+    # sweeper recovers. The other chat no longer says its user holds the browser.
+    assert (await computer.log(another))[-1] == "browser.control_returned"
+    assert (await computer.handed_back(another))["handed_back_from"] == str(chat)
+
+
 async def test_two_hand_backs_posted_together_tell_the_chat_one_and_give_its_agent_one_turn(computer, monkeypatch):
     chat = await computer.idle()
     await computer.control(chat, "acquire")
@@ -1082,21 +1195,22 @@ async def test_a_take_over_is_told_to_no_other_chat_but_the_users_own_there_with
     another_user, _ = await add_user(session_factory, computer.org_id)
     idle, held = await computer.idle(), await computer.told_taken_over()
     # Chats whose hand back gave a turn no request has read: this one's own, then those that are not
-    # this user's with the agent on this computer; and one whose turn was read, and one stopped.
+    # this user's with the agent on this computer; and one whose turn was read, and one deleted.
     theirs = {
         "another computer's": await computer.idle(device_id=uuid4()),
         "another agent's": await computer.idle(agent_id=f"another-agent-{uuid4()}"),
         "another user's": await computer.idle(user_id=another_user),
     }
-    read, mine = await computer.idle(), await computer.idle()
-    for chat in (*theirs.values(), read, mine):
+    read, deleted, mine = await computer.idle(), await computer.idle(), await computer.idle()
+    for chat in (*theirs.values(), read, deleted, mine):
         await computer.store.emit_event(chat, EventType.BROWSER_CONTROL_GRANTED, {"computer": True})
         told = await computer.store.tell_browser_control(
             chat, EventType.BROWSER_CONTROL_RETURNED, {"session_id": str(chat), "computer": True}, gives_a_turn=True,
         )
         assert told.turn
     await computer.store.emit_event(read, EventType.LLM_REQUEST, {})
-    before = {chat: await computer.log(chat) for chat in (idle, held, read, mine, *theirs.values())}
+    await computer.store.update_session_status(deleted, "archived")
+    before = {chat: await computer.log(chat) for chat in (idle, held, read, deleted, mine, *theirs.values())}
     taken_from = await computer.idle()
 
     # A worker's token speaks for its own session: its take-over is told to that one alone.
@@ -2293,10 +2407,14 @@ async def test_the_hold_taken_for_a_hand_backs_turn_is_given_back_where_the_tell
 
     async with session_factory() as holder:
         await hold_from_outside(holder, "its lock", asking.store, chat)
+        started = time.monotonic()
         answer = await asking.control(chat, "release", asking.window, handed_back=True)
+        waited = time.monotonic() - started
         await holder.rollback()
 
+    # Answered once the telling's wait is up: the lock that was not had is not waited for a second time.
     assert answer == (503, BUSY)
+    assert waited < 2 * CONTROL_LOCK_WAIT_MS / 1000 - 0.5
     assert (len(ops.held), ops.spent) == (2, GIVEN_BACK)
     assert await holds_listed(asking, chat) == {}
     try:
@@ -2325,6 +2443,27 @@ async def test_the_hold_taken_for_a_hand_backs_turn_is_given_back_where_the_tell
 
     assert (len(ops.held), ops.spent) == (2, GIVEN_BACK)
     assert await holds_listed(asking, chat) == {}
+
+
+async def test_a_hold_is_left_where_the_telling_failed_and_the_chats_log_cannot_be_read_either(asking, monkeypatch):
+    chat = await asking.stopped_while_held()
+    metered(asking.api, CAPPED, ops := Ops())
+
+    async def the_database_goes_away(session_id: UUID) -> None:
+        raise RuntimeError("the database went away")
+
+    async def and_stays_away(session_id: UUID, **how) -> bool:
+        raise RuntimeError("the database is still away")
+
+    before_the_telling(asking, monkeypatch, the_database_goes_away)
+    monkeypatch.setattr(asking.store, "hand_backs_turn_stands", and_stays_away)
+
+    # The request fails as the telling failed. Whether a turn stands is not known: the hold is not
+    # given back under a turn that may have been given, and ops lets go of one nobody settles.
+    with pytest.raises(RuntimeError, match="the database went away"):
+        await asking.control(chat, "release", asking.window, handed_back=True)
+    assert ops.spent == []
+    assert [len(holds) for holds in (await holds_listed(asking, chat)).values()] == [1]
 
 
 async def test_only_the_hold_a_hand_backs_own_request_took_is_given_back_and_only_while_it_is_still_listed(
