@@ -963,6 +963,34 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
   });
 
+  it("says that a release is installed, and ends 0, only once nothing it started is still running as root: the app starts again at that", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    expect(root("find /opt/surogate -mindepth 1 -delete 2>/dev/null; rm -f /tmp/left /tmp/ended").status).toBe(0);
+    // A tool of the system's that leaves a program of its own behind, with all the helper had open:
+    // here sync, which then goes on for three seconds, as a package's hook or a tool's own helper may.
+    const leaving = (seconds: number) => `#!/bin/sh
+/opt/hold/sync "$@" || exit
+[ -e /tmp/left ] || { : >/tmp/left; (/usr/bin/sleep ${seconds}; : >/tmp/ended) 2>/dev/null & }
+exit 0
+`;
+    const waited = swapped("sync", leaving(3), [`/opt/surogate-test/install.sh --apply ${files()}; echo "ended $? $(test -e /tmp/ended && echo after || echo before)"`]);
+    expect(waited).toMatchObject({ stdout: "Surogate Desktop: 1.0.0 is installed\nended 0 after\n", stderr: "" });
+    // One that does not end is waited for a bounded while, and the helper then does not end 0: the
+    // release is in place, and whoever started the helper is told what still runs.
+    expect(root("rm -f /tmp/left /tmp/ended").status).toBe(0);
+    const bound = Number(root(`bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && echo "$LEFT_WAIT"'`).stdout);
+    expect(bound).toBe(30);
+    const began = Date.now();
+    const left = swapped("sync", leaving(300), [`/opt/surogate-test/install.sh --apply ${files()}; echo "ended $?"; pkill -x sleep; true`]);
+    expect(left).toMatchObject({ stdout: "ended 1\n", stderr: "Surogate Desktop: 1.0.0 is in place, and something that its update started as root is still running after 30 seconds: start Surogate again once that has ended\n" });
+    expect(Date.now() - began).toBeGreaterThan(29_000);
+    expect(current()).toBe("/opt/surogate/versions/1.0.0");
+    // And the next apply is not held by what an earlier one left, once that has ended.
+    expect(root(`/opt/surogate-test/install.sh --apply ${files()}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+  });
+
   it("runs the system's own tools, and no script that its caller's environment names", () => {
     const tarball = releaseOf("1.0.0");
     manifestOf("1.0.0", tarball, {}, other.privateKey);

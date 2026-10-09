@@ -38,6 +38,9 @@ settings() {
   LOCK_WAIT=300
   READ_WAIT=120
   SMALL_WAIT=5
+  # How long an apply that has put its release in place waits for what it started as root to end,
+  # before it says that the release is installed (settled).
+  LEFT_WAIT=30
   # How long a download from the base may wait, as curl is told: 30 seconds to be connected, and a
   # minute at under 1024 bytes a second. A base that takes the connection and never answers, or
   # stops in the middle of an answer, would otherwise hold an install or a rollback for good.
@@ -621,11 +624,12 @@ unlisted() {
 # department's group alone may enter, could read the update themselves and never have it applied.
 # Never in a group of root's, which the helper's own are, and never in one its caller names. With
 # none of the helper's open files, and for $1 seconds at most: a filesystem of the user's own may
-# never answer, and the user can stop what runs as them. The command alone is killed then
+# never answer, and the user can stop what runs as them. Without the apply's second lock too,
+# which what it starts as root holds (settled): the reader is not root. The command alone is killed then
 # (--foreground): GNU's timeout otherwise kills itself with it, and bash says so in words of its
 # own.
 as_reader() {
-  timeout --foreground -s KILL "$1" /usr/bin/perl -e "$AS_READER" "${READER[0]}" "${READER[1]}" "${READER[3]}" "${@:2}" 9<&- </dev/null
+  timeout --foreground -s KILL "$1" /usr/bin/perl -e "$AS_READER" "${READER[0]}" "${READER[1]}" "${READER[3]}" "${@:2}" 8<&- 9<&- </dev/null
 }
 
 # Refuses file $1, which the reader could not read as a file. Root never looks at a file it is
@@ -680,6 +684,11 @@ apply() {
   done
   # Before the tree is touched: a removal that runs now takes it away, and this apply makes it again.
   lock
+  # A second lock, of this apply's own, which everything it starts as root holds with it for as
+  # long as it runs: how this apply knows at its end that nothing of its own is left (settled).
+  # Free at once, but for what an apply before left running, which is waited for as at an end.
+  exec 8>>"$LOCKS/running"
+  flock -w "$LEFT_WAIT" 8 || fail "something that an update before this one started as root is still running after $LEFT_WAIT seconds: try again once that has ended"
   unlinked
   # Its folders are root's own, whoever made them. The tree's first: from then on no one else puts
   # anything in it. Then the three in it, each a folder of the tree's own and never a link, which
@@ -853,7 +862,23 @@ apply() {
     done
   fi
   rm -rf -- "$work"
+  settled "$version"
   say "$version is installed"
+}
+
+# Waits, at an apply's end, until nothing that the apply started is still running as root, for
+# LEFT_WAIT seconds at most. The app starts again when its helper ends 0, and whoever ran the
+# script reads "is installed" as the end: a tool's own helper that goes on after its tool has
+# answered, as root, with what the helper had open, would still be at work under a running app.
+# Every program an apply starts as root has the apply's second lock open with it, and holds it:
+# only the asking user's reader is started without. So the apply lets its own hold go and takes
+# the lock afresh, which it gets once no one else holds it. Where it does not, release $1 is in
+# place all the same, and that is what is said; the script does not end 0.
+settled() {
+  exec 8>&-
+  exec 8>>"$LOCKS/running"
+  flock -w "$LEFT_WAIT" 8 || fail "$1 is in place, and something that its update started as root is still running after $LEFT_WAIT seconds: start Surogate again once that has ended"
+  exec 8>&-
 }
 
 # What the app needs of the system: bubblewrap, socat and ripgrep for the file helper's srt; QEMU,
