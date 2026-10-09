@@ -2000,7 +2000,7 @@ describe("a page's download, as the host stages it", () => {
       expect(await within(ADDRESS_MS - LOOK_MS, host.address(SESSION, true, "upload-1", "chat-1"))).toEqual({ refused: EARLIER_RUNNING });
       expect(performance.now() - began).toBeGreaterThanOrEqual(TURN_MS - 20);
       expect(EARLIER_RUNNING).toBe(
-        "The agent's browser on this computer was still busy with this session's earlier operation, so nobody was asked about this upload and the page was given nothing. Send it again once that operation has answered.",
+        "The agent's browser on this computer was still busy with what this session did before, which has not ended in its page yet, though it may have been answered or cancelled. Nobody was asked about this upload, and the page was given nothing. Send it again in a moment.",
       );
       expect(keeps()).toEqual([[], null]);
       // The operation ends, and the question's turn comes: nothing is kept for the upload then either.

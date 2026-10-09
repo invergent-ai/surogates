@@ -198,8 +198,10 @@ const unmeasured = (name: string): string => `The page downloaded ${quoted(name)
 const failed = (message: string): Outcome => ({ error: { type: "browser", message } });
 const DELETED = failed("The chat was deleted, and its tabs closed with it");
 const ANOTHER_CHATS = failed("This session's tab in the agent's browser on this computer is another chat's");
+// True of an operation that still runs, and of one that was answered already and still acts in its page: one
+// the server cancelled is answered at once, and goes on in the page until it ends there.
 export const EARLIER_RUNNING =
-  "The agent's browser on this computer was still busy with this session's earlier operation, so nobody was asked about this upload and the page was given nothing. Send it again once that operation has answered.";
+  "The agent's browser on this computer was still busy with what this session did before, which has not ended in its page yet, though it may have been answered or cancelled. Nobody was asked about this upload, and the page was given nothing. Send it again in a moment.";
 export const ASKING = failed(
   "The page asked its user a question while they held the browser, and it is still open. It is theirs to answer, in the agent's browser on this computer: nothing is done in this page until they have.",
 );
