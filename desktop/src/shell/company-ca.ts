@@ -12,7 +12,7 @@
 
 import { spawnSync } from "node:child_process";
 import { X509Certificate } from "node:crypto";
-import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 // Not named imports: Node 22, which the tests run on, has neither of the two the app's Node 24 has.
 import * as tls from "node:tls";
@@ -25,6 +25,8 @@ export const COMPANY_CA = "/etc/surogate/ca.pem";
 // fingerprint: the install script's --uninstall takes them out by it.
 export const NICKNAME = "Surogate company CA";
 const OURS = new RegExp(`^${NICKNAME} [0-9a-f]{16}$`);
+const HOLDS_OURS = new RegExp(`${NICKNAME} [0-9a-f]{16}`);
+const MAX_DATABASE_BYTES = 64 * 1024 * 1024;
 // More than any company's certificate authorities take: hundreds of certificates.
 const MAX_BYTES = 1024 * 1024;
 const CERTUTIL = "/usr/bin/certutil";
@@ -131,20 +133,37 @@ export function chromiumDatabase(home: string, dataHome: string | undefined): st
   return folder ? earlier : join(dataHome || join(home, ".local", "share"), "pki", "nssdb");
 }
 
+// Whether the NSS database in *folder* holds a name the app gives its entries, by the file's bytes,
+// which keep a name as it is written. One too large to look through, or closed, is taken to hold none.
+function holdsOurs(folder: string): boolean {
+  const file = join(folder, "cert9.db");
+  try {
+    return statSync(file).size <= MAX_DATABASE_BYTES && HOLDS_OURS.test(readFileSync(file, "latin1"));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Chromium trusts *certificates* for TLS: the NSS database it reads for the user whose home is
  * *home* and whose XDG_DATA_HOME is *dataHome* holds each, under a name of the app's, unless it
  * holds it already under one of the user's; and no other entry of the app's. Where Chromium has
  * made no database yet, the one it would make is made. An entry the app did not add is never
  * changed: adding its certificate again would reset its trust to the app's. Throws the user's
- * words when certutil cannot do it: a DatabaseRefusal when the database itself keeps it from it.
+ * words when certutil cannot do it: a DatabaseRefusal when the database itself keeps it from it,
+ * and that certutil is not installed when there is a certificate to add or an entry of the app's
+ * to take out.
  */
 export function trustInChromium(certificates: string[], home: string, dataHome: string | undefined, certutil = CERTUTIL): void {
   const folder = chromiumDatabase(home, dataHome);
   const made = existsSync(join(folder, "cert9.db"));
   // With nothing to trust, only a database that is there can hold an entry of the app's.
-  if (certificates.length === 0 && (!made || !existsSync(certutil))) return;
-  if (!existsSync(certutil)) throw new Error("certutil is not installed");
+  if (certificates.length === 0 && !made) return;
+  if (!existsSync(certutil)) {
+    // Without certutil nothing is listed: the database's own bytes say whether an entry is the app's.
+    if (certificates.length === 0 && !holdsOurs(folder)) return;
+    throw new Error("certutil is not installed");
+  }
   const run = (args: string[], input?: string): string => {
     // Started as every program the app starts, with none of the app's open files, and in no language
     // and no environment of the user's. No password is asked for: a database that has one is not
@@ -196,5 +215,48 @@ export function trustInChromium(certificates: string[], home: string, dataHome: 
       }
       throw error;
     }
+  }
+}
+
+/** What the user is told when the company's CA is not trusted as its file says, once the app is ready. */
+export interface Untrusted {
+  message: string;
+  detail: string;
+}
+
+const ASK = "Ask your administrator to run Surogate's install script again with --ca-cert.";
+const NOT_TRUSTED = "Surogate could not trust your company's certificate authority";
+const NOT_REMOVED = "Surogate could not stop trusting your company's certificate authority";
+const said = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/**
+ * The company's CA file at *path* (companyCertificates) trusted in both TLS stacks, for the user
+ * whose home is *home* and whose XDG_DATA_HOME is *dataHome*: what the user is told when it is
+ * not, or null. A file that is there and refused names no CA, as no file does: what an earlier
+ * start added for Chromium goes, and Node is given nothing, so no start trusts a CA whose file it
+ * refused. The app goes on with the public roots either way.
+ */
+export function trustCompanyCa(path: string, rootOwned: boolean, home: string, dataHome: string | undefined, certutil = CERTUTIL): Untrusted | null {
+  let certificates: string[];
+  try {
+    certificates = companyCertificates(path, rootOwned);
+  } catch (error) {
+    try {
+      trustInChromium([], home, dataHome, certutil);
+    } catch (kept) {
+      return { message: NOT_TRUSTED, detail: `${said(error)}. Surogate could not take the certificate authority it trusted before out of your browser's trust: ${said(kept)}. ${ASK}` };
+    }
+    return { message: NOT_TRUSTED, detail: `${said(error)}. Your company's certificate authority is not trusted until the file is mended. ${ASK}` };
+  }
+  try {
+    trustInNode(certificates);
+    trustInChromium(certificates, home, dataHome, certutil);
+    return null;
+  } catch (error) {
+    // The user's own database is theirs to change: an install run again changes nothing of it.
+    if (error instanceof DatabaseRefusal) return { message: certificates.length > 0 ? NOT_TRUSTED : NOT_REMOVED, detail: said(error) };
+    if (certificates.length > 0) return { message: NOT_TRUSTED, detail: `${said(error)}. ${ASK}` };
+    // No CA any more, and no certutil to take the app's entries out with.
+    return { message: NOT_REMOVED, detail: `Your company's certificate authority could not be removed from your browser's trust: ${said(error)}. Ask your administrator to install the libnss3-tools package.` };
   }
 }

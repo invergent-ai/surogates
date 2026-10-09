@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { chromiumDatabase, COMPANY_CA, companyCaFile, companyCertificates, DatabaseRefusal, NICKNAME, trustInChromium } from "../src/shell/company-ca.js";
+import { chromiumDatabase, COMPANY_CA, companyCaFile, companyCertificates, DatabaseRefusal, NICKNAME, trustCompanyCa, trustInChromium } from "../src/shell/company-ca.js";
 import { certificate } from "./certificates.js";
 
 // Each program started here, by what was handed to spawnSync: the real one starts it.
@@ -44,6 +44,13 @@ vi.mock("node:fs", async (original) => {
     return found;
   }) as typeof real.lstatSync;
   return { ...real, default: { ...real, readSync, lstatSync }, readSync, lstatSync };
+});
+
+// Node's default CAs, as the app's Node 24 keeps them and the tests' Node 22 cannot: what they were set to last.
+const node = vi.hoisted(() => ({ trusted: undefined as string[] | undefined }));
+vi.mock("node:tls", async (original) => {
+  const real = await original<typeof import("node:tls")>();
+  return { ...real, default: real, getCACertificates: () => ["a public root"], setDefaultCACertificates: (all: string[]) => void (node.trusted = all) };
 });
 
 const CERTUTIL = "/usr/bin/certutil";
@@ -343,5 +350,95 @@ describe.skipIf(!existsSync(CERTUTIL))("the company's CA in the user's NSS datab
     expect(trust).toThrow("certutil is not installed");
     expect(trust).not.toThrow(DatabaseRefusal);
     expect(() => trustInChromium([], home, data(), join(home, "no-certutil"))).not.toThrow();
+  });
+
+  describe("at a start of the app", () => {
+    const ASK = "Ask your administrator to run Surogate's install script again with --ca-cert.";
+    const NOT_TRUSTED = "Surogate could not trust your company's certificate authority";
+    const NOT_REMOVED = "Surogate could not stop trusting your company's certificate authority";
+    const file = () => join(home, "ca.pem");
+    // A start that trusted the company's CA, beside an entry of the user's own.
+    const trusted = () => {
+      added(own(), another, "IT Root", "CT,C,C");
+      writeFileSync(file(), pem(company));
+      node.trusted = undefined;
+      expect(trustCompanyCa(file(), false, home, data())).toBeNull();
+      expect(node.trusted).toEqual(["a public root", pem(company).trim()]);
+      expect(entries(own())).toEqual(["IT Root CT,C,C", `${nickname(company)} C,,`]);
+      node.trusted = undefined;
+    };
+
+    it.each<[kind: string, spoil: (path: string) => void, why: string]>([
+      ["emptied", (path) => writeFileSync(path, ""), "holds no certificate"],
+      ["made text", (path) => writeFileSync(path, "the company's CA is on the intranet\n"), "holds no certificate"],
+      ["given a certificate that cannot be read", (path) => writeFileSync(path, "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydGlmaWNhdGU=\n-----END CERTIFICATE-----\n"), "holds a certificate Surogate cannot read"],
+      ["given a site's certificate", (path) => writeFileSync(path, pem(join(certs, "site.pem"))), "holds a certificate that is not a certificate authority's: CN=site"],
+      ["given its private key", (path) => appendFileSync(path, pem(join(certs, "company.key"))), "holds a private key"],
+      ["made more than a megabyte", (path) => writeFileSync(path, pem(company).padEnd(1024 * 1024 + 1, "\n")), "holds more than a megabyte"],
+      ["made a folder", (path) => (rmSync(path), mkdirSync(path)), "is no file"],
+      ["closed to its reader", (path) => chmodSync(path, 0o000), "could not be read: EACCES"],
+    ])("takes back what an earlier start trusted once the file is there and %s: a file it refuses names no CA, and it says both", (kind, spoil, why) => {
+      // Root reads whatever its mode.
+      if (kind === "closed to its reader" && process.getuid?.() === 0) return;
+      trusted();
+      spoil(file());
+      expect(trustCompanyCa(file(), false, home, data())).toEqual({
+        message: NOT_TRUSTED,
+        detail: `${file()} ${why}. Your company's certificate authority is not trusted until the file is mended. ${ASK}`,
+      });
+      expect(entries(own())).toEqual(["IT Root CT,C,C"]);
+      expect(node.trusted).toBeUndefined();
+    });
+
+    it("takes it back from an installed app's file that is no longer root's own word", () => {
+      if (process.getuid?.() === 0) return;
+      trusted();
+      expect(trustCompanyCa(file(), true, home, data())).toEqual({
+        message: NOT_TRUSTED,
+        detail: `${file()} is not the install script's: only root may write it. Your company's certificate authority is not trusted until the file is mended. ${ASK}`,
+      });
+      expect(entries(own())).toEqual(["IT Root CT,C,C"]);
+    });
+
+    it("says that what it trusted before could not be taken out, when the file is refused and the database cannot be changed", () => {
+      if (process.getuid?.() === 0) return;
+      trusted();
+      writeFileSync(file(), "");
+      for (const name of ["cert9.db", "key4.db"]) chmodSync(join(own(), name), 0o400);
+      chmodSync(own(), 0o500);
+      try {
+        const said = trustCompanyCa(file(), false, home, data());
+        expect(said?.message).toBe(NOT_TRUSTED);
+        expect(said?.detail).toMatch(new RegExp(`^${file()} holds no certificate\\. Surogate could not take the certificate authority it trusted before out of your browser's trust: certutil could not change ${own()}: .*SEC_ERROR_READ_ONLY[^\\n]*\\. Ask your administrator`));
+      } finally {
+        chmodSync(own(), 0o700);
+      }
+    });
+
+    it("says once that the CA could not be removed from the browser's trust, when the file is gone and certutil with it, and nothing when no entry is the app's", () => {
+      trusted();
+      rmSync(file());
+      const gone = join(home, "no-certutil");
+      expect(trustCompanyCa(file(), false, home, data(), gone)).toEqual({
+        message: NOT_REMOVED,
+        detail: "Your company's certificate authority could not be removed from your browser's trust: certutil is not installed. Ask your administrator to install the libnss3-tools package.",
+      });
+      expect(entries(own())).toEqual(["IT Root CT,C,C", `${nickname(company)} C,,`]);
+      // With certutil it goes, and then nothing is left to say without it: the user's own entries are not the app's.
+      expect(trustCompanyCa(file(), false, home, data())).toBeNull();
+      added(own(), company, `${NICKNAME} of our old proxy`, "CT,C,C");
+      expect(trustCompanyCa(file(), false, home, data(), gone)).toBeNull();
+    });
+
+    it("says what keeps a CA untrusted as before: the database's own refusal alone, and a missing certutil as the administrator's", () => {
+      writeFileSync(file(), pem(company));
+      expect(trustCompanyCa(file(), false, home, data(), join(home, "no-certutil"))).toEqual({ message: NOT_TRUSTED, detail: `certutil is not installed. ${ASK}` });
+      mkdirSync(own(), { recursive: true, mode: 0o700 });
+      writeFileSync(join(home, "password"), "secret\n");
+      expect(spawnSync(CERTUTIL, ["-N", "-d", `sql:${own()}`, "-f", join(home, "password")]).status).toBe(0);
+      const said = trustCompanyCa(file(), false, home, data());
+      expect(said?.message).toBe(NOT_TRUSTED);
+      expect(said?.detail).toMatch(new RegExp(`^certutil could not change ${own()}: .*SEC_ERROR_TOKEN_NOT_LOGGED_IN[^\\n]*$`));
+    });
   });
 });

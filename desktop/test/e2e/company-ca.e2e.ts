@@ -128,10 +128,31 @@ it("says once it is ready that it could not trust the company's CA, and why, and
   await expect.poll(() => page.isVisible("#first-run")).toBe(true);
   expect(await shown()).toEqual([{
     type: "error", message: "Surogate could not trust your company's certificate authority",
-    detail: `${notes} holds no certificate. Ask your administrator to run Surogate's install script again with --ca-cert.`,
+    detail: `${notes} holds no certificate. Your company's certificate authority is not trusted until the file is mended. Ask your administrator to run Surogate's install script again with --ca-cert.`,
   }]);
   // As with no CA at all: the database Chromium makes for itself holds nothing of the app's.
   expect(entries(own())).toEqual([]);
+});
+
+it("stops trusting the company's CA at the start that finds its file made text: no entry of the app's is left, and a site the CA signed is refused", async () => {
+  const file = join(home, "ca.pem");
+  writeFileSync(file, readFileSync(join(certs, "company.pem")));
+  const fetched = () => app!.evaluate(({ net }, asked) => net.fetch(asked).then(() => "reached", (error: Error) => error.message), `${origin}/auth/config`);
+  app = await launch(home, { SUROGATE_CA_CERT: file });
+  expect(await fetched()).toBe("reached");
+  expect(entries(own())).toEqual([`Surogate company CA ${fingerprint(file)} C,,`]);
+  await quit(app);
+
+  writeFileSync(file, "the company's CA is on the intranet\n");
+  app = await launch(home, { SUROGATE_CA_CERT: file }, [], [keeping()]);
+  const page = await shellPage(app);
+  await expect.poll(() => page.isVisible("#first-run")).toBe(true);
+  expect(await shown()).toEqual([{
+    type: "error", message: "Surogate could not trust your company's certificate authority",
+    detail: `${file} holds no certificate. Your company's certificate authority is not trusted until the file is mended. Ask your administrator to run Surogate's install script again with --ca-cert.`,
+  }]);
+  expect(entries(own())).toEqual([]);
+  expect(await fetched()).toContain("ERR_CERT_AUTHORITY_INVALID");
 });
 
 it("says of the user's own database, when its password keeps the CA untrusted, only why: no install run again changes it", async () => {

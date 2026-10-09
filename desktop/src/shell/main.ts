@@ -35,7 +35,7 @@ import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor
 import { autostartFile, HIDDEN, LAUNCHER, loginRefusal, setStartAtLogin, startsAtLogin } from "./autostart.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
-import { companyCaFile, companyCertificates, DatabaseRefusal, trustInChromium, trustInNode } from "./company-ca.js";
+import { companyCaFile, trustCompanyCa } from "./company-ca.js";
 import { reauthorize, rebind, register } from "./computer.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
 import { linkIn, type OpenLink } from "./deep-link.js";
@@ -2504,22 +2504,12 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   // The company's CA, which the install script's --ca-cert keeps for every user, or for a development
   // build SUROGATE_CA_CERT's file: trusted in both TLS stacks before Chromium checks a certificate, as it
-  // checks none again. What keeps it untrusted is said once the app is ready, and the app goes on without it.
-  let untrusted: string | null = null;
+  // checks none again. What keeps it untrusted is said once the app is ready, and the app goes on without it:
+  // a file it refuses is trusted no more than none.
   const companyCa = companyCaFile(app.isPackaged, process.env);
-  if (companyCa) {
-    try {
-      // An installed app's is root's alone to write, as the install script leaves it.
-      const certificates = companyCertificates(companyCa, app.isPackaged);
-      trustInNode(certificates);
-      // In the database Chromium reads for this user, by its own rule: the session's XDG_DATA_HOME as it is written.
-      trustInChromium(certificates, app.getPath("home"), process.env.XDG_DATA_HOME);
-    } catch (error) {
-      const why = error instanceof Error ? error.message : String(error);
-      // The user's own database is theirs to change: an install run again changes nothing of it.
-      untrusted = error instanceof DatabaseRefusal ? why : `${why}. Ask your administrator to run Surogate's install script again with --ca-cert.`;
-    }
-  }
+  // An installed app's is root's alone to write, as the install script leaves it. In the database Chromium
+  // reads for this user, by its own rule: the session's XDG_DATA_HOME as it is written.
+  const untrusted = companyCa ? trustCompanyCa(companyCa, app.isPackaged, app.getPath("home"), process.env.XDG_DATA_HOME) : null;
   // A second launch shows the window, unless it is a start at login, and hands it the link it was started
   // with, if any; once the quit goes on, it does neither.
   app.on("second-instance", (_event, argv) => {
@@ -2559,7 +2549,7 @@ if (!app.requestSingleInstanceLock()) {
     });
     // Electron's own menu goes: its reload, zoom and developer tools would act on the window's own pages.
     setMenu();
-    if (untrusted) void dialog.showMessageBox({ type: "error", message: "Surogate could not trust your company's certificate authority", detail: untrusted });
+    if (untrusted) void dialog.showMessageBox({ type: "error", ...untrusted });
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
     // The VM slept with the computer: at its wake its clock is set, and its keepalive starts afresh.
     powerMonitor.on("resume", () => vm?.resume());
