@@ -131,6 +131,17 @@ roots_own() {
   [ "$(stat -c '%f %u' -- "$1" 2>/dev/null)" = "$2 0" ]
 }
 
+# Whether $1 is a file of root's own that no one else may write, at whichever mode: a file and no
+# link, root's, with no write bit for its group or for others. Read as numbers alone, as roots_own
+# reads.
+roots_alone() {
+  local seen mode
+  seen="$(stat -c '%f %u' -- "$1" 2>/dev/null)" || return 1
+  [ "${seen#* }" = 0 ] || return 1
+  mode=$(( 16#${seen% *} ))
+  (( (mode & 0170000) == 0100000 && (mode & 0022) == 0 ))
+}
+
 # The release keys this computer trusts, into the array $1 names. One file says which: the helper
 # pkexec runs, whose own list they are, whichever script asks, that helper or an install script
 # of any age. Its list is read as settings writes one, each entry between its two quotes, and the
@@ -244,27 +255,48 @@ helper_release() {
 # Finishes a helper's pair that an apply left half done, stopped between its mark's rename and the
 # helper's: the mark names a release, and the helper is still the one before, or at a first
 # install none. That release's folder is here whole, as it had its name before the mark had: its
-# own helper is put where pkexec runs one, by one rename, from a copy in $1, a folder of this
-# apply's own. So the keys this computer trusts are those of the release its mark names before
-# anything is asked of them: stopped there, an update that dropped a key would otherwise leave the
-# key trusted until a later release came, and what the key signed meanwhile would be taken.
-# Nothing is done where the mark is not root's own word for a version that is here whole, where
-# the helper is not as an apply leaves one, or where a version is installed and has no helper:
-# each is refused where it is read (trusted, apply), and none is mended.
+# own helper is put where pkexec runs one, by one rename and never written into, from a copy in
+# $1, a folder of this apply's own. So the keys this computer trusts are those of the release its
+# mark names before anything is asked of them: stopped there, an update that dropped a key would
+# otherwise leave the key trusted until a later release came, and what the key signed meanwhile
+# would be taken.
+#
+# This is the one change that an apply makes and may then refuse: whatever it is handed, a pair
+# found half done is finished first. Every other refusal leaves all as it was.
+#
+# A pair is found half done where the mark is root's own word for a release (marked), that
+# release is here, its folder's mark the helper's mark byte for byte, with a helper of its own,
+# and the helper pkexec runs is other bytes than that one, or is not there. Such a pair is
+# finished or refused, and never passed over, which would leave the release before trusted for
+# what is applied next:
+# - The helper there now is one whose keys are taken, or this is a first install (trusted).
+# - The folder is whole for the mark, and its mark and its helper are root's own, the helper at any
+#   mode that an apply takes and that lets no one else write it.
+# - The helper is never finished toward an older release, from a mark that is behind it, as an
+#   install script that writes no mark leaves one under a newer release: where a newer version
+#   than the mark names is installed, or the helper is the own one of a newer version that is here.
+# Nothing is half done, and nothing is done, where there is no such mark, where its release is not
+# here (an older version applied since, with the helper kept, has taken its folder away; or the
+# folder is the same version built again, stopped before its mark's rename), or where the folder
+# has no helper of its own to compare with: an apply of that version unpacks it again.
 paired() {
-  local version of keys
+  local version of own keys installed other
+  local refused="$HELPER is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again"
   version="$(marked)" || return 0
   of="$ROOT/versions/$version"
-  whole "$HELPER_MARK" "$of" && roots_own "$of/release.json" 81a4 && roots_own "$of/bin/surogate-apply-update" 81ed || return 0
-  if [ -e "$HELPER" ] || [ -L "$HELPER" ]; then
-    roots_own "$HELPER" 81ed || return 0
-    listed keys "$HELPER"
-    [ "${#keys[@]}" -gt 0 ] || return 0
-    ! cmp -s "$of/bin/surogate-apply-update" "$HELPER" || return 0
-  else
-    [ ! -e "$ROOT/current" ] && [ ! -L "$ROOT/current" ] || return 0
-  fi
-  install -m 0755 "$of/bin/surogate-apply-update" "$1/paired"
+  own="$of/bin/surogate-apply-update"
+  cmp -s "$HELPER_MARK" "$of/release.json" && [ -f "$own" ] && [ ! -L "$own" ] || return 0
+  ! cmp -s "$own" "$HELPER" || return 0
+  trusted keys
+  whole "$HELPER_MARK" "$of" && roots_own "$of/release.json" 81a4 && roots_alone "$own" || fail "$refused"
+  installed="$(installed_version)"
+  if a_version "$installed" && dpkg --compare-versions "$installed" gt "$version"; then fail "$refused"; fi
+  for other in "$ROOT"/versions/*; do
+    if a_version "${other##*/}" && dpkg --compare-versions "${other##*/}" gt "$version" && cmp -s "$other/bin/surogate-apply-update" "$HELPER"; then
+      fail "$refused"
+    fi
+  done
+  install -m 0755 "$own" "$1/paired"
   sync -f "$1"
   mv -T "$1/paired" "$HELPER"
 }
@@ -412,7 +444,8 @@ taken() {
 # of bwrap, and /opt/surogate/current is switched to it by one rename. Its helper is the one
 # pkexec runs from just before that, unless this computer has installed a newer release: that
 # one's helper stays, and the release keys it lists with it. A helper's pair that an earlier apply
-# left half done is finished first (paired). An older version than the installed one is refused,
+# left half done is finished first (paired), and stays finished where this apply is then refused:
+# the one change that a refused apply leaves. An older version than the installed one is refused,
 # unless $4 is "older", as only an administrator's --version asks; it is then refused when it
 # cannot read what the installed one keeps for its users. The previous version is kept, and older
 # ones not running are removed, by an update; a repair removes none. A version that is here whole

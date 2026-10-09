@@ -1237,53 +1237,182 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     ]);
   });
 
+  // The script, killed where it would make one of its last three renames, the mark's, the helper's
+  // or current's: the name of that copy of it in the container.
+  const stoppedBefore = (rename: "mark" | "helper" | "current") => {
+    const killed = {
+      mark: String.raw`s|^    mv -T "\$work/helper.json" "\$HELPER_MARK"$|    kill -KILL $$|`,
+      helper: String.raw`s|^    mv -T "\$work/helper" "\$HELPER"$|    kill -KILL $$|`,
+      current: String.raw`s|^  mv -T "\$work/current" "\$ROOT/current"$|  kill -KILL $$|`,
+    }[rename];
+    expect(root(`sed '${killed}' /opt/surogate-test/install.sh >/opt/surogate-test/stopped-${rename}.sh && chmod 755 /opt/surogate-test/stopped-${rename}.sh `
+      + `&& ! cmp -s /opt/surogate-test/install.sh /opt/surogate-test/stopped-${rename}.sh`).status, rename).toBe(0);
+    return `stopped-${rename}.sh`;
+  };
+  // A change of a release's tree: its own helper lists *trusted*, at *mode*.
+  const listing = (trusted: string[], mode = 0o755) => (top: string) => {
+    writeFileSync(join(top, "bin", "surogate-apply-update"), withKeys(readFileSync(SCRIPT, "utf8"), trusted));
+    chmodSync(join(top, "bin", "surogate-apply-update"), mode);
+  };
+
   it("finishes a helper's pair that an apply left half done before it asks the helper's keys about anything, at an update and at a first install: a release that dropped a key is not left trusting it", () => {
     const helper = "/opt/surogate/bin/surogate-apply-update";
     const mark = "/opt/surogate/bin/release.json";
-    const script = readFileSync(SCRIPT, "utf8");
-    const listing = (trusted: string[]) => (top: string) => writeFileSync(join(top, "bin", "surogate-apply-update"), withKeys(script, trusted), { mode: 0o755 });
-    // The script, killed where it would make one of its last three renames: the mark's, the helper's, and current's.
-    const stopping: Array<[string, string]> = [
-      ["mark", String.raw`s|^    mv -T "\$work/helper.json" "\$HELPER_MARK"$|    kill -KILL $$|`],
-      ["helper", String.raw`s|^    mv -T "\$work/helper" "\$HELPER"$|    kill -KILL $$|`],
-      ["current", String.raw`s|^  mv -T "\$work/current" "\$ROOT/current"$|  kill -KILL $$|`],
-    ];
-    for (const [at, change] of stopping) {
-      expect(root(`sed '${change}' /opt/surogate-test/install.sh >/opt/surogate-test/stopped-${at}.sh && chmod 755 /opt/surogate-test/stopped-${at}.sh && ! cmp -s /opt/surogate-test/install.sh /opt/surogate-test/stopped-${at}.sh`).status, at).toBe(0);
-    }
     // A rotation's first release: the old key signs it, and its helper lists the old key and the new.
     const first = releaseOf("1.0.0", listing([PUBLIC, pem(next.publicKey)]));
     manifestOf("1.0.0", first);
     // A first install stopped at each of the three: the same apply, run again, finishes it, pair and all.
-    for (const [at] of stopping) {
+    for (const at of ["mark", "helper", "current"] as const) {
       expect(root("find /opt/surogate -mindepth 1 -delete").status, at).toBe(0);
-      expect(apply(first, `stopped-${at}.sh`).status, at).toBe(137);
+      expect(apply(first, stoppedBefore(at)).status, at).toBe(137);
       expect(root("test ! -e /opt/surogate/current").status, at).toBe(0);
       expect(root(`/opt/surogate-test/install.sh --apply ${files()}`), at).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
       expect(root(`cmp ${helper} /opt/surogate/current/bin/surogate-apply-update && cmp ${mark} /opt/surogate/current/release.json`).status, at).toBe(0);
     }
+    // Stopped before the helper's rename, a first install has its mark and no helper: the next
+    // apply, of whatever, puts that release's own helper in first. The keys asked are then its
+    // helper's, and not the list of the script that asks, which here lists the old key alone: what
+    // a third key signs is refused, and what the new key signs is taken.
+    expect(root("find /opt/surogate -mindepth 1 -delete").status).toBe(0);
+    expect(apply(first, stoppedBefore("helper")).status).toBe(137);
+    expect(root(`test ! -e ${helper} && test ! -L ${helper} && test ! -e /opt/surogate/current && cmp ${mark} /opt/surogate/versions/1.0.0/release.json`).status).toBe(0);
+    const patch = releaseOf("1.0.1", listing([PUBLIC, pem(next.publicKey)]));
+    manifestOf("1.0.1", patch, {}, other.privateKey);
+    expect(apply(patch)).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
+    expect(root(`cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update && stat -c '%a %U' ${helper} && test ! -e /opt/surogate/current && ls /opt/surogate/versions`).stdout).toBe("755 root\n1.0.0\n");
+    manifestOf("1.0.1", patch, {}, next.privateKey);
+    expect(apply(patch)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.1 is installed\n" });
+    // What stands installed but for the helper pkexec runs, and that helper's place on the disk.
+    const helperLine = (snapshot: string) => snapshot.split("\n").findIndex((line) => line.startsWith(`${helper} `));
+    const butHelper = (snapshot: string) => snapshot.split("\n").filter((_, at) => at !== helperLine(snapshot) && at !== helperLine(snapshot) + 1).join("\n");
+    const inode = (snapshot: string) => snapshot.split("\n")[helperLine(snapshot)]?.split(" ")[1];
     // The release that drops the old key: the new key signs it, and its helper lists the new key
-    // alone. Its update is stopped between the mark's rename and the helper's.
+    // alone. Its update is stopped between the mark's rename and the helper's. Its own helper as
+    // package.sh packs one, and as one that root alone may run, which an apply takes too.
+    for (const mode of [0o755, 0o700]) {
+      expect(root("find /opt/surogate -mindepth 1 -delete").status).toBe(0);
+      manifestOf("1.0.0", first);
+      expect(apply(first).status).toBe(0);
+      const second = releaseOf("1.1.0", listing([pem(next.publicKey)], mode));
+      manifestOf("1.1.0", second, {}, next.privateKey);
+      expect(apply(second, stoppedBefore("helper")).status).toBe(137);
+      expect(root(`cmp ${mark} /home/tester/manifest.json && cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update && stat -c %a /opt/surogate/versions/1.1.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout)
+        .toBe(`${mode.toString(8)}\n/opt/surogate/versions/1.0.0\n`);
+      // What the old key signs then, newer than both, is no release to this computer: the pair is
+      // finished first, and the keys asked are the ones of the release the mark names.
+      const before = standing();
+      const third = releaseOf("1.2.0", listing([PUBLIC]));
+      manifestOf("1.2.0", third);
+      expect(apply(third)).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
+      // This is the one refusal that does not leave all as it was: the helper is the release's
+      // that its mark names, and nothing else is changed.
+      const after = standing();
+      expect(butHelper(after)).toBe(butHelper(before));
+      expect(root(`cmp ${helper} /opt/surogate/versions/1.1.0/bin/surogate-apply-update && stat -c '%a %U' ${helper} && readlink /opt/surogate/current && ls -A /opt/surogate/staging`).stdout)
+        .toBe("755 root\n/opt/surogate/versions/1.0.0\n");
+      // Put there by a rename, and never written into: pkexec may be running the one that was there.
+      expect(inode(after)).not.toBe(inode(before));
+      // The update itself, applied again, is installed.
+      manifestOf("1.1.0", second, {}, next.privateKey);
+      expect(apply(second)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.1.0 is installed\n" });
+      expect(current()).toBe("/opt/surogate/versions/1.1.0");
+    }
+    // The helper has its name by one rename, of a copy in the apply's own folder that is on the
+    // disk first, as the apply's own renames are: it is not taken away and made again, which would
+    // leave pkexec none between the two.
+    expect(root("find /opt/surogate -mindepth 1 -delete").status).toBe(0);
+    manifestOf("1.0.0", first);
+    expect(apply(first).status).toBe(0);
     const second = releaseOf("1.1.0", listing([pem(next.publicKey)]));
     manifestOf("1.1.0", second, {}, next.privateKey);
-    expect(apply(second, "stopped-helper.sh").status).toBe(137);
-    expect(root(`cmp ${mark} /home/tester/manifest.json && cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout).toBe("/opt/surogate/versions/1.0.0\n");
-    // Only a version's own helper that is root's own is put where pkexec runs one: while the
-    // release's is another user's, the finishing by itself, from the script's functions without
-    // its last line, leaves the helper as it is.
-    const own = "/opt/surogate/versions/1.1.0/bin/surogate-apply-update";
-    expect(root(`chown tester ${own} && mkdir -p /root/paired && bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && paired /root/paired' && chown root ${own} && cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update`))
-      .toMatchObject({ status: 0, stdout: "", stderr: "" });
-    // What the old key signs then, newer than both, is no release to this computer: the pair is
-    // finished first, and the keys asked are the ones of the release the mark names.
-    const third = releaseOf("1.2.0", listing([PUBLIC]));
-    manifestOf("1.2.0", third);
-    expect(apply(third)).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
-    expect(root(`cmp ${helper} /opt/surogate/versions/1.1.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout).toBe("/opt/surogate/versions/1.0.0\n");
-    // The update itself, applied again, is installed.
-    manifestOf("1.1.0", second, {}, next.privateKey);
-    expect(apply(second)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.1.0 is installed\n" });
+    expect(apply(second, stoppedBefore("helper")).status).toBe(137);
+    const at = traced();
+    const renamed = at(/^\d+ +rename\w*\(.*"\/opt\/surogate\/staging\/apply\.\w+\/paired", .*"\/opt\/surogate\/bin\/surogate-apply-update".*\) += 0$/);
+    expect(renamed).toBeGreaterThan(-1);
+    const synced = at(/^\d+ +syncfs\(\d+\) += 0$/);
+    expect(synced).toBeGreaterThan(-1);
+    expect(synced).toBeLessThan(renamed);
     expect(current()).toBe("/opt/surogate/versions/1.1.0");
+  });
+
+  it("refuses a helper's pair that it finds half done and cannot finish, and one whose mark is behind its helper: none is passed over, and none is finished toward an older release", () => {
+    const helper = "/opt/surogate/bin/surogate-apply-update";
+    const mark = "/opt/surogate/bin/release.json";
+    const refusal = { status: 1, stdout: "", stderr: `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again\n` };
+    const applying = () => root(`/opt/surogate-test/install.sh --apply ${files()}`);
+    // The finishing by itself, from the script's functions without its last line.
+    const finishing = () => root(`rm -rf /root/paired && mkdir /root/paired && bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && paired /root/paired'`);
+    const first = releaseOf("1.0.0", listing([PUBLIC, pem(next.publicKey)]));
+    manifestOf("1.0.0", first);
+    expect(apply(first).status).toBe(0);
+    // Half done: the update that drops the old key, stopped between its mark's rename and its helper's. Kept, to start each case from.
+    const second = releaseOf("1.1.0", listing([pem(next.publicKey)]));
+    manifestOf("1.1.0", second, {}, next.privateKey);
+    expect(apply(second, stoppedBefore("helper")).status).toBe(137);
+    expect(root("rm -rf /opt/half && cp -a /opt/surogate /opt/half").status).toBe(0);
+    const halfDone = (then = ":") => expect(root(`find /opt/surogate -mindepth 1 -delete; cp -a /opt/half/. /opt/surogate/ && ${then}`).status, then).toBe(0);
+    // What only root can have made of the release that the mark names: the helper is not finished
+    // from it, and the apply does not go on with the keys of the release before. Whatever is
+    // applied: here the update itself again, which those keys would take.
+    const own = "/opt/surogate/versions/1.1.0";
+    for (const [what, made] of [
+      ["its own helper another user's", `chown tester ${own}/bin/surogate-apply-update`],
+      ["its own helper for others to write", `chmod 775 ${own}/bin/surogate-apply-update`],
+      ["its own helper no program", `chmod 644 ${own}/bin/surogate-apply-update`],
+      ["its own mark another user's", `chown tester ${own}/release.json`],
+      ["its folder without its program", `rm ${own}/surogate`],
+    ] as const) {
+      halfDone(made);
+      const before = standing();
+      expect(applying(), what).toMatchObject(refusal);
+      expect(standing(), what).toBe(before);
+      expect(root("ls -A /opt/surogate/staging").stdout, what).toBe("");
+    }
+    // A mark behind its helper, as only root's own hand leaves one: the helper is not finished to
+    // the older release that such a mark names. On a computer that runs the newer one:
+    halfDone();
+    expect(applying()).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.1.0 is installed\n" });
+    expect(root(`install -m 0644 /opt/surogate/versions/1.0.0/release.json ${mark} && ! cmp -s ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update`).status).toBe(0);
+    let before = standing();
+    expect(applying()).toMatchObject(refusal);
+    expect(standing()).toBe(before);
+    // And on one that was rolled back to the older, whose helper is still the newer version's own.
+    expect(root("ln -sfn /opt/surogate/versions/1.0.0 /opt/surogate/current").status).toBe(0);
+    before = standing();
+    expect(applying()).toMatchObject(refusal);
+    expect(standing()).toBe(before);
+    expect(root(`cmp ${helper} ${own}/bin/surogate-apply-update`).status).toBe(0);
+    // And where the helper is the own one of no version that is here: the installed version is
+    // newer than the mark names, and that alone says the mark is behind.
+    expect(root(`ln -sfn /opt/surogate/versions/1.1.0 /opt/surogate/current && install -m 0755 /opt/surogate-test/install.sh ${helper} `
+      + `&& ! cmp -s ${helper} ${own}/bin/surogate-apply-update && ! cmp -s ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update`).status).toBe(0);
+    before = standing();
+    expect(applying()).toMatchObject(refusal);
+    expect(standing()).toBe(before);
+
+    // Nothing is half done where the folder of the version that the mark names is another build's
+    // than the mark's: the installed version built again, stopped before its mark's rename. That
+    // is passed over, and the same apply, run again, ends it.
+    expect(root("find /opt/surogate -mindepth 1 -delete").status).toBe(0);
+    manifestOf("1.0.0", first);
+    expect(apply(first).status).toBe(0);
+    const again = releaseOf("1.0.0", listing([PUBLIC]));
+    manifestOf("1.0.0", again);
+    expect(apply(again, stoppedBefore("mark")).status).toBe(137);
+    expect(root(`! cmp -s ${mark} /opt/surogate/versions/1.0.0/release.json && ! cmp -s ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update`).status).toBe(0);
+    before = standing();
+    expect(finishing()).toMatchObject({ status: 0, stdout: "", stderr: "" });
+    expect(standing()).toBe(before);
+    expect(applying()).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    expect(root(`cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update && cmp ${mark} /opt/surogate/versions/1.0.0/release.json`).status).toBe(0);
+    // Stopped after its mark's rename, the mark is that build's, of the version that runs: no
+    // older release's, and its helper is put in. A third build, as a tarball has its version's name.
+    const third = releaseOf("1.0.0", listing([PUBLIC, pem(next.publicKey)]));
+    manifestOf("1.0.0", third);
+    expect(apply(third, stoppedBefore("helper")).status).toBe(137);
+    expect(root(`cmp ${mark} /opt/surogate/versions/1.0.0/release.json && ! cmp -s ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout).toBe("/opt/surogate/versions/1.0.0\n");
+    expect(finishing()).toMatchObject({ status: 0, stdout: "", stderr: "" });
+    expect(root(`cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update`).status).toBe(0);
   });
 
   it("unpacks the installed version again when its folder has lost a program, and takes an older version out of versions by one rename", () => {
