@@ -1167,13 +1167,19 @@ describe("a page's download, as the host stages it", () => {
     // plays it. *heard*: how many hear it ask for a file. *input*: a file input of it clicked, as the browser says
     // it to whatever hears; *made*: what an upload's files are once they are ready in the page, whose one step puts
     // them into the input. *navigates*: the agent's own navigation in it, not answered yet, and its request.
+    // *reads*: the host's own readings of it, over a line of the host's to the browser, that it has not answered:
+    // each answered at once, unless the page is *slow*, when a test answers them.
     const taken = (session = SESSION) => {
       const hears = new Map<string, Set<(event: unknown) => void>>();
       const on = (event: string, heard: (event: unknown) => void) => void hears.set(event, (hears.get(event) ?? new Set()).add(heard));
       const frame = {};
+      const reads: Array<() => void> = [];
+      const answering = { slow: false };
+      const line = { send: () => (answering.slow ? new Promise<void>((done) => reads.push(done)) : Promise.resolve()), detach: () => Promise.resolve() };
       const page = {
         on, once: on, off: (event: string, heard: (event: unknown) => void) => void hears.get(event)?.delete(heard),
         goto: () => new Promise(() => {}), mainFrame: () => frame, frames: () => [], url: () => FORM_URL, title: () => Promise.resolve(""), isClosed: () => false,
+        context: () => ({ newCDPSession: () => Promise.resolve(line) }),
       } as unknown as Page;
       if (!state().tabs.has(session)) {
         state().roots.set(session, "chat-1");
@@ -1181,7 +1187,7 @@ describe("a page's download, as the host stages it", () => {
       }
       state().adopt(session, page);
       return {
-        page,
+        page, reads, answering,
         heard: () => hears.get("filechooser")?.size ?? 0,
         input: (made: unknown = {}) => {
           const element = { evaluate: () => Promise.resolve({ here: true, href: FORM_URL, origin: new URL(FORM_URL).origin }), evaluateHandle: () => Promise.resolve(made) };
@@ -1199,6 +1205,8 @@ describe("a page's download, as the host stages it", () => {
     const uploads = (id?: string) => host.perform(
       { executable: join(profile, "no-browser-here"), profile }, "chat-1", SESSION, "browser.set_input_files", { files: [REPORT] }, new AbortController().signal, id,
     );
+    // What the host does once what it waits for has answered, with no timer of its: done by the time this is.
+    const turn = () => new Promise((done) => setImmediate(done));
     // The session has no page but those a test's host takes.
     const fresh = () => {
       state().roots.set(SESSION, "chat-1");
@@ -1238,10 +1246,14 @@ describe("a page's download, as the host stages it", () => {
         expect(staged).toEqual([{ root: "chat-1", session: SUB_AGENT, name: "export.csv", path: theirs, user: true }]);
         // The upload that prompt was for comes now: it gives nothing.
         expect(await uploads("upload-1")).toEqual(PAUSED);
-        // Five seconds after the take-over, and after the file the page asked for since, and not before, a file input is their own to click.
+        // Five seconds after the take-over, and after the file the page asked for since, and not before, a file input
+        // is their own to click: once each page has answered that nothing more is on its way to it.
         vi.advanceTimersByTime(OWN_CHOOSER_MS - 1);
+        await turn();
         expect([tab.heard(), other.heard()]).toEqual([1, 1]);
         vi.advanceTimersByTime(1);
+        expect([tab.heard(), other.heard()]).toEqual([1, 1]);
+        await turn();
         expect([tab.heard(), other.heard()]).toEqual([0, 0]);
         // Handed back: heard again at once, with nothing kept from before for either upload.
         host.pause("chat-2", false);
@@ -1256,6 +1268,49 @@ describe("a page's download, as the host stages it", () => {
         ends(own);
         await onItsWay;
         expect([staged.length, existsSync(own), state().unseen.get(SESSION)]).toEqual([2, false, [FILE_ASKED, interrupted("own.bin")]]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("lets a page its user holds be only once it has answered, twice over, with nothing heard of it meanwhile: a file it asked for before, heard of only then, begins its five seconds anew; and not once the browser is handed back", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const tab = taken();
+        tab.answering.slow = true;
+        const answers = async () => {
+          tab.reads.shift()!();
+          await turn();
+        };
+        host.pause("chat-2", true);
+        vi.advanceTimersByTime(OWN_CHOOSER_MS);
+        await turn();
+        // Its five seconds have passed: it is asked to answer, and heard until it has, a second time too.
+        expect([tab.heard(), tab.reads.length]).toEqual([1, 1]);
+        await answers();
+        expect([tab.heard(), tab.reads.length]).toEqual([1, 1]);
+        // What it asked for before it was busy is heard of now, before it has answered the second time.
+        tab.input();
+        await answers();
+        expect([tab.heard(), tab.reads.length, state().choosers.size]).toEqual([1, 0, 0]);
+        // Its five seconds begin from that: asked again then, it answers twice with nothing heard, and is let be.
+        vi.advanceTimersByTime(OWN_CHOOSER_MS - 1);
+        await turn();
+        expect(tab.reads.length).toBe(0);
+        vi.advanceTimersByTime(1);
+        await turn();
+        await answers();
+        expect(tab.heard()).toBe(1);
+        await answers();
+        expect(tab.heard()).toBe(0);
+        // Handed back while it is asked: its answer after that lets nothing be. It is heard for the agent.
+        host.pause("chat-2", false);
+        host.pause("chat-2", true);
+        vi.advanceTimersByTime(OWN_CHOOSER_MS);
+        await turn();
+        host.pause("chat-2", false);
+        while (tab.reads.length > 0) await answers();
+        expect(tab.heard()).toBe(1);
       } finally {
         vi.useRealTimers();
       }
@@ -1393,8 +1448,10 @@ describe("a page's download, as the host stages it", () => {
         wall += 3_600_000;
         steady += 3_600_000;
         vi.advanceTimersByTime(OWN_CHOOSER_MS - 1);
+        await turn();
         expect(tab.heard()).toBe(1);
         vi.advanceTimersByTime(1);
+        await turn();
         expect(tab.heard()).toBe(0);
         // The minute after the hand back is the steady clock's: the computer's put on an hour does not end it, nor do
         // the timers, and the steady one does.
