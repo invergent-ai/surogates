@@ -5,13 +5,14 @@ import {
   symlinkSync, truncateSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { landable } from "../src/files/land.js";
+import { fileToolsMissing } from "../src/hosts/policy.js";
 import { type Context, OWN_FILE, perform, revisionOf } from "../src/files/operations.js";
 
 const SAGA = "0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f";
@@ -926,5 +927,84 @@ describe("what a landing's file is, and what its put-back gives back", () => {
     } finally {
       rmSync(other, { recursive: true, force: true });
     }
+  });
+});
+
+describe("a landing's helper in the file helper's sandbox", () => {
+  const sandboxed = fileToolsMissing(undefined, process.env.PATH ?? "").length === 0;
+  const dist = (file: string) => new URL(`../dist/${file}`, import.meta.url).href;
+
+  it.skipIf(!sandboxed)("lands and puts back there, given the thread's copy to read and the kept folder to write", { timeout: 60_000 }, async () => {
+    writeFileSync(join(folder, "Report.docx"), "the report, v1");
+    const after = turn("Report.docx", "the report, by the thread");
+    const fresh = turn("threads/A/new.md", "new\n");
+    const work = join(base, "work");
+    // srt's own files go where its host points them, as the app's host does: never in the folder.
+    for (const dir of [work, join(base, "srt")]) mkdirSync(dir);
+    // A host of the test's own: the file helper's policy, with the copy readable and the kept folder writable, around
+    // a helper that is asked a landing's steps. It says what it was answered.
+    const host = `
+      import { spawnSync } from "node:child_process";
+      import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
+      const { hideSrtTmp, pathOutside, quote, sandboxPolicy } = await import(${JSON.stringify(dist("hosts/policy.js"))});
+      const [folder, work, copy, kept, node, home] = process.argv.slice(1);
+      const path = pathOutside(process.env.PATH, []);
+      const policy = sandboxPolicy({ folder, tmp: work, appDirs: ${JSON.stringify([...["../dist", "../node_modules"].map((dir) => fileURLToPath(new URL(dir, import.meta.url))), dirname(dirname(process.execPath))])} });
+      policy.filesystem.allowRead.push(copy, kept);
+      policy.filesystem.allowWrite.push(kept);
+      await SandboxManager.initialize(policy, () => Promise.resolve(false));
+      const asked = ${JSON.stringify(`
+        const { perform } = await import(${JSON.stringify(dist("files/operations.js"))});
+        const [folder, copy, kept, steps] = process.argv.slice(1);
+        const context = { folder, home: "/nowhere", env: {}, landing: { copy, kept } };
+        const out = [];
+        for (const args of JSON.parse(steps)) {
+          if (args.expected === "seen") args.expected = out[0].ok.revisions[0][1];
+          out.push(await perform("land", args, context, new AbortController().signal));
+        }
+        console.log(JSON.stringify(out.slice(1)));
+      `)};
+      process.chdir(work);
+      const words = [node, "--input-type=module", "-e", asked, folder, copy, kept, process.env.STEPS].map(quote).join(" ");
+      const [file, flag, line] = (await SandboxManager.wrapWithSandboxArgv(words)).argv;
+      const ran = spawnSync(file, ["--norc", "--noprofile", flag, hideSrtTmp(line)], { cwd: folder, env: { HOME: home, PATH: path }, encoding: "utf8", timeout: 30000 });
+      await SandboxManager.reset().catch(() => {});
+      process.stderr.write(ran.stderr);
+      process.stdout.write(ran.stdout);
+      process.exit(ran.status ?? 1);
+    `;
+    const steps = [
+      { action: "revisions", paths: ["Report.docx"] },
+      { ...apply(1, "Report.docx", blob("the report, v1"), after, "seen") },
+      apply(2, "threads/A/new.md", null, fresh, "absent"),
+      unapply(2, "threads/A/new.md"),
+      unapply(1, "Report.docx"),
+    ];
+    // In a group of its own, as the app's hosts are: what srt started goes with it.
+    const child = spawn(process.execPath, ["--input-type=module", "-e", host, folder, work, copy, kept, process.execPath, base], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)), detached: true, stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, TMPDIR: join(base, "srt"), STEPS: JSON.stringify(steps) },
+    });
+    let [said, failed] = ["", ""];
+    child.stdout.on("data", (chunk: Buffer) => { said += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { failed += chunk.toString(); });
+    const bound = setTimeout(() => child.kill("SIGKILL"), 45_000);
+    const status = await new Promise<number | null>((resolve) => child.once("exit", resolve));
+    clearTimeout(bound);
+    try {
+      process.kill(-child.pid!, "SIGKILL");
+    } catch {
+      // Nothing of it was left.
+    }
+    expect([status, failed]).toEqual([0, ""]);
+    expect(JSON.parse(said)).toEqual([
+      { ok: { path: "Report.docx", before: blob("the report, v1"), after, made: [] } },
+      { ok: { path: "threads/A/new.md", before: null, after: fresh, made: ["threads/A", "threads"] } },
+      { ok: { path: "threads/A/new.md", put_back: true } },
+      { ok: { path: "Report.docx", put_back: true } },
+    ]);
+    expect(readdirSync(folder)).toEqual(["Report.docx"]);
+    expect(readFileSync(join(folder, "Report.docx"), "utf8")).toBe("the report, v1");
+    expect(existsSync(join(kept, SAGA))).toBe(false);
   });
 });
