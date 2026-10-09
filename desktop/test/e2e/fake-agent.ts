@@ -3,11 +3,13 @@
 // standing for the web client at every other path. Tests drive that page as the web client
 // would, and stand in for the system browser on the authorize page. With projects set, the
 // page serves them on every load, as the web client serves its own, and keeps what it
-// changes of them here (PUT /fake/projects), as the agent's server keeps its projects.
+// changes of them here (PUT /fake/projects), as the agent's server keeps its projects. Given a
+// certificate and its key, it serves over TLS, as an agent behind a company's network is met.
 
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer as createTlsServer } from "node:https";
 import type { AddressInfo } from "node:net";
 
 import type { ElectronApplication, Page } from "playwright-core";
@@ -96,8 +98,15 @@ export class FakeAgent {
   // What a chat's event stream answers, when not the stream: an agent out of reach answers 503.
   chatStatus = 200;
   private lastEvent = 100;
-  readonly server: Server = createServer((request, response) => void this.answer(request, response));
+  readonly server: Server;
+  private readonly scheme: "http" | "https";
   private linked = false;
+
+  constructor(tls?: { cert: string; key: string }) {
+    const answer = (request: IncomingMessage, response: ServerResponse): void => void this.answer(request, response);
+    this.server = tls ? createTlsServer(tls, answer) : createServer(answer);
+    this.scheme = tls ? "https" : "http";
+  }
 
   private async answer(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const path = request.url ?? "/";
@@ -291,7 +300,7 @@ export class FakeAgent {
     await once(this.server, "listening");
     if (!this.linked) await this.link.start({ server: this.server, path: "/api/v1/devices/connect" });
     this.linked = true;
-    return `http://127.0.0.1:${(this.server.address() as AddressInfo).port}`;
+    return `${this.scheme}://127.0.0.1:${(this.server.address() as AddressInfo).port}`;
   }
 
   async stop(): Promise<void> {
