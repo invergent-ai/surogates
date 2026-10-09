@@ -1,0 +1,805 @@
+"""A command the user typed is answered once, whatever wakes its session afterwards.
+
+The wake, the command handlers, replay, the loop and the turn's end are the
+real ones, on the tests' Postgres and Redis; only the model is scripted.
+Every wake is a new worker's: two wakes share nothing but the database.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import UUID
+
+import pytest
+from sqlalchemy import text
+
+import surogates.harness.loop as loop_module
+from surogates.coding_agents.run_core import CodingRunOutcome
+from surogates.config import SHARED_WORK_QUEUE_KEY
+from surogates.harness.budget import IterationBudget
+from surogates.harness.loop import AgentHarness
+from surogates.harness.loop_pending import _actionable_pending_events
+from surogates.harness.slash_skill import build_deep_research_message
+from surogates.orchestrator.dispatcher import Orchestrator
+from surogates.runtime import SLASH_COMMAND_IDS, SlashCommandConfig
+from surogates.scheduled.materialize import materialize_scheduled_run
+from surogates.scheduled.store import ScheduledSessionStore
+from surogates.session.events import EventType
+from surogates.session.provisioning import create_child_session
+from surogates.tenant.context import TenantContext
+from surogates.tools.registry import ToolRegistry
+from tests.test_steer_loop import _final_response
+
+from .test_devices import AGENT_ID, api  # noqa: F401  (api is a fixture)
+from .test_workstream_threads import answered, start, turn_ends
+from .test_workstreams import create, master_of
+
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+HANDLERS = (
+    "_handle_compress_command", "_handle_clear_command", "_handle_goal_command", "_handle_mission_command",
+    "_handle_auto_research_command", "_handle_code_command", "_handle_loop_command",
+)
+# What a chat has said before its user types a command: enough for /compress to compress.
+TALK = (("Open the report.", "It is open."), ("Read it.", "It says Q3 was flat."), ("And Q2?", "Q2 grew."), ("Thanks.", "Any time."))
+# Further back than any other test leaves a session, so a sweep for sessions this quiet finds only ours.
+LONG_QUIET = "interval '10 years'"
+QUIET_FOR_NINE_YEARS = 9 * 365 * 86400
+
+
+class Meanwhile:
+    """The store of a worker to which something happens in the middle of a command.
+
+    *dies*: the worker stops as it writes the command's answer (``answering``), once the answer is
+    written and before the cursor has moved past it (``answered``), or as it ends the command's turn
+    (``ending``).  *then*: what happens right after the answer is written.
+    """
+
+    def __init__(self, store, dies: str | None = None, then=None) -> None:
+        self._store, self._dies, self._then, self._answered = store, dies, then, False
+
+    def __getattr__(self, name: str):
+        return getattr(self._store, name)
+
+    async def emit_event(self, session_id, event_type, data, **kwargs):
+        if event_type != EventType.LLM_RESPONSE:
+            return await self._store.emit_event(session_id, event_type, data, **kwargs)
+        if self._dies == "answering":
+            raise asyncio.CancelledError
+        event_id = await self._store.emit_event(session_id, event_type, data, **kwargs)
+        self._answered = True
+        if self._then is not None:
+            await self._then()
+        return event_id
+
+    async def advance_harness_cursor(self, *args, **kwargs):
+        # Only the write that ends a turn says whether the session comes to rest.
+        if self._answered and (self._dies == "answered" or (self._dies == "ending" and "at_rest" in kwargs)):
+            raise asyncio.CancelledError
+        return await self._store.advance_harness_cursor(*args, **kwargs)
+
+
+class Workers:
+    """The workers that wake the app's sessions, and what they ran."""
+
+    def __init__(self, api, monkeypatch) -> None:
+        self.api, self.store = api, api.app.state.session_store
+        #: Each command handler a wake ran, in order.
+        self.ran: list[str] = []
+        #: The conversation of each request made to the model.
+        self.requests: list[list[dict]] = []
+        #: The title the next wake gives an untitled chat, as the wake of a chat's first message does.
+        self.title: str | None = None
+        #: A stand-in for the sandbox pool, where a test's command needs one.
+        self.sandbox_pool = None
+        self._workers = 0
+        self._work_done = asyncio.Event()
+        monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
+
+        async def title(**_):
+            # A title is a model's call: it comes back after a command's instant answer.
+            if self.title is not None:
+                await self._work_done.wait()
+            return self.title
+
+        async def model(**kwargs):
+            self.requests.append(kwargs["create_kwargs"]["messages"][1:])  # after the system prompt
+            return _final_response("Noted.")
+
+        monkeypatch.setattr(loop_module, "maybe_generate_session_title", title)
+        monkeypatch.setattr(loop_module, "call_llm_with_retry", model)
+
+    def worker(self, commands: SlashCommandConfig | None = None, store=None) -> AgentHarness:
+        """A worker started just now: it knows nothing an earlier one learnt."""
+        state, self._workers = self.api.app.state, self._workers + 1
+        self._work_done.clear()
+
+        async def compress(messages, *_, **__):
+            kept = list(messages[-2:])
+            return kept, {"strategy": "summary", "original_message_count": len(messages), "compressed_message_count": len(kept)}
+
+        harness = AgentHarness(
+            session_store=store or self.store,
+            tool_registry=ToolRegistry(),
+            llm_client=AsyncMock(),
+            tenant=TenantContext(
+                org_id=self.api.org_id, user_id=self.api.user_id, org_config={}, user_preferences={},
+                permissions=frozenset(), asset_root="/tmp/test",
+            ),
+            worker_id=f"worker-{self._workers}",
+            budget=IterationBudget(max_total=10),
+            context_compressor=SimpleNamespace(
+                context_length=200_000, prune_stale_browser_states=lambda messages: messages,
+                should_compress=lambda *_, **__: False, compress=compress,
+            ),
+            prompt_builder=SimpleNamespace(has_agents=False, set_agent_def=lambda _: None, build=lambda: "SYS"),
+            redis_client=state.redis,
+            session_factory=state.session_factory,
+            credential_vault=state.credential_vault,
+            sandbox_pool=self.sandbox_pool,
+            slash_commands=commands,
+        )
+        harness._renew_lease_forever = AsyncMock(return_value=None)
+        harness._build_system_prompt = AsyncMock(return_value="SYS")
+        drain = harness._drain_background_tasks
+
+        async def drained(session_id):
+            self._work_done.set()
+            await drain(session_id)
+
+        harness._drain_background_tasks = drained
+        for name in HANDLERS:
+            setattr(harness, name, self._watched(name, getattr(harness, name)))
+        return harness
+
+    def _watched(self, name: str, handler):
+        async def run(*args, **kwargs):
+            self.ran.append(name)
+            return await handler(*args, **kwargs)
+
+        return run
+
+    async def wake(self, chat: UUID, commands: SlashCommandConfig | None = None) -> None:
+        await self.worker(commands).wake(chat)
+
+    async def wake_of_a_worker_that_dies(self, chat: UUID, when: str) -> None:
+        """A wake cut off *when* (see ``Meanwhile``), as when its worker is stopped."""
+        try:
+            await self.worker(store=Meanwhile(self.store, dies=when)).wake(chat)
+        except asyncio.CancelledError:
+            pass
+
+    async def chat(self, talk=TALK) -> UUID:
+        """A chat of the app's user in which *talk* has been said, each turn ended as a turn ends."""
+        created = await self.api.client.post("/v1/sessions", json={}, headers=self.api.auth())
+        assert created.status_code == 201, created.text
+        chat = UUID(created.json()["id"])
+        for asked, said in talk:
+            await self.says(chat, asked)
+            await self.store.emit_event(chat, EventType.LLM_REQUEST, {})
+            session = await self.session(chat)
+            await answered(self.api, session, said)
+            await turn_ends(self.api, session)
+        return chat
+
+    async def says(self, chat: UUID, words: str) -> None:
+        """The chat's user sends *words*, as the web client does."""
+        sent = await self.api.client.post(f"/v1/sessions/{chat}/messages", json={"content": words}, headers=self.api.auth())
+        assert sent.status_code == 202, sent.text
+
+    async def types(self, chat: UUID, command: str, commands: SlashCommandConfig | None = None) -> str:
+        """The chat's user sends *command*, and the wake their message queued answers it: the answer."""
+        await self.says(chat, command)
+        await self.wake(chat, commands)
+        return (await self.said(chat))[-1]
+
+    async def session(self, chat: UUID):
+        return await self.store.get_session(chat)
+
+    async def status(self, chat: UUID) -> str:
+        return (await self.session(chat)).status
+
+    async def log(self, chat: UUID) -> list[str]:
+        return [event.type for event in await self.store.get_events(chat)]
+
+    async def said(self, chat: UUID) -> list[str]:
+        """What the chat's assistant said, in order: the model's words and the harness's answers alike."""
+        events = await self.store.get_events(chat, types=[EventType.LLM_RESPONSE])
+        return [event.data["message"]["content"] for event in events]
+
+    async def nothing_waits(self, chat: UUID) -> bool:
+        """Whether nothing of the chat's waits for a wake, and no sweeper takes it for abandoned."""
+        abandoned = await self.store.find_orphaned_sessions(stale_seconds=0, agent_id=AGENT_ID)
+        cursor, events = await self.store.get_harness_cursor(chat), await self.store.get_events(chat)
+        return chat not in [session.id for session in abandoned] and _actionable_pending_events(events, cursor) == []
+
+    async def a_helper_reports(self, chat: UUID) -> UUID:
+        """A helper the chat started ends its turn: its report lands in the chat, which is queued."""
+        helper = await create_child_session(store=self.store, parent=await self.session(chat), channel="worker")
+        await answered(self.api, helper, "Checked the figures.")
+        await turn_ends(self.api, helper)
+        return helper.id
+
+    async def its_browser_is_handed_back(self, chat: UUID) -> None:
+        """What the browser's route writes when the chat's user hands its cloud browser back; it queues the chat."""
+        await self.store.emit_event(
+            chat, EventType.BROWSER_CONTROL_RETURNED, {"session_id": str(chat), "released_by": str(self.api.user_id)},
+        )
+
+    async def its_browser_is_taken_over(self, chat: UUID) -> None:
+        """What the browser's route writes when the chat's user takes its cloud browser over; it queues nobody."""
+        await self.store.emit_event(
+            chat, EventType.BROWSER_CONTROL_GRANTED, {"session_id": str(chat), "owner_user_id": str(self.api.user_id)},
+        )
+
+    async def swept(self, chat: UUID) -> bool:
+        """One pass of the orphan sweeper over the chat, quiet for long: whether it recovered and queued it."""
+        state = self.api.app.state
+        async with state.session_factory() as db:
+            await db.execute(text(f"UPDATE sessions SET updated_at = now() - {LONG_QUIET} WHERE id = :id"), {"id": chat})
+            await db.commit()
+        before = (await self.log(chat)).count(EventType.HARNESS_RECOVERED.value)
+        sweeper = Orchestrator(
+            state.redis, self.store, lambda _session_id: None,
+            queue_key=SHARED_WORK_QUEUE_KEY, max_concurrent=1, session_factory=state.session_factory, agent_id=AGENT_ID,
+        )
+        await sweeper._sweep_orphans_once(stale_seconds=QUIET_FOR_NINE_YEARS, reason="orchestrator_sweeper")
+        return (await self.log(chat)).count(EventType.HARNESS_RECOVERED.value) > before
+
+    async def routines(self) -> list:
+        return await ScheduledSessionStore(self.api.app.state.session_factory).list_for_user(
+            org_id=self.api.org_id, user_id=self.api.user_id, service_account_id=None, agent_id=AGENT_ID,
+        )
+
+
+@pytest.fixture
+def workers(api, monkeypatch) -> Workers:
+    return Workers(api, monkeypatch)
+
+
+#: Each command the harness answers itself and that starts no work of its own, with its handler.
+ANSWERED = {
+    "/compress": "_handle_compress_command",
+    "/clear": "_handle_clear_command",
+    "/goal status": "_handle_goal_command",
+    "/goal pause": "_handle_goal_command",
+    "/goal clear": "_handle_goal_command",
+    "/mission status": "_handle_mission_command",
+    "/mission pause": "_handle_mission_command",
+    "/auto-research status": "_handle_auto_research_command",
+    "/code status": "_handle_code_command",
+    "/code help": "_handle_code_command",
+    "/loop list": "_handle_loop_command",
+    "/loop 1d Check the cash report": "_handle_loop_command",
+}
+
+
+async def a_helper_reports(workers: Workers, chat: UUID) -> None:
+    await workers.a_helper_reports(chat)
+
+
+async def its_browser_is_handed_back(workers: Workers, chat: UUID) -> None:
+    await workers.its_browser_is_handed_back(chat)
+
+
+async def the_sweeper_passes_while_its_browser_is_taken_over(workers: Workers, chat: UUID) -> None:
+    # A take-over queues nobody; the sweeper is what would wake a chat it took for abandoned.
+    await workers.its_browser_is_taken_over(chat)
+    await workers.swept(chat)
+
+
+#: What wakes a chat for a reason that is none of its user's messages.
+LATER = {
+    "a helper's report": a_helper_reports,
+    "its browser handed back": its_browser_is_handed_back,
+    "a recovery": the_sweeper_passes_while_its_browser_is_taken_over,
+}
+
+
+# -- The fault: the command's own wake, then a wake for something else --
+
+
+@pytest.mark.parametrize("later", list(LATER))
+@pytest.mark.parametrize("command", list(ANSWERED))
+async def test_a_command_is_not_run_again_by_a_wake_for_something_else(workers, command, later):
+    chat = await workers.chat()
+    answer = await workers.types(chat, command)
+    assert workers.ran == [ANSWERED[command]]
+
+    await LATER[later](workers, chat)
+    written = await workers.log(chat)
+    await workers.wake(chat)
+
+    assert workers.ran == [ANSWERED[command]]
+    assert (await workers.said(chat)).count(answer) == 1
+    # As after any turn that ended: the wake had nothing of the agent's to do, and wrote nothing.
+    assert workers.requests == []
+    assert await workers.log(chat) == written
+
+
+@pytest.mark.parametrize("command", list(ANSWERED))
+async def test_a_second_wake_with_nothing_new_runs_nothing_and_writes_nothing(workers, command):
+    # A chat's first message: its wake also titles the chat, after the command's answer.
+    workers.title = "The Q3 report"
+    chat = await workers.chat(talk=())
+    await workers.types(chat, command)
+    written = await workers.log(chat)
+    assert written[-1] == EventType.SESSION_TITLE_UPDATED.value
+
+    await workers.wake(chat)
+
+    assert workers.ran == [ANSWERED[command]]
+    assert await workers.log(chat) == written
+
+
+@pytest.mark.parametrize("later", list(LATER))
+async def test_a_command_switched_off_for_the_agent_is_refused_once(workers, later):
+    without_loop = SlashCommandConfig(commands=frozenset(SLASH_COMMAND_IDS - {"loop"}))
+    chat = await workers.chat()
+    refusal = await workers.types(chat, "/loop 1d Check the cash report", without_loop)
+    assert refusal == "/loop is disabled for this agent."
+
+    await LATER[later](workers, chat)
+    await workers.wake(chat, without_loop)
+
+    assert (await workers.said(chat)).count(refusal) == 1
+    assert (workers.ran, workers.requests, await workers.routines()) == ([], [], [])
+
+
+# -- A worker's death between the command and the later wake --
+
+
+@pytest.mark.parametrize("command", ["/compress", "/clear", "/goal status", "/mission status", "/code status"])
+async def test_a_command_whose_worker_died_before_answering_is_run_once_by_the_wake_that_recovers_it(workers, command):
+    chat = await workers.chat()
+    before = await workers.said(chat)
+    await workers.says(chat, command)
+    await workers.wake_of_a_worker_that_dies(chat, "answering")
+    assert (workers.ran, await workers.said(chat)) == ([ANSWERED[command]], before)
+
+    # The sweeper finds the chat left half done, and its wake runs the command its user still waits for.
+    assert await workers.swept(chat)
+    await workers.wake(chat)
+    assert workers.ran == [ANSWERED[command]] * 2
+    assert len(await workers.said(chat)) == len(before) + 1
+
+    # Answered now, it is run by no wake after that.
+    await workers.its_browser_is_handed_back(chat)
+    await workers.wake(chat)
+    assert workers.ran == [ANSWERED[command]] * 2
+    assert len(await workers.said(chat)) == len(before) + 1
+
+
+DIED = ["/compress", "/clear", "/goal status", "/mission status", "/code status", "/loop 1d Check the cash report"]
+
+
+@pytest.mark.parametrize("command", DIED)
+async def test_a_command_whose_worker_died_before_the_cursor_moved_is_run_once_more_and_a_routine_is_never_made_twice(
+    workers, command,
+):
+    chat = await workers.chat()
+    await workers.says(chat, command)
+    # Its answer is written; the worker stops before the cursor says so.
+    await workers.wake_of_a_worker_that_dies(chat, "answered")
+    answers = len(await workers.said(chat))
+    assert workers.ran == [ANSWERED[command]]
+
+    await workers.its_browser_is_handed_back(chat)
+    await workers.wake(chat)
+
+    # The cursor is what says a command was answered.  Behind it, the command runs once more, as a
+    # turn does whose worker died before its end was written: all but /loop, whose answer in the log
+    # says its routine was made.
+    again = 0 if command.startswith("/loop") else 1
+    assert workers.ran == [ANSWERED[command]] * (1 + again)
+    assert len(await workers.said(chat)) == answers + again
+    assert len(await workers.routines()) == (1 if command.startswith("/loop") else 0)
+    assert (await workers.status(chat), await workers.nothing_waits(chat)) == ("completed", True)
+
+    # And then by no wake.
+    await workers.a_helper_reports(chat)
+    await workers.wake(chat)
+    assert workers.ran == [ANSWERED[command]] * (1 + again)
+    assert (len(await workers.said(chat)), workers.requests) == (answers + again, [])
+
+
+@pytest.mark.parametrize("later", list(LATER))
+@pytest.mark.parametrize("command", ["/goal status", "/mission status", "/code status", "/loop 1d Check the cash report"])
+async def test_a_chat_left_active_behind_an_answered_command_is_brought_to_rest_by_the_next_wake(workers, command, later):
+    chat = await workers.chat()
+    await workers.says(chat, command)
+    # These commands move the cursor past their answer themselves; the worker stops before the turn's
+    # end is written.  It is also how every chat was left whose last message was such a command,
+    # before a command's answer ended its turn.
+    await workers.wake_of_a_worker_that_dies(chat, "ending")
+    answer = (await workers.said(chat))[-1]
+
+    await LATER[later](workers, chat)
+    await workers.wake(chat)
+
+    assert workers.ran == [ANSWERED[command]]
+    assert (await workers.said(chat)).count(answer) == 1
+    # Nothing in it for the model either: the wake ends the turn that was left open.
+    assert (workers.requests, await workers.status(chat), await workers.nothing_waits(chat)) == ([], "completed", True)
+
+
+async def test_a_chat_resumed_after_a_stop_that_landed_on_a_command_takes_no_turn(workers):
+    chat = await workers.chat()
+
+    async def the_user_stops_it():
+        stopped = await workers.api.client.post(f"/v1/sessions/{chat}/pause", headers=workers.api.auth())
+        assert stopped.status_code == 200, stopped.text
+
+    await workers.says(chat, "/compress")
+    await workers.worker(store=Meanwhile(workers.store, then=the_user_stops_it)).wake(chat)
+    resumed = await workers.api.client.post(f"/v1/sessions/{chat}/resume", headers=workers.api.auth())
+    assert resumed.status_code == 200, resumed.text
+
+    await workers.wake(chat)
+
+    # The command was answered before the stop: there is nothing to go on with.
+    assert workers.ran == ["_handle_compress_command"]
+    assert (workers.requests, await workers.status(chat)) == ([], "completed")
+
+
+async def test_a_command_typed_during_a_turn_is_that_turns_to_read_also_after_its_worker_died(workers):
+    chat = await workers.chat()
+    await workers.says(chat, "Open the report.")
+    # A worker is in the model's turn: a tool call is under way when the user types a command.  The
+    # turn reads what its user says meanwhile as their words; the call's result moves the cursor past
+    # it, the model is asked again, and the worker dies.
+    lease = await workers.store.try_acquire_lease(chat, "a-worker-that-dies", ttl_seconds=60)
+    await workers.store.emit_event(chat, EventType.HARNESS_WAKE, {"worker_id": "a-worker-that-dies", "cursor": 0})
+    await workers.store.emit_event(chat, EventType.LLM_REQUEST, {})
+    call = {"id": "call_todo", "type": "function", "function": {"name": "todo", "arguments": "{}"}}
+    await workers.store.emit_event(
+        chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "", "tool_calls": [call]}},
+    )
+    await workers.store.emit_event(chat, EventType.TOOL_CALL, {"tool_call_id": "call_todo", "name": "todo", "arguments": "{}"})
+    await workers.says(chat, "/compress")
+    result = await workers.store.emit_event(
+        chat, EventType.TOOL_RESULT, {"tool_call_id": "call_todo", "name": "todo", "content": '{"ok": true}'},
+    )
+    await workers.store.advance_harness_cursor(chat, result, lease.lease_token)
+    await workers.store.emit_event(chat, EventType.LLM_REQUEST, {})
+    await workers.store.release_lease(chat, lease.lease_token)
+    assert await workers.swept(chat)
+
+    await workers.wake(chat)
+
+    # The wake that recovers the chat goes on with the turn; it does not start the command instead.
+    assert workers.ran == []
+    [conversation] = workers.requests
+    assert {"role": "user", "content": "/compress"} in conversation
+    assert (await workers.said(chat))[-1] == "Noted."
+
+
+# -- The chat after a command --
+
+
+@pytest.mark.parametrize("command", list(ANSWERED))
+async def test_a_command_answered_leaves_its_chat_at_rest(workers, command):
+    chat = await workers.chat()
+    await workers.types(chat, command)
+    assert await workers.status(chat) == "completed"
+    assert await workers.nothing_waits(chat)
+
+
+async def test_the_users_next_message_after_a_command_is_answered_by_the_model(workers):
+    chat = await workers.chat()
+    answer = await workers.types(chat, "/goal status")
+
+    await workers.says(chat, "And Q1?")
+    await workers.wake(chat)
+
+    [conversation] = workers.requests
+    assert conversation[-3:] == [
+        {"role": "user", "content": "/goal status"}, {"role": "assistant", "content": answer},
+        {"role": "user", "content": "And Q1?"},
+    ]
+    assert (workers.ran, (await workers.said(chat))[-1], await workers.status(chat)) == (
+        ["_handle_goal_command"], "Noted.", "completed",
+    )
+
+
+@pytest.mark.parametrize("command", ["/goal status", "/loop list"])
+async def test_a_command_typed_again_is_run_again(workers, command):
+    chat = await workers.chat()
+    first = await workers.types(chat, command)
+    again = await workers.types(chat, command)
+    assert (workers.ran, first, (await workers.said(chat))[-2:]) == ([ANSWERED[command]] * 2, again, [first, again])
+
+
+@pytest.mark.parametrize("command", ["/compress", "/goal status"])
+async def test_a_message_sent_as_a_command_is_answered_is_answered_too(workers, command):
+    chat = await workers.chat()
+
+    async def the_user_goes_on():
+        await workers.says(chat, "And Q1?")
+
+    await workers.says(chat, command)
+    await workers.worker(store=Meanwhile(workers.store, then=the_user_goes_on)).wake(chat)
+    # More was said: the cursor stays behind it, and the chat does not rest on the command's answer.
+    assert await workers.status(chat) == "active"
+    assert not await workers.nothing_waits(chat)
+
+    await workers.wake(chat)
+
+    [conversation] = workers.requests
+    assert conversation[-1] == {"role": "user", "content": "And Q1?"}
+    assert (workers.ran, await workers.status(chat)) == ([ANSWERED[command]], "completed")
+
+
+async def test_a_chat_its_user_stopped_while_a_command_was_answered_stays_stopped(workers):
+    chat = await workers.chat()
+
+    async def the_user_stops_it():
+        stopped = await workers.api.client.post(f"/v1/sessions/{chat}/pause", headers=workers.api.auth())
+        assert stopped.status_code == 200, stopped.text
+
+    await workers.says(chat, "/compress")
+    await workers.worker(store=Meanwhile(workers.store, then=the_user_stops_it)).wake(chat)
+
+    # A stop is its user's: the command's answer does not turn it into a turn that ended by itself.
+    assert await workers.status(chat) == "paused"
+    await workers.its_browser_is_handed_back(chat)
+    await workers.wake(chat)
+    assert (workers.ran, workers.requests, await workers.status(chat)) == (["_handle_compress_command"], [], "paused")
+
+
+# -- Commands that start work of their own --
+
+
+async def test_a_goal_set_by_a_command_is_worked_on_by_the_next_wake(workers):
+    chat = await workers.chat()
+    await workers.types(chat, "/goal Ship the Q3 report")
+    # The command queued its own first turn: the chat stays active for it.
+    assert (await workers.status(chat), (await workers.log(chat))[-1]) == ("active", EventType.USER_MESSAGE.value)
+
+    await workers.wake(chat)
+
+    assert workers.requests[0][-1] == {"role": "user", "content": "Ship the Q3 report"}
+    assert workers.ran == ["_handle_goal_command"]
+
+
+MISSION = "/mission Audit the Q3 figures\n\nRubric:\n- every figure is sourced"
+
+
+async def test_a_mission_started_by_a_command_is_worked_on_by_the_next_wake(workers):
+    chat = await workers.chat()
+    await workers.types(chat, MISSION)
+    assert (await workers.status(chat), (await workers.log(chat))[-1]) == ("active", EventType.USER_MESSAGE.value)
+
+    await workers.wake(chat)
+
+    [conversation] = workers.requests
+    assert conversation[-1]["content"].startswith("[Mission kickoff]")
+    # Its mission in flight, the coordinator's chat stays active for its helpers' reports.
+    assert (workers.ran, await workers.status(chat)) == (["_handle_mission_command"], "active")
+
+
+async def a_coordinator(workers: Workers) -> UUID:
+    """A chat whose mission is in flight: started by its command, its first turn taken."""
+    chat = await workers.chat()
+    await workers.types(chat, MISSION)
+    await workers.wake(chat)
+    workers.ran.clear()
+    workers.requests.clear()
+    return chat
+
+
+async def test_a_coordinator_takes_its_turn_on_a_report_after_a_command(workers):
+    chat = await a_coordinator(workers)
+    answer = await workers.types(chat, "/mission status")
+    assert answer.startswith("Mission ") and "status=active" in answer
+    # A mission's chat is not at rest between its turns.
+    assert await workers.status(chat) == "active"
+
+    helper = await workers.a_helper_reports(chat)
+    await workers.wake(chat)
+
+    assert workers.ran == ["_handle_mission_command"]
+    assert (await workers.said(chat)).count(answer) == 1
+    [conversation] = workers.requests
+    assert conversation[-3:] == [
+        {"role": "user", "content": "/mission status"}, {"role": "assistant", "content": answer},
+        {"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."},
+    ]
+
+
+async def test_a_coordinator_does_not_run_a_command_it_refused_when_a_report_wakes_it(workers):
+    without_research = SlashCommandConfig(commands=frozenset(SLASH_COMMAND_IDS - {"deep-research"}))
+    chat = await a_coordinator(workers)
+    refusal = await workers.types(chat, "/deep-research The Q3 market", without_research)
+    assert refusal == "/deep-research is disabled for this agent."
+
+    await workers.a_helper_reports(chat)
+    await workers.wake(chat, without_research)
+
+    assert (await workers.said(chat)).count(refusal) == 1
+    [conversation] = workers.requests
+    # The refused command is read as it was typed: never as the research it asked for.
+    assert {"role": "user", "content": "/deep-research The Q3 market"} in conversation
+    assert build_deep_research_message(topic="The Q3 market") not in [message["content"] for message in conversation]
+
+
+async def test_a_research_command_is_the_models_to_answer(workers):
+    chat = await workers.chat()
+    await workers.says(chat, "/deep-research The Q3 market")
+    await workers.wake(chat)
+
+    [conversation] = workers.requests
+    assert conversation[-1] == {"role": "user", "content": build_deep_research_message(topic="The Q3 market")}
+    assert (workers.ran, (await workers.said(chat))[-1], await workers.status(chat)) == ([], "Noted.", "completed")
+
+
+async def test_a_research_command_cut_off_in_its_turn_is_read_again_as_the_research_it_asked_for(workers):
+    chat = await workers.chat()
+    await workers.says(chat, "/deep-research The Q3 market")
+    # Its worker made a tool call, whose result moved the cursor past the message, and died.
+    lease = await workers.store.try_acquire_lease(chat, "a-worker-that-dies", ttl_seconds=60)
+    await workers.store.emit_event(chat, EventType.HARNESS_WAKE, {"worker_id": "a-worker-that-dies", "cursor": 0})
+    await workers.store.emit_event(chat, EventType.LLM_REQUEST, {})
+    call = {"id": "call_todo", "type": "function", "function": {"name": "todo", "arguments": "{}"}}
+    await workers.store.emit_event(
+        chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "", "tool_calls": [call]}},
+    )
+    await workers.store.emit_event(chat, EventType.TOOL_CALL, {"tool_call_id": "call_todo", "name": "todo", "arguments": "{}"})
+    result = await workers.store.emit_event(
+        chat, EventType.TOOL_RESULT, {"tool_call_id": "call_todo", "name": "todo", "content": '{"ok": true}'},
+    )
+    await workers.store.advance_harness_cursor(chat, result, lease.lease_token)
+    await workers.store.release_lease(chat, lease.lease_token)
+    await workers.store.emit_event(chat, EventType.HARNESS_RECOVERED, {"recovered_by": "orchestrator_sweeper"})
+    await workers.its_browser_is_handed_back(chat)
+
+    await workers.wake(chat)
+
+    [conversation] = workers.requests
+    assert {"role": "user", "content": build_deep_research_message(topic="The Q3 market")} in conversation
+
+
+# -- A project's master --
+
+
+@pytest.mark.parametrize("command", ["/compress", "/loop 1d Check the cash report"])
+async def test_a_master_reads_a_threads_report_after_a_command(api, workers, command):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    answer = await workers.types(master.id, command)
+    at_rest = await workers.status(master.id)
+
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    await workers.wake(master.id)
+
+    assert workers.ran == [ANSWERED[command]]
+    assert (await workers.said(master.id)).count(answer) == 1
+    # The report revives the master, as after any turn of its own, and its turn reads it.
+    assert [conversation[-1]["content"].split("]")[0] for conversation in workers.requests] == [
+        f'[Thread "Draft A" ({thread.id}) reported',
+    ]
+    assert at_rest == "completed"
+    assert len(await workers.routines()) == (1 if command.startswith("/loop") else 0)
+
+
+async def test_a_command_whose_turn_was_refused_before_any_wake_read_it_is_run_when_its_user_retries(api, workers):
+    master = await master_of(api, await create(api))
+    await workers.says(master.id, "/compress")
+    # The user's limit refuses the turn at its wake: the session fails, its cursor past the message.
+    refusing = workers.worker()
+    refusing._admit_turn = AsyncMock(return_value="You have reached your limit.")
+    await refusing.wake(master.id)
+    [typed] = await workers.store.get_events(master.id, types=[EventType.USER_MESSAGE])
+    assert (workers.ran, await workers.status(master.id)) == ([], "failed")
+    assert await workers.store.get_harness_cursor(master.id) > typed.id
+
+    retried = await api.client.post(f"/v1/sessions/{master.id}/retry", headers=api.auth())
+    assert retried.status_code == 200, retried.text
+    await workers.wake(master.id)
+
+    # No wake had taken the command up: the cursor behind which it lies is the failure's.
+    assert workers.ran == ["_handle_compress_command"]
+    assert (workers.requests, await workers.status(master.id)) == ([], "completed")
+
+
+# -- The sweeper --
+
+
+async def test_a_chat_that_scheduled_a_routine_is_not_failed_by_the_sweeper_after_a_wake_for_something_else(workers):
+    chat = await workers.chat()
+    await workers.types(chat, "/loop 1d Check the cash report")
+    await workers.its_browser_is_handed_back(chat)
+    await workers.wake(chat)
+
+    # Every pass of the sweeper, and the wake it would queue.
+    recovered = []
+    for _ in range(4):
+        recovered.append(await workers.swept(chat))
+        await workers.wake(chat)
+
+    assert recovered == [False] * 4
+    assert (await workers.status(chat), EventType.SESSION_FAIL.value in await workers.log(chat)) == ("completed", False)
+    assert (workers.ran, len(await workers.routines())) == (["_handle_loop_command"], 1)
+
+
+async def test_a_coding_run_that_finished_leaves_its_chat_at_rest(workers, monkeypatch):
+    async def run(*, store, session, agent, started_metadata, **_):
+        await store.emit_event(session.id, EventType.CODE_RUN_STARTED, {"run_id": "run-1", "agent": agent, **started_metadata})
+        result = await store.emit_event(
+            session.id, EventType.CODE_RUN_RESULT,
+            {"run_id": "run-1", "agent": agent, "final_message": "The totals are fixed.", "error": None},
+        )
+        return CodingRunOutcome(status="ok", result_event_id=result)
+
+    monkeypatch.setattr("surogates.coding_agents.run_core.execute_coding_run", run)
+    workers.sandbox_pool = SimpleNamespace()  # the run above never reaches it
+    chat = await workers.chat()
+    await workers.says(chat, '/code claude "Fix the totals"')
+    await workers.wake(chat)
+    assert (await workers.log(chat))[-1] == EventType.CODE_RUN_RESULT.value
+    at_rest = await workers.status(chat)
+
+    # No pass of the sweeper takes the finished run for a worker's death, and no later wake looks at it again.
+    recovered = []
+    for _ in range(4):
+        recovered.append(await workers.swept(chat))
+        await workers.wake(chat)
+    await workers.its_browser_is_handed_back(chat)
+    await workers.wake(chat)
+
+    assert (workers.ran, workers.requests) == (["_handle_code_command"], [])
+    assert recovered == [False] * 4
+    assert (at_rest, await workers.status(chat)) == ("completed", "completed")
+    assert EventType.SESSION_FAIL.value not in await workers.log(chat)
+
+
+async def test_a_coding_run_whose_worker_died_is_left_as_its_death_left_it(workers, monkeypatch):
+    async def run(*, store, session, agent, started_metadata, **_):
+        await store.emit_event(session.id, EventType.CODE_RUN_STARTED, {"run_id": "run-1", "agent": agent, **started_metadata})
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("surogates.coding_agents.run_core.execute_coding_run", run)
+    workers.sandbox_pool = SimpleNamespace()
+    chat = await workers.chat()
+    await workers.says(chat, '/code claude "Fix the totals"')
+    with pytest.raises(asyncio.CancelledError):
+        await workers.wake(chat)
+
+    # The run is started once, and the wake that recovers the chat neither starts it again nor
+    # takes the chat for one whose command was answered: the sweeper still sees a worker's death.
+    assert await workers.swept(chat)
+    await workers.wake(chat)
+
+    assert (await workers.log(chat)).count(EventType.CODE_RUN_STARTED.value) == 1
+    assert (await workers.status(chat), await workers.nothing_waits(chat)) == ("active", False)
+
+
+# -- A routine's run --
+
+
+async def test_a_routines_run_whose_prompt_is_a_command_ends_and_its_routine_goes_on(workers):
+    state = workers.api.app.state
+    routines = ScheduledSessionStore(state.session_factory)
+    chat = await workers.chat()
+    # A routine with no interval: each run says when the next one is, or the sweep gives it the fallback delay.
+    await workers.types(chat, "/loop /goal status")
+    [routine] = await workers.routines()
+    run = await materialize_scheduled_run(
+        routine, session_store=workers.store, scheduled_store=routines,
+        storage=state.storage, settings=state.settings, redis=state.redis,
+    )
+    workers.ran.clear()
+
+    await workers.wake(run)
+
+    assert (workers.ran, (await workers.said(run))[-1]) == (["_handle_goal_command"], "No active outcome. Set one with /goal <text>.")
+    assert await workers.status(run) == "completed"
+    # The run is not taken for one whose worker died, to be queued again at every sweep ...
+    stalled = await routines.find_retryable_stalled_dynamic_loop_runs(agent_id=AGENT_ID, stale_seconds=0)
+    assert routine.id not in [r.id for r in stalled]
+    # ... and its routine is given its next run.
+    given = await routines.recover_stalled_dynamic_loops(agent_id=AGENT_ID, stale_seconds=0)
+    assert routine.id in [r.id for r in given]
