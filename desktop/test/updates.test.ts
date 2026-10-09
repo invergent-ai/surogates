@@ -344,7 +344,8 @@ describe("installing an update", () => {
     const ran = readFileSync(log, "utf8").split("\n");
     expect(ran.slice(0, 5)).toEqual(["--first", "--apply", "/c/m.json", "/c/m.json.sig", "/c/r.tar.gz"]);
     expect(ran.slice(5).filter((line) => /^[A-Z_]+=/.test(line) && !/^(PWD|SHLVL|_)=/.test(line))).toEqual(["PATH=/usr/bin:/bin"]);
-    expect(await helperRun([join(dir, "missing")])(files)).toMatchObject({ code: null, said: expect.stringContaining("ENOENT") });
+    // Through the line that starts every child, a helper that is not there is that line's 127, in a shell's words for it.
+    expect(await helperRun([join(dir, "missing")])(files)).toEqual({ code: 127, said: `${join(dir, "missing")}: No such file or directory` });
     // One that a signal ends has no exit code: how it ended is the last of what is said of it.
     writeFileSync(join(dir, "stopped"), "#!/bin/sh\necho 'Surogate Desktop: it began' >&2\nkill -KILL $$\n");
     chmodSync(join(dir, "stopped"), 0o755);
