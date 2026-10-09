@@ -6,7 +6,7 @@
 // file in it is checked; its last step is its completion mark, so a folder with that
 // mark and its files' sizes is a whole image, and one without is downloaded again.
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, type Stats, writeFileSync } from "node:fs";
 import { open, statfs } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -58,10 +58,10 @@ export function readManifest(path: string): ImageManifest {
  * that others may read, since the app reads its release keys from it as its user: the install
  * script asks its helper the same (roots_program in release/install.sh), so the two never answer
  * otherwise. A set-id or a sticky bit is not looked at, there or here: neither changes who may
- * write the file, and no script is run as its owner.
+ * write the file, and no script is run as its owner. *found* is what the file is, where a reader
+ * holds it open and asks of what it reads, not of what its name leads to by then.
  */
-export function rootsOwn(path: string, run = false): void {
-  const found = lstatSync(path);
+export function rootsOwn(path: string, run = false, found: Stats = lstatSync(path)): void {
   if (found.isSymbolicLink()) throw new Error(`${path} is not the install script's: it is a link`);
   if (found.uid !== 0 || (found.mode & 0o022) !== 0) throw new Error(`${path} is not the install script's: only root may write it`);
   if (!found.isFile()) throw new Error(`${path} is not the install script's: it is no file`);
