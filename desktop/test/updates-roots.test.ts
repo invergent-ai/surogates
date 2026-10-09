@@ -100,11 +100,17 @@ describe("what an installed app reads as root's own", () => {
       base.heard = [];
       await expect(found.check(), name).rejects.toThrow(why);
       expect([name, found.state, updateLine(found.state), states, base.heard]).toEqual([name, { state: "broken" }, LINE, ["broken"], []]);
-      // Nothing is installed from it, and once the helper is as an install leaves it the line goes.
+      // Nothing is installed from it, and once the helper is as an install leaves it the line goes:
+      // at the next check, also one that the base then leaves without an answer.
       await found.install();
       expect(found.state).toEqual({ state: "broken" });
       writeFileSync(base.helper, helperWith([keys.publicKey]));
       roots(base.helper, 0o755);
+      const offered = base.served.get("/desktop/latest.json")!;
+      base.served.delete("/desktop/latest.json");
+      await expect(found.check(), name).rejects.toThrow("latest.json");
+      expect([name, found.state, updateLine(found.state)]).toEqual([name, { state: "none" }, null]);
+      base.served.set("/desktop/latest.json", offered);
       await found.check();
       expect([name, found.state.state, updateLine(found.state)?.text]).toEqual([name, "available", "Update available: Surogate 1.2.4"]);
     }
