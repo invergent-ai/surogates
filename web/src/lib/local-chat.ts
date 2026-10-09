@@ -548,6 +548,12 @@ export function browserPane(posts: BrowserPosts): BrowserPane {
       }),
   };
 
+  // The presses that took the browser over or handed it back, counted: what one of them is
+  // answered is said only while no later one has begun. Its user may press Take over as soon as the
+  // desktop has handed the browser back, with the server yet to answer the hand back: said then,
+  // that answer would have the agent going on while they hold the browser.
+  let holds = 0;
+
   return {
     state: () => state,
     subscribe: (listener) => {
@@ -563,6 +569,10 @@ export function browserPane(posts: BrowserPosts): BrowserPane {
       }
       // The desktop has answered a take-over or a hand back, whatever the server has yet to hear.
       let waiting = handingBack || action === "takeOver";
+      if (waiting) {
+        holds += 1;
+      }
+      const held = holds;
       const answered = () => {
         if (waiting) {
           waiting = false;
@@ -592,13 +602,15 @@ export function browserPane(posts: BrowserPosts): BrowserPane {
       return acted.then(
         (said) => {
           answered();
-          if (said !== null) {
+          if (said !== null && held === holds) {
             set({ said });
           }
         },
         (error: unknown) => {
           answered();
-          set({ failure: saidBy(error) });
+          if (held === holds) {
+            set({ failure: saidBy(error) });
+          }
         },
       );
     },

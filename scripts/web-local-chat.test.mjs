@@ -481,6 +481,49 @@ test("posts a hand back as its user's confirmed one only of the browser this cha
   assert.deepEqual([kept.did, keeping.state()], [[["handBack", "root-1"]], quiet(1)]);
 });
 
+// What the pane has said and asked once the presses made so far have gone as far as they can without *slow*.
+const settled = () => new Promise((done) => setTimeout(done, 5));
+
+test("says nothing of a hand back whose answer comes once its user has taken the browser over again", async () => {
+  for (const [answer, lost] of [
+    [(slow) => slow.resolve({ outcome: "released", resumes: true }), "said"],
+    [(slow) => slow.reject(new Error("offline")), "failure"],
+  ]) {
+    const desk = browserDesk();
+    const slow = later();
+    desk.answers.release = () => slow.promise;
+    const pane = browserPane(desk.posts);
+    await pane.press("takeOver", "root-1", desk.desktop);
+    const handing = pane.press("handBack", "root-1", desk.desktop);
+    await settled();
+    // The desktop has handed it back and the server is slow to answer: the pane offers Take over, and it is pressed.
+    const taking = pane.press("takeOver", "root-1", desk.desktop);
+    await settled();
+    answer(slow);
+    await Promise.all([handing, taking]);
+    // The server is told both, in order. Its user holds the browser: the pane says nothing of the
+    // hand back, neither that the agent goes on nor that it could not be told.
+    assert.deepEqual(desk.did.slice(2), [["handBack", "root-1"], ["post", "hand back"], ["takeOver", "root-1"], ["post", "acquire"]]);
+    assert.deepEqual(pane.state(), quiet(3), lost);
+  }
+  // A press that leaves the browser whose it is drops nothing: the answer is said when it comes.
+  const desk = browserDesk();
+  const slow = later();
+  desk.answers.release = () => slow.promise;
+  const pane = browserPane(desk.posts);
+  await pane.press("takeOver", "root-1", desk.desktop);
+  const handing = pane.press("handBack", "root-1", desk.desktop);
+  await settled();
+  await pane.press("show", "root-1", desk.desktop);
+  slow.resolve({ outcome: "released", resumes: true });
+  await handing;
+  assert.deepEqual(pane.state(), { ...quiet(2), said: AGENT_GOES_ON });
+  // And the last press's own answer is said, a take-over's failure as a hand back's words.
+  desk.answers.acquire = offline;
+  await pane.press("takeOver", "root-1", desk.desktop);
+  assert.deepEqual(pane.state(), { ...quiet(3), failure: UNTOLD_TAKEN });
+});
+
 test("asks the desktop once for each press, the first thing the press does", async () => {
   const { did, desktop, posts } = browserDesk();
   const pane = browserPane(posts);
