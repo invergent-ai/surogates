@@ -5,8 +5,10 @@
 // starts is reachable from the next.
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { chmodSync, chownSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { chmod, chown, mkdir, readdir, readFile, rmdir, writeFile } from "node:fs/promises";
+import type { Socket } from "node:net";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
 
@@ -541,6 +543,8 @@ export interface RootsOptions {
   flush?(share: Share, stalled: boolean): Promise<boolean>;
   // The root's socket for its connections to the host proxy, its guest user's, made before its namespaces (Network.listen); resolves with what closes it.
   tunnels?(root: string, uid: number): Promise<() => void>;
+  // A connection into the root that its runner was asked for under *id*, once it comes on the root's socket, or why none (Network.arrival).
+  arrivals?(root: string, id: string): Promise<Socket | string>;
   questionMs?: number;
   // How far past a run's timeout its backstop falls: BACKSTOP_MS by default.
   backstopMs?: number;
@@ -732,6 +736,22 @@ export class Roots {
       // share: the host keeps it in the guest, which could not let it go.
       if (this.held.delete(root)) throw new Error(HELD);
     })());
+  }
+
+  /**
+   * A connection into *root* (spec, Section 5): to *port* of the root's own loopback, the family
+   * *first* names tried before the other, made by its runner inside the root's namespaces, which
+   * can reach no other root's. The socket, or why there
+   * is none: "sandbox" for a root not set up here, else what its runner or the agent's network said.
+   * Asked under an id of 128 random bits, which names that one connection on the root's socket.
+   */
+  async reach(root: string, port: number, first: 4 | 6 = 4): Promise<Socket | string> {
+    const target = this.roots.get(root);
+    if (!target || target.runner.went || !this.options.arrivals) return "sandbox";
+    const id = randomBytes(16).toString("hex");
+    const arriving = this.options.arrivals(root, id);
+    target.runner.dial(id, port, first);
+    return arriving;
   }
 
   // One process operation's outcome. Never rejects. A root whose runner cannot answer

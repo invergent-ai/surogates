@@ -1,6 +1,6 @@
 // The VM layer's Linux backend (spec, Section 11): QEMU with KVM, or emulated where this
-// computer gives it no KVM it can use; the control and net ports virtio-serial ports on Unix
-// sockets of QEMU's, and each root's folder shared by a virtiofsd of its own, hot-added
+// computer gives it no KVM it can use; the control, net and inbound ports virtio-serial ports on
+// Unix sockets of QEMU's, and each root's folder shared by a virtiofsd of its own, hot-added
 // through QMP. QEMU and virtiofsd run through setpriv --pdeathsig, so they die with the
 // manager however it dies, and each leaves a pidfile in the runtime folder, so a later
 // manager can end one that did not.
@@ -178,7 +178,7 @@ export function emulation(kvm = "/dev/kvm", groups = "/etc/group"): Emulated | n
 const KVM_FAILED = /failed to initialize kvm|Could not access KVM kernel module/;
 
 /**
- * QEMU on *options*, once its control and net ports and its monitor have taken their
+ * QEMU on *options*, once its control, net and inbound ports and its monitor have taken their
  * connections: with KVM when this user can open it, and emulated otherwise, or when
  * QEMU could not use it. Its runtime folder is swept first, and the sparse sessions
  * disk made at the first boot. Rejects with why not, QEMU's own words included.
@@ -213,15 +213,18 @@ async function launchVm(options: VmOptions, signal: AbortSignal | undefined, dea
   signal?.addEventListener("abort", halt, { once: true });
   let control: Socket | null = null;
   let net: Socket | null = null;
+  let inbound: Socket | null = null;
   try {
     control = await reach(join(options.run, "control.sock"), qemu, deadline);
     net = control ? await reach(join(options.run, "net.sock"), qemu, deadline) : null;
-    const monitor = net ? await reach(join(options.run, "qmp.sock"), qemu, deadline) : null;
-    if (!control || !net || !monitor) throw new Error(ended(qemu) ? "QEMU exited" : "QEMU did not open its sockets");
-    return new LinuxVm(options, qemu, said, control, net, await Qmp.open(monitor, deadline), emulated);
+    inbound = net ? await reach(join(options.run, "inbound.sock"), qemu, deadline) : null;
+    const monitor = inbound ? await reach(join(options.run, "qmp.sock"), qemu, deadline) : null;
+    if (!control || !net || !inbound || !monitor) throw new Error(ended(qemu) ? "QEMU exited" : "QEMU did not open its sockets");
+    return new LinuxVm(options, qemu, said, control, net, inbound, await Qmp.open(monitor, deadline), emulated);
   } catch (error) {
     control?.destroy();
     net?.destroy();
+    inbound?.destroy();
     qemu.kill("SIGKILL");
     await exited(qemu);
     throw new Error([(error as Error).message, said()].filter(Boolean).join(": "));
@@ -257,6 +260,7 @@ class LinuxVm implements VmBackend {
     said: () => string,
     readonly control: Socket,
     readonly net: Socket,
+    readonly inbound: Socket,
     private readonly qmp: Qmp,
     readonly emulated: Emulated | null,
   ) {
@@ -364,6 +368,7 @@ class LinuxVm implements VmBackend {
       this.qmp.close();
       this.control.destroy();
       this.net.destroy();
+      this.inbound.destroy();
       for (const child of [this.qemu, ...this.daemons]) child.kill("SIGKILL");
       await Promise.all([exited(this.qemu), ...this.daemons.map(exited)]);
     })();

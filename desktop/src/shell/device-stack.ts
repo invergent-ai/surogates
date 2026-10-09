@@ -58,6 +58,8 @@ export interface ToolLayer extends Executor {
   // What saves each download the agent's pages start: the stack's, through the binder. *stop* aborts when the
   // download's chat is deleted.
   saveDownloadsWith?(save: (download: StagedDownload, stop: AbortSignal) => Promise<string>): void;
+  // Whether something in a chat's sandbox listens on a port of its own loopback now.
+  listening?(root: string, port: number): Promise<boolean>;
 }
 
 export interface DeviceStackOptions {
@@ -184,6 +186,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     retired: (root) => tools.retired?.(root),
     address: tools.address?.bind(tools),
     notComing: tools.notComing?.bind(tools),
+    listening: tools.listening?.bind(tools),
     approvalPrompts: options.approvalPrompts,
     onError: options.onError,
   });
