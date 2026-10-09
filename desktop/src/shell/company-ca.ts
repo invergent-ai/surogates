@@ -1,4 +1,4 @@
-// The company's certificate authority (spec, Section 9, step 6): the certificates an administrator
+// The company's certificate authority (spec, Section 9): the certificates an administrator
 // gave the install script with --ca-cert, which it keeps in /etc/surogate/ca.pem. A company that
 // inspects TLS signs every site it carries with it, an internal server's too. The app trusts it
 // beside the public roots in both of its TLS stacks, and keeps every other check of a certificate,

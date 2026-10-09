@@ -1,4 +1,4 @@
-// The company's CA (spec, Section 9, step 6) in both of the app's TLS stacks, against an agent behind
+// The company's CA (spec, Section 9) in both of the app's TLS stacks, against an agent behind
 // a company's network that signs every site with its CA: the fake agent over TLS, with a certificate
 // the test's own CA signed. The window and the app's calls to the agent are Chromium's; the device
 // link is Node's. The NSS databases are in the test's data home, never the user's. Its last test
