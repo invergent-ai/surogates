@@ -93,6 +93,7 @@ from surogates.runtime.context import SlashCommandConfig
 from surogates.runtime.turn_slots import current_turn, detach_turn, turn_joining
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
+from surogates.session.store import RERUN_WINDOW
 from surogates.tools.builtin.file_ops import clear_read_tracker, notify_other_tool_call, reset_file_dedup
 
 if TYPE_CHECKING:
@@ -176,9 +177,11 @@ from surogates.harness.loop_mission_evaluator import (
 from surogates.harness.outcomes import OutcomeState
 from surogates.harness.loop_pending import (
     _actionable_pending_events,
+    _aware,
     _command_answered,
     _first_unread,
     _goal_turn_waits,
+    _left_behind,
     _turn_cut_off,
 )
 from surogates.harness.loop_tool_recovery import (
@@ -235,11 +238,6 @@ def _mcp_tool_component(name: str) -> str:
     return name.rsplit("__", 1)[-1]
 
 
-
-
-def _aware(moment: datetime) -> datetime:
-    """*moment* in UTC: the store gives some timestamps without their zone."""
-    return moment.replace(tzinfo=timezone.utc) if moment.tzinfo is None else moment
 
 
 def _format_loop_list(rows: list[Any]) -> str:
@@ -798,9 +796,11 @@ class AgentHarness(
             after=cursor,
             types=[
                 EventType.USER_MESSAGE, EventType.HARNESS_WAKE, EventType.LLM_REQUEST,
-                EventType.LLM_RESPONSE, EventType.CODE_RUN_RESULT,
+                EventType.LLM_RESPONSE, EventType.CODE_RUN_STARTED, EventType.CODE_RUN_RESULT,
+                EventType.SESSION_COMPLETE,
             ],
         )
+        now = datetime.now(timezone.utc)
         # A command the harness has answered is not stranded, though the
         # cursor may lie before it: a command's end leaves the cursor
         # before a report no turn has read.
@@ -809,7 +809,10 @@ class AgentHarness(
             and not (event.data or {}).get("synthetic")
             and not (
                 self._answers_itself(_user_event_text(event.data), session)
-                and _command_answered(events, event.id)
+                and (
+                    _command_answered(events, event.id)
+                    or _left_behind(events, event.id, now=now, window=RERUN_WINDOW)
+                )
             )
             for event in events
         )
@@ -829,13 +832,17 @@ class AgentHarness(
         Every command a user typed is run, once, in the order typed,
         however many arrived before or during a wake.  One that waits is
         work for a wake whatever the cursor says, and whatever the session
-        was in the middle of when it was typed."""
+        was in the middle of when it was typed.  Not one behind a turn's
+        end older than the sweeper's own window for doing again what a
+        user asked for (``RERUN_WINDOW``)."""
+        now = datetime.now(timezone.utc)
         for event in events:
             if (
                 event.type == EventType.USER_MESSAGE.value
                 and not (event.data or {}).get("synthetic")
                 and self._answers_itself(_user_event_text(event.data), session)
                 and not _command_answered(events, event.id)
+                and not _left_behind(events, event.id, now=now, window=RERUN_WINDOW)
             ):
                 return event
         return None
@@ -854,7 +861,7 @@ class AgentHarness(
             session.id, after=typed[0].id - 1,
             types=[
                 EventType.USER_MESSAGE, EventType.HARNESS_WAKE, EventType.LLM_REQUEST, EventType.LLM_RESPONSE,
-                EventType.CODE_RUN_STARTED, EventType.CODE_RUN_RESULT,
+                EventType.CODE_RUN_STARTED, EventType.CODE_RUN_RESULT, EventType.SESSION_COMPLETE,
             ],
         )
         return self._waiting_command(session, since) is not None

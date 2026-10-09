@@ -1,10 +1,11 @@
 """Which events left past the cursor give a wake work to do, and when a command has its answer."""
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from surogates.harness.loop_pending import _actionable_pending_events, _command_answered
+from surogates.harness.loop_pending import _actionable_pending_events, _command_answered, _left_behind
 from surogates.session.events import EventType
 
 
@@ -94,3 +95,22 @@ def test_what_was_said_before_a_command_does_not_answer_it():
     # Nor does the wake before it make a later word its answer.
     events = log(EventType.HARNESS_WAKE, EventType.USER_MESSAGE, EventType.LLM_RESPONSE)
     assert _command_answered(events, typed_at=2) is False
+
+
+def test_a_command_is_left_behind_once_the_turns_end_after_it_is_older_than_the_window():
+    now, hour = datetime(2026, 10, 9, 12, tzinfo=timezone.utc), timedelta(hours=1)
+
+    def ended(ago: timedelta, zone=timezone.utc) -> list[SimpleNamespace]:
+        end = SimpleNamespace(id=2, type=EventType.SESSION_COMPLETE.value, data={}, created_at=(now - ago).replace(tzinfo=zone))
+        return [event(1, EventType.USER_MESSAGE), end]
+
+    assert _left_behind(ended(hour + timedelta(seconds=1)), 1, now=now, window=hour) is True
+    # The sweeper's own bound for a crash: at the hour itself it is not yet old.
+    assert _left_behind(ended(hour), 1, now=now, window=hour) is False
+    assert _left_behind(ended(timedelta(minutes=59)), 1, now=now, window=hour) is False
+    # A time the store gives without its zone is UTC.
+    assert _left_behind(ended(timedelta(hours=2), zone=None), 1, now=now, window=hour) is True
+    # A turn's end before the command, however old, says nothing of it; nor does any other event after it.
+    assert _left_behind(ended(timedelta(days=40)), 2, now=now, window=hour) is False
+    old = SimpleNamespace(id=2, type=EventType.LLM_RESPONSE.value, data={}, created_at=now - timedelta(days=40))
+    assert _left_behind([event(1, EventType.USER_MESSAGE), old], 1, now=now, window=hour) is False

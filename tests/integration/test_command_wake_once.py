@@ -571,6 +571,28 @@ async def test_a_command_typed_during_a_chats_turn_is_run_by_its_own_wake_once_t
     assert (workers.ran, len(workers.requests)) == ([ANSWERED[command]], 2)
 
 
+@pytest.mark.parametrize("ago, run", [("40 days", False), ("61 minutes", False), ("59 minutes", True)])
+async def test_a_command_behind_a_turns_end_waits_for_an_hour_and_no_longer(workers, ago, run):
+    chat = await workers.chat()
+    # As the harness once left it: the command typed during a turn, the turn gone on to its end, and
+    # no wake since.  Its user has long had the model's answer, or has it still on the screen.
+    await in_a_turn(workers, chat, "a tool call", "/clear")
+    async with workers.api.app.state.session_factory() as db:
+        await db.execute(
+            text(f"UPDATE events SET created_at = created_at - interval '{ago}' WHERE session_id = :id"), {"id": chat},
+        )
+        await db.commit()
+    await workers.its_browser_is_handed_back(chat)
+    written = await workers.log(chat)
+
+    await workers.wake(chat)
+
+    if run:
+        assert (workers.ran, (await workers.said(chat))[-1]) == (["_handle_clear_command"], "Conversation cleared.")
+    else:
+        assert (workers.ran, await workers.log(chat), await workers.status(chat)) == ([], written, "completed")
+
+
 async def test_a_command_refused_by_its_users_limit_is_run_at_the_retry_also_when_the_retrys_first_wake_crashes(api, workers):
     master = await master_of(api, await create(api))
     await workers.says(master.id, "/compress")

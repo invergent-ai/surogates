@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from surogates.session.events import EventType
@@ -78,6 +79,28 @@ def _command_answered(events: list[Any], typed_at: int) -> bool:
         elif taken_up and event_type == EventType.LLM_RESPONSE.value:
             return True
     return False
+
+
+def _left_behind(events: list[Any], typed_at: int, *, now: datetime, window: timedelta) -> bool:
+    """Return True if the command typed at event *typed_at* lies behind a turn's end older than *window*.
+
+    A command typed during a turn waits for that turn's end, and its own
+    wake follows at once.  One still unanswered long after is from a log an
+    older harness left, whose user has had the model's words for it since:
+    it is not run.
+    """
+    return any(
+        event.id is not None
+        and event.id > typed_at
+        and _event_type(event) == EventType.SESSION_COMPLETE.value
+        and _aware(event.created_at) < now - window
+        for event in events
+    )
+
+
+def _aware(moment: datetime) -> datetime:
+    """*moment* in UTC: the store gives some timestamps without their zone."""
+    return moment.replace(tzinfo=timezone.utc) if moment.tzinfo is None else moment
 
 
 _REPORT_EVENT_TYPES = frozenset({

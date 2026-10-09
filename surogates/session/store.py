@@ -2456,7 +2456,8 @@ class SessionStore:
         )
         latest_event_is_an_old_crash = and_(
             latest_event_type == "harness.crash",
-            latest_event(EventRow.created_at) < func.now() - text("interval '1 hour'"),
+            latest_event(EventRow.created_at)
+            < func.now() - text(f"make_interval(secs => {int(RERUN_WINDOW.total_seconds())})"),
         )
         # ``case`` checks the type before taking the length: one response
         # whose ``tool_calls`` is a JSON null would otherwise error the sweep.
@@ -2513,6 +2514,12 @@ class SessionStore:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
+#: How long what a session's user asked for is still run once the session
+#: has gone quiet over it: a crashed turn is retried, and a command typed
+#: during a turn that has since ended is answered, only within it.  Past
+#: it, a deploy or a stray wake must not do what was asked for long ago.
+RERUN_WINDOW = timedelta(hours=1)
 
 #: How stale ``sessions.updated_at`` may get while a response streams.  Only
 #: has to stay well under the dispatcher's ``_ORPHAN_STALE_SECONDS`` (60s) so
