@@ -719,13 +719,13 @@ async def test_as_many_hand_backs_of_one_chat_at_once_as_the_pool_is_wide_give_i
 BUSY = {"detail": "The chat is being told of its browser by another request. Post it again."}
 
 
-HELD = {
+HELD_FROM_OUTSIDE = {
     "its lock": select(func.pg_advisory_xact_lock(func.hashtext(text("'browser-control:' || :chat")))),
     "its row": text("SELECT 1 FROM sessions WHERE id = CAST(:chat AS uuid) FOR UPDATE"),
 }
 
 
-@pytest.mark.parametrize("held", HELD)
+@pytest.mark.parametrize("held", HELD_FROM_OUTSIDE)
 @pytest.mark.parametrize("posted", ["acquire", "release"])
 async def test_posts_kept_waiting_for_one_chats_lock_are_answered_busy_and_leave_the_pool_its_connections(
     pg_url, session_factory, redis_client, posted, held,
@@ -734,23 +734,34 @@ async def test_posts_kept_waiting_for_one_chats_lock_are_answered_busy_and_leave
         chat, other = await (narrow.idle() if posted == "acquire" else narrow.told_taken_over()), await narrow.idle()
         before = await narrow.log(chat)
         said = {"handed_back": True} if posted == "release" else {}
-        # Whatever holds the chat's lock, or the row a telling writes to under it, holds it for longer
-        # than a telling takes: here, from outside.
-        async with session_factory() as holder:
-            await holder.execute(HELD[held], {"chat": str(chat)})
-            started = time.monotonic()
-            # As many posts for that chat as the pool is wide: each waits on a connection of its own.
-            answers = await asyncio.wait_for(
-                asyncio.gather(*(narrow.control(chat, posted, answered=503, leaves=False, **said) for _ in range(2))), 10.0,
-            )
-            waited = time.monotonic() - started
-            # They give up, are answered that nothing was told, and the pool has its connections back
-            # while the lock is still held: a read of another chat is not kept waiting. Each waited its
-            # time for the lock, and the one that got it for the row.
-            assert answers == [BUSY, BUSY]
-            assert CONTROL_LOCK_WAIT_MS / 1000 <= waited < 2 * CONTROL_LOCK_WAIT_MS / 1000 + 1
-            await asyncio.wait_for(narrow.store.get_session(other), 1.0)
-            await holder.rollback()
+        wait_s = CONTROL_LOCK_WAIT_MS / 1000
+        # A post waits its time for the lock, and the one that got the lock for the row.
+        longest = wait_s * (2 if held == "its row" else 1)
+        taken = asyncio.Event()
+
+        async def held_from_outside() -> None:
+            # Whatever holds the chat's lock, or the row a telling writes to under it, holds it for
+            # longer than a telling waits, and then lets it go: a post left waiting would then be made.
+            async with session_factory() as holder:
+                await holder.execute(HELD_FROM_OUTSIDE[held], {"chat": str(chat)})
+                taken.set()
+                await asyncio.sleep(longest + 1.5)
+                await holder.rollback()
+
+        holding = asyncio.create_task(held_from_outside())
+        await taken.wait()
+        started = time.monotonic()
+        # As many posts for that chat as the pool is wide: each waits on a connection of its own.
+        # They give up and are answered that nothing was told (a post that waited on would be answered 200).
+        answers = await asyncio.gather(*(narrow.control(chat, posted, answered=503, leaves=False, **said) for _ in range(2)))
+        waited = time.monotonic() - started
+        assert answers == [BUSY, BUSY]
+        assert wait_s <= waited < longest + 1
+        # The pool has its connections back while the lock is still held: a read of another chat is
+        # not kept waiting.
+        assert not holding.done()
+        await asyncio.wait_for(narrow.store.get_session(other), 1.0)
+        await holding
         try:
             # Nothing was told, and no turn given. Posted again, it is.
             assert await narrow.log(chat) == before

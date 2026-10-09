@@ -245,6 +245,17 @@ async def test_a_wake_at_a_hand_back_its_user_confirmed_runs_the_agents_turn(mon
 
 
 @pytest.mark.asyncio
+async def test_a_commands_wake_with_a_hand_back_unread_and_no_queue_to_reach_ends_as_any_commands_wake(monkeypatch):
+    # A worker with no queue of its own, as a test's or a one-off run's: there is nowhere to queue the
+    # hand back's turn, and the command is answered all the same.
+    handed_back_ = told(4, EventType.BROWSER_CONTROL_RETURNED, resumes=True)
+    refused = said(6, "/auto-research status")
+    turns, wrote = await _wake(monkeypatch, told(3, EventType.BROWSER_CONTROL_GRANTED), handed_back_, resumed(5), refused)
+    assert turns == 0
+    assert wrote == [EventType.HARNESS_WAKE, EventType.LLM_RESPONSE]
+
+
+@pytest.mark.asyncio
 async def test_a_wake_at_a_hand_back_whose_user_took_the_browser_over_again_runs_no_turn(monkeypatch):
     taken_over_ = told(3, EventType.BROWSER_CONTROL_GRANTED)
     handed_back_ = told(4, EventType.BROWSER_CONTROL_RETURNED, resumes=True)
