@@ -805,87 +805,142 @@ describe("a page's download, as the host stages it", () => {
     state().tabs.set(SESSION, [PAGE]);
   });
 
-  it("drops a download of the agent's once no byte has come for the stated time, counted from when it began whatever came or did not before it, tells its agent so, and drops none of its user's own", async () => {
-    // The host's clock, which the test puts on: past the minute after a hand back in which a download may be its user's.
-    let skew = 0;
-    host = new BrowserHost({ downloaded: (download) => staged.push(download), stalledMs: 300, now: () => performance.now() + skew });
+  // A host that stages in a folder of the test's, on a clock the test moves: each download begins as the browser
+  // says it, with the id its file is staged under. *begin*: one of the agent's, or its user's own while they hold
+  // the browser, that goes on until the host stops it or the test ends it; *grow*: its staged file, to so many bytes.
+  const staging = (options: BrowserHostOptions) => {
+    host = new BrowserHost({ downloaded: (download) => staged.push(download), now: () => clock, ...options });
     state().roots.set(SESSION, "chat-1");
     state().tabs.set(SESSION, [PAGE]);
-    const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
-    // A download that goes on until a test ends it, or the host stops it: stopped, it says so as the browser does.
-    const endless = (name: string) => {
-      let fails!: (error: Error) => void;
-      const ends = new Promise<string>((_, reject) => {
-        fails = reject;
-      });
-      const download = downloadOf(name, fileOf(6), ends);
-      return { ...download, cancel: () => (did.push(`cancel ${name}`), fails(new Error("canceled")), Promise.resolve()) };
-    };
-    // The first is not stopped before its time, and is once it has passed: the browser shows this host no file that grows.
-    const first = arrives(endless("first.bin"));
-    await sleep(150);
-    expect(did).toEqual([]);
-    await first;
-    expect(did).toEqual(["cancel first.bin"]);
-    expect(state().unseen.get(SESSION)).toEqual([notFinished("first.bin", "no more of it came for 0.3 s")]);
-    // Some while later another begins. It has its own time, whole: not what was left of the first's.
-    await sleep(200);
-    const second = arrives(endless("second.bin"));
-    await sleep(150);
-    expect(did).toEqual(["cancel first.bin"]);
-    await second;
-    expect(did).toEqual(["cancel first.bin", "cancel second.bin"]);
-    // With none of the agent's on its way, nothing is staged that this host watches.
-    expect([state().arriving.size, staged, (host as unknown as { watching: unknown }).watching]).toEqual([0, [], null]);
-    // Their own, begun while they hold the browser, is never stopped so, though one of the agent's beside it is.
-    host.pause("chat-1", true);
-    void arrives(endless("theirs.bin"));
-    host.pause("chat-1", false);
-    skew += AFTER_HAND_BACK_MS + 1;
-    await arrives(endless("third.bin"));
-    await sleep(400);
-    expect(did.filter((done) => done.startsWith("cancel"))).toEqual(["cancel first.bin", "cancel second.bin", "cancel third.bin"]);
-  });
-
-  it("stops the agent's downloads on their way only once the folder they are staged in holds more than it may, whatever is in it: what has ended and waits to be saved counts, and so does its user's own, which is never stopped", async () => {
-    let skew = 0;
-    host = new BrowserHost({ downloaded: (download) => staged.push(download), stagedBytes: 1_000, now: () => performance.now() + skew });
-    state().roots.set(SESSION, "chat-1");
-    state().tabs.set(SESSION, [PAGE]);
-    const folder = join(profile, "staging");
+    const folder = join(profile, `staging-${(next += 1)}`);
     mkdirSync(folder);
     Object.assign(host, { staging: folder });
-    const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
-    const endless = (name: string) => {
-      let fails!: (error: Error) => void;
-      const ends = new Promise<string>((_, reject) => {
-        fails = reject;
-      });
-      const download = downloadOf(name, fileOf(6), ends);
-      return { ...download, cancel: () => (did.push(`cancel ${name}`), fails(new Error("canceled")), Promise.resolve()) };
+    const grow = (id: string, bytes: number, ended = false) => {
+      rmSync(join(folder, ended ? `${id}.crdownload` : id), { force: true });
+      writeFileSync(join(folder, ended ? id : `${id}.crdownload`), "x".repeat(bytes));
     };
-    // Their own is on its way since they held the browser; one that ended waits to be saved; two of the agent's begin.
-    host.pause("chat-1", true);
-    void arrives(endless("theirs.bin"));
-    host.pause("chat-1", false);
-    skew += AFTER_HAND_BACK_MS + 1;
-    writeFileSync(join(folder, "theirs"), "t".repeat(100));
-    writeFileSync(join(folder, "waiting"), "w".repeat(300));
-    writeFileSync(join(folder, "first"), "f".repeat(300));
-    writeFileSync(join(folder, "second"), "s".repeat(300));
-    const [first, second] = [arrives(endless("first.bin")), arrives(endless("second.bin"))];
-    // As much as it may hold, to the byte: nothing is stopped.
-    await sleep(2_500);
+    const begin = (id: string, name: string, theirs = false) => {
+      let fails!: (error: Error) => void;
+      let succeeds!: (path: string) => void;
+      const ends = new Promise<string>((resolve, reject) => {
+        [succeeds, fails] = [resolve, reject];
+      });
+      const url = `http://fixture.test/${name}`;
+      const download = {
+        ...downloadOf(name, join(folder, id), ends, url),
+        cancel: () => (did.push(`cancel ${name}`), rmSync(join(folder, `${id}.crdownload`), { force: true }), fails(new Error("canceled")), Promise.resolve()),
+      };
+      // Asked for by the agent's own navigation, where it is the agent's; while they hold the browser, where theirs.
+      if (theirs) host.pause("chat-1", true);
+      else asks(url);
+      host.begins(id, url, name);
+      const arrived = arrives(download);
+      if (theirs) host.pause("chat-1", false);
+      return { arrived, ends: (bytes: number) => (grow(id, bytes, true), succeeds(join(folder, id))) };
+    };
+    return { folder, grow, begin };
+  };
+  const look = () => new Promise((done) => setTimeout(done, 700));
+
+  it("drops a download of the agent's once no byte of its own has come for the stated time, to the millisecond, whatever comes of any other, tells its agent so, and drops none of its user's own", async () => {
+    const { grow, begin } = staging({ stalledMs: 1_000 });
+    // Their own, begun while they hold the browser, has its first part and no more. The minute after the hand back has passed.
+    void begin("theirs", "theirs.bin", true).arrived;
+    grow("theirs", 100);
+    clock += AFTER_HAND_BACK_MS + 1;
+    const began = clock;
+    const [still, coming] = [begin("still", "still.bin"), begin("coming", "coming.bin")];
+    grow("still", 100);
+    grow("coming", 100);
+    await look();
+    // A millisecond short of the stated time since its bytes last grew: neither is stopped. The other's bytes come on.
+    clock = began + 999;
+    grow("coming", 200);
+    await look();
+    expect(did).toEqual([]);
+    // At the stated time, the one whose own bytes stopped is dropped, alone, though another's still come; and told.
+    clock = began + 1_000;
+    await still.arrived;
+    expect(did).toEqual(["cancel still.bin"]);
+    expect(state().unseen.get(SESSION)).toEqual([notFinished("still.bin", "no more of it came for 1 s")]);
+    // The one whose bytes come is not: it ends, and is handed on. Their own, as still as the first, is never stopped.
+    clock = began + 5_000;
+    grow("coming", 300);
+    await look();
+    coming.ends(400);
+    await coming.arrived;
+    expect([did, staged.map(({ name, user }) => [name, user]), state().arriving.size]).toEqual([["cancel still.bin"], [["coming.bin", false]], 0]);
+    // With none of the agent's on its way, nothing is staged that this host watches.
+    expect((host as unknown as { watching: unknown }).watching).toBeNull();
+  }, 20_000);
+
+  it("stops the agent's downloads on their way once the agent's own, on their way and waiting to be saved, are more than may be staged, to the byte: nothing of its user's counts, however large, and what it tells the agent speaks of the agent's own alone", async () => {
+    const { grow, begin } = staging({ stagedBytes: 1_000 });
+    // Their own is far past what may be staged, and grows: it counts for nothing, and is never stopped.
+    void begin("theirs", "theirs.bin", true).arrived;
+    grow("theirs", 5_000);
+    clock += AFTER_HAND_BACK_MS + 1;
+    // One of the agent's ends, and waits to be saved: it counts, for as long as its file is there.
+    const waits = begin("waits", "waits.bin");
+    waits.ends(300);
+    await waits.arrived;
+    expect(staged.map(({ name, user }) => [name, user])).toEqual([["waits.bin", false]]);
+    // Two more on their way: with what waits, as much as may be staged, to the byte. Nothing is stopped.
+    const [first, second] = [begin("first", "first.bin"), begin("second", "second.bin")];
+    grow("first", 300);
+    grow("second", 400);
+    grow("theirs", 9_000);
+    await look();
+    await look();
     expect([did, state().arriving.size]).toEqual([[], 2]);
-    // A byte more, of whichever: both of the agent's are stopped, and told so. Not their user's.
-    writeFileSync(join(folder, "theirs"), "t".repeat(101));
-    await Promise.all([first, second]);
+    // A byte more of the agent's own: both on their way are stopped, and told so, in words of its own downloads alone.
+    grow("second", 401);
+    await Promise.all([first.arrived, second.arrived]);
     expect(did.sort()).toEqual(["cancel first.bin", "cancel second.bin"]);
     expect(state().unseen.get(SESSION)?.sort()).toEqual([tooMuch("first.bin", 1_000), tooMuch("second.bin", 1_000)]);
-    await sleep(1_500);
-    expect([did.length, staged]).toEqual([2, []]);
+    expect(tooMuch("first.bin", 1_000)).toBe(
+      'The page\'s download of "first.bin" was not saved: the agent\'s own downloads in its browser on this computer, those on their way and those waiting to be saved, were together more than 1000 bytes, too large to save. If it is not the large one, the agent may start it again once the others are saved.',
+    );
+    // One that ends is handed on only where the agent's own, with it, are no more than may be staged: 300 wait.
+    state().unseen.delete(SESSION);
+    const fits = begin("fits", "fits.bin");
+    fits.ends(700);
+    await fits.arrived;
+    const over = begin("over", "over.bin");
+    over.ends(1);
+    await over.arrived;
+    expect([staged.map(({ name }) => name), state().unseen.get(SESSION)]).toEqual([["waits.bin", "fits.bin"], [tooMuch("over.bin", 1_000)]]);
+    // What waited is saved, and gone from where it was staged: it counts no more.
+    rmSync(staged[0]!.path);
+    rmSync(staged[1]!.path);
+    const after = begin("after", "after.bin");
+    after.ends(1_000);
+    await after.arrived;
+    expect(staged.map(({ name }) => name)).toEqual(["waits.bin", "fits.bin", "after.bin"]);
     // The most, unless a host is told another: eight files as large as one that can be saved.
     expect(STAGED_MOST_BYTES).toBe(8 * MAX_WRITE_BYTES);
+  }, 30_000);
+
+  it("counts what the folder holds under no id it knows for a download of the agent's that the browser said no id of: the bound and the stall are the folder's then", async () => {
+    const { folder, begin } = staging({ stagedBytes: 1_000 });
+    // The browser says nothing of this one: no file is known to be its own.
+    let fails!: (error: Error) => void;
+    const ends = new Promise<string>((_, reject) => {
+      fails = reject;
+    });
+    const url = "http://fixture.test/unsaid.bin";
+    asks(url);
+    const unsaid = arrives({ ...downloadOf("unsaid.bin", join(folder, "x"), ends, url), cancel: () => (did.push("cancel unsaid.bin"), fails(new Error("canceled")), Promise.resolve()) });
+    const said = begin("said", "said.bin");
+    writeFileSync(join(folder, "whose.crdownload"), "x".repeat(600));
+    writeFileSync(join(folder, "said.crdownload"), "x".repeat(400));
+    await look();
+    await look();
+    expect(did).toEqual([]);
+    // A byte more under no id: taken for the agent's own, and both are stopped.
+    writeFileSync(join(folder, "whose.crdownload"), "x".repeat(601));
+    await Promise.all([unsaid, said.arrived]);
+    expect(did.sort()).toEqual(["cancel said.bin", "cancel unsaid.bin"]);
   }, 20_000);
 
   it("hands on one of exactly what a write may carry, and none a byte over, which it removes and says", async () => {
@@ -2820,7 +2875,7 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     expect(staged).toEqual([]);
   });
 
-  it("drops a download of the agent's that has no end once no byte of any download has come for the stated time, and says so as of any that did not finish: not one that still comes a little at a time, and never its user's own", async () => {
+  it("drops a download of the agent's that has no end once no byte of its own has come for the stated time, and says so as of any that did not finish: not one that still comes a little at a time; whatever comes of its user's own beside it, which is never dropped", async () => {
     const staged: StagedDownload[] = [];
     // The host's clock, which the test puts on: past the minute after a hand back in which a download may be its user's.
     let skew = 0;
@@ -2846,28 +2901,27 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     expect(await told()).toEqual([notFinished("stalls.bin", "no more of it came for 2 s")]);
     expect(notFinished("stalls.bin", "no more of it came for 2 s")).toBe('The page\'s download of "stalls.bin" did not finish (no more of it came for 2 s), so it was not saved.');
     expect([staged.length, readdirSync(folder)]).toEqual([1, []]);
-    // Their own, begun while they hold the browser, and as still: on its way after the hand back, when the agent begins another.
+    // Their own, begun while they hold the browser, streams without end. The agent's that is still is dropped beside
+    // it all the same, two seconds on: the bytes that come are not its own.
     host.pause("chat-1", true);
-    const [theirs] = await Promise.all([page.waitForEvent("download", { timeout: 10_000 }), page.evaluate("void (location.href = '/stalls.bin?theirs')")]);
+    const [theirs] = await Promise.all([page.waitForEvent("download", { timeout: 10_000 }), page.evaluate("void (location.href = '/endless.bin')")]);
     host.pause("chat-1", false);
     skew += AFTER_HAND_BACK_MS + 1;
     await script(a, "location.href = '/stalls.bin'; return 1;", "chat-1");
     await expect.poll(() => arriving.size, { timeout: 5_000 }).toBe(1);
     const again = performance.now();
     await expect.poll(() => arriving.size, { timeout: 10_000 }).toBe(0);
-    // Its two seconds are its own: counted from when it began, whatever came, or did not, before it.
     expect(performance.now() - again).toBeGreaterThan(1_500);
     expect(await told()).toEqual([notFinished("stalls.bin", "no more of it came for 2 s")]);
-    // Theirs is not dropped, then or two stated times on: it ends when its site ends it, and is staged as theirs.
+    // Theirs is not dropped, then or two stated times on: it is the one file in the folder, and grows.
     await new Promise((done) => setTimeout(done, 4_000));
-    expect(readdirSync(folder)).toHaveLength(1);
     expect(await within(200, theirs.failure())).toBe("late");
-    stalling[1]!.end("end");
-    await expect.poll(() => staged.map(({ name, user }) => [name, user]), { timeout: 10_000 }).toEqual([["trickles.bin", false], ["stalls.bin", true]]);
-    expect(await told()).toEqual([]);
+    const size = () => readdirSync(folder).map((name) => statSync(join(folder, name)).size);
+    const [before] = size();
+    await expect.poll(() => size().length === 1 && size()[0]! > before!, { timeout: 5_000 }).toBe(true);
   }, 90_000);
 
-  it("stops every download of the agent's on its way once more is staged than may be, one that streams without end and one beside it that is not the large one, tells its agent of each, removes what they had staged, and leaves its user's own on its way", async () => {
+  it("stops the agent's own downloads on their way once they are, together, more than may be staged: one that streams without end and one beside it that is not the large one, each told in words of the agent's own; and not for a download of its user's own that is far past that, which is never stopped and of which the agent is told nothing", async () => {
     const staged: StagedDownload[] = [];
     const most = 8 * 1024 * 1024;
     let skew = 0;
@@ -2877,28 +2931,32 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     const page = tabs().get(a)![0]!;
     const arriving = (host as unknown as { arriving: Set<unknown> }).arriving;
     const told = async () => (await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")).ok.notices as string[];
-    // Their own, begun while they hold the browser, and still on its way after the hand back: its first part came, and no more.
+    const folder = (host as unknown as { staging: string }).staging;
+    const sizes = () => readdirSync(folder).map((name) => statSync(join(folder, name)).size).sort((one, other) => one - other);
+    // Their own, begun while they hold the browser, streams without end: it is past what may be staged within a second or two.
     host.pause("chat-1", true);
-    const [theirs] = await Promise.all([page.waitForEvent("download", { timeout: 10_000 }), page.evaluate("void (location.href = '/stalls.bin?theirs')")]);
+    const [theirs] = await Promise.all([page.waitForEvent("download", { timeout: 10_000 }), page.evaluate("void (location.href = '/endless.bin')")]);
     host.pause("chat-1", false);
     skew += AFTER_HAND_BACK_MS + 1;
-    // Two of the agent's: one as small and as still, and one that streams without end.
+    await expect.poll(() => sizes().at(-1) ?? 0, { timeout: 15_000 }).toBeGreaterThan(most);
+    // The agent's own downloads go on as ever beside it: one is staged and handed on, and one that is on its way
+    // for two looks is not stopped. The agent is told nothing: none of its own is too large.
+    await script(a, "location.href = '/report.txt'; return 1;", "chat-1");
+    await expect.poll(() => staged.map(({ name, user }) => [name, user]), { timeout: 10_000 }).toEqual([["report.txt", false]]);
     await script(a, "location.href = '/stalls.bin'; return 1;", "chat-1");
     await expect.poll(() => arriving.size, { timeout: 5_000 }).toBe(1);
+    await new Promise((done) => setTimeout(done, 2_500));
+    expect([arriving.size, await told()]).toEqual([1, []]);
+    // One of the agent's own streams without end: both of the agent's on their way are stopped once its own are
+    // more than may be staged, and the agent is told of each, in words of its own downloads alone.
     await script(a, "location.href = '/endless.bin'; return 1;", "chat-1");
-    await expect.poll(() => arriving.size, { timeout: 5_000 }).toBe(2);
-    const folder = (host as unknown as { staging: string }).staging;
-    // Both are stopped once the folder holds more than it may, and the agent is told of each that it can start it again.
     await expect.poll(() => arriving.size, { timeout: 15_000 }).toBe(0);
     expect((await told()).sort()).toEqual([tooMuch("endless.bin", most), tooMuch("stalls.bin", most)]);
-    expect(tooMuch("endless.bin", most)).toBe(
-      'The page\'s download of "endless.bin" was stopped: the downloads then on their way in the agent\'s browser on this computer were, together, more than 8388608 bytes, too large to save, so it was not saved. If it is not the large one, the agent may start it again.',
-    );
-    // What they had staged is gone. Their user's own is where it was, on its way: it ends when its site ends it.
-    await expect.poll(() => readdirSync(folder).map((name) => statSync(join(folder, name)).size), { timeout: 10_000 }).toEqual([4_096]);
-    expect([staged, await within(200, theirs.failure())]).toEqual([[], "late"]);
-    stalling[0]!.end("end");
-    await expect.poll(() => staged.map(({ name, user }) => [name, user]), { timeout: 10_000 }).toEqual([["stalls.bin", true]]);
+    // What they had staged is gone. What is left is the agent's file that waits to be saved, and their user's own, on its way and growing.
+    await expect.poll(() => sizes().length, { timeout: 10_000 }).toBe(2);
+    expect([sizes()[0], staged.length, await within(200, theirs.failure())]).toEqual([6, 1, "late"]);
+    const [, before] = sizes();
+    await expect.poll(() => sizes()[1]! > before!, { timeout: 5_000 }).toBe(true);
     expect(await told()).toEqual([]);
   }, 90_000);
 

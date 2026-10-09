@@ -110,11 +110,12 @@ export const LEFT_TO_USER =
 export const tooLarge = (name: string, bytes: number, most = MAX_WRITE_BYTES): string =>
   `The page downloaded ${quoted(name)} (${bytes} bytes), too large to save in the chat's folder at once (at most ${most} bytes), so it was not saved.`;
 /**
- * What the agent is told of one of its own that was stopped with the rest on their way, because more was
- * staged than may be: which of them was the large one, the browser does not say. *most*: the limit in force.
+ * What the agent is told of one of its own that was stopped, or not handed on, because the agent's own
+ * downloads, on their way and waiting to be saved, were together more than may be staged. It speaks of the
+ * agent's own alone: nothing of its user's is counted, or said. *most*: the limit in force.
  */
 export const tooMuch = (name: string, most: number): string =>
-  `The page's download of ${quoted(name)} was stopped: the downloads then on their way in the agent's browser on this computer were, together, more than ${most} bytes, too large to save, so it was not saved. If it is not the large one, the agent may start it again.`;
+  `The page's download of ${quoted(name)} was not saved: the agent's own downloads in its browser on this computer, those on their way and those waiting to be saved, were together more than ${most} bytes, too large to save. If it is not the large one, the agent may start it again once the others are saved.`;
 /** What the agent is told of one of its own that its user's take-over of the browser stopped. */
 export const interrupted = (name: string): string =>
   `The page's download of ${quoted(name)} was interrupted when the user took over the agent's browser on this computer, so it was not saved.`;

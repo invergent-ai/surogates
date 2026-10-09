@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { type BrowserContext, type CDPSession, chromium, type Dialog, type Download, type FileChooser, type Page, type Request } from "playwright-core";
 
@@ -152,6 +152,8 @@ interface Begun {
 
 // What a page did that its agent could not see happen, at most this many to an answer.
 const MAX_NOTICES = 20;
+// How many of the browser's words that a download begins are kept while no download is matched to them.
+const UNMATCHED = 64;
 // How many answers this host remembers the notices of, for one whose cancel crossed it on the way (unanswered).
 const CARRIED = 32;
 export const FILE_ASKED =
@@ -173,18 +175,18 @@ export const GIVEN_AS_TAKEN = "The files of an upload were given to the page jus
 export const notFinished = (name: string, why: string): string => `The page's download of ${quoted(name)} did not finish (${why}), so it was not saved.`;
 // Why one did not finish: the browser's own word for one that was cancelled, or whose connection broke; of
 // any other, this host's words. What an error says itself is not the agent's to read.
-// How long the agent's downloads on their way may go with no byte of any download coming, before they are
-// dropped as ones that did not finish: a site can begin a download and never end it, and it would stay on
-// its way, its part kept, for as long as the browser runs. Its user's own are never dropped so.
+// How long a download of the agent's may go with no byte of its own coming, before it is dropped as one that
+// did not finish: a site can begin a download and never end it, and it would stay on its way, its part
+// kept, for as long as the browser runs. One whose site is silent that long part-way is dropped the same,
+// though it would have gone on. Its user's own are never dropped so.
 export const STALLED_MS = 60_000;
-// The most the host's staging folder may hold while a download of the agent's is on its way. Past it, every
-// download of the agent's still on its way is stopped and dropped, and its agent told that it was too large
-// to save (tooMuch). A file is saved only up to what a write may carry, and is measured only once it has
-// ended: one that never ends and keeps coming would fill the disk, and the browser says which staged file
-// is whose only at a download's end, so the one that grows cannot be told from the rest and all of the
-// agent's go together. Eight files as large as one that can be saved: a browser fetches six at once from one
-// site, and what has ended and waits to be saved, each a write's most or less, is in the folder too. Its
-// user's own downloads count toward it, and are never stopped by it.
+// The most the agent's own downloads may have staged together: those on their way, each by its own bytes, and
+// those that ended and wait to be saved. Past it, every download of the agent's still on its way is stopped
+// and dropped, and one that ends is not handed on; its agent is told of each that it was too large to save
+// (tooMuch). A file is saved only up to what a write may carry, and is measured for that only once it has
+// ended: one that never ends and keeps coming would fill the disk. Eight files as large as one that can be
+// saved: a browser fetches six at once from one site, and what waits to be saved is each a write's most or
+// less. Its user's own downloads never count toward it, and are never stopped by it.
 export const STAGED_MOST_BYTES = 8 * MAX_WRITE_BYTES;
 // How often what is staged is looked at for both, at most: what a download that keeps coming adds between
 // two looks is what the folder can hold past its most.
@@ -607,11 +609,21 @@ export class BrowserHost {
   private staging: string | null = null;
   // The agent's downloads on their way, until each is handed on or dropped: a take-over stops them all.
   private readonly arriving = new Set<Download>();
-  // The look at what is staged, while a download of the agent's is on its way (watch); when a byte of any
-  // download last came, as far as that look has seen; and the downloads dropped for none having come.
+  // The look at what is staged, while a download of the agent's is on its way (watch); for each of those, its
+  // own bytes at the last look and when they last grew; and the downloads dropped for none having come.
   private watching: NodeJS.Timeout | null = null;
-  private lastByte = 0;
+  private readonly grew = new Map<Download, { bytes: number; at: number }>();
   private readonly stalled = new WeakSet<Download>();
+  // The id the browser names each download's staged file by, for every download on its way, the agent's and
+  // its user's: said by the browser on a line of this host's own as the download begins (begins), and matched
+  // to the download Playwright announces by its address and its name, in the order both come. *said*: ids
+  // no download is matched to yet; *unnamed*: downloads the browser has said no id of yet.
+  private readonly ids = new Map<Download, string>();
+  private readonly said: Array<{ id: string; url: string; name: string }> = [];
+  private readonly unnamed: Download[] = [];
+  // The agent's files that ended and were handed on to be saved, by where each is staged: counted with the
+  // agent's own until it is gone from there.
+  private readonly waiting = new Set<string>();
   // The downloads stopped because more was staged than may be.
   private readonly overfull = new WeakSet<Download>();
   // The chat that last handed the browser back, and when.
@@ -1491,8 +1503,10 @@ export class BrowserHost {
     const name = download.suggestedFilename();
     const { root, session } = of;
     const user = stop === null;
+    this.name(download);
     if (stop) {
       this.arriving.add(download);
+      this.grew.set(download, { bytes: -1, at: this.now() });
       this.watch();
     }
     // Taken over between its request and its announcement: stopped as one on its way is.
@@ -1521,37 +1535,94 @@ export class BrowserHost {
         await download.delete().catch(() => {});
         return;
       }
+      // One of the agent's that ends is handed on only where the agent's own, with it, are no more than may be staged.
+      const bound = this.options.stagedBytes ?? STAGED_MOST_BYTES;
+      if (!user && (await this.staged({ download, path })).own + size > bound) {
+        tell(tooMuch(name, bound));
+        await download.delete().catch(() => {});
+        return;
+      }
+      if (!user) this.waiting.add(path);
       this.options.downloaded({ root, session, name, path, user, ...(user && of.after === true ? { afterHandBack: true as const } : {}) });
     } finally {
       this.arriving.delete(download);
+      this.grew.delete(download);
+      this.ids.delete(download);
+      if (this.unnamed.includes(download)) this.unnamed.splice(this.unnamed.indexOf(download), 1);
       if (this.arriving.size === 0) this.unwatch();
     }
   }
 
-  // What is staged is looked at while a download of the agent's is on its way: each file of the staging
-  // folder, and its size. The browser says of a download only that it began and that it ended, and not which
-  // file is whose until then: so a byte counts whichever download it is of. Once the folder holds more than
-  // it may, or no byte has come for the stated time, in a new file or a longer one, every download of the
-  // agent's still on its way is stopped and dropped (stage tells why). Its user's own are not among them.
+  /**
+   * The browser says a download begins, on a line of this host's own: *id*, the name of the file it stages it
+   * under, for the download Playwright announces with the same address and the same name.
+   */
+  begins(id: string, url: string, name: string): void {
+    const at = this.unnamed.findIndex((download) => download.url() === url && download.suggestedFilename() === name);
+    if (at !== -1) return void this.ids.set(this.unnamed.splice(at, 1)[0] as Download, id);
+    this.said.push({ id, url, name });
+    // One Playwright never announces here is matched to nothing: the oldest go.
+    if (this.said.length > UNMATCHED) this.said.shift();
+  }
+
+  // *download* is announced: the id the browser said for it, where it has; else it waits for the browser's word.
+  private name(download: Download): void {
+    const at = this.said.findIndex(({ url, name }) => url === download.url() && name === download.suggestedFilename());
+    if (at === -1) return void this.unnamed.push(download);
+    this.ids.set(download, (this.said.splice(at, 1)[0] as { id: string }).id);
+  }
+
+  // What the agent's own downloads have staged now: *own*, all of it but that of *ending*, which is measured
+  // by itself; *each*, the bytes of each on its way. One on its way is counted by the file the browser named
+  // for it. Where the browser said no id for one of the agent's, what is in the folder under no id this host
+  // knows is taken for it: the agent's own cannot then be told from its user's, and the bound and the stall
+  // are the folder's.
+  private async staged(ending?: { download: Download; path: string }): Promise<{ own: number; each: Map<Download, number> }> {
+    const files = await this.sizes();
+    for (const path of this.waiting) if (!files.has(basename(path))) this.waiting.delete(path);
+    const waits = [...this.waiting].map((path) => basename(path));
+    // A download's file is named by its id once it has ended, and by its id with an ending of the browser's
+    // own (.crdownload) while it is on its way.
+    const of = (name: string): string => name.split(".")[0] as string;
+    const known = new Set([...this.ids.values(), ...waits, ...(ending ? [basename(ending.path)] : [])]);
+    const stray = [...files].reduce((sum, [name, size]) => (known.has(of(name)) ? sum : sum + size), 0);
+    const bytes = (id: string): number => [...files].reduce((sum, [name, size]) => (of(name) === id ? sum + size : sum), 0);
+    const each = new Map<Download, number>();
+    let unsaid = false;
+    for (const download of this.arriving) {
+      if (download === ending?.download) continue;
+      const id = this.ids.get(download);
+      unsaid ||= id === undefined;
+      each.set(download, id === undefined ? stray : bytes(id));
+    }
+    const own = waits.reduce((sum, name) => sum + (files.get(name) ?? 0), 0)
+      + [...each].reduce((sum, [download, bytes]) => (this.ids.has(download) ? sum + bytes : sum), 0)
+      + (unsaid ? stray : 0);
+    return { own, each };
+  }
+
+  // What is staged is looked at, once a second, while a download of the agent's is on its way: each file of the
+  // staging folder, which the browser names by its download's id, and its size. Once the agent's own, on their
+  // way and waiting to be saved, are more than may be staged, every one of the agent's still on its way is
+  // stopped and dropped; and one of them whose own bytes have not grown for the stated time is stopped and
+  // dropped alone (stage tells why). Its user's own are counted nowhere, and are not among those stopped.
   private watch(): void {
-    this.lastByte = this.now();
     if (this.watching !== null) return;
     const limit = this.options.stalledMs ?? STALLED_MS;
-    let sizes = new Map<string, number>();
     let looking = false;
     const mine: NodeJS.Timeout = setInterval(() => {
       if (looking) return;
       looking = true;
-      void this.sizes().then((found) => {
+      void this.staged().then(({ own, each }) => {
         looking = false;
         if (this.watching !== mine) return;
-        const more = [...found].some(([name, size]) => size > (sizes.get(name) ?? -1));
-        sizes = found;
-        if (more) this.lastByte = this.now();
-        const held = [...found.values()].reduce((sum, size) => sum + size, 0);
-        const why = held > (this.options.stagedBytes ?? STAGED_MOST_BYTES) ? this.overfull : this.now() - this.lastByte >= limit ? this.stalled : null;
-        if (why === null) return;
+        const overfull = own > (this.options.stagedBytes ?? STAGED_MOST_BYTES);
         for (const download of this.arriving) {
+          const bytes = each.get(download) ?? 0;
+          const kept = this.grew.get(download);
+          if (!kept || bytes > kept.bytes) this.grew.set(download, { bytes, at: this.now() });
+          const why = overfull ? this.overfull : kept && bytes <= kept.bytes && this.now() - kept.at >= limit ? this.stalled : null;
+          if (why === null) continue;
           why.add(download);
           void download.cancel().catch(() => {});
         }
@@ -1563,6 +1634,21 @@ export class BrowserHost {
   private unwatch(): void {
     if (this.watching !== null) clearInterval(this.watching);
     this.watching = null;
+  }
+
+  // The browser is asked to say each download as it begins, on a line of this host's own that stays for as
+  // long as the browser runs: with the id it names the download's staged file by (begins). Asked as Playwright
+  // asks it, with the same folder, so that nothing of where downloads go changes. Where the browser will not
+  // say, a download of the agent's is counted by what the folder holds under no id (staged).
+  private async saysDownloads(context: BrowserContext, staging: string): Promise<void> {
+    try {
+      const line = await context.browser()?.newBrowserCDPSession();
+      if (!line) return;
+      line.on("Browser.downloadWillBegin", ({ guid, url, suggestedFilename }) => this.begins(guid, url, suggestedFilename));
+      await line.send("Browser.setDownloadBehavior", { behavior: "allowAndName", downloadPath: staging, eventsEnabled: true });
+    } catch {
+      // Said by nobody: counted by the folder.
+    }
   }
 
   // Each file of the staging folder now, and its size: none where there is no folder, or it cannot be read.
@@ -1762,6 +1848,7 @@ export class BrowserHost {
     context.on("requestfailed", (request) => this.failed(request));
     try {
       await this.bypassWorkers(context);
+      await this.saysDownloads(context, staging);
       this.spare = await this.proxied(context, this.proxy.server);
     } catch (error) {
       await context.close().catch(() => {});
