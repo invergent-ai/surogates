@@ -1109,6 +1109,12 @@ export class BrowserHost {
     if (!chooser || this.sessionOf(chooser.page()) !== session) return failed(NOT_ASKED);
     const files = filesOf(args.files);
     if (!files) return failed("A file for the page is a name, its type and what it holds");
+    // A question the input's page asked its user is theirs still, as for anything else the agent would do in
+    // the page (act): nothing is given into it, or into a frame of it that the question does not hold.
+    if (this.asking.has(chooser.page())) {
+      if (!(await this.answers(chooser.page()))) return ASKING;
+      if (stop.aborted) return PAUSED;
+    }
     let refused: unknown;
     try {
       refused = await this.bounded(chooser.page(), this.doing(chooser.page(), this.give(session, chooser, files, named?.input ?? null, stop)), stop);

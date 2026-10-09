@@ -3191,7 +3191,7 @@ await navigator.serviceWorker.ready;`);
     expect(await page.evaluate(filed)).toEqual([[], ["report.pdf"]]);
   }, 60_000);
 
-  it("gives nothing into a frame of a page whose own question its user left open at the hand back, though that frame's script makes its input ask meanwhile: not until they have answered it", async () => {
+  it("gives nothing into a frame of a page whose own question its user left open at the hand back, though that frame's script makes its input ask meanwhile, a second after the hand back or more than ten: not until they have answered it", async () => {
     const a = session();
     await op(a, "browser.navigate", { url: "http://other.test/fileframe" }, "chat-1");
     const page = tabs().get(a)![0]!;
@@ -3209,22 +3209,28 @@ await navigator.serviceWorker.ready;`);
     expect(await within(2_000, framed.evaluate("1"))).toBe(1);
     await asks();
     await new Promise((done) => setTimeout(done, 1_000));
-    // Nothing is kept of it for an upload, and nothing is given: the page is its user's until they have answered.
+    // Asked while the page is still waited for after the hand back, it is kept for no upload, and nothing is given.
     expect(kept(a)).toBeUndefined();
     expect((await upload()).error?.message).toBe(NOT_ASKED);
     expect(await framed.evaluate(filed)).toEqual([[]]);
-    expect(await within(500, page.evaluate("window.answered"))).toBe("late");
-    // They answer it. What the frame asks for then is the agent's to answer again.
-    asUser("focus", xwindow()!.id);
-    asUser("press", "Escape");
-    await expect.poll(() => within(500, page.evaluate("window.answered")), { timeout: 10_000 }).toBe(false);
+    // The page, which answers nothing while its question is open, is waited for ten seconds and no longer. What its
+    // frame asks for after that is kept, as what any page asks for: and nothing is given into it all the same. The
+    // page is its user's until they have answered, each frame of it too.
+    await new Promise((done) => setTimeout(done, SETTLE_MS));
     await expect.poll(async () => {
       await asks();
       return kept(a) !== undefined;
     }, { timeout: 10_000 }).toBe(true);
+    expect(await within(2_000, upload())).toEqual(ASKING);
+    expect(await framed.evaluate(filed)).toEqual([[]]);
+    expect(await within(500, page.evaluate("window.answered"))).toBe("late");
+    // They answer it. The input that asked is the agent's to answer again.
+    asUser("focus", xwindow()!.id);
+    asUser("press", "Escape");
+    await expect.poll(() => within(500, page.evaluate("window.answered")), { timeout: 10_000 }).toBe(false);
     expect(await upload()).toMatchObject({ ok: { files: 1 } });
     expect(await framed.evaluate(filed)).toEqual([["report.pdf"]]);
-  }, 60_000);
+  }, 90_000);
 
   it("waits no longer than ten seconds for a page to answer after a hand back: a frame of another site that is stuck keeps the agent out of the page no longer, and what the page asks for then is kept", async () => {
     const a = session();
