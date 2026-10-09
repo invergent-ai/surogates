@@ -675,8 +675,10 @@ class History:
         ``has_saga`` says whether ``main`` is the landing of *saga*: the only
         proof that a landing pushed.  ``missing`` are those of *commits* the
         history does not have now, which no fetch can bring: a landing whose
-        base stays among them can be put back by no one.
+        base stays among them can be put back by no one.  A master's pod,
+        which opens nothing, may make its repository here.
         """
+        self._init()
         main = self._take().get(MAIN)
         wanted = [_checked_id(c, "a fetch") for c in commits]
         missing = [c for c in wanted if not self._has(c) and not self._in_durable(c)]

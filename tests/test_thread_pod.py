@@ -827,3 +827,67 @@ def test_a_thread_pod_not_told_its_turn_refuses_to_start(tmp_path, monkeypatch, 
     with pytest.raises(SystemExit) as exited:
         executor_server.main()
     assert exited.value.code == 1 and "HISTORY_TURN" in caplog.text
+
+
+def a_masters_app(tmp_path):
+    """A project's master pod: its workspace is the real files, and its history has no copy."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_text("v1\n")
+    history = History(
+        repo=_shadow_repo_path(str(workspace), base=tmp_path / "home"), project=workspace, copy=None, thread=None, user="u1",
+    )
+    app = executor_server.create_app(token="t", workspace=str(workspace), require_fuse=False, history=history)
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://pod"), workspace
+
+
+async def test_a_masters_pod_is_ready_at_once_and_picks_up_nothing_before_any_history(tmp_path):
+    client, workspace = a_masters_app(tmp_path)
+    async with client:
+        # Nothing to open: its workspace is the real files.
+        assert (await client.get("/healthz")).status_code == 200
+        answer = (await client.post("/execute", json={"name": "_history", "args": {
+            "action": "pickup", "author": {"name": "Health check", "email": "routine:r1@surogate"},
+            "trailers": [["Surogate-Saga", "saga:r"], ["Surogate-Kind", "pickup"]], "push": True,
+        }}, headers=AUTH)).json()
+    # No history yet: the first thread's pod makes main's first commit, by you.
+    assert answer == {"main": None, "commit": None, "picked_up": [], "packs": 0}
+    assert not (workspace / "_history").exists()
+
+
+async def test_a_masters_pod_runs_only_the_steps_that_need_no_copy(tmp_path, monkeypatch):
+    # The pod forks a child per call, which inherits this.
+    monkeypatch.setattr(executor_server, "_run_checkpoint", lambda args, workspace: json.dumps({"of": workspace}))
+    client, workspace = a_masters_app(tmp_path)
+
+    async def run(name, **args) -> dict:
+        return (await client.post("/execute", json={"name": name, "args": args}, headers=AUTH)).json()
+
+    async with client:
+        # A landing's own steps are a thread's: refused with a reason, never a crash.
+        for action in ("commit", "apply", "record", "keep", "hand_off", "take_up", "prune"):
+            assert await run("_history", action=action) == {
+                "error": f"This pod has no copy of a project's files: it cannot {action}",
+            }
+        # What settles a landing left running needs no copy: the look, and a put-back.
+        assert await run("_history", action="fetch") == {"main": None, "has_saga": False, "packs": 0, "missing": []}
+        assert await run("_history", action="unapply", path="gone.md", before=None, after=None) == {
+            "path": "gone.md", "before": None, "after": None,
+        }
+        # Its checkpoints stay its workspace's own.
+        assert await run("_checkpoint", action="take") == {"of": str(workspace)}
+
+
+def test_a_masters_pod_keeps_a_history_of_its_workspace(tmp_path, monkeypatch):
+    import uvicorn
+
+    for name, value in {"TOOL_EXECUTOR_TOKEN": "t", "WORKSPACE_DIR": str(tmp_path), "HISTORY_MAIN": "1", "USER_ID": "u1"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("PROJECT_DIR", raising=False)
+    made: dict = {}
+    monkeypatch.setattr(executor_server, "init_registry", lambda: None)
+    monkeypatch.setattr(executor_server, "create_app", lambda **kwargs: made.update(kwargs))
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: None)
+    executor_server.main()
+    history = made["history"]
+    assert (history.project, history.copy, history.thread) == (tmp_path, None, None)

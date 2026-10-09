@@ -35,8 +35,13 @@ class ThreadPods:
     async def provision(self, spec: SandboxSpec) -> str:
         sandbox_id = uuid4().hex
         if "HISTORY_THREAD" not in spec.env:
-            # A pod with the plain layout: the real files at its workspace.
-            app = executor_server.create_app(token="t", workspace=str(self.project), require_fuse=False)
+            # A pod with the plain layout: the real files at its workspace,
+            # with a history of them in a project's master pod.
+            history = History(
+                repo=_shadow_repo_path(str(self.project), base=self.root / sandbox_id / "home" / ".surogates" / "history"),
+                project=self.project, copy=None, thread=None, user=spec.env.get("USER_ID", ""),
+            ) if "HISTORY_MAIN" in spec.env else None
+            app = executor_server.create_app(token="t", workspace=str(self.project), require_fuse=False, history=history)
             self.pods[sandbox_id] = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://pod")
             return sandbox_id
         copy = self.root / sandbox_id / "workspace"
