@@ -140,6 +140,35 @@ channel.port1.onmessage = () => {
 channel.port2.postMessage(0);
 </script>`;
 
+// A page that asks for a file every 2.5 s for as long as it has leave to, and says when that leave comes and goes.
+// At its site's word it does what a page does with leave under its user's hand: a window, the whole screen, the
+// clipboard; and says what came of each.
+const KEEPER = `<!doctype html><title>KEEPER</title><body style="margin:0">
+<input id="file" type="file" style="position:absolute;left:0;top:0;width:280px;height:40px">
+<script>
+const say = (what) => navigator.sendBeacon("/said", what);
+const input = document.getElementById("file");
+let had = false;
+setInterval(() => {
+  const has = navigator.userActivation.isActive;
+  if (has) input.click();
+  if (has !== had) say(has ? "leave" : "no leave");
+  had = has;
+}, 2500);
+fetch("/word" + location.search).then(async () => {
+  const active = navigator.userActivation.isActive;
+  const opened = window.open("/second", "_blank") !== null;
+  const full = await document.documentElement.requestFullscreen().then(() => true, () => false);
+  const text = document.createElement("textarea");
+  text.value = "the page's";
+  document.body.append(text);
+  text.select();
+  const wrote = document.execCommand("copy");
+  text.remove();
+  say(JSON.stringify({ active, opened, full, wrote }));
+});
+</script>`;
+
 let site: Server;
 let canary: Server;
 let ports: { site: number; canary: number };
@@ -155,6 +184,8 @@ let said: Array<{ host: string; from: string; what: string }>;
 let gate: ((ms: number, first?: boolean) => void) | null;
 // The answers of the fixture's download that never ends, still open: a test ends one, and each is cut at the test's end.
 let stalling: ServerResponse[];
+// The fixture's keeper pages wait for their site's word: each, by its address's query, until a test gives it.
+let words: Map<string, () => void>;
 let profile: string;
 let launch: Launch;
 let host: BrowserHost;
@@ -167,6 +198,7 @@ beforeEach(async () => {
   said = [];
   gate = null;
   stalling = [];
+  words = new Map();
   site = createServer((req, res) => {
     if (req.url === "/said") {
       let what = "";
@@ -178,6 +210,8 @@ beforeEach(async () => {
       });
     }
     if (req.url?.startsWith("/acts")) return void res.writeHead(200, { "content-type": "text/html" }).end(ACTS(req.url === "/acts?framing"));
+    if (req.url?.startsWith("/keeper")) return void res.writeHead(200, { "content-type": "text/html" }).end(KEEPER);
+    if (req.url?.startsWith("/word")) return void words.set(req.url.slice("/word".length), () => void (res.headersSent || res.writeHead(200).end("go")));
     if (req.url?.startsWith("/twice-read")) return void res.writeHead(200, { "content-type": "text/html" }).end(TWICE_READ);
     if (req.url === "/stuck") return void res.writeHead(200, { "content-type": "text/html" }).end(STUCK);
     // The stuck page in a frame of a page of its own site: a frame nothing of this host's has read before it asks.
@@ -382,6 +416,7 @@ const hostWith = (options: Omit<BrowserHostOptions, "proxy"> = {}) => new Browse
 afterEach(async () => {
   await host.close();
   for (const open of stalling) open.destroy();
+  for (const word of words.values()) word();
   await Promise.all([site, canary].map((server) => new Promise<void>((done) => server.close(() => done()))));
   rmSync(profile, { recursive: true, force: true });
 });
@@ -449,8 +484,12 @@ function ownChoosers(): string[] {
 // address a new browser is asked first, to see that its requests come through its proxy: that one fails, and is kept its second.
 const requested = () => [...(host as unknown as { open: Map<{ url(): string }, unknown> }).open.keys()].map((request) => request.url())
   .filter((url) => url.startsWith("http://fixture.test/"));
-// How many listeners *page* has for a file a page asks for: the host's, or none while its user holds the browser.
-const hears = (page: Page) => (page as unknown as { listenerCount(event: string): number }).listenerCount("filechooser");
+// Whether the host hears *page* ask for a file, so that the browser opens no chooser of its own for it: by
+// Playwright's listener while the agent drives, or on lines of the host's own while its user holds the browser.
+const hears = (page: Page) => Math.min(1, (page as unknown as { listenerCount(event: string): number }).listenerCount("filechooser")
+  + ((host as unknown as { hearing: Map<Page, { lines?: unknown }> }).hearing.get(page)?.lines ? 1 : 0));
+// How many of Playwright's own listeners *page* has for a file it asks for: each ask one of them hears is read as a gesture.
+const playwrightHears = (page: Page) => (page as unknown as { listenerCount(event: string): number }).listenerCount("filechooser");
 // The user's own hand on that display, as X events (x-user.py): the window given the keyboard, a click, keys typed.
 const X_USER = fileURLToPath(new URL("./x-user.py", import.meta.url));
 const asUser = (...args: string[]) => void execFileSync("python3", [X_USER, ...args]);
@@ -702,7 +741,7 @@ describe("a page's download, as the host stages it", () => {
   const state = () => host as unknown as {
     roots: Map<string, string>; tabs: Map<string, Page[]>; unseen: Map<string, string[]>; interrupt: AbortController; arriving: Set<unknown>;
     open: Map<unknown, unknown>;
-    hearing: Map<Page, unknown>; choosers: Map<string, FileChooser>; named: Map<string, { input: { chooser: FileChooser } | null; of: string | undefined }>;
+    hearing: Map<Page, unknown>; settling: Map<Page, unknown>; choosers: Map<string, FileChooser>; named: Map<string, { input: { chooser: FileChooser } | null; of: string | undefined }>;
     prompted: Set<string>;
     live: BrowserContext | null;
     adopt(session: string, page: Page): void;
@@ -1355,11 +1394,34 @@ describe("a page's download, as the host stages it", () => {
       const frame = {};
       const reads: Array<() => void> = [];
       const answering = { slow: false };
-      const line = { send: () => (answering.slow ? new Promise<void>((done) => reads.push(done)) : Promise.resolve()), detach: () => Promise.resolve() };
+      // The host's own lines to the page, each as the browser keeps one: whether it stops the page's own chooser and
+      // is told what the page asks for, until it is closed.
+      // *takes*: where the page is slow, what makes it take a line's word to stop its chooser, as a busy page does late.
+      const lines: Array<{ stops: boolean; open: boolean; asked: Array<() => void> }> = [];
+      const takes: Array<() => void> = [];
+      const line = () => {
+        const mine = { stops: false, open: true, asked: [] as Array<() => void> };
+        lines.push(mine);
+        return {
+          send: (method: string, params?: { enabled?: boolean }) => {
+            if (method === "Runtime.evaluate") return answering.slow ? new Promise<void>((done) => reads.push(done)) : Promise.resolve();
+            if (method !== "Page.setInterceptFileChooserDialog") return Promise.resolve();
+            const stop = () => void (mine.stops = mine.open && params?.enabled === true);
+            if (!answering.slow || params?.enabled !== true) return Promise.resolve(stop());
+            return new Promise<void>((done) => takes.push(() => done(stop())));
+          },
+          on: (event: string, heard: () => void) => void (event === "Page.fileChooserOpened" && mine.asked.push(heard)),
+          detach: () => {
+            Object.assign(mine, { stops: false, open: false });
+            mine.asked.length = 0;
+            return Promise.resolve();
+          },
+        };
+      };
       const page = {
         on, once: on, off: (event: string, heard: (event: unknown) => void) => void hears.get(event)?.delete(heard),
         goto: () => new Promise(() => {}), mainFrame: () => frame, frames: () => [], url: () => FORM_URL, title: () => Promise.resolve(""), isClosed: () => false,
-        context: () => ({ newCDPSession: () => Promise.resolve(line) }),
+        context: () => ({ newCDPSession: () => Promise.resolve(line()) }),
       } as unknown as Page;
       if (!state().tabs.has(session)) {
         state().roots.set(session, "chat-1");
@@ -1367,8 +1429,14 @@ describe("a page's download, as the host stages it", () => {
       }
       state().adopt(session, page);
       return {
-        page, reads, answering,
-        heard: () => hears.get("filechooser")?.size ?? 0,
+        page, reads, answering, takes,
+        // How many lines of the host's own to the page are open, and what tells the host that the page's tab crashed.
+        open: () => lines.filter((kept) => kept.open).length,
+        crashes: () => void [...(hears.get("crash") ?? [])].forEach((heard) => heard(page)),
+        // Whether the page is heard when it asks, so that the browser opens no chooser of its own: by Playwright
+        // (*playwright*: how many of its listeners), or on a line of the host's own.
+        heard: () => ((hears.get("filechooser")?.size ?? 0) > 0 || lines.some(({ stops }) => stops) ? 1 : 0),
+        playwright: () => hears.get("filechooser")?.size ?? 0,
         input: (made: unknown = {}) => {
           const element = {
             evaluate: () => Promise.resolve({ here: true, href: FORM_URL, origin: new URL(FORM_URL).origin }), evaluateHandle: () => Promise.resolve(made),
@@ -1377,7 +1445,9 @@ describe("a page's download, as the host stages it", () => {
             dispose: () => Promise.resolve(void (element.letGo += 1)),
           };
           const chooser = { page: () => page, element: () => element } as unknown as FileChooser;
-          for (const heard of hears.get("filechooser") ?? []) heard(chooser);
+          // The browser says it to each that listens: Playwright, which makes the input of it, and the host's own lines.
+          for (const heard of [...(hears.get("filechooser") ?? [])]) heard(chooser);
+          for (const { stops, asked } of [...lines]) if (stops) for (const heard of [...asked]) heard();
           return chooser;
         },
         navigates: (url: string) => {
@@ -1471,6 +1541,10 @@ describe("a page's download, as the host stages it", () => {
         expect(READS).toBe(4);
         host.pause("chat-2", true);
         await turn();
+        // It takes the word of the host's own line, and is heard on that from here on, not by Playwright.
+        tab.takes.shift()!();
+        await turn();
+        expect([tab.playwright(), tab.heard()]).toEqual([0, 1]);
         // It is asked to answer at once, one time after the other. Its five seconds begin at its last answer, not
         // before: however long it takes over them, it is heard, and not asked again.
         for (let n = 1; n < READS; n += 1) {
@@ -1901,6 +1975,87 @@ describe("a page's download, as the host stages it", () => {
       const looked = performance.now();
       expect(await host.address(SESSION, true, "upload-4", "chat-1")).toBe(FORM_URL);
       expect(performance.now() - looked).toBeGreaterThanOrEqual(LOOK_MS - 20);
+    });
+
+    it("hears a page its user holds on lines of its own and not by Playwright, once those lines hear; hears it by both for a moment at the hand back, and takes what it asks for then from Playwright alone; and leaves no line open, whatever the page answers or does not", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const tab = taken();
+        const answers = async () => {
+          while (tab.reads.length > 0) {
+            tab.reads.shift()!();
+            await turn();
+          }
+        };
+        // Taken over: Playwright's listener goes once the host's own line hears, and not before. A busy page takes the
+        // line's word late: until it has, Playwright hears it as before.
+        tab.answering.slow = true;
+        host.pause("chat-2", true);
+        await turn();
+        expect([tab.playwright(), tab.heard(), tab.takes.length]).toEqual([1, 1, 1]);
+        tab.takes.shift()!();
+        await turn();
+        expect([tab.playwright(), tab.heard()]).toEqual([0, 1]);
+        // What it asks for is heard on that line: kept for no one, the agent told nothing, and nothing made of the input.
+        const asked = tab.input();
+        expect([state().choosers.size, state().unseen.get(SESSION), (asked.element() as unknown as { letGo: number }).letGo]).toEqual([0, undefined, 0]);
+        // Handed back: Playwright hears it again at once, and the host's own line hears it too until the page has
+        // answered. What it asks for meanwhile is heard by both, and is one ask: kept for no one, as before it answered.
+        host.pause("chat-2", false);
+        await turn();
+        expect([tab.playwright(), tab.heard()]).toEqual([1, 1]);
+        tab.input();
+        expect([state().choosers.size, state().unseen.get(SESSION)]).toEqual([0, undefined]);
+        await answers();
+        // It has answered: Playwright alone hears it, what it asks for is the agent's, and no line of the host's is
+        // open. What the host's own line heard after the hand back began no quiet of the page's: it is heard on.
+        vi.advanceTimersByTime(2 * OWN_CHOOSER_MS);
+        await answers();
+        expect([tab.playwright(), tab.open()]).toEqual([1, 0]);
+        tab.input();
+        expect([state().choosers.size, state().unseen.get(SESSION)]).toEqual([1, [FILE_ASKED]]);
+        // Taken over and handed back before the host's own line heard: the line is closed, and Playwright hears on.
+        host.pause("chat-2", true);
+        await turn();
+        host.pause("chat-2", false);
+        tab.takes.shift()!();
+        await answers();
+        expect([tab.playwright(), tab.heard(), tab.open()]).toEqual([1, 1, 0]);
+        // A page that never answers: taken over, it is waited for on a line that stays open while its user holds the
+        // browser; handed back, that one is closed, and the one it is waited for on then is closed at the ten seconds.
+        host.pause("chat-2", true);
+        await turn();
+        tab.takes.shift()!();
+        await turn();
+        expect([tab.playwright(), tab.open()]).toEqual([0, 2]);
+        // What it asks for meanwhile begins its quiet anew: the line it was waited for on is closed, for another.
+        tab.input();
+        await turn();
+        expect(tab.open()).toBe(2);
+        host.pause("chat-2", false);
+        await turn();
+        expect(tab.open()).toBe(2);
+        vi.advanceTimersByTime(SETTLE_MS);
+        await turn();
+        expect([tab.playwright(), tab.open()]).toEqual([1, 0]);
+        tab.reads.length = 0;
+        // And one whose tab crashes while it is waited for answers nothing more: the wait ends, and the line is closed.
+        host.pause("chat-2", true);
+        await turn();
+        tab.takes.shift()!();
+        await turn();
+        expect(tab.open()).toBe(2);
+        tab.crashes();
+        await turn();
+        expect(tab.open()).toBe(1);
+        host.pause("chat-2", false);
+        await turn();
+        tab.crashes();
+        await turn();
+        expect([tab.playwright(), tab.open(), state().settling.size]).toEqual([1, 0, 0]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("names no input for an upload's prompt where the browser was taken over while its page was still saying where the input is, though it was handed back before the page said: the upload that prompt is about is given to nothing", async () => {
@@ -4149,6 +4304,51 @@ await navigator.serviceWorker.ready;`);
     expect([Math.max(...seen), said.map(({ what }) => what)]).toEqual([0, ["free", "asked"]]);
     expect(kept(a)).toBeUndefined();
   }, 60_000);
+
+  it("lets no page keep a click's leave by asking for a file while its user holds the browser, in the chat's own tab or another chat's that nobody touched: heard on lines of the host's own, with no gesture, a page that keeps asking loses its leave, opens no window, fills no screen and writes no clipboard, and a file input in it then opens the browser's chooser at its user's own click", async () => {
+    const [a, b] = [session(), session()];
+    await op(b, "browser.navigate", { url: "http://fixture.test/keeper?idle" }, "chat-2");
+    await op(a, "browser.navigate", { url: "http://fixture.test/keeper?own" }, "chat-1");
+    const [own, idle] = [tabs().get(a)![0]!, tabs().get(b)![0]!];
+    const saying = (which: string) => said.filter(({ from }) => from === `/keeper?${which}`).map(({ what }) => what);
+    // Where a page's top left corner is on the screen, read in a third chat's page while that one is in front:
+    // reading a keeper would give it leave.
+    const third = session();
+    await op(third, "browser.navigate", { url: "http://fixture.test/second" }, "chat-3");
+    await tabs().get(third)![0]!.bringToFront();
+    await expect.poll(() => xwindow()?.front, { timeout: 5_000 }).toBe("Second");
+    const [left, top] = await tabs().get(third)![0]!.evaluate(() => [
+      window.screenX + Math.round((window.outerWidth - window.innerWidth) / 2), window.screenY + (window.outerHeight - window.innerHeight),
+    ] as const);
+    expect(top).toBeGreaterThan(50);
+    // While the agent drives, each keeps the leave its opening gave it for as long as it asks: Playwright reads each
+    // ask as a gesture. Eight seconds on, neither has lost it.
+    await new Promise((done) => setTimeout(done, 8_000));
+    expect([saying("own"), saying("idle")]).toEqual([["leave"], ["leave"]]);
+    // Taken over. Playwright hears neither from here on, each is heard still, and each has lost its leave some five seconds on.
+    host.pause("chat-1", true);
+    const taken = performance.now();
+    await expect.poll(() => [playwrightHears(own), playwrightHears(idle), hears(own), hears(idle)], { timeout: 5_000 }).toEqual([0, 0, 1, 1]);
+    await expect.poll(() => [saying("own"), saying("idle")], { timeout: 12_000 }).toEqual([["leave", "no leave"], ["leave", "no leave"]]);
+    expect(performance.now() - taken).toBeLessThan(OWN_CHOOSER_MS + 4_000);
+    // At their site's word, twelve seconds into the hold, each finds it can do nothing a click of its user's allows.
+    await new Promise((done) => setTimeout(done, taken + 12_000 - performance.now()));
+    const [open, front] = [await pages(), xwindow()?.front];
+    words.get("?idle")!();
+    words.get("?own")!();
+    const nothing = JSON.stringify({ active: false, opened: false, full: false, wrote: false });
+    await expect.poll(() => [saying("own").at(-1), saying("idle").at(-1)], { timeout: 10_000 }).toEqual([nothing, nothing]);
+    expect([await pages(), xwindow()?.front, ownChoosers()]).toEqual([open, front, []]);
+    // Each was let be meanwhile. Their own click on the chat's page's file input opens the browser's chooser.
+    await expect.poll(() => [hears(own), hears(idle)], { timeout: 15_000 }).toEqual([0, 0]);
+    await own.bringToFront();
+    await expect.poll(() => xwindow()?.front, { timeout: 5_000 }).toBe("KEEPER");
+    await new Promise((done) => setTimeout(done, 3_000));
+    expect(ownChoosers()).toEqual([]);
+    asUser("focus", xwindow()!.id);
+    asUser("click", String(left + 140), String(top + 20));
+    await expect.poll(() => ownChoosers().length, { timeout: 10_000 }).toBe(1);
+  }, 90_000);
 
   it("gives a page no leave by letting go, at the take-over, a button the agent held down in it: the release reaches a busy page after its user has held the browser five seconds, and the page, which asks the moment it has leave, asks for nothing", async () => {
     const { a, watched } = await stuck();

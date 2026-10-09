@@ -10,7 +10,7 @@ import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { type BrowserContext, chromium, type Dialog, type Download, type FileChooser, type Page, type Request } from "playwright-core";
+import { type BrowserContext, type CDPSession, chromium, type Dialog, type Download, type FileChooser, type Page, type Request } from "playwright-core";
 
 import { MAX_WRITE_BYTES } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
@@ -579,7 +579,16 @@ export class BrowserHost {
   private readonly giving = new Set<FileChooser>();
   // Those whose handle this host has let go.
   private readonly released = new WeakSet<FileChooser>();
-  private readonly hearing = new Map<Page, { session: string; heard: ((chooser: FileChooser) => void) | null; acting: number; quiet?: NodeJS.Timeout; turn?: object }>();
+  // Each page this host took, and how it is heard when it asks for a file. *heard*: Playwright's listener, while
+  // the agent drives. *lines*: lines of this host's own to the page and to each frame a process of its own
+  // draws, while its user holds the browser (overhear); *over*: those being made. *turn*: the page's quiet, as
+  // it is counted now, and what ends the waits it began (quiet).
+  private readonly hearing = new Map<Page, {
+    session: string; heard: ((chooser: FileChooser) => void) | null; lines?: CDPSession[]; over?: object;
+    acting: number; quiet?: NodeJS.Timeout; turn?: { end(): void };
+  }>();
+  // The pages whose tab crashed, and has not been loaded again since.
+  private readonly crashed = new WeakSet<Page>();
   // The pages that have not answered yet since the browser was last handed back (settle): what one of them
   // asks for is kept for no one, and no operation of the agent's acts in it, until it has.
   private readonly settling = new Map<Page, Promise<void>>();
@@ -739,9 +748,17 @@ export class BrowserHost {
       for (const [page, kept] of this.hearing) {
         clearTimeout(kept.quiet);
         delete kept.quiet;
+        kept.turn?.end();
         delete kept.turn;
+        // Playwright hears the page again, and this host's own lines hear it until the page has answered: by
+        // then Playwright's listener is on in the browser, so nothing a page asks for is heard by neither. What
+        // both hear meanwhile is taken from Playwright alone (overheard).
+        const { lines } = kept;
+        delete kept.lines;
+        delete kept.over;
         this.hear(page);
         this.settle(page);
+        if (lines) void this.settling.get(page)?.then(() => this.drop(lines));
       }
       return;
     }
@@ -770,6 +787,7 @@ export class BrowserHost {
     // heard, and kept for no one (asks). A page in which something of the agent's, or of this host's for an
     // upload, is still on its way waits for that to reach it (doing).
     for (const [page, kept] of this.hearing) {
+      this.overhear(page);
       if (kept.acting === 0) this.quiet(page);
     }
   }
@@ -830,7 +848,13 @@ export class BrowserHost {
     this.unwatch();
     if (this.staging !== null) await rm(this.staging, { recursive: true, force: true }).catch(() => {});
     this.staging = null;
-    for (const kept of this.hearing.values()) clearTimeout(kept.quiet);
+    for (const kept of this.hearing.values()) {
+      clearTimeout(kept.quiet);
+      kept.turn?.end();
+      if (kept.lines) this.drop(kept.lines);
+      delete kept.lines;
+      delete kept.over;
+    }
   }
 
   // An operation at its turn. Taken over while it acts, it is answered paused at once, whatever it has
@@ -975,11 +999,19 @@ export class BrowserHost {
       const pages = this.tabs.get(session);
       if (pages?.includes(page)) pages.splice(pages.indexOf(page), 1);
       this.asking.delete(page);
-      clearTimeout(this.hearing.get(page)?.quiet);
+      const kept = this.hearing.get(page);
+      clearTimeout(kept?.quiet);
+      kept?.turn?.end();
+      if (kept?.lines) this.drop(kept.lines);
       this.hearing.delete(page);
       this.settling.delete(page);
     });
     page.on("popup", (popup) => this.adopt(session, popup));
+    // A tab that crashed answers nothing until it is loaded again: it is not waited for meanwhile (read).
+    page.on("crash", () => this.crashed.add(page));
+    page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame()) this.crashed.delete(page);
+    });
     this.hearing.set(page, { session, heard: null, acting: 0 });
     // One that opens under its user's hand is heard from the hand back.
     if (this.held === null) this.hear(page);
@@ -998,9 +1030,61 @@ export class BrowserHost {
   // *page* is heard no more: a file input in it opens the browser's own chooser, as in any browser.
   private unhear(page: Page): void {
     const kept = this.hearing.get(page);
-    if (!kept?.heard) return;
-    page.off("filechooser", kept.heard);
+    if (!kept) return;
+    if (kept.heard) page.off("filechooser", kept.heard);
     kept.heard = null;
+    if (kept.lines) this.drop(kept.lines);
+    delete kept.lines;
+    delete kept.over;
+  }
+
+  // While its user holds the browser, what *page* asks for is heard on lines of this host's own, and not by
+  // Playwright. Playwright reads each input that asks, twice, as a gesture: so a page that keeps asking keeps
+  // what a click gave it for as long as it asks, and with it can open a window in front of its user, fill
+  // their screen or write their clipboard, from any tab the agent ever opened. The browser says an ask to
+  // each line that listens for it, and on this host's nobody reads the input: the page is given nothing, and
+  // its leave runs out. A line to the page, and one to each frame a process of its own draws: a frame made
+  // after this has no leave but what its user's own click gives it. Playwright's listener goes only once
+  // every one of those lines hears, which a busy page keeps waiting: until then it hears as before.
+  private overhear(page: Page): void {
+    const kept = this.hearing.get(page);
+    if (!kept?.heard || kept.lines || kept.over) return;
+    const mine = {};
+    kept.over = mine;
+    const lines: CDPSession[] = [];
+    const targets = [page, ...page.frames().filter((frame) => frame !== page.mainFrame())];
+    void Promise.allSettled(targets.map(async (target) => {
+      // None for a frame its page's own process draws, nor for a page that is gone.
+      const line = await page.context().newCDPSession(target).catch(() => null);
+      if (line === null) return;
+      lines.push(line);
+      line.on("Page.fileChooserOpened", () => this.overheard(page, lines));
+      // The browser stops a page's own chooser for a line only once the line has the page's events.
+      await Promise.all([line.send("Page.enable"), line.send("Page.setInterceptFileChooserDialog", { enabled: true })]);
+    })).then(() => {
+      if (this.hearing.get(page) !== kept || kept.over !== mine || this.held === null) return void this.drop(lines);
+      delete kept.over;
+      kept.lines = lines;
+      if (kept.heard) page.off("filechooser", kept.heard);
+      kept.heard = null;
+    });
+  }
+
+  // *page* asked for a file, as one of this host's own *lines* to it heard. While its user holds the browser
+  // it is kept for no one, and the page's quiet begins anew, as where Playwright hears it (asks). Handed back,
+  // those lines hear a little longer beside Playwright, which is the one listened to then.
+  private overheard(page: Page, lines: CDPSession[]): void {
+    const kept = this.hearing.get(page);
+    if (this.held === null || !kept || (kept.lines !== lines && kept.over === undefined)) return;
+    if (kept.acting === 0) this.quiet(page);
+  }
+
+  // This host's own *lines* to a page hear it no more, and are closed.
+  private drop(lines: CDPSession[]): void {
+    for (const line of lines) {
+      void line.send("Page.setInterceptFileChooserDialog", { enabled: false }).catch(() => {});
+      void line.detach().catch(() => {});
+    }
   }
 
   // *page* is asked to answer, READS times over, now that the browser is handed back (heardOut).
@@ -1014,7 +1098,7 @@ export class BrowserHost {
     const late = new Promise<void>((resolve) => {
       timer = setTimeout(resolve, SETTLE_MS);
     });
-    const settled: Promise<void> = Promise.race([this.heardOut(page), late]).then(() => {
+    const settled: Promise<void> = Promise.race([this.heardOut(page, () => true, late), late]).then(() => {
       clearTimeout(timer);
       if (this.settling.get(page) === settled) this.settling.delete(page);
     });
@@ -1028,8 +1112,8 @@ export class BrowserHost {
   // heard. A busy page keeps the first of them waiting, and the rest follow once it is free. Each answer
   // here comes after one more of those steps was sent, this host's reading being sent later than the step
   // it follows: so three cover the three, and one more is to spare. *still*: asked no more once it is not so.
-  private async heardOut(page: Page, still: () => boolean = () => true): Promise<void> {
-    for (let n = 0; n < READS && still(); n += 1) await this.read(page);
+  private async heardOut(page: Page, still: () => boolean = () => true, over?: Promise<unknown>): Promise<void> {
+    for (let n = 0; n < READS && still(); n += 1) await this.read(page, true, over);
   }
 
   // *page* is asked to answer, wherever its frames run: the page, and each frame of it that a process of
@@ -1039,18 +1123,27 @@ export class BrowserHost {
   // for five seconds: leave to open a window, fill the screen, write the clipboard, ask for a file, send
   // the tab elsewhere from a frame. This reading is the host's own, of every page there is, at moments the
   // agent did not choose, so it gives a page nothing, and tells it nothing: it runs none of the page's code.
-  private read(page: Page, framed = true): Promise<unknown> {
+  // *over*: once it settles the answer is waited for no longer. Each line is closed when its answer has come,
+  // when that wait is over, and when the page's tab has crashed, which answers nothing more: none is left open.
+  private read(page: Page, framed = true, over?: Promise<unknown>): Promise<unknown> {
+    if (this.crashed.has(page)) return Promise.resolve();
     const targets = [page, ...(framed ? page.frames().filter((frame) => frame !== page.mainFrame()) : [])];
+    let crashes = (): void => {};
+    const crashed = new Promise<void>((resolve) => {
+      crashes = () => resolve();
+      page.once("crash", crashes);
+    });
+    const ended = over === undefined ? crashed : Promise.race([over, crashed]);
     return Promise.allSettled(targets.map(async (target) => {
       // None for a frame its page's own process draws, nor for a page that is gone.
       const line = await page.context().newCDPSession(target).catch(() => null);
       if (line === null) return;
       try {
-        await line.send("Runtime.evaluate", { expression: "1" });
+        await Promise.race([line.send("Runtime.evaluate", { expression: "1" }), ended]);
       } finally {
         void line.detach().catch(() => {});
       }
-    }));
+    })).finally(() => page.off("crash", crashes));
   }
 
   // *page*, held and heard, is let be OWN_CHOOSER_MS after it has answered for all that was sent it before
@@ -1064,15 +1157,21 @@ export class BrowserHost {
   // a file input in it opens nothing for its user while they hold the browser.
   private quiet(page: Page): void {
     const kept = this.hearing.get(page);
-    if (!kept?.heard) return;
+    if (!kept || (kept.heard === null && !kept.lines)) return;
     clearTimeout(kept.quiet);
-    const turn = {};
+    // The turn before this one is over: what it still waits for of the page is waited for no longer.
+    kept.turn?.end();
+    let end = (): void => {};
+    const over = new Promise<void>((resolve) => {
+      end = resolve;
+    });
+    const turn = { end };
     kept.turn = turn;
-    const mine = () => this.hearing.get(page) === kept && kept.turn === turn && kept.heard !== null;
-    void this.heardOut(page, mine).then(() => {
+    const mine = () => this.hearing.get(page) === kept && kept.turn === turn && (kept.heard !== null || kept.lines !== undefined);
+    void this.heardOut(page, mine, over).then(() => {
       if (!mine()) return;
       kept.quiet = setTimeout(() => {
-        void this.heardOut(page, mine).then(() => {
+        void this.heardOut(page, mine, over).then(() => {
           if (mine() && kept.acting === 0) this.unhear(page);
         });
       }, OWN_CHOOSER_MS);
@@ -1495,9 +1594,10 @@ export class BrowserHost {
   // (read), which gives the page nothing: it is asked before each thing the agent would do there.
   private async answers(page: Page): Promise<boolean> {
     let timer: NodeJS.Timeout | undefined;
-    const answered = await Promise.race([this.read(page, false).then(() => true), new Promise<false>((resolve) => {
+    const late = new Promise<false>((resolve) => {
       timer = setTimeout(() => resolve(false), ASKING_MS);
-    })]);
+    });
+    const answered = await Promise.race([late, this.read(page, false, late).then(() => true)]);
     clearTimeout(timer);
     if (answered) this.asking.delete(page);
     return answered;
@@ -1616,7 +1716,13 @@ export class BrowserHost {
     this.spare = null;
     this.tabs.clear();
     this.untold.clear();
-    for (const kept of this.hearing.values()) clearTimeout(kept.quiet);
+    for (const kept of this.hearing.values()) {
+      clearTimeout(kept.quiet);
+      kept.turn?.end();
+      if (kept.lines) this.drop(kept.lines);
+      delete kept.lines;
+      delete kept.over;
+    }
     this.hearing.clear();
     this.settling.clear();
     this.choosers.clear();
