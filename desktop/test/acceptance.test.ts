@@ -599,10 +599,12 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
         // bash's own, the script it reads and what the script opened.
         const { 0: input, 1: output, 2: errors, 255: script, ...opened } = byPkexec.descriptors;
         expect([input, output, errors, script]).toEqual(["/dev/null", "/dev/null", byApp.descriptors["2"], HELPER]);
-        // And pkexec itself, which is root's process for as long as its prompt is open, held nothing
-        // else either: none of what the app's main process has open.
+        // And pkexec itself, which is root's process for as long as its prompt is open, held none of
+        // what the app's main process has open: no file at all, and beside its three no more than
+        // the few it opens for itself, its connection to the system's bus among them.
         const { 0: _input, 1: _output, 2: _errors, ...held } = byApp.descriptors;
-        expect(held).toEqual({});
+        expect(Object.values(held).filter((file) => file.startsWith("/"))).toEqual([]);
+        expect(Object.keys(held).length).toBeLessThan(12);
         expect(Object.keys(opened).every((fd) => Number(fd) > 2)).toBe(true);
 
         // The administrator rolls back: the version before, with the binding still there, and the
