@@ -2537,6 +2537,22 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       const taken = rolled("1.6.0", `chmod ${mode} ${record}`, restored);
       expect(taken.startsWith("0 2 ") && taken.endsWith("Surogate Desktop: 1.6.0 is installed\n"), `${mode}: ${taken}`).toBe(true);
     }
+    // A mark of the release's own bytes that is not root's own file at the mode an apply gives it
+    // says nothing either, and what its refusal names mends it: to the install script, run again,
+    // a folder with such a mark is not whole, and its release is unpacked again.
+    for (const [what, made] of [
+      ["closed to others", `chmod 600 ${mark}`],
+      ["one that its group may write", `chmod 664 ${mark}`],
+      ["a link to its own bytes", `cp ${mark} /root/same.json && rm ${mark} && ln -s /root/same.json ${mark}`],
+      ["another user's", `chown tester ${mark}`],
+    ] as const) {
+      expect(rolled("1.6.0", made), what).toBe(`1 0 Surogate Desktop: ${noSchema}\n`);
+      const again = install();
+      expect(again.status, `${what}: ${again.stderr}`).toBe(0);
+      expect(root(`stat -c '%f %u' ${mark} && cmp ${mark} /root/mark`).stdout, what).toBe("81a4 0\n");
+      const taken = rolled("1.6.0");
+      expect(taken.startsWith("0 2 ") && taken.endsWith("Surogate Desktop: 1.6.0 is installed\n"), `${what}: ${taken}`).toBe(true);
+    }
   });
 
   it("rolls back with the system's own tools and into a folder of root's own, whatever PATH and TMPDIR root's own shell has, and through the user's proxy from a base whose name has a letter outside ASCII, for each of its three downloads", () => {

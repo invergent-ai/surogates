@@ -288,7 +288,7 @@ paired() {
   cmp -s "$HELPER_MARK" "$of/release.json" && [ -f "$own" ] && [ ! -L "$own" ] || return 0
   ! cmp -s "$own" "$HELPER" || return 0
   trusted keys
-  whole "$HELPER_MARK" "$of" && roots_own "$of/release.json" 81a4 && roots_alone "$own" || fail "$refused"
+  whole "$HELPER_MARK" "$of" && roots_alone "$own" || fail "$refused"
   installed="$(installed_version)"
   if a_version "$installed" && dpkg --compare-versions "$installed" gt "$version"; then fail "$refused"; fi
   for other in "$ROOT"/versions/*; do
@@ -332,11 +332,14 @@ in_use() {
   return 1
 }
 
-# Whether version folder $2 is whole, for manifest $1: its mark is that manifest, and the app and
-# its helper are there to run, each a file of the folder's own and no link. Nothing else in the
-# folder is looked at, where only root writes: a version damaged elsewhere is taken as it is.
+# Whether version folder $2 is whole, for manifest $1: its mark is that manifest, in a file of
+# root's own at the mode an apply gives it, and the app and its helper are there to run, each a
+# file of the folder's own and no link. A mark that is a link, or another's to write, is the word
+# of no one for what the version keeps (installed_schema): its folder is unpacked again, by the
+# install script that such a mark's refusal names. Nothing else in the folder is looked at, where
+# only root writes: a version damaged elsewhere is taken as it is.
 whole() {
-  cmp -s "$1" "$2/release.json" && [ -f "$2/surogate" ] && [ ! -L "$2/surogate" ] && [ -x "$2/surogate" ] \
+  cmp -s "$1" "$2/release.json" && roots_own "$2/release.json" 81a4 && [ -f "$2/surogate" ] && [ ! -L "$2/surogate" ] && [ -x "$2/surogate" ] \
     && [ -f "$2/bin/surogate-apply-update" ] && [ ! -L "$2/bin/surogate-apply-update" ] && [ -x "$2/bin/surogate-apply-update" ]
 }
 
