@@ -1066,3 +1066,42 @@ def test_a_request_to_forget_is_one_the_agent_runs_and_names_a_saga(tmp_path, fo
         answer = ask(tree, {**place, "action": "forget", "args": {"saga": saga}})
         assert answer == {"error": {"code": "not_a_request", "message": "refused the request: it names no saga"}}, saga
     assert ask(tree, {**place, "action": "forget", "args": {"saga": "saga:1"}})["error"]["code"] == "landing_unsettled"
+
+
+@pytest.mark.parametrize("act, why", [
+    (lambda h: h.apply("notes.txt", None, None), "a folder's history writes no file of the folder"),
+    (lambda h: h.unapply("notes.txt", None, None), "a folder's history writes no file of the folder"),
+    (lambda h: h._put("notes.txt", "0" * 40), "a folder's history writes no file of the folder"),
+    (lambda h: h._remove("notes.txt", []), "a folder's history writes no file of the folder"),
+    (lambda h: h.pickup(author=YOURS, trailers=[], push=True), "a folder's history records no routine's run"),
+    (lambda h: h.prune(keep=[], now=time.time()), "a folder's history is not pruned"),
+    (lambda h: h.hand_off(author=A, trailers=[]), "a thread on a computer has no helper with a copy of its own"),
+    (lambda h: h.hand_back(author=A, trailers=[]), "a thread on a computer has no helper with a copy of its own"),
+    (lambda h: h.keep_apart(author=A, trailers=[]), "a thread on a computer has no helper with a copy of its own"),
+    (lambda h: h.drop_hand_off(), "a thread on a computer has no helper with a copy of its own"),
+    (lambda h: h.opened(), "a thread on a computer has no helper with a copy of its own"),
+])
+def test_what_a_folders_history_takes_no_part_in_is_refused_in_words_and_changes_nothing(tmp_path, folder, act, why):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    land(one, "saga:1")
+    theirs, refs = files_of(folder), (tmp_path / "store" / "history.git" / "packed-refs").read_bytes()
+    with refused("not_a_request", f"refused the request: {why}"):
+        act(LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1"))
+    assert (files_of(folder), (tmp_path / "store" / "history.git" / "packed-refs").read_bytes()) == (theirs, refs)
+
+
+def test_a_folders_history_is_no_helpers_and_no_turns_and_holds_no_hand_off(tmp_path, folder):
+    place = {"repo": tmp_path / "r", "project": folder, "copy": tmp_path / "c", "thread": "t1", "user": "u1", "store": tmp_path / "s"}
+    for more in ({"helper": "h1"}, {"turn": "turn-1"}):
+        with refused("not_a_request", "refused the request: a thread on a computer has no helper with a copy of its own"):
+            LocalHistory(**place, **more)
+    one = a_copy(tmp_path, folder)
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    landed = land(one, "saga:1")
+    # A hand-off in the folder's history is no ref a folder's history writes: nothing of it is taken up into a copy.
+    packed = tmp_path / "store" / "history.git" / "packed-refs"
+    packed.write_text(packed.read_text() + f"{landed['landing']} refs/handoff/t1\n")
+    for ask in (lambda h: h.open(), lambda h: h.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:2"]]), lambda h: h.take_up()):
+        with refused("history_refused", "refused the project's history: it holds a hand-off, which a folder's history never does"):
+            ask(LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1"))

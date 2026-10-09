@@ -127,6 +127,9 @@ _ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "keep": ("keep", frozenset({"author", "trailers", "base"})),
     "forget": ("forget", frozenset({"saga"})),
 }
+#: Why a folder's history takes no part in what the cloud's does besides.
+_NO_WRITER = "a folder's history writes no file of the folder: the desktop's file helper lands a turn's files"
+_NO_HELPER = "a thread on a computer has no helper with a copy of its own"
 
 
 @dataclass(frozen=True)
@@ -137,6 +140,11 @@ class LocalHistory(History):
 
     excludes: ClassVar[list[str]] = LOCAL_EXCLUDES
     platform: ClassVar[tuple[str, ...]] = LOCAL_PLATFORM
+
+    def __post_init__(self) -> None:
+        # The cloud tells a thread's pod its turn so that its copy takes up its helpers' hand-offs by it.
+        if self.helper is not None or self.turn is not None:
+            _refuse(_NO_HELPER)
 
     @classmethod
     def at(cls, place: Path, folder: Path, *, thread: str, user: str) -> LocalHistory:
@@ -169,7 +177,13 @@ class LocalHistory(History):
         """The history's refs now, each checked as one of its own."""
         self._pin()
         self._check_durable()
-        return self._durable_refs()
+        refs = self._durable_refs()
+        if any(ref.startswith(("refs/handoff", "refs/helpers/")) for ref in refs):
+            # None is written here, so none is taken up into a copy, by a turn no request names.
+            raise HistoryError(
+                "refused the project's history: it holds a hand-off, which a folder's history never does", code=HISTORY_REFUSED,
+            )
+        return refs
 
     def _git(self, args: list[str], *, env: dict[str, str], cwd: Path, input: str | None = None) -> str:
         self._pin()
@@ -477,6 +491,46 @@ class LocalHistory(History):
             )
         return {"landing": None}
 
+    def pickup(self, *, author: dict[str, str], trailers: list[list[str]], push: bool = False) -> dict:
+        if push:
+            _refuse("a folder's history records no routine's run: a pickup is a landing's first step here, pushed with its record")
+        return super().pickup(author=author, trailers=trailers)
+
+    def take_up(self) -> dict:
+        """Nothing: no helper has a copy of its own to hand back from, and a history holding a hand-off is refused."""
+        self._take()
+        return {"not_taken": []}
+
+    def apply(self, *args: Any, **kwargs: Any) -> dict:
+        _refuse(_NO_WRITER)
+
+    def unapply(self, *args: Any, **kwargs: Any) -> dict:
+        _refuse(_NO_WRITER)
+
+    def _put(self, *args: Any, **kwargs: Any) -> list[str]:
+        _refuse(_NO_WRITER)
+
+    def _remove(self, *args: Any, **kwargs: Any) -> None:
+        _refuse(_NO_WRITER)
+
+    def prune(self, **kwargs: Any) -> dict:
+        _refuse("a folder's history is not pruned: nothing on this computer cuts it back yet")
+
+    def hand_off(self, **kwargs: Any) -> dict:
+        _refuse(_NO_HELPER)
+
+    def hand_back(self, **kwargs: Any) -> dict:
+        _refuse(_NO_HELPER)
+
+    def keep_apart(self, **kwargs: Any) -> dict:
+        _refuse(_NO_HELPER)
+
+    def drop_hand_off(self, *args: Any, **kwargs: Any) -> dict:
+        _refuse(_NO_HELPER)
+
+    def opened(self) -> dict:
+        _refuse(_NO_HELPER)
+
     def _to_main(self) -> bool:
         """Move a copy with nothing unlanded, and its base, to ``main`` as the folder is now; whether it moved."""
         tip = self.snapshot("before a turn")
@@ -586,7 +640,7 @@ class LocalHistory(History):
 
 
 def _refuse(why: str) -> NoReturn:
-    """Refuse a request that is none this history takes, in words."""
+    """Refuse what a folder's history takes no part in, in words."""
     raise HistoryError(f"refused the request: {why}", code=NOT_A_REQUEST)
 
 
