@@ -82,6 +82,17 @@ sandbox, over a pipe, in a profile of the agent's own under `browser-profiles/` 
 root, and sends its every request through a pinning proxy that reaches nothing on this
 computer or its private networks. The browser dies with the host.
 
+That proxy listens on this computer's loopback, where any program here can connect to it. A
+public site it carries for whoever asks, since that program reaches the site by itself.
+Whatever else it answers, it answers only to the browser it launched: the browser signs in
+to it with a secret made at each launch, given to the browser over its pipe and kept in
+memory alone, on no command line, in no environment and in no file. Without that sign-in the
+answer is 407 and nothing more. Today the only such answer is the one a launch proves its
+proxy with, so a browser that did not take the sign-in is not used. Should a running browser
+stop signing in, it shows its own proxy sign-in prompt for such a request and nothing is
+carried. Measured on Chrome; not yet on Edge, nor with a second user of this computer at the
+proxy's port.
+
 A file a page downloads waits in the browser host's own temporary folder, under
 `browser-profiles/` too, and is then saved under `Downloads` in the chat's folder through
 the chat's file host: under its own name, made one plain visible file name, or the next free

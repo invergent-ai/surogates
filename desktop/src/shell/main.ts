@@ -232,6 +232,11 @@ const trying = (write: () => void): void => {
   }
 };
 
+// What asks Playwright to print what it says to the browser, in the environment of whoever starts the app. The
+// browser host says its proxy's sign-in there, so it is started without them: the sign-in is in no log.
+const PRINTS = /^(DEBUG|DEBUGP|DEBUG_.*|PWDEBUG.*)$/;
+const unprinted = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => Object.fromEntries(Object.entries(env).filter(([name]) => !PRINTS.test(name)));
+
 // A process of the app's own in an Electron utility process: the VM manager (spec, Section 11)
 // and each device's browser host (Section 1). A hang or a crash there leaves the windows and the
 // device link alone. What is sent before it has spawned waits. *temp*: its temp folder, made now; the app's by default.
@@ -242,7 +247,7 @@ function utility<To, From>(script: string, serviceName: string, temp?: string): 
   kill(): void;
 } {
   if (temp) mkdirSync(temp, { recursive: true, mode: 0o700 });
-  const env = temp ? { env: { ...process.env, TMPDIR: temp } } : {};
+  const env = temp ? { env: { ...unprinted(process.env), TMPDIR: temp } } : {};
   const child = utilityProcess.fork(script, [], { serviceName, stdio: "inherit", ...env });
   const waiting: To[] = [];
   let spawned = false;
