@@ -1445,6 +1445,25 @@ def test_a_pushed_copy_names_eight_parents_at_most_the_older_hand_offs_folded_be
     assert git(durable, "fsck", "--no-dangling") == ""
 
 
+def test_a_keep_names_the_helpers_files_its_pods_take_ups_left_as_the_copy_had_them(tmp_path, project):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first, "saga:1")
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report v2, saved by you")
+    helper = a_helper(tmp_path, project)
+    (helper.copy / "Report.docx").write_bytes(b"PK\x03\x04 report v1 + the helper's numbers")
+    (helper.copy / "h.md").write_text("the helper's own file")
+    helper.hand_back(author=A, trailers=KEPT)
+    failing = a_pod(tmp_path, project)  # its open takes the hand-off up, leaving Report.docx as the copy has it
+    (failing.copy / "half.md").write_text("half")
+    # The turn fails, and its keep says what the turn's report must: this pod's list goes with the pod.
+    kept = failing.keep(author=A, trailers=KEPT, base=True)
+    assert kept["not_taken"] == ["Report.docx"]
+    assert failing.keep(author=A, trailers=KEPT, base=True) == kept  # and at a second try, with nothing new to push
+    # The next turn's pod took nothing up: it has nothing to name.
+    assert a_pod(tmp_path, project).commit_turn(author=A, trailers=TURN)["not_taken"] == []
+
+
 def test_the_commit_step_takes_up_what_a_helper_kept_since_the_copy_last_did(tmp_path, project):
     thread = a_pod(tmp_path, project)
     (thread.copy / "outline.md").write_text("outline")

@@ -572,7 +572,9 @@ class History:
         A failed turn's work, kept for the thread's next landing: one
         commit, the copy's files on its base, as a turn is.  A copy the
         branch holds already, pushed by its commit step or an earlier keep,
-        is left as it is there.
+        is left as it is there.  ``not_taken`` are the helpers' files this
+        pod's take-ups left as the copy had them, as the commit step names
+        them: the list goes with the pod, so the kept turn's report says it.
         """
         tip = self._commit_copy(author, "Kept", trailers)
         refs = self._durable_refs()
@@ -581,7 +583,7 @@ class History:
         there = refs.get(self.branch)
         if there and there != onto and self._has(there) and self._tree(there) == self._tree(tip) and self._parents(there) == [onto, *behind]:
             self._main("update-ref", self.synced, there)
-            return {"commit": there}
+            return {"commit": there, "not_taken": self._not_taken()}
         kept = self._one(tip, onto, *behind, author=author, title="Kept", trailers=trailers)
         # A branch never reaches the history without its base: the overlap check is against it.
         moves_base = base or self.base not in refs
@@ -590,7 +592,7 @@ class History:
             expect={self.branch: self._ref(self.synced)},
         )
         self._main("update-ref", self.synced, kept)
-        return {"commit": kept}
+        return {"commit": kept, "not_taken": self._not_taken()}
 
     def hand_off(self, *, author: dict[str, str], trailers: list[list[str]]) -> dict:
         """Put the thread's copy on its hand-off, for a helper about to start from it; the branch stays as it was.

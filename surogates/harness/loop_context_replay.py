@@ -221,19 +221,28 @@ def _landing_lines(data: dict, kept: list, deleted: list) -> str:
         for f in kept:
             why[f.get("reason") if f.get("reason") in _NOT_MERGED else "changed"].append(f)
         lines += "".join(f"\n{_NOT_MERGED[reason]}: {_listed(named)}" for reason, named in why.items() if named)
-    for key, words in (
-        ("excluded", "Not saved, because the project's history leaves them out"),
-        ("repositories", "Not landed, because they are inside a git repository"),
-        (
-            "not_taken",
-            "Not taken up from a helper, because the file changed after the helper started "
-            "(the helper's version is kept in the project's history)",
-        ),
-    ):
+    return lines + _left_out_lines(data, "excluded", "repositories", "not_taken")
+
+
+#: What a report says of the files a turn made that are in no landing, by where they were left.
+_LEFT_OUT = {
+    "excluded": "Not saved, because the project's history leaves them out",
+    "repositories": "Not landed, because they are inside a git repository",
+    "not_taken": (
+        "Not taken up from a helper, because the file changed after the helper started "
+        "(the helper's version is kept in the project's history)"
+    ),
+}
+
+
+def _left_out_lines(data: dict, *keys: str) -> str:
+    """A report's lines on the files named under each of *keys*, a line a key that names any."""
+    lines = ""
+    for key in keys:
         named = data.get(key)
         if isinstance(named, list) and named:
             names = [{"label": name} for name in named if isinstance(name, str)]
-            lines += f"\n{words}: {_listed(names, limit=_MAX_LISTED_LEFT_OUT, total=data.get(f'{key}_count'))}"
+            lines += f"\n{_LEFT_OUT[key]}: {_listed(names, limit=_MAX_LISTED_LEFT_OUT, total=data.get(f'{key}_count'))}"
     return lines
 
 
@@ -257,7 +266,8 @@ def worker_note(event_type: str, data: dict) -> dict:
         # A title is one line, but it can hold a quote.
         named = f"[Thread {json.dumps(title, ensure_ascii=False)} ({worker_id})"
         if failed:
-            content = f"{named} failed: {data.get('error', 'unknown error')}]"
+            # A failed turn that was kept names what its take-ups left out, as a landing does.
+            content = f"{named} failed: {data.get('error', 'unknown error')}]" + _left_out_lines(data, "not_taken")
         else:
             files = data.get("files")
             # A thread's files that did not land, and the ones it deleted,

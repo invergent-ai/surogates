@@ -202,12 +202,14 @@ async def land_turn(
             # copy is kept first: a keep moves only its thread's own refs, and waits
             # on no other thread's landing.
             logger.warning("The landing of %s did not run", session.id, exc_info=True)
-            saved = await _kept(session_factory, sandbox_pool, session, saga_settings, waited)
+            kept = await _kept(session_factory, sandbox_pool, session, saga_settings, waited)
             outcome = {
                 "saga": None, "commit": None, "landed": [], "overlapped": [], "excluded": [], "repositories": [],
-                "not_taken": [], "files": [], "saved": saved, "packs": 0,
+                # What the pod's take-ups left out is named by this report or by none: its list goes with the pod.
+                "not_taken": kept.get("not_taken", []) if kept else [],
+                "files": [], "saved": kept is not None, "packs": 0,
                 # Before its own first step nothing of it reached the real files.
-                "state": "compensated" if saved and not began else "failed",
+                "state": "compensated" if kept is not None and not began else "failed",
             }
         else:
             # The landing is done; only the lock's transaction did not end cleanly.
@@ -230,7 +232,8 @@ async def keep_copy(
     """Keep *session*'s copy in the project's history, under its lock; None when it holds none.
 
     *action* is the pod's: ``keep`` a thread's failed turn on its branch,
-    base and all, to land with its next turn (its files may be half made);
+    base and all, to land with its next turn (its files may be half made),
+    answering ``not_taken``, the helpers' files its pod's take-ups left out;
     ``hand_off`` a thread's copy, for a helper about to start from it;
     ``hand_back`` a helper's, merged onto its thread's hand-off; and
     ``keep_apart`` a failed helper's, merged onto nothing.  The landings a
@@ -277,16 +280,18 @@ def _kept_as(session: Any) -> dict:
     }
 
 
-async def _kept(session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any, waited: set[int]) -> bool:
-    """Whether a turn whose landing did not run was kept on its thread's branch all the same."""
+async def _kept(
+    session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any, waited: set[int],
+) -> dict | None:
+    """The keep of a turn whose landing did not run, on its thread's branch all the same; None when it could not be kept."""
     try:
         return await keep_copy(
             session_factory=session_factory, sandbox_pool=sandbox_pool, session=session,
             saga_settings=saga_settings, settle=False, waited=waited,
-        ) is not None
+        )
     except Exception:
         logger.warning("Could not keep the copy of %s", session.id, exc_info=True)
-        return False
+        return None
 
 
 async def take_up(sandbox_pool: Any, owner: str) -> list[str]:

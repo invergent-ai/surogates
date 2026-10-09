@@ -1718,6 +1718,59 @@ async def test_a_landings_report_names_a_helpers_files_the_threads_copy_did_not_
     assert not [ref for ref in refs if "handoff" in ref]
 
 
+NOT_TAKEN = (
+    "Not taken up from a helper, because the file changed after the helper started "
+    "(the helper's version is kept in the project's history): notes.txt"
+)
+
+
+async def a_thread_whose_open_left_a_helpers_file_out(api, monkeypatch, tmp_path):
+    """A thread at work in a pod whose open took up a helper's work, but for ``notes.txt``, which you saved since; with its master and pods."""
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    helper = await a_helper(api, thread)
+    await a_turn(api, monkeypatch, helper, [
+        calling(("terminal", {"command": "echo by the helper >> notes.txt && echo h > h.md"})), _final_response("Done."),
+    ], pool=SandboxPool(pods))
+    (pods.project / "notes.txt").write_text("v2 notes, saved by you\n")  # after the helper started
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo half > half.md")
+    return master, thread, pods, pool
+
+
+async def test_a_failed_turns_report_names_a_helpers_files_its_open_did_not_take_up(api, monkeypatch, tmp_path):
+    master, thread, pods, pool = await a_thread_whose_open_left_a_helpers_file_out(api, monkeypatch, tmp_path)
+    await ends(api, pool, thread, failed=True)
+    # The pod's list of them goes with the pod: the failed turn's own report is the one place they are named.
+    store = api.app.state.session_store
+    [failed] = [e.data for e in await store.get_events(master.id, types=[EventType.WORKER_FAILED])]
+    [end] = [e.data for e in await store.get_events(thread.id, types=[EventType.SESSION_FAIL])]
+    assert failed["not_taken"] == end["not_taken"] == ["notes.txt"]
+    said = worker_note(EventType.WORKER_FAILED.value, failed)["content"]
+    assert said.startswith(f'[Thread "Draft A" ({thread.id}) failed: provider_error')
+    assert said.endswith("Its work is kept, and lands with the thread's next turn]\n" + NOT_TAKEN)
+    # The thread's next turn lands the kept work, and has nothing more to name.
+    await ends(api, SandboxPool(pods), thread)
+    [report] = await reports(api, master)
+    assert {(f["ref"], f["landing"]) for f in report["files"]} == {("h.md", "landed"), ("half.md", "landed")}
+    assert "not_taken" not in report and (pods.project / "notes.txt").read_text() == "v2 notes, saved by you\n"
+
+
+async def test_a_turn_kept_because_its_landing_could_not_start_names_them_too(api, monkeypatch, tmp_path):
+    master, thread, pods, pool = await a_thread_whose_open_left_a_helpers_file_out(api, monkeypatch, tmp_path)
+
+    async def no_settle(*args, **kwargs):
+        raise ConnectionError("the database did not answer")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "settle_running", no_settle)
+        await ends(api, pool, thread)
+    [report] = await reports(api, master)
+    assert (report["landing"], report["saved"], report["not_taken"]) == ("compensated", True, ["notes.txt"])
+    assert NOT_TAKEN in worker_note(EventType.WORKER_COMPLETE.value, report)["content"]
+
+
 async def test_a_routine_run_of_a_thread_lands_with_the_threads_next_turn(api, monkeypatch, tmp_path):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)

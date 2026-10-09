@@ -1420,6 +1420,8 @@ class ArtifactCompletionMixin:
         # told.  Then its pod goes: the next turn takes the work up from the history.
         saved: bool | None = None
         left: list[str] = []
+        # The helpers' files the turn's take-ups left as its copy had them: named here, as a landing names them.
+        not_taken: list[str] = []
         owner = sandbox_session_key(session)
         if self._sandbox_pool is not None and self._sandbox_pool.holds_copy(owner):
             helper = bool(session.config.get("history_thread"))
@@ -1430,6 +1432,7 @@ class ArtifactCompletionMixin:
                 )
                 saved = kept is not None
                 left = kept.get("left", []) if kept else []
+                not_taken = kept.get("not_taken", []) if kept else []
             except Exception:
                 logger.exception("Could not keep the copy of %s", session.id)
                 saved = False
@@ -1449,6 +1452,7 @@ class ArtifactCompletionMixin:
             **({"saved": saved} if saved is not None else {}),
             # A failed helper's changes, kept apart in the history: never in its thread's copy.
             **({"left": left} if left else {}),
+            **({"not_taken": not_taken} if not_taken else {}),
         }
         if cost_tracker is not None:
             fail_data["cost_summary"] = cost_tracker.summary()
@@ -1495,6 +1499,7 @@ class ArtifactCompletionMixin:
                     redis=self._redis,
                     task_id=getattr(session, "task_id", None),
                     session_factory=self._session_factory,
+                    not_taken=not_taken,
                 )
             except Exception:
                 logger.warning(

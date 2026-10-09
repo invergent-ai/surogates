@@ -243,6 +243,7 @@ async def notify_parent_on_failure(
     redis: Redis | None = None,
     task_id: UUID | None = None,
     session_factory: Any | None = None,
+    not_taken: list[str] | None = None,
 ) -> None:
     """Emit a ``WORKER_FAILED`` event into the parent session and re-enqueue it.
 
@@ -251,6 +252,10 @@ async def notify_parent_on_failure(
 
     ``task_id`` is included in the event payload when this worker session
     was running for a subagent task; ``None`` for plain spawn_worker.
+
+    A project's thread whose failed turn was kept also reports
+    *not_taken*, the helpers' files its copy did not take up, as a landing
+    reports them.
     """
     try:
         payload: dict[str, Any] = {
@@ -262,6 +267,11 @@ async def notify_parent_on_failure(
         title = await _thread_title(session_factory, worker_session_id)
         if title is not None:
             payload["title"] = title
+            if not_taken:
+                # At most this many names, and how many there are in all.
+                payload["not_taken"] = not_taken[:_MAX_LEFT_OUT_NAMED]
+                if len(not_taken) > _MAX_LEFT_OUT_NAMED:
+                    payload["not_taken_count"] = len(not_taken)
 
         await session_store.emit_event(
             parent_session_id,
