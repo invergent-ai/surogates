@@ -37,5 +37,9 @@ export const KEY_LISTS: KeyList[] = [
   // list's name, which no reader of a list looks at. Both readers read the list's two; the release
   // job, which asks bash too, refuses a script that the two would not read as bash runs it.
   ["with a key added to it from the middle of another line", (script) => rewritten(script, (list) => `${list}  true && RELEASE_KEYS+=('-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA9SZBZHM7o/wDBWPfbhPMxucA2139J9j+nFHJYNwPA1w=\n-----END PUBLIC KEY-----')\n`), 2],
+  // bash drops such a byte from a script it runs and from what a command writes it, and would set
+  // the key without it. Read letter for letter, the line is no line of a key.
+  ["with a zero byte in a key's line", (script) => rewritten(script, (list) => list.replace(/\n([A-Za-z0-9+/=]{8})(?=[A-Za-z0-9+/=]+\n)/, "\n$1\0")), 0],
+  ["with a zero byte behind its closing bracket", (script) => rewritten(script, (list) => list.replace(/\)\n$/, ")\0\n")), 0],
   ["with a key that is no key", (script) => rewritten(script, (list) => list.replace(/\n[A-Za-z0-9+/=]+\n/, "\nbm90IGEga2V5\n")), 1],
 ];

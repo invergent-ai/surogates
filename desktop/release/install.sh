@@ -202,7 +202,8 @@ trusted() {
 # script assigns the list a second time or adds to it. The helper is read, and not run: grep
 # counts the lines that assign the list, sed takes the list's own lines, from the one that opens
 # it to the first that closes one, and those few are asked line by line, letter for letter, in no
-# locale of the caller's.
+# locale of the caller's. A zero byte, which bash would drop from what sed hands it, is handed on
+# as a byte that no line of the form holds: the line it is in is read as the app reads it.
 listed() {
   local -n entries="$1"
   local LC_ALL=C name=RELEASE_KEYS lists text line entry="" at=before blank=$'^[ \t]*'
@@ -213,7 +214,7 @@ listed() {
   entries=()
   lists="$(grep -cE "^[[:blank:]]*${name}\\+?=" -- "$2" 2>/dev/null)" || lists=0
   [ "$lists" = 1 ] || return 0
-  text="$(sed -n "/^[[:blank:]]*${name}=($/,/^[[:blank:]]*)$/p" -- "$2" 2>/dev/null)" || return 0
+  text="$(sed -n -e 's/\x00/\x01/g' -e "/^[[:blank:]]*${name}=($/,/^[[:blank:]]*)$/p" -- "$2" 2>/dev/null)" || return 0
   while IFS= read -r line; do
     case "$at" in
       before) at=open ;;
