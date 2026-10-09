@@ -45,7 +45,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("whether a chat's own ser
     manager = new VmManager(options);
     expect(await run(ROOT, "true")).toMatchObject({ ok: { returncode: 0 } });
     expect(await run(OTHER, "true")).toMatchObject({ ok: { returncode: 0 } });
-  });
+    // An emulated guest takes minutes to boot.
+  }, KVM === undefined ? 60_000 : 600_000);
 
   afterAll(async () => {
     await manager?.stop();
