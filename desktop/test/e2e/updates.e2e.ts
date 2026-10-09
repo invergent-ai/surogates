@@ -252,14 +252,22 @@ describe("updates, through the app", () => {
     publish("0.0.1");
     writeFileSync(join(home, "answer"), "126\n");
     const page = await launched();
+    // The app's log: what it writes for whoever looks into a failure.
+    let logged = "";
+    app!.process().stderr?.on("data", (chunk: Buffer) => {
+      logged += chunk.toString();
+    });
     await expect.poll(() => page.locator("#update-button").textContent({ timeout: 1_000 }).catch(() => null), { timeout: 30_000 }).toBe("Restart to update");
     await page.click("#update-button");
     await expect.poll(() => page.textContent("#update-text"), { timeout: 10_000 }).toBe("An administrator needs to install this update.");
     await expect.poll(() => page.textContent("#update-button"), { timeout: 10_000 }).toBe("Try again");
+    await expect.poll(() => logged, { timeout: 10_000 }).toContain("Surogate 0.0.1 was not installed (exit 126)");
     writeFileSync(join(home, "answer"), "1 the release's archive could not be unpacked\n");
     await page.click("#update-button");
     await expect.poll(() => page.textContent("#update-text"), { timeout: 10_000 }).toBe("Surogate could not install its update: the release's archive could not be unpacked");
     await expect.poll(() => page.textContent("#update-button"), { timeout: 10_000 }).toBe("Try again");
+    // All that the helper said is in the log, as it said it.
+    await expect.poll(() => logged, { timeout: 10_000 }).toContain("Surogate 0.0.1 was not installed (exit 1): Surogate Desktop: the release's archive could not be unpacked");
     // Still the running app, its window up.
     await expect.poll(() => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isVisible())), { timeout: 10_000 }).toBe(true);
   });

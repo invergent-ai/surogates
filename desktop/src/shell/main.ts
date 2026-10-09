@@ -50,7 +50,7 @@ import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { appTools, BWRAP } from "./tools.js";
 import { asShown } from "./text.js";
-import { CHECK_MS, helperRun, installedUpdates, ROOT_RECORD, updateLine, Updates } from "./updates.js";
+import { CHECK_MS, helperRun, installedUpdates, ROOT_RECORD, updateLine, Updates, type UpdatesOptions } from "./updates.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
@@ -329,17 +329,20 @@ let updates: Updates | null = null;
 function startUpdates(): void {
   const cache = join(cacheHome, "surogate", "updates");
   const helper = process.env.SUROGATE_UPDATE_HELPER;
+  let options: UpdatesOptions;
   if (app.isPackaged) {
-    updates = new Updates({ ...installedUpdates(VERSION, cache, fromBase, stopDelivery.signal), log: report }, changed);
+    options = installedUpdates(VERSION, cache, fromBase, stopDelivery.signal);
   } else if (INSTALL_RECORD && helper) {
     // A development build runs its test's helper itself: no pkexec, and no helper of an installed app's.
-    updates = new Updates({
+    options = {
       version: VERSION, record: INSTALL_RECORD, rootOwned: false, helper, installed: null, cache, fetch: fromBase, signal: stopDelivery.signal,
-      apply: helperRun([helper]), log: report,
-    }, changed);
+      apply: helperRun([helper]),
+    };
   } else {
     return;
   }
+  // Whichever build: all that a helper said of an install that did not end well goes to the log.
+  updates = new Updates({ ...options, log: report }, changed);
   // A check that finds none it can take is said in the log, and tried again at the next.
   const check = () => void updates?.check().catch(report);
   check();
