@@ -213,17 +213,59 @@ export function newer(a: string, b: string): boolean {
  */
 export function releaseKeys(helper: string, rootOwned = false): KeyObject[] {
   if (rootOwned) rootsOwn(helper, true);
-  const list = /^[ \t]*RELEASE_KEYS=\(\n([^)]*)\)/m.exec(readFileSync(helper, "utf8"))?.[1] ?? "";
-  const keys = (list.match(/-----BEGIN PUBLIC KEY-----\n[A-Za-z0-9+/=\n]+-----END PUBLIC KEY-----/g) ?? []).flatMap((pem) => {
+  const keys = listedKeys(readFileSync(helper, "utf8"));
+  if (keys.length === 0) throw new Error(`${helper} trusts no release key`);
+  return keys;
+}
+
+const BEGIN_KEY = "-----BEGIN PUBLIC KEY-----";
+const END_KEY = "-----END PUBLIC KEY-----";
+
+/**
+ * The release keys that *script*, an install script, lists: read as the script's own reader
+ * reads a helper's list (listed in release/install.sh), line by line and by its one form, and
+ * never run. The list is one `RELEASE_KEYS=(` on a line of its own, then each key as OpenSSL
+ * writes one, its first line behind a quote and its last before one, then `)` on a line of its
+ * own. Any other spelling is no list, and no key of it is read, whatever bash would make of it:
+ * a comment in it, other quotes, one line, an indented key, a second list. It never throws, and
+ * answers no more keys than an install would trust.
+ */
+export function listedKeys(script: string): KeyObject[] {
+  const entries: string[] = [];
+  let at: "before" | "open" | "key" | "closed" | "wrong" = "before";
+  let entry = "";
+  let lists = 0;
+  const lines = script.split("\n");
+  // As the script reads: a last line with no newline is a line, and the end behind a newline is none.
+  if (lines.at(-1) === "") lines.pop();
+  for (const line of lines) {
+    if (/^[ \t]*RELEASE_KEYS\+?=/.test(line)) {
+      lists += 1;
+      if (at === "before" && /^[ \t]*RELEASE_KEYS=\($/.test(line)) {
+        at = "open";
+        continue;
+      }
+      at = "wrong";
+    }
+    if (at === "open") {
+      if (/^[ \t]*'-----BEGIN PUBLIC KEY-----$/.test(line)) [entry, at] = [BEGIN_KEY, "key"];
+      else at = /^[ \t]*\)$/.test(line) ? "closed" : "wrong";
+    } else if (at === "key") {
+      if (/^[A-Za-z0-9+/=]+$/.test(line)) entry += `\n${line}`;
+      else if (line === `${END_KEY}'` && entry !== BEGIN_KEY) [entries[entries.length], at] = [`${entry}\n${END_KEY}`, "open"];
+      else at = "wrong";
+    }
+  }
+  if (at !== "closed" || lists !== 1) return [];
+  return entries.flatMap((pem) => {
     try {
       const key = createPublicKey(pem);
-      return key.asymmetricKeyType === "ed25519" ? [key] : [];
+      // A key, and written as OpenSSL writes that key: what the script's signing loads.
+      return key.asymmetricKeyType === "ed25519" && key.export({ type: "spki", format: "pem" }).toString().trim() === pem ? [key] : [];
     } catch {
       return []; // not a key OpenSSL loads
     }
   });
-  if (keys.length === 0) throw new Error(`${helper} trusts no release key`);
-  return keys;
 }
 
 // Whether *text* escapes the first half of a pair with no escape of its second half behind it: jq

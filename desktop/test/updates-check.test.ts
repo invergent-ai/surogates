@@ -8,7 +8,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { CHECK_MS, signedRelease } from "../src/shell/updates.js";
+import { CHECK_MS, listedKeys, signedRelease } from "../src/shell/updates.js";
 import { helperWith, keys, next, ranged, servedBase, sha256 } from "./updates-base.js";
 
 const base = servedBase();
@@ -112,6 +112,35 @@ describe("a signed manifest", () => {
     const found = base.updates();
     await expect(found.check()).rejects.toThrow(`${base.url}/desktop/latest.json ${NO_RELEASE}`);
     expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json.sig"]);
+  });
+});
+
+describe("a helper's list of release keys", () => {
+  it("is read in the one form the install script's own reader takes, and no key of any other spelling: never more than an install would trust", () => {
+    const script = helperWith([keys.publicKey, next.publicKey]);
+    const list = /^ *RELEASE_KEYS=\(\n[^)]*\)\n/m.exec(script)![0];
+    const with_ = (change: (list: string) => string) => script.replace(list, change(list));
+    expect(listedKeys(script)).toHaveLength(2);
+    const spellings: Array<[string, string, number]> = [
+      ["spaces after an entry's quote", with_((text) => text.replace("-----END PUBLIC KEY-----'\n", "-----END PUBLIC KEY-----'  \n")), 0],
+      ["a comment in it", with_((text) => text.replace("(\n", "(\n    # the first key, since 2026\n")), 0],
+      ["a comment that has an apostrophe in it", with_((text) => text.replace("(\n", "(\n    # Surogate's release key since 2026\n")), 0],
+      ["a comment that has a parenthesis in it", with_((text) => text.replace("(\n", "(\n    # the first key (2026)\n")), 0],
+      ["a comment between two keys", with_((text) => text.replace("-----END PUBLIC KEY-----'\n", "-----END PUBLIC KEY-----'\n    # the next\n")), 0],
+      ["its keys in double quotes", with_((text) => text.replaceAll("'", '"')), 0],
+      ["one line", with_((text) => `${text.trim().replace("(\n", "( ").replace(/\n *\)$/, " )")}\n`), 0],
+      ["its closing bracket behind the last key", with_((text) => text.replace(/'\n *\)\n$/, "' )\n")), 0],
+      ["a key's lines indented", with_((text) => text.replace(/\n(?=[A-Za-z0-9+/=]+\n|-----END)/g, "\n    ")), 0],
+      ["an empty line in it", with_((text) => text.replace("(\n", "(\n\n")), 0],
+      ["no key in it", with_((text) => `${text.split("\n")[0]}\n  )\n`), 0],
+      ["a second list added to it", with_((text) => `${text}${text.replace("RELEASE_KEYS=(", "RELEASE_KEYS+=(")}`), 0],
+      ["the list given twice", with_((text) => `${text}${text}`), 0],
+      ["a carriage return at each of its lines' ends", with_((text) => text.replaceAll("\n", "\r\n")), 0],
+      ["a list that never ends", with_((text) => text.replace(/\n *\)\n$/, "\n")), 0],
+      ["a key that is no key", with_((text) => text.replace(/\n[A-Za-z0-9+/=]+\n/, "\nbm90IGEga2V5\n")), 1],
+      ["nothing", "", 0],
+    ];
+    expect(spellings.map(([name, written]) => [name, listedKeys(written).length])).toEqual(spellings.map(([name, , read]) => [name, read]));
   });
 });
 
