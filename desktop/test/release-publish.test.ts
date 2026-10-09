@@ -550,6 +550,8 @@ describe("the desktop's release manifest", () => {
         "#!/bin/sh",
         `seen='${seen}'/$$-${program}`,
         '/usr/bin/env >"$seen.env"',
+        // Each descriptor it has open, by its number, its own script's among them: listed by the shell itself, which opens nothing for it but the list.
+        'for open in /proc/$$/fd/*; do echo "${open##*/}"; done >"$seen.open"',
         ': >"$seen.argv"',
         "count=$#; at=0",
         "for arg do",
@@ -558,6 +560,8 @@ describe("the desktop's release manifest", () => {
         '  case "$arg" in /dev/fd/*)',
         '    if [ -p "$arg" ]; then /usr/bin/printf \'pipe\\n\' >"$seen.$at.kind"; else /usr/bin/printf \'file\\n\' >"$seen.$at.kind"; fi',
         '    /usr/bin/cat "$arg" >"$seen.$at.handed"; arg="$seen.$at.handed" ;;',
+        // And what each file that it is handed by name holds, as it is then.
+        '  *) if [ -f "$arg" ]; then /usr/bin/cat "$arg" >"$seen.$at.named"; fi ;;',
         "  esac",
         '  set -- "$@" "$arg"',
         "done",
@@ -577,6 +581,8 @@ describe("the desktop's release manifest", () => {
       argv: readFileSync(join(seen, `${run}.argv`), "utf8").split("\n").slice(0, -1),
       env: readFileSync(join(seen, `${run}.env`), "utf8"),
       input: readFileSync(join(seen, `${run}.input`), "utf8"),
+      named: files.filter((file) => file.startsWith(`${run}.`) && file.endsWith(".named")).map((file) => readFileSync(join(seen, file), "utf8")),
+      open: readFileSync(join(seen, `${run}.open`), "utf8").split("\n").slice(0, -1).map(Number),
       handed: files.filter((file) => file.startsWith(`${run}.`) && file.endsWith(".handed")).map((file) => {
         const at = Number(file.slice(run.length + 1, -".handed".length));
         return { at, kind: readFileSync(join(seen, `${run}.${at}.kind`), "utf8").trim(), holds: readFileSync(join(seen, file), "utf8") };
@@ -593,15 +599,27 @@ describe("the desktop's release manifest", () => {
     // It is in no program's arguments, which every process of the runner's could read, and comes on none's input.
     expect(started.filter(({ argv }) => argv.join("\n").includes(body)).map(({ program, argv }) => [program, argv])).toEqual([]);
     expect(started.filter(({ input }) => input.includes(body)).map(({ program, argv }) => [program, argv])).toEqual([]);
+    // Nor is it in any file that a program is handed by name.
+    expect(started.filter(({ named }) => named.some((held) => held.includes(body))).map(({ program, argv }) => [program, argv])).toEqual([]);
     // It is handed to openssl alone, twice, each time in a pipe that the script names: to say the
     // key's public half, and to sign.
     const given = started.flatMap(({ program, argv, handed }) => handed.filter(({ holds }) => holds.includes(body)).map(({ at, kind }) => [program, argv.slice(0, 2).join(" "), argv[at - 2], kind]));
     expect(given.sort()).toEqual([["openssl", "pkey -pubout", "-in", "pipe"], ["openssl", "pkeyutl -sign", "-inkey", "pipe"]]);
+    // No program has a descriptor open that the script was not itself started with, but each pipe
+    // that its arguments name: one that the script opened on the key before it started them
+    // would be every program's to read.
+    const startedWith = keyed[0]?.open ?? [];
+    expect(startedWith).toEqual(expect.arrayContaining([0, 1, 2]));
+    expect(started.flatMap(({ program, argv, open }) => open.filter((number) => !startedWith.includes(number) && !argv.includes(`/dev/fd/${number}`))
+      .map((number) => [program, argv.slice(0, 2).join(" "), number]))).toEqual([]);
     // And no program is started but by its name, which is how each of them is a stand-in here:
     // the script names none by a path, and never says where names are looked for.
     const lines = readFileSync(join(RELEASE, "publish.sh"), "utf8").split("\n").slice(1).filter((line) => !line.trim().startsWith("#"));
     expect(lines.filter((line) => /(^|[\s;|&(`"'=])\/(usr|bin|sbin|opt|snap|nix|home|root|var|tmp)\//.test(line))).toEqual([]);
     expect(lines.filter((line) => /\bPATH\b/.test(line))).toEqual([]);
+    // Nor by bash's own way round a name: command -p looks in the system's folders whatever PATH
+    // says, and exec, enable and hash can each put another program under a name.
+    expect(lines.filter((line) => /(^|[\s;|&(`])(command|exec|enable|hash|builtin|alias)\s/.test(line))).toEqual([]);
   });
 
   it("signs the line it wrote, in a folder of its own: what another puts under the manifest's name while it signs is not what is signed, and is not left there", () => {
