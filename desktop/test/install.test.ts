@@ -2029,6 +2029,17 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       expect(as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- ${args}`), args)
         .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: usage: install.sh --base <http or https URL>\n" });
     }
+    // Nor a base with a user or a password in it, said as what it is, before sudo is asked: the
+    // base is written where every user reads it, and the app takes no such base.
+    for (const named of ["http://user:secret@127.0.0.1:9", "https://user@surogate.example/", "http://:secret@surogate.example", `http://user:secret@${base.slice("http://".length)}`]) {
+      for (const started of [as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- --base ${named}`), root(`/opt/surogate-test/install.sh --base ${named}`)]) {
+        expect(started, named).toMatchObject({
+          status: 1, stdout: "", stderr: "Surogate Desktop: a base with a user or a password in it is not taken: it would be written where every user of this computer reads it. Name the server alone\n",
+        });
+      }
+    }
+    // An at sign after the server's name is no user's: such a base is read on, to this computer's own refusal or its install.
+    expect(root("test ! -e /opt/surogate && test ! -e /etc/surogate").status).toBe(0);
     expect(root("cp /etc/os-release /root/os-release").status).toBe(0);
     const others = [
       'ID=ubuntu\nVERSION_ID="25.10"\nVERSION="25.10 (Questing Quokka)"',
@@ -2763,6 +2774,9 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       ["an empty record", `: >${record}`],
       ["a record of more than 4096 bytes", padded],
     ] as const) refused(what, made, noServer);
+    // Nor from a base with a user or a password in it, which no install writes: said as what it is.
+    refused("a base with a password in it", `echo '{"base":"${base.replace("http://", "http://user:secret@")}","channel":"stable"}' >${record}`,
+      `${record} names a base with a user or a password in it: run Surogate Desktop's install script again, with a base that names its server alone`);
     // Nor a record that is not root's own file, or that anyone else may write, whatever it names: here the base itself.
     for (const [what, made] of [
       ["a link to a user's file", `cp ${record} /home/tester/record.json && chown tester /home/tester/record.json && rm ${record} && ln -s /home/tester/record.json ${record}`],

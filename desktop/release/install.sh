@@ -45,6 +45,10 @@ settings() {
   # Who reads the files an apply is handed, by user and group number, by name, and by the numbers
   # of all its groups: root, unless the helper was run for another user (asker).
   READER=(0 0 root 0)
+  # What is said of a base with a user or a password in it. The base is written into the install
+  # record, which every user of the computer reads and the app reads its base from: a password
+  # there would be every user's, and the app takes no base that has one.
+  CREDENTIALS="a base with a user or a password in it is not taken: it would be written where every user of this computer reads it. Name the server alone"
   # Folders of this run's own, which go however it ends.
   OWN=()
   # The release keys' public halves: a release's manifest is signed by the private half of one of
@@ -923,7 +927,9 @@ POLICY
 }
 
 # Where the app updates from, and downloads its VM's image from: the base this script installed from.
+# Never one with a user or a password in it, whoever calls this: the record is every user's to read.
 record() {
+  nameless "$1" || fail "$CREDENTIALS"
   mkdir -p "$(dirname "$RECORD")"
   jq -n --arg base "$1" --arg channel "$CHANNEL" '{base: $base, channel: $channel}' >"$RECORD.new"
   chmod 0644 "$RECORD.new"
@@ -959,6 +965,7 @@ roll_back() {
   roots_alone "$RECORD" || fail "$RECORD is not as Surogate Desktop's install leaves it: run its install script again"
   base="$(one_object "$RECORD" any | jq -er '.base | strings' 2>/dev/null)" && http_url "$base" \
     || fail "$RECORD names no server to roll back from: run Surogate Desktop's install script again"
+  nameless "$base" || fail "$RECORD names a base with a user or a password in it: run Surogate Desktop's install script again, with a base that names its server alone"
   installed="$(installed_version)"
   [ -n "$installed" ] || fail "Surogate Desktop is not installed: run its install script first"
   # Before anything is asked of the base: where what the installed version keeps is not known, no
@@ -1004,6 +1011,13 @@ install_all() {
 # its caller's: what is a base is then the same for whoever runs the script, and for root's part
 # of it. In most locales, more characters than ASCII's six are white space, and bytes that are no
 # characters match nothing.
+# Whether base $1 names its server alone, with no user and no password before it (user:password@):
+# asked of the part between the two slashes and the next slash, question mark or hash.
+nameless() {
+  local server="${1#*://}"
+  [[ "${server%%[/?#]*}" != *@* ]]
+}
+
 http_url() {
   local LC_ALL=C
   [[ "$1" =~ ^https?://[^[:space:]]+$ ]]
@@ -1127,6 +1141,8 @@ main() {
       local base=https://surogate.ai
       if [ "${1:-}" = --base ]; then
         [ "$#" -eq 2 ] && http_url "$2" || fail "usage: install.sh --base <http or https URL>"
+        # Before sudo is asked, and before anything is written or downloaded.
+        nameless "$2" || fail "$CREDENTIALS"
         base="${2%/}"
       fi
       supported
