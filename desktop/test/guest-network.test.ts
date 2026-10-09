@@ -7,8 +7,9 @@ import { duplexPair } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { Network } from "../src/guest/network.js";
+import { MAX_TUNNELS, Network } from "../src/guest/network.js";
 import { openPort } from "../src/guest/port.js";
+import { MAX_INBOUND } from "../src/guest/protocol.js";
 import type { NetworkAsk } from "../src/hosts/messages.js";
 import { NetProxy } from "../src/vm/proxy.js";
 
@@ -165,6 +166,60 @@ describe("the agent's network", () => {
     expect(await brought(network.path(ROOT), `/in/${ID}`)).toBe("closed ");
     expect(await first).toBe("kept ");
     if (typeof socket !== "string") socket.destroy();
+  });
+
+  it("leaves a root's commands their connections while the browser's are at their bound, and the other way", { timeout: 20_000 }, async () => {
+    await network.listen(ROOT, uid);
+    await network.listen(OTHER, uid);
+    const id = (n: number) => n.toString(16).padStart(32, "0");
+    // A connection the root's runner brings under *n*'s id, as it was asked: the agent's end, and the runner's.
+    const bring = async (root: string, n: number) => {
+      const asked = network.arrival(root, id(n));
+      const runner: Socket = connect({ path: network.path(root), allowHalfOpen: true });
+      runner.on("error", () => {});
+      runner.write(`/in/${id(n)}\n`);
+      return { handed: await asked, runner };
+    };
+    // One asked for and never brought, or that nothing took, holds no place once it is answered.
+    expect(new Set(await Promise.all(Array.from({ length: MAX_INBOUND }, (_, n) => network.arrival(ROOT, id(n), 50))))).toEqual(new Set(["ETIMEDOUT"]));
+    const held = [];
+    for (let n = 0; n < MAX_INBOUND; n += 1) held.push(await bring(ROOT, n));
+    expect(held.every(({ handed }) => typeof handed === "object")).toBe(true);
+    // The next is refused, asked of nobody; a command of that root still has its network, and another root its own bound.
+    expect(await network.arrival(ROOT, id(MAX_INBOUND))).toBe("EMFILE");
+    expect(await through(network.path(ROOT), "echo.example:80")).toEqual({ status: "200", reply: "got 5\n" });
+    const others = await bring(OTHER, 0);
+    expect(typeof others.handed).toBe("object");
+    // One that ends gives its place to the next.
+    const [first] = held;
+    if (typeof first?.handed !== "object") throw new Error("not handed over");
+    first.handed.destroy();
+    await vi.waitFor(async () => expect(typeof (await bring(ROOT, MAX_INBOUND)).handed).toBe("object"));
+    expect(await network.arrival(ROOT, id(MAX_INBOUND + 1))).toBe("EMFILE");
+
+    // The other way: its commands at their bound, each waiting on its user's answer.
+    answer = () => new Promise(() => {});
+    asked = [];
+    for (let port = 1; port <= MAX_TUNNELS; port += 1) {
+      const socket = connect(network.path(OTHER));
+      socket.on("error", () => {});
+      socket.write(`echo.example:${port}\n`);
+    }
+    await vi.waitFor(() => expect(asked).toHaveLength(MAX_TUNNELS), { timeout: 5_000 });
+    expect(typeof (await bring(OTHER, 1)).handed).toBe("object");
+    // One more of its commands' is closed unheard, as before.
+    const heard = await new Promise<string | null>((done) => {
+      const socket = connect(network.path(OTHER));
+      let said = "";
+      socket.on("error", () => {});
+      socket.on("data", (chunk: Buffer) => {
+        said += chunk.toString();
+      });
+      socket.on("close", () => done(said));
+      setTimeout(() => done(null), 2_000);
+      socket.write("echo.example:257\n");
+    });
+    expect([heard, asked.length]).toEqual(["", MAX_TUNNELS]);
   });
 
   it("answers what the host proxy refuses with its status and reason, and ends the connection", async () => {

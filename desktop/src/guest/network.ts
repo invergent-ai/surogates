@@ -13,7 +13,7 @@ import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import type { Duplex } from "node:stream";
 
-import { INBOUND_LINE } from "./protocol.js";
+import { INBOUND_LINE, MAX_INBOUND } from "./protocol.js";
 
 // The roots' sockets, the agent's own: each root's namespace has its own bound at /run/surogate/net.sock.
 const TUNNELS = "/run/surogate/net";
@@ -23,7 +23,8 @@ const DESTINATION = /^[\x21-\x2e\x30-\x7e]{1,255}:\d{1,5}$/;
 // A destination line's bound: its bytes, and the time it has to end.
 const MAX_LINE = 512;
 const LINE_MS = 5_000;
-// How many connections one root may have open at once: past it, a connection is refused at once.
+// How many connections one root's commands may have open at once: past it, a connection is closed unheard.
+// Those its runner brings for the browser are counted apart (protocol.ts, MAX_INBOUND).
 export const MAX_TUNNELS = 256;
 // How long a root's runner has to bring a connection the agent asked it for: its dial is to its own loopback.
 const ARRIVAL_MS = 5_000;
@@ -37,6 +38,8 @@ export class Network {
   private readonly session: ClientHttp2Session;
   // The connections asked of each root's runner and not brought yet, by root and id.
   private readonly awaited = new Map<string, (brought: Socket | string) => void>();
+  // How many connections into each root are asked of its runner, or handed over and still open.
+  private readonly inward = new Map<string, number>();
 
   constructor(port: Duplex, private readonly folder = TUNNELS, private readonly lineMs = LINE_MS) {
     this.session = connectH2("http://guest", { createConnection: () => port });
@@ -51,12 +54,19 @@ export class Network {
     rmSync(path, { force: true });
     // Its connections, which end with it.
     const open = new Set<Socket>();
+    // Those of them that are its commands': each one, until its line says its runner brings it for the browser.
+    const commands = new Set<Socket>();
     const server = createServer({ allowHalfOpen: true }, (socket) => {
       open.add(socket);
-      socket.on("close", () => open.delete(socket));
-      this.tunnel(root, socket);
+      commands.add(socket);
+      socket.on("close", () => {
+        open.delete(socket);
+        commands.delete(socket);
+      });
+      this.tunnel(root, socket, commands);
     });
-    server.maxConnections = MAX_TUNNELS;
+    // Its commands' and the browser's, each with a bound of its own, so that neither takes the other's place.
+    server.maxConnections = MAX_TUNNELS + MAX_INBOUND;
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(path, resolve);
@@ -77,24 +87,36 @@ export class Network {
 
   /**
    * The connection into *root* its runner was asked for under *id*, once the runner brings it on
-   * that root's own socket; or why there is none: what the runner said of its dial, or "ETIMEDOUT"
-   * when it brought nothing in *ms*. Never rejects.
+   * that root's own socket; or why there is none: what the runner said of its dial, "ETIMEDOUT"
+   * when it brought nothing in *ms*, or "EMFILE" for a root that has MAX_INBOUND of them already,
+   * awaited or open. Never rejects.
    */
   arrival(root: string, id: string, ms = ARRIVAL_MS): Promise<Socket | string> {
+    if ((this.inward.get(root) ?? 0) >= MAX_INBOUND) return Promise.resolve("EMFILE");
     const key = `${root} ${id}`;
+    const count = (change: number) => {
+      const left = (this.inward.get(root) ?? 0) + change;
+      if (left === 0) this.inward.delete(root);
+      else this.inward.set(root, left);
+    };
+    count(1);
     return new Promise((resolve) => {
       const timer = setTimeout(() => settle("ETIMEDOUT"), ms);
       const settle = (brought: Socket | string) => {
         clearTimeout(timer);
         this.awaited.delete(key);
+        // One handed over keeps its place until it closes.
+        if (typeof brought === "string") count(-1);
+        else brought.once("close", () => count(-1));
         resolve(brought);
       };
       this.awaited.set(key, settle);
     });
   }
 
-  // A connection of *root*'s: its destination line, then a stream for it.
-  private tunnel(root: string, socket: Socket): void {
+  // A connection of *root*'s: its destination line, then a stream for it. *commands*: the root's open
+  // connections that are its commands', this one among them until its line says otherwise.
+  private tunnel(root: string, socket: Socket, commands: Set<Socket>): void {
     socket.on("error", () => {});
     const timer = setTimeout(() => socket.destroy(), this.lineMs);
     let head = Buffer.alloc(0);
@@ -110,6 +132,7 @@ export class Network {
       const line = head.subarray(0, end).toString("latin1");
       const inbound = INBOUND_LINE.exec(line);
       if (inbound) {
+        commands.delete(socket);
         // What the root's server said first comes with the line, and is kept for whoever asked.
         socket.pause();
         if (end + 1 < head.length) socket.unshift(head.subarray(end + 1));
@@ -118,8 +141,8 @@ export class Network {
         if (!asked || inbound[2] !== undefined) socket.destroy();
         return void asked?.(inbound[2] ?? socket);
       }
-      // The runner sends nothing past its line before the answer.
-      if (end + 1 < head.length) return void socket.destroy();
+      // The runner sends nothing past its line before the answer; and one past its commands' bound is closed unheard.
+      if (end + 1 < head.length || commands.size > MAX_TUNNELS) return void socket.destroy();
       this.open(root, line, socket);
     };
     socket.on("data", read);

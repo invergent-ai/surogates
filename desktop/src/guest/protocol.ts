@@ -34,6 +34,9 @@ export const INBOUND_PORT = "ai.surogate.inbound";
 // destination a command names starts with '/' (network.ts).
 export const INBOUND_LINE = /^\/in\/([0-9a-f]{32})(?: ([A-Z]{1,16}))?$/;
 export const inboundLine = (id: string, reason?: string): string => `/in/${id}${reason ? ` ${reason}` : ""}\n`;
+// How many connections of the browser's one root may have open at once, counted apart from its commands'
+// own (network.ts, MAX_TUNNELS): neither can take the other's place. One browser's most, measured, is 146.
+export const MAX_INBOUND = 160;
 
 // How the guest mounts a root's folder, as the host's VM backend shared it. Each
 // kind names who maps the folder's owner to the root's guest uid. virtiofs: its
