@@ -475,18 +475,35 @@ def _latest_user_event_text(events: list[Any]) -> str:
         )
         if type_value != EventType.USER_MESSAGE.value:
             continue
-        data = event.data if isinstance(event.data, dict) else {}
-        raw = data.get("content", "")
-        if isinstance(raw, list):
-            raw = next(
-                (
-                    p["text"] for p in raw
-                    if isinstance(p, dict) and p.get("type") == "text"
-                ),
-                "",
-            )
-        return (raw or "").strip()
+        return _user_event_text(event.data)
     return ""
+
+
+def _user_event_text(data: Any) -> str:
+    """The raw text of one ``USER_MESSAGE`` event's payload, as the user typed it."""
+    raw = data.get("content", "") if isinstance(data, dict) else ""
+    if isinstance(raw, list):
+        raw = next(
+            (
+                p["text"] for p in raw
+                if isinstance(p, dict) and p.get("type") == "text"
+            ),
+            "",
+        )
+    return (raw or "").strip()
+
+
+def _latest_user_event_id(events: list[Any] | None) -> int | None:
+    """Return the id of the latest ``USER_MESSAGE`` event, or ``None`` when there is none."""
+    latest: int | None = None
+    for event in events or []:
+        event_type = getattr(event, "type", None)
+        type_value = event_type.value if hasattr(event_type, "value") else str(event_type)
+        event_id = getattr(event, "id", None)
+        if type_value == EventType.USER_MESSAGE.value and event_id is not None:
+            if latest is None or event_id > latest:
+                latest = event_id
+    return latest
 
 
 def _latest_user_event_data(events: list[Any]) -> dict | None:

@@ -53,6 +53,9 @@ class _StubSessionStore:
     async def emit_event(self, *args, **kwargs):
         return None
 
+    async def last_event(self, *args, **kwargs):
+        return None
+
 
 def _fake_spawn(session_factory, org_id, parent_session_id):
     """Side effect for create_task_and_spawn: insert a REAL Task row (so the

@@ -42,7 +42,7 @@ from tests.test_steer_loop import _final_response
 
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_durable_landings import FENCED, a_short_fence, edited, ends, stored  # noqa: F401  (a_short_fence is a fixture)
-from .test_thread_copies import a_thread, a_waking_thread_harness, git, pods, reports  # noqa: F401  (pods is a fixture)
+from .test_thread_copies import a_thread, a_waking_thread_harness, git, its_first_turn_was_taken, pods, reports  # noqa: F401  (pods is a fixture)
 from .test_turn_sagas import a_chat, a_looping_harness, a_turn, calling, stop
 from .test_workstream_threads import call_tool
 from .test_workstreams import create, master_of
@@ -202,12 +202,14 @@ async def test_a_threads_mission_starts_its_tasks_on_copies_of_their_own_and_the
     thread = await a_thread(api, "Draft A", master)
     pods = stored(api, thread, tmp_path)
     store, mine, theirs = api.app.state.session_store, SandboxPool(pods), SandboxPool(pods)
+    # Typed once the thread's first turn has read its goal: before that the command waits for that turn.
+    await its_first_turn_was_taken(store, thread)
     await store.emit_event(thread.id, EventType.USER_MESSAGE, {
         "content": "/mission List the report's sources.\n\nRubric:\n- sources.md names every source",
     })
     # The command is the thread's own to run: it answers as it does in any chat, and starts no turn of its own.
     await asyncio.wait_for(a_worker_waking(api, monkeypatch, mine, thread, AsyncMock()).wake(thread.id), 60)
-    [answer] = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
+    *_, answer = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
     assert "can't start" not in answer and "Mission" in answer, answer
     thread = await store.get_session(thread.id)
     assert thread.config["strict_coordinator"] is True and thread.config["active_mission_id"]
@@ -251,6 +253,8 @@ async def test_a_threads_research_command_is_refused_and_starts_nothing(api, mon
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
     store, pool = api.app.state.session_store, SandboxPool(pods)
+    # Typed once the thread's first turn has read its goal: before that the command waits for that turn.
+    await its_first_turn_was_taken(store, thread)
     await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": command})
     ran: list = []
 
@@ -258,7 +262,7 @@ async def test_a_threads_research_command_is_refused_and_starts_nothing(api, mon
         ran.append(args)
 
     await asyncio.wait_for(a_worker_waking(api, monkeypatch, pool, thread, a_turn_of_it).wake(thread.id), 60)
-    [answer] = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
+    *_, answer = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
     name = command.split()[0]
     assert answer == f"A thread can't start {name} {NO_OTHER_WAY}", why
     # No turn ran for it, no helper or task was started, no research run made, no pod, no history.
@@ -636,6 +640,7 @@ async def test_a_mission_in_a_thread_loses_no_finished_tasks_work_when_a_turn_th
     thread = await a_thread(api, "Draft A", master)
     pods = stored(api, thread, tmp_path)
     store, mine = api.app.state.session_store, SandboxPool(pods)
+    await its_first_turn_was_taken(store, thread)
     await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "/mission Write three parts.\n\nRubric:\n- a.md, b.md and c.md exist"})
     await asyncio.wait_for(a_worker_waking(api, monkeypatch, mine, thread, AsyncMock()).wake(thread.id), 60)
     thread = await store.get_session(thread.id)

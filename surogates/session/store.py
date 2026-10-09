@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, case, not_, select, text, true, update, delete, func, or_, tuple_
+from sqlalchemy import and_, case, exists, not_, select, text, true, update, delete, func, or_, tuple_
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
@@ -1753,12 +1753,18 @@ class SessionStore:
         return events
 
     async def last_event(
-        self, session_id: UUID, *types: EventType, with_key: str | None = None,
+        self, session_id: UUID, *types: EventType,
+        containing: dict[str, Any] | None = None, with_key: str | None = None, before: int | None = None,
     ) -> Event | None:
-        """The session's latest event of one of *types* whose data has the key *with_key*; None when it has none."""
+        """The session's latest event of one of *types* whose data holds *containing* and has the
+        key *with_key*, of those before event *before* when given; None when it has none."""
         stmt = select(EventRow).where(EventRow.session_id == session_id, EventRow.type.in_([t.value for t in types]))
+        if containing:
+            stmt = stmt.where(EventRow.data.contains(containing))
         if with_key is not None:
             stmt = stmt.where(EventRow.data.has_key(with_key))
+        if before is not None:
+            stmt = stmt.where(EventRow.id < before)
         stmt = stmt.order_by(EventRow.id.desc()).limit(1)
         async with self._sf() as db:
             row = (await db.execute(stmt)).scalars().first()
@@ -2450,8 +2456,15 @@ class SessionStore:
         session_id: UUID,
         through_event_id: int,
         lease_token: UUID,
+        *,
+        at_rest: bool = False,
     ) -> None:
-        """Advance the durable cursor.  Only succeeds if the caller holds the lease."""
+        """Advance the durable cursor.  Only succeeds if the caller holds the lease.
+
+        With *at_rest*, a session still active comes to rest (``completed``)
+        in the same write: the end of a turn is recorded whole or not at
+        all, and a session its user stopped meanwhile stays stopped.
+        """
         async with self._sf() as db:
             # Verify lease ownership (SELECT FOR UPDATE).
             lease_row = (
@@ -2482,6 +2495,12 @@ class SessionStore:
                 ),
                 {"sid": session_id, "cursor": through_event_id},
             )
+            if at_rest:
+                await db.execute(
+                    update(SessionRow)
+                    .where(SessionRow.id == session_id, SessionRow.status == "active")
+                    .values(status="completed", updated_at=func.now())
+                )
             await db.commit()
 
     async def get_pending_events(self, session_id: UUID) -> list[Event]:
@@ -2660,7 +2679,8 @@ class SessionStore:
         )
         latest_event_is_an_old_crash = and_(
             latest_event_type == "harness.crash",
-            latest_event(EventRow.created_at) < func.now() - text("interval '1 hour'"),
+            latest_event(EventRow.created_at)
+            < func.now() - text(f"make_interval(secs => {int(RERUN_WINDOW.total_seconds())})"),
         )
         # ``case`` checks the type before taking the length: one response
         # whose ``tool_calls`` is a JSON null would otherwise error the sweep.
@@ -2672,10 +2692,18 @@ class SessionStore:
                 else_=0,
             ) == 0,
         )
+        # A paused mission's coordinator takes no turn on what arrives: its
+        # chat ends on a helper's report, or a browser's event, with no
+        # worker dead.  It is abandoned only when its log ends inside a turn.
+        waits_on_a_paused_mission = and_(
+            exists().where(MissionRow.session_id == SessionRow.id, MissionRow.status == "paused"),
+            latest_event_type.notin_(_TURN_EVENT_TYPES),
+        )
         latest_event_ended_work = or_(
             latest_event_type.in_(session_end_event_types),
             latest_event_is_an_old_crash,
             latest_llm_response_is_clean,
+            waits_on_a_paused_mission,
         )
         stmt = (
             select(SessionRow)
@@ -2883,6 +2911,19 @@ class SessionStore:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
+#: The events a turn under way writes.  A log that ends on one of them, with
+#: no lease held, is a turn its worker left.
+_TURN_EVENT_TYPES = (
+    "user.message", "harness.wake", "llm.request", "llm.thinking", "llm.delta", "llm.response",
+    "tool.call", "tool.result",
+)
+
+#: How long what a session's user asked for is still run once the session
+#: has gone quiet over it: a crashed turn is retried, and a command typed
+#: during a turn that has since ended is answered, only within it.  Past
+#: it, a deploy or a stray wake must not do what was asked for long ago.
+RERUN_WINDOW = timedelta(hours=1)
 
 #: How stale ``sessions.updated_at`` may get while a response streams.  Only
 #: has to stay well under the dispatcher's ``_ORPHAN_STALE_SECONDS`` (60s) so
