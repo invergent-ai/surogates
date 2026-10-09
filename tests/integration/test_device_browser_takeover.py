@@ -20,6 +20,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import surogates.harness.loop as loop_module
@@ -580,6 +581,27 @@ async def test_a_hand_back_and_the_turn_it_gives_are_announced_to_the_chats_list
     finally:
         await listening.aclose()
         await computer.unqueue(chat)
+
+
+async def test_a_take_over_gives_no_turn_whatever_its_telling_is_asked(computer):
+    chat = await computer.idle()
+    await computer.store.update_session_status(chat, "completed")
+
+    # Only a hand back gives a turn: the store, asked for one with a take-over, tells the take-over alone.
+    told = await computer.store.tell_browser_control(
+        chat, EventType.BROWSER_CONTROL_GRANTED, {"session_id": str(chat), "computer": True}, gives_a_turn=True,
+    )
+
+    assert told is False
+    assert (await computer.log(chat))[-1] == "browser.control_granted"
+    assert "resumes" not in (await computer.store.get_events(chat, types=[EventType.BROWSER_CONTROL_GRANTED]))[-1].data
+    assert (await computer.resumed(chat), (await computer.store.get_session(chat)).status) == ([], "completed")
+
+
+async def test_a_telling_the_database_refuses_for_another_reason_is_not_answered_as_busy(computer):
+    # No such chat: the event has no session to belong to. Busy is said of a lock that was waited for, alone.
+    with pytest.raises(IntegrityError):
+        await computer.store.tell_browser_control(uuid4(), EventType.BROWSER_CONTROL_GRANTED, {"computer": True})
 
 
 async def test_a_hand_back_whose_turn_cannot_be_written_is_not_told_and_can_be_made_again(computer, monkeypatch):
@@ -1611,10 +1633,12 @@ async def test_a_hand_back_made_while_a_commands_wake_ran_is_given_its_turn_by_t
 
 @pytest.mark.parametrize("command", [*COMMANDS, SWITCHED_OFF])
 async def test_a_commands_wake_queues_nothing_more_where_no_hand_back_waits_for_a_turn(asking, monkeypatch, command):
-    # Its user still holds the browser; and in another chat a hand back's turn was read before the command.
+    # Its user still holds the browser; and in another chat a hand back's turn ran, and ended, before the command.
     held, read = await asking.held(), await asking.stopped_while_held()
     await asking.hands_back(read)
     await asking.store.emit_event(read, EventType.LLM_REQUEST, {})
+    await asking.store.emit_event(read, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "Going on."}})
+    await asking.ends(read)
     await asking.unqueue(read)
 
     try:
@@ -1623,6 +1647,18 @@ async def test_a_commands_wake_queues_nothing_more_where_no_hand_back_waits_for_
             assert not await asking.queued(chat)
     finally:
         await asking.unqueue(held, read)
+
+
+async def test_a_commands_wake_queues_a_hand_backs_turn_only_in_a_chat_on_its_users_computer(asking, monkeypatch):
+    # A chat in the cloud, whose log says what only a chat on a computer is ever written.
+    session = await asking.store.create_session(user_id=asking.api.user_id, org_id=asking.api.org_id, agent_id=AGENT_ID)
+    await asking.store.emit_event(session.id, EventType.SESSION_RESUME, {"source": "browser_hand_back"})
+
+    try:
+        await command_answered(asking, monkeypatch, session.id, "/goal status")
+        assert not await asking.queued(session.id)
+    finally:
+        await asking.unqueue(session.id)
 
 
 async def test_a_hand_back_a_turn_ended_over_without_reading_is_read_at_the_wake_it_queued(asking, monkeypatch):

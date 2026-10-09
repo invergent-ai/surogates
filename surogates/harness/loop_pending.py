@@ -24,8 +24,8 @@ _HARNESS_CONTROL_PENDING_EVENT_TYPES = frozenset({
 })
 
 
-def _kind(event: Any) -> str:
-    return str(getattr(event.type, "value", event.type))
+def _event_type(event: Any) -> str:
+    return event.type.value if isinstance(event.type, EventType) else str(event.type)
 
 
 def _hand_backs_taken_over_again(events: list[Any]) -> set[int]:
@@ -40,7 +40,7 @@ def _hand_backs_taken_over_again(events: list[Any]) -> set[int]:
     waiting: list[int] = []
     taken_again: set[int] = set()
     for event in events:
-        if _kind(event) == EventType.LLM_REQUEST.value:
+        if _event_type(event) == EventType.LLM_REQUEST.value:
             waiting = []
         elif resumes_the_agent(event):
             waiting.append(event.id)
@@ -58,7 +58,7 @@ def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
         if (
             event.id is not None
             and event.id > cursor
-            and _kind(event) not in _HARNESS_CONTROL_PENDING_EVENT_TYPES
+            and _event_type(event) not in _HARNESS_CONTROL_PENDING_EVENT_TYPES
             and not for_the_pane_alone(event)
             and event.id not in taken_again
         ):
@@ -77,7 +77,7 @@ def _hand_back_unread(events: list[Any]) -> bool:
     """
     unread = False
     for event in events:
-        if _kind(event) == EventType.LLM_REQUEST.value or takes_the_browser_over(event):
+        if _event_type(event) == EventType.LLM_REQUEST.value or takes_the_browser_over(event):
             unread = False
         elif resumes_the_agent(event):
             unread = True
@@ -109,7 +109,7 @@ def _turn_for_a_hand_back(events: list[Any]) -> bool:
     for event in events:
         if event.id in taken_again:
             continue
-        kind = _kind(event)
+        kind = _event_type(event)
         ends_a_turn = kind == EventType.SESSION_COMPLETE.value or (
             # The model's answer ends a turn; its calls for tools do not.
             kind == EventType.LLM_RESPONSE.value

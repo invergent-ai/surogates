@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 import surogates.harness.loop as loop_module
+from surogates.harness.loop_context_replay import news, unread_reports
 from surogates.harness.loop_pending import _actionable_pending_events, _hand_back_unread, _turn_for_a_hand_back
 from surogates.session.events import EventType
 from tests.test_wake_slash_command_gate import _harness, _permissive, _session, _stub_store
@@ -91,6 +92,16 @@ def test_a_hand_backs_resume_is_no_work_once_its_user_took_the_browser_over_agai
     # Only a take-over of the computer's browser, and only a hand back's resume.
     assert work(resumed(5), taken_over(6, computer=False)) == [5]
     assert work(resumed(5, "user_retry"), taken_over(6)) == [5]
+
+
+def test_a_take_over_takes_only_the_hand_back_from_the_news_that_waits_for_the_next_request():
+    report = SimpleNamespace(id=1, type=EventType.WORKER_COMPLETE.value, data={"worker_id": "w-1", "result": "Drafted the memo."})
+    # A worker's report is true whoever holds the browser, and one that came after the take-over as well.
+    assert unread_reports([report, resumed(2)]) == [news(report), news(resumed(2))]
+    assert unread_reports([report, resumed(2), taken_over(3)]) == [news(report)]
+    assert unread_reports([resumed(1), taken_over(2), report, resumed(4)]) == [news(report), news(resumed(4))]
+    # The cloud's browser taken over is no word of the computer's.
+    assert unread_reports([resumed(1), taken_over(2, computer=False)]) == [news(resumed(1))]
 
 
 def said(id_: int, text: str = "Open the report.") -> SimpleNamespace:
