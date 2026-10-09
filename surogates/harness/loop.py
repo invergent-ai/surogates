@@ -914,7 +914,10 @@ class AgentHarness(
         """
         reason_msg = self._interrupt_message or "interrupted"
         # A project thread's turn that is stopped is over from here on, whatever becomes of this worker.
-        stop_written = is_project_thread(session.config) and await self._write_that_the_turn_was_stopped(session, reason_msg)
+        # One taken at the wake, before its loop named a turn, has made no pod and handed nothing on:
+        # there is no turn of this wake to write an end for.
+        named = is_project_thread(session.config) and session.config.get("turn_after") is not None
+        stop_written = named and await self._write_that_the_turn_was_stopped(session, reason_msg)
         if saga is not None and saga.active_sagas:
             await self._compensate_sagas(saga, session, "interrupt")
         # A project's stopped turn spent what it spent: settle its holds now,
@@ -990,7 +993,8 @@ class AgentHarness(
 
         left = "The thread's next copy leaves the stopped turn's own files out, and keeps its helpers' work."
         if not handed_on(session):
-            if is_project_thread(session.config) and await self._turn_started_a_helper(session):
+            named = is_project_thread(session.config) and session.config.get("turn_after") is not None
+            if named and await self._turn_started_a_helper(session):
                 logger.warning(
                     "The stop of thread %s's turn was not carried out on its hand-off: this worker did not hand the "
                     "copy on itself, the turn having been cut off and taken up again. %s", session.id, left,

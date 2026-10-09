@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import time
@@ -2430,3 +2431,22 @@ async def test_a_turn_that_handed_on_and_neither_landed_nor_was_kept_leaves_its_
         calling(("terminal", {"command": "ls > seen.txt"})), _final_response("Done."),
     ], pool=SandboxPool(pods))
     assert pods.real_names() == ["Report.docx", "notes.txt", "seen.txt", "sources.md"]
+
+
+async def test_a_stop_taken_before_a_threads_turn_has_a_name_writes_nothing_and_warns_of_nothing(api, pods, caplog):
+    thread = await a_thread(api)
+    store = api.app.state.session_store
+    # An earlier turn started a helper, and ended.
+    await store.emit_event(thread.id, EventType.TOOL_CALL, {"tool_call_id": "c1", "name": "spawn_worker", "arguments": {}})
+    await store.emit_event(thread.id, EventType.SESSION_COMPLETE, {"reason": "completed"})
+    harness = harness_of(api)
+    harness._sandbox_pool = SandboxPool(pods)
+    harness._tenant = SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id)
+    harness._interrupt_message = "stopped by the user"
+    assert "turn_after" not in thread.config
+    with caplog.at_level(logging.WARNING):
+        # As the wake takes a stop before its loop starts: no turn is named yet, no pod made, nothing handed on.
+        await harness._abort_iteration_with_pause(thread, None)
+    assert "was not carried out on its hand-off" not in caplog.text
+    assert await store.get_events(thread.id, types=[EventType.SESSION_PAUSE]) == []
+    assert pods.pods == {}
