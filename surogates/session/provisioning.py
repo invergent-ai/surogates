@@ -147,6 +147,7 @@ async def create_agent_session(
     merged_config.pop("sandbox_root_session_id", None)
     merged_config.pop("history_thread", None)
     merged_config.pop("history_project", None)
+    merged_config.pop("under_thread", None)
     # Server-owned too: where a session runs is decided from a device the API
     # checked, never by caller-supplied config.
     merged_config.pop("execution", None)

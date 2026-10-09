@@ -611,3 +611,17 @@ async def test_every_session_under_a_project_thread_says_which_thread_and_no_cal
     # A child of any other session does not, whatever its caller passes.
     await create_child_session(store=store, parent=_make_session(), channel="delegation", config={"under_thread": "t-1"})
     assert "under_thread" not in store.create_session.await_args.kwargs["config"]
+
+
+@pytest.mark.asyncio
+async def test_no_caller_says_a_new_chat_is_under_a_project_thread():
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+    storage = SimpleNamespace(
+        create_bucket=AsyncMock(),
+        resolve_workspace_path=lambda bucket, sid: f"/workspace/{bucket}/{sid}",
+    )
+    await create_agent_session(
+        store=store, storage=storage, settings=SimpleNamespace(storage=SimpleNamespace(bucket="tenant-bucket")),
+        org_id=uuid4(), user_id=uuid4(), agent_id="a-1", channel="web", config={"under_thread": "t-1"},
+    )
+    assert "under_thread" not in store.create_session.await_args.kwargs["config"]
