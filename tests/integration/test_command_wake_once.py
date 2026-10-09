@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select, text
 
 import surogates.harness.loop as loop_module
@@ -305,9 +306,13 @@ class Workers:
         )
 
 
-@pytest.fixture
-def workers(api, monkeypatch) -> Workers:
-    return Workers(api, monkeypatch)
+@pytest_asyncio.fixture(loop_scope="session")
+async def workers(api, monkeypatch):
+    yield Workers(api, monkeypatch)
+    # The routines these chats made are due: no other test's ticker should find them.
+    async with api.app.state.session_factory() as db:
+        await db.execute(text("DELETE FROM scheduled_sessions WHERE org_id = :org"), {"org": api.org_id})
+        await db.commit()
 
 
 #: Each command the harness answers itself and that starts no work of its own, with its handler.
