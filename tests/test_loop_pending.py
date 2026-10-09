@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 
 import surogates.harness.loop as loop_module
-from surogates.harness.loop_pending import _actionable_pending_events, _turn_for_a_hand_back
+from surogates.harness.loop_pending import _actionable_pending_events, _hand_back_unread, _turn_for_a_hand_back
 from surogates.session.events import EventType
 from tests.test_wake_slash_command_gate import _harness, _permissive, _session, _stub_store
 
@@ -70,6 +70,29 @@ def test_a_computers_hand_back_is_told_for_the_pane_and_the_turn_it_gives_is_its
     assert [e.id for e in _actionable_pending_events(events, cursor=4)] == [8, 9]
 
 
+def taken_over(id_: int, *, computer: bool = True) -> SimpleNamespace:
+    """A take-over as the control route writes it: a computer's says it is one, the cloud's does not."""
+    return SimpleNamespace(
+        id=id_, type=EventType.BROWSER_CONTROL_GRANTED.value,
+        data={"owner_user_id": "user-1", **({"computer": True} if computer else {})},
+    )
+
+
+def test_a_hand_backs_resume_is_no_work_once_its_user_took_the_browser_over_again_before_it_was_read():
+    def work(*log: SimpleNamespace) -> list[int]:
+        return [e.id for e in _actionable_pending_events(list(log), cursor=4)]
+
+    assert work(resumed(5)) == [5]
+    assert work(resumed(5), taken_over(6)) == []
+    # Each hand back's own: one made after the take-over is work.
+    assert work(resumed(5), taken_over(6), resumed(7)) == [7]
+    # Read by a request first, it was the work of that turn, which a wake may have to run again.
+    assert work(resumed(5), asked(6), taken_over(7)) == [5, 6]
+    # Only a take-over of the computer's browser, and only a hand back's resume.
+    assert work(resumed(5), taken_over(6, computer=False)) == [5]
+    assert work(resumed(5, "user_retry"), taken_over(6)) == [5]
+
+
 def said(id_: int, text: str = "Open the report.") -> SimpleNamespace:
     return SimpleNamespace(id=id_, type=EventType.USER_MESSAGE.value, data={"content": text})
 
@@ -94,6 +117,18 @@ def asked(id_: int) -> SimpleNamespace:
 def woken(id_: int) -> SimpleNamespace:
     """A wake that took the session's work: the user's last message, if one waited."""
     return SimpleNamespace(id=id_, type=EventType.HARNESS_WAKE.value, data={"worker_id": "worker-1"})
+
+
+@pytest.mark.parametrize(("log", "unread"), [
+    ([resumed(1)], True),
+    ([resumed(1), asked(2)], False),
+    ([resumed(1), taken_over(2)], False),
+    ([resumed(1), taken_over(2), resumed(3)], True),
+    ([resumed(1), taken_over(2, computer=False)], True),
+    ([resumed(1, "user_retry")], False),
+], ids=["given", "read", "taken-over-again", "handed-back-anew", "the-clouds-taken-over", "another-resume"])
+def test_a_hand_back_is_unread_until_a_request_reads_it_or_its_user_takes_the_browser_over_again(log, unread):
+    assert _hand_back_unread(log) is unread
 
 
 @pytest.mark.parametrize(("log", "the_hand_backs"), [
@@ -128,6 +163,16 @@ def woken(id_: int) -> SimpleNamespace:
     # A turn the model answered, then a command its own wake answers with no request: the request was the
     # turn before's, and this command is done with.
     ([said(1), woken(2), asked(3), answered(4), said(5, "/code fix the totals"), woken(6), resumed(7)], True),
+    # Its user took the browser over again before the hand back's turn came: that turn is nobody's, and
+    # the log reads as it did before the hand back.
+    ([said(1), answered(2), resumed(3), taken_over(4)], False),
+    ([said(1, "/compress"), resumed(2), taken_over(3)], False),
+    # And handed it back anew: the turn is that hand back's.
+    ([said(1), answered(2), resumed(3), taken_over(4), resumed(5)], True),
+    # Taken over again once the hand back's turn had begun, and been cut off: the turn is still its own.
+    ([said(1), answered(2), resumed(3), woken(4), asked(5), answered(6, calls=True), taken_over(7)], True),
+    # The cloud's browser taken over takes no turn away.
+    ([said(1), answered(2), resumed(3), taken_over(4, computer=False)], True),
     # A hand back's own event, a resume for any other reason, and the cloud's hand back give no such turn.
     ([said(1), answered(2), handed_back(3, computer=True, resumes=True)], False),
     ([said(1), answered(2), resumed(3, "user_retry")], False),
@@ -138,6 +183,8 @@ def woken(id_: int) -> SimpleNamespace:
     "its-turn-ended-unanswered", "message-not-taken", "message-under-way", "typed-since", "hand-back-answered",
     "during-a-commands-wake", "a-command-answered-its-own-way", "read-in-the-messages-turn",
     "a-new-message-after-a-command", "a-command-after-an-answered-turn",
+    "taken-over-again", "taken-over-again-over-a-message", "handed-back-anew", "taken-over-again-in-its-turn",
+    "the-clouds-taken-over",
     "the-hand-backs-own-event", "another-resume", "the-clouds", "empty",
 ])
 def test_a_turn_is_a_hand_backs_once_the_users_last_message_is_done_with_and_until_it_is_answered(log, the_hand_backs):
@@ -184,6 +231,14 @@ async def test_a_wake_at_a_hand_back_its_user_confirmed_runs_the_agents_turn(mon
     turns, wrote = await _wake(monkeypatch, taken_over, handed_back_, resumed(5))
     assert turns == 1
     assert wrote == [EventType.HARNESS_WAKE]
+
+
+@pytest.mark.asyncio
+async def test_a_wake_at_a_hand_back_whose_user_took_the_browser_over_again_runs_no_turn(monkeypatch):
+    taken_over_ = told(3, EventType.BROWSER_CONTROL_GRANTED)
+    handed_back_ = told(4, EventType.BROWSER_CONTROL_RETURNED, resumes=True)
+    again = told(6, EventType.BROWSER_CONTROL_GRANTED)
+    assert await _wake(monkeypatch, taken_over_, handed_back_, resumed(5), again) == (0, [])
 
 
 @pytest.mark.asyncio

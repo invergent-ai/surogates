@@ -2463,6 +2463,24 @@ class SessionStore:
             EventRow.type == "browser.control_returned",
             EventRow.data["computer"].astext.is_not_distinct_from("true"),
         )
+        # The resume such a hand back gave is passed over with it once its
+        # user took the browser over again: with that turn still to come, a
+        # wake finds no work in it (``_hand_backs_taken_over_again``), and a
+        # chat recovered for it pass after pass would be failed.  One a turn
+        # had read is under that turn's own events, so nothing changes there.
+        later = aliased(EventRow)
+        resume_taken_over_again = and_(
+            EventRow.type == "session.resume",
+            EventRow.data["source"].astext.is_not_distinct_from(BROWSER_HAND_BACK),
+            select(later.id)
+            .where(
+                later.session_id == EventRow.session_id,
+                later.id > EventRow.id,
+                later.type == "browser.control_granted",
+                later.data["computer"].astext.is_not_distinct_from("true"),
+            )
+            .exists(),
+        )
 
         # Correlated scalar subqueries: latest event for the session
         # under test, skipping trailing-async events so the predicate
@@ -2476,6 +2494,7 @@ class SessionStore:
                     EventRow.session_id == SessionRow.id,
                     EventRow.type.notin_(trailing_async_event_types),
                     not_(hand_back_for_the_pane),
+                    not_(resume_taken_over_again),
                 )
                 .order_by(EventRow.id.desc())
                 .limit(1)

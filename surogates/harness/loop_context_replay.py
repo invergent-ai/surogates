@@ -9,7 +9,7 @@ import re
 from uuid import UUID
 
 from surogates.devices.binding import device_of
-from surogates.devices.browser import of_a_sub_agent, resumes_the_agent
+from surogates.devices.browser import of_a_sub_agent, resumes_the_agent, takes_the_browser_over
 from surogates.harness.context_files import load_folder_context
 from surogates.harness.loop_attachments import (
     _attachments_note_from_data,
@@ -280,6 +280,21 @@ def news(event) -> dict | None:
     return None
 
 
+def held_news(held: list[dict], event) -> list[dict]:
+    """*held*, the news waiting for a session's next model request, once
+    *event* is in its log after it.
+
+    News is added to it.  And where the user of a chat on their computer
+    takes its browser over again, a hand back still waiting is news no
+    more: read then, it would say the browser tools work while they do not.
+    """
+    if (note := news(event)) is not None:
+        return [*held, note]
+    if takes_the_browser_over(event):
+        return [note for note in held if note["content"] != BROWSER_HANDED_BACK]
+    return held
+
+
 def unread_reports(events: list) -> list[dict]:
     """The news no model request has read, worker reports and hand backs of
     the browser alike: those after the log's last ``llm.request``.  Replay
@@ -288,10 +303,7 @@ def unread_reports(events: list) -> list[dict]:
     replay puts them once that request is in the log."""
     held: list[dict] = []
     for event in events:
-        if event.type == EventType.LLM_REQUEST.value:
-            held = []
-        elif (note := news(event)) is not None:
-            held.append(note)
+        held = [] if event.type == EventType.LLM_REQUEST.value else held_news(held, event)
     return held
 
 
@@ -523,10 +535,11 @@ class ContextReplayMixin:
                     held_reports.append(note)
 
             # The resume a hand back of the browser gave the chat is read the
-            # same way: at the next request, on its own.  The hand back's own
-            # event, as the take-over's, is for the pane.
-            elif resumes_the_agent(event):
-                held_reports.append({"role": "user", "content": BROWSER_HANDED_BACK})
+            # same way: at the next request, on its own, unless its user took
+            # the browser over again first.  The hand back's own event, as the
+            # take-over's, is for the pane.
+            elif resumes_the_agent(event) or takes_the_browser_over(event):
+                held_reports = held_news(held_reports, event)
 
             # A sub-agent's tab on the user's computer is in this log for the
             # chat's pane alone: this session's own tab is as it was.

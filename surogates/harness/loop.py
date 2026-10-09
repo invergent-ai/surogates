@@ -200,7 +200,7 @@ from surogates.harness.loop_context_replay import (
     ContextReplayMixin,
     build_user_message_dict,
     coalesce_user_messages,
-    news,
+    held_news,
     prune_superseded_canvas_images,
     unread_reports,
 )
@@ -830,7 +830,7 @@ class AgentHarness(
         """
         events = await self._store.get_events(
             session_id,
-            types=[EventType.LLM_REQUEST, EventType.SESSION_RESUME],
+            types=[EventType.LLM_REQUEST, EventType.SESSION_RESUME, EventType.BROWSER_CONTROL_GRANTED],
         )
         return _hand_back_unread(events)
 
@@ -851,13 +851,15 @@ class AgentHarness(
     async def _collect_reports(
         self,
         session: Session,
+        held: list[dict],
         after_event_id: int,
         before: int | None = None,
     ) -> tuple[list[dict], int]:
-        """The news that reached a session past *after_event_id*, and below
-        *before* when given: for a project's master, thread reports and news
-        of threads the user started; for a chat on its user's computer, the
-        resume their handing back the browser gave it.
+        """*held*, the news waiting for a session's next request, with what
+        reached it past *after_event_id*, and below *before* when given:
+        for a project's master, thread reports and news of threads the user
+        started; for a chat on its user's computer, the resume their handing
+        back the browser gave it, unless they took it over again since.
 
         Read for each model request, and at the end of a reply, one message
         each, as replay renders them.  Of workers, only a master reads them
@@ -869,16 +871,17 @@ class AgentHarness(
         if is_project_master(session.config):
             types += [EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.WORKER_SPAWNED]
         if device_of(session.config) is not None:
-            types.append(EventType.SESSION_RESUME)
+            types += [EventType.SESSION_RESUME, EventType.BROWSER_CONTROL_GRANTED]
         if not types:
-            return [], after_event_id
+            return held, after_event_id
         events = await self._store.get_events(session.id, after=after_event_id, types=types)
         if before is not None:
             events = [event for event in events if event.id < before]
         if not events:
-            return [], after_event_id
-        notes = [news(event) for event in events]
-        return [note for note in notes if note is not None], max(event.id for event in events)
+            return held, after_event_id
+        for event in events:
+            held = held_news(held, event)
+        return held, max(event.id for event in events)
 
     async def _collect_steer_messages(
         self,
@@ -2220,10 +2223,10 @@ class AgentHarness(
             # it rebuilds is the one sent.  A master's threads also report
             # during its turn; this request reads those written before it,
             # and one that lands after it waits for the next request.
-            arrived, report_cursor = await self._collect_reports(
-                session, report_cursor, before=request_id,
+            reports, report_cursor = await self._collect_reports(
+                session, reports, report_cursor, before=request_id,
             )
-            messages.extend(reports + arrived)
+            messages.extend(reports)
             reports = []
 
             # 2. Call the LLM with retry (streaming or non-streaming).
@@ -3039,8 +3042,7 @@ class AgentHarness(
                 # going too; the next request reads it.  News alone waits
                 # for the master's next turn, which reads it from the log.
                 # So does the resume a hand back of the browser gave the chat.
-                arrived, report_cursor = await self._collect_reports(session, report_cursor)
-                reports.extend(arrived)
+                reports, report_cursor = await self._collect_reports(session, reports, report_cursor)
                 if followup is not None or (reports and (
                     await self._has_unread_report(session.id)
                     or (device_of(session.config) is not None and await self._has_unread_hand_back(session.id))

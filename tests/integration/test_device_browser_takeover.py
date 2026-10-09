@@ -743,6 +743,43 @@ async def test_a_hand_back_whose_wake_was_lost_is_found_by_the_sweeper(computer,
         await computer.unqueue(chat)
 
 
+async def test_a_hand_back_whose_user_took_the_browser_over_again_before_its_wake_ran_is_left_alone_by_the_sweeper(computer):
+    chat = await computer.idle()
+    await computer.control(chat, "acquire")
+    await computer.hands_back(chat)
+    # The wake the hand back queued never ran, and its user has the browser again.
+    await computer.unqueue(chat)
+    assert await computer.orphans() == {chat}
+    assert (await computer.control(chat, "acquire"))["outcome"] == "granted"
+
+    try:
+        # A wake would find no work in it, so the sweeper recovers nothing: pass after pass would fail the chat.
+        assert (await computer.log(chat))[-3:] == ["browser.control_returned", "session.resume", "browser.control_granted"]
+        assert await computer.work(chat) == []
+        assert await computer.orphans() == set()
+        assert await computer.sweep() == 0
+        # Handed back anew, and that wake lost too: found as any is.
+        await computer.hands_back(chat)
+        await computer.unqueue(chat)
+        assert await computer.orphans() == {chat}
+    finally:
+        await computer.unqueue(chat)
+
+
+async def test_a_resume_passed_over_for_a_later_take_over_is_a_hand_backs_and_the_take_over_a_computers(computer):
+    emit = computer.store.emit_event
+    another_resume, the_clouds = await computer.idle(), await computer.idle()
+    # A resume for any other reason is a turn to run, whoever took the browser over after it.
+    await emit(another_resume, EventType.SESSION_RESUME, {"source": "user_retry"})
+    await emit(another_resume, EventType.BROWSER_CONTROL_GRANTED, {"computer": True})
+    # And a hand back's is, where what followed it names no computer.
+    await emit(the_clouds, EventType.SESSION_RESUME, {"source": "browser_hand_back"})
+    await emit(the_clouds, EventType.BROWSER_CONTROL_GRANTED, {"owner_user_id": str(computer.user_id)})
+    await computer.left(another_resume, the_clouds)
+
+    assert await computer.orphans() == {another_resume, the_clouds}
+
+
 async def test_a_take_over_of_a_chat_no_turn_has_run_in_leaves_it_waiting_for_its_first_message(computer):
     # A chat on a folder with no events waits for its first message: the sweeper leaves it, and would fail
     # it at its third pass otherwise. Its browser taken over from it changes nothing of that.
@@ -1602,6 +1639,89 @@ async def test_a_hand_back_while_a_turn_is_under_way_is_made_and_tells_neither_t
     assert handed == []
     assert await asking.resumes(chat) == []
     assert HANDED_BACK not in await replayed(asking.api, await asking.session(chat))
+
+
+async def test_a_hand_back_left_unread_is_no_news_once_its_user_has_taken_the_browser_over_again(asking, monkeypatch):
+    chat = await asking.stopped_while_held()
+    await asking.hands_back(chat)
+    # Stopped before the wake came, and the browser taken over again.
+    await asking.store.update_session_status(chat, "paused")
+    await asking.unqueue(chat)
+    assert (await asking.control(chat, "acquire", asking.window))[1]["outcome"] == "granted"
+
+    try:
+        # Their next message's turn is not told that the browser tools work again: they do not.
+        await asking.says(chat, "Where were we?")
+        sent = await woken(asking.api, monkeypatch, await asking.session(chat))
+        assert sent[-1] == {"role": "user", "content": "Where were we?"}
+        assert HANDED_BACK not in sent
+        # Nor does replay say it of that request later.
+        await asking.ends(chat)
+        assert HANDED_BACK not in await replayed(asking.api, await asking.session(chat))
+        # Handed back again, that hand back's turn reads its own, once.
+        await asking.hands_back(chat)
+        sent = await woken(asking.api, monkeypatch, await asking.session(chat))
+        assert sent.count(HANDED_BACK) == 1
+    finally:
+        await asking.unqueue(chat)
+
+
+async def test_a_hand_back_whose_user_took_the_browser_over_again_before_its_wake_ran_gives_no_turn(asking, monkeypatch):
+    chat = await asking.stopped_while_held()
+    await asking.hands_back(chat)
+    assert (await asking.control(chat, "acquire", asking.window))[1]["outcome"] == "granted"
+
+    try:
+        # The wake the hand back queued finds nothing to do, and nothing revives the chat for it.
+        harness, handed = waking(asking.api, monkeypatch)
+        await harness.wake(chat)
+        assert handed == []
+        await asking.store.update_session_status(chat, "completed")
+        harness, handed = waking(asking.api, monkeypatch)
+        await harness.wake(chat)
+        assert handed == []
+        assert await asking.resumes(chat) == [{"source": "browser_hand_back"}]
+    finally:
+        await asking.unqueue(chat)
+
+
+async def test_a_hand_back_read_in_a_turn_under_way_is_dropped_where_the_browser_is_taken_over_again_before_its_request(
+    asking, monkeypatch,
+):
+    chat = await asking.stopped_while_held()
+    await asking.says(chat, "Where are we?")
+
+    async def user_hands_back():
+        async with asking.no_turn_seen_under_way(monkeypatch):
+            await asking.hands_back(chat)
+
+    unread = loop_module.AgentHarness._has_unread_hand_back
+
+    async def and_takes_over_again(self, session_id) -> bool:
+        # Once the hand back is held for the turn's next request, and before that request is made.
+        waits = await unread(self, session_id)
+        if waits:
+            assert (await asking.control(chat, "acquire", asking.window))[1]["outcome"] == "granted"
+        return waits
+
+    monkeypatch.setattr(loop_module.AgentHarness, "_has_unread_hand_back", and_takes_over_again)
+    try:
+        requests = await live_turn(
+            asking.api, monkeypatch, await asking.session(chat),
+            [_final_response("Waiting for the browser."), _final_response("Still waiting.")],
+            during_reply=user_hands_back,
+        )
+        # The hand back kept the turn going; its request does not say the browser tools work again.
+        assert len(requests) == 2
+        assert HANDED_BACK not in requests[1]
+        # Replay gives the conversation that request sent.
+        await asking.ends(chat)
+        replay = await replayed(asking.api, await asking.session(chat))
+        assert HANDED_BACK not in replay
+        [_system, *sent] = requests[1]
+        assert replay[: len(sent)] == sent
+    finally:
+        await asking.unqueue(chat)
 
 
 async def test_a_hand_back_given_its_turn_as_another_began_is_read_in_that_turn_and_gives_no_second(

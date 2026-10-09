@@ -163,6 +163,12 @@ def resumes_the_agent(event: Any) -> bool:
     return said is not None and said.get("source") == BROWSER_HAND_BACK
 
 
+def takes_the_browser_over(event: Any) -> bool:
+    """Whether an event tells a chat on its user's computer that its user took its browser over."""
+    said = _of(event, EventType.BROWSER_CONTROL_GRANTED)
+    return said is not None and said.get("computer") is True
+
+
 def for_the_pane_alone(event: Any) -> bool:
     """Whether an event is a hand back of the browser on the user's computer: told for the chat's
     pane, as the take-over was, and no work for anyone, whoever made it and whatever it gave.  The

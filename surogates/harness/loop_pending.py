@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from surogates.devices.browser import for_the_pane_alone, resumes_the_agent
+from surogates.devices.browser import for_the_pane_alone, resumes_the_agent, takes_the_browser_over
 from surogates.session.events import EventType
 
 _HARNESS_CONTROL_PENDING_EVENT_TYPES = frozenset({
@@ -24,20 +24,43 @@ _HARNESS_CONTROL_PENDING_EVENT_TYPES = frozenset({
 })
 
 
+def _kind(event: Any) -> str:
+    return str(getattr(event.type, "value", event.type))
+
+
+def _hand_backs_taken_over_again(events: list[Any]) -> set[int]:
+    """The resumes a hand back of the browser gave a chat that are news no more: its user took the
+    browser over again before any request of the model's had read them.
+
+    The agent would read that the browser tools work again while its user
+    holds the browser.  Such a resume is as though it had not been written:
+    no work for a wake, no turn, and nothing to read.  The next hand back
+    gives its own.
+    """
+    waiting: list[int] = []
+    taken_again: set[int] = set()
+    for event in events:
+        if _kind(event) == EventType.LLM_REQUEST.value:
+            waiting = []
+        elif resumes_the_agent(event):
+            waiting.append(event.id)
+        elif takes_the_browser_over(event):
+            taken_again.update(waiting)
+            waiting = []
+    return taken_again
+
+
 def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
     """Return post-cursor events that should start harness work."""
+    taken_again = _hand_backs_taken_over_again(events)
     pending = []
     for event in events:
-        event_type = (
-            event.type.value
-            if isinstance(event.type, EventType)
-            else str(event.type)
-        )
         if (
             event.id is not None
             and event.id > cursor
-            and event_type not in _HARNESS_CONTROL_PENDING_EVENT_TYPES
+            and _kind(event) not in _HARNESS_CONTROL_PENDING_EVENT_TYPES
             and not for_the_pane_alone(event)
+            and event.id not in taken_again
         ):
             pending.append(event)
     return pending
@@ -45,7 +68,7 @@ def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
 
 def _hand_back_unread(events: list[Any]) -> bool:
     """Whether the resume a hand back of the browser gave the chat waits to be read: none of the
-    model's requests came after it.
+    model's requests came after it, and its user has not taken the browser over again since.
 
     The cursor cannot tell: one that lands while a turn, or a command's
     wake, is under way is behind the cursor once that moves.  Every model
@@ -54,7 +77,7 @@ def _hand_back_unread(events: list[Any]) -> bool:
     """
     unread = False
     for event in events:
-        if str(getattr(event.type, "value", event.type)) == EventType.LLM_REQUEST.value:
+        if _kind(event) == EventType.LLM_REQUEST.value or takes_the_browser_over(event):
             unread = False
         elif resumes_the_agent(event):
             unread = True
@@ -82,8 +105,11 @@ def _turn_for_a_hand_back(events: list[Any]) -> bool:
     taken = asked = False
     # A hand back no model request has read yet.
     unread = False
+    taken_again = _hand_backs_taken_over_again(events)
     for event in events:
-        kind = str(getattr(event.type, "value", event.type))
+        if event.id in taken_again:
+            continue
+        kind = _kind(event)
         ends_a_turn = kind == EventType.SESSION_COMPLETE.value or (
             # The model's answer ends a turn; its calls for tools do not.
             kind == EventType.LLM_RESPONSE.value
