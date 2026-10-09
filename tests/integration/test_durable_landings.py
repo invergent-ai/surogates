@@ -1843,14 +1843,24 @@ async def test_a_failed_turns_report_names_a_helpers_files_its_open_did_not_take
     assert "not_taken" not in report and (pods.project / "notes.txt").read_text() == "v2 notes, saved by you\n"
 
 
-async def test_a_turn_kept_because_its_landing_could_not_start_names_them_too(api, monkeypatch, tmp_path):
+@pytest.mark.parametrize("landing", ["could not start", "failed at its commit step"])
+async def test_a_turn_kept_because_its_landing_did_not_run_names_them_too(api, monkeypatch, tmp_path, landing):
     master, thread, pods, pool = await a_thread_whose_open_left_a_helpers_file_out(api, monkeypatch, tmp_path)
+    call = landing_module._call
 
     async def no_settle(*args, **kwargs):
         raise ConnectionError("the database did not answer")
 
+    async def the_commit_fails(sandbox_pool, owner, action, **arguments):
+        if action == "commit":
+            raise landing_module.LandingStepError("git add failed: Input/output error")
+        return await call(sandbox_pool, owner, action, **arguments)
+
     with monkeypatch.context() as patch:
-        patch.setattr(landing_module, "settle_running", no_settle)
+        if landing == "could not start":
+            patch.setattr(landing_module, "settle_running", no_settle)
+        else:
+            patch.setattr(landing_module, "_call", the_commit_fails)
         await ends(api, pool, thread)
     [report] = await reports(api, master)
     assert (report["landing"], report["saved"], report["not_taken"]) == ("compensated", True, ["notes.txt"])

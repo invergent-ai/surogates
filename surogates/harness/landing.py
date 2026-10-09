@@ -506,8 +506,9 @@ async def _land(
             # at the turn's end: the copy is kept on its branch first.
             try:
                 await held()
-                await _call(sandbox_pool, owner, "keep", **_kept_as(session), base=True)
-                outcome["saved"] = True
+                kept = await _call(sandbox_pool, owner, "keep", **_kept_as(session), base=True)
+                # What the commit step would have named: the pod's list goes with the pod.
+                outcome.update(saved=True, not_taken=kept.get("not_taken", []))
             except Exception:
                 logger.warning("Could not keep the copy of %s", session.id, exc_info=True)
     applied = {c["path"]: c for c in outcome["landed"]}
