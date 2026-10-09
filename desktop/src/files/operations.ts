@@ -51,6 +51,11 @@ const KINDS: Record<string, Kind> = {
   land,
 };
 
+// The helper's own files beside a user's: a write's temp file, and a landing's (land.ts). A helper killed at the wrong
+// moment leaves one, so no listing names it as a file of the folder's.
+export const OWN_FILE = /^\.surogate-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.tmp$/;
+export const ownFile = (): string => `.surogate-${randomUUID()}.tmp`;
+
 const WRITE_EFBIG = new Failure({ type: "os", code: "EFBIG", message: WRITE_TOO_LARGE });
 const READ_EFBIG = new Failure({ type: "os", code: "EFBIG", message: READ_TOO_LARGE });
 // What one read call takes from the file at a time.
@@ -355,7 +360,7 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
     if (existing.nlink > 1) throw osError("EMLINK", key, "File has more than one hard link, so it is not changed");
     mode = existing.mode & 0o7777;
   }
-  const temporary = join(parent, `.surogate-${randomUUID()}.tmp`);
+  const temporary = join(parent, ownFile());
   const fd = io(key, () =>
     openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o666));
   try {
