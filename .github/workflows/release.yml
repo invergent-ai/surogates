@@ -279,14 +279,16 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" "desktop-vm-${key}.json" --repo "$GITHUB_REPOSITORY"
           fi
 
-  # Surogate Desktop's release (desktop/release/), in two jobs, as every step of a job shares its
-  # runner. desktop-build makes the tarball from this tag with the VM image's manifest the
-  # desktop-vm-image job checked R2 against, and holds no secret: its npm ci runs the install
-  # scripts of the whole dependency tree. desktop-publish runs no npm and no script of a
-  # dependency's: in the desktop-release Environment, whose reviewer approves each run, it writes
-  # the tarball's manifest in a step that has no key, signs that manifest with the release key in
-  # the next, which opens no tarball, then puts the release, the install script and latest.json on
-  # R2 under desktop/. The cloud's release waits for neither.
+  # Surogate Desktop's release (desktop/release/), in three jobs, as every step of a job shares its
+  # runner: a job is the boundary, and a step is none. desktop-build makes the tarball from this
+  # tag with the VM image's manifest the desktop-vm-image job checked R2 against, and holds no
+  # secret: its npm ci runs the install scripts of the whole dependency tree. desktop-describe
+  # reads that tarball, all of it that is ever read before it is installed, and writes its
+  # manifest: it holds no secret either, and runs no npm. desktop-publish runs no npm, no script
+  # of a dependency's, and nothing that opens the tarball: in the desktop-release Environment,
+  # whose reviewer approves each run, it signs that manifest with the release key, only as the one
+  # of this tag and of the build's own two words for its tarball, then puts the release, the
+  # install script and latest.json on R2 under desktop/. The cloud's release waits for none.
   desktop-build:
     needs: desktop-vm-image
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -344,8 +346,43 @@ jobs:
           path: out/desktop/surogate-desktop-*-linux-x64.tar.gz
           if-no-files-found: error
 
-  desktop-publish:
+  desktop-describe:
     needs: desktop-build
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      # publish.sh, and the install script it reads the tarball's helper and package by, from the
+      # tag; the tarball from the build. Each action by its commit, as in the job that signs: what
+      # this job writes is what that one signs.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Take the tarball
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-tarball
+          path: out/desktop
+
+      # All that reads the build's tarball, in a job that has no secret and no Environment: what a
+      # flaw in a reader of the build's bytes could write, or leave running, stays on this runner.
+      # What the build says is read from the step's environment, never pasted into its script.
+      - name: Write its manifest
+        env:
+          DESKTOP_TARBALL_SHA256: ${{ needs.desktop-build.outputs.sha256 }}
+        run: desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/desktop
+
+      - name: Keep the manifest for the publish job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-manifest
+          path: out/desktop/manifest.json
+          if-no-files-found: error
+
+  desktop-publish:
+    needs:
+      - desktop-build
+      - desktop-describe
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     environment: desktop-release
@@ -356,9 +393,9 @@ jobs:
       group: desktop-release
       cancel-in-progress: false
     steps:
-      # publish.sh, and the install script it trusts and sends, from the tag; the tarball from the build.
-      # Each action by its commit: a tag can be moved to other code, which this job would run with
-      # the release key.
+      # publish.sh, and the install script it trusts and sends, from the tag; the tarball from the
+      # build, and its manifest from the job that read it. Each action by its commit: a tag can be
+      # moved to other code, which this job would run with the release key.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Take the tarball
@@ -367,16 +404,15 @@ jobs:
           name: desktop-tarball
           path: out/desktop
 
-      # All that reads the build's tarball, in a step that has no secret: a program can read what
-      # its step's shell was started with, and the release key is in the next step's alone.
-      # What the build says is read from the step's environment, never pasted into its script.
-      - name: Write its manifest
-        env:
-          DESKTOP_TARBALL_SHA256: ${{ needs.desktop-build.outputs.sha256 }}
-        run: desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/desktop
+      - name: Take its manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-manifest
+          path: out/desktop
 
       # The signing opens no tarball: it signs the manifest only as the one of this tag and of the
-      # tarball the build made, by the build's own words for its hash and its size.
+      # tarball the build made, by the build's own words for its hash and its size. Of what the
+      # other job wrote, its state schema alone is taken.
       - name: Sign its manifest
         env:
           DESKTOP_RELEASE_KEY: ${{ secrets.DESKTOP_RELEASE_KEY }}
@@ -384,6 +420,7 @@ jobs:
           DESKTOP_TARBALL_SIZE: ${{ needs.desktop-build.outputs.size }}
         run: desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop
 
+      # The tarball is sent only as the one that the signed manifest names, by its hash.
       - name: Publish the release
         env:
           S3_ENDPOINT: ${{ secrets.R2_ENDPOINT }}

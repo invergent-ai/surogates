@@ -219,26 +219,67 @@ class ReleaseWorkflowTest < Minitest::Test
     ], steps[hash].fetch("run").lines.map(&:strip)
   end
 
+  def test_desktop_describe_writes_the_manifest_of_the_built_tarball_in_a_job_that_holds_no_secret
+    job = @workflow.fetch("jobs").fetch("desktop-describe")
+    steps = job.fetch("steps")
+
+    # All that reads the build's tarball, on a runner of its own: a step of the job that signs
+    # could write into that job's checkout, or leave something running beside its key. The job
+    # is these four steps and nothing else, each action by its commit (v4.4.0, v4.3.0, v4.6.2).
+    assert_equal [
+      { "uses" => "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" },
+      { "uses" => "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" },
+      { "run" => 'desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/desktop' },
+      { "uses" => "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" },
+    ], steps.map { |step| step.slice("uses", "run") }
+    assert_equal [%w[uses], %w[name uses with], %w[env name run], %w[name uses with]], steps.map { |step| step.keys.sort }
+    assert_equal({ "name" => "desktop-tarball", "path" => "out/desktop" }, steps[1].fetch("with"))
+    # The hash the build's job gave for its tarball, through the step's environment, never pasted
+    # into its script, where what the build says would be run.
+    assert_equal({ "DESKTOP_TARBALL_SHA256" => "${{ needs.desktop-build.outputs.sha256 }}" }, steps[2].fetch("env"))
+    # The manifest alone is handed on, and a run that wrote none hands on nothing.
+    assert_equal({ "name" => "desktop-manifest", "path" => "out/desktop/manifest.json", "if-no-files-found" => "error" }, steps[3].fetch("with"))
+    # No secret by any name, no Environment, which would hand it every secret of that one, and no
+    # env of the job's own; a runner of its own; and the build before it, whose hash it checks.
+    assert_equal %w[needs permissions runs-on steps timeout-minutes], job.keys.sort
+    assert_equal ["desktop-build"], Array(job.fetch("needs"))
+    assert_equal({ "contents" => "read" }, job.fetch("permissions"))
+    assert_equal "blacksmith-4vcpu-ubuntu-2404", job.fetch("runs-on")
+    refute_match(/\bsecrets\b/, job.to_s)
+    refute_includes job.to_s, "DESKTOP_RELEASE_KEY"
+    refute_includes job.to_s, "desktop-release"
+    # Nothing of the dependency tree: no npm, no node, and no script of the package's but the one.
+    steps.each do |step|
+      refute_match(/\b(npm|npx|node|package\.sh)\b/, step["run"].to_s, "#{step["name"] || step["uses"]} runs npm, node or the packaging")
+      refute_includes step["uses"].to_s, "setup-node"
+    end
+  end
+
   def test_desktop_publish_signs_and_sends_the_built_tarball_one_release_at_a_time_in_its_environment
     job = @workflow.fetch("jobs").fetch("desktop-publish")
     steps = job.fetch("steps")
     runs = steps.map { |step| step["run"].to_s }
 
-    assert_equal ["desktop-build"], Array(job.fetch("needs"))
+    # Both: the build, for its two words of the tarball, and the job that wrote the manifest, which
+    # this one does not write itself.
+    assert_equal %w[desktop-build desktop-describe], Array(job.fetch("needs"))
     assert_equal "desktop-release", job.fetch("environment")
     assert_equal({ "contents" => "read" }, job.fetch("permissions"))
     assert_equal({ "group" => "desktop-release", "cancel-in-progress" => false }, job.fetch("concurrency"))
-    tarball = steps.index { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }
-    assert_equal({ "name" => "desktop-tarball", "path" => "out/desktop" }, steps[tarball].fetch("with"))
-    describe = runs.index { |run| run.include?('desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/desktop') }
+    taken = steps.each_index.select { |index| steps[index]["uses"].to_s.start_with?("actions/download-artifact@") }
+    assert_equal [{ "name" => "desktop-tarball", "path" => "out/desktop" }, { "name" => "desktop-manifest", "path" => "out/desktop" }], taken.map { |index| steps[index].fetch("with") }
     sign = runs.index { |run| run.include?('desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop') }
     send = runs.index { |run| run.include?('desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop') }
-    refute_nil describe
     refute_nil sign
-    # The manifest is written of the tarball before it is signed, and signed before it is sent.
-    assert_operator tarball, :<, describe
-    assert_operator describe, :<, sign
+    refute_nil send
+    # The manifest and the tarball are here before the one is signed, and it is signed before both are sent.
+    assert_operator taken.max, :<, sign
     assert_operator sign, :<, send
+    # The job that holds the key reads no tarball: it writes no manifest of one, and unpacks none.
+    runs.each do |run|
+      refute_match(/\bdescribe\b/, run, "the job that holds the release key writes a tarball's manifest")
+      refute_match(/\b(tar|unzip|gzip|gunzip|zcat)\b/, run, "the job that holds the release key unpacks an archive")
+    end
     %w[desktop/scripts/package.sh desktop/release/publish.sh desktop/release/install.sh].each do |script|
       assert File.executable?(script), "#{script} is not executable"
     end
@@ -255,23 +296,17 @@ class ReleaseWorkflowTest < Minitest::Test
 
     # npm ci runs the dependency tree's install scripts, and a job's steps share its runner: the
     # build holds no secret, and the job that holds them installs and runs nothing of npm's.
-    %w[desktop-build desktop-publish].each { |name| refute jobs.fetch(name).key?("env"), "#{name}'s env reaches every step" }
-    jobs.fetch("desktop-build").fetch("steps").each do |step|
-      refute step.to_s.include?("secrets."), "desktop-build's #{step["name"] || step["uses"]} reads a secret"
+    %w[desktop-build desktop-describe desktop-publish].each { |name| refute jobs.fetch(name).key?("env"), "#{name}'s env reaches every step" }
+    %w[desktop-build desktop-describe].each do |name|
+      jobs.fetch(name).fetch("steps").each do |step|
+        refute step.to_s.include?("secrets."), "#{name}'s #{step["name"] || step["uses"]} reads a secret"
+      end
     end
     jobs.fetch("desktop-publish").fetch("steps").each do |step|
       run = step["run"].to_s
       refute_match(/\b(npm|npx|node)\b/, run, "#{step["name"] || step["uses"]} runs npm or node")
       refute_includes step["uses"].to_s, "setup-node"
-      if run.include?("publish.sh describe")
-        # The step that reads the build's tarball has no secret, and the release key by no name: a
-        # program reads what its step's shell was started with. It has the hash the build's job
-        # gave for its tarball, through the step's environment, never pasted into its script,
-        # where what the build says would be run.
-        assert_equal({ "DESKTOP_TARBALL_SHA256" => "${{ needs.desktop-build.outputs.sha256 }}" }, step.fetch("env"))
-        refute step.to_s.include?("secrets."), "the step that reads the build's tarball reads a secret"
-        refute step.to_s.include?("DESKTOP_RELEASE_KEY"), "the step that reads the build's tarball names the release key"
-      elsif run.include?("publish.sh sign")
+      if run.include?("publish.sh sign")
         # With the key, the build's own words for its tarball, its hash and its size: the signing
         # opens no tarball.
         assert_equal({
@@ -307,6 +342,7 @@ class ReleaseWorkflowTest < Minitest::Test
     jobs = @workflow.fetch("jobs")
 
     assert jobs.fetch("desktop-build").key?("timeout-minutes")
+    assert jobs.fetch("desktop-describe").key?("timeout-minutes")
     assert jobs.fetch("desktop-publish").key?("timeout-minutes")
   end
 
@@ -314,10 +350,11 @@ class ReleaseWorkflowTest < Minitest::Test
     release_needs = Array(@workflow.fetch("jobs").fetch("release").fetch("needs", []))
 
     refute_includes release_needs, "desktop-build"
+    refute_includes release_needs, "desktop-describe"
     refute_includes release_needs, "desktop-publish"
   end
 
-  def test_desktop_publish_is_the_tag_s_checkout_the_tarball_s_download_and_publish_sh_and_nothing_else
+  def test_desktop_publish_is_the_tag_s_checkout_the_two_downloads_and_publish_sh_and_nothing_else
     job = @workflow.fetch("jobs").fetch("desktop-publish")
     steps = job.fetch("steps")
 
@@ -329,12 +366,12 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal [
       { "uses" => "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" },
       { "uses" => "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" },
-      { "run" => 'desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/desktop' },
+      { "uses" => "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" },
       { "run" => 'desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop' },
       { "run" => 'desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop' },
     ], steps.map { |step| step.slice("uses", "run") }
     # The checkout names no ref, repository or path: publish.sh and install.sh are the tag's.
-    assert_equal [%w[uses], %w[name uses with], %w[env name run], %w[env name run], %w[env name run]], steps.map { |step| step.keys.sort }
+    assert_equal [%w[uses], %w[name uses with], %w[name uses with], %w[env name run], %w[env name run]], steps.map { |step| step.keys.sort }
     assert_equal %w[concurrency environment needs permissions runs-on steps timeout-minutes], job.keys.sort
     assert_equal "blacksmith-4vcpu-ubuntu-2404", job.fetch("runs-on")
   end

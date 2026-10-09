@@ -501,6 +501,29 @@ describe("the desktop's release manifest", () => {
     expect(wrote).toEqual(given.map(({ name, takes }) => ({ name, writes: takes })));
   });
 
+  it("sends no tarball but the one its signed manifest names, by its hash: the job that sends has a download of its own of the build's tarball, and nothing else in that job reads one", () => {
+    expect(release().status).toBe(0);
+    const bucket = { S3_ENDPOINT: "http://127.0.0.1:9", S3_BUCKET: "releases", ...CREDENTIALS };
+    // No request is made of any bucket: curl, were it started, would write its arguments down.
+    recording(dir, "curl", () => ["exit 7"]);
+    const notIts = { status: 1, stdout: "", stderr: `publish.sh: ${tarball()} is not the tarball that ${out}/manifest.json names, by its sha256: nothing is sent\n` };
+    // Another tarball under the release's name, as another job of the run may put one under the artifact's.
+    const signed = readFileSync(join(out, "manifest.json"));
+    packed(dir, out, "1.2.3", withApp({ version: "1.2.3", stateSchema: 9 }));
+    expect((JSON.parse(signed.toString()) as { sha256: string }).sha256).not.toBe(sha256(readFileSync(tarball())));
+    expect(publish("send", "1.2.3", bucket)).toMatchObject(notIts);
+    // Nor with a manifest that names no hash, or none there, or no tarball.
+    writeFileSync(join(out, "manifest.json"), "{}\n");
+    expect(publish("send", "1.2.3", bucket)).toMatchObject(notIts);
+    rmSync(join(out, "manifest.json"));
+    expect(publish("send", "1.2.3", bucket)).toMatchObject(notIts);
+    writeFileSync(join(out, "manifest.json"), signed);
+    rmSync(tarball());
+    expect(publish("send", "1.2.3", bucket)).toMatchObject(notIts);
+    expect(existsSync(join(dir, "curl-argv"))).toBe(false);
+    expect(readdirSync(out).sort()).toEqual(["manifest.json", "manifest.json.sig"]);
+  });
+
   it("signs with either key a rotating install.sh lists, and refuses a key whose public half it does not list", () => {
     const next = generateKeyPairSync("ed25519");
     writeFileSync(join(dir, "release", "install.sh"), trusting([PUBLIC, pem(next.publicKey)]));

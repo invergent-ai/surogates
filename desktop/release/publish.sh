@@ -21,10 +21,11 @@
 #                                                 # must be the one of this version and of the build's
 #                                                 # tarball, by DESKTOP_TARBALL_SHA256 and
 #                                                 # DESKTOP_TARBALL_SIZE, the build's own words for both
-#   release/publish.sh send <version> <out>       # the release, then the install script and latest.json
-#                                                 # with its signature, each read back, then the release's
-#                                                 # own manifest; never a release again, and latest.json
-#                                                 # only for the newest version
+#   release/publish.sh send <version> <out>       # the release, whose tarball is the one its manifest
+#                                                 # names by its hash, then the install script and
+#                                                 # latest.json with its signature, each read back, then
+#                                                 # the release's own manifest; never a release again,
+#                                                 # and latest.json only for the newest version
 # Environment for send: S3_ENDPOINT (R2's https://<account>.r2.cloudflarestorage.com), S3_BUCKET,
 # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
 set -euo pipefail
@@ -169,6 +170,15 @@ case "$VERB" in
   send)
     : "${S3_ENDPOINT:?}" "${S3_BUCKET:?}" "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
     bucket="${S3_ENDPOINT%/}/$S3_BUCKET/desktop"
+    # What is sent is one release: the tarball is the one its manifest names, by its hash. The
+    # manifest was signed for the build's own word of that hash, where no tarball was opened, and
+    # the tarball here is this job's own download of the build's artifact, which is the run's:
+    # any job of the run may put another file under its name. Sent with another, the release
+    # would be one that no install takes, under a version that is never sent again. Asked before
+    # anything is asked of the bucket.
+    named="$(jq -r '.sha256 | strings' "$OUT/manifest.json" 2>/dev/null)" || named=
+    [ -n "$named" ] && [ -f "$OUT/$TARBALL" ] && [ "$(sha256sum <"$OUT/$TARBALL" | cut -d' ' -f1)" = "$named" ] \
+      || fail "$OUT/$TARBALL is not the tarball that $OUT/manifest.json names, by its sha256: nothing is sent"
     # What a send keeps beside the release while it runs goes however it ends.
     trap 'rm -f "$OUT/sent" "$OUT/latest.json"' EXIT
     # A request to the bucket, signed; its HTTP status on stdout. One that cannot connect in half a
