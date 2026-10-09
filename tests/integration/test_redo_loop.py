@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -12,7 +13,7 @@ from surogates.config import SHARED_WORK_QUEUE_KEY
 from surogates.db.models import InboxItem
 from surogates.harness import landing as landing_module
 from surogates.harness import loop_artifact_completion
-from surogates.harness.loop_context_replay import unread_reports, worker_note
+from surogates.harness.loop_context_replay import news, unread_reports, worker_note
 from surogates.harness.loop_pending import NAMES_ANSWERS
 from surogates.jobs.inbox_expire import expire_inbox_items
 from surogates.runtime import SlashCommandConfig
@@ -49,6 +50,7 @@ from .test_thread_copies import (  # noqa: F401  (pods is a fixture)
 from .test_turn_sagas import a_turn, calling
 from .test_workstream_overview import rows as thread_rows
 from .test_workstream_threads import call_tool, queued
+from .test_workstream_threads import turn_ends as a_turn_ends
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -1016,8 +1018,7 @@ async def a_thread_at_rest(workers, pods):
     thread = await a_thread(api, "Draft A", master)
     workers.sandbox_pool = SandboxPool(pods)
     await its_first_turn_was_taken(store, thread)
-    await store.emit_event(thread.id, EventType.SESSION_COMPLETE, {"reason": "completed"})
-    await store.update_session_status(thread.id, "completed")
+    await a_turn_ends(api, thread)
     await workers.nobody_is_queued()
     return thread, master
 
@@ -1069,8 +1070,7 @@ async def test_an_answer_typed_while_the_thread_works_ends_the_wait(workers, mon
     thread = await a_thread(api, "Draft A", master)
     workers.sandbox_pool = SandboxPool(pods)
     await its_first_turn_was_taken(store, thread)
-    await store.emit_event(thread.id, EventType.SESSION_COMPLETE, {"reason": "completed"})
-    await store.update_session_status(thread.id, "completed")
+    await a_turn_ends(api, thread)
     await workers.nobody_is_queued()
     model = Model()
     monkeypatch.setattr(loop_module, "call_llm_with_retry", model)
@@ -1092,3 +1092,161 @@ async def test_an_answer_typed_while_the_thread_works_ends_the_wait(workers, mon
     row = await row_of(api, project, thread)
     assert (row["group"], row["reason"]) == ("idle", None)
     assert sum(retired) == 1 and await workers.status(thread.id) == "completed"
+
+
+LEFT_OUT_AGAIN = (
+    "[Your changes to these files were left out again, since each changed once more while you redid it:\n"
+    "- Report.docx\n"
+    "The newer file was kept, and your version is in the file's history, not in the file. "
+    "The user was asked what to do about it: do not put your change in again unless they tell you to.]"
+)
+
+
+async def test_a_thread_reads_its_wait_over_files_as_news_and_no_other_item():
+    def raised(**payload) -> dict | None:
+        return news(SimpleNamespace(type=EventType.INBOX_ACTION_REQUIRED.value, data=payload))
+
+    assert raised(**landing_module.waiting_on_you(["Report.docx"], escalated=False)) == {"role": "user", "content": LEFT_OUT_AGAIN}
+    assert raised(**landing_module.waiting_on_you(["a.md", "b\n.md"], escalated=True)) == {"role": "user", "content": (
+        "[A landing of your changes to these files could not be finished, nor put back whole:\n"
+        "- a.md\n- b .md\n"
+        "Each may hold part of your change in the project. The user was asked to check them: "
+        "read a file again before you change it.]"
+    )}
+    # An item that asks its user for anything else is theirs alone.
+    assert raised(title="Log in", instructions="", context="", action_type="browser", target="site") is None
+
+
+async def a_waiting_thread(workers, pods):
+    """``a_thread_at_rest`` that waits on you over its report, and the wait's event."""
+    thread, master = await a_thread_at_rest(workers, pods)
+    wait = await workers.store.emit_event(
+        thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Report.docx"], escalated=False),
+    )
+    return thread, master, wait
+
+
+def notes_in(request: list[dict]) -> int:
+    return sum(1 for message in request if message.get("content") == LEFT_OUT_AGAIN)
+
+
+async def replayed_as_asked(workers, thread, requests: list[list[dict]]) -> bool:
+    """Whether replay rebuilds each of *requests*, the thread's last ones, as it was sent."""
+    events = await workers.store.get_events(thread.id)
+    asked = [i for i, e in enumerate(events) if e.type == EventType.LLM_REQUEST.value][-len(requests):]
+    return [workers.worker()._rebuild_messages(events[:at + 1]) for at in asked] == requests
+
+
+async def test_the_turn_on_your_answer_to_a_wait_reads_what_the_thread_waits_over(workers, monkeypatch, pods):
+    api = workers.api
+    thread, _, _ = await a_waiting_thread(workers, pods)
+    # Nobody is woken for it: it is the user's to answer.
+    assert not await queued(api, thread)
+    await workers.wake(thread.id, SlashCommandConfig())
+    assert workers.requests == []
+    await workers.says(thread.id, "Use yours.")
+    await workers.wake(thread.id, SlashCommandConfig())
+    [request] = workers.requests
+    # The model that answers knows its change is not in the file, and that its user was asked.
+    assert [m["content"] for m in request[-2:]] == ["Use yours.", LEFT_OUT_AGAIN]
+    assert await replayed_as_asked(workers, thread, [request])
+    # Read once: the next turn has it in its place, and not again.
+    await workers.says(thread.id, "Thanks.")
+    await workers.wake(thread.id, SlashCommandConfig())
+    assert [notes_in(r) for r in workers.requests] == [1, 1] and workers.requests[1][-1]["content"] == "Thanks."
+    assert await workers.status(thread.id) == "completed" and not await queued(api, thread)
+
+
+async def test_an_answer_steered_into_a_turn_finds_the_wait_already_read_by_that_turn(workers, monkeypatch, pods):
+    api = workers.api
+    thread, master, _ = await a_waiting_thread(workers, pods)
+    model = Model()
+    monkeypatch.setattr(loop_module, "call_llm_with_retry", model)
+    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Finish the report.")
+    model.script.append(calls("call_1"))
+
+    async def you_answer() -> None:
+        await workers.says(thread.id, "Keep my version of Report.docx.")
+
+    workers.during_the_tool_call = you_answer
+    await settles(workers, thread)
+    first, second = model.requests
+    # The follow-up's turn reads the wait at its first request; your answer joins it after the call's result.
+    assert [m["content"] for m in first[-2:]] == ["[From the project's coordinator]\nFinish the report.", LEFT_OUT_AGAIN]
+    assert (second[-2]["role"], second[-1]["content"]) == ("tool", "Keep my version of Report.docx.")
+    assert [notes_in(r) for r in model.requests] == [1, 1]
+    assert await replayed_as_asked(workers, thread, [first, second])
+    assert await workers.status(thread.id) == "completed" and not await queued(api, thread)
+
+
+async def test_a_command_typed_before_your_answer_is_answered_alone_and_the_wait_is_read_with_the_answer(workers, monkeypatch, pods):
+    api = workers.api
+    thread, _, _ = await a_waiting_thread(workers, pods)
+    assert await workers.types(thread.id, A_COMMAND, SlashCommandConfig()) == REFUSED
+    # The command is the harness's to answer: no request, and the thread rests with the wait's news unread.
+    assert workers.requests == [] and await workers.status(thread.id) == "completed" and not await queued(api, thread)
+    await workers.says(thread.id, "Use yours.")
+    await workers.wake(thread.id, SlashCommandConfig())
+    [request] = workers.requests
+    assert [m["content"] for m in request[-4:]] == [A_COMMAND, REFUSED, "Use yours.", LEFT_OUT_AGAIN]
+    assert await replayed_as_asked(workers, thread, [request])
+    assert (await workers.said(thread.id)).count(REFUSED) == 1
+    await workers.wake(thread.id, SlashCommandConfig())
+    assert len(workers.requests) == 1
+
+
+async def test_a_wait_written_while_its_thread_works_is_read_by_the_turn_under_way(workers, monkeypatch, pods):
+    api, store = workers.api, workers.store
+    thread, _ = await a_thread_at_rest(workers, pods)
+    model = Model()
+    monkeypatch.setattr(loop_module, "call_llm_with_retry", model)
+    model.script.append(calls("call_1"))
+
+    async def another_threads_settle_escalates_its_landing() -> None:
+        await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["a.md"], escalated=True))
+
+    workers.during_the_tool_call = another_threads_settle_escalates_its_landing
+    await workers.says(thread.id, "Go on.")
+    await workers.wake(thread.id, SlashCommandConfig())
+    first, second = model.requests
+    note = news(SimpleNamespace(type=EventType.INBOX_ACTION_REQUIRED.value, data=landing_module.waiting_on_you(["a.md"], escalated=True)))
+    assert note not in first and (second[-2]["role"], second[-1]) == ("tool", note)
+    assert await replayed_as_asked(workers, thread, [first, second])
+
+
+async def test_a_wait_over_a_file_that_has_since_landed_is_over(api, monkeypatch, pods):
+    project = await create(api)
+    master = await master_of(api, project)
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v2 by you")
+    await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v3 by you")
+    assert (await row_of(api, project, thread))["reason"] == "files"
+    # Its coordinator reads the file was left out and follows up; the thread puts its change in again, and it lands.
+    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Put your change in again.")
+    await a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "printf ' by A' >> Report.docx"})), _final_response("Put it in again."),
+    ], pool=pool)
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v3 by you by A"
+    [wait] = await waits_of(api, thread)
+    assert wait.status == "expired"
+    row = await row_of(api, project, thread)
+    assert (row["group"], row["reason"]) == ("idle", None)
+
+
+async def test_a_wait_is_over_once_the_last_of_its_files_has_landed_and_an_escalations_stays(api):
+    thread = await a_thread(api, "Draft A", await master_of(api, await create(api)))
+    store = api.app.state.session_store
+    await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["A.md", "B.md"], escalated=False))
+    await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["A.md"], escalated=True))
+
+    async def stand() -> list[tuple[str, list[str]]]:
+        return [(wait.status, wait.payload["files"]) for wait in sorted(await waits_of(api, thread), key=lambda w: w.id)]
+
+    assert await store.land_file_waits(thread.id, {"C.md"}) == 0
+    assert await stand() == [("pending", ["A.md", "B.md"]), ("pending", ["A.md"])]
+    # One of its two: it waits over the other still.  A landing that could not be put back is the user's to check.
+    assert await store.land_file_waits(thread.id, {"A.md"}) == 0
+    assert await stand() == [("pending", ["B.md"]), ("pending", ["A.md"])]
+    assert await store.land_file_waits(thread.id, {"B.md", "C.md"}) == 1
+    assert await stand() == [("expired", ["B.md"]), ("pending", ["A.md"])]

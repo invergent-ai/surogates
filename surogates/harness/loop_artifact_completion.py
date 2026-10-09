@@ -1349,6 +1349,12 @@ class ArtifactCompletionMixin:
                 payload={"saga": landing["saga"], "files": landing["redo"]}, redis=self._redis,
             )
 
+        if landing is not None and landing["state"] == "completed":
+            # A file it waited on you over has landed since: that wait is over.
+            landed = {f["ref"] for f in landing["files"] if f.get("landing") == "landed"}
+            if landed:
+                await self._store.land_file_waits(session.id, landed)
+
         if landing is not None and (landing.get("stuck") or landing["state"] == "escalated"):
             # It waits on you: a file left out again after its redo, or a
             # landing it could not put back whole.

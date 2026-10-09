@@ -318,6 +318,37 @@ class SessionStore:
             await db.commit()
         return result.rowcount
 
+    async def land_file_waits(self, session_id: UUID, landed: set[str]) -> int:
+        """Take *landed*, the files a landing of *session_id*'s just landed, off its waits on you
+        over files that clashed again; how many waits that ended.
+
+        A wait whose files have all landed since asks nothing any more:
+        it is over, expired and not answered.  One over a landing that
+        could not be put back stays: its files are the user's to check.
+        """
+        ended = 0
+        async with self._sf() as db:
+            waits = (await db.execute(
+                select(InboxItem)
+                .where(
+                    InboxItem.session_id == session_id, InboxItem.kind == "action_required",
+                    InboxItem.status == "pending", InboxItem.payload.contains({"action_type": "files", "escalated": False}),
+                )
+                .with_for_update()
+            )).scalars()
+            for wait in waits:
+                files = wait.payload.get("files") or []
+                left = [path for path in files if path not in landed]
+                if left == files:
+                    continue
+                if left:
+                    wait.payload = {**wait.payload, "files": left}
+                else:
+                    wait.status, ended = "expired", ended + 1
+                wait.updated_at = func.now()
+            await db.commit()
+        return ended
+
     _INBOX_TERMINAL = frozenset({"acknowledged", "responded", "expired"})
     _INBOX_ALLOWED_TRANSITIONS = {
         "pending": frozenset({"acknowledged", "responded", "expired"}),

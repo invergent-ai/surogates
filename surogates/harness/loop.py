@@ -1049,7 +1049,8 @@ class AgentHarness(
         """*held*, the news waiting for a session's next request, with what
         reached it past *after_event_id*, and below *before* when given:
         for a project's master, thread reports and news of threads the user
-        started; for a chat on its user's computer, the resume their handing
+        started; for a project's thread, a wait on its user over its files;
+        for a chat on its user's computer, the resume their handing
         back the browser gave it, unless they took it over again since.
 
         Read for each model request, and at the end of a reply, one message
@@ -1061,6 +1062,9 @@ class AgentHarness(
         types: list[EventType] = []
         if is_project_master(session.config):
             types += [EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.WORKER_SPAWNED]
+        if is_project_thread(session.config):
+            # Another thread's turn end can find this one's landing escalated, while it works.
+            types += [EventType.INBOX_ACTION_REQUIRED]
         if device_of(session.config) is not None:
             types += [EventType.SESSION_RESUME, EventType.BROWSER_CONTROL_GRANTED]
         if not types:

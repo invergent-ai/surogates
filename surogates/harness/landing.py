@@ -1219,4 +1219,8 @@ def waiting_on_you(paths: list[str], *, escalated: bool) -> dict:
             f"{named} changed again while this thread redid its change. "
             "The newer file was kept; this thread's version is in the file's History."
         )
-    return {"title": title, "instructions": instructions, "context": "", "action_type": "files", "target": first, "reason": "files"}
+    return {
+        "title": title, "instructions": instructions, "context": "", "action_type": "files", "target": first, "reason": "files",
+        # For the thread, which reads the wait as news, and for a later landing, which ends a wait whose files landed.
+        "files": list(paths), "escalated": escalated,
+    }

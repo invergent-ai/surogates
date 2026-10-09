@@ -137,7 +137,9 @@ BROWSER_HANDED_BACK = (
     "you act on it.]"
 )
 #: The events a session reads as news at its next model request.
-NEWS_TYPES = WORKER_NEWS_TYPES | {EventType.SESSION_RESUME.value, EventType.HISTORY_REDO.value}
+NEWS_TYPES = WORKER_NEWS_TYPES | {
+    EventType.SESSION_RESUME.value, EventType.HISTORY_REDO.value, EventType.INBOX_ACTION_REQUIRED.value,
+}
 
 
 #: The lines a thread's own words sit between in its report.  Only the
@@ -352,6 +354,28 @@ def redo_note(data: dict) -> dict:
     )}
 
 
+def wait_note(data: dict) -> dict | None:
+    """The user-role message a thread reads its wait on its user over files
+    as, built from the item's payload alone, so the live loop and replay
+    produce the same bytes; None for an item that asks its user for
+    anything else.  The item is the user's to read; without this the thread
+    would answer their reply believing its change is in the file."""
+    if data.get("action_type") != "files":
+        return None
+    files = "\n".join(f"- {_file_label(path)}" for path in data.get("files") or [] if isinstance(path, str))
+    if data.get("escalated"):
+        return {"role": "user", "content": (
+            f"[A landing of your changes to these files could not be finished, nor put back whole:\n{files}\n"
+            "Each may hold part of your change in the project. The user was asked to check them: "
+            "read a file again before you change it.]"
+        )}
+    return {"role": "user", "content": (
+        f"[Your changes to these files were left out again, since each changed once more while you redid it:\n{files}\n"
+        "The newer file was kept, and your version is in the file's history, not in the file. "
+        "The user was asked what to do about it: do not put your change in again unless they tell you to.]"
+    )}
+
+
 def worker_news(event_type: str, data: dict) -> dict | None:
     """The message a coordinator reads a worker's news as: its report, or a
     thread the user started; None for a spawn the coordinator made."""
@@ -366,12 +390,15 @@ def worker_news(event_type: str, data: dict) -> dict | None:
 def news(event) -> dict | None:
     """The message a session reads an event as at its next model request, or
     None for an event that is no news: a worker's news to its coordinator,
-    a redo a project's thread was told of, and, in a chat on its user's
-    computer, the resume a hand back of the browser gave it."""
+    a redo a project's thread was told of, the wait on its user over files
+    it was put in, and, in a chat on its user's computer, the resume a hand
+    back of the browser gave it."""
     if event.type in WORKER_NEWS_TYPES:
         return worker_news(event.type, event.data)
     if event.type == EventType.HISTORY_REDO.value:
         return redo_note(event.data)
+    if event.type == EventType.INBOX_ACTION_REQUIRED.value:
+        return wait_note(event.data or {})
     if resumes_the_agent(event):
         return {"role": "user", "content": BROWSER_HANDED_BACK}
     return None
@@ -651,6 +678,11 @@ class ContextReplayMixin:
             # is read the same way: a command its user typed meanwhile is
             # answered first, and its answer stands before the redo.
             elif etype == EventType.HISTORY_REDO.value:
+                held_reports = held_news(held_reports, event)
+
+            # So is the wait on its user over files a thread was put in:
+            # the turn that reads their answer reads what was asked.
+            elif etype == EventType.INBOX_ACTION_REQUIRED.value:
                 held_reports = held_news(held_reports, event)
 
             # A sub-agent's tab on the user's computer is in this log for the
