@@ -33,6 +33,8 @@ const THIRD = "7a8b9c0d-1e2f-4a3b-84c5-d6e7f8a9b0c1";
 const NAMED = process.env.SUROGATE_TEST_BROWSER;
 const BROWSER = NAMED ? findBrowsers().find((browser) => browser.executable === NAMED) ?? null : chosenBrowser({ choice: "auto" }, findBrowsers());
 const run = BROWSER !== null && process.env.SUROGATE_BROWSER_TESTS === "1";
+// The guest's image, for the tests that run a chat's commands too (SUROGATE_VM_TESTS=1), as commands.e2e.ts takes it.
+const IMAGE = process.env.SUROGATE_VM_IMAGE ?? fileURLToPath(new URL("../../../images/guest/out", import.meta.url));
 
 let home: string;
 let origin: string;
@@ -86,9 +88,9 @@ async function operation(kind: string, args: Record<string, unknown>, invocation
   return result?.outcome;
 }
 
-// The app launched and signed in, and *folder* bound to the chat in the desktop's own sheet. Each of
-// *requires*, a script of the test's, runs in the app before its own code.
-async function bound(folder: string, requires: string[] = []): Promise<Page> {
+// The app launched and signed in, with *env* in its environment, and *folder* bound to the chat in the desktop's own
+// sheet. Each of *requires*, a script of the test's, runs in the app before its own code.
+async function bound(folder: string, requires: string[] = [], env: Record<string, string> = {}): Promise<Page> {
   origin = await agent.start();
   // The app's own environment is the browser's: apart from the user's session, or no launch.
   isolated(shellEnv(home));
@@ -96,7 +98,7 @@ async function bound(folder: string, requires: string[] = []): Promise<Page> {
     mkdirSync(join(home, "surogate"), { recursive: true });
     writeFileSync(join(home, "surogate", "browser.json"), JSON.stringify({ choice: BROWSER.id }));
   }
-  app = await launch(home, {}, [], requires);
+  app = await launch(home, env, [], requires);
   await stubNative(app);
   const page = await shellPage(app);
   await connect(page, origin);
@@ -453,6 +455,46 @@ const kept = () => {
     return "";
   }
 };
+
+describe.skipIf(!run || process.env.SUROGATE_VM_TESTS !== "1")("a chat's own servers named in the agent's browser, through the app", () => {
+  beforeAll(() => isolated());
+
+  it("tells the agent what is so in its chat's sandbox: that nothing listens on a port, until a server it started there does, and never asks this computer's own", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder, [], { SUROGATE_VM_IMAGE: IMAGE });
+    const NOT_LISTENING = (port: number) => ({
+      error: {
+        type: "browser",
+        message: `Nothing listens on port ${port} in this chat's sandbox. Start the server there as a background command, then open http://localhost:${port}/ again.`,
+      },
+    });
+    // Before the chat has run anything its sandbox is not up, and none is started to ask: after its first use of the browser, nothing listens.
+    const first = operation("browser.navigate", { url: `http://localhost:${canaryPort}/`, wait_until: "load" });
+    await press(await prompt(app!), "allow_session");
+    expect(await first).toEqual(NOT_LISTENING(canaryPort));
+    // The chat's server, on the very port this computer's own canary has, once it answers inside the sandbox.
+    const background = { command: `python3 -m http.server ${canaryPort} --bind 127.0.0.1`, workdir: null, task_id: "servers", pty: false, notify_on_complete: false, watcher_interval: null };
+    expect(await operation("start", background)).toMatchObject({ ok: { session_id: expect.any(String) } });
+    const answering = `curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:${canaryPort}/`;
+    await expect.poll(async () => (await operation("run", { command: answering, workdir: null, timeout: 10 })).ok?.output, { timeout: 30_000 }).toBe("200");
+    // Now the sandbox says the chat listens there, by each of the loopback's names: the navigation goes on to the
+    // browser, whose proxy opens no port of this computer's names yet.
+    for (const name of ["localhost", "127.0.0.1"]) {
+      expect(await operation("browser.navigate", { url: `http://${name}:${canaryPort}/`, wait_until: "load" })).toEqual({
+        error: { type: "browser", message: `The agent's browser does not reach this computer's own services (${name}:${canaryPort})` },
+      });
+    }
+    // A port beside it, where the chat has no server, and the sandbox's own proxy, which is not the browser's to open.
+    const beside = canaryPort === 65_535 ? canaryPort - 1 : canaryPort + 1;
+    expect(await operation("browser.navigate", { url: `http://localhost:${beside}/`, wait_until: "load" })).toEqual(NOT_LISTENING(beside));
+    expect(await operation("browser.navigate", { url: "http://localhost:3128/", wait_until: "load" })).toEqual({
+      error: { type: "browser", message: "Port 3128 is the sandbox's own proxy for this chat's commands, which the agent's browser does not open" },
+    });
+    // Its user was asked nothing for any of it, and this computer's own service on that port heard nothing.
+    expect([await promptsShown(app!), hits]).toEqual([0, []]);
+  }, 180_000);
+});
 
 describe.skipIf(!run)("Custom… in Settings → Browser", () => {
   beforeAll(() => isolated());
