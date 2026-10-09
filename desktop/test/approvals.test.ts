@@ -1064,11 +1064,14 @@ describe("the browser on this computer", () => {
       user = new User("allow_session");
       approvals = made(user);
       expect(await approvals.admit(open("http://localhost:8000/"), never())).toEqual(NOT_LISTENING(8000));
+      // Whatever the sandbox would say of them: it carries no connection to them, and is not asked.
       for (const proxy of [3128, 1080]) {
-        listens[ROOT] = [proxy];
-        expect(await approvals.admit(open(`http://localhost:${proxy}/`), never())).toEqual({
-          error: { type: "browser", message: `Port ${proxy} is the sandbox's own proxy for this chat's commands, which the agent's browser does not open` },
-        });
+        for (const answers of [[proxy], []]) {
+          listens[ROOT] = answers;
+          expect(await approvals.admit(open(`http://localhost:${proxy}/`), never())).toEqual({
+            error: { type: "browser", message: `Port ${proxy} is the sandbox's own proxy for this chat's commands, which the agent's browser does not open` },
+          });
+        }
       }
       // A sandbox that cannot be asked listens on nothing.
       approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant", listening: () => Promise.reject(new Error("no sandbox")) });

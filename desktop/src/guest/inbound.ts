@@ -3,13 +3,15 @@
 // host opens a CONNECT stream for each connection the agent's browser makes to a server of
 // a root's own. Its authority is 127.0.0.1 or [::1] and a port, and nothing else is
 // taken: the connection is made by the root's runner, to its own loopback, the family
-// the authority names first, inside the root's namespaces (root.ts, Roots.reach). The agent opens no stream here, and the host no
-// stream on the net port: neither way's rules read the other's requests.
+// the authority names first, inside the root's namespaces (root.ts, Roots.reach). The
+// agent opens no stream here, and the host no stream on the net port: neither way's
+// rules read the other's requests.
 
 import { constants, performServerHandshake, type ServerHttp2Stream } from "node:http2";
 import type { Socket } from "node:net";
 import type { Duplex } from "node:stream";
 
+import { SANDBOX_PORTS } from "./listeners.js";
 import { MAX_TUNNELS } from "./network.js";
 import { MAX_SHARES, ROOT_ID } from "./protocol.js";
 
@@ -35,7 +37,8 @@ export class Inbound {
       const authority = AUTHORITY.exec(String(headers[":authority"] ?? ""));
       const to = Number(authority?.[2] ?? 0);
       const first = authority?.[1] === "[::1]" ? 6 : 4;
-      if (headers[":method"] !== "CONNECT" || typeof root !== "string" || !ROOT_ID.test(root) || to < 1 || to > 65_535) {
+      // Nor is a connection carried to the root's own proxies, which would take it for a command's.
+      if (headers[":method"] !== "CONNECT" || typeof root !== "string" || !ROOT_ID.test(root) || to < 1 || to > 65_535 || SANDBOX_PORTS.has(to)) {
         return refuse(stream, 400, "invalid");
       }
       void Promise.resolve().then(() => reach(root, to, first)).catch(() => "unreachable").then((reached) => {

@@ -611,10 +611,10 @@ describe("whether a chat's own server listens, asked through the guest's inbound
     });
     await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
     port = (server.address() as { port: number }).port;
-    // Root 1 listens on 3000, and nothing else does.
+    // Root 1 listens on 3000, and on its own proxies' ports as every root does; nothing else listens.
     reach = (root, to) => {
       reached.push([root, to]);
-      return root === "root-1" && to === 3000 ? dial() : Promise.resolve("ECONNREFUSED");
+      return root === "root-1" && [3000, 3128, 1080].includes(to) ? dial() : Promise.resolve("ECONNREFUSED");
     };
   });
 
@@ -633,6 +633,9 @@ describe("whether a chat's own server listens, asked through the guest's inbound
     // The root's server saw one connection, which said nothing and is gone.
     await gone();
     expect(heard).toEqual([""]);
+    // The root's own proxies for its commands are no server of the chat's, though they listen: its runner is asked for neither.
+    reached = [];
+    expect([await manager.listening("root-1", 3128), await manager.listening("root-1", 1080), reached]).toEqual([false, false, []]);
     await manager.stop();
     expect(await manager.listening("root-1", 3000)).toBe(false);
   });

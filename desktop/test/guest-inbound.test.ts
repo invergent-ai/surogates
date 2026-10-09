@@ -80,6 +80,10 @@ describe("the agent's door for connections into a root", () => {
     ]) {
       expect(await into(authority), authority).toMatchObject({ status: 400, reason: "invalid" });
     }
+    // Nor the root's own proxies for its commands, by either family: they are not a server of the chat's.
+    for (const authority of ["127.0.0.1:3128", "127.0.0.1:1080", "[::1]:3128", "[::1]:1080"]) {
+      expect(await into(authority), authority).toMatchObject({ status: 400, reason: "invalid" });
+    }
     // What is no authority at all never becomes a stream: HTTP/2 resets it, or the agent refuses it.
     for (const authority of ["127.0.0.1:3000/", "127.0.0.1:3000 ", "127.0.0.1:3000\t"]) expect([0, 400], authority).toContain((await into(authority)).status);
     for (const root of ["", "../other", "a b", "x".repeat(65)]) expect(await into("127.0.0.1:3000", root), root).toMatchObject({ status: 400 });

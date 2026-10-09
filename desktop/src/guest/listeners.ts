@@ -12,6 +12,8 @@ import { inboundLine } from "./protocol.js";
 
 export const HTTP_PORT = 3128;
 export const SOCKS_PORT = 1080;
+// Both of them: a root's own proxies for its commands, which nothing from outside the root is carried to.
+export const SANDBOX_PORTS: ReadonlySet<number> = new Set([HTTP_PORT, SOCKS_PORT]);
 // What a command's proxy variables name (root.ts, rootEnvironment).
 export const PROXY_URL = `http://127.0.0.1:${HTTP_PORT}`;
 // The agent's answer is one short line.

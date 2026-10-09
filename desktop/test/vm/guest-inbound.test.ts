@@ -60,6 +60,16 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("whether a chat's own ser
     expect([await manager.listening(ROOT, 8000), await manager.listening(ROOT, 8009)]).toEqual([true, false]);
   });
 
+  it("carries no connection to the root's own proxies for its commands, though they listen in the chat", async () => {
+    const guest = await (manager as unknown as { guest: Promise<Guest> }).guest;
+    for (const port of [3128, 1080]) {
+      expect(await said(ROOT, `(exec 3<>/dev/tcp/127.0.0.1/${port}) 2>/dev/null && echo listens`)).toBe("listens\n");
+      const reached = await guest.reach(ROOT, port);
+      if (typeof reached !== "string") reached.destroy();
+      expect([port, typeof reached === "string" ? reached : "carried", await manager.listening(ROOT, port)]).toEqual([port, "unreachable", false]);
+    }
+  });
+
   it("asks the chat named and no other, though another chat listens on the same port", async () => {
     await serve(OTHER, 8005, "second chat");
     expect([await manager.listening(OTHER, 8005), await manager.listening(ROOT, 8005)]).toEqual([true, false]);
