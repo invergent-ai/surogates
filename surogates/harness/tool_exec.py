@@ -1860,7 +1860,7 @@ async def _run_single_tool(
                         kept = await keep_copy(
                             session_factory=session_factory, sandbox_pool=sandbox_pool, session=session,
                             # The fence its landings have, from the settings its turn's saga was made with.
-                            saga_settings=saga.settings if saga is not None else None, action="hand_off",
+                            saga_settings=saga.settings if saga is not None else None, action="hand_off", redis=redis,
                         )
                     except Exception as exc:
                         # A helper started now would work on old files with nobody told: none is started.

@@ -1,4 +1,5 @@
-"""A project's files in its threads' rows: what each thread's landings changed, and how each file stands."""
+"""A project's files in its threads' rows: what each thread's landings changed, how each file
+stands, and the stream's word of a landing another lock holder finished."""
 
 from __future__ import annotations
 
@@ -6,17 +7,28 @@ import pytest
 from sqlalchemy import text
 
 from surogates.harness import landing as landing_module
+from surogates.session.store import SessionStore
+from surogates.workstreams import stream as project_stream
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
 from tests.test_steer_loop import _final_response
 
 from .test_devices import api  # noqa: F401  (api is a fixture)
-from .test_durable_landings import a_short_fence, edited, ends, rows, stored  # noqa: F401  (a_short_fence is a fixture)
+from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
+    a_landing_killed,
+    a_short_fence,
+    edited,
+    ends,
+    rows,
+    rows_stand,
+    stored,
+)
 from .test_redo_loop import a_clash
 from .test_thread_copies import a_thread, open_pod, pods  # noqa: F401  (pods is a fixture)
 from .test_turn_sagas import a_turn, calling
 from .test_workstream_overview import act_on
 from .test_workstream_overview import rows as thread_rows
+from .test_workstream_overview import streamed
 from .test_workstream_threads import call_tool
 from .test_workstreams import create, master_of
 
@@ -170,3 +182,123 @@ async def test_another_projects_landings_and_a_landing_left_running_mark_nothing
         ), {"id": row.id})
         await db.commit()
     assert await marks_of(api, project, thread) == [("Report.docx", "landed")]
+
+
+async def a_landing_left_pushed(api, monkeypatch, tmp_path):
+    """A project whose thread B's landing pushed and was killed before its row said so, its fence
+    long past; and thread A, with a change of its own to land."""
+    project = await create(api)
+    master = await master_of(api, project)
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(stored(api, first, tmp_path))
+    await edited(pool, second, "echo b > b.md")
+    await a_landing_killed(api, monkeypatch, pool, second, after="record")
+    async with api.app.state.session_factory() as db:
+        await db.execute(text("UPDATE workstream_history SET updated_at = now() - interval '1 hour' WHERE saga_state = 'running'"))
+        await db.commit()
+    await edited(pool, first, "echo c > c.md")
+    return project, first, second, pool
+
+
+def announced(api, monkeypatch, thread) -> list[tuple[str, str, list[str]]]:
+    """Each landing the stream is told of: its thread, and that thread's landings' states and
+    files as a client refetching at that moment reads them."""
+    told: list[tuple[str, str, list[str]]] = []
+    publish = landing_module.publish
+
+    async def recorded(redis, workstream_id, session_id, kind):
+        told.append((str(session_id), kind, [f"{row.saga_state}: {f['path']}" for row in await rows(api, thread) for f in row.files]))
+        await publish(redis, workstream_id, session_id, kind)
+
+    monkeypatch.setattr(landing_module, "publish", recorded)
+    return told
+
+
+async def test_a_threads_landing_another_threads_landing_settles_is_announced_too(api, monkeypatch, tmp_path):
+    project, first, second, pool = await a_landing_left_pushed(api, monkeypatch, tmp_path)
+    assert await marks_of(api, project, second) == []
+
+    async def act():
+        await ends(api, pool, first)
+
+    # A's worker holds the lock next: it completes B's landing, and the stream says B's files changed.
+    sent = await streamed(api, monkeypatch, project, 1, act)
+    assert sent[:2] == [("ready", {}), ("change", {"thread_id": str(second.id), "type": "history.landed"})]
+    assert await marks_of(api, project, second) == [("b.md", "landed")]
+
+
+async def test_a_settled_landing_is_announced_once_and_only_after_its_row_says_it_landed(api, monkeypatch, tmp_path):
+    project, first, second, pool = await a_landing_left_pushed(api, monkeypatch, tmp_path)
+    told = announced(api, monkeypatch, second)
+    await ends(api, pool, first)
+    # Whoever hears it reads the row complete, with its files.
+    assert told == [(str(second.id), "history.landed", ["completed: b.md"])]
+    # A later lock holder finds nothing left running: nothing is said again.
+    await edited(pool, first, "echo d > d.md")
+    await ends(api, pool, first)
+    assert len(told) == 1
+
+
+async def test_a_settled_landing_whose_row_could_not_be_written_is_not_announced(api, monkeypatch, tmp_path):
+    project, first, second, pool = await a_landing_left_pushed(api, monkeypatch, tmp_path)
+    told = announced(api, monkeypatch, second)
+    save = landing_module.save_landing
+    refused: list[int] = []
+
+    async def unwritten(session_factory, row, saga, **values):
+        if values.get("state") == "completed" and saga.session_id == second.id:
+            refused.append(row)
+            raise ConnectionError("the database went away")
+        await save(session_factory, row, saga, **values)
+
+    monkeypatch.setattr(landing_module, "save_landing", unwritten)
+    await ends(api, pool, first)
+    # The settle found it pushed, and its row was never written so: nothing is announced that a
+    # reader would not find.  A's landing went over it, so the next settle, the pruning's, takes
+    # it for not pushed and puts it back: it never landed, and nothing said it had.
+    assert len(refused) == 2 and told == []
+    assert [row.saga_state for row in await rows(api, second)] == ["compensated"]
+
+
+async def test_a_landing_settled_as_put_back_is_not_announced_as_landed(api, monkeypatch, tmp_path):
+    project = await create(api)
+    master = await master_of(api, project)
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(stored(api, first, tmp_path))
+    await edited(pool, second, "echo b > b.md")
+    await a_landing_killed(api, monkeypatch, pool, second, after="apply b.md")
+    told = announced(api, monkeypatch, second)
+    await edited(pool, first, "echo c > c.md")
+    await ends(api, pool, first)
+    assert [row.saga_state for row in await rows(api, second)] == ["compensated"] and told == []
+
+
+async def test_the_wait_a_settled_escalation_puts_on_its_thread_reaches_the_projects_stream(api, monkeypatch, tmp_path):
+    project = await create(api)
+    master = await master_of(api, project)
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pods = stored(api, first, tmp_path)
+    pool = SandboxPool(pods)
+    # Its row written at every try, as a slow landing's is: a.md's apply is known to have run.
+    rows_stand(monkeypatch, "exact")
+    await edited(pool, first, "for f in a b c; do echo $f > $f.md; done")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply b.md")
+    (pods.project / "a.md").write_text("saved by you over the half landing")  # its put-back finds it changed
+    await edited(pool, second, "echo by B > B.md")
+    heard: list[tuple[str, str]] = []
+    publish = project_stream.publish
+
+    async def recorded(redis, workstream_id, session_id, kind):
+        if redis is not None:  # with none, nothing is said
+            heard.append((str(session_id), kind))
+        await publish(redis, workstream_id, session_id, kind)
+
+    monkeypatch.setattr(project_stream, "publish", recorded)
+    monkeypatch.setattr(api.app.state, "session_store", SessionStore(api.app.state.session_factory, api.app.state.redis))
+    await ends(api, pool, second)
+    [killed] = await rows(api, first)
+    assert killed.saga_state == "escalated"
+    # A's row moves to Waiting on you, and the master's card of it changes: both are said.
+    assert (str(first.id), "inbox.action_required") in heard and (str(master.id), "worker.complete") in heard
+    [found] = await thread_rows(api, project, thread_id=str(first.id))
+    assert (found["group"], found["reason"]) == ("waiting", "files")
