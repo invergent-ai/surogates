@@ -1190,7 +1190,12 @@ describe("a page's download, as the host stages it", () => {
         page, reads, answering,
         heard: () => hears.get("filechooser")?.size ?? 0,
         input: (made: unknown = {}) => {
-          const element = { evaluate: () => Promise.resolve({ here: true, href: FORM_URL, origin: new URL(FORM_URL).origin }), evaluateHandle: () => Promise.resolve(made) };
+          const element = {
+            evaluate: () => Promise.resolve({ here: true, href: FORM_URL, origin: new URL(FORM_URL).origin }), evaluateHandle: () => Promise.resolve(made),
+            // How many times the host let its handle on the input go.
+            letGo: 0,
+            dispose: () => Promise.resolve(void (element.letGo += 1)),
+          };
           const chooser = { page: () => page, element: () => element } as unknown as FileChooser;
           for (const heard of hears.get("filechooser") ?? []) heard(chooser);
           return chooser;
@@ -1314,6 +1319,59 @@ describe("a page's download, as the host stages it", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("lets go its handle on the input of each file a page asked for once nothing keeps it for an upload: asked under its user's hand or before the page answered after a hand back, replaced by a later one, given its files, named for an upload that is not coming, or kept when the browser is taken over; and on none it still keeps, or is giving files to", async () => {
+      const tab = taken();
+      const letGo = (...inputs: FileChooser[]) => inputs.map((input) => (input.element() as unknown as { letGo: number }).letGo);
+      const given = () => ({ evaluate: () => Promise.resolve("given"), dispose: () => Promise.resolve() });
+      // Asked while its user holds the browser, and before the page has answered after the hand back: kept for no one.
+      host.pause("chat-2", true);
+      const held = tab.input();
+      tab.answering.slow = true;
+      host.pause("chat-2", false);
+      const early = tab.input();
+      expect(letGo(held, early)).toEqual([1, 1]);
+      tab.answering.slow = false;
+      while (tab.reads.length > 0) tab.reads.shift()!();
+      await turn();
+      // Kept for an upload; and let go when the page asks for another.
+      const first = tab.input();
+      expect(letGo(first)).toEqual([0]);
+      const second = tab.input(given());
+      expect(letGo(first, second)).toEqual([1, 0]);
+      // Named for an upload's prompt, it is kept though another asks after; until that upload is not coming.
+      expect(await host.address(SESSION, true, "upload-1")).toBe(FORM_URL);
+      const third = tab.input();
+      expect(letGo(second, third)).toEqual([0, 0]);
+      host.notComing("upload-1");
+      expect(letGo(second, third)).toEqual([1, 0]);
+      // An upload the input refuses leaves it kept, for the agent's next: given its files, it is let go.
+      Object.assign(third.element(), { evaluate: () => Promise.resolve({ here: true, href: FORM_URL, origin: new URL(FORM_URL).origin, folder: true }) });
+      expect(await uploads()).toEqual({ error: { type: "browser", message: A_FOLDER } });
+      expect(letGo(third)).toEqual([0]);
+      Object.assign(third.element(), { evaluate: () => Promise.resolve({ here: true, href: FORM_URL, origin: new URL(FORM_URL).origin }), evaluateHandle: () => Promise.resolve(given()) });
+      expect(await uploads()).toMatchObject({ ok: { files: 1 } });
+      expect(letGo(third)).toEqual([1]);
+      // Being given its files when the page asks for another: kept until that is done.
+      const slow: { takes?: (came: string) => void } = {};
+      const fourth = tab.input({ evaluate: () => new Promise((done) => {
+        slow.takes = done;
+      }), dispose: () => Promise.resolve() });
+      const giving = uploads();
+      await vi.waitFor(() => expect(slow.takes).toBeDefined());
+      const fifth = tab.input();
+      expect(letGo(fourth, fifth)).toEqual([0, 0]);
+      slow.takes!("given");
+      expect(await giving).toMatchObject({ ok: { files: 1 } });
+      expect(letGo(fourth, fifth)).toEqual([1, 0]);
+      // Taken over: what was kept for an upload, named for a prompt or not, is kept no more.
+      expect(await host.address(SESSION, true, "upload-2")).toBe(FORM_URL);
+      const sixth = tab.input();
+      host.pause("chat-2", true);
+      expect(letGo(fifth, sixth)).toEqual([1, 1]);
+      // And each once.
+      expect(letGo(held, early, first, second, third, fourth)).toEqual([1, 1, 1, 1, 1, 1]);
     });
 
     it("names no input for an upload's prompt where the browser was taken over while its page was still saying where the input is, though it was handed back before the page said: the upload that prompt is about is given to nothing", async () => {

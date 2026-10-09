@@ -513,6 +513,10 @@ export class BrowserHost {
   // opens no file chooser of its own there. Null once its user holds the browser and the page has been quiet
   // for OWN_CHOOSER_MS: a file input is theirs then. *acting*: how many operations of the agent's are still
   // doing something in it. *quiet*: what lets it be, while it is held and heard.
+  // The inputs an upload is giving files to now: held until it has.
+  private readonly giving = new Set<FileChooser>();
+  // Those whose handle this host has let go.
+  private readonly released = new WeakSet<FileChooser>();
   private readonly hearing = new Map<Page, { session: string; heard: ((chooser: FileChooser) => void) | null; acting: number; quiet?: NodeJS.Timeout }>();
   // The pages that have not answered yet since the browser was last handed back (settle): what one of them
   // asks for is kept for no one, and no operation of the agent's acts in it, until it has.
@@ -599,13 +603,17 @@ export class BrowserHost {
       // Its user holds the browser, or took it over since this began, handed back or not: no input is named,
       // or kept, for any upload. The one that had asked did so before they held it.
       if (this.held !== null || taken.aborted) return tab;
+      // The input named for the prompt before this one, if any, is named no more.
+      const before = this.named.get(session)?.input?.chooser;
       if (!chooser || !at?.here) {
         // Nothing has asked: its user is asked by the tab's page, and the upload is given to nothing, though an input asks after.
         this.named.set(session, { input: null, why: NOT_ASKED, of });
+        this.release(before);
         return tab;
       }
       const site = siteOf(at);
       this.named.set(session, site === null ? { input: null, why: NO_SITE, of } : { input: { chooser, href: at.href, origin: at.origin }, why: NOT_AS_ASKED, of });
+      this.release(before);
       return site ?? { refused: NO_SITE };
     }).catch(() => NEW_TAB);
   }
@@ -617,7 +625,9 @@ export class BrowserHost {
   notComing(of: string): void {
     this.prompted.delete(of);
     for (const [session, kept] of this.named) {
-      if (kept.of === of) this.named.delete(session);
+      if (kept.of !== of) continue;
+      this.named.delete(session);
+      this.release(kept.input?.chooser);
     }
   }
 
@@ -645,8 +655,10 @@ export class BrowserHost {
     this.interrupt = new AbortController();
     // What its pages asked for before is not the agent's to answer once its user has held the browser: no
     // input is kept for an upload, named for a prompt or not, and none is taken up again at the hand back.
+    const kept = [...this.choosers.values(), ...[...this.named.values()].map((named) => named.input?.chooser)];
     this.choosers.clear();
     this.named.clear();
+    for (const chooser of new Set(kept)) this.release(chooser);
     // The agent's downloads on their way stop where they are: each is dropped once it has ended.
     for (const download of this.arriving) void download.cancel().catch(() => {});
     // A button the agent pressed and holds, in any session's page, comes up: not left down under its user's hand.
@@ -739,7 +751,7 @@ export class BrowserHost {
     if (kind === "browser.set_input_files") return this.upload(session, args, stop, id);
     // Its agent acted since an upload's prompt named an input: that prompt's upload is not coming, or, allowed
     // and still having its files read, comes to nothing (upload).
-    if (!looks(kind, args)) this.named.delete(session);
+    if (!looks(kind, args)) this.unname(session);
     const operation = OPERATIONS[kind];
     if (!operation) return { error: { type: "unsupported", message: `This computer's browser does not handle ${kind}` } };
     let page: Page | undefined;
@@ -990,12 +1002,24 @@ export class BrowserHost {
   private asks(page: Page, session: string, chooser: FileChooser): void {
     if (this.held !== null) {
       if ((this.hearing.get(page)?.acting ?? 0) === 0) this.quiet(page);
-      return;
+      return void this.release(chooser);
     }
     // Handed back, and not answered since: it asked for this before, under its user's hand or by what the take-over stopped.
-    if (this.settling.has(page)) return;
+    if (this.settling.has(page)) return void this.release(chooser);
+    const before = this.choosers.get(session);
     this.choosers.set(session, chooser);
+    this.release(before);
     this.note(session, FILE_ASKED);
+  }
+
+  // This host's handle on *chooser*'s input is let go, where nothing keeps the input for an upload any
+  // more, or is giving it files: each file a page asks for leaves one here, and a page can ask without end.
+  private release(chooser: FileChooser | undefined): void {
+    if (!chooser || this.giving.has(chooser) || this.released.has(chooser)) return;
+    for (const kept of this.choosers.values()) if (kept === chooser) return;
+    for (const kept of this.named.values()) if (kept.input?.chooser === chooser) return;
+    this.released.add(chooser);
+    void chooser.element().dispose().catch(() => {});
   }
 
   // The session whose page *page* is now, a popup of its too: none for a tab its user opened themselves,
@@ -1111,8 +1135,21 @@ export class BrowserHost {
     if (asked && !named) return failed(NOT_AS_ASKED);
     if (named && named.input === null) return failed(named.why);
     const chooser = named?.input?.chooser ?? this.choosers.get(session);
+    if (!chooser) return failed(NOT_ASKED);
+    try {
+      return await this.fill(session, chooser, named?.input ?? null, args, stop);
+    } finally {
+      // Named for this upload alone, or given its files: this host's handle on it is let go.
+      this.release(chooser);
+    }
+  }
+
+  // An upload's files given to *chooser*'s input, of *session*'s: *at*, where its prompt named it.
+  private async fill(
+    session: string, chooser: FileChooser, at: { href: string; origin: string } | null, args: Record<string, unknown>, stop: AbortSignal,
+  ): Promise<Outcome> {
     // Its page closed, or is this session's no more.
-    if (!chooser || this.sessionOf(chooser.page()) !== session) return failed(NOT_ASKED);
+    if (this.sessionOf(chooser.page()) !== session) return failed(NOT_ASKED);
     const files = filesOf(args.files);
     if (!files) return failed("A file for the page is a name, its type and what it holds");
     // A question the input's page asked its user is theirs still, as for anything else the agent would do in
@@ -1123,7 +1160,14 @@ export class BrowserHost {
     }
     let refused: unknown;
     try {
-      refused = await this.bounded(chooser.page(), this.doing(chooser.page(), this.give(session, chooser, files, named?.input ?? null, stop)), stop);
+      // Answered at once where its user takes the browser over, its steps may reach the page later: the
+      // input is held until the last of them has.
+      this.giving.add(chooser);
+      const giving = this.give(session, chooser, files, at, stop).finally(() => {
+        this.giving.delete(chooser);
+        this.release(chooser);
+      });
+      refused = await this.bounded(chooser.page(), this.doing(chooser.page(), giving), stop);
     } catch (error) {
       if (stop.aborted) return PAUSED;
       return failed(said(error));
@@ -1137,6 +1181,13 @@ export class BrowserHost {
     const notices = (this.unseen.get(session) ?? []).filter((notice) => !(last && notice === FILE_ASKED));
     this.unseen.delete(session);
     return { ok: { files: files.length, notices } };
+  }
+
+  // No input is named for *session*'s upload any more.
+  private unname(session: string): void {
+    const named = this.named.get(session);
+    this.named.delete(session);
+    this.release(named?.input?.chooser);
   }
 
   // *files* given to *chooser*'s input: null once it has them, why not in words, or HELD. They are made
@@ -1297,8 +1348,10 @@ export class BrowserHost {
     this.unseen.delete(session);
     this.untold.delete(session);
     this.roots.delete(session);
+    const asked = this.choosers.get(session);
     this.choosers.delete(session);
-    this.named.delete(session);
+    this.unname(session);
+    this.release(asked);
     return pages.filter((page) => !page.isClosed());
   }
 
