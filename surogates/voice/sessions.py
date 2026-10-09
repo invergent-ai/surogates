@@ -41,7 +41,11 @@ ANONYMOUS = "anonymous"
 # model reads them in any language. The first one also says which language the call is in.
 HEARD_NONE = "[The caller interrupted you before hearing your previous answer.] "
 HEARD_PART = "[The caller interrupted you; of your previous answer they heard only: «{}».] "
-SPEAK = "[This call is in {}: speak only {}.] "
+SPEAK = "[This call is in {0}: speak only {0}.] "
+
+
+def speak_note(language: str) -> str:
+    return SPEAK.format(language_name(language))
 GREETED = "[You already answered the phone with: «{}».] "
 GREETING_CUT = "[You answered the phone, but the caller interrupted you after: «{}».] "
 
@@ -215,8 +219,6 @@ class CallSession:
                 self._lookup(False)
             await pubsub.aclose()
 
-    def _speak(self) -> str:
-        return SPEAK.format(*[language_name(self.language)] * 2)
 
     def _lookup(self, on: bool) -> None:
         if self.on_lookup is not None:
@@ -256,7 +258,7 @@ class CallSession:
         """
         heard = heard.strip()
         if not self._user_event:  # nothing asked yet: it was the greeting
-            self.note = self._speak() + (GREETING_CUT.format(heard) if heard else "")
+            self.note = speak_note(self.language) + (GREETING_CUT.format(heard) if heard else "")
             return
         events = await self.store.get_events(self.session_id, after=self._user_event)
         written = any(e.type == EventType.LLM_RESPONSE.value for e in events)
@@ -296,4 +298,4 @@ class VoiceSessions:
         return CallSession(store=self._store, redis=self._redis, session_id=session_id, org_id=target.org_id,
                            agent_id=target.agent_id, user_id=ident.user_id, caller=caller_id, language=language,
                            lines=lines or default_lines(language),
-                           note=SPEAK.format(*[language_name(language)] * 2) + (GREETED.format(greeting) if greeting else ""))
+                           note=speak_note(language) + (GREETED.format(greeting) if greeting else ""))

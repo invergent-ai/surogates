@@ -12,7 +12,7 @@ plugins default to models their provider has retired: a model is always chosen e
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import httpx
 
@@ -36,6 +36,8 @@ class Provider:
     needs_url: bool = False  # a server of the owner's (Hugging Face endpoint, self-hosted, OpenAI-compatible)
     voices: str = "list"  # "list": the account's voices API; "fixed": the catalog's own list; "id": typed in
     fixed_voices: tuple[str, ...] = ()
+    library: bool = False  # has a public voice library besides the account's own (Studio's "Library" tab)
+    searches: bool = True  # filters voices by name and language itself; if not, list_voices does it here
     keys_url: str = ""  # where an owner creates a key (Studio links it)
     note: str = ""  # what the key needs, shown beside the key field
 
@@ -51,16 +53,19 @@ PROVIDERS: dict[str, Provider] = {p.id: p for p in (
              stt=(Model("scribe_v2_realtime", "Scribe v2 Realtime"),),
              tts=(Model("eleven_flash_v2_5", "Flash v2.5, fastest", FLASH_LANGUAGES),
                   Model("eleven_v4_turbo", "v4 Turbo, 90+ languages")),
+             library=True,
              keys_url="https://elevenlabs.io/app/settings/api-keys",
              note="Enable Text to Speech, Speech to Text and Voices read."),
     Provider("cartesia", "Cartesia",
              stt=(Model("ink-whisper", "Ink Whisper"),),
              tts=(Model("sonic-3.6", "Sonic 3.6"),),
+             library=True,
              keys_url="https://play.cartesia.ai/keys"),
     Provider("deepgram", "Deepgram",
              stt=(Model("nova-3", "Nova-3"), Model("flux-general-en", "Flux, English", ("en",))),
              # Deepgram's voices are its models ("aura-2-thalia-en"): the voice picked is the model built
              tts=(Model("aura-2", "Aura-2", ("en", "es", "de", "fr", "nl", "it", "ja")),),
+             searches=False,
              keys_url="https://console.deepgram.com/"),
     Provider("openai", "OpenAI",
              stt=(Model("gpt-4o-transcribe", "GPT-4o Transcribe"), Model("gpt-4o-mini-transcribe", "GPT-4o mini Transcribe")),
@@ -71,9 +76,11 @@ PROVIDERS: dict[str, Provider] = {p.id: p for p in (
     Provider("gradium", "Gradium",
              stt=(Model("default", "Gradium STT", ("en", "fr", "de", "es", "pt")),),
              tts=(Model("default", "Gradium TTS", ("en", "fr", "de", "es", "pt")),),
+             library=True, searches=False,
              keys_url="https://gradium.ai/"),
     Provider("fishaudio", "Fish Audio",
              tts=(Model("s2.1-pro", "S2.1 Pro"), Model("s1", "S1")),
+             library=True,
              keys_url="https://fish.audio/app/api-keys/"),
     # Any speech model behind an OpenAI-compatible API: a Hugging Face Inference Endpoint, Speaches,
     # Kokoro-FastAPI, vLLM. The model and voice are whatever that server calls them.
@@ -83,10 +90,6 @@ PROVIDERS: dict[str, Provider] = {p.id: p for p in (
 )}
 
 
-def provider(pid: str) -> Provider | None:
-    return PROVIDERS.get(pid)
-
-
 # --- the owner's account: is the key good, which voices can it use (ops calls these) -----------------
 
 @dataclass(frozen=True)
@@ -94,7 +97,6 @@ class Status:
     ok: bool
     code: str = ""  # invalid_key | forbidden | no_credits | rate_limited | unreachable | error
     message: str = ""
-    account: str = ""  # the plan or credits, when the provider says
 
 
 @dataclass(frozen=True)
@@ -114,7 +116,6 @@ class Conn:
     provider: str
     api_key: str = ""
     base_url: str = ""
-    extra: dict = field(default_factory=dict)
 
 
 MESSAGES = {
@@ -207,7 +208,7 @@ def _voices(pid: str, body) -> list[Voice]:
 async def list_voices(conn: Conn, client: httpx.AsyncClient, *, query: str = "", language: str = "",
                       library: bool = False) -> tuple[Status, list[Voice]]:
     """The voices this account can speak with: its own, or the provider's public library."""
-    p = provider(conn.provider)
+    p = PROVIDERS.get(conn.provider)
     if p is None:
         return Status(False, "error", "Unknown provider."), []
     if p.voices == "fixed":
@@ -226,9 +227,9 @@ async def list_voices(conn: Conn, client: httpx.AsyncClient, *, query: str = "",
         voices = _voices(conn.provider, r.json())
     except (ValueError, KeyError, TypeError, AttributeError):  # a proxy's page, a changed API
         return Status(False, "error", "The provider answered in a way we could not read."), []
-    if query and conn.provider in ("deepgram", "gradium"):  # no search on their side
+    if query and not p.searches:
         q = query.lower()
         voices = [v for v in voices if q in v.name.lower() or q in v.id.lower()]
-    if language and conn.provider in ("deepgram", "gradium"):
+    if language and not p.searches:
         voices = [v for v in voices if not v.languages or any(x.split("-")[0] == language for x in v.languages)]
     return status, voices

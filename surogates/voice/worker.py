@@ -97,12 +97,10 @@ class Runtime:
         line without its key cannot speak, and the caller must hear that instead of silence."""
         if slot.ours or not slot.key_ref:
             return ""
-        from surogates.tenant.credentials import parse_vault_ref
-
         if self.vault is None:
             raise ProviderUnavailable(slot.provider, "no_vault")
         try:
-            value = await self.vault.retrieve(org_id, parse_vault_ref(slot.key_ref))
+            value = await self.vault.resolve_ref(slot.key_ref, org_id=org_id)
         except Exception as e:  # a bad ref, an undecryptable value, the database
             raise ProviderUnavailable(slot.provider, "key_unreadable") from e
         if not value:
@@ -123,6 +121,9 @@ def prewarm(proc: JobProcess) -> None:
     import surogates.db.engine  # noqa: F401
     import surogates.runtime.platform_client  # noqa: F401
     import surogates.session.store  # noqa: F401
+    # a line's provider plugin (openai alone took 130 ms): imported here, not before the greeting
+    import livekit.plugins.cartesia, livekit.plugins.deepgram, livekit.plugins.elevenlabs  # noqa: E401, F401
+    import livekit.plugins.fishaudio, livekit.plugins.gradium, livekit.plugins.openai  # noqa: E401, F401
     import surogates.storage.backend  # noqa: F401
 
 
@@ -288,9 +289,12 @@ async def entrypoint(ctx: JobContext) -> None:
     config = CallConfig.from_routing(tenant.get("config"))
     org_id = UUID(str(tenant["org_id"]))
     try:  # the line's own voice and ears; a provider line without its key cannot take the call
-        tts = build_tts(config.speaking, key=await rt.key(org_id, config.speaking), language=config.language,
+        # each distinct key once (one account often hears and speaks), together: the caller is waiting
+        slots_by_ref = {s.key_ref: s for s in (config.speaking, config.hearing)}
+        keys = dict(zip(slots_by_ref, await asyncio.gather(*(rt.key(org_id, s) for s in slots_by_ref.values()))))
+        tts = build_tts(config.speaking, key=keys[config.speaking.key_ref], language=config.language,
                         tts_url=vs.tts_url)
-        heard = build_stt(config.hearing, key=await rt.key(org_id, config.hearing), language=config.language,
+        heard = build_stt(config.hearing, key=keys[config.hearing.key_ref], language=config.language,
                           stt_url=vs.stt_url)
     except Exception as e:
         log.warning("call %s refused: %s", info.call_id, e, exc_info=not isinstance(e, ProviderUnavailable))

@@ -158,8 +158,8 @@ async def test_a_provider_line_without_its_key_refuses_the_call_instead_of_speak
         def __init__(self, value):
             self.value, self.asked = value, []
 
-        async def retrieve(self, org_id, name):
-            self.asked.append(name)
+        async def resolve_ref(self, ref, *, org_id):  # CredentialVault's
+            self.asked.append(ref.removeprefix("vault://"))
             return self.value
 
     org, slot = uuid4(), Slot(provider="cartesia", voice="v", key_ref="vault://cartesia-key")

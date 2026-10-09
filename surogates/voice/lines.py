@@ -60,11 +60,11 @@ NAMES = {"ro": "Romanian", "en": "English", "de": "German", "fr": "French", "es"
 
 
 def default_lines(language: str) -> Lines:
-    return DEFAULTS.get(language.split("-")[0], DEFAULTS[FALLBACK])
+    return DEFAULTS.get(language, DEFAULTS[FALLBACK])
 
 
 def language_name(language: str) -> str:
-    return NAMES.get(language.split("-")[0], language)
+    return NAMES.get(language, language)
 
 
 def lines_from_routing(language: str, cfg: Any) -> Lines:

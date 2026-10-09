@@ -126,7 +126,7 @@ RULES = {
 
 
 def rules(language: str) -> Rules | None:
-    return RULES.get(language.split("-")[0])
+    return RULES.get(language)
 
 
 def is_preamble(sentence: str, language: str = "ro") -> bool:
