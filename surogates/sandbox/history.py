@@ -100,6 +100,8 @@ _ZERO = "0" * 40
 #: The blob of a file with nothing in it, as an index entry holds it.
 _EMPTY = bytes.fromhex("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
 MAIN = "refs/heads/main"
+#: The failed helpers' copies kept apart for one thread, at most: the oldest goes for one more.
+_APART = 16
 #: The title of a commit that only names hand-offs, changing no file.
 _EARLIER = "Earlier hand-offs"
 #: What a thread's hand-off says of itself: the hand-off its copy had taken up, and the one its pod made before it.
@@ -708,7 +710,9 @@ class History:
         """Keep a failed helper's copy on a ref of its own, merged onto nothing: its files may be half made.
 
         ``left`` names the files it changed, which its thread is told are
-        there: one commit, its files on where it started.
+        there: one commit, its files on where it started.  A thread keeps
+        the copies of its last ``_APART`` failed helpers: one more lets the
+        oldest go.
         """
         own = self._commit_copy(author, "Kept apart", trailers)
         since = self._ref(self.synced)
@@ -716,8 +720,28 @@ class History:
         if not left:
             return {"commit": since, "left": []}
         tip = self._one(own, since, author=author, title="Kept apart", trailers=trailers)
-        self._push({self.apart: tip}, expect={})
+        self._push({self.apart: tip, **dict.fromkeys(self._oldest_apart(), None)}, expect={})
         return {"commit": tip, "left": left}
+
+    def _oldest_apart(self) -> list[str]:
+        """The refs of the thread's failed helpers' copies to let go so that, with one more, ``_APART`` are kept: the oldest.
+
+        By the date each was kept.  The ref of versions left out is none of
+        them.  One whose commit the history lacks is let go first.
+        """
+        prefix = f"refs/helpers/{self.thread}/"
+        kept = {ref: commit for ref, commit in self._durable_refs().items() if ref.startswith(prefix) and ref not in (self.untaken, self.apart)}
+        if len(kept) < _APART:
+            return []
+
+        def when(ref: str) -> int:
+            try:
+                self._fetch(kept[ref])
+                return int(self._main("log", "-1", "--format=%ct", "--end-of-options", kept[ref]))
+            except HistoryError:
+                return 0
+
+        return sorted(kept, key=lambda ref: (when(ref), ref))[:len(kept) - _APART + 1]
 
     def take_up(self) -> dict:
         """Bring into the thread's copy what its helpers kept on the hand-off since the copy last had it.

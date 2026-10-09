@@ -2154,3 +2154,20 @@ def test_a_stop_follows_a_bounded_number_of_commits_whatever_the_hand_offs_say(t
     monkeypatch.setattr(history_module, "_HAND_BACKS", 8)
     assert turn.drop_hand_off() == {"dropped": True}
     assert names_in(a_pod(tmp_path, project, turn="turn-3")) == ["Report.docx", "h0.md", "h1.md", "h2.md", "h3.md", "notes.txt"]
+
+
+def test_a_threads_failed_helpers_copies_kept_apart_are_bounded_in_number_the_oldest_let_go(tmp_path, project, monkeypatch):
+    monkeypatch.setattr(history_module, "_APART", 3)
+    durable = project / "_history"
+    thread = a_pod(tmp_path, project)
+    thread.hand_off(author=A, trailers=KEPT)
+    for n in range(5):
+        failed = a_helper(tmp_path, project, f"h{n}")
+        (failed.copy / f"half{n}.md").write_text("half made")
+        failed.keep_apart(author=A, trailers=KEPT)
+        time.sleep(1.1)  # each a second after the last: the oldest is the one kept first
+    kept = git(durable, "for-each-ref", "--format=%(refname)", "refs/helpers/t1/").splitlines()
+    # The last three failed helpers' copies; the two oldest are let go, with the files only they held.
+    assert kept == ["refs/helpers/t1/h2", "refs/helpers/t1/h3", "refs/helpers/t1/h4"]
+    assert git(durable, "show", "refs/helpers/t1/h4:half4.md") == "half made"
+    assert git(durable, "fsck", "--no-dangling") == ""
