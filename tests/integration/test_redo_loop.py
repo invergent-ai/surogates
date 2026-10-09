@@ -430,6 +430,95 @@ async def test_a_message_typed_after_a_redo_has_the_turn_and_its_skill_runs_once
     assert expanded == ["/report-writer Tidy the notes."]
 
 
+THE_EDIT = calling(("terminal", {"command": "printf ' by A' >> Report.docx"}))
+A_SKILL = "/report-writer Tidy the notes."
+THE_SKILL = "Follow the report-writer skill: tidy the notes."
+
+
+def skills_expanded(monkeypatch) -> list[str]:
+    """Each message a wake expands a skill for from here on, at its own wake or again at a later one."""
+    expanded: list[str] = []
+
+    async def a_skill(**kwargs):
+        expanded.append(kwargs["text"])
+        return THE_SKILL, "report-writer", None, "skill"
+
+    monkeypatch.setattr(loop_module, "expand_slash_skill", a_skill)
+    monkeypatch.setattr(loop_module, "expand_skill_again", a_skill)
+    return expanded
+
+
+def with_real_tools(workers, store=None):
+    """A worker whose tools run for real in the thread's pod, so that its turn's end lands what it changed."""
+    harness = workers.worker(SlashCommandConfig(), store=store)
+    del harness._tools.dispatch
+    harness._saga_settings = QUICK
+    return harness
+
+
+async def a_clash_while_its_user_types(workers, pods, pool, thread, typed: str) -> None:
+    """``a_clash_among``, its user typing *typed* as the turn lands: after its last request, before its redo is written."""
+    land_turn = landing_module.land_turn
+
+    async def typed_meanwhile(**arguments):
+        await workers.store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": typed})
+        return await land_turn(**arguments)
+
+    with pytest.MonkeyPatch.context() as scripted:
+        scripted.setattr(loop_artifact_completion, "land_turn", typed_meanwhile)
+        await a_clash(workers.api, scripted, pods, pool, thread, YOURS)
+
+
+def dies_as_the_model_answers(store) -> DiesWriting:
+    """The store of a worker that dies once the model was asked, before its answer is written."""
+    return DiesWriting(store, lambda kind, data: kind == EventType.LLM_RESPONSE and "answers" not in data)
+
+
+@pytest.mark.parametrize("typed", ["as its last message before the clash", "while the clashing turn landed", "after the redo"])
+async def test_a_redo_turn_cut_off_after_the_model_was_asked_keeps_its_redo_beside_a_skill(workers, monkeypatch, pods, typed):
+    api, store = workers.api, workers.store
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    workers.sandbox_pool = pool = SandboxPool(pods)
+    expanded = skills_expanded(monkeypatch)
+    if typed == "as its last message before the clash":
+        await its_first_turn_was_taken(store, thread)
+        # Its own wake ran the skill, and the model answered it.
+        assert await workers.types(thread.id, A_SKILL, SlashCommandConfig()) == "Noted."
+        assert workers.requests[-1][-1]["content"] == THE_SKILL
+        await a_clash_among(workers, pods, pool, thread)
+    elif typed == "while the clashing turn landed":
+        await a_clash_while_its_user_types(workers, pods, pool, thread, A_SKILL)
+    else:
+        await a_clash_among(workers, pods, pool, thread)
+        await workers.says(thread.id, A_SKILL)
+    await workers.nobody_is_queued()
+    workers.requests.clear()
+    # The turn that reads the redo is cut off once the model was asked; the wake that recovers it asks again.
+    workers.replies = [_final_response("Never written."), THE_EDIT, _final_response("Redid the edit.")]
+    with pytest.raises(asyncio.CancelledError):
+        await with_real_tools(workers, store=dies_as_the_model_answers(store)).wake(thread.id)
+    await with_real_tools(workers).wake(thread.id)
+    cut_off, recovered = workers.requests[:2]
+    # The same request: the redo in it once, and no skill written over it.
+    assert recovered == cut_off and [m["content"] for m in recovered].count(REDO_OF_THE_REPORT) == 1
+    assert recovered[-1] == {"role": "user", "content": REDO_OF_THE_REPORT}
+    if typed == "as its last message before the clash":
+        # That message's skill ran at its own turn: it is not given to the model again as something new.
+        assert expanded == [A_SKILL] and [m["content"] for m in recovered].count(THE_SKILL) == 0
+    elif typed == "after the redo":
+        assert [m["content"] for m in recovered[-2:]] == [THE_SKILL, REDO_OF_THE_REPORT]
+        assert [m["content"] for m in recovered].count(THE_SKILL) == 1
+    # The redo is done, once, and its master reads the file landed.
+    assert (pods.project / "Report.docx").read_bytes() == YOURS + b" by A"
+    assert len(await store.get_events(thread.id, types=[EventType.HISTORY_REDO])) == 1
+    assert {f["ref"]: f["landing"] for f in (await reports(api, master))[-1]["files"]} == {"Report.docx": "landed"}
+    assert await workers.status(thread.id) == "completed"
+    asked = len(workers.requests)
+    await with_real_tools(workers).wake(thread.id)
+    assert len(workers.requests) == asked
+
+
 async def test_a_redo_revives_no_thread_whose_turn_failed(api, monkeypatch, pods):
     thread = await a_thread(api, "Draft A", await master_of(api, await create(api)))
     store, pool = api.app.state.session_store, SandboxPool(pods)

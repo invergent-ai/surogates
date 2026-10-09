@@ -218,6 +218,7 @@ from surogates.harness.loop_context_replay import (
     build_user_message_dict,
     coalesce_user_messages,
     held_news,
+    news,
     prune_superseded_canvas_images,
     unread_reports,
 )
@@ -1851,10 +1852,18 @@ class AgentHarness(
             # disables every slash command (incl. /<skill>) when the message
             # carries a path-only attachment.  ``last_user`` (rebuilt message)
             # is still needed below for in-place mutation when a skill
-            # expansion succeeds.
+            # expansion succeeds.  It is the message replay built from the
+            # user's latest one, and never a note of the harness's a request
+            # has read since (a worker's report, a redo, a hand back of the
+            # browser): a turn cut off after such a request is recovered
+            # with the note as its newest user-role message, and an
+            # expansion written over it would lose the note for good.
+            said = build_user_message_dict(_latest_user_event_data(all_events) or {})["content"]
+            notes = [note["content"] for event in all_events if (note := news(event)) is not None]
+            theirs = [m for m in messages if m.get("role") == "user" and m.get("content") not in notes]
             last_user = next(
-                (m for m in reversed(messages) if m.get("role") == "user"),
-                None,
+                (m for m in reversed(theirs) if m.get("content") == said),
+                theirs[-1] if theirs else None,
             )
             # A wake for a report has no new user input, so the user's last
             # message, a command already handled included, must not run again.
@@ -1863,7 +1872,8 @@ class AgentHarness(
             for_news = revived_by == "worker_report" or _turn_for_a_hand_back(all_events)
             # Nor has the turn a redo gives a project's thread, which reads
             # its redo: in a thread the redo's own wake left active, its
-            # worker dead before the model was asked, as in a finished one.
+            # worker dead before the model was asked or after, as in a
+            # finished one.
             for_redo = _turn_for_a_redo(all_events, is_command=lambda event: self._is_command(session, event))
             last_user_content = "" if for_news or for_redo else _latest_user_event_text(all_events)
 

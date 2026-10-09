@@ -149,25 +149,38 @@ def _redo_unread(events: list[Any]) -> bool:
 
 
 def _turn_for_a_redo(events: list[Any], *, is_command: Any) -> bool:
-    """Whether the turn a wake is about to run is the one a redo gives its thread.
+    """Whether the turn a wake is about to run, or to go on with, is the one a redo gives its thread.
 
-    The redo is unread and nothing was said after it that opens a turn of
-    its own.  A wake reads the user's last message to run its command; in
-    such a turn that message is not what the wake is for, and its command
-    must not run again.  A command the harness answers itself (*is_command*
-    says which) opens no turn of the model's, typed before the redo or after
-    it; any other message after the redo is the turn's, and its command runs
-    once.  A turn the redo opened and a dead worker cut off before its first
-    request is still the redo's.
+    Nothing was said after the redo that opens a turn of its own, and the
+    turn it opened has not ended.  A wake reads the user's last message to
+    run its command; in such a turn that message is not what the wake is
+    for, and its command must not run again.  A command the harness answers
+    itself (*is_command* says which) opens no turn of the model's, typed
+    before the redo or after it; any other message after the redo is the
+    turn's, and its command runs once.
+
+    The turn is the redo's until it ends: at the model's answer that calls
+    no tool, or at a turn's end, once the model was asked in it.  One a dead
+    worker cut off, before its first request or after it, is still the
+    redo's for the wake that goes on with it.
     """
-    opened = False
+    # Whether the redo's turn is open, and whether the model was asked in it.
+    opened = asked = False
     for event in events:
         kind = _event_type(event)
+        data = getattr(event, "data", None) or {}
         if kind == EventType.LLM_REQUEST.value:
-            opened = False
+            asked = opened
         elif kind == EventType.HISTORY_REDO.value:
-            opened = True
+            opened, asked = True, False
         elif kind == EventType.USER_MESSAGE.value and not is_command(event):
+            opened = False
+        elif asked and (
+            kind in _TURN_END_EVENT_TYPES
+            # The model's answer ends a turn; its calls for tools do not, nor the harness's answer to a command.
+            or kind == EventType.LLM_RESPONSE.value and "answers" not in data
+            and not (data.get("message") or {}).get("tool_calls")
+        ):
             opened = False
     return opened
 

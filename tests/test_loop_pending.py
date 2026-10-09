@@ -525,6 +525,10 @@ def test_a_commands_end_does_not_move_the_cursor_past_a_redo():
     assert _first_unread([*events, event(7, REQUEST)], **nothing_plain) is None
 
 
+#: The model's answer that calls a tool: its turn goes on.
+CALLS = (ANSWER, {"message": {"role": "assistant", "tool_calls": [{"id": "call-1"}]}})
+
+
 @pytest.mark.parametrize("after_the_redo, the_redos", [
     ((), True),
     # A command the harness answers opens no turn of the model's, answered or not.
@@ -537,18 +541,28 @@ def test_a_commands_end_does_not_move_the_cursor_past_a_redo():
     (("/report-writer Go on.",), False),
     (("/loop 5m Go on.", "Go on."), False),
     (("Go on.", "/loop 5m Go on."), False),
-    ((REQUEST,), False),
+    # The turn is the redo's until it ends: a worker that died once the model was asked left it open.
+    ((REQUEST,), True),
+    ((REQUEST, CALLS, EventType.TOOL_RESULT, REQUEST), True),
+    ((REQUEST, "/loop 5m Go on.", EventType.HARNESS_WAKE, (ANSWER, {"answers": 7})), True),
+    ((REQUEST, "Go on."), False),
+    ((REQUEST, ANSWER), False),
+    ((REQUEST, CALLS, EventType.TOOL_RESULT, EventType.SESSION_STOPPED), False),
     ((REQUEST, ANSWER, DONE, "/loop 5m Go on."), False),
 ], ids=[
     "the redo alone", "a command waiting", "a command answered", "a dead wake", "a message", "a skill",
-    "a message behind a command", "a command behind a message", "read", "read, and a command since",
+    "a message behind a command", "a command behind a message", "the model asked", "the model's tools called",
+    "a command answered meanwhile", "a message meanwhile", "the model's answer", "stopped", "ended, and a command since",
 ])
 def test_the_turn_after_a_redo_is_the_redos_unless_something_else_opened_it(after_the_redo, the_redos):
     events = log(SAID, REQUEST, ANSWER, DONE, REDO)
     for said in after_the_redo:
-        events.append(
-            event(len(events) + 1, said) if isinstance(said, EventType) else event(len(events) + 1, SAID, content=said)
-        )
+        if isinstance(said, tuple):
+            events.append(event(len(events) + 1, said[0], **said[1]))
+        else:
+            events.append(
+                event(len(events) + 1, said) if isinstance(said, EventType) else event(len(events) + 1, SAID, content=said)
+            )
     is_command = lambda e: e.type == SAID and (e.data.get("content") or "").startswith("/loop")  # noqa: E731
     assert _turn_for_a_redo(events, is_command=is_command) is the_redos
 
