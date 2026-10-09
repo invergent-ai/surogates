@@ -38,7 +38,7 @@ export interface ThreadRow {
   id: string; // the thread's session id
   title: string;
   group: ThreadGroup;
-  reason: "question" | "approval" | "failed" | "computer" | null;
+  reason: "question" | "approval" | "failed" | "computer" | "files" | null; // files: a file that did not merge, or a landing that escalated
   statusLine: string | null;
   progress: { done: number; total: number } | null;
   files: ProducedFile[];

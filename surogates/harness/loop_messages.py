@@ -6,7 +6,7 @@ import contextlib
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from surogates.session.events import EventType
+from surogates.session.events import MESSAGE_TYPES, EventType
 
 if TYPE_CHECKING:
     from surogates.browser.control import BrowserControlStore
@@ -432,9 +432,8 @@ def _view_context_note(events: list[Any]) -> str | None:
     used for ephemeral mid-array insertion.
     """
     for event in reversed(events):
-        event_type = event.type
-        type_value = event_type.value if hasattr(event_type, "value") else event_type
-        if type_value != EventType.USER_MESSAGE.value:
+        # A coordinator's follow-up is the turn's message: it was typed on no page.
+        if event.type not in MESSAGE_TYPES:
             continue
         data = event.data if isinstance(event.data, dict) else {}
         return _view_context_note_from_metadata(data.get("metadata"))
@@ -465,18 +464,26 @@ def _latest_user_event_text(events: list[Any]) -> str:
     start whenever the message carries a path-only attachment (e.g. a
     PDF too large to inline) and silently disable dispatch.
 
+    A project coordinator's follow-up to its thread is read as a typed
+    message is: its marked text is the latest, so no command the user
+    typed before it runs again.
+
     Returns ``""`` when no ``USER_MESSAGE`` event exists or the content
     is missing / malformed.
     """
     for event in reversed(events):
-        event_type = event.type
-        type_value = (
-            event_type.value if hasattr(event_type, "value") else event_type
-        )
-        if type_value != EventType.USER_MESSAGE.value:
+        if event.type not in MESSAGE_TYPES:
             continue
         return _user_event_text(event.data)
     return ""
+
+
+def _latest_message_is_a_follow_up(events: list[Any]) -> bool:
+    """Whether the latest message typed into the session is its project coordinator's follow-up, not its user's."""
+    return next(
+        (event.type == EventType.COORDINATOR_MESSAGE.value for event in reversed(events) if event.type in MESSAGE_TYPES),
+        False,
+    )
 
 
 def _user_event_text(data: Any) -> str:
@@ -515,14 +522,11 @@ def _latest_user_event_data(events: list[Any]) -> dict | None:
     :func:`surogates.harness.loop_context_replay.build_user_message_dict`.
 
     Returns ``None`` when no ``USER_MESSAGE`` event exists or its payload is
-    not a dict.
+    not a dict.  A project coordinator's follow-up counts, as in
+    :func:`_latest_user_event_text`.
     """
     for event in reversed(events):
-        event_type = event.type
-        type_value = (
-            event_type.value if hasattr(event_type, "value") else event_type
-        )
-        if type_value != EventType.USER_MESSAGE.value:
+        if event.type not in MESSAGE_TYPES:
             continue
         return event.data if isinstance(event.data, dict) else None
     return None

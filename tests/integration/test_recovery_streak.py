@@ -60,7 +60,7 @@ async def test_streak_counts_consecutive_recoveries(
 
 @pytest.mark.parametrize(
     "progress_type",
-    [EventType.LLM_RESPONSE, EventType.TOOL_RESULT, EventType.USER_MESSAGE],
+    [EventType.LLM_RESPONSE, EventType.TOOL_RESULT, EventType.USER_MESSAGE, EventType.COORDINATOR_MESSAGE],
 )
 async def test_progress_after_a_recovery_resets_the_streak(
     session_store, session_factory, progress_type,
