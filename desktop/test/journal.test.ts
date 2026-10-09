@@ -426,6 +426,59 @@ describe("the bindings", () => {
     journal.close();
   });
 
+  it("keep the ports of a root's own servers its user let the browser open, one root a port, and tell of each change", () => {
+    const before = new OperationJournal(path);
+    before.bindings.add(binding("r1", 1));
+    before.bindings.add(binding("r2", 2));
+    const told: string[] = [];
+    before.bindings.watch((root) => told.push(root));
+    before.bindings.allowPort("r1", 3000);
+    before.bindings.allowPort("r1", 8000);
+    // Allowed already, or for a root with no binding: nothing is kept, and nothing told.
+    before.bindings.allowPort("r1", 3000);
+    before.bindings.allowPort("r3", 5000);
+    expect(told).toEqual(["r1", "r1"]);
+    // Another chat's user allowed the same port: it is that chat's now, and both hear of it.
+    before.bindings.allowPort("r2", 3000);
+    expect(told).toEqual(["r1", "r1", "r1", "r2"]);
+    before.close();
+    const after = new OperationJournal(path);
+    expect([after.bindings.ports("r1"), after.bindings.ports("r2"), after.bindings.ports("r3")]).toEqual([[8000], [3000], []]);
+    expect([after.bindings.portOwner(3000), after.bindings.portOwner(8000), after.bindings.portOwner(5000)]).toEqual(["r2", "r1", undefined]);
+    expect(after.bindings.forwards()).toEqual([{ port: 3000, root: "r2" }, { port: 8000, root: "r1" }]);
+    after.close();
+  });
+
+  it("forget a root's ports one at a time, with its browser, and with the root", () => {
+    const journal = new OperationJournal(path);
+    for (const [root, at] of [["r1", 1], ["r2", 2], ["r3", 3]] as const) {
+      journal.bindings.add(binding(root, at));
+      journal.bindings.allowBrowser(root);
+    }
+    journal.bindings.allowPort("r1", 3000);
+    journal.bindings.allowPort("r1", 8000);
+    journal.bindings.allowPort("r2", 5173);
+    journal.bindings.allowPort("r3", 9000);
+    const told: string[] = [];
+    journal.bindings.watch((root) => told.push(root));
+    // One taken back: another chat's port, or one never allowed, changes nothing.
+    journal.bindings.disallowPort("r2", 3000);
+    journal.bindings.disallowPort("r1", 4000);
+    journal.bindings.disallowPort("r1", 3000);
+    expect([journal.bindings.ports("r1"), told]).toEqual([[8000], ["r1"]]);
+    // The browser taken back: its ports go with it.
+    journal.bindings.disallowBrowser("r1");
+    expect([journal.bindings.ports("r1"), journal.bindings.browsing("r1"), told]).toEqual([[], false, ["r1", "r1"]]);
+    // A deleted chat's go with its binding.
+    journal.bindings.retire("r2");
+    expect([journal.bindings.ports("r2"), journal.bindings.portOwner(5173), told]).toEqual([[], undefined, ["r1", "r1", "r2"]]);
+    expect(journal.bindings.forwards()).toEqual([{ port: 9000, root: "r3" }]);
+    // The sandbox's own proxies' ports are no chat's servers: never kept, whoever asks.
+    for (const proxy of [3128, 1080]) expect(() => journal.bindings.allowPort("r3", proxy)).toThrow(`Port ${proxy} is the sandbox's own proxy`);
+    expect([journal.bindings.forwards(), told]).toEqual([[{ port: 9000, root: "r3" }], ["r1", "r1", "r2"]]);
+    journal.close();
+  });
+
   it("read back a folder whose device and inode numbers are past 2^53", () => {
     const journal = new OperationJournal(path);
     const large = { ...binding("r1", 1), dev: 2 ** 53 + 4, ino: 2 ** 53 + 2 };

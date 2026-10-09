@@ -199,10 +199,11 @@ describe("one agent's device", () => {
     expect(asked).toMatchObject([{ kind: "browser", action: "script", page: `https://bank.example/${CHILD}` }]);
   });
 
-  it("asks its tools whether a chat's sandbox listens before its browser is sent to a port of the chat's own servers, and sends it to none nothing listens on", async () => {
+  it("asks its tools whether a chat's sandbox listens, and then its user, before its browser is sent to a port of the chat's own servers: to none nothing listens on, and none its user did not allow", async () => {
     const asked: ApprovalRequest[] = [];
+    let answer: "deny" | "allow_session" = "deny";
     const device = await start({
-      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve("deny")), confirmFreeMode: () => Promise.resolve(false) },
+      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve(answer)), confirmFreeMode: () => Promise.resolve(false) },
     });
     await server.until(() => statuses.includes("connected"));
     const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
@@ -218,13 +219,25 @@ describe("one agent's device", () => {
         message: "Nothing listens on port 3000 in this chat's sandbox. Start the server there as a background command, then open http://localhost:3000/ again.",
       },
     });
-    expect(tools.ran.filter((ran) => ran.kind === "browser.navigate")).toEqual([]);
+    expect(asked).toEqual([]);
+    // Something does: its user is asked, and denied, the tools still run nothing.
     tools.listens = [3000];
     server.send(op("nav-2", "browser.navigate", { url: "http://127.0.0.1:3000/", wait_until: "load" }, false, CHILD));
     await server.until(() => results("nav-2").length === 1);
-    expect(results("nav-2")[0]?.outcome).toEqual({ ok: "ran browser.navigate" });
-    // The sandbox is asked by the chat's root, whichever of its sessions navigates.
-    expect([tools.probed, asked]).toEqual([[[ROOT, 3000], [ROOT, 3000]], []]);
+    expect(results("nav-2")[0]?.outcome).toEqual({ error: { type: "denied", message: "The user did not let the agent's browser open port 3000 of this chat's servers" } });
+    expect(tools.ran.filter((ran) => ran.kind === "browser.navigate")).toEqual([]);
+    // Allowed for the chat, it is kept with the chat's binding, and its next navigation there asks nobody.
+    answer = "allow_session";
+    server.send(op("nav-3", "browser.navigate", { url: "http://127.0.0.1:3000/", wait_until: "load" }, false, CHILD));
+    await server.until(() => results("nav-3").length === 1);
+    server.send(op("nav-4", "browser.navigate", { url: "http://localhost:3000/x", wait_until: "load" }));
+    await server.until(() => results("nav-4").length === 1);
+    expect([results("nav-3")[0]?.outcome, results("nav-4")[0]?.outcome]).toEqual([{ ok: "ran browser.navigate" }, { ok: "ran browser.navigate" }]);
+    expect(tools.bindings?.ports(ROOT)).toEqual([3000]);
+    // The sandbox is asked by the chat's root, whichever of its sessions navigates, and its user about that chat.
+    expect(tools.probed).toEqual([[ROOT, 3000], [ROOT, 3000], [ROOT, 3000]]);
+    expect(asked).toMatchObject([1, 2].map(() => ({ kind: "browser", action: "port", detail: "3000", chat: { root: ROOT, calling: CHILD } })));
+    expect(asked).toHaveLength(2);
   });
 
   it("takes the agent's browser over through its tools, from the chat that asks first: every chat's open browser prompt dismissed and answered as its tools answer now", async () => {

@@ -996,6 +996,10 @@ describe("the browser on this computer", () => {
         message: `Nothing listens on port ${number} in this chat's sandbox. Start the server there as a background command, then open http://localhost:${number}/ again.`,
       },
     });
+    const port = (number: number, root = ROOT, calling = root) => ({ kind: "browser", chat: { ...chat(calling), root }, action: "port", detail: String(number) });
+    const PORT_DENIED = (number: number) => ({
+      error: { type: "denied", message: `The user did not let the agent's browser open port ${number} of this chat's servers` },
+    });
     // The ports each chat's sandbox listens on, and each one the approvals asked it about.
     let listens: Record<string, number[]>;
     let probed: Array<[string, number]>;
@@ -1009,36 +1013,50 @@ describe("the browser on this computer", () => {
       probed = [];
     });
 
-    it("asks the chat's sandbox whether it listens there, in either mode, however the address spells this computer: a port that does goes on to the browser", async () => {
+    it("asks before the browser opens one, in either mode, once the chat's sandbox says it listens there: Allow for this chat is kept with its binding, however the address spells this computer", async () => {
       bind(ROOT, "free");
       journal.bindings.allowBrowser(ROOT);
+      user = new User("allow_session");
+      approvals = made(user);
+      // Asked by the chat and never its sub-agent, of the sandbox and in the prompt alike.
+      expect(await approvals.admit(open("http://localhost:3000/app", ROOT, CHILD), never())).toBeNull();
+      expect(user.asked).toEqual([port(3000, ROOT, CHILD)]);
+      expect(journal.bindings.ports(ROOT)).toEqual([3000]);
+      // Its other names, a sub-agent and the next launch ask nothing more; nor is the sandbox asked again.
+      for (const url of ["http://127.0.0.1:3000/", "http://[::1]:3000/x", "http://2130706433:3000/", "http://0x7f.1:3000/", "http://LOCALHOST.:3000/"]) {
+        expect(await approvals.admit(open(url, ROOT, CHILD), never()), url).toBeNull();
+      }
+      journal.close();
+      journal = new OperationJournal(join(base, "journal.sqlite"));
       user = new User("deny");
       approvals = made(user);
-      const urls = ["http://localhost:3000/app", "http://127.0.0.1:3000/", "http://[::1]:3000/x", "http://2130706433:3000/", "http://0x7f.1:3000/", "http://LOCALHOST.:3000/"];
-      for (const url of urls) expect(await approvals.admit(open(url, ROOT, CHILD), never()), url).toBeNull();
-      // Its user is asked nothing for it, and the chat's own sandbox each time, by the chat and never its sub-agent.
-      expect([user.asked, probed]).toEqual([[], urls.map(() => [ROOT, 3000])]);
-      // A chat that asks every time is asked for the navigation as for any, once the sandbox has answered; port 80 is an address without one.
+      expect(await approvals.admit(open("http://localhost:3000/"), never())).toBeNull();
+      expect([user.asked, probed]).toEqual([[], [[ROOT, 3000]]]);
+      // A chat that asks every time is asked for the port, then for the navigation as for any; port 80 is an address without one.
       bind(OTHER, "ask");
       journal.bindings.allowBrowser(OTHER);
       listens[OTHER] = [80];
       probed = [];
+      user = new User("allow_session");
+      approvals = made(user);
       expect(await approvals.admit(open("http://localhost/", OTHER), never())).toEqual(ACT_DENIED);
-      expect(user.asked).toEqual([{ kind: "browser", chat: { ...chat(OTHER), root: OTHER }, action: "open", detail: "http://localhost/" }]);
-      expect(probed).toEqual([[OTHER, 80]]);
-      // Another chat's server on the port is not this chat's.
+      expect(user.asked).toEqual([port(80, OTHER), { kind: "browser", chat: { ...chat(OTHER), root: OTHER }, action: "open", detail: "http://localhost/" }]);
+      expect([journal.bindings.ports(OTHER), probed]).toEqual([[80], [[OTHER, 80]]]);
+      // Another chat's server on a port is not this chat's: its sandbox does not listen there, so nobody is asked.
       expect(await approvals.admit(open("http://localhost:3000/", OTHER), never())).toEqual(NOT_LISTENING(3000));
+      expect([user.asked.length, journal.bindings.portOwner(3000)]).toEqual([2, ROOT]);
     });
 
-    it("asks a chat that may not use the browser yet for the browser first, and its sandbox only then", async () => {
+    it("asks a chat that may not use the browser yet for the browser first, its sandbox only then, and then for the port", async () => {
       bind(ROOT, "free");
       user = new User("deny");
       approvals = made(user);
       expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(BROWSER_DENIED);
       expect([user.asked, probed]).toEqual([[{ kind: "browser", chat: chat(), action: "use", detail: "" }], []]);
-      user.auto = "allow_session";
+      user = new User("allow_session");
+      approvals = made(user);
       expect(await approvals.admit(open("http://localhost:3000/"), never())).toBeNull();
-      expect([user.asked.length, probed]).toEqual([2, [[ROOT, 3000]]]);
+      expect([user.asked, probed]).toEqual([[{ kind: "browser", chat: chat(), action: "use", detail: "" }, port(3000)], [[ROOT, 3000]]]);
     });
 
     it("asks about nothing but a port of this computer's own names over plain http: any other address is the proxy's to judge", async () => {
@@ -1081,17 +1099,42 @@ describe("the browser on this computer", () => {
       // Nor does one whose answer is no yes.
       approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant", listening: () => Promise.resolve("yes" as unknown as boolean) });
       expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(NOT_LISTENING(3000));
-      // Not even for the navigation, in a chat that asks every time.
-      expect([user.asked, probed]).toEqual([[], [[ROOT, 8000]]]);
+      // Not even for the navigation, in a chat that asks every time; and nothing is kept.
+      expect([user.asked, probed, journal.bindings.forwards()]).toEqual([[], [[ROOT, 8000]], []]);
     });
 
-    it("goes with a take-over or a cancel while the sandbox is asked, as any browser prompt does", async () => {
+    it("refuses a port its user denies, nobody answers, or whose prompt is dismissed, keeps nothing, and asks again next time", async () => {
+      bind(ROOT, "ask");
+      journal.bindings.allowBrowser(ROOT);
+      user = new User("deny");
+      approvals = made(user);
+      expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(PORT_DENIED(3000));
+      // "Allow" is not offered: one page load makes many connections, so an answer the prompt does not offer denies.
+      for (const unoffered of ["allow", "stop_asking"] as const) {
+        user.auto = unoffered;
+        expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(PORT_DENIED(3000));
+      }
+      user.auto = "timeout";
+      expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual({
+        error: { type: "denied", message: "Nobody answered on this computer in time, so the agent's browser did nothing" },
+      });
+      user.auto = null;
+      const dismissed = new AbortController();
+      const asking = approvals.admit(open("http://localhost:3000/"), dismissed.signal);
+      await vi.waitFor(() => expect(user.open).toHaveLength(1));
+      dismissed.abort();
+      expect(await asking).toEqual(ACT_DENIED);
+      // "Stop asking" on a prompt that does not offer it frees no chat; each of the five was the port's prompt, and nothing else was asked.
+      expect([user.asked, journal.bindings.ports(ROOT), journal.bindings.get(ROOT)?.mode]).toEqual([Array.from({ length: 5 }, () => port(3000)), [], "ask"]);
+    });
+
+    it("goes with a take-over or a cancel as any browser prompt does, while the sandbox is asked or the port's prompt is open, and keeps nothing", async () => {
       bind(ROOT, "free");
       journal.bindings.allowBrowser(ROOT);
       let taken = false;
       const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
       // A sandbox that answers only once its user has taken the browser over.
-      const answering = Promise.withResolvers<boolean>();
+      let answering = Promise.withResolvers<boolean>();
       let asked = 0;
       approvals = new Approvals({
         bindings: journal.bindings, prompts: user, agent: "Research assistant", listening: () => ((asked += 1), answering.promise),
@@ -1108,7 +1151,55 @@ describe("the browser on this computer", () => {
       approvals.dismissBrowser();
       answering.resolve(true);
       expect(await waiting).toEqual(PAUSED);
-      expect(user.asked).toEqual([]);
+      expect([user.asked, journal.bindings.ports(ROOT)]).toEqual([[], []]);
+      // Taken over with the port's prompt open: what the dismissed prompt settles with allows nothing.
+      taken = false;
+      answering = Promise.withResolvers<boolean>();
+      answering.resolve(true);
+      const prompted = approvals.admit(open("http://localhost:3000/"), never());
+      await vi.waitFor(() => expect(user.open).toHaveLength(1));
+      taken = true;
+      approvals.dismissBrowser();
+      expect(await prompted).toEqual(PAUSED);
+      expect([user.asked, user.dismissed, journal.bindings.ports(ROOT)]).toEqual([[port(3000)], 1, []]);
+    });
+
+    it("says when another chat's server has the port in the browser, and gives it to the chat allowed last", async () => {
+      bind(ROOT, "free");
+      bind(OTHER, "free");
+      for (const root of [ROOT, OTHER]) journal.bindings.allowBrowser(root);
+      journal.bindings.allowPort(OTHER, 3000);
+      user = new User("deny");
+      approvals = made(user);
+      expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(PORT_DENIED(3000));
+      expect(user.asked).toEqual([{ ...port(3000), held: OTHER }]);
+      expect(journal.bindings.portOwner(3000)).toBe(OTHER);
+      user.auto = "allow_session";
+      expect(await approvals.admit(open("http://localhost:3000/"), never())).toBeNull();
+      expect([journal.bindings.portOwner(3000), journal.bindings.ports(OTHER)]).toEqual([ROOT, []]);
+      // The chat it was taken from is asked again at its next navigation there, and told who has it.
+      expect(await approvals.admit(open("http://localhost:3000/", OTHER), never())).toBeNull();
+      expect(user.asked.at(-1)).toEqual({ ...port(3000, OTHER), held: ROOT });
+    });
+
+    it("refuses a port it could not record, or whose owner it could not read: the proxy lets through only what is kept", async () => {
+      bind(ROOT, "free");
+      journal.bindings.allowBrowser(ROOT);
+      user = new User("allow_session");
+      const errors: unknown[] = [];
+      const bindings = Object.create(journal.bindings) as typeof journal.bindings;
+      bindings.allowPort = () => {
+        throw new Error("disk I/O error");
+      };
+      approvals = new Approvals({ bindings, prompts: user, agent: "Research assistant", listening: () => Promise.resolve(true), onError: (error) => errors.push(error) });
+      const COULD_NOT = { error: { type: "denied", message: "This computer could not ask its user about this: disk I/O error" } };
+      expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(COULD_NOT);
+      expect([errors.length, user.asked.length, journal.bindings.ports(ROOT)]).toEqual([1, 1, []]);
+      bindings.portOwner = () => {
+        throw new Error("disk I/O error");
+      };
+      expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(COULD_NOT);
+      expect(user.asked).toHaveLength(1);
     });
   });
 
