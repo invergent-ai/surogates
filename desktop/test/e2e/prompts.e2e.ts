@@ -127,7 +127,7 @@ describe("the folder sheet", () => {
     expect(await answer("accept", "free")).toBe(false);
     await expect(answer("accept", "everything")).rejects.toThrow("Not an option of this prompt");
     await expect(answer("grant", "free")).rejects.toThrow("Not a button of this prompt");
-    expect(await promptsShown(app!)).toBe(1);
+    await expect.poll(() => promptsShown(app!)).toBe(1);
     await expect.poll(() => sheet.getAttribute('[data-id="accept"]', "aria-disabled")).toBe("false");
     // Taken: the window closes as it answers.
     expect(await answer("accept", "ask").catch(() => true)).toBe(true);
@@ -573,7 +573,7 @@ describe("an approval prompt", () => {
       const [one, two] = [write("a.txt", "a"), write("b.txt", "b", OTHER, second)];
       const first = await prompt(app!);
       await expect.poll(() => text(first, "#prompt-waiting")).toBe("More prompts wait after this one.");
-      expect(await promptsShown(app!)).toBe(1);
+      await expect.poll(() => promptsShown(app!)).toBe(1);
       await press(first, "deny");
       expect(await outcome(one)).toMatchObject({ error: { type: "os", code: "EACCES" } });
       await expect.poll(async () => text(await prompt(app!), "#prompt-waiting")).toBe("");

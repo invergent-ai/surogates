@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { Failure } from "../src/files/answers.js";
+import { Failure, NUL_REFUSED } from "../src/files/answers.js";
 import { checkWrite, inFolderRefusal, movesOutOfDependency, protectedInFolder } from "../src/files/protect.js";
 
 const home = "/home/tester";
@@ -72,13 +72,13 @@ describe("checkWrite, with the cloud's two lists", () => {
     expect(checkWrite(folder, home, "~/.ssh")).toBeNull();
   });
 
-  it("refuses a NUL byte with a Failure refusal of type 'value'", () => {
+  it("refuses a NUL in the cloud's sentence, with a Failure refusal of type 'value'", () => {
     try {
       checkWrite(folder, home, "a\0b");
       throw new Error("should have thrown");
     } catch (error) {
       expect(error).toBeInstanceOf(Failure);
-      expect((error as Failure).refusal).toEqual({ type: "value", message: "embedded null byte" });
+      expect((error as Failure).refusal).toEqual({ type: "value", message: NUL_REFUSED });
     }
   });
 });

@@ -416,3 +416,17 @@ jobs:
             dist/*.whl
             dist/*.tar.gz
           body_path: release-notes.md
+
+  # The cluster's rollout (update-images.yml): the nodes update their agent images and the agent
+  # pods restart. It waits for the cloud's release, which waits for the images, the npm packages
+  # and the wheel, and for no job of the desktop's: one of those that fails, or waits for its
+  # reviewer, changes how the run ends and never whether the cluster is rolled out.
+  rollout:
+    needs: release
+    # It holds the cluster's SSH key and reads nothing of the repository's.
+    permissions: {}
+    uses: ./.github/workflows/update-images.yml
+    secrets:
+      NODE_HOSTS: ${{ secrets.NODE_HOSTS }}
+      MASTER_HOST: ${{ secrets.MASTER_HOST }}
+      SSH_KEY: ${{ secrets.SSH_KEY }}

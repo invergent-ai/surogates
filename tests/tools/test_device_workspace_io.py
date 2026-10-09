@@ -31,7 +31,9 @@ from surogates.devices.workspace import (
 )
 from surogates.tools.builtin import file_ops
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io import FileStat, LinePage, LocalWorkspaceIO, RevisionConflict, RipgrepError
+from surogates.tools.workspace_io import (
+    NUL_REFUSED, FileStat, LinePage, LocalWorkspaceIO, RevisionConflict, RipgrepError,
+)
 from tests import fake_laptop
 from tests.fake_laptop import BAD_PAGE, BAD_WALK, CONFLICT, InProcessRunner, perform
 
@@ -97,8 +99,9 @@ async def test_os_errors_keep_their_type_errno_and_message(wio, root):
 async def test_other_errors_keep_their_type(wio, root):
     with pytest.raises(WorkspaceSandboxError, match="Path traversal blocked"):
         await wio.resolve("../outside.txt")
-    with pytest.raises(ValueError, match="null byte"):
+    with pytest.raises(ValueError) as refused:
         await wio.read(str(root / "nul\x00byte"))
+    assert str(refused.value) == NUL_REFUSED
 
 
 async def test_commands_and_checks_run_on_the_laptop(wio, root):

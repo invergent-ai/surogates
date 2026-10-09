@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 
 import { connectDevice } from "../src/device.js";
+import { NUL_REFUSED } from "../src/files/answers.js";
 import { INTERRUPTED, OperationJournal } from "../src/journal/journal.js";
 import type { DeviceLink } from "../src/link/client.js";
 import { MAX_FRAME_CHARS, type Operation, type Outcome } from "../src/link/protocol.js";
@@ -717,6 +718,35 @@ describe("an operation the executor admits before it starts", () => {
     expect(results("a")).toEqual([]);
     expect(gate.ran).toEqual(["z"]);
     expect(journal.openIds()).toEqual([]);
+  });
+
+  it.each([
+    ["run", { command: "rm -rf x\0", workdir: null, timeout: 10 }],
+    ["run", { command: "pwd", workdir: "a\0b", timeout: 0 }],
+    ["start", { command: "a\0b", workdir: null, task_id: 5 }],
+    ["write", { key: "/f/a\0b", data: "eA==", expected_revision: "0:0:0:0:0" }],
+    ["delete", { key: "/f/a\0b" }],
+    ["resolve", { path: "a\0b" }],
+    ["read_lines", { key: "/f/a\0b", encoding: "latin-1" }],
+    ["ripgrep", { key: "/f", mode: "count", pattern: "a\0", glob: null, context: -1 }],
+    ["ripgrep", { key: "/f", mode: "count", pattern: "a", glob: "*\0", context: 0 }],
+  ])("refuses a %s with a NUL before its user is asked or anything else of it is looked at", async (kind, args) => {
+    const asked: string[] = [];
+    await start({
+      admit: (operation) => { asked.push(operation.id); return Promise.resolve(null); },
+      run: (operation) => { asked.push(`ran ${operation.id}`); return Promise.resolve({ ok: "ran" }); },
+    });
+    server.send({ ...opFrame("a"), kind, args });
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual({ error: { type: "value", message: NUL_REFUSED } });
+    expect(asked).toEqual([]);
+  });
+
+  it("lets a stat of a key with a NUL through: it answers that nothing is there", async () => {
+    await start({ run: () => Promise.resolve({ ok: null }) });
+    server.send({ ...opFrame("a"), kind: "stat", args: { key: "/f/a\0b" } });
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual({ ok: null });
   });
 
   it("is answered as an error when the executor's admit fails", async () => {

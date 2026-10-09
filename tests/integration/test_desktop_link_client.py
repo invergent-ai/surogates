@@ -86,6 +86,20 @@ async def client(
     return Client(process)
 
 
+async def ended(task: asyncio.Task | None, within: float = 30.0) -> None:
+    """Stop *task* if it still runs, and wait until it has ended, *within* seconds at most.
+
+    For a test's ``finally``, so that a test that failed leaves no task behind
+    either: a task still pending when the run's loop closes is cancelled there
+    once, and waited for without a bound.
+    """
+    if task is None or task.done():
+        return
+    task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=within)
+    assert done, "stopped, the task did not end"
+
+
 def connected(events: list[dict]) -> bool:
     return any(e == {"event": "status", "status": "connected"} for e in events)
 
@@ -118,6 +132,7 @@ async def test_the_app_answers_an_operation_the_server_sends(built_client, lapto
 async def test_a_cancel_reaches_the_app_and_stops_its_work(built_client, laptop_rig, link_url, tmp_path):
     rig = laptop_rig
     app = await client(built_client, link_url, rig.token, tmp_path / "journal.sqlite", hold=True)
+    waiting = None
     try:
         await app.until(connected)
         waiting = asyncio.create_task(rig.ops.run(held(rig)))
@@ -126,7 +141,10 @@ async def test_a_cancel_reaches_the_app_and_stops_its_work(built_client, laptop_
         assert await asyncio.wait_for(waiting, 5.0) == CANCELLED_OUTCOME
         await app.until(lambda events: any(e["event"] == "cancel" for e in events))
     finally:
-        await app.close()
+        try:
+            await ended(waiting)
+        finally:
+            await app.close()
 
 
 async def test_an_app_that_quit_mid_operation_reports_it_interrupted_and_the_cancellation_stands(
@@ -135,11 +153,15 @@ async def test_an_app_that_quit_mid_operation_reports_it_interrupted_and_the_can
     rig = laptop_rig
     journal = tmp_path / "journal.sqlite"
     app = await client(built_client, link_url, rig.token, journal, hold=True)
+    first = None
     try:
         await app.until(connected)
         first = asyncio.create_task(rig.ops.run(held(rig)))
         await app.until(lambda events: any(e["event"] == "op" for e in events))
         operation_id = next(e["id"] for e in app.events if e["event"] == "op")
+    except BaseException:
+        await ended(first)
+        raise
     finally:
         await app.close()  # the app quits with the operation started
 

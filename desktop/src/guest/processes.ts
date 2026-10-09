@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
 import { constants as osConstants } from "node:os";
 import { TextDecoder } from "node:util";
 
-import { Failure, osError, type Refusal, sandboxError, valueError } from "../files/answers.js";
+import { Failure, NUL_REFUSED, osError, type Refusal, sandboxError, valueError } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
 import { CANCELLED, type CommandChild, type CommandEnd } from "./command.js";
 import { capStrings, firstPoints, lastPoints, splitLines, stripAnsi } from "./output.js";
@@ -213,6 +213,8 @@ export class Processes {
     if (requested !== null && typeof requested !== "string") throw valueError("'workdir' must be a string or null");
     const taskId = args.task_id ?? null;
     if (taskId !== null && typeof taskId !== "string") throw valueError("'task_id' must be a string or null");
+    // Before the workdir is looked at, as the cloud refuses it: a NUL in either is one refusal.
+    if (command.includes("\0") || requested?.includes("\0")) throw valueError(NUL_REFUSED);
     // notify_on_complete and watcher_interval are taken and ignored: nothing in the cloud reads them yet.
     // A cancel does not wait out the runner's answer, or the runner's start.
     const cancelled = new Promise<never>((_resolve, reject) => {
@@ -226,10 +228,7 @@ export class Processes {
       if (signal.aborted) return CANCELLED;
       throw error;
     }
-    // The cloud resolves the workdir before it sees the NUL, and Popen sees the NUL
-    // before it enters the workdir.
     const { cwd } = placed;
-    if (command.includes("\0")) throw valueError("embedded null byte");
     if (placed.unenterable) throw osError(placed.unenterable, cwd);
     await this.refuse();
     this.prune();

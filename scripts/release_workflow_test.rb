@@ -4,8 +4,39 @@ require "minitest/autorun"
 require "yaml"
 
 class ReleaseWorkflowTest < Minitest::Test
+  ROLLOUT = ".github/workflows/update-images.yml"
+
   def setup
     @workflow = YAML.load_file(".github/workflows/release.yml")
+    @rollout = YAML.load_file(ROLLOUT)
+  end
+
+  # YAML 1.1 reads a workflow's `on` key as true.
+  def triggers(workflow)
+    workflow.fetch("on") { workflow.fetch(true) }
+  end
+
+  # The one job of the release that rolls the cluster out, by calling update-images.yml.
+  def rollout_job
+    names = @workflow.fetch("jobs").select { |_, job| job["uses"] == "./#{ROLLOUT}" }.keys
+
+    assert_equal 1, names.size, "one job of the release calls #{ROLLOUT}"
+    names.first
+  end
+
+  # Every job the named one waits for: its `needs`, and theirs.
+  def waits_for(name)
+    jobs = @workflow.fetch("jobs")
+    found = []
+    queue = Array(jobs.fetch(name).fetch("needs", []))
+    until queue.empty?
+      need = queue.shift
+      next if found.include?(need)
+
+      found << need
+      queue.concat(Array(jobs.fetch(need).fetch("needs", [])))
+    end
+    found
   end
 
   def test_the_release_runs_for_a_pushed_version_tag_and_for_nothing_else
@@ -59,6 +90,65 @@ class ReleaseWorkflowTest < Minitest::Test
     jobs.except("release").each_value do |job|
       refute job.fetch("steps", []).any? { |step| step["uses"] == "softprops/action-gh-release@v2" }
     end
+  end
+
+  def test_the_cluster_s_rollout_waits_for_no_job_of_the_desktop_s
+    jobs = @workflow.fetch("jobs")
+    # By this rule, so that a desktop job added later is held too.
+    desktop = jobs.keys.select { |name| name.start_with?("desktop-") }
+
+    refute_empty desktop
+    assert_empty Array(jobs.fetch(rollout_job).fetch("needs", [])) & desktop
+    # Nor through a job it needs: a desktop job that fails, or waits for its reviewer, would skip
+    # or hold the rollout as surely from there.
+    assert_empty waits_for(rollout_job) & desktop
+  end
+
+  def test_the_cluster_s_rollout_waits_for_the_whole_of_the_cloud_s_release
+    # The nodes update to what the images job pushed. A tag whose npm packages, wheel or GitHub
+    # release fails rolls nothing out, as when the rollout waited for the whole run.
+    assert_equal %w[images npm release wheel], waits_for(rollout_job).sort
+    # always() or !cancelled() would roll out a release that failed.
+    refute @workflow.fetch("jobs").fetch(rollout_job).key?("if")
+  end
+
+  def test_the_cluster_s_rollout_holds_no_permission_on_the_repository
+    # It holds the cluster's SSH key and reads nothing of the repository's: without this it would
+    # take the workflow's contents: write and packages: write.
+    assert_equal({}, @workflow.fetch("jobs").fetch(rollout_job)["permissions"])
+    # A called workflow can narrow what its caller grants and never widen it: it asks for none.
+    refute @rollout.key?("permissions")
+    @rollout.fetch("jobs").each { |name, job| refute job.key?("permissions"), "#{name} asks for permissions of its own" }
+  end
+
+  def test_the_rollout_is_started_by_the_release_s_call_and_never_by_how_a_run_ended
+    on = triggers(@rollout)
+
+    refute on.key?("workflow_run"), "a failed desktop job fails the run, and the rollout would be skipped without a word"
+    assert on.key?("workflow_call")
+    # Called by the release, a job sees the tag's push as its event: a condition on the event
+    # skips it there, and a skipped job is no failure.
+    @rollout.fetch("jobs").each { |name, job| refute job.key?("if"), "#{name} has a condition of its own" }
+  end
+
+  def test_the_rollout_can_still_be_started_by_hand
+    assert triggers(@rollout).key?("workflow_dispatch")
+  end
+
+  def test_the_rollout_is_handed_each_secret_it_reads_by_name_and_no_other
+    jobs = @rollout.fetch("jobs").to_s
+    read = jobs.scan(/\bsecrets\.([A-Za-z_][A-Za-z0-9_]*)/).flatten.uniq.sort
+    declared = triggers(@rollout).dig("workflow_call", "secrets") || {}
+    handed = @workflow.fetch("jobs").fetch(rollout_job)["secrets"]
+
+    assert_equal %w[MASTER_HOST NODE_HOSTS SSH_KEY], read
+    # secrets['X'] or toJSON(secrets) would read a secret this test cannot name.
+    refute_match(/\bsecrets\b(?!\.[A-Za-z_])/, jobs)
+    # A called workflow reads only the secrets it declares and its caller hands it. Any other
+    # comes empty, and the job does not always fail on it: with no NODE_HOSTS it updates no node,
+    # restarts the pods and ends well.
+    assert_equal read, declared.keys.sort
+    assert_equal read.to_h { |name| [name, "${{ secrets.#{name} }}"] }, handed
   end
 
   def test_release_notes_are_generated_from_commit_messages
