@@ -2236,6 +2236,22 @@ def test_a_hand_off_the_open_cannot_follow_gives_the_copy_none_of_its_own_files_
     assert "Could not follow the hand-off of thread t1" in caplog.text and "none of its own files" in caplog.text
 
 
+@pytest.mark.parametrize("parents_of_the_copy", [0, 2])
+def test_a_hand_back_that_is_no_helpers_copy_on_its_start_does_not_keep_the_threads_pod_from_opening(tmp_path, project, caplog, parents_of_the_copy):
+    turn = a_turn_that_handed_on_and_was_not_stopped_in_the_history(tmp_path, project)
+    durable = project / "_history"
+    tip = git(durable, "rev-parse", "refs/handoff/t1")
+    tree = git(durable, "rev-parse", f"{tip}^{{tree}}")
+    stamp = "X <x@x> 1700000000 +0000"
+    lines = "".join(f"parent {tip}\n" for _ in range(parents_of_the_copy))
+    odd = a_hand_off_put_in_place_of(turn, "0" * 40, body=f"tree {tree}\n{lines}author {stamp}\ncommitter {stamp}\n\nKept\n")
+    # A merge of the hand-off and that copy, as a helper's hand-back is made, written by the thread's agent.
+    a_hand_off_put_in_place_of(turn, tip, body=f"tree {tree}\nparent {tip}\nparent {odd}\nauthor {stamp}\ncommitter {stamp}\n\nKept\n")
+    with caplog.at_level(logging.WARNING):
+        later = a_pod(tmp_path, project, turn="turn-3")
+    assert "draft.md" not in names_in(later) and "Could not follow the hand-off of thread t1" in caplog.text
+
+
 def test_a_threads_pod_must_be_told_its_turn(tmp_path, project):
     pod = tmp_path / "pod-untold"
     (pod / "workspace").mkdir(parents=True)

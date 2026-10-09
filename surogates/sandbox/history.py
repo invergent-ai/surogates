@@ -859,8 +859,9 @@ class History:
         where the walk ended at a hand-off of the thread's, the base that
         one was made on.
 
-        It cannot always be followed: a commit the history lacks, or more
-        than ``_HAND_BACKS`` commits in all.  Then the answer is None, and a stop changes
+        It cannot always be followed: a commit the history lacks, one that
+        is no hand-back the platform makes, or more than ``_HAND_BACKS``
+        commits in all.  Then the answer is None, and a stop changes
         nothing.  With *partly*, for a copy's open, the answer is what
         could be followed: none of the hand-offs' own files, since what
         the last of them rests on cannot be told, and what helpers kept
@@ -888,6 +889,8 @@ class History:
                     # On the hand-off it started from, another helper's copy as well as a thread's hand-off.
                     kept.append(commit)
                     commit = parents[0]
+                elif message[:1] == ["Kept"]:
+                    raise HistoryError(f"{commit} is no hand-back the platform makes")
                 elif message[:1] == ["Handed on"] and parents:
                     said = dict(line.split(": ", 1) for line in message if ": " in line)
                     if not gone(commit, said):
@@ -918,7 +921,10 @@ class History:
         for tip in reversed(kept):
             try:
                 self._fetch(tip)
-                [since] = self._parents(tip)
+                started = self._parents(tip)
+                if len(started) != 1:
+                    raise HistoryError(f"{tip} is no helper's copy on where it started")
+                [since] = started
                 # Where the helper started may be a hand-off this pod never held: an earlier turn's.
                 self._fetch(since)
                 if found is None:
