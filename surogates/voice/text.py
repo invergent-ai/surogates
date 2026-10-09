@@ -45,7 +45,7 @@ SENTENCE_END = re.compile(r"(?<=[.!?…])\s+|(?<=[a-zăâîșț0-9]{2}[.!?…])(
 # Romanian line quotes English names and the other way round.
 ABBREVIATION_END = re.compile(
     r"((?i:\b(?:nr|dl|dna|dra|str|tel|prof|dr|ing|art|alin|pct|etc|ex|sf|bd|jud|mun"
-    r"|mr|mrs|ms|st|vs|no|jr|sr|inc|ltd|co|dept|approx))|\b[A-ZĂÂÎȘȚ])\.$")
+    r"|mr|mrs|ms|st|vs|jr|sr|inc|ltd|dept|approx))|\b[A-ZĂÂÎȘȚ])\.$")
 
 
 class SentenceSplitter:
@@ -93,8 +93,10 @@ class Rules:
     # The agent's "I'm on it" line. Once per answer is natural; the model sometimes says it again after
     # the tool returns ("O clipă, mă uit…" then "Imediat, verific…"), and twice sounds broken.
     preamble: re.Pattern
-    bye: re.Pattern  # the caller is done: hang up after the agent's answer
-    farewell: re.Pattern  # a whole reply that is only a goodbye
+    # The caller is done, hang up after the agent's answer: a goodbye anywhere, "that's all" at the end, or
+    # a thanks that is almost all they said ("thanks" closes ordinary requests too: "…opening hours, thanks").
+    bye: re.Pattern
+    farewell: re.Pattern  # a goodbye word in the agent's reply; is_farewell also wants it short, no question
     details: re.Pattern  # words of something a person writes down (a name, a number…)
 
 
@@ -103,20 +105,20 @@ RULES = {
         preamble=re.compile(r"^(o clipă|imediat|stai puțin|un moment|o secundă|mă uit|verific|caut|acum verific)\b"
                             r".{0,80}(verific|mă uit|caut|văd|iau)", re.I),
         # "pa" only as the last word: "Papa Francisc…"
-        bye=re.compile(r"\b(la revedere|o zi bună|mulțumesc,? atât|asta e tot|gata,? mulțumesc|nimic altceva)\b"
-                       r"|\b(pa[ -]?pa|pa|mersi|ciao|bye)[.!]?$", re.I),
-        farewell=re.compile(r"^\W*(pa|la revedere|o zi bună|cu plăcere|mulțumesc|spor|numai bine|toate cele bune)\b"
-                            r"[^?]{0,60}$", re.I),
+        bye=re.compile(r"\b(la revedere|o zi bună)\b"
+                       r"|\b(mulțumesc,? atât|asta e tot|gata,? mulțumesc|nimic altceva)\b[^?]{0,15}$"
+                       r"|^\W*(\w+\W+){0,2}(pa[ -]?pa|pa|mersi|ciao|bye|mulțumesc( frumos)?)\W*$", re.I),
+        farewell=re.compile(r"\b(pa|la revedere|o zi bună|spor|numai bine|toate cele bune)\b", re.I),
         details=re.compile(r"\b(nume|numele|prenume|telefon|număr|numărul|e-?mail|adres[aă]|data|cnp|cod|ziua|ora)\b",
                            re.I),
     ),
     "en": Rules(
         preamble=re.compile(r"^(one moment|just a moment|one second|just a second|hold on|let me|i'll|i will)\b"
                             r".{0,80}(check|look|find|see|search|pull)", re.I),
-        bye=re.compile(r"\b(goodbye|good bye|bye[ -]?bye|have a (nice|good|great) day|that'?s all|that is all"
-                       r"|nothing else|that'?s it,? thanks)\b|\b(bye|thanks|thank you|cheers)[.!]?$", re.I),
-        farewell=re.compile(r"^\W*(bye|goodbye|good bye|have a (nice|good|great) day|you'?re welcome|thank you"
-                            r"|thanks|take care|all the best)\b[^?]{0,60}$", re.I),
+        bye=re.compile(r"\b(goodbye|good bye|bye[ -]?bye|have a (nice|good|great) day)\b"
+                       r"|\b(that'?s all|that is all|nothing else|that'?s it)\b[^?]{0,15}$"
+                       r"|^\W*(\w+\W+){0,2}(bye|thanks|thank you|cheers)( (so|very) much)?\W*$", re.I),
+        farewell=re.compile(r"\b(bye|goodbye|good bye|have a (nice|good|great) day|take care|all the best)\b", re.I),
         details=re.compile(r"\b(name|surname|phone|number|e-?mail|address|date|code|day|time|postcode|zip)\b", re.I),
     ),
 }
@@ -198,9 +200,10 @@ def caller_says_goodbye(text: str, language: str = "ro") -> bool:
 
 
 def is_farewell(reply: str, language: str = "ro") -> bool:
-    """A whole reply that is only a goodbye: the call can end after it."""
-    r = rules(language)
-    return r is not None and bool(r.farewell.match(reply.strip()))
+    """A reply that says goodbye and nothing more: short, no question, a goodbye word in it ("thank you"
+    alone is not one: "Thank you, John. Your appointment is confirmed."). The call can end after it."""
+    r, reply = rules(language), reply.strip()
+    return r is not None and "?" not in reply and len(words(reply)) <= 15 and bool(r.farewell.search(reply))
 
 
 def asks_for_details(sentence: str, language: str = "ro") -> bool:

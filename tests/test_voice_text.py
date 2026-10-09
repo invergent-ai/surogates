@@ -104,3 +104,28 @@ def test_a_language_without_rules_never_guesses():
     assert not is_farewell("Auf Wiedersehen!", "de")
     assert not asks_for_details("Wie ist Ihre Telefonnummer?", "de")
     assert say_as("Surogate", {}, "de") == "Surogate"  # the Romanian spelling is for our Romanian voice
+
+
+def test_thanks_in_the_middle_of_a_conversation_is_not_a_goodbye():
+    # the agent hung up on these (review 2026-10-09): "thanks" opens or closes ordinary sentences
+    for reply in ["Thank you, John. Your appointment is confirmed for Monday.",
+                  "Thanks! I found your order, it ships tomorrow.",
+                  "You're welcome. Your table is booked for eight."]:
+        assert not is_farewell(reply, "en"), reply
+    for said in ["Could you tell me your opening hours, thanks.", "Can you check order 4411 for me, thank you",
+                 "That's it, thanks, but one more question about parking"]:
+        assert not caller_says_goodbye(said, "en"), said
+    assert not is_farewell("Mulțumesc, am notat programarea pentru marți.")
+    assert not caller_says_goodbye("Îmi spuneți și programul de mâine, mersi")
+    # a goodbye is still a goodbye
+    assert is_farewell("You're welcome, have a nice day!", "en")
+    assert is_farewell("Thank you for calling, goodbye!", "en")
+    assert is_farewell("Cu plăcere, o zi bună.")
+    for said in ["Thanks", "Okay, thank you.", "That's it, thanks.", "Nothing else, bye"]:
+        assert caller_says_goodbye(said, "en"), said
+    assert caller_says_goodbye("Bine, mersi")
+
+
+def test_no_at_the_end_of_a_sentence_is_an_answer_not_an_abbreviation():
+    s = SentenceSplitter()
+    assert s.push("Unfortunately, no. We close at five today. ") == ["Unfortunately, no.", "We close at five today."]
