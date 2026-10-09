@@ -85,7 +85,7 @@ def question_text(arguments: Any, said: str = "", choices_line: str = default_li
             continue
         labels = [str(c.get("label")).strip() for c in q.get("choices") or []
                   if isinstance(c, dict) and str(c.get("label") or "").strip()]
-        choices = choices_line.format(", ".join(labels)) if labels else ""
+        choices = choices_line.replace("{}", ", ".join(labels), 1) if labels else ""  # the owner's text: not a template
         repeated = (asked and not spoken) or _words(str(q["prompt"])) in _words(said)
         prompt = "" if repeated else str(q["prompt"]).strip()
         spoken.append(" ".join(p for p in (prompt, choices) if p))

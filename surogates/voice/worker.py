@@ -155,6 +155,12 @@ def tone(rate: int = 16000) -> list[rtc.AudioFrame]:
     return [rtc.AudioFrame(data=pcm, sample_rate=rate, num_channels=1, samples_per_channel=len(pcm) // 2)]
 
 
+def refused_outcome(error: Exception) -> str:
+    """How a call refused before it started is reported: the owner's key is theirs to fix (provider_error),
+    anything else building the line's speech (a missing plugin, a bad option) is ours."""
+    return "provider_error" if isinstance(error, ProviderUnavailable) else "error"
+
+
 def provider_failed(error: object, config: CallConfig) -> bool:
     """The session closed because the owner's provider gave up for good (a revoked key, no credits left,
     the provider down): its owner must see why. Our own speech servers failing is our outage, not theirs."""
@@ -287,8 +293,8 @@ async def entrypoint(ctx: JobContext) -> None:
         heard = build_stt(config.hearing, key=await rt.key(org_id, config.hearing), language=config.language,
                           stt_url=vs.stt_url)
     except Exception as e:
-        log.warning("call %s refused: %s", info.call_id, e)
-        await report("provider_error")
+        log.warning("call %s refused: %s", info.call_id, e, exc_info=not isinstance(e, ProviderUnavailable))
+        await report(refused_outcome(e))
         return await tone_and_hang_up(ctx, vs.tts_url)
     phrases = PhraseCache(rt.redis, tts, scope=phrase_scope(config.speaking, config.language, str(org_id)))
     slots = CallSlots(rt.redis, vs.max_concurrent_calls)  # releasing a line never taken is a no-op

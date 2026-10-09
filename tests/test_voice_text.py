@@ -129,3 +129,22 @@ def test_thanks_in_the_middle_of_a_conversation_is_not_a_goodbye():
 def test_no_at_the_end_of_a_sentence_is_an_answer_not_an_abbreviation():
     s = SentenceSplitter()
     assert s.push("Unfortunately, no. We close at five today. ") == ["Unfortunately, no.", "We close at five today."]
+
+
+def test_the_call_never_ends_on_a_reply_that_asks_something():
+    from surogates.voice.text import hang_up_after
+
+    # "Yes, thank you." to "Shall I book Monday?" read as a goodbye; the agent still needs the name
+    assert caller_says_goodbye("Yes, thank you.", "en")
+    assert not hang_up_after("Booked. What name should I put?", caller_said_bye=True, language="en")
+    assert hang_up_after("Booked for Monday. Goodbye!", caller_said_bye=True, language="en")
+    assert hang_up_after("You're welcome, have a nice day!", caller_said_bye=False, language="en")
+    assert not hang_up_after("Your table is booked for eight.", caller_said_bye=False, language="en")
+
+
+def test_a_goodbye_word_inside_a_sentence_is_not_a_farewell():
+    for reply in ["Don't worry, we'll take care of the paperwork for you.", "All the best rooms are booked on Friday."]:
+        assert not is_farewell(reply, "en"), reply
+    assert not is_farewell("Avem un spor de zece la sută la comenzile de azi.")
+    assert is_farewell("Thanks for calling. Take care!", "en")
+    assert is_farewell("Mulțumim, numai bine!")

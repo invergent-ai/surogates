@@ -221,3 +221,11 @@ async def test_the_filler_is_spoken_while_the_tool_still_runs():
         first = piece
         break
     assert SentenceSplitter().push(first) == [FILLER]
+
+
+def test_a_choices_line_with_other_braces_reads_the_choices_and_keeps_the_rest():
+    from surogates.voice.sessions import question_text
+
+    args = {"questions": [{"prompt": "Which day?", "choices": [{"label": "Monday"}, {"label": "Tuesday"}]}]}
+    text = question_text(args, choices_line="Options: {} (pick {one})")  # an owner's wording; no crash
+    assert "Monday" in text and "{one}" in text

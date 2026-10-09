@@ -17,7 +17,7 @@ from livekit.agents import Agent, ModelSettings, StopResponse, llm, stt
 from surogates.voice.lines import Lines, default_lines, lines_from_routing
 from surogates.voice.soundscape import SoundSettings
 from surogates.voice.speech import Slot
-from surogates.voice.text import caller_says_goodbye, is_echo, is_farewell, say_as, spoken_sentences
+from surogates.voice.text import caller_says_goodbye, hang_up_after, is_echo, say_as, spoken_sentences
 
 LANGUAGE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$")  # a BCP 47 tag as Studio stores it: "ro", "en", "pt-BR"
 SENTENCE_PAUSE = 0.25  # Amami ends a sentence with almost no silence: without a breath, sentences run together
@@ -112,5 +112,6 @@ class VoiceAgent(Agent):
             async with tts.synthesize(say_as(sentence, self.config.pronunciations, self.config.language)) as stream:
                 async for audio in stream:
                     yield audio.frame
-        if said and is_farewell(" ".join(said), self.config.language):
-            self.hangup_after_reply = True
+        if said:
+            self.hangup_after_reply = hang_up_after(" ".join(said), caller_said_bye=self.hangup_after_reply,
+                                                    language=self.config.language)

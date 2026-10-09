@@ -116,3 +116,12 @@ def test_a_provider_that_gives_up_ends_the_call_as_a_provider_error():
     # our own speech servers failing is our outage, not the owner's provider
     assert not provider_failed(err(STTError), CallConfig())
     assert not provider_failed(err(TTSError), CallConfig(hearing=el))
+
+
+def test_only_the_owners_key_failing_is_a_provider_error():
+    from surogates.voice.worker import ProviderUnavailable, refused_outcome
+
+    assert refused_outcome(ProviderUnavailable("elevenlabs", "key_missing")) == "provider_error"
+    # a missing plugin or a bad option is our bug: never shown to the owner as their provider's fault
+    assert refused_outcome(ImportError("livekit.plugins.fishaudio")) == "error"
+    assert refused_outcome(ValueError("could not convert string to float: 'fast'")) == "error"

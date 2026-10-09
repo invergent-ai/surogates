@@ -96,7 +96,7 @@ class Rules:
     # The caller is done, hang up after the agent's answer: a goodbye anywhere, "that's all" at the end, or
     # a thanks that is almost all they said ("thanks" closes ordinary requests too: "…opening hours, thanks").
     bye: re.Pattern
-    farewell: re.Pattern  # a goodbye word in the agent's reply; is_farewell also wants it short, no question
+    farewell: re.Pattern  # a goodbye word closing the agent's reply; is_farewell also wants it short, no question
     details: re.Pattern  # words of something a person writes down (a name, a number…)
 
 
@@ -108,7 +108,7 @@ RULES = {
         bye=re.compile(r"\b(la revedere|o zi bună)\b"
                        r"|\b(mulțumesc,? atât|asta e tot|gata,? mulțumesc|nimic altceva)\b[^?]{0,15}$"
                        r"|^\W*(\w+\W+){0,2}(pa[ -]?pa|pa|mersi|ciao|bye|mulțumesc( frumos)?)\W*$", re.I),
-        farewell=re.compile(r"\b(pa|la revedere|o zi bună|spor|numai bine|toate cele bune)\b", re.I),
+        farewell=re.compile(r"\b(pa|la revedere|o zi bună|spor|numai bine|toate cele bune)\b\W*(\w+\W*){0,3}$", re.I),
         details=re.compile(r"\b(nume|numele|prenume|telefon|număr|numărul|e-?mail|adres[aă]|data|cnp|cod|ziua|ora)\b",
                            re.I),
     ),
@@ -118,7 +118,8 @@ RULES = {
         bye=re.compile(r"\b(goodbye|good bye|bye[ -]?bye|have a (nice|good|great) day)\b"
                        r"|\b(that'?s all|that is all|nothing else|that'?s it)\b[^?]{0,15}$"
                        r"|^\W*(\w+\W+){0,2}(bye|thanks|thank you|cheers)( (so|very) much)?\W*$", re.I),
-        farewell=re.compile(r"\b(bye|goodbye|good bye|have a (nice|good|great) day|take care|all the best)\b", re.I),
+        farewell=re.compile(r"\b(bye|goodbye|good bye|have a (nice|good|great) day|take care|all the best)\b"
+                            r"\W*(\w+\W*){0,3}$", re.I),
         details=re.compile(r"\b(name|surname|phone|number|e-?mail|address|date|code|day|time|postcode|zip)\b", re.I),
     ),
 }
@@ -204,6 +205,13 @@ def is_farewell(reply: str, language: str = "ro") -> bool:
     alone is not one: "Thank you, John. Your appointment is confirmed."). The call can end after it."""
     r, reply = rules(language), reply.strip()
     return r is not None and "?" not in reply and len(words(reply)) <= 15 and bool(r.farewell.search(reply))
+
+
+def hang_up_after(reply: str, *, caller_said_bye: bool, language: str = "ro") -> bool:
+    """End the call once this reply is spoken: the caller said goodbye, or the reply is one. Never when the
+    reply asks something ("Yes, thank you." reads as a goodbye, but "What name should I put?" needs an answer)."""
+    reply = reply.strip()
+    return not reply.endswith("?") and (caller_said_bye or is_farewell(reply, language))
 
 
 def asks_for_details(sentence: str, language: str = "ro") -> bool:
