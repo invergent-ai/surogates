@@ -4,7 +4,12 @@
 // leads past this computer and its private networks, and connects to the addresses it
 // judged, so a name cannot lead elsewhere between the two. Nothing is asked: the first
 // release gives the agent's browser no private network at all.
+//
+// Its port is one any program on this computer can find and connect to. A public site is
+// carried for whoever asks, since that program reaches it by itself. Everything else is its
+// own browser's alone, by a sign-in made for each launch of that browser (signIn).
 
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, request as httpRequest, type Server, type ServerResponse } from "node:http";
 import { BlockList, isIPv6, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
@@ -20,6 +25,14 @@ export interface BrowserProxyOptions extends ReachOptions {
 // that goes around the proxy reaches nothing with one.
 export const CHECK_DOMAIN = ".proxy-check.invalid";
 const checkOf = (host: string): string | null => (host.endsWith(CHECK_DOMAIN) ? host.slice(0, -CHECK_DOMAIN.length) : null);
+
+// The name the proxy's own browser signs in under; the secret is each launch's own.
+const SIGN_IN_AS = "surogate";
+// What is answered to whatever needs the sign-in and comes without it, and nothing else.
+const CHALLENGE = 'Basic realm="Surogate"';
+/** What the browser is told in place of a site's own 407: the proxy's words, with nothing the site chose. */
+export const SITE_SIGN_IN = "This site answered as a proxy that wants a sign-in (407), which a site may not. Surogate's proxy did not pass its answer on.";
+const digest = (text: string): Buffer => createHash("sha256").update(text).digest();
 
 const subnets = (ranges: Array<[string, number]>) => {
   const list = new BlockList();
@@ -63,6 +76,16 @@ export async function admitted(host: string, port: number, options: ReachOptions
   }
 }
 
+/**
+ * The addresses a request for *to* is carried to whoever sends it: a public site's, which any
+ * program on this computer reaches by itself. Null where it needs the browser's sign-in: one of
+ * the proxy's own names, this computer, a private network, and whatever cannot be placed.
+ */
+export async function unsigned(to: { host: string; port: number } | null, options: ReachOptions = {}): Promise<string[] | null> {
+  // Its own names lead nowhere (RFC 6761), so they are no public site's.
+  return to && admitted(to.host, to.port, options);
+}
+
 // CONNECT's target, host:port, an IPv6 address in brackets; null for anything else.
 function target(named: string | undefined): { host: string; port: number } | null {
   const at = named?.lastIndexOf(":") ?? -1;
@@ -84,11 +107,30 @@ export class BrowserProxy {
   // The checks a launch waits on, by token, and whether each has come through. Only these are
   // kept: a page can ask for any number of others, and none of them can push a launch's out.
   private readonly checks = new Map<string, boolean>();
+  // What the browser of the last launch signs in with, as a digest: the secret itself is given
+  // to that launch and kept nowhere here. Null until a launch: nobody is signed in.
+  private signed: Buffer | null = null;
 
   constructor(private readonly options: BrowserProxyOptions = {}) {
     this.server = createServer((request, response) => void this.forward(request, response));
     this.server.on("connect", (request: IncomingMessage, client: Duplex, head: Buffer) => void this.tunnel(request, client, head));
     this.server.on("clientError", (_error, socket: Duplex) => socket.destroy());
+  }
+
+  /**
+   * A sign-in for the browser about to be launched, its secret 256 random bits made now. What
+   * the launch before signed in with is taken no more.
+   */
+  signIn(): { username: string; password: string } {
+    const password = randomBytes(32).toString("base64url");
+    this.signed = digest(`Basic ${Buffer.from(`${SIGN_IN_AS}:${password}`).toString("base64")}`);
+    return { username: SIGN_IN_AS, password };
+  }
+
+  // Whether a request or a tunnel carries the launch's sign-in, once: digests compared, so in constant time.
+  private own(request: IncomingMessage): boolean {
+    const said = request.headersDistinct["proxy-authorization"];
+    return this.signed !== null && said?.length === 1 && timingSafeEqual(digest(said[0] ?? ""), this.signed);
   }
 
   /** Listens on 127.0.0.1, on a port the system picks, and gives that port. */
@@ -140,9 +182,13 @@ export class BrowserProxy {
     const gone = new AbortController();
     client.once("close", () => gone.abort());
     const to = target(request.url);
+    const addresses = await unsigned(to, this.options);
+    // Not a public site's, and not its own browser's: the challenge, with nothing dialed and no word of why.
+    if (!addresses && !this.own(request)) {
+      return void client.end(`HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: ${CHALLENGE}\r\nContent-Length: 0\r\n\r\n`);
+    }
     // The https upgrade's try at a check comes here; the plain request after it is answered.
     if (to && this.answered(to.host)) return void client.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
-    const addresses = to && (await admitted(to.host, to.port, this.options));
     if (!to || !addresses) return void client.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
     let upstream: Socket;
     try {
@@ -169,13 +215,16 @@ export class BrowserProxy {
     } catch {
       // Not a proxy's request.
     }
-    if (!url || url.protocol !== "http:") return void response.writeHead(400).end();
-    if (this.answered(url.hostname)) return void response.writeHead(204).end();
-    const port = Number(url.port || 80);
+    if (url?.protocol !== "http:") url = null;
+    const port = Number(url?.port || 80);
     // Before the lookup, so a request the browser gave up on during it is not sent.
     const gone = new AbortController();
     response.once("close", () => gone.abort());
-    const addresses = await admitted(url.hostname, port, this.options);
+    const addresses = await unsigned(url && { host: url.hostname, port }, this.options);
+    // Not a public site's, and not its own browser's: the challenge, with nothing dialed and no word of why.
+    if (!addresses && !this.own(request)) return void response.writeHead(407, { "proxy-authenticate": CHALLENGE, "content-length": 0 }).end();
+    if (!url) return void response.writeHead(400).end();
+    if (this.answered(url.hostname)) return void response.writeHead(204).end();
     if (!addresses) return void response.writeHead(403).end();
     let socket: Socket;
     try {
@@ -195,6 +244,12 @@ export class BrowserProxy {
         headers: { ...passed(request.headers), host: url.host }, setHost: false,
       },
       (answer) => {
+        // A 407 is the proxy's alone to answer: a browser that reads one on a request it signed takes its
+        // sign-in for refused, and signs no more. A site's own is answered in the proxy's words, and the site let go.
+        if (answer.statusCode === 407) {
+          response.writeHead(502, { "content-type": "text/plain; charset=utf-8", "content-length": Buffer.byteLength(SITE_SIGN_IN) }).end(SITE_SIGN_IN);
+          return void socket.destroy();
+        }
         response.writeHead(answer.statusCode ?? 502, passed(answer.headers));
         // A site that hangs up partway through its answer: the browser's is cut short too, not left open.
         answer.once("close", () => {

@@ -260,6 +260,30 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     await expect.poll(() => browsers().length, { timeout: 15_000 }).toBe(0);
   });
 
+  it("prints nothing of what it says to the browser, though its user's environment asks Playwright to: its proxy's sign-in is in no log", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    // As a developer's shell may have it set: Playwright then prints every message of the browser's protocol.
+    await bound(folder, [], { DEBUG: "pw:protocol", DEBUG_FILE: join(home, "debug.log"), DEBUGP: "pw:protocol" });
+    // The browser's host writes where the app does.
+    let printed = "";
+    app!.process().stderr!.on("data", (chunk: Buffer) => (printed += chunk.toString()));
+    const navigating = operation("browser.navigate", { url: `http://127.0.0.1:${canaryPort}/`, wait_until: "load" });
+    await press(await prompt(app!), "allow_session");
+    // The browser is up, and has signed in to its proxy.
+    expect((await navigating).error.type).toBe("browser");
+    expect(browsers().length).toBeGreaterThan(0);
+    await new Promise((done) => setTimeout(done, 500));
+    try {
+      printed += readFileSync(join(home, "debug.log"), "utf8");
+    } catch {
+      // Nothing was written there.
+    }
+    expect(printed).not.toMatch(/continueWithAuth|password/i);
+    expect(printed).not.toMatch(/proxy-authorization/i);
+    expect(printed).not.toContain("pw:protocol");
+  });
+
   it("answers the chat's browser operations as denied once its user denies the first use, and asks again at the next", async () => {
     const folder = join(home, "project");
     mkdirSync(folder);
