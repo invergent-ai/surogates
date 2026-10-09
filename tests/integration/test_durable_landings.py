@@ -438,12 +438,13 @@ async def test_a_recovery_from_a_row_behind_its_landing_puts_back_what_it_knows_
         # A row that shows the applies done knows the folders they made, and that your save is a conflict.
         assert not (pods.project / "made").exists() and row.saga_state == "escalated"
         # The master is told of it, in a report of the dead landing's thread: B's own turn landed.
+        # It names the one file at issue, the one you saved over: the others went back, or were never written.
         [report] = told
         assert (report["worker_id"], report["recovered"], "gone" in report) == (str(first.id), True, False)
-        assert [f["ref"] for f in report["files"]] == ["a.md", "made/deep/b.md", "notes.txt", "Report.docx"]
+        assert [f["ref"] for f in report["files"]] == ["a.md"] and report["saga"] == row.saga_id
         assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"] == (
             f'[Thread "Draft A" ({first.id}): a landing its worker left unfinished was settled]\n'
-            "Could not finish landing these; check them: a.md, made/deep/b.md, notes.txt, Report.docx"
+            "Could not finish landing these; check them: a.md"
         )
     else:
         # A row behind them knows neither: the folders stay, empty, and the landing reads as put back.
@@ -1412,6 +1413,30 @@ async def test_a_landing_left_running_whose_commits_the_history_lost_is_given_up
     )
     # What it half landed stays, for a person to check; nothing is written over.
     assert pods.real_names() == ["B.md", "C.md", "Report.docx", "a.md", "notes.txt"]
+
+
+async def test_a_landing_left_escalated_whose_row_cannot_be_written_is_told_to_the_master_once(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second, third = [await a_thread(api, name, master) for name in ("Draft A", "Draft B", "Draft C")]
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo a > a.md && echo b > b.md")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")
+    shutil.rmtree(pods.project / "_history")
+    save = rows_module.save_landing
+
+    async def not_escalated(session_factory, row, saga, **values):
+        if values.get("state") == "escalated":
+            raise ConnectionError("the row's write did not go through")
+        await save(session_factory, row, saga, **values)
+
+    monkeypatch.setattr(landing_module, "save_landing", not_escalated)
+    for thread, name in ((second, "B"), (third, "C")):
+        await edited(pool, thread, f"echo by {name} > {name}.md")
+        await ends(api, pool, thread)
+    # Its row still reads running, so each later holder of the lock settles it again: the master hears of it once.
+    [row] = await rows(api, first)
+    told = [report for report in await reports(api, master) if report.get("recovered")]
+    assert row.saga_state == "running" and [report["saga"] for report in told] == [row.saga_id]
 
 
 async def test_a_landing_left_running_is_not_given_up_while_the_history_is_only_slow_to_show_its_commits(api, monkeypatch, pods):

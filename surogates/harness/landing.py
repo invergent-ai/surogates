@@ -607,7 +607,7 @@ def _row_files(saga: Any, state: str) -> list[dict]:
 
 async def _settle(
     saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str, row: _Row,
-    *, recovered: bool = False, held: Any = None,
+    *, recovered: bool = False, held: Any = None, at_issue: list[str] | None = None,
 ) -> tuple[str, str | None]:
     """End a landing that did not finish: ``completed`` with its commit when it pushed, else put back.
 
@@ -618,7 +618,9 @@ async def _settle(
     and a fence that fell short.  A
     *recovered* landing's steps are as its row last had them: a step it
     was in, or had done since, shows ``pending``.  Its put-backs ask *held*
-    first, as a landing's applies do.
+    first, as a landing's applies do.  *at_issue* takes the files of a
+    landing left ``escalated`` that a person has to check: those whose
+    put-back failed, or, for one given up, each that may have been written.
     """
     async def look(*, found: bool = False, **arguments: Any) -> dict:
         """A look at the history through the pod, tried as a step is, each try marking the row alive first.
@@ -666,9 +668,13 @@ async def _settle(
         for it in saga.steps:
             if it.tool_name == "history.apply" and it.state is not StepState.COMPENSATED:
                 it.state, it.error = StepState.COMPENSATION_FAILED, _GONE
+                if at_issue is not None:
+                    at_issue.append(it.arguments["path"])
         await _written(row.write, tries=2, state="escalated")
         return "escalated", None
     failed = await _put_back(saga, orchestrator, sandbox_pool, owner, row, recovered=recovered, held=held)
+    if at_issue is not None:
+        at_issue.extend(it.arguments["path"] for it in failed if it.tool_name == "history.apply")
     state = "escalated" if failed else "compensated"
     await _written(row.write, tries=2, state=state)
     return state, None
@@ -682,16 +688,21 @@ class _Unseen(Exception):
         self.missing = missing
 
 
-async def _tell_escalated(session_factory: Any, thread_id: Any, saga: Any) -> None:
+async def _tell_escalated(session_factory: Any, thread_id: Any, saga: Any, at_issue: list[str]) -> None:
     """Report a landing a settle left ``escalated`` to its thread's master, as a turn's own is reported.
 
     No turn of the thread ends here, so the report has no words of its:
-    it is ``recovered``, names the files the landing was writing, each to
-    check, and says ``gone`` when the history had nothing to put back.  The
-    master reads it at its next wake, and the thread's row shows it as the
-    thread's last report.  As best it can: the row reads ``escalated``
-    whatever comes of the telling.
+    it is ``recovered``, names the files *at_issue*, each to check, and
+    says ``gone`` when the history had nothing to put back.  The master
+    reads it at its next wake, and the thread's row shows it as the
+    thread's last report.  It is written once a landing, by its ``saga``:
+    a row whose ``escalated`` could not be written is settled again by
+    each later lock holder, and told by the first.  As best it can: the
+    row reads ``escalated`` whatever comes of the telling.
     """
+    from sqlalchemy import select
+
+    from surogates.db.models import Event
     from surogates.session.store import SessionStore
     from surogates.workstreams.store import WorkstreamStore
 
@@ -701,11 +712,17 @@ async def _tell_escalated(session_factory: Any, thread_id: Any, saga: Any) -> No
         named = await WorkstreamStore(session_factory).get_thread(thread_id)
         if thread.parent_id is None:
             return
-        paths = [s.arguments["path"] for s in saga.steps if s.tool_name == "history.apply"]
+        async with session_factory() as db:
+            told = await db.scalar(select(Event.id).where(
+                Event.session_id == thread.parent_id, Event.type == EventType.WORKER_COMPLETE.value,
+                Event.data["saga"].astext == saga.saga_id,
+            ).limit(1))
+        if told is not None:
+            return
         await store.emit_event(thread.parent_id, EventType.WORKER_COMPLETE, {
             "worker_id": str(thread_id), "title": named.title if named is not None else thread.title, "result": "",
-            "files": [{"kind": "file", "label": path, "ref": path, "landing": "not_merged"} for path in paths],
-            "landing": "escalated", "recovered": True,
+            "files": [{"kind": "file", "label": path, "ref": path, "landing": "not_merged"} for path in at_issue],
+            "landing": "escalated", "recovered": True, "saga": saga.saga_id,
             **({"gone": True} if any(s.error == _GONE for s in saga.steps) else {}),
         })
     except Exception:
@@ -755,14 +772,15 @@ async def settle_running(
         saga = saga_of(row)
         orchestrator = _orchestrator(saga_settings)
         orchestrator.adopt(saga)
+        at_issue: list[str] = []
         state, _ = await _settle(
             saga, orchestrator, sandbox_pool, owner, _Row(session_factory, row.id, saga),
-            recovered=True, held=held,
+            recovered=True, held=held, at_issue=at_issue,
         )
         done.add(row.id)
         logger.warning("Settled landing %s of %s, left running: %s", row.saga_id, row.thread_id, state)
         if state == "escalated" and row.thread_id is not None:
-            await _tell_escalated(session_factory, row.thread_id, saga)
+            await _tell_escalated(session_factory, row.thread_id, saga, at_issue)
         settled.append({"thread": row.thread_id, "state": state, "files": _row_files(saga, state)})
     return settled
 
