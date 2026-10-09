@@ -133,8 +133,8 @@ describe("an update", () => {
       const found = updates();
       if (why) await expect(found.check(), `${version} ${JSON.stringify(fields)}`).rejects.toThrow(why);
       else await found.check();
-      // Nothing of any is taken; one that no trusted key signed has a line of its own, which says what may mend it.
-      expect(found.state, `${version} ${JSON.stringify(fields)}`).toEqual({ state: why === unsigned ? "unsigned" : "none" });
+      // Nothing of any is taken, and nothing is said of any at its first check.
+      expect(found.state, `${version} ${JSON.stringify(fields)}`).toEqual({ state: "none" });
       expect(heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", `/desktop/releases/${version}/manifest.json.sig`]);
     }
     // The signature asked for is the release's own, by the version the manifest names: a

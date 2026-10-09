@@ -343,7 +343,9 @@ function startUpdates(): void {
     return;
   }
   // Whichever build: all that a helper said of an install that did not end well goes to the log.
-  updates = new Updates({ ...options, log: report }, changed);
+  // What it keeps of a newest release that no trusted key signed is under the app's own root,
+  // which no chat's folder reaches.
+  updates = new Updates({ ...options, standing: join(root, "update-unsigned.json"), log: report }, changed);
   // Checked at the start and every six hours; sooner after a check that failed; and when the
   // computer wakes. A quit in the middle of one is no failure to say.
   powerMonitor.on("resume", keepChecked(updates, stopDelivery.signal, report));

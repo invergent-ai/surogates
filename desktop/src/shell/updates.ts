@@ -116,7 +116,8 @@ export type UpdateState =
   // The helper pkexec would run is not one the app can take: nothing is installed until the
   // install script has put it right.
   | { state: "broken" }
-  // The base's newest release is signed by no key the helper lists: nothing of it is taken.
+  // The base's newest release is signed by no key the helper lists, and has been for a day of
+  // failed checks: nothing of it is taken.
   | { state: "unsigned" };
 
 // What the root helper's run came to: its exit code, null when it did not run or a signal ended
@@ -196,6 +197,12 @@ const HELPER_UNSIGNED = `the release's manifest${NOT_SIGNED}`;
 
 // A release that none of the keys asked has signed.
 export class Unsigned extends Error {}
+// When the line says so: not at the first such check, which a release caught between two of its
+// uploads, a server's bad hour or a forgery each make, but once it has stood for a day of failed
+// checks. Both hold: this many checks in a row found it so, and the first of them is this old.
+// By the checks' own series (nextCheckIn) an app that runs through the day makes twelve in it.
+export const UNSIGNED_CHECKS = 8;
+export const UNSIGNED_MS = 24 * 60 * 60 * 1000;
 
 /** The sidebar's line for *state*, or null for none. */
 export function updateLine(state: UpdateState | null): UpdateLine | null {
@@ -525,6 +532,8 @@ export interface UpdatesOptions {
   signal: AbortSignal; // the quit: a check or a download under way stops with the app
   apply: (files: Staged) => Promise<Applied>; // the root helper's run: helperRun's
   log?: (words: string) => void; // told, whole, what pkexec and the helper said of an install that did not end well
+  standing?: string; // a file of the app's own, where it keeps how long the newest release has been unsigned; in memory without
+  now?: () => number; // the clock: Date.now
 }
 
 /**
@@ -541,6 +550,8 @@ export class Updates {
   private checking: Promise<void> | null = null;
   // Where the cache home led when it was first taken.
   private readonly took: { home: string | null } = { home: null };
+  // The failed checks that stand where no file keeps them (stands).
+  private stood: { since: number; count: number } | null = null;
 
   constructor(private readonly options: UpdatesOptions, private readonly changed: () => void = () => {}) {}
 
@@ -632,13 +643,16 @@ export class Updates {
       release = signedRelease(latest, manifest, signature, keys, channel);
     } catch (error) {
       // Signed by no key the helper lists: forged, or signed by a key that a release this computer
-      // never took brought. The helper would refuse it too, and say nothing more; the line says
-      // what mends the second, beside no update that is here and offered.
-      if (error instanceof Unsigned && !this.settled() && (this.state.state === "none" || this.state.state === "unsigned")) this.set({ state: "unsigned" });
+      // never took brought. The helper would refuse it too. The app keeps its version and checks
+      // on, and its log has this check's failure; its line says so only once that has stood
+      // (stands), beside no update that is here and offered. Any other refusal is of a manifest
+      // that a trusted key did sign.
+      if (!(error instanceof Unsigned)) this.signed();
+      else if (this.stands() && !this.settled() && (this.state.state === "none" || this.state.state === "unsigned")) this.set({ state: "unsigned" });
       throw error;
     }
-    // One its keys take: the line goes.
-    if (this.state.state === "unsigned") this.set({ state: "none" });
+    // One its keys take: what stood is forgotten, and the line goes.
+    this.signed();
     // Nor by one that was asking its base when the install began: the root helper reads the cache
     // while it runs, and nothing in it is changed or removed under it.
     if (this.settled()) return;
@@ -693,6 +707,40 @@ export class Updates {
     const shown = this.state;
     if ((shown.state === "refused" || shown.state === "failed") && shown.version === release.version) return;
     this.set({ state: "available", version: release.version, files });
+  }
+
+  // One more check has found the base's newest release signed by no trusted key. Whether that has
+  // now stood long enough to be said: UNSIGNED_CHECKS such checks in a row, the first of them
+  // UNSIGNED_MS ago or more. In a row: with no answer between them that a trusted key signed; a
+  // base that did not answer is neither. What stands is kept in a file, so that an app that is
+  // started once a day counts on. One that cannot be what stood begins the count again: no such
+  // record, or a first failure in the future, as after the clock was set back.
+  private stands(): boolean {
+    const now = (this.options.now ?? Date.now)();
+    const { standing } = this.options;
+    let stood = this.stood;
+    if (standing !== undefined) {
+      stood = null;
+      try {
+        const read: unknown = regular(standing) ? JSON.parse(readFileSync(standing, "utf8")) : null;
+        const { since, count } = (typeof read === "object" && read !== null && !Array.isArray(read) ? read : {}) as { since?: unknown; count?: unknown };
+        if (Number.isSafeInteger(since) && Number.isSafeInteger(count) && (count as number) >= 1) stood = { since: since as number, count: count as number };
+      } catch {
+        // not JSON: no record
+      }
+    }
+    if (stood === null || stood.since > now) stood = { since: now, count: 0 };
+    stood = { since: stood.since, count: stood.count + 1 };
+    this.stood = stood;
+    if (standing !== undefined) keep(standing, Buffer.from(JSON.stringify(stood)));
+    return stood.count >= UNSIGNED_CHECKS && now - stood.since >= UNSIGNED_MS;
+  }
+
+  // An answer that a trusted key signed: nothing stands, and the line for it goes.
+  private signed(): void {
+    this.stood = null;
+    if (this.options.standing !== undefined) rmSync(this.options.standing, { recursive: true, force: true });
+    if (this.state.state === "unsigned") this.set({ state: "none" });
   }
 
   // Whether an install runs, or is done: from then on a check changes neither the line nor the cache.

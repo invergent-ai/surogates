@@ -34,7 +34,7 @@ describe("a signed manifest", () => {
     expect(JSON.parse(base.served.get("/desktop/latest.json")!.toString())).toEqual(JSON.parse(manifest.toString()));
     const found = base.updates();
     await expect(found.check()).rejects.toThrow(`${base.url}/desktop/latest.json is not signed by Surogate's release key`);
-    expect(found.state).toEqual({ state: "unsigned" });
+    expect(found.state).toEqual({ state: "none" });
     expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", base.signatureAt("1.2.4")]);
   });
 
@@ -120,20 +120,100 @@ describe("a signed manifest", () => {
 
 describe("a release that no key this computer trusts has signed", () => {
   const LINE = { text: `Surogate's newest release${NOT_SIGNED}`, button: null };
-  it("has a line that says what is so and the way on, as the install script says it: a computer that missed the release which brought a new key takes no later one, and no one at it can know why", async () => {
+  // A clock of the test's own, and where the failures that stand are kept.
+  const HOUR = 60 * 60 * 1000;
+  const standing = () => join(base.dir, "unsigned.json");
+  const kept = () => (existsSync(standing()) ? JSON.parse(readFileSync(standing(), "utf8")) as unknown : null);
+  const UNSIGNED = "is not signed by Surogate's release key";
+
+  it("says nothing of one at its first failed check, nor for a day: it keeps its version, logs it, and checks on; the line shows once eight checks in a row have failed so and the first of them is a day old", async () => {
     base.publish("1.2.4", {}, next.privateKey);
+    let now = Date.UTC(2026, 0, 1);
     const states: string[] = [];
-    const found = base.updates({}, () => states.push(found.state.state));
-    await expect(found.check()).rejects.toThrow(`${base.url}/desktop/latest.json is not signed by Surogate's release key`);
+    const found = base.updates({ standing: standing(), now: () => now }, () => states.push(found.state.state));
+    // Seven failed checks, the last of them two days after the first: a count short.
+    for (let failed = 1; failed <= 7; failed += 1) {
+      await expect(found.check(), String(failed)).rejects.toThrow(`${base.url}/desktop/latest.json ${UNSIGNED}`);
+      expect([found.state, updateLine(found.state), kept()], String(failed)).toEqual([{ state: "none" }, null, { since: Date.UTC(2026, 0, 1), count: failed }]);
+      now += 8 * HOUR;
+    }
+    expect(now - Date.UTC(2026, 0, 1)).toBeGreaterThan(48 * HOUR);
+    // The eighth: both hold, and the line is there.
+    await expect(found.check()).rejects.toThrow(UNSIGNED);
     expect([found.state, updateLine(found.state), states]).toEqual([{ state: "unsigned" }, LINE, ["unsigned"]]);
     // Nothing of it was downloaded, and nothing is installed from it.
-    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", base.signatureAt("1.2.4")]);
+    expect(base.heard.map(({ url }) => url)).toEqual(Array.from({ length: 8 }, () => ["/desktop/latest.json", base.signatureAt("1.2.4")]).flat());
+    expect(existsSync(base.cache())).toBe(false);
     await found.install();
     expect(found.state).toEqual({ state: "unsigned" });
-    // The line goes once the base's newest is one its keys take.
+    // The line goes once the base's newest is one its keys take, and what stood is forgotten.
     base.publish("1.2.4");
     await found.check();
     expect(found.state).toMatchObject({ state: "available", version: "1.2.4" });
+    expect(kept()).toBeNull();
+  });
+
+  it("counts a span as well as checks: eight failed checks within the hour show nothing, and the next one a day after the first does", async () => {
+    base.publish("1.2.4", {}, next.privateKey);
+    let now = Date.UTC(2026, 0, 1);
+    const found = base.updates({ standing: standing(), now: () => now });
+    for (let failed = 1; failed <= 12; failed += 1) {
+      await expect(found.check()).rejects.toThrow(UNSIGNED);
+      now += 5 * 60 * 1000;
+    }
+    expect([found.state, kept()]).toEqual([{ state: "none" }, { since: Date.UTC(2026, 0, 1), count: 12 }]);
+    // A millisecond short of the day, and then the day.
+    now = Date.UTC(2026, 0, 2) - 1;
+    await expect(found.check()).rejects.toThrow(UNSIGNED);
+    expect(found.state).toEqual({ state: "none" });
+    now = Date.UTC(2026, 0, 2);
+    await expect(found.check()).rejects.toThrow(UNSIGNED);
+    expect(found.state).toEqual({ state: "unsigned" });
+  });
+
+  it("keeps what has stood across a restart, and forgets it at any answer a trusted key signed, a newer release or not", async () => {
+    base.publish("1.2.4", {}, next.privateKey);
+    let now = Date.UTC(2026, 0, 1);
+    const app = () => base.updates({ standing: standing(), now: () => now });
+    for (let failed = 1; failed <= 7; failed += 1) await expect(app().check()).rejects.toThrow(UNSIGNED);
+    expect(kept()).toEqual({ since: Date.UTC(2026, 0, 1), count: 7 });
+    // An app started two days later shows the line at its first check: the failure has stood.
+    now += 48 * HOUR;
+    const later = app();
+    await expect(later.check()).rejects.toThrow(UNSIGNED);
+    expect(later.state).toEqual({ state: "unsigned" });
+    // A signed answer that is no newer release clears it, and the count begins again at the next.
+    base.publish("1.2.3");
+    await later.check();
+    expect([later.state, kept()]).toEqual([{ state: "none" }, null]);
+    base.publish("1.2.4", {}, next.privateKey);
+    await expect(later.check()).rejects.toThrow(UNSIGNED);
+    expect([later.state, kept()]).toEqual([{ state: "none" }, { since: now, count: 1 }]);
+    // So does one that a trusted key signed and that is no release for this computer.
+    base.publish("1.2.4", { arch: "arm64" });
+    await expect(later.check()).rejects.toThrow(NO_RELEASE);
+    expect(kept()).toBeNull();
+    // A base that does not answer neither counts nor clears.
+    base.publish("1.2.4", {}, next.privateKey);
+    await expect(later.check()).rejects.toThrow(UNSIGNED);
+    base.served.delete("/desktop/latest.json");
+    await expect(later.check()).rejects.toThrow("answered 404");
+    expect(kept()).toEqual({ since: now, count: 1 });
+  });
+
+  it("begins again where what was kept cannot be what stood: a first failure in the future, as after the clock was set back, or a file that is no such record", async () => {
+    base.publish("1.2.4", {}, next.privateKey);
+    const now = Date.UTC(2026, 0, 3);
+    const found = base.updates({ standing: standing(), now: () => now });
+    for (const written of [JSON.stringify({ since: now + 1, count: 500 }), "{", JSON.stringify({ since: "2026", count: 9 }), JSON.stringify({ since: now - 48 * HOUR, count: 7.5 }), JSON.stringify([now - 48 * HOUR, 9]), JSON.stringify({ since: now - 48 * HOUR, count: 0 }), JSON.stringify({ since: now - 48 * HOUR, count: -9 })]) {
+      writeFileSync(standing(), written);
+      await expect(found.check(), written.slice(0, 40)).rejects.toThrow(UNSIGNED);
+      expect([found.state, kept()], written.slice(0, 40)).toEqual([{ state: "none" }, { since: now, count: 1 }]);
+    }
+    // And one that is such a record is taken as it is.
+    writeFileSync(standing(), JSON.stringify({ since: now - 24 * HOUR, count: 7 }));
+    await expect(found.check()).rejects.toThrow(UNSIGNED);
+    expect(found.state).toEqual({ state: "unsigned" });
   });
 
   it("leaves the line of an update that is here: one downloaded and offered stays offered", async () => {
