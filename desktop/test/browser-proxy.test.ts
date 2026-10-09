@@ -3,7 +3,7 @@ import { connect as connectTcp, createServer, type Server, type Socket } from "n
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { BrowserProxy } from "../src/browser/proxy.js";
+import { BrowserProxy, unsigned } from "../src/browser/proxy.js";
 
 // What a name leads to, and how often it was looked up: rebinding.example leads elsewhere, then here.
 let lookups: Record<string, number>;
@@ -48,6 +48,11 @@ let open: Set<Socket>;
 let accepted: Set<Socket>;
 let proxy: BrowserProxy;
 let port: number;
+// What the launch's own browser sends with each request, and what another program has: nothing.
+let signed: string;
+const UNSIGNED = null;
+const signIn = ({ username, password }: { username: string; password: string }) => `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
+const signing = (as: string | null): Record<string, string> => (as === null ? {} : { "proxy-authorization": as });
 // Each address:port the proxy dialed.
 let dialed: string[];
 // Each request the site was sent, as it saw it.
@@ -103,6 +108,7 @@ beforeEach(async () => {
     },
   });
   port = await proxy.listen();
+  signed = signIn(proxy.signIn());
 });
 
 afterEach(async () => {
@@ -121,15 +127,15 @@ async function stillOpen(): Promise<number> {
 async function asking(authority: string): Promise<Socket> {
   const browser = connectTcp({ host: "127.0.0.1", port });
   browser.on("error", () => {});
-  browser.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`);
+  browser.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\nProxy-Authorization: ${signed}\r\n\r\n`);
   while (!lookups[authority.slice(0, authority.lastIndexOf(":"))]) await sleep(5);
   return browser;
 }
 
 // CONNECT *authority* through the proxy, as the browser asks for https and WebSockets: its status, and the tunnel.
-function connect(authority: string): Promise<{ status: number; socket: Socket }> {
+function connect(authority: string, as: string | null = signed): Promise<{ status: number; socket: Socket }> {
   return new Promise((done, fail) => {
-    const asked = request({ host: "127.0.0.1", port, method: "CONNECT", path: authority, headers: { host: authority } });
+    const asked = request({ host: "127.0.0.1", port, method: "CONNECT", path: authority, headers: { host: authority, ...signing(as) } });
     asked.on("connect", (answer, socket) => done({ status: answer.statusCode ?? 0, socket }));
     asked.on("error", fail);
     asked.end();
@@ -144,9 +150,9 @@ function said(socket: Socket, line: string): Promise<string> {
 }
 
 // A plain http request, as the browser sends one to a proxy: *path* is the request target as written.
-function get(path: string, host: string): Promise<{ status: number; body: string }> {
+function get(path: string, host: string, as: string | null = signed): Promise<{ status: number; body: string }> {
   return new Promise((done, fail) => {
-    const asked = request({ host: "127.0.0.1", port, method: "GET", path, headers: { host, "proxy-connection": "keep-alive" } }, (answer) => {
+    const asked = request({ host: "127.0.0.1", port, method: "GET", path, headers: { host, "proxy-connection": "keep-alive", ...signing(as) } }, (answer) => {
       let body = "";
       answer.on("data", (chunk: Buffer) => {
         body += chunk.toString();
@@ -158,7 +164,144 @@ function get(path: string, host: string): Promise<{ status: number; body: string
   });
 }
 
+// Whatever *written* is, sent to the proxy as it stands by a program of this computer's: all the proxy answers, until it closes or a moment after its answer's head.
+function raw(written: string): Promise<string> {
+  return new Promise((done) => {
+    const program = connectTcp({ host: "127.0.0.1", port });
+    let answer = "";
+    const end = () => {
+      program.destroy();
+      done(answer);
+    };
+    program.on("data", (chunk: Buffer) => {
+      answer += chunk.toString();
+      // Its head has come: a moment more, for anything it says after.
+      if (answer.includes("\r\n\r\n")) setTimeout(end, 30);
+    });
+    program.on("error", end);
+    program.on("close", end);
+    program.on("connect", () => program.write(written));
+    setTimeout(end, 500);
+  });
+}
+// The proxy's challenge, and nothing else: no body, no word of what it would have carried.
+const CHALLENGED = /^HTTP\/1\.1 407 Proxy Authentication Required\r\n(?:proxy-authenticate: Basic realm="Surogate"\r\ncontent-length: 0\r\n(?:Date: [^\r]+\r\n)?(?:Connection: [^\r]+\r\n)?(?:Keep-Alive: [^\r]+\r\n)?|Proxy-Authenticate: Basic realm="Surogate"\r\nContent-Length: 0\r\n)\r\n$/;
+// What needs the sign-in today: each is refused to its own browser too, but a launch's check, which is answered.
+const OWN = ["127.0.0.1", "localhost", "[::1]", "app.localhost", "0.0.0.0", "192.168.1.1", "lan.example", "rebinding-now.example", "missing.example", "[64:ff9b::7f00:1]", "0123abcd.proxy-check.invalid"];
+
 describe("the browser's proxy", () => {
+  it("places a request as one anyone may send only when it leads to a public site: its own names, this computer, a private network and what it cannot place need the sign-in", async () => {
+    const options = { resolve, local: () => ["127.0.0.1", "::1"], subnets: () => [] };
+    expect(await unsigned({ host: "example.com", port: 80 }, options)).toEqual(["93.184.215.14"]);
+    for (const host of ["127.0.0.1", "localhost", "::1", "app.localhost", "0.0.0.0", "192.168.1.1", "lan.example", "half-lan.example", "missing.example", "*.example.com", ""]) {
+      expect(await unsigned({ host, port: 3000 }, options), host).toBeNull();
+    }
+    expect(await unsigned({ host: "example.com", port: 99999 }, options)).toBeNull();
+    expect(await unsigned(null, options)).toBeNull();
+    // One of its own names leads nowhere: nothing is looked up for it.
+    expect(await unsigned({ host: "0123abcd.proxy-check.invalid", port: 80 }, options)).toBeNull();
+    expect(lookups["0123abcd.proxy-check.invalid"]).toBeUndefined();
+  });
+
+  it("carries a public site for a program that does not sign in, as for its browser, and its browser's sign-in reaches no site", async () => {
+    expect(await get("http://example.com/a", "example.com", UNSIGNED)).toEqual({ status: 201, body: "hello from the site" });
+    expect(await get("http://example.com/b", "example.com", "Basic bm90Om1pbmU=")).toEqual({ status: 201, body: "hello from the site" });
+    const { status, socket } = await connect("example.com:443", UNSIGNED);
+    expect(status).toBe(200);
+    expect(await said(socket, "hi")).toBe("echo hi");
+    socket.destroy();
+    expect(dialed).toEqual(["93.184.215.14:80", "93.184.215.14:80", "93.184.215.14:443"]);
+    expect(seen.map(({ headers }) => headers.includes("proxy-authorization"))).toEqual([false, false]);
+  });
+
+  it("answers its challenge and nothing else to what needs the sign-in and comes without it, whatever its headers say, and dials nothing", async () => {
+    names["rebinding-now.example"] = [["127.0.0.1"]];
+    proxy.expect("0123abcd");
+    for (const host of OWN) {
+      const at = `${host}:3000`;
+      for (const written of [
+        `GET http://${at}/ HTTP/1.1\r\nHost: ${at}\r\n\r\n`,
+        // A browser's own headers, written by hand.
+        `GET http://${at}/ HTTP/1.1\r\nHost: ${at}\r\nSec-Fetch-Site: same-origin\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Dest: empty\r\n\r\n`,
+        `POST http://${at}/ HTTP/1.1\r\nHost: ${at}\r\nSec-Fetch-Site: none\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-User: ?1\r\nContent-Length: 0\r\n\r\n`,
+        `DELETE http://${at}/ HTTP/1.1\r\nHost: ${at}\r\nSec-Fetch-Site: cross-site\r\nOrigin: http://localhost:3000\r\n\r\n`,
+        // A tunnel, and a WebSocket's handshake written into it before any answer.
+        `CONNECT ${at} HTTP/1.1\r\nHost: ${at}\r\n\r\n`,
+        `CONNECT ${at} HTTP/1.1\r\nHost: ${at}\r\n\r\nGET /ws HTTP/1.1\r\nHost: ${at}\r\nOrigin: http://localhost:3000\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+      ]) {
+        expect(await raw(written), written).toMatch(CHALLENGED);
+      }
+    }
+    // And what is no proxy's request at all.
+    for (const written of ["GET /index.html HTTP/1.1\r\nHost: localhost:3000\r\n\r\n", "GET https://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n", "CONNECT example.com HTTP/1.1\r\n\r\n"]) {
+      expect(await raw(written), written).toMatch(CHALLENGED);
+    }
+    expect(dialed).toEqual([]);
+    expect(seen).toEqual([]);
+    expect(proxy.checked("0123abcd")).toBe(false);
+  });
+
+  it("takes no sign-in but its launch's own: another secret, another name, the launch before's, another scheme, or two of them", async () => {
+    const before = signed;
+    const { username, password } = proxy.signIn();
+    signed = signIn({ username, password });
+    const wrong = [
+      before,
+      signIn({ username, password: `${password.slice(0, -1)}${password.endsWith("A") ? "B" : "A"}` }),
+      signIn({ username: "another", password }),
+      signIn({ username, password: "" }),
+      // Of another length, short and long: told apart by nothing.
+      signIn({ username, password: "x" }),
+      signIn({ username, password: "x".repeat(4096) }),
+      `Bearer ${password}`,
+      signed.toLowerCase(),
+      ` ${signed}x`,
+      "",
+    ];
+    proxy.expect("0123abcd");
+    for (const as of wrong) {
+      expect((await get("http://0123abcd.proxy-check.invalid/", "0123abcd.proxy-check.invalid", as)).status, as).toBe(407);
+      expect((await connect("localhost:3000", as)).status, as).toBe(407);
+    }
+    // Two sign-ins, the right one first or last: one request never carries two.
+    for (const pair of [[signed, before], [before, signed], [signed, signed]]) {
+      const twice = pair.map((as) => `Proxy-Authorization: ${as}\r\n`).join("");
+      expect(await raw(`GET http://0123abcd.proxy-check.invalid/ HTTP/1.1\r\nHost: 0123abcd.proxy-check.invalid\r\n${twice}\r\n`)).toMatch(CHALLENGED);
+      expect(await raw(`CONNECT localhost:3000 HTTP/1.1\r\nHost: localhost:3000\r\n${twice}\r\n`)).toMatch(CHALLENGED);
+    }
+    expect(proxy.checked("0123abcd")).toBe(false);
+    proxy.expect("0123abcd");
+    expect((await get("http://0123abcd.proxy-check.invalid/", "0123abcd.proxy-check.invalid")).status).toBe(204);
+    expect(proxy.checked("0123abcd")).toBe(true);
+  });
+
+  it("takes no sign-in at all before a launch has made one", async () => {
+    const fresh = new BrowserProxy({ resolve });
+    const at = await fresh.listen();
+    try {
+      for (const as of [signed, "", "Basic ", signIn({ username: "surogate", password: "" })]) {
+        const answer = await new Promise<number>((done, fail) => {
+          const headers = { host: "0123abcd.proxy-check.invalid", "proxy-authorization": as };
+          request({ host: "127.0.0.1", port: at, path: "http://0123abcd.proxy-check.invalid/", headers }, (answered) => done(answered.resume().statusCode ?? 0)).on("error", fail).end();
+        });
+        expect(answer, as).toBe(407);
+      }
+    } finally {
+      await fresh.close();
+    }
+  });
+
+  it("keeps a launch's secret nowhere: what it holds of it tells nobody the sign-in", () => {
+    const { password } = proxy.signIn();
+    expect(password).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(proxy.signIn().password).not.toBe(password);
+    const { password: last } = proxy.signIn();
+    // Every field of the proxy's but its server, a buffer in each spelling.
+    const kept = Object.entries(proxy).filter(([name]) => name !== "server")
+      .map(([, value]) => (Buffer.isBuffer(value) ? ["latin1", "hex", "base64", "base64url"].map((spelling) => value.toString(spelling as BufferEncoding)).join(" ") : JSON.stringify(value) ?? "")).join(" ");
+    for (const spelled of [last, Buffer.from(`surogate:${last}`).toString("base64"), Buffer.from(last).toString("hex")]) expect(kept).not.toContain(spelled);
+  });
+
   it("tunnels to a site past this computer, at the address it judged", async () => {
     const { status, socket } = await connect("example.com:443");
     expect(status).toBe(200);
