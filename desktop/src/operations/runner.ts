@@ -7,7 +7,7 @@
 
 import { createHash } from "node:crypto";
 
-import { MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES } from "../files/answers.js";
+import { MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES, NUL_REFUSED, refusedForNul } from "../files/answers.js";
 import type { OperationJournal } from "../journal/journal.js";
 import {
   CHUNK_BYTES, chunkAck, MAX_FRAME_CHARS, opResult, type Operation, type Outcome, type Transfer, transferOf,
@@ -322,7 +322,10 @@ export class OperationRunner {
     let answer: Outcome | null = null;
     let data: Buffer | null = null;
     const transfer = sentTransfer(operation);
-    if (transfer === "malformed") {
+    if (refusedForNul(operation.kind, operation.args)) {
+      // Before its data is waited for and its user asked: it can never run.
+      answer = { error: { type: "value", message: NUL_REFUSED } };
+    } else if (transfer === "malformed") {
       answer = MALFORMED_TRANSFER;
     } else if (transfer !== null) {
       data = await this.receiver.whole(operation.id, transfer, signal);

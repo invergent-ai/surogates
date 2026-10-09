@@ -101,8 +101,10 @@ An error names the exception the worker raises again:
 
 A NUL in a path as the model wrote it, a key, a working folder, a command, or
 a search's pattern or glob is answered with a value error whose message is
-NUL_REFUSED (surogates.tools.workspace_io.base), before anything is done with
-the text: the cloud's own workspaces refuse it in the same sentence.
+NUL_REFUSED (surogates.tools.utils.workspace_sandbox), before the computer's
+user is asked and before any other argument is looked at.  The cloud's own
+workspaces answer the same.  DeviceWorkspaceIO refuses it before an operation is recorded,
+so the computer's own refusal is for a server that did not.
 
 Data is standard base64 (RFC 4648 section 4: the "+" and "/" alphabet, padded
 with "=", no line breaks).  A reply in any other form is refused, never decoded

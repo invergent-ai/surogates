@@ -241,6 +241,11 @@ SAME = [
     ("list_dir", {"key": "{f}/a\0b"}),
     ("walk", {"key": "{f}/a\0b", "skip": [], "skip_top": [], "skip_hidden": False, "since": None}),
     ("ripgrep", {"key": "{f}/a\0b", "mode": "count", "pattern": "gamma", "glob": None, "context": 0}),
+    # A NUL and another argument that is refused: the NUL first.
+    ("ripgrep", {"key": "{f}/sub", "mode": "count", "pattern": "a\0", "glob": None, "context": -1}),
+    ("ripgrep", {"key": "{f}/sub", "mode": "regex", "pattern": "a\0", "glob": None, "context": 0}),
+    ("read_lines", {"key": "{f}/a\0b", **PAGE, "encoding": "latin-1"}),
+    ("walk", {"key": "{f}/a\0b", "skip": "x", "skip_top": [], "skip_hidden": False, "since": None}),
 ]
 
 # Changes that fail the same way on both and change nothing.
@@ -255,6 +260,7 @@ SAME_FAILURES = [
     ("delete", {"key": "{f}/sub"}),
     ("delete", {"key": "{f}"}),
     ("write", {"key": "{f}/a\0b", "data": b64(b"x")}),
+    ("write", {"key": "{f}/a\0b", "data": b64(b"x"), "expected_revision": "0:0:0:0:0"}),
     ("delete", {"key": "{f}/a\0b"}),
 ]
 
@@ -282,6 +288,8 @@ SAME_RUN = [
     # A NUL is refused before the workdir is looked at: one outside the folder is a refusal of its own.
     ("run", {"command": "a\0b", "workdir": "/etc", "timeout": 10}),
     ("run", {"command": "pwd", "workdir": "/etc/a\0b", "timeout": 10}),
+    ("run", {"command": "a\0b", "workdir": None, "timeout": 0}),
+    ("run", {"command": "pwd", "workdir": "a\0b", "timeout": 0}),
     ("run", {"command": "exit 0", "workdir": None, "timeout": 10}),
 ]
 

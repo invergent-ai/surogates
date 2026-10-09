@@ -187,6 +187,9 @@ def _cap_strings(value: Any) -> Any:
 
 
 async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
+    if kind != "stat":
+        # As the app: a NUL is refused before anything else of the operation is looked at.
+        refuse_nul(*(a.get(name) for name in ("path", "key", "workdir", "command", "pattern", "glob")))
     if kind in _PROCESS_KINDS:
         return _cap_strings(await _run_process(folder, kind, a))
     if kind == "resolve":
@@ -266,7 +269,6 @@ def _walk(a: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(key, str):
         # The key before anything else, as the app checks it.
         raise ValueError("'key' must be a string")
-    refuse_nul(key)
     skip, top, hidden, since = (a.get(name) for name in ("skip", "skip_top", "skip_hidden", "since"))
     if (
         type(hidden) is not bool
