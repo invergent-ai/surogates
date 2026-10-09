@@ -842,7 +842,8 @@ class History:
         """The hand-off *top* without the own files of each of the thread's hand-offs that *gone* names.
 
         Followed down from *top*: a helper's hand-back is its copy alone on
-        the hand-off it started from, or a merge of the hand-off and its
+        the hand-off it started from, which is a thread's hand-off or
+        another helper's hand-back, or a merge of the hand-off and its
         copy; a thread's hand-off says which hand-off its copy had taken
         up.  It ends at *floor*, where the hand-off is taken up from, at a
         hand-off of the thread's that is not gone, at one that found none,
@@ -869,11 +870,10 @@ class History:
                     kept.append(parents[1])
                     commit = parents[0]
                 elif message[:1] == ["Kept"] and len(parents) == 1:
-                    if parents[0] != floor:
-                        self._fetch(parents[0])
-                    if parents[0] == floor or self._message(parents[0])[:1] != ["Handed on"]:
+                    if parents[0] == floor:
                         found = commit  # a helper's copy onto none: it is the hand-off, from where it started
                         break
+                    # On the hand-off it started from, another helper's copy as well as a thread's hand-off.
                     kept.append(commit)
                     commit = parents[0]
                 elif message[:1] == ["Handed on"] and parents:

@@ -2174,3 +2174,23 @@ def test_a_threads_failed_helpers_copies_kept_apart_are_bounded_in_number_the_ol
     assert kept == ["refs/helpers/t1/h2", "refs/helpers/t1/h3", "refs/helpers/t1/h4"]
     assert git(durable, "show", "refs/helpers/t1/h4:half4.md") == "half made"
     assert git(durable, "fsck", "--no-dangling") == ""
+
+
+@pytest.mark.parametrize("helpers", [2, 3])
+@pytest.mark.parametrize("stop", ["not carried out", "tried"])
+def test_helpers_that_hand_back_one_after_the_other_onto_a_stopped_turns_hand_off_do_not_bring_its_files_back(tmp_path, project, helpers, stop):
+    turn = a_turn_that_handed_on_and_was_not_stopped_in_the_history(tmp_path, project)
+    for n in range(helpers):
+        # The first was started by the stopped turn.  Each next one was queued behind it, and starts from the
+        # hand-off as the one before left it.
+        task = a_helper(tmp_path, project, f"task-{n}")
+        (task.copy / f"t{n}.md").write_text(f"t{n}")
+        task.hand_back(author=A, trailers=KEPT)
+    if stop == "tried":
+        # A stop on that chain takes the turn's own files off it, and says so.
+        assert turn.drop_hand_off() == {"dropped": True}
+    later = a_pod(tmp_path, project, turn="turn-3")
+    kept = [f"t{n}.md" for n in range(helpers)]
+    assert names_in(later) == sorted(["Report.docx", "notes.txt", "outline.md", "sources.md", *kept])
+    land(later, "saga:3")
+    assert not (project / "draft.md").exists() and all((project / name).exists() for name in kept)

@@ -15,7 +15,7 @@ import logging
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
@@ -29,7 +29,9 @@ from surogates.sandbox.pool import SandboxPool
 from surogates.session.acting_principal import ActingPrincipal
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
+from surogates.db.models import Task
 from surogates.tasks import service as task_service
+from surogates.tasks import spawn as task_spawn
 from surogates.tools.builtin import delegate as delegate_module
 from surogates.workstreams import thread_refusal
 from tests.test_steer_loop import _final_response
@@ -990,3 +992,48 @@ async def test_a_thread_whose_copy_was_made_again_after_it_handed_on_is_told_wha
         "turn is in it, with what helpers kept since. Changes it made after that are not in it. "
         "Check the files before making any of those changes again.]\n\n"
     )
+
+
+@pytest.mark.parametrize("stop_is", ["carried out", "not carried out"])
+async def test_a_stopped_turns_file_never_lands_when_its_tasks_queued_in_order_hand_back_one_after_the_other(
+    api, monkeypatch, tmp_path, stop_is,
+):
+    master = await master_of(api, await create(api))
+    thread = await a_coordinating_thread(api, master)
+    pods = stored(api, thread, tmp_path)
+    store, mine, theirs = api.app.state.session_store, SandboxPool(pods), SandboxPool(pods)
+    spawn, made = task_service.create_task_and_spawn, []
+
+    async def noted(**task):
+        made.append(await spawn(**task))
+        return made[-1]
+
+    monkeypatch.setattr(task_service, "create_task_and_spawn", noted)
+
+    async def stopped(harness):
+        if stop_is == "not carried out":
+            landing_module.turn_ended(thread)  # the worker that stops it is not the one that handed on
+        await stop(harness)
+
+    def replies():
+        yield calling(("terminal", {"command": "echo the stopped turn > stopped.md"}))
+        yield calling(("spawn_task", {"goal": "Write part one."}))
+        yield calling(("spawn_task", {"goal": "Write part two.", "parents": [made[0]["task_id"]]}))
+        yield calling(("memory", {"action": "add", "content": "x"}))
+        yield _final_response("Done.")
+
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, replies(), pool=mine, during=stopped), 120)
+    [first] = await helpers_of(api, thread)
+    await a_helpers_turn(api, monkeypatch, theirs, first, "echo part one > one.md")
+    # The tick starts the task queued behind it: no step of the thread hands a copy on for it, and it starts
+    # from the hand-off as the first task left it.
+    async with api.app.state.session_factory() as db:
+        queued = await db.get(Task, UUID(made[1]["task_id"]))
+    second = await task_spawn._create_session_for_task(
+        queued, session_store=store, session_factory=api.app.state.session_factory,
+        tenant=SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id),
+    )
+    await a_helpers_turn(api, monkeypatch, theirs, second, "cat one.md > two.md && echo part two >> two.md")
+    await one_more_turn(api, monkeypatch, pods, thread, "ls > seen-later.txt")
+    assert pods.real_names() == ["Report.docx", "notes.txt", "one.md", "seen-later.txt", "two.md"]
+    assert (pods.project / "two.md").read_text() == "part one\npart two\n"
