@@ -178,6 +178,22 @@ roots_alone() {
   (( (mode & 0170000) == 0100000 && (mode & 07022) == 0 ))
 }
 
+# Ends a run that would write or remove in the folder of the install record and the company's CA
+# while that folder is not root's own: a folder and no link, root's, with no write bit for its
+# group or for others. In one that is another's to write, that other's link would stand where root
+# writes a file, and root would write through it. Only root can have given the folder away, and
+# only root gives it back. A folder that is not there yet is root's when this script makes it.
+# $1: what the run did not do.
+roots_folder() {
+  local folder seen mode
+  folder="$(dirname "$RECORD")"
+  [ -e "$folder" ] || [ -L "$folder" ] || return 0
+  seen="$(stat -c '%f %u' -- "$folder" 2>/dev/null)" || seen="0 x"
+  mode=$(( 16#${seen% *} ))
+  [ "${seen#* }" = 0 ] && (( (mode & 0170000) == 0040000 && (mode & 0022) == 0 )) \
+    || fail "$folder must be a folder of root's own that no one else may write, and no link: $1. Give it back to root (sudo chown root:root $folder && sudo chmod 755 $folder), look at what it holds, and run this again"
+}
+
 # Whether $1 is a program of root's own that no one else may write and that others may read: a
 # file and no link, root's, with no write bit for its group or for others, one that someone may
 # run, and one that others may read. The helper pkexec runs is asked so, by this script and by
@@ -955,14 +971,17 @@ company_ca() {
 # Keeps the company's certificate authority this run was given, once its downloads have passed with
 # it: a CA that is not this network's then never takes the place of the one that works. Replaced
 # whole, by one rename, whatever stands in its place: a link there is not written through, and a
-# folder, which no rename replaces, goes first. Its own folder is one that every user's app can
-# look into, as the script makes it.
+# folder, which no rename replaces, goes first. So does whatever an earlier run left where the new
+# file is written: nothing there becomes the CA. Its own folder is root's own (roots_folder), and
+# one that every user's app can look into, as the script makes it.
 keep_company_ca() {
   local folder
   folder="$(dirname "$COMPANY_CA")"
+  roots_folder "the company's certificate authority was not kept"
   mkdir -p "$folder"
   chmod 0755 "$folder"
-  install -m 0644 "$GIVEN_CA" "$COMPANY_CA.new"
+  rm -rf -- "$COMPANY_CA.new"
+  install -m 0644 -T "$GIVEN_CA" "$COMPANY_CA.new"
   [ ! -d "$COMPANY_CA" ] || [ -L "$COMPANY_CA" ] || rm -rf -- "$COMPANY_CA"
   mv -T "$COMPANY_CA.new" "$COMPANY_CA"
   say "every user's Surogate, and their Chrome, Edge and Brave, trust the company's certificate authority in $COMPANY_CA"
@@ -1105,6 +1124,7 @@ POLICY
 # Never one with a user or a password in it, whoever calls this: the record is every user's to read.
 record() {
   nameless "$1" || fail "$CREDENTIALS"
+  roots_folder "where it installed from was not written"
   mkdir -p "$(dirname "$RECORD")"
   jq -n --arg base "$1" --arg channel "$CHANNEL" '{base: $base, channel: $channel}' >"$RECORD.new"
   chmod 0644 "$RECORD.new"
@@ -1326,6 +1346,7 @@ uninstall() {
   # starts now waits, and makes the tree again once this has ended.
   lock
   in_use "$ROOT" && fail "Surogate is running: quit it first, for every user of this computer"
+  roots_folder "nothing was removed"
   local kept=
   [ ! -e "$COMPANY_CA" ] && [ ! -L "$COMPANY_CA" ] || kept=1
   if [ -f "$PROFILE" ]; then

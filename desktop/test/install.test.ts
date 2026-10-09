@@ -3615,6 +3615,44 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(again.status, again.stderr).toBe(0);
   });
 
+  it("keeps the CA as a file of root's whatever an earlier run left half made beside it, and writes and removes nothing in an /etc/surogate that is not root's own: no CA, no record, no uninstall", () => {
+    expect(root("mkdir -p /srv/aside && cp /home/tester/it.pem /srv/aside.pem").status).toBe(0);
+    for (const left of ["mkdir -p /etc/surogate/ca.pem.new/inside", "ln -s /srv/aside.pem /etc/surogate/ca.pem.new", "ln -s /srv/aside /etc/surogate/ca.pem.new", "ln -s /srv/nowhere /etc/surogate/ca.pem.new", "mkfifo /etc/surogate/ca.pem.new"]) {
+      expect(root(`rm -rf /etc/surogate/ca.pem.new && ${left}`).status, left).toBe(0);
+      expect(alone("GIVEN_CA=/home/tester/company.pem; keep_company_ca"), left).toMatchObject({ status: 0, stderr: "" });
+      expect(root("stat -c '%F %a %U' /etc/surogate/ca.pem; ls -A /etc/surogate").stdout, left).toBe("regular file 644 root\nca.pem\ninstall.json\n");
+      expect(kept(), left).toBe(readFileSync(join(certs, "company.pem"), "utf8"));
+    }
+    // What a link there named is as it was.
+    expect(root("cmp /srv/aside.pem /home/tester/it.pem && test -z \"$(ls -A /srv/aside)\" && test ! -e /srv/nowhere").status).toBe(0);
+
+    // The folder given away, as only root can give it: its owner's links stand where root would write.
+    const refusal = (ended: string) => `Surogate Desktop: /etc/surogate must be a folder of root's own that no one else may write, and no link: ${ended}. `
+      + "Give it back to root (sudo chown root:root /etc/surogate && sudo chmod 755 /etc/surogate), look at what it holds, and run this again\n";
+    const standing = () => root("ls -lAn --time-style=+ /etc/surogate /srv/aside /opt/surogate; cat /etc/surogate/ca.pem /etc/surogate/install.json /srv/aside.pem").stdout;
+    for (const given of [
+      "chown tester /etc/surogate && runuser -u tester -- ln -s /srv/aside /etc/surogate/ca.pem.new && runuser -u tester -- ln -s /srv/aside.pem /etc/surogate/install.json.new",
+      "chmod 777 /etc/surogate",
+      "chgrp tester /etc/surogate && chmod 775 /etc/surogate",
+      "mv /etc/surogate /srv/moved && ln -s /srv/moved /etc/surogate",
+    ]) {
+      expect(root(given).status, given).toBe(0);
+      const before = standing();
+      expect(alone("GIVEN_CA=/home/tester/both.pem; keep_company_ca"), given).toMatchObject({ status: 1, stdout: "", stderr: refusal("the company's certificate authority was not kept") });
+      expect(alone("record http://127.0.0.1:9"), given).toMatchObject({ status: 1, stdout: "", stderr: refusal("where it installed from was not written") });
+      expect(root("/opt/surogate-test/install.sh --uninstall"), given).toMatchObject({ status: 1, stdout: "", stderr: refusal("nothing was removed") });
+      expect(standing(), given).toBe(before);
+      expect(root("if [ -L /etc/surogate ]; then rm /etc/surogate && mv /srv/moved /etc/surogate; fi; rm -f /etc/surogate/*.new; chown root:root /etc/surogate && chmod 755 /etc/surogate").status, given).toBe(0);
+    }
+    // Given back, it is written in as before; a folder closed to everyone but root is root's own too.
+    expect(root("chmod 700 /etc/surogate").status).toBe(0);
+    expect(alone("GIVEN_CA=/home/tester/both.pem; keep_company_ca; record " + base)).toMatchObject({ status: 0, stderr: "" });
+    expect(root("stat -c '%F %a %U' /etc/surogate/ca.pem /etc/surogate /etc/surogate/install.json").stdout).toBe("regular file 644 root\ndirectory 755 root\nregular file 644 root\n");
+    expect(kept()).toBe(readFileSync(join(certs, "both.pem"), "utf8"));
+    const again = install();
+    expect(again.status, again.stderr).toBe(0);
+  });
+
   it("trusts the system's own roots as before, beside the company's CA and never in their place: a server that one of them signed is reached with the CA kept, and with one given", () => {
     const reached = (given = "") => alone(`${given}fetch -fsS -o /dev/null ${publicBase}/desktop/latest.json`);
     // Neither the kept CA nor a given one signed it, and the system does not trust who did.
