@@ -1627,9 +1627,6 @@ class AgentHarness(
                                 messages=messages, system_prompt=system_prompt,
                                 all_events=all_events, typed=waiting,
                             )
-                    except LeaseNotHeldError:
-                        # Another worker has the session, and the command.
-                        raise
                     except Exception:
                         logger.exception("Session %s: %s failed", session_id, last_user_content.split()[0])
                     written = all_events + await self._store.get_events(
@@ -1649,7 +1646,7 @@ class AgentHarness(
                             session_id, after=all_events[-1].id, exclude_types=[EventType.LLM_DELTA],
                         )
                 at_rest = await self._end_command_turn(session, lease, typed_at, written, ends_here=is_new)
-                if is_new and self._redis is not None and _command_answered(written, typed_at) and (
+                if is_new and self._redis is not None and (
                     not at_rest or is_project_master(session.config) and unread_reports(written)
                 ):
                     # What still waits, another command, a message, a turn
