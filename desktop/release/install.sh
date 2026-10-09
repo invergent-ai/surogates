@@ -181,9 +181,16 @@ listed() {
 # Whether manifest $1 is signed, in signature $2, by the private half of one of the release keys
 # this computer trusts.
 signed() {
-  local key keys
+  local keys
   trusted keys
-  for key in "${keys[@]}"; do
+  signed_by "$1" "$2" "${keys[@]}"
+}
+
+# Whether manifest $1 is signed, in signature $2, by the private half of one of the release keys
+# that follow them.
+signed_by() {
+  local key
+  for key in "${@:3}"; do
     openssl pkeyutl -verify -pubin -inkey <(printf '%s\n' "$key") -rawin -in "$1" -sigfile "$2" >/dev/null 2>&1 && return 0
   done
   return 1
@@ -252,41 +259,50 @@ helper_release() {
   marked
 }
 
-# Finishes a helper's pair that an apply left half done, stopped between its mark's rename and the
-# helper's: the mark names a release, and the helper is still the one before, or at a first
-# install none. That release's folder is here whole, as it had its name before the mark had: its
-# own helper is put where pkexec runs one, by one rename and never written into, from a copy in
-# $1, a folder of this apply's own. So the keys this computer trusts are those of the release its
-# mark names before anything is asked of them: stopped there, an update that dropped a key would
-# otherwise leave the key trusted until a later release came, and what the key signed meanwhile
-# would be taken.
+# The release whose helper's pair is found half done, into the variable $1 names, or nothing: an
+# apply was stopped between its mark's rename and the helper's. The mark is root's own word for a
+# release (marked), that release is here, its folder's mark the helper's mark byte for byte, with
+# a helper of its own, and the helper pkexec runs is other bytes than that one, or is not there.
+# Nothing is half done where there is no such mark, where its release is not here (an older
+# version applied since, with the helper kept, has taken its folder away; or the folder is the
+# same version built again, stopped before its mark's rename), or where the folder has no helper
+# of its own to compare with: an apply of that version unpacks it again.
+half_done() {
+  local -n found="$1"
+  local own
+  found="$(marked)" || found=""
+  [ -n "$found" ] || return 0
+  own="$ROOT/versions/$found/bin/surogate-apply-update"
+  if cmp -s "$HELPER_MARK" "$ROOT/versions/$found/release.json" && [ -f "$own" ] && [ ! -L "$own" ] && ! cmp -s "$own" "$HELPER"; then return 0; fi
+  found=""
+}
+
+# Finishes a helper's pair that an apply left half done (half_done): the mark names a release,
+# and the helper is still the one before, or at a first install none. That release's folder is
+# here whole, as it had its name before the mark had: its own helper is put where pkexec runs
+# one, by one rename and never written into, from a copy in $1, a folder of this apply's own. So
+# the keys this computer trusts are those of the release its mark names before anything is asked
+# of them: stopped there, an update that dropped a key would otherwise leave the key trusted
+# until a later release came, and what the key signed meanwhile would be taken.
 #
 # This is the one change that an apply makes and may then refuse: whatever it is handed, a pair
 # found half done is finished first. Every other refusal leaves all as it was.
 #
-# A pair is found half done where the mark is root's own word for a release (marked), that
-# release is here, its folder's mark the helper's mark byte for byte, with a helper of its own,
-# and the helper pkexec runs is other bytes than that one, or is not there. Such a pair is
-# finished or refused, and never passed over, which would leave the release before trusted for
-# what is applied next:
+# Such a pair is finished or refused, and never passed over, which would leave the release before
+# trusted for what is applied next:
 # - The helper there now is one whose keys are taken, or this is a first install (trusted).
 # - The folder is whole for the mark, and its mark and its helper are root's own, the helper at any
 #   mode that an apply takes and that lets no one else write it.
 # - The helper is never finished toward an older release, from a mark that is behind it, as an
 #   install script that writes no mark leaves one under a newer release: where a newer version
 #   than the mark names is installed, or the helper is the own one of a newer version that is here.
-# Nothing is half done, and nothing is done, where there is no such mark, where its release is not
-# here (an older version applied since, with the helper kept, has taken its folder away; or the
-# folder is the same version built again, stopped before its mark's rename), or where the folder
-# has no helper of its own to compare with: an apply of that version unpacks it again.
 paired() {
   local version of own keys installed other
   local refused="$HELPER is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again"
-  version="$(marked)" || return 0
+  half_done version
+  [ -n "$version" ] || return 0
   of="$ROOT/versions/$version"
   own="$of/bin/surogate-apply-update"
-  cmp -s "$HELPER_MARK" "$of/release.json" && [ -f "$own" ] && [ ! -L "$own" ] || return 0
-  ! cmp -s "$own" "$HELPER" || return 0
   trusted keys
   whole "$HELPER_MARK" "$of" && roots_alone "$own" || fail "$refused"
   installed="$(installed_version)"
@@ -299,6 +315,24 @@ paired() {
   install -m 0755 "$own" "$1/paired"
   sync -f "$1"
   mv -T "$1/paired" "$HELPER"
+}
+
+# Ends an install or a rollback whose release, $1 by its address, with manifest $2 and signature
+# $3, no release key this computer trusts has signed. Before any lock is held, the keys asked are
+# those of the helper that is there, and a helper's pair that is half done is finished only by an
+# apply: where the release that the pair's mark names lists a key that did sign this one, an
+# update that added the key was stopped before its end, and what is said is what ends it. Not for
+# that update itself, $4 where a rollback asks for one: it would be told to run itself first.
+unsigned() {
+  local half own keys
+  half_done half
+  own="$ROOT/versions/$half/bin/surogate-apply-update"
+  if [ -n "$half" ] && [ "$half" != "${4:-}" ] && whole "$HELPER_MARK" "$ROOT/versions/$half" && roots_alone "$own"; then
+    listed keys "$own"
+    ! signed_by "$2" "$3" "${keys[@]}" \
+      || fail "$1 is signed by a release key that the update to $half brings, and that update was stopped before its end: run Surogate Desktop's install script with --version $half first"
+  fi
+  fail "$1 is not signed by Surogate's release key"
 }
 
 # The state schema of what the installed version keeps in each user's home, as its mark names it:
@@ -697,7 +731,7 @@ install_latest() {
   LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 65 "${TIMELY[@]}" -o "$download/manifest.json.sig" "$base/desktop/latest.json.sig" \
     || fail "could not download $base/desktop/latest.json.sig"
   signed "$download/manifest.json" "$download/manifest.json.sig" \
-    || fail "$base/desktop/latest.json is not signed by Surogate's release key"
+    || unsigned "$base/desktop/latest.json" "$download/manifest.json" "$download/manifest.json.sig"
   release="$(release_of "$download/manifest.json")" \
     || fail "$base/desktop/latest.json is not a release of Surogate Desktop for this computer"
   read -r version _ size <<<"$release"
@@ -814,7 +848,7 @@ roll_back() {
   LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 65 "${TIMELY[@]}" -o "$download/manifest.json.sig" "$base/desktop/releases/$version/manifest.json.sig" \
     || fail "could not download $base/desktop/releases/$version/manifest.json.sig"
   signed "$download/manifest.json" "$download/manifest.json.sig" \
-    || fail "$base/desktop/releases/$version/manifest.json is not signed by Surogate's release key"
+    || unsigned "$base/desktop/releases/$version/manifest.json" "$download/manifest.json" "$download/manifest.json.sig" "$version"
   release="$(release_of "$download/manifest.json")" && read -r its _ size <<<"$release" && [ "$its" = "$version" ] \
     || fail "$base/desktop/releases/$version/manifest.json is not release $version of Surogate Desktop for this computer"
   # Before its tarball is asked for; apply compares them again, with the lock held.

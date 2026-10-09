@@ -2739,6 +2739,57 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(install().status).toBe(0);
     expect(current()).toBe("/opt/surogate/versions/3.4.0");
   });
+
+  it("says what mends it where the base's release is signed by a key that an update stopped before its end brings: to run --version of that update first", () => {
+    expect(current()).toBe("/opt/surogate/versions/3.4.0");
+    const helper = "/opt/surogate/bin/surogate-apply-update";
+    const schema = { stateSchema: 2 };
+    const added = [PUBLIC, pem(next.publicKey)];
+    // An update that adds a key: the key the computer trusts signs it, and its helper lists that
+    // key and the new one. It is stopped between its mark's rename and its helper's.
+    publish("3.5.0", keys.privateKey, schema, added);
+    const killed = String.raw`s|^    mv -T "\$work/helper" "\$HELPER"$|    kill -KILL $$|`;
+    expect(root(`sed '${killed}' /opt/surogate-test/install.sh >/opt/surogate-test/stopped.sh && chmod 755 /opt/surogate-test/stopped.sh && ! cmp -s /opt/surogate-test/install.sh /opt/surogate-test/stopped.sh`).status).toBe(0);
+    expect(root(`cd /home/tester && curl -fsSLO ${base}/desktop/releases/3.5.0/manifest.json -O ${base}/desktop/releases/3.5.0/manifest.json.sig `
+      + `-o release.tar.gz ${base}/desktop/releases/3.5.0/surogate-desktop-3.5.0-linux-x64.tar.gz && /opt/surogate-test/stopped.sh --apply manifest.json manifest.json.sig release.tar.gz`).status).toBe(137);
+    expect(root(`cmp /opt/surogate/bin/release.json /opt/surogate/versions/3.5.0/release.json && ! cmp -s ${helper} /opt/surogate/versions/3.5.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout)
+      .toBe("/opt/surogate/versions/3.4.0\n");
+    // The base's newest then, which the added key alone signs. Before any lock, the keys asked are
+    // still the helper's that is there, and the release is none to them: what is said names the
+    // update to end first, to an install and to a rollback, and each leaves all as it was.
+    publish("3.6.0", next.privateKey, schema, added);
+    const stopped = standing();
+    const first = (file: string) => `Surogate Desktop: ${base}/desktop/${file} is signed by a release key that the update to 3.5.0 brings, and that update was stopped before its end: `
+      + "run Surogate Desktop's install script with --version 3.5.0 first\n";
+    const plain = (file: string) => `Surogate Desktop: ${base}/desktop/${file} is not signed by Surogate's release key\n`;
+    const refused = (ran: { status: number | null; stderr: string }, said: string) => {
+      expect(ran.status, ran.stderr).toBe(1);
+      expect(ran.stderr.endsWith(said), ran.stderr).toBe(true);
+      expect(standing()).toBe(stopped);
+    };
+    refused(install(), first("latest.json"));
+    refused(rollBack("3.6.0"), first("releases/3.6.0/manifest.json"));
+    // One that no key of either list signed is not signed, and no update's end would make it so.
+    publish("3.7.0", other.privateKey, schema, added);
+    refused(install(), plain("latest.json"));
+    refused(rollBack("3.7.0"), plain("releases/3.7.0/manifest.json"));
+    latest("3.6.0");
+    // Nor is the stopped update itself asked for first, where the base now serves it under the
+    // added key's signature: that would send a person round in a circle.
+    const signature = join(www(), "desktop", "releases", "3.5.0", "manifest.json.sig");
+    const signedByOld = readFileSync(signature);
+    writeFileSync(signature, sign(null, readFileSync(join(www(), "desktop", "releases", "3.5.0", "manifest.json")), next.privateKey));
+    refused(rollBack("3.5.0"), plain("releases/3.5.0/manifest.json"));
+    writeFileSync(signature, signedByOld);
+    // As it says: the update is ended by its --version, and the base's newest is then installed.
+    const ended = rollBack("3.5.0");
+    expect(ended.status, ended.stderr).toBe(0);
+    expect(ended.stdout).toContain("Surogate Desktop: 3.5.0 is installed\n");
+    expect(root(`cmp ${helper} /opt/surogate/versions/3.5.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout).toBe("/opt/surogate/versions/3.5.0\n");
+    const newest = install();
+    expect(newest.status, newest.stderr).toBe(0);
+    expect(current()).toBe("/opt/surogate/versions/3.6.0");
+  });
 });
 
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --uninstall as root, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
