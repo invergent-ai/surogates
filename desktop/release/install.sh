@@ -937,9 +937,11 @@ main() {
       if [ "$EUID" -ne 0 ]; then
         say "installing needs administrator rights: sudo asks for your password once"
         # Again as root, from this script's own functions: a script piped to bash has no file to name.
-        # sudo resets the environment, so the proxy the user's shell names goes with them.
+        # sudo resets the environment, so the proxy the user's shell names goes with them. The shell
+        # that reads them is named by its whole path: a sudo with no secure_path looks for it on
+        # its caller's PATH.
         { declare -f; declare -p http_proxy https_proxy HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY 2>/dev/null || true; echo 'main "$@"'; } \
-          | sudo -- bash -s -- "$@" || exit "$?"
+          | sudo -- /bin/bash -s -- "$@" || exit "$?"
         return
       fi
       install_all "$base"
@@ -954,7 +956,7 @@ main() {
       if [ "$EUID" -ne 0 ]; then
         say "rolling back needs administrator rights: sudo asks for your password once"
         { declare -f; declare -p http_proxy https_proxy HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY 2>/dev/null || true; echo 'main "$@"'; } \
-          | sudo -- bash -s -- "$@" || exit "$?"
+          | sudo -- /bin/bash -s -- "$@" || exit "$?"
         return
       fi
       roll_back "$2"
@@ -971,7 +973,7 @@ main() {
         config="$(xdg "${XDG_CONFIG_HOME:-}" "$HOME/.config")"
         data="$(xdg "${XDG_DATA_HOME:-}" "$HOME/.local/share")"
         cache="$(xdg "${XDG_CACHE_HOME:-}" "$HOME/.cache")"
-        { declare -f; echo 'main "$@"'; } | sudo -- bash -s -- --uninstall "$config" "$data" "$cache" || exit "$?"
+        { declare -f; echo 'main "$@"'; } | sudo -- /bin/bash -s -- --uninstall "$config" "$data" "$cache" || exit "$?"
         return
       fi
       # What removes it is the system's own tools, wherever its caller's PATH points.

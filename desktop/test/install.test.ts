@@ -2550,6 +2550,43 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(install().status).toBe(0);
     expect(root("cmp /opt/surogate/bin/surogate-apply-update /opt/surogate/versions/3.3.0/bin/surogate-apply-update && cmp /opt/surogate/bin/release.json /opt/surogate/versions/3.3.0/release.json").status).toBe(0);
   });
+
+  it("runs none of its caller's tools as root where sudo keeps its caller's PATH: the shell that reads its root part is named by its whole path, and each root part's tools are the system's own", () => {
+    expect(current()).toBe("/opt/surogate/versions/3.3.0");
+    // A folder with a tool under every name of the system's four folders, first on the user's
+    // PATH: each writes down that it ran where it runs as root, and then runs the system's own by
+    // its whole path. As the user, whose tools they are, each only runs the system's.
+    const standIns = [
+      "mkdir -p /tmp/sudoer",
+      'for tool in /usr/sbin/* /usr/bin/* /sbin/* /bin/*; do',
+      '  [ -f "$tool" ] && [ -x "$tool" ] || continue',
+      '  [ -e "/tmp/sudoer/$(basename "$tool")" ] || printf \'#!/bin/sh\\n[ "$(/usr/bin/id -u)" != 0 ] || echo %s >>/tmp/sudoer/ran\\nexec %s "$@"\\n\' "$(basename "$tool")" "$tool" >"/tmp/sudoer/$(basename "$tool")"',
+      "done",
+      "chmod 755 /tmp/sudoer/*",
+      "ls /tmp/sudoer | wc -l",
+    ].join("\n");
+    expect(Number(root(standIns).stdout)).toBeGreaterThan(300);
+    // A sudo with no secure_path: what it runs has its caller's PATH, and it looks there for what it is told to run.
+    expect(root("echo 'Defaults !secure_path' >/etc/sudoers.d/callers-path && chmod 440 /etc/sudoers.d/callers-path").status).toBe(0);
+    try {
+      expect(as("tester", "PATH=/tmp/sudoer:$PATH /usr/bin/sudo /usr/bin/printenv PATH").stdout).toMatch(/^\/tmp\/sudoer:/);
+      const asked = (args: string) => as("tester", `PATH=/tmp/sudoer:$PATH; /usr/bin/curl -fsSL ${base}/desktop/install.sh | /bin/bash -s -- ${args}`);
+      // The install, a rollback and the removal: each has its root part read by a shell, through sudo.
+      for (const [args, said] of [[`--base ${base}`, "3.3.0 is installed"], ["--version 3.3.0", "3.3.0 is installed"], ["--uninstall", "removed from this computer"]] as const) {
+        const ran = asked(args);
+        expect(ran.status, `${args}: ${ran.stderr}`).toBe(0);
+        expect(ran.stdout, args).toContain(`Surogate Desktop: ${said}\n`);
+        expect(root("cat /tmp/sudoer/ran 2>/dev/null").stdout, args).toBe("");
+      }
+    } finally {
+      root("rm -f /etc/sudoers.d/callers-path");
+    }
+    expect(root("test ! -e /opt/surogate && test ! -e /etc/surogate").status).toBe(0);
+    // Installed again, at a first install: by the list of the base's own script.
+    publish("3.4.0", undefined, { stateSchema: 2 });
+    expect(install().status).toBe(0);
+    expect(current()).toBe("/opt/surogate/versions/3.4.0");
+  });
 });
 
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --uninstall as root, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
