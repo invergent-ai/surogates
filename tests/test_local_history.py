@@ -789,3 +789,22 @@ def test_a_request_that_is_not_one_is_answered_never_raised(tree):
         assert ran.returncode == 0, (raw, ran.stderr)
         answer = json.loads(ran.stdout)["error"]
         assert answer["code"] == code and isinstance(answer["message"], str) and set(answer) == {"code", "message"}, (raw, ran.stdout)
+
+
+def test_a_history_that_moved_under_a_landing_is_told_from_a_git_that_failed(tmp_path, folder, tree):
+    one, two = a_copy(tmp_path, folder, THREAD), a_copy(tmp_path, folder, "t2")
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    (two.copy / "B.md").write_text("B's own\n")
+    saga = [["Surogate-Saga", "saga:1"]]
+    picked = one.pickup(author=YOURS, trailers=saga)
+    turn = one.commit_turn(author=A, trailers=saga, pickup=picked["commit"])
+    # Another thread lands between this landing's first look and its record.
+    land(two, "saga:2", B)
+    step = {"turn": turn["commit"], "applied": [], "author": A, "trailers": saga, "main": picked["main"], "pickup": picked["commit"]}
+    with refused("conflict", "main moved in the project's history since the landing began"):
+        one.record(**step)
+    # And so it reaches whoever asked, by its code.
+    place = {"store": str(tmp_path / "store"), "folder": str(folder), "thread": THREAD, "user": "u1"}
+    assert ask(tree, {**place, "action": "record", "args": step}) == {"error": {
+        "code": "conflict", "message": "main moved in the project's history since the landing began",
+    }}

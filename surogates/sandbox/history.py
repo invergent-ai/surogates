@@ -174,9 +174,12 @@ def tracked(path: str) -> bool:
 #: Why a request to a history was not answered, for whoever asked to go by.  A code is never
 #: changed; the words beside it are a person's, and may be.  ``failed``: git, or the system
 #: under it, did not do what was asked.  ``history_refused``: the project's history is not what
-#: the platform wrote, and nothing was read from it.
+#: the platform wrote, and nothing was read from it.  ``conflict``: git did what was asked, and
+#: what a landing expected is no longer there: ``main`` or a ref moved in the history, or a real
+#: file changed.
 FAILED = "failed"
 HISTORY_REFUSED = "history_refused"
+CONFLICT = "conflict"
 
 
 class HistoryError(RuntimeError):
@@ -188,7 +191,10 @@ class HistoryError(RuntimeError):
 
 
 class HistoryConflict(HistoryError):
-    """A real file is not the version a landing expected."""
+    """A real file, or the history itself, is not as a landing expected: told from a failure by its code."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code=CONFLICT)
 
 
 class LandingStepError(RuntimeError):
