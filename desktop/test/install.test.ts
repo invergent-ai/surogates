@@ -1775,6 +1775,18 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     const asked = as("other", `timeout -s KILL 20 script -qec "${AS_ROOT.join(" ")} --apply ${updates}/manifest.json ${updates}/manifest.json.sig ${updates}/release.tar.gz; echo ended \\$?" /dev/null`);
     expect(asked.stdout).toContain("ended 127");
     expect(asked.stdout).not.toContain("AUTHENTICATING");
+    // The words the app reads that 127 by: pkexec's own, in no locale, for a command it could not
+    // run as another user. Its 127 with any other words is a failure, which the app says as it is.
+    expect(asked.stdout).toContain("Error executing command as another user: No authentication agent found.");
+    // Such a failure, for the user the rule lets update: the helper is not there for pkexec to run.
+    expect(root("mv /opt/surogate/bin/surogate-apply-update /opt/surogate/bin/aside").status).toBe(0);
+    try {
+      const gone = as("tester", `${AS_ROOT.join(" ")} --apply ${updates}/manifest.json ${updates}/manifest.json.sig ${updates}/release.tar.gz; exit $?`);
+      expect(gone).toMatchObject({ status: 127, stdout: "" });
+      expect(gone.stderr.trim()).toBe("Error accessing /opt/surogate/bin/surogate-apply-update: No such file or directory");
+    } finally {
+      expect(root("mv /opt/surogate/bin/aside /opt/surogate/bin/surogate-apply-update").status).toBe(0);
+    }
     root("rm /etc/polkit-1/rules.d/10-test.rules");
   });
 

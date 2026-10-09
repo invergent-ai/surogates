@@ -95,6 +95,68 @@ describe("the files the root helper is handed", () => {
   });
 });
 
+describe("what pkexec answers for the helper", () => {
+  // pkexec's own words, as measured on Ubuntu 24.04 and 26.04.
+  const AS_ANOTHER = "Error executing command as another user:";
+  it("is an administrator being needed for its 126, and for its 127 where it could not run the command as another user; any other exit is a failure, said as it is", async () => {
+    base.publish("1.2.4");
+    let answer: Applied = { code: 0, said: "" };
+    const logged: string[] = [];
+    const found = base.updates({ apply: () => Promise.resolve(answer), log: (words) => logged.push(words) });
+    await found.check();
+    const refusals: Applied[] = [
+      { code: 126, said: "" },
+      { code: 126, said: `${AS_ANOTHER} Request dismissed` },
+      { code: 127, said: `${AS_ANOTHER} Not authorized\n\nThis incident has been reported.` },
+      { code: 127, said: `${AS_ANOTHER} No authentication agent found.` },
+    ];
+    for (answer of refusals) {
+      await found.install();
+      expect(found.state, JSON.stringify(answer)).toMatchObject({ state: "refused", version: "1.2.4" });
+    }
+    // pkexec's 127 is also its answer when it cannot run the helper at all: no administrator can help then.
+    const failures: Array<[Applied, string]> = [
+      [{ code: 127, said: "Error accessing /opt/surogate/bin/surogate-apply-update: No such file or directory" }, "Error accessing /opt/surogate/bin/surogate-apply-update: No such file or directory"],
+      [{ code: 127, said: "Error executing /opt/surogate/bin/surogate-apply-update: Permission denied" }, "Error executing /opt/surogate/bin/surogate-apply-update: Permission denied"],
+      [{ code: 127, said: "pkexec must be setuid root" }, "pkexec must be setuid root"],
+      [{ code: 127, said: "Error getting authority: Error initializing authority: Could not connect: Connection refused" }, "Error getting authority: Error initializing authority: Could not connect: Connection refused"],
+      [{ code: 127, said: "" }, "its helper exited 127"],
+      // Nor is an exit beside pkexec's two a refusal.
+      [{ code: 125, said: "" }, "its helper exited 125"],
+      [{ code: 128, said: `${AS_ANOTHER} Not authorized` }, `${AS_ANOTHER} Not authorized`],
+      [{ code: 1, said: `${AS_ANOTHER} Not authorized` }, `${AS_ANOTHER} Not authorized`],
+    ];
+    for (const [given, why] of failures) {
+      answer = given;
+      await found.install();
+      expect(found.state, JSON.stringify(given)).toMatchObject({ state: "failed", version: "1.2.4", why });
+    }
+  });
+
+  it("goes to the log whole, whatever the line shows of it: a refusal's words, which the line does not show, and a failure's", async () => {
+    base.publish("1.2.4");
+    let answer: Applied = { code: 0, said: "" };
+    const logged: string[] = [];
+    const found = base.updates({ apply: () => Promise.resolve(answer), log: (words) => logged.push(words) });
+    await found.check();
+    answer = { code: 127, said: `${AS_ANOTHER} Not authorized\n\nThis incident has been reported.` };
+    await found.install();
+    answer = { code: 1, said: "tar: oops\nSurogate Desktop: the release's archive could not be unpacked" };
+    await found.install();
+    answer = { code: null, said: "spawn /usr/bin/pkexec ENOENT" };
+    await found.install();
+    expect(logged).toEqual([
+      `Surogate 1.2.4 was not installed (exit 127): ${AS_ANOTHER} Not authorized\n\nThis incident has been reported.`,
+      "Surogate 1.2.4 was not installed (exit 1): tar: oops\nSurogate Desktop: the release's archive could not be unpacked",
+      "Surogate 1.2.4 was not installed: spawn /usr/bin/pkexec ENOENT",
+    ]);
+    // An update that installs says nothing there.
+    answer = { code: 0, said: "" };
+    await found.install();
+    expect(logged).toHaveLength(3);
+  });
+});
+
 describe("an install under way", () => {
   it("keeps its line to its helper's end: a check that finds the installed version's mark changed, as the helper's last rename leaves it, says nothing before the helper has ended", async () => {
     base.publish("1.2.4");

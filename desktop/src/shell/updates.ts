@@ -74,8 +74,15 @@ export interface Applied {
   said: string;
 }
 
-// pkexec's own exit codes: authorization was refused or dismissed (126), or could not be obtained (127).
-const NOT_AUTHORIZED = [126, 127];
+// pkexec's own answers where no administrator approved: 126, the prompt was dismissed; and 127 in
+// these words, authorization was refused or there was no one to ask. It is started with no locale,
+// so its words are English. Its 127 is also what it answers when it cannot run the helper at all
+// (the helper gone or no program, pkexec not set-id, no system bus), in other words: no
+// administrator can help then, and it is a failure, said as pkexec says it.
+const DISMISSED = 126;
+const NOT_AUTHORIZED = 127;
+const AS_ANOTHER_USER = "Error executing command as another user:";
+const refusal = (code: number | null, said: string) => code === DISMISSED || (code === NOT_AUTHORIZED && said.startsWith(AS_ANOTHER_USER));
 // How an installed app runs the root helper: pkexec, by its whole path, on the helper at the path
 // with no link in it that the install script's polkit action names. Never with pkexec's own agent:
 // started from a terminal in a session with no polkit agent, pkexec would ask for a password on
@@ -282,6 +289,7 @@ export interface UpdatesOptions {
   fetch: Fetch;
   signal: AbortSignal; // the quit: a check or a download under way stops with the app
   apply: (files: Staged) => Promise<Applied>; // the root helper's run: helperRun's
+  log?: (words: string) => void; // told, whole, what pkexec and the helper said of an install that did not end well
 }
 
 /**
@@ -328,7 +336,9 @@ export class Updates {
     this.set({ state: "installing", version });
     const { code, said } = await this.options.apply(files);
     if (code === 0) return this.set({ state: "installed", version });
-    if (code !== null && NOT_AUTHORIZED.includes(code)) return this.set({ state: "refused", version, files });
+    // What was said goes to the log whole: the line shows one line of a failure, and of a refusal none.
+    this.options.log?.(`Surogate ${version} was not installed${code === null ? "" : ` (exit ${code})`}: ${said}`);
+    if (refusal(code, said)) return this.set({ state: "refused", version, files });
     // The helper's last line, without its name: the why of the first failure it met.
     const why = said.split("\n").at(-1)?.replace(/^Surogate Desktop: /, "") || `its helper exited ${code}`;
     this.set({ state: "failed", version, files, why });

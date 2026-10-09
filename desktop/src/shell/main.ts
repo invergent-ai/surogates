@@ -330,12 +330,12 @@ function startUpdates(): void {
   const cache = join(cacheHome, "surogate", "updates");
   const helper = process.env.SUROGATE_UPDATE_HELPER;
   if (app.isPackaged) {
-    updates = new Updates(installedUpdates(VERSION, cache, fromBase, stopDelivery.signal), changed);
+    updates = new Updates({ ...installedUpdates(VERSION, cache, fromBase, stopDelivery.signal), log: report }, changed);
   } else if (INSTALL_RECORD && helper) {
     // A development build runs its test's helper itself: no pkexec, and no helper of an installed app's.
     updates = new Updates({
       version: VERSION, record: INSTALL_RECORD, rootOwned: false, helper, installed: null, cache, fetch: fromBase, signal: stopDelivery.signal,
-      apply: helperRun([helper]),
+      apply: helperRun([helper]), log: report,
     }, changed);
   } else {
     return;
