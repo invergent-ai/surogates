@@ -153,18 +153,26 @@ case "$VERB" in
     public="$(openssl pkey -pubout -in <(printf '%s\n' "$DESKTOP_RELEASE_KEY"))"
     bash -c '. <(sed "\$d" "$1") && settings && for key in "${RELEASE_KEYS[@]}"; do [ "$key" != "$2" ] || exit 0; done; exit 1' _ "$HERE/install.sh" "$public" \
       || fail "DESKTOP_RELEASE_KEY is not a key whose public half install.sh trusts"
-    # The manifest is a file that another step wrote, where the build's tarball was read, and no
+    # The manifest is a file that another job wrote, where the build's tarball was read, and no
     # tarball is opened here. So it is signed only where it is, byte for byte, the manifest of this
     # version and of the tarball the build made, by the build's own words for its hash and its
-    # size. Its state schema alone is that step's word, read as the install script beside this one
+    # size. Its state schema alone is that job's word, read as the install script beside this one
     # reads a manifest: one object on one line, of a manifest's size, whose every field is one an
     # install takes.
     [ -f "$OUT/manifest.json" ] && [ ! -L "$OUT/manifest.json" ] || fail "$OUT/manifest.json is not there: run publish.sh describe first"
     schema="$(bash -c '. <(sed "\$d" "$1") && settings && release_of "$2" >/dev/null && one_object "$2" | jq -e ".stateSchema | floor"' _ "$HERE/install.sh" "$OUT/manifest.json" 2>/dev/null)" \
       || fail "$OUT/manifest.json is no manifest that install.sh takes: nothing is signed"
-    manifest "$VERSION" "$DESKTOP_TARBALL_SHA256" "$DESKTOP_TARBALL_SIZE" "$schema" | cmp -s - "$OUT/manifest.json" \
+    # What is signed is the line written here, of those four words, in a folder of this signing's
+    # own: the file that came is compared with it, and is not opened again. Were the file itself
+    # handed to openssl after the comparison, what is signed would be whatever stood under its
+    # name by then. openssl signs a file, and no pipe: it asks a file's size first. The folder
+    # goes however this ends.
+    signing="$(mktemp -d --tmpdir release-signing-XXXXXXXXXX)"
+    trap 'rm -rf "$signing"' EXIT
+    manifest "$VERSION" "$DESKTOP_TARBALL_SHA256" "$DESKTOP_TARBALL_SIZE" "$schema" >"$signing/manifest.json"
+    cmp -s "$signing/manifest.json" "$OUT/manifest.json" \
       || fail "$OUT/manifest.json is not the manifest of $VERSION and of the tarball the build made, of sha256 $DESKTOP_TARBALL_SHA256 and $DESKTOP_TARBALL_SIZE bytes: nothing is signed"
-    openssl pkeyutl -sign -inkey <(printf '%s\n' "$DESKTOP_RELEASE_KEY") -rawin -in "$OUT/manifest.json" -out "$OUT/manifest.json.sig"
+    openssl pkeyutl -sign -inkey <(printf '%s\n' "$DESKTOP_RELEASE_KEY") -rawin -in "$signing/manifest.json" -out "$OUT/manifest.json.sig"
     echo "signed $OUT/manifest.json"
     ;;
   send)

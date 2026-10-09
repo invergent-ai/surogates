@@ -309,8 +309,10 @@ describe("the desktop's release manifest", () => {
     const argv = readFileSync(join(dir, "openssl-argv"), "utf8");
     expect(argv).toContain("-sign");
     expect(argv).not.toContain(body);
-    // Every file openssl is given is a pipe, but the manifest it signs and the signature it writes.
-    expect(argv.split("\n").filter((arg) => arg.startsWith("/") && !/^\/dev\/fd\/\d+$/.test(arg))).toEqual([join(out, "manifest.json"), join(out, "manifest.json.sig")]);
+    // Every file openssl is given is a pipe, but the line it signs, in the signing's own folder, and the signature it writes.
+    expect(argv.split("\n").filter((arg) => arg.startsWith("/") && !/^\/dev\/fd\/\d+$/.test(arg)))
+      .toEqual([expect.stringMatching(new RegExp(`^${tmp}/release-signing-\\w{10}/manifest\\.json$`)), join(out, "manifest.json.sig")]);
+    expect(readdirSync(tmp)).toEqual([]);
     // Beside the tarball, the manifest and its signature, and nothing else.
     expect(readdirSync(out).sort()).toEqual(["manifest.json", "manifest.json.sig", "surogate-desktop-1.2.3-linux-x64.tar.gz"]);
     expect(spawnSync("grep", ["-rlF", body, dir], { encoding: "utf8" }).stdout).toBe("");
@@ -344,12 +346,12 @@ describe("the desktop's release manifest", () => {
     // the key's own line, under whatever name.
     const body = PRIVATE.split("\n")[1] ?? "";
     const counted = (real: string) => [`/usr/bin/env | /usr/bin/grep -cF '${body}' >> '${join(dir, "keyed")}'`, `exec '${real}' "$@"`];
-    for (const program of ["bash", "dirname", "tail", "sed", "head", "jq", "cmp", "openssl", "tar", "sha256sum", "stat", "realpath", "mktemp", "cut"]) recording(dir, program, counted);
+    for (const program of ["bash", "dirname", "tail", "sed", "head", "jq", "cmp", "openssl", "tar", "sha256sum", "stat", "realpath", "mktemp", "cut", "rm", "chmod"]) recording(dir, program, counted);
     expect(publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE, ...said })).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
     expect(verify(null, readFileSync(join(out, "manifest.json")), keys.publicKey, readFileSync(join(out, "manifest.json.sig")))).toBe(true);
     // No tar, and nothing that would unpack, hash or measure one.
     const started = readdirSync(dir).filter((name) => name.endsWith("-argv")).sort();
-    expect(started).toEqual(["bash-argv", "cmp-argv", "dirname-argv", "head-argv", "jq-argv", "openssl-argv", "sed-argv", "tail-argv"]);
+    expect(started).toEqual(["bash-argv", "cmp-argv", "dirname-argv", "head-argv", "jq-argv", "mktemp-argv", "openssl-argv", "rm-argv", "sed-argv", "tail-argv"]);
     // And none of what it starts is given the tarball's path, where it was or where it is: the manifest's alone.
     const given = started.map((name) => readFileSync(join(dir, name), "utf8")).join("");
     expect(given).toContain(`${join(out, "manifest.json")}\n`);
@@ -499,6 +501,37 @@ describe("the desktop's release manifest", () => {
       return { name, writes: step.status === 0 && existsSync(join(out, "manifest.json")) };
     });
     expect(wrote).toEqual(given.map(({ name, takes }) => ({ name, writes: takes })));
+  });
+
+  it("signs the line it wrote and compared, and no file that another could change after: a manifest swapped between the comparison and the signing is not what is signed", () => {
+    // Another manifest that a signing would take for its form: the same release, at another state schema.
+    const other = (written: Buffer) => Buffer.from(written.toString().replace('"stateSchema":1}', '"stateSchema":7}'));
+    const swapped = join(dir, "swapped.json");
+    // The swap, by a stand-in for each of the two programs it can come between: cmp, once it has
+    // compared and found the two the same; and openssl, as it is started to sign.
+    const swapping: Array<[program: string, lines: (real: string) => string[]]> = [
+      ["cmp", (real) => [`'${real}' "$@"`, "same=$?", `[ "$same" != 0 ] || /usr/bin/cp '${swapped}' '${join(out, "manifest.json")}'`, 'exit "$same"']],
+      ["openssl", (real) => [`case " $* " in *" -sign "*) /usr/bin/cp '${swapped}' '${join(out, "manifest.json")}' ;; esac`, `exec '${real}' "$@"`]],
+    ];
+    for (const [program, lines] of swapping) {
+      again();
+      expect(describes().status, program).toBe(0);
+      const compared = readFileSync(join(out, "manifest.json"));
+      writeFileSync(swapped, other(compared));
+      expect(other(compared).equals(compared), program).toBe(false);
+      recording(dir, program, lines);
+      expect(signs(), program).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
+      rmSync(join(dir, "bin", program));
+      // The swap was made: the file is the other manifest now.
+      expect(readFileSync(join(out, "manifest.json")).equals(other(compared)), program).toBe(true);
+      // And the signature is of what was compared, and of nothing else.
+      const signature = readFileSync(join(out, "manifest.json.sig"));
+      expect(verify(null, compared, keys.publicKey, signature), program).toBe(true);
+      expect(verify(null, other(compared), keys.publicKey, signature), program).toBe(false);
+      // Nothing of the signing's own is left where it kept its line.
+      expect(readdirSync(tmp), program).toEqual([]);
+    }
+    recording(dir, "openssl");
   });
 
   it("sends no tarball but the one its signed manifest names, by its hash: the job that sends has a download of its own of the build's tarball, and nothing else in that job reads one", () => {
