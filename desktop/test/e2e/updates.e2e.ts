@@ -247,6 +247,16 @@ describe("updates, through the app", () => {
     });
     expect(drawn).toMatchObject({ wider: false, inside: true, user: true });
     expect(drawn.height).toBeLessThan(260);
+    // The sandbox's own line beside it holds QEMU's words, which name the user's paths: drawn with
+    // one unbroken word as long, it stays inside the sidebar too.
+    const sandbox = await page.evaluate(() => {
+      const line = document.querySelector<HTMLElement>("#sandbox")!;
+      line.hidden = false;
+      document.querySelector("#sandbox-text")!.textContent = `Surogate's sandbox could not start: /${"folder/".repeat(60)}rootfs.img`;
+      const [box, words] = [line.getBoundingClientRect(), document.querySelector("#sandbox-text")!.getBoundingClientRect()];
+      return { wider: line.scrollWidth > line.clientWidth || words.right > box.right, inside: box.right <= document.querySelector("#sidebar")!.getBoundingClientRect().right };
+    });
+    expect(sandbox).toEqual({ wider: false, inside: true });
   });
 
   it("says to run the install script again where its helper is not one it can take, and offers nothing", async () => {

@@ -1453,7 +1453,8 @@ body.about-page {
   cursor: default;
 }
 
-#update-text {
+#update-text,
+#sandbox-text {
   overflow-wrap: anywhere;
 }
 
