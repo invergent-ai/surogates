@@ -3,7 +3,7 @@ import { connect as connectTcp, createServer, type Server, type Socket } from "n
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { BrowserProxy, unsigned } from "../src/browser/proxy.js";
+import { BrowserProxy, SITE_SIGN_IN, unsigned } from "../src/browser/proxy.js";
 
 // What a name leads to, and how often it was looked up: rebinding.example leads elsewhere, then here.
 let lookups: Record<string, number>;
@@ -79,7 +79,8 @@ beforeEach(async () => {
       return void setTimeout(() => res.socket?.destroy(), 50);
     }
     // A site that asks for a proxy's sign-in, as only a proxy may.
-    if (req.url === "/sign-in") return void res.writeHead(407, { "proxy-authenticate": 'Basic realm="site"' }).end();
+    if (req.url === "/sign-in") return void res.writeHead(407, { "proxy-authenticate": 'Basic realm="site"', "x-of-the-site": "chosen" }).end("the site's own words");
+    if (req.url === "/sign-in-bare") return void res.writeHead(407).end("the site's own words");
     res.writeHead(201, { "content-type": "text/plain" }).end("hello from the site");
   });
   // Reads all it is sent, and never closes, the browser's end or not.
@@ -374,19 +375,25 @@ describe("the browser's proxy", () => {
     expect((await get("http://lan.example/", "lan.example")).status).toBe(403);
   });
 
-  it("sends a site the target's own host, and no proxy's sign-in either way", async () => {
-    const answer = await new Promise<{ status: number; headers: IncomingHttpHeaders }>((done, fail) => {
-      const headers = { host: "intranet.corp", "proxy-authorization": "Basic dXNlcjpwYXNz" };
-      const asked = request({ host: "127.0.0.1", port, path: "http://example.com:8080/sign-in", headers }, (answered) => {
-        answered.resume();
-        done({ status: answered.statusCode ?? 0, headers: answered.headers });
+  it("sends a site the target's own host and no proxy's sign-in, and gives the browser none of a site's own: 502 in its place, in the proxy's words, and the site let go", async () => {
+    for (const path of ["/sign-in", "/sign-in-bare"]) {
+      seen = [];
+      const answer = await new Promise<{ status: number; headers: IncomingHttpHeaders; body: string }>((done, fail) => {
+        const headers = { host: "intranet.corp", "proxy-authorization": signed };
+        const asked = request({ host: "127.0.0.1", port, path: `http://example.com:8080${path}`, headers }, (answered) => {
+          let body = "";
+          answered.on("data", (chunk: Buffer) => (body += chunk.toString()));
+          answered.on("end", () => done({ status: answered.statusCode ?? 0, headers: answered.headers, body }));
+        });
+        asked.on("error", fail);
+        asked.end();
       });
-      asked.on("error", fail);
-      asked.end();
-    });
-    expect(answer.status).toBe(407);
-    expect(answer.headers).not.toHaveProperty("proxy-authenticate");
-    expect(seen).toEqual([{ method: "GET", url: "/sign-in", host: "example.com:8080", headers: expect.not.arrayContaining(["proxy-authorization"]) }]);
+      // A browser reads a 407 on a request it signed as its proxy refusing the sign-in, and signs no more.
+      expect([answer.status, answer.body], path).toEqual([502, SITE_SIGN_IN]);
+      expect(Object.keys(answer.headers).sort().filter((name) => !["connection", "date", "keep-alive"].includes(name)), path).toEqual(["content-length", "content-type"]);
+      expect(seen).toEqual([{ method: "GET", url: path, host: "example.com:8080", headers: expect.not.arrayContaining(["proxy-authorization"]) }]);
+      expect(await stillOpen()).toBe(0);
+    }
   });
 
   it("answers a launch's check itself, at its own name and over the https upgrade's tunnel, and dials nothing for it", async () => {

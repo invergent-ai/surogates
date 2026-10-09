@@ -30,6 +30,8 @@ const checkOf = (host: string): string | null => (host.endsWith(CHECK_DOMAIN) ? 
 const SIGN_IN_AS = "surogate";
 // What is answered to whatever needs the sign-in and comes without it, and nothing else.
 const CHALLENGE = 'Basic realm="Surogate"';
+/** What the browser is told in place of a site's own 407: the proxy's words, with nothing the site chose. */
+export const SITE_SIGN_IN = "This site answered as a proxy that wants a sign-in (407), which a site may not. Surogate's proxy did not pass its answer on.";
 const digest = (text: string): Buffer => createHash("sha256").update(text).digest();
 
 const subnets = (ranges: Array<[string, number]>) => {
@@ -242,6 +244,12 @@ export class BrowserProxy {
         headers: { ...passed(request.headers), host: url.host }, setHost: false,
       },
       (answer) => {
+        // A 407 is the proxy's alone to answer: a browser that reads one on a request it signed takes its
+        // sign-in for refused, and signs no more. A site's own is answered in the proxy's words, and the site let go.
+        if (answer.statusCode === 407) {
+          response.writeHead(502, { "content-type": "text/plain; charset=utf-8", "content-length": Buffer.byteLength(SITE_SIGN_IN) }).end(SITE_SIGN_IN);
+          return void socket.destroy();
+        }
         response.writeHead(answer.statusCode ?? 502, passed(answer.headers));
         // A site that hangs up partway through its answer: the browser's is cut short too, not left open.
         answer.once("close", () => {

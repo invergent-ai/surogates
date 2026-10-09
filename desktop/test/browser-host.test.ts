@@ -2763,6 +2763,10 @@ new Image().src = "http://" + own("image") + "/";
         if (req.url?.startsWith("/signs/")) return void res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" }).end(SIGNS);
         if (req.url === "/kept.js") return void res.writeHead(200, { "content-type": "text/javascript", "cache-control": "public, max-age=3600" }).end("window.kept = 1;");
         if (req.url?.startsWith("/file.bin")) return void res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment" }).end("f".repeat(64 * 1024));
+        // A site that answers as a proxy that wants a sign-in, with a challenge of its own or with none; and its page with such an image.
+        if (req.url?.startsWith("/asks/challenge")) return void res.writeHead(407, { "proxy-authenticate": 'Basic realm="site"', "content-type": "text/html" }).end("<title>Asks</title>");
+        if (req.url?.startsWith("/asks/")) return void res.writeHead(407, { "content-type": "text/html" }).end("<title>Asks</title>");
+        if (req.url === "/asking") return void res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" }).end(`<title>Asking</title><img src="/asks/image"><img src="/asks/challenge-image">`);
         res.writeHead(200, { "content-type": "text/plain", "cache-control": "no-store" }).end("ok");
       });
       origin.on("upgrade", (req, socket) => {
@@ -2979,6 +2983,26 @@ new Image().src = "http://" + own("image") + "/";
       await host.close();
       expect(folders.flatMap(holding)).toEqual([]);
     }, 240_000 + IDLE_MS);
+
+    it("stays signed in whatever a site answers: a site's own 407, to an image or to a navigation, with a challenge or with none, is never the proxy's to its browser", async () => {
+      const a = session();
+      expected("first");
+      expect((await op(a, "browser.navigate", { url: "http://fixture.test/signs/first" })).ok?.title).toBe("Signs");
+      await carried("first", 0);
+      let mark = asked.length;
+      expect((await op(a, "browser.navigate", { url: "http://fixture.test/asking" })).ok?.title).toBe("Asking");
+      await expect.poll(() => heard.filter((what) => what.startsWith("GET /asks/")).sort(), { timeout: 10_000 }).toEqual(["GET /asks/challenge-image", "GET /asks/image"]);
+      await op(a, "browser.navigate", { url: "http://fixture.test/asks/bare" });
+      await op(a, "browser.navigate", { url: "http://fixture.test/asks/challenge" });
+      await expect.poll(() => heard.filter((what) => what.startsWith("GET /asks/")).length, { timeout: 10_000 }).toBe(4);
+      // Each came signed in, and was answered by the proxy in the site's place.
+      expect(asked.slice(mark).filter(({ what }) => what.includes("/asks/")).map(({ signed, status }) => [signed, status])).toEqual([[true, 502], [true, 502], [true, 502], [true, 502]]);
+      mark = asked.length;
+      expected("after");
+      expect((await op(a, "browser.navigate", { url: "http://fixture.test/signs/after" })).ok?.title).toBe("Signs");
+      await carried("after", mark);
+      expect(asked.filter(({ status }) => status === 407)).toHaveLength(1);
+    }, 60_000);
 
     it("carries a public site for another program at its port, as ever, and nothing else, whatever headers that program writes: no service of this computer's and no name of its own", async () => {
       expect((await op(session(), "browser.navigate", { url: "http://fixture.test/second" })).ok?.opened).toBe(true);
