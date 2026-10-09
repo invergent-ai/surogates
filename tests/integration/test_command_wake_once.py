@@ -239,11 +239,15 @@ class Workers:
         events = await self.store.get_events(chat, types=[EventType.LLM_RESPONSE])
         return [event.data["message"]["content"] for event in events]
 
+    async def looks_abandoned(self, chat: UUID) -> bool:
+        """Whether a sweeper would take the chat for one whose worker died."""
+        abandoned = await self.store.find_orphaned_sessions(stale_seconds=0, agent_id=AGENT_ID)
+        return chat in [session.id for session in abandoned]
+
     async def nothing_waits(self, chat: UUID) -> bool:
         """Whether nothing of the chat's waits for a wake, and no sweeper takes it for abandoned."""
-        abandoned = await self.store.find_orphaned_sessions(stale_seconds=0, agent_id=AGENT_ID)
         cursor, events = await self.store.get_harness_cursor(chat), await self.store.get_events(chat)
-        return chat not in [session.id for session in abandoned] and _actionable_pending_events(events, cursor) == []
+        return not await self.looks_abandoned(chat) and _actionable_pending_events(events, cursor) == []
 
     async def a_helper_reports(self, chat: UUID) -> UUID:
         """A helper the chat started ends its turn: its report lands in the chat, which is queued."""
@@ -432,7 +436,7 @@ async def test_a_command_whose_worker_died_once_it_had_answered_is_not_run_again
     assert workers.ran == [ANSWERED[command]]
     assert (len(await workers.said(chat)), workers.requests) == (answers, [])
     assert len(await workers.routines()) == (1 if command.startswith("/loop") else 0)
-    assert (await workers.status(chat), await workers.nothing_waits(chat)) == ("completed", True)
+    assert (await workers.status(chat), await workers.looks_abandoned(chat)) == ("completed", False)
 
 
 @pytest.mark.parametrize("later", list(LATER))
@@ -452,7 +456,7 @@ async def test_a_chat_left_active_behind_an_answered_command_is_brought_to_rest_
     assert workers.ran == [ANSWERED[command]]
     assert (await workers.said(chat)).count(answer) == 1
     # Nothing in it for the model either: the wake ends the turn that was left open.
-    assert (workers.requests, await workers.status(chat), await workers.nothing_waits(chat)) == ([], "completed", True)
+    assert (workers.requests, await workers.status(chat), await workers.looks_abandoned(chat)) == ([], "completed", False)
 
 
 async def test_a_chat_resumed_after_a_stop_that_landed_on_a_command_takes_no_turn(workers):
@@ -746,6 +750,41 @@ async def test_a_coordinator_takes_its_turn_on_a_report_after_a_command(workers)
         {"role": "user", "content": "/mission status"}, {"role": "assistant", "content": answer},
         {"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."},
     ]
+
+
+@pytest.mark.parametrize("command", ["/compress", "/mission status"])
+async def test_a_coordinators_command_is_answered_once_and_a_wake_with_nothing_new_takes_no_turn(workers, command):
+    chat = await a_coordinator(workers)
+    handler = "_handle_compress_command" if command == "/compress" else "_handle_mission_command"
+    await workers.types(chat, command)
+    written = await workers.log(chat)
+    # The mission's chat stays active, with nothing waiting: the cursor is past the command's answer.
+    assert (await workers.status(chat), await workers.nothing_waits(chat)) == ("active", True)
+
+    await workers.wake(chat)
+    assert (workers.ran, workers.requests, await workers.log(chat)) == ([handler], [], written)
+
+    helper = await workers.a_helper_reports(chat)
+    await workers.wake(chat)
+    assert workers.ran == [handler]
+    [conversation] = workers.requests
+    assert conversation[-1] == {"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."}
+
+
+async def test_a_report_no_turn_has_read_is_not_passed_over_by_a_commands_end(workers):
+    chat = await a_coordinator(workers)
+    # A helper reports, and before any wake reads the report the user types a command.
+    helper = await workers.a_helper_reports(chat)
+    await workers.types(chat, "/mission status")
+    assert (workers.ran, workers.requests) == (["_handle_mission_command"], [])
+    assert not await workers.nothing_waits(chat)
+
+    # One wake was queued for both; the next one, a sweeper's or another report's, reads the report.
+    await workers.wake(chat)
+
+    [conversation] = workers.requests
+    assert {"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."} in conversation
+    assert workers.ran == ["_handle_mission_command"]
 
 
 async def test_a_coordinator_does_not_run_a_command_it_refused_when_a_report_wakes_it(workers):

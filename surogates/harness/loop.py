@@ -175,6 +175,7 @@ from surogates.harness.loop_mission_evaluator import (
 from surogates.harness.loop_pending import (
     _actionable_pending_events,
     _command_answered,
+    _first_unread_report,
 )
 from surogates.harness.loop_tool_recovery import (
     _is_valid_json_args,
@@ -1528,8 +1529,8 @@ class AgentHarness(
             if slash_block is not None or command not in (None, _COMMAND_FOR_THE_MODEL):
                 typed_at = _latest_user_event_id(all_events) or 0
                 is_new = not _command_answered(all_events, typed_at)
-                # What was written since the command: as this wake found
-                # the log, or with the answer this wake writes.
+                # The log as this wake found it, or with what was written
+                # since when this wake answers the command.
                 written = all_events
                 if is_new:
                     if slash_block is not None:
@@ -1542,8 +1543,8 @@ class AgentHarness(
                             messages=messages, system_prompt=system_prompt,
                             all_events=all_events,
                         )
-                    written = await self._store.get_events(
-                        session_id, after=typed_at, exclude_types=[EventType.LLM_DELTA],
+                    written = all_events + await self._store.get_events(
+                        session_id, after=all_events[-1].id, exclude_types=[EventType.LLM_DELTA],
                     )
                 at_rest = await self._end_command_turn(session, lease, typed_at, written)
                 if is_new or at_rest:
@@ -4778,7 +4779,8 @@ class AgentHarness(
         events: list,
     ) -> bool:
         """End the turn of the command the user typed at event *typed_at*, once the
-        harness has answered it in *events*: whether the session is at rest.
+        harness has answered it in *events*, the session's log: whether the
+        session is at rest.
 
         A model's last answer ends its turn: the cursor moves past it and the
         session comes to rest, so a later wake finds nothing to do.  A
@@ -4802,9 +4804,12 @@ class AgentHarness(
         if not _command_answered(events, typed_at):
             return False
         at_rest = not await self._mission_has_pending_work(session)
+        # Never past a helper's report no turn has read: behind the cursor
+        # it would wake nobody, and it is still to be read.
+        unread = _first_unread_report(events)
         await self._store.advance_harness_cursor(
             session.id,
-            through_event_id=events[-1].id,
+            through_event_id=events[-1].id if unread is None else unread - 1,
             lease_token=lease.lease_token,
             at_rest=at_rest,
         )

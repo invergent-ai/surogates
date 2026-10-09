@@ -72,3 +72,25 @@ def _command_answered(events: list[Any], typed_at: int) -> bool:
         elif taken_up and event_type in _COMMAND_ANSWER_EVENT_TYPES:
             return True
     return False
+
+
+_REPORT_EVENT_TYPES = frozenset({
+    EventType.WORKER_COMPLETE.value,
+    EventType.WORKER_FAILED.value,
+})
+
+
+def _first_unread_report(events: list[Any]) -> int | None:
+    """Return the id of the first worker's report in *events* that no model request has read.
+
+    A request reads the reports written before it, so the unread ones are
+    those after the log's last ``llm.request``.
+    """
+    first: int | None = None
+    for event in events:
+        event_type = _event_type(event)
+        if event_type == EventType.LLM_REQUEST.value:
+            first = None
+        elif first is None and event_type in _REPORT_EVENT_TYPES:
+            first = event.id
+    return first
