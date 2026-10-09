@@ -3932,6 +3932,38 @@ await navigator.serviceWorker.ready;`);
     expect(await page.evaluate(() => [...(document.getElementById("top") as HTMLInputElement).files!].map((file) => file.name))).toEqual(["report.pdf"]);
   }, 60_000);
 
+  it("gives a page nothing by looking whether it answers, where its question was left open: neither the page nor a frame of it has, after that look, what a click of its user's gives it", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/acts?framing" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const asking = (host as unknown as { asking: Set<Page> }).asking;
+    await expect.poll(() => said.filter(({ what }) => what === "ready").length, { timeout: 10_000 }).toBe(3);
+    // Whatever opening it gave it has run out. No test reads these pages: a reading is what gives it.
+    await new Promise((done) => setTimeout(done, 6_000));
+    said.length = 0;
+    // A page as one whose question its user left open, and has answered since. The agent's next operation looks
+    // whether it answers, and then does nothing in it: it asks for a move to nowhere, refused before the page is touched.
+    asking.add(page);
+    expect((await op(a, "browser.mouse", { action: "move", x: "nowhere", y: 1 }, "chat-1")).error?.type).toBe("browser");
+    expect(asking.has(page)).toBe(false);
+    await new Promise((done) => setTimeout(done, 1_500));
+    expect(said).toEqual([]);
+  }, 60_000);
+
+  it("looks whether a page answers at the page alone, where its question was left open: a frame of another site that is stuck keeps the agent out of the page for no question of that page's", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://other.test/fileframe" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const framed = page.frames().find((frame) => frame.url() === "http://fixture.test/fileinput")!;
+    const asking = (host as unknown as { asking: Set<Page> }).asking;
+    // The framed site, drawn by a process of its own, is stuck for a long while; the page that frames it answers.
+    await framed.evaluate("void setTimeout(() => { const until = Date.now() + 25000; while (Date.now() < until) {} }, 0)");
+    await new Promise((done) => setTimeout(done, 100));
+    asking.add(page);
+    expect(await within(3_000, script(a, "return document.title;", "chat-1"))).toBe("Framing");
+    expect(asking.has(page)).toBe(false);
+  }, 60_000);
+
   it("gives an operation its whole bound once its page has been waited for after a hand back: the wait for a page one of whose frames is stuck is not taken from it", async () => {
     host = hostWith({ boundMs: SETTLE_MS + 2_000 });
     const a = session();
