@@ -233,6 +233,31 @@ function halfAlone(text: string): boolean {
   return false;
 }
 
+// Whether a field is named twice in any one object of *text*, which is JSON: of the two, each
+// reader keeps the last and says nothing of the first, and where the first is deeper than one jq
+// reads at all, that jq refuses the text and JSON.parse drops it unread. Asked of the text
+// itself, word by word, before any field has replaced another. A name is compared as jq reads
+// it: its escapes read, and the second half of a pair that is escaped alone as the replacement
+// character jq makes of it.
+function namedTwice(text: string): boolean {
+  // The names so far of each object that is open; a list, which has none, has an empty one.
+  const open: Array<Set<string>> = [];
+  let word = "";
+  for (const [token] of text.matchAll(/"(?:[^"\\]|\\[^\n])*"|[{}[\]:]/g)) {
+    if (token === "{" || token === "[") open.push(new Set());
+    else if (token === "}" || token === "]") open.pop();
+    else if (token !== ":") word = token;
+    else {
+      // The word before a colon is a field's name, in the object that is open.
+      const name = (JSON.parse(word) as string).replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, REPLACEMENT);
+      const names = open.at(-1)!;
+      if (names.has(name)) return true;
+      names.add(name);
+    }
+  }
+  return false;
+}
+
 // Whether none of *value*'s values is more than *steps* fields and places down, as jq counts a path.
 function within(value: unknown, steps: number): boolean {
   if (typeof value !== "object" || value === null) return true;
@@ -246,7 +271,8 @@ function within(value: unknown, steps: number): boolean {
  * the app with JSON.parse, and each takes what the other takes and nothing else: UTF-8 or nothing,
  * with no replacement character, which is what jq makes of any other byte; JSON as it is spelled,
  * each number in 17 digits at most (SPELLED); no first half of a pair escaped alone (halfAlone);
- * and no value more than 64 fields and places down.
+ * no field named twice in any one object (namedTwice); and no value more than 64 fields and places
+ * down.
  */
 function oneObject(bytes: Buffer): Record<string, unknown> | null {
   if (bytes.length > MANIFEST_MAX || bytes.indexOf(0x0a) !== bytes.length - 1) return null;
@@ -254,6 +280,7 @@ function oneObject(bytes: Buffer): Record<string, unknown> | null {
     const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
     if (text.includes(REPLACEMENT) || !SPELLED.test(text) || halfAlone(text)) return null;
     const named: unknown = JSON.parse(text);
+    if (namedTwice(text)) return null;
     // JSON's null is null here too.
     return typeof named === "object" && !Array.isArray(named) && within(named, DOWN_MAX) ? named as Record<string, unknown> | null : null;
   } catch {

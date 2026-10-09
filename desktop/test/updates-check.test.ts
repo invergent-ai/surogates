@@ -58,6 +58,48 @@ describe("a signed manifest", () => {
     }
   });
 
+  it("names no field twice in any one object, whatever its two values: of the two a reader keeps one, and says nothing of the other", () => {
+    const text = signed({ note: "@" })[0].toString();
+    // The line with a field of its own, *value* as it is where its value goes; and with that field named twice.
+    const own = (value: string) => text.replace('"@"', value);
+    const twice = (first: string, second: string) => text.replace('"note":"@"', `"note":${first},"note":${second}`);
+    const down = (steps: number, open: string, close: string) => `${open.repeat(steps)}1${close.repeat(steps)}`;
+    expect(signedRelease("URL", ...signed(own("1")), [keys.publicKey], "stable").version).toBe("1.2.4");
+    const refused: Array<[string, string]> = [
+      ["its version, the release's last", text.replace('{"version"', '{"version":"9.9.9","version"')],
+      ["its size, the release's last", text.replace('"size":', '"size":1,"size":')],
+      ["its state schema, the same both times", text.replace('"stateSchema":1', '"stateSchema":1,"stateSchema":1')],
+      ["a field of its own", twice("1", "2")],
+      ["a field of its own, the same both times", twice("1", "1")],
+      // Dropped unread by a reader that keeps the last, where one jq cannot read it at all.
+      ["a field of its own, the first 300 down in lists", twice(down(300, "[", "]"), "1")],
+      ["a field of its own, the first 300 down in objects", twice(down(300, '{"n":', "}"), "1")],
+      ["a field of its own, the first 1000 down in lists", twice(down(1000, "[", "]"), "1")],
+      ["a field of its own, the second 300 down in lists", twice("1", down(300, "[", "]"))],
+      ["a field of its own, the second time by an escape", text.replace('"note":"@"', '"note":1,"\\u006eote":2')],
+      ["a field in an object of its own", own('{"a":1,"a":2}')],
+      ["a field in an object in a list of its own", own('[{"a":1,"a":2}]')],
+      ["a field in an object far down", own(`${"[".repeat(40)}{"a":1,"b":2,"a":3}${"]".repeat(40)}`)],
+      // jq reads the second half of a pair that is escaped alone as a replacement character: two
+      // such names, or one and that character's own escape, are one name to it.
+      ["two second halves of a pair, each escaped alone", own('{"\\udc00":1,"\\udfff":2}')],
+      ["a second half of a pair escaped alone, and a replacement character's escape", own('{"x\\udc00":1,"x\\ufffd":2}')],
+    ];
+    for (const [what, form] of refused) expect(() => signedRelease("URL", ...signed(form), [keys.publicKey], "stable"), what).toThrow(`URL ${NO_RELEASE}`);
+    // One name in two objects is two fields; and names that only look alike are two names.
+    const taken: Array<[string, string]> = [
+      ["a field of one name in two objects of its own", own('[{"a":1},{"a":2}]')],
+      ["a field of its own name inside it", own('{"note":{"note":1}}')],
+      ["a field after an object that has one of its name", twice('{"more":1}', "2").replace(',"note":2', ',"more":2')],
+      ["a field after a list of objects that have one of its name", twice('[{"more":1},{"more":2}]', "3").replace(',"note":3', ',"more":3')],
+      ["a list's two places", own("[1,1]")],
+      ["names in other capitals", own('{"a":1,"A":2}')],
+      ["two pairs, each escaped whole", own('{"\\ud83d\\ude00":1,"\\ud83d\\ude01":2}')],
+      ["a name and its colon in a word", own('{"a":"\\"a\\":1","b":"a"}')],
+    ];
+    for (const [what, form] of taken) expect(signedRelease("URL", ...signed(form), [keys.publicKey], "stable").version, what).toBe("1.2.4");
+  });
+
   it("is one line with its newline, of 4096 bytes at most, as its root helper reads one: no other form of the same release is offered", async () => {
     const [manifest] = signed({});
     const text = manifest.toString();
