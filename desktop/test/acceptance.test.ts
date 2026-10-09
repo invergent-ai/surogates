@@ -543,19 +543,10 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
           logged: [`Surogate ${NEXT} was not installed (exit 1): Surogate Desktop: the downloaded release is not the one its manifest names`],
         });
         expect((await ssh("readlink /opt/surogate/current; sudo ls -A /opt/surogate/staging")).stdout).toBe(`/opt/surogate/versions/${VERSION}\n`);
-        // Second: the helper at a mode that an install does not leave it at. The app takes it, as
-        // above: it is root's alone to write, and a program. The helper does not, and says what to do.
-        const unlike = `${HELPER} is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again`;
+        // The administrator's update, with the helper at a mode that an install does not leave it
+        // at, and that is root's alone to write and a program still: the app takes it by that rule,
+        // and so does the helper. With root looking on at what is handed to whom.
         expect((await ssh(`sudo chmod 0555 ${HELPER}`)).status).toBe(0);
-        const unlikely = await started("tester", "--update", VERSION);
-        expect((await ssh(`sudo chmod 0755 ${HELPER}`)).status).toBe(0);
-        expect(unlikely, JSON.stringify(unlikely)).toMatchObject({
-          found: "available", update: { state: "failed", version: NEXT, why: unlike }, line: { text: `Surogate could not install its update: ${unlike}`, button: "Try again" },
-          logged: [`Surogate ${NEXT} was not installed (exit 1): Surogate Desktop: ${unlike}`],
-        });
-        expect((await ssh("readlink /opt/surogate/current; sudo ls -A /opt/surogate/staging")).stdout).toBe(`/opt/surogate/versions/${VERSION}\n`);
-
-        // The administrator's update, with root looking on at what is handed to whom.
         const watching = ssh(`sudo rm -rf /root/handed && sudo bash -s /root/handed <<'HANDED'${HANDED}HANDED`);
         const updated = await started("tester", "--update", VERSION);
         expect(updated, JSON.stringify(updated)).toMatchObject({

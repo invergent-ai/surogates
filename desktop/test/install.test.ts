@@ -922,6 +922,9 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       [`chmod 775 ${helper}`, `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
       [`mv ${helper} /root/helper && ln -s /root/helper ${helper}`, `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
       [`chown tester ${helper}`, `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
+      // One that no one may run, and a folder in its place: pkexec could run neither.
+      [`chmod 644 ${helper}`, `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
+      [`rm ${helper} && mkdir ${helper}`, `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
       // One that lists no key: this script's own list does not stand in for it.
       [`sed -i '/BEGIN PUBLIC KEY/,/END PUBLIC KEY/d' ${helper}`, `Surogate Desktop: ${helper} lists no release key: ${again}`],
       // One whose mark is gone, or names no release: which release it is of is not known, so nothing replaces it.
@@ -955,6 +958,15 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(standing(), damage).toBe(before);
       expect(root("ls -A /opt/surogate/staging").stdout, damage).toBe("");
       expect(root("rm -rf /opt/surogate/bin && cp -a /opt/kept /opt/surogate/bin").status, damage).toBe(0);
+    }
+    // At any mode that leaves it root's alone to write, and a program, the helper is root's own
+    // word, as it is to the app, which offers an update by the same rule: an administrator may
+    // have closed it to others. The same release again is applied, and the helper is as an apply
+    // leaves one.
+    for (const mode of ["555", "700", "744", "511", "4755"]) {
+      expect(root(`chmod ${mode} ${helper}`).status, mode).toBe(0);
+      expect(root(`/opt/surogate-test/install.sh --apply ${files()}`), mode).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+      expect(root(`stat -c '%a %U' ${helper}`).stdout, mode).toBe("755 root\n");
     }
     // Nor is a link to nothing no helper where the release it is of is asked by itself, from the
     // script's functions without its last line: it is a helper, and here one with no mark.

@@ -158,6 +158,19 @@ roots_alone() {
   (( (mode & 0170000) == 0100000 && (mode & 07022) == 0 ))
 }
 
+# Whether $1 is a program of root's own that no one else may write, at whichever mode: a file and
+# no link, root's, with no write bit for its group or for others, and one that someone may run.
+# The helper pkexec runs is asked so, by this script and by the app (rootsOwn in
+# src/vm/image.ts), which offers an update only by a helper that this takes: an administrator
+# may have closed it to others, and it is root's word no less.
+roots_program() {
+  local seen mode
+  seen="$(stat -c '%f %u' -- "$1" 2>/dev/null)" || return 1
+  [ "${seen#* }" = 0 ] || return 1
+  mode=$(( 16#${seen% *} ))
+  (( (mode & 0170000) == 0100000 && (mode & 0022) == 0 && (mode & 0111) != 0 ))
+}
+
 # The release keys this computer trusts, into the array $1 names. One file says which: the helper
 # pkexec runs, whose own list they are, whichever script asks, that helper or an install script
 # of any age. Its list is read where it is in the list's one form (listed), and the helper is not
@@ -175,7 +188,7 @@ trusted() {
     fail "$HELPER is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again"
   fi
   list=()
-  roots_own "$HELPER" 81ed || fail "$HELPER is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again"
+  roots_program "$HELPER" || fail "$HELPER is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again"
   listed list "$HELPER"
   [ "${#list[@]}" -gt 0 ] || fail "$HELPER lists no release key: remove Surogate Desktop with --uninstall, and install it again"
 }
@@ -341,7 +354,7 @@ half_done() {
   found="$(marked)" || found=""
   [ -n "$found" ] || return 0
   own="$ROOT/versions/$found/bin/surogate-apply-update"
-  if cmp -s "$HELPER_MARK" "$ROOT/versions/$found/release.json" && ! cmp -s "$own" "$HELPER"; then return 0; fi
+  if cmp -s "$HELPER_MARK" "$ROOT/versions/$found/release.json" 2>/dev/null && ! cmp -s "$own" "$HELPER" 2>/dev/null; then return 0; fi
   found=""
 }
 
@@ -376,7 +389,7 @@ paired() {
   installed="$(installed_version)"
   if a_version "$installed" && dpkg --compare-versions "$installed" gt "$version"; then fail "$refused"; fi
   for other in "$ROOT"/versions/*; do
-    if a_version "${other##*/}" && dpkg --compare-versions "${other##*/}" gt "$version" && cmp -s "$other/bin/surogate-apply-update" "$HELPER"; then
+    if a_version "${other##*/}" && dpkg --compare-versions "${other##*/}" gt "$version" && cmp -s "$other/bin/surogate-apply-update" "$HELPER" 2>/dev/null; then
       fail "$refused"
     fi
   done
@@ -448,7 +461,7 @@ in_use() {
 # install script that such a mark's refusal names. Nothing else in the folder is looked at, where
 # only root writes: a version damaged elsewhere is taken as it is.
 whole() {
-  cmp -s "$1" "$2/release.json" && roots_own "$2/release.json" 81a4 && [ -f "$2/surogate" ] && [ ! -L "$2/surogate" ] && [ -x "$2/surogate" ] \
+  cmp -s "$1" "$2/release.json" 2>/dev/null && roots_own "$2/release.json" 81a4 && [ -f "$2/surogate" ] && [ ! -L "$2/surogate" ] && [ -x "$2/surogate" ] \
     && [ -f "$2/bin/surogate-apply-update" ] && [ ! -L "$2/bin/surogate-apply-update" ] && [ -x "$2/bin/surogate-apply-update" ]
 }
 
