@@ -1256,3 +1256,46 @@ async def test_a_threads_pod_asked_for_with_no_turns_name_is_refused_in_words(ap
     thread = await a_thread(api)
     with pytest.raises(RuntimeError, match="made for a turn of its thread, and this session carries no turn's name"):
         await tool_exec._build_session_sandbox_spec(thread, SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id), str(thread.id))
+
+
+async def test_a_pause_is_its_status_and_its_event_together_or_neither(api, monkeypatch):
+    thread = await a_thread(api)
+    store = api.app.state.session_store
+    emit = store.emit_event
+
+    async def the_route_dies_here(*args, **kwargs):
+        raise ConnectionError("the route died at its write of the event")
+
+    # A thread left paused with no turn-ending event would have its next turn named as the stopped one.
+    with monkeypatch.context() as dying:
+        dying.setattr(store, "emit_event", the_route_dies_here)
+        with pytest.raises(ConnectionError):
+            await api.client.post(f"/v1/sessions/{thread.id}/pause", headers=api.auth())
+    assert (await store.get_session(thread.id)).status == "active"
+    # The one write is one transaction: with its commit lost, neither is there.
+    sessions = store._sf
+
+    def a_database_that_goes_before_the_commit():
+        db = sessions()
+
+        async def gone():
+            raise ConnectionError("the database went away")
+
+        db.commit = gone
+        return db
+
+    with monkeypatch.context() as down:
+        down.setattr(store, "_sf", a_database_that_goes_before_the_commit)
+        with pytest.raises(ConnectionError):
+            await emit(thread.id, EventType.SESSION_PAUSE, {}, status="paused")
+    assert (await store.get_session(thread.id)).status == "active"
+    assert await store.get_events(thread.id, types=[EventType.SESSION_PAUSE]) == []
+    # And whole, through the route.
+    paused = await api.client.post(f"/v1/sessions/{thread.id}/pause", headers=api.auth())
+    assert paused.status_code == 200, paused.text
+    assert (await store.get_session(thread.id)).status == "paused"
+    assert len(await store.get_events(thread.id, types=[EventType.SESSION_PAUSE])) == 1
+    # An archived session stays archived: the event's status is not written over a deletion.
+    await store.update_session_status(thread.id, "archived")
+    await emit(thread.id, EventType.SESSION_PAUSE, {}, status="paused")
+    assert (await store.get_session(thread.id)).status == "archived"
