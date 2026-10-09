@@ -30,10 +30,12 @@ from surogates.devices.operations import (
 )
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import CHUNK_BYTES
+from surogates.runtime.turn_slots import current_turn
 from surogates.session.store import SessionStore
 from surogates.tools.builtin import file_ops
 from surogates.tools.registry import ToolSchema
 from surogates.tools.workspace_io import RevisionConflict
+from tests.test_turn_slots import as_tool_call, held_turn
 
 from .test_device_transfers import StoppingStore, big_text, stored, transfers_of
 from .test_devices import (  # noqa: F401  (fixtures)
@@ -181,15 +183,28 @@ async def test_a_write_whose_data_cannot_be_kept_is_not_recorded(laptop_rig, eng
 IN_PARTS = os.urandom(CHUNK_BYTES * 3 + 32 * 1024)
 
 
+@pytest.mark.parametrize("handed_over", [False, True], ids=["by its user", "for another worker to resume"])
 async def test_a_write_stopped_at_any_wait_of_its_recording_ends_with_all_of_it_recorded_or_none(
-    laptop_rig, stopping, session_factory, redis_client,
+    laptop_rig, stopping, session_factory, redis_client, handed_over,
 ):
     rig = laptop_rig
     ops = DeviceOperations(stopping.session_factory, redis_client)
     for at in range(500):
         request = write_request(rig, IN_PARTS)
+        slots, _, _ = await held_turn()
+
+        async def in_its_turn():
+            current_turn.set(slots)
+            async with as_tool_call(slots):
+                return await ops.run(request)
+
+        def hand_over():
+            # As the dispatcher hands a turn to another worker: detached, then cancelled.
+            slots.detach()
+            asyncio.current_task().cancel()
+
         # No computer answers: the call waits until it is stopped.
-        assert await stopping.stop_at(at, ops.run(request))
+        assert await stopping.stop_at(at, in_its_turn(), **({"stop": hand_over} if handed_over else {}))
         async with session_factory() as db:
             operation = (await db.execute(
                 select(DeviceOperation.id, DeviceOperation.outcome)
@@ -199,8 +214,9 @@ async def test_a_write_stopped_at_any_wait_of_its_recording_ends_with_all_of_it_
             # Stopped before its commit: nothing of the write, so the same call asks for it afresh.
             assert await transfers_of(session_factory, rig.device_id) == 0
             continue
-        # Stopped once committed: all of it, and closed, so its computer is never sent it.
-        assert operation.outcome == CANCELLED_OUTCOME
+        # Stopped once committed: all of it.  Closed, so its computer is never sent it; or left open
+        # for the worker that resumes the turn, which asks for the same operation and joins it.
+        assert operation.outcome == (None if handed_over else CANCELLED_OUTCOME)
         assert await stored(session_factory, str(operation.id)) == IN_PARTS
         break
     else:

@@ -198,11 +198,15 @@ async def inbox_client(inbox_app):
 # Calls stopped at a wait of the test's choosing
 # ---------------------------------------------------------------------------
 
+def _stop() -> None:
+    asyncio.current_task().cancel()
+
+
 class _StoppedAt:
     """Awaits a call, asking for its task's cancellation as the call reaches one of its waits."""
 
-    def __init__(self, call, at: int) -> None:
-        self._call, self._at = call, at
+    def __init__(self, call, at: int, stop) -> None:
+        self._call, self._at, self._stop = call, at, stop
 
     def __await__(self):
         call = self._call.__await__()
@@ -215,7 +219,7 @@ class _StoppedAt:
             if waits == self._at:
                 # Asked for by the task itself as it suspends: the stop lands at this
                 # wait and no other, as one from outside does when it comes during it.
-                asyncio.current_task().cancel()
+                self._stop()
             waits += 1
             send = throw = None
             try:
@@ -241,15 +245,16 @@ class Stopping:
         })
         self.session_factory = async_sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
 
-    async def stop_at(self, at: int, call, *, within: float = 10.0) -> bool:
+    async def stop_at(self, at: int, call, *, stop=_stop, within: float = 10.0) -> bool:
         """Run *call* in a task of its own, stopped at its wait number *at*, counted from 0.
 
         Returns once the task ended with its connections given back: True when
         it was stopped, False when the call ended before that wait.  A sweep of
-        *at* from 0 stops a call at each of its waits in turn.
+        *at* from 0 stops a call at each of its waits in turn.  *stop* is what
+        stops it, run in the task itself: its cancellation, unless given.
         """
         async def stopped():
-            return await _StoppedAt(call, at)
+            return await _StoppedAt(call, at, stop)
 
         # A connection in the pool first: the waits counted are the call's own, not those of connecting.
         async with self.engine.connect() as connection:
