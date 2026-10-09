@@ -17,7 +17,7 @@ from surogates.session.events import MESSAGE_TYPES, EventType
 #: ``ThreadGroup``, in the order the shell draws its sections.
 GROUPS = ("waiting", "working", "idle", "resolved")
 #: ``ThreadRow.reason``, when there is one.
-REASONS = ("question", "approval", "failed", "computer")
+REASONS = ("question", "approval", "failed", "computer", "files")
 #: The inbox kinds a thread waits on the user for, and the reason each gives.
 WAITING_KINDS = {"input_required": "question", "action_required": "approval", "governance_gate": "approval"}
 #: The event types the rules read the latest of.  Turn summaries are read
@@ -117,7 +117,7 @@ def _waiting(facts: ThreadFacts, latest: dict[str, Any]) -> tuple[str, str | Non
     pending = [i for i in facts.items if i.status == "pending"]
     if pending:
         newest = max(pending, key=lambda i: i.source_event_id)
-        return WAITING_KINDS[newest.kind], newest.title
+        return _reason(newest), newest.title
     if facts.status == "failed":
         failure = latest.get(EventType.SESSION_FAIL.value)
         data = failure.data if failure else {}
@@ -126,6 +126,13 @@ def _waiting(facts: ThreadFacts, latest: dict[str, Any]) -> tuple[str, str | Non
     if asked is not None:
         return "question", asked.title
     return None
+
+
+def _reason(item: Any) -> str:
+    """Why *item* makes its thread wait: a landing's files, else by its kind."""
+    if item.kind == "action_required" and (item.payload or {}).get("action_type") == "files":
+        return "files"
+    return WAITING_KINDS[item.kind]
 
 
 def _working(latest: dict[str, Any]) -> tuple[str | None, str | None]:

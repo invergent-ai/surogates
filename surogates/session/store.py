@@ -300,6 +300,24 @@ class SessionStore:
         # Populated lazily when a deliverable event is emitted.
         self._channel_cache: dict[UUID, tuple[str, dict]] = {}
 
+    async def answer_file_waits(self, session_id: UUID, *, before: int) -> int:
+        """Retire *session_id*'s waits on you over its files raised before event *before*; how many.
+
+        A message to the thread after the wait began is your answer.
+        """
+        async with self._sf() as db:
+            result = await db.execute(
+                update(InboxItem)
+                .where(
+                    InboxItem.session_id == session_id, InboxItem.kind == "action_required",
+                    InboxItem.status == "pending", InboxItem.payload.contains({"action_type": "files"}),
+                    InboxItem.source_event_id < before,
+                )
+                .values(status="responded", responded_at=func.now(), updated_at=func.now())
+            )
+            await db.commit()
+        return result.rowcount
+
     _INBOX_TERMINAL = frozenset({"acknowledged", "responded", "expired"})
     _INBOX_ALLOWED_TRANSITIONS = {
         "pending": frozenset({"acknowledged", "responded", "expired"}),

@@ -31,6 +31,14 @@ describe("the projects the page serves", () => {
     expect(await rows).toEqual(threads[REPORT]);
   });
 
+  it("take a thread that waits on you over its files", async () => {
+    const { source } = page();
+    const rows = source.threads(REPORT);
+    const waiting = { ...threads[REPORT]![0]!, reason: "files", statusLine: "Couldn't merge my changes to Report.docx" };
+    source.answered(1, { ok: [waiting] });
+    expect(await rows).toEqual([waiting]);
+  });
+
   it("refuse an answer that is not of its shape, and say the page's own error", async () => {
     const { source } = page();
     const wrong = source.threads(REPORT);

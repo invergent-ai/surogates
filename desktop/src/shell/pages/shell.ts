@@ -21,7 +21,7 @@ interface ThreadRow {
   id: string;
   title: string;
   group: "waiting" | "working" | "idle" | "resolved";
-  reason: "question" | "approval" | "failed" | "computer" | null;
+  reason: "question" | "approval" | "failed" | "computer" | "files" | null;
   statusLine: string | null;
   progress: { done: number; total: number } | null;
   files: Array<{ label: string }>;
@@ -170,7 +170,7 @@ function renderCards(): void {
 const plural = (count: number, one: string, many: string): string => `${count} ${count === 1 ? one : many}`;
 const kilobytes = (size: number | null): string => (size === null ? "" : ` · ${Math.max(1, Math.round(size / 1024))} KB`);
 // A row's state in a word or two: what it waits for, or else its group.
-const REASONS = { question: "Question", approval: "Approval", failed: "Failed", computer: "Computer away" } as const;
+const REASONS = { question: "Question", approval: "Approval", failed: "Failed", computer: "Computer away", files: "Files" } as const;
 const GROUPS = { waiting: "Waiting", working: "Working", idle: "Idle", resolved: "Resolved" } as const;
 let tab = "threads";
 

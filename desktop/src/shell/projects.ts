@@ -73,7 +73,7 @@ function threadOf(value: unknown): ThreadRow {
   const { id, title, group, reason, statusLine, progress, files, place, createdAt, updatedAt, resolvedAt } = fields(value);
   const { done, total } = fields(progress);
   need(named(id) && text(title, 500) && one(group, ["waiting", "working", "idle", "resolved"])
-    && one(reason, ["question", "approval", "failed", "computer", null]) && (statusLine === null || text(statusLine, 2_000))
+    && one(reason, ["question", "approval", "failed", "computer", "files", null]) && (statusLine === null || text(statusLine, 2_000))
     && (progress === null || (count(done) && count(total))) && time(createdAt) && time(updatedAt)
     && (resolvedAt === null || time(resolvedAt)));
   return {

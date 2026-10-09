@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from sqlalchemy import select
 
 import surogates.harness.loop as loop_module
 from surogates.config import SHARED_WORK_QUEUE_KEY
+from surogates.db.models import InboxItem
 from surogates.harness import landing as landing_module
 from surogates.harness import loop_artifact_completion
 from surogates.harness.loop_context_replay import unread_reports, worker_note
 from surogates.harness.loop_pending import NAMES_ANSWERS
+from surogates.jobs.inbox_expire import expire_inbox_items
 from surogates.runtime import SlashCommandConfig
 from surogates.sandbox.history import History
 from surogates.sandbox.pool import SandboxPool
@@ -22,10 +25,12 @@ from tests.test_steer_loop import _final_response, _make_loop_harness
 from .test_command_wake_once import DiesWriting, workers  # noqa: F401  (workers is a fixture)
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
+    a_landing_killed,
     a_short_fence,
     edited,
     ends,
     rows,
+    rows_stand,
     stored,
     turn_ends,
 )
@@ -40,6 +45,7 @@ from .test_thread_copies import (  # noqa: F401  (pods is a fixture)
     reports,
 )
 from .test_turn_sagas import a_turn, calling
+from .test_workstream_overview import rows as thread_rows
 from .test_workstream_threads import call_tool, queued
 from .test_workstreams import create, master_of
 
@@ -514,14 +520,14 @@ async def test_a_file_whose_author_a_prunings_cut_hides_is_not_redone():
     # Its landing names no one for it (the thread's base is behind the cut): no redo is started on a guess.
     outcome = {
         "state": "completed", "saved": False, "overlapped": [{"path": "notes.txt", "reason": "changed"}],
-        "files": [{"ref": "notes.txt", "landing": "not_merged"}],
+        "files": [{"ref": "notes.txt", "landing": "not_merged"}], "landed": [],
     }
-    landing_module._tell(outcome)
+    landing_module._tell(outcome, set())
     assert (outcome["redo"], outcome["saved"], outcome["files"][0]["landing"]) == ([], False, "not_merged")
     # Beside a file someone is named for, that one alone is redone, and the turn's end saved less than its work.
     outcome["overlapped"].append({"path": "Report.docx", "reason": "changed", "by": {"kind": "you"}})
     outcome["files"].append({"ref": "Report.docx", "landing": "not_merged"})
-    landing_module._tell(outcome)
+    landing_module._tell(outcome, set())
     assert outcome["redo"] == [{"path": "Report.docx", "reason": "changed", "by": {"kind": "you"}}]
     assert ([f["landing"] for f in outcome["files"]], outcome["saved"]) == (["not_merged", "redoing"], False)
 
@@ -533,8 +539,8 @@ async def test_a_redo_takes_the_files_held_with_a_clash_and_only_a_landing_that_
     ]
     files = [{"ref": "Draft.docx", "landing": "not_merged"}, {"ref": "Final.docx", "landing": "not_merged"}]
     # A move whose old name changed meanwhile: both names are redone, and the turn's end saved its work.
-    outcome = {"state": "completed", "saved": False, "overlapped": held, "files": [dict(f) for f in files]}
-    landing_module._tell(outcome)
+    outcome = {"state": "completed", "saved": False, "overlapped": held, "files": [dict(f) for f in files], "landed": []}
+    landing_module._tell(outcome, set())
     assert outcome["redo"] == [
         {"path": "Draft.docx", "reason": "changed", "by": {"kind": "thread", "id": "t2", "title": "Draft B"}},
         {"path": "Final.docx", "reason": "with"},
@@ -542,9 +548,9 @@ async def test_a_redo_takes_the_files_held_with_a_clash_and_only_a_landing_that_
     assert ([f["landing"] for f in outcome["files"]], outcome["saved"]) == (["redoing", "redoing"], True)
     # A landing put back for good applied nothing: its turn is on its branch, and lands whole with the next.
     put_back = {"state": "compensated", "saved": True, "overlapped": held, "files": [dict(f) for f in files]}
-    landing_module._tell(put_back)
+    landing_module._tell(put_back, set())
     assert "redo" not in put_back and [f["landing"] for f in put_back["files"]] == ["not_merged", "not_merged"]
-    landing_module._tell(None)
+    landing_module._tell(None, set())
 
 
 async def test_a_projects_stream_carries_a_redo():
@@ -607,3 +613,250 @@ async def test_a_follow_up_whose_words_are_a_command_is_the_models_to_read_and_h
     assert await workers.status(thread.id) == "completed" and not await queued(api, thread)
     await workers.wake(thread.id, SlashCommandConfig())
     assert len(workers.requests) == 2
+
+
+async def waits_of(api, thread) -> list[InboxItem]:
+    async with api.app.state.session_factory() as db:
+        return list((await db.execute(select(InboxItem).where(InboxItem.session_id == thread.id))).scalars())
+
+
+async def row_of(api, project, thread) -> dict:
+    [row] = [r for r in await thread_rows(api, project) if r["id"] == str(thread.id)]
+    return row
+
+
+async def test_a_second_clash_puts_the_thread_in_waiting_on_you(api, monkeypatch, pods):
+    project = await create(api)
+    master = await master_of(api, project)
+    thread = await a_thread(api, "Draft A", master)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v2 by you")
+    # You save again before the redo lands.
+    await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v3 by you")
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v3 by you"
+    # Not told again: it waits on you.
+    assert len(await store.get_events(thread.id, types=[EventType.HISTORY_REDO])) == 1
+    [wait] = await waits_of(api, thread)
+    assert (wait.kind, wait.title, wait.payload["target"], wait.status) == (
+        "action_required", "Couldn't merge my changes to Report.docx", "Report.docx", "pending",
+    )
+    row = await row_of(api, project, thread)
+    assert (row["group"], row["reason"], row["status_line"]) == ("waiting", "files", "Couldn't merge my changes to Report.docx")
+    # Its version is in history, the landing's second parent.
+    landing = git(pods.project / "_history", "rev-parse", "refs/heads/main")
+    assert git(pods.project / "_history", "show", f"{landing}^2:Report.docx") == "PK\x03\x04 report v2 by you by A"
+    # The thread's turn has ended, and the sweeper leaves its wait.
+    await expire_inbox_items(store)
+    assert (await row_of(api, project, thread))["reason"] == "files"
+
+
+async def test_a_wait_on_you_is_answered_by_your_next_message_not_by_a_wake(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v2 by you")
+    await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Budget.xlsx"], escalated=False))
+
+    async def a_turn_that_does_nothing(session, *_, **__):
+        pass
+
+    # The redo of another file wakes it: no answer of yours.
+    await a_waking_thread_harness(api, monkeypatch, pool, a_turn_that_does_nothing).wake(thread.id)
+    [wait] = await waits_of(api, thread)
+    assert wait.status == "pending"
+    # Nor is the coordinator's follow-up: it is the coordinator's, never the user's.
+    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Finish the report.")
+    await a_waking_thread_harness(api, monkeypatch, pool, a_turn_that_does_nothing).wake(thread.id)
+    [wait] = await waits_of(api, thread)
+    assert wait.status == "pending"
+    # Nor is a message the harness wrote for itself.
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Continue.", "synthetic": "nudge"})
+    await a_waking_thread_harness(api, monkeypatch, pool, a_turn_that_does_nothing).wake(thread.id)
+    [wait] = await waits_of(api, thread)
+    assert wait.status == "pending"
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Keep my version, and add yours below it."})
+    emit, at_wake = store.emit_event, []
+
+    async def watched(session_id, event_type, data, *args, **kwargs):
+        if event_type == EventType.HARNESS_WAKE:
+            # What the project's clients read as the wake is streamed.
+            at_wake.append([w.status for w in await waits_of(api, thread)])
+        return await emit(session_id, event_type, data, *args, **kwargs)
+
+    monkeypatch.setattr(store, "emit_event", watched)
+    await a_waking_thread_harness(api, monkeypatch, pool, a_turn_that_does_nothing).wake(thread.id)
+    [wait] = await waits_of(api, thread)
+    assert wait.status == "responded" and at_wake == [["responded"]]
+
+
+async def test_a_redo_turn_that_calls_no_tool_marks_the_file_not_merged_and_nothing_waits(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v2 by you")
+    await a_turn(api, monkeypatch, thread, [_final_response("Your version of the report stays as it is.")], pool=pool)
+    # It never used its pod, so it lands nothing; the master hears the file was left as it is.
+    _, second = await reports(api, master)
+    assert [(f["ref"], f["landing"], f.get("reason")) for f in second["files"]] == [("Report.docx", "not_merged", "left")]
+    assert worker_note(EventType.WORKER_COMPLETE.value, second)["content"].endswith(
+        "Not merged, because the thread left the newer file as it is: Report.docx"
+    )
+    assert await waits_of(api, thread) == []
+
+
+async def test_a_redo_turn_that_leaves_the_file_alone_marks_it_not_merged_and_nothing_waits(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v2 by you")
+    await a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "echo more > b.md"})), _final_response("Kept your version of the report."),
+    ], pool=pool)
+    _, second = await reports(api, master)
+    assert {f["ref"]: (f["landing"], f.get("reason")) for f in second["files"]} == {
+        "b.md": ("landed", None), "Report.docx": ("not_merged", "left"),
+    }
+    assert await waits_of(api, thread) == []
+
+
+async def test_a_landing_that_escalates_puts_its_thread_in_waiting_on_you(api, monkeypatch, pods):
+    project = await create(api)
+    thread = await a_thread(api, "Draft A", await master_of(api, project))
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md && echo b > b.md")
+    call = landing_module._call
+
+    async def your_save_lands_then_b_fails(sandbox_pool, owner, action, **arguments):
+        if action == "apply" and arguments.get("path") == "b.md":
+            (pods.project / "a.md").write_text("saved by you over the half landing")  # a.md cannot be put back
+            raise landing_module.LandingStepError("the pod's step timed out")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    monkeypatch.setattr(landing_module, "_call", your_save_lands_then_b_fails)
+    await ends(api, pool, thread)
+    [row] = await rows(api, thread)
+    assert row.saga_state == "escalated"
+    [wait] = await waits_of(api, thread)
+    assert (wait.title, wait.payload["action_type"]) == ("Couldn't finish landing my changes", "files")
+    assert (await row_of(api, project, thread))["reason"] == "files"
+
+
+async def test_a_landing_settled_as_escalated_puts_its_own_thread_in_waiting_on_you(api, monkeypatch, pods):
+    project = await create(api)
+    master = await master_of(api, project)
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    # Its row written at every try, as a slow landing's is: a.md's apply is known to have run.
+    rows_stand(monkeypatch, "exact")
+    await edited(pool, first, "for f in a b c; do echo $f > $f.md; done")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply b.md")
+    (pods.project / "a.md").write_text("saved by you over the half landing")  # its put-back finds it changed
+    await edited(pool, second, "echo by B > B.md")
+    await ends(api, pool, second)
+    [killed] = await rows(api, first)
+    assert killed.saga_state == "escalated"
+    [wait] = await waits_of(api, first)
+    assert wait.title == "Couldn't finish landing my changes"
+    assert (await row_of(api, project, first))["reason"] == "files"
+
+
+async def test_a_redo_turns_files_are_sorted_each_from_its_own_clash():
+    you = {"kind": "you"}
+
+    def landed_as(held: list[dict], *landed: str) -> dict:
+        return {
+            "state": "completed", "saved": False, "overlapped": held, "landed": [{"path": path} for path in landed],
+            "files": [{"ref": o["path"], "landing": "not_merged"} for o in held] + [{"ref": path, "landing": "landed"} for path in landed],
+        }
+
+    # Woken for the report and the summary.  The report is held again, and the name it was moved to with it;
+    # the budget clashes for the first time; the summary the turn left alone, and the notes it landed.
+    outcome = landed_as([
+        {"path": "Report.docx", "reason": "changed", "by": you}, {"path": "Final.docx", "reason": "with"},
+        {"path": "Budget.xlsx", "reason": "changed", "by": you},
+    ], "Notes.md")
+    landing_module._tell(outcome, {"Report.docx", "Final.docx", "Summary.md", "Notes.md"})
+    assert outcome["stuck"] == ["Final.docx", "Report.docx"]
+    assert outcome["redo"] == [{"path": "Budget.xlsx", "reason": "changed", "by": you}]
+    assert {f["ref"]: (f["landing"], f.get("reason")) for f in outcome["files"]} == {
+        "Report.docx": ("not_merged", None), "Final.docx": ("not_merged", None), "Budget.xlsx": ("redoing", None),
+        "Notes.md": ("landed", None), "Summary.md": ("not_merged", "left"),
+    }
+    # Its copy goes with files of its own that are being redone by no one.
+    assert outcome["saved"] is False
+    # A file held only with a stuck one is not redone.
+    outcome = landed_as([{"path": "Report.docx", "reason": "changed", "by": you}, {"path": "Final.docx", "reason": "with"}])
+    landing_module._tell(outcome, {"Report.docx"})
+    assert (outcome["stuck"], outcome["redo"], outcome["saved"]) == (["Report.docx"], [], False)
+    # A file redone and held again with no one's change behind it waits on nobody, and is not redone again.
+    outcome = landed_as([{"path": "Plans", "reason": "shape"}])
+    landing_module._tell(outcome, {"Plans"})
+    assert (outcome["stuck"], outcome["redo"], [f.get("reason") for f in outcome["files"]]) == ([], [], [None])
+
+
+async def test_a_wait_on_you_names_its_first_file_and_counts_the_others():
+    def title_and_target(*paths: str, escalated: bool = False) -> tuple[str, str]:
+        wait = landing_module.waiting_on_you(list(paths), escalated=escalated)
+        assert (wait["action_type"], wait["reason"]) == ("files", "files")
+        return wait["title"], wait["target"]
+
+    assert title_and_target("Report.docx") == ("Couldn't merge my changes to Report.docx", "Report.docx")
+    assert title_and_target("A.md", "B.md") == ("Couldn't merge my changes to A.md and 1 other file", "A.md")
+    assert title_and_target("A.md", "B.md", "C.md") == ("Couldn't merge my changes to A.md and 2 other files", "A.md")
+    assert title_and_target("A.md", "B.md", escalated=True) == ("Couldn't finish landing my changes", "A.md")
+    # A landing that knew none of its files still waits, on the thread itself.
+    assert title_and_target(escalated=True) == ("Couldn't finish landing my changes", "session")
+    many = landing_module.waiting_on_you([f"{n}.md" for n in range(23)], escalated=False)["instructions"]
+    assert "19.md and 3 more changed again" in many and "20.md" not in many
+
+
+REQUEST, COMPLETE = EventType.LLM_REQUEST, EventType.SESSION_COMPLETE
+
+
+@pytest.mark.parametrize("since, the_redos", [
+    ((), True),
+    ((REQUEST,), True),
+    ((REQUEST, COMPLETE), False),
+    ((REQUEST, EventType.SESSION_FAIL), False),
+    ((REQUEST, EventType.SESSION_PAUSE), False),
+    ((REQUEST, EventType.SESSION_STOPPED), False),
+    ((EventType.SESSION_FAIL,), True),
+    ((EventType.SESSION_FAIL, REQUEST), True),
+    ((EventType.SESSION_FAIL, REQUEST, COMPLETE), False),
+    ((REQUEST, COMPLETE, REQUEST), False),
+], ids=[
+    "told", "its turn under way", "its turn landed", "its turn failed", "its turn stopped", "its turn stopped by the route",
+    "a turn the limit refused, which read nothing", "the turn after that one", "that turn landed", "the turn after the redo's",
+])
+async def test_a_turn_is_the_redos_from_its_first_request_until_it_ends(api, since, the_redos):
+    thread = await a_thread(api, "Draft A", await master_of(api, await create(api)))
+    store = api.app.state.session_store
+    assert await landing_module.redo_files(store, thread.id) == set()
+    await store.emit_event(thread.id, COMPLETE, {"reason": "completed"})
+    await store.emit_event(thread.id, EventType.HISTORY_REDO, {"saga": "saga:1", "files": [{"path": "Report.docx", "reason": "changed"}]})
+    for kind in since:
+        await store.emit_event(thread.id, kind, {})
+    assert await landing_module.redo_files(store, thread.id) == ({"Report.docx"} if the_redos else set())
+
+
+async def test_your_message_answers_the_waits_over_files_before_it_and_no_other(api):
+    thread = await a_thread(api, "Draft A", await master_of(api, await create(api)))
+    store = api.app.state.session_store
+    approval = {"title": "Send it?", "instructions": "", "context": "", "action_type": "approval", "target": "the memo"}
+    await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, approval)
+    await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Report.docx"], escalated=False))
+    said = await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Keep mine."})
+    # Raised after your message: not what it answered.
+    await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Budget.xlsx"], escalated=True))
+    assert await store.answer_file_waits(thread.id, before=said) == 1
+    assert {wait.title: wait.status for wait in await waits_of(api, thread)} == {
+        "Send it?": "pending", "Couldn't merge my changes to Report.docx": "responded",
+        "Couldn't finish landing my changes": "pending",
+    }
+    # The sweeper leaves a finished thread's waits over files alone, and expires its other items as before.
+    await store.update_session_status(thread.id, "completed")
+    await expire_inbox_items(store)
+    assert {wait.title: wait.status for wait in await waits_of(api, thread)} == {
+        "Send it?": "expired", "Couldn't merge my changes to Report.docx": "responded",
+        "Couldn't finish landing my changes": "pending",
+    }

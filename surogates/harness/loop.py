@@ -1760,6 +1760,18 @@ class AgentHarness(
                     )
                     return
 
+            # 4''. A thread that waits on you over its files waits no more once
+            # a message of yours reaches it after the wait began: the message
+            # is your answer.  Its coordinator's follow-up is not yours, nor
+            # is a message the harness wrote.  Before the wake is streamed,
+            # so a client that reads the thread's row then sees it.
+            if is_project_thread(session.config):
+                said = max((
+                    e.id for e in all_events
+                    if e.type == EventType.USER_MESSAGE.value and not (e.data or {}).get("synthetic")
+                ), default=0)
+                await self._store.answer_file_waits(session_id, before=said)
+
             # 5. Emit HARNESS_WAKE event.
             await self._store.emit_event(
                 session_id,
