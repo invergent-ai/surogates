@@ -13,6 +13,7 @@ import dataclasses
 import json
 import logging
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
@@ -34,6 +35,7 @@ from surogates.tasks import service as task_service
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from surogates.tasks import spawn as task_spawn
+from surogates.tools.builtin import coding_agent
 from surogates.tools.builtin import delegate as delegate_module
 from surogates.workstreams import thread_refusal
 from tests.test_steer_loop import _final_response
@@ -1196,3 +1198,61 @@ async def test_a_stop_this_worker_could_not_write_down_is_written_before_the_thr
     await one_more_turn(api, monkeypatch, pods, thread, "ls > seen-later.txt")
     assert len(await store.get_events(thread.id, types=[EventType.SESSION_PAUSE])) == 1
     assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "seen-later.txt", "sources.md"]
+
+
+async def test_a_threads_coding_agent_run_has_its_pod_made_for_the_threads_turn(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store, pool, told = api.app.state.session_store, SandboxPool(pods), []
+    ensure = pool.ensure
+
+    async def watched(owner, spec):
+        told.append(spec.env["HISTORY_TURN"])
+        return await ensure(owner, spec)
+
+    async def as_far_as_its_pod(*, ensure_sandbox, **run):
+        await ensure_sandbox()  # the run's first act; no coding agent is run here
+        return SimpleNamespace(status="not_connected")
+
+    monkeypatch.setattr(pool, "ensure", watched)
+    monkeypatch.setattr(coding_agent, "execute_coding_run", as_far_as_its_pod)
+    monkeypatch.setattr(coding_agent, "resolve_git_pat", AsyncMock(return_value="a token"))
+    # The tool is handed the turn's own config, as the harness hands it every tool: the thread's as its
+    # row has it, the turn's name, and the repositories the wake put there.
+    turn = thread.model_copy(update={"config": dict(thread.config)})
+    await landing_module.name_turn(store, turn)
+    config = {**turn.config, "repos": [{"url": "https://github.com/acme/api", "default_branch": "main"}]}
+    answer = json.loads(await coding_agent._run_coding_agent_handler(
+        {"agent": "claude", "prompt": "Add a line to the readme."},
+        tenant=SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id, service_account_id=None),
+        session_id=str(thread.id), session_store=store, sandbox_pool=pool, credential_vault=object(), session_config=config,
+    ))
+    assert "is not connected" in answer["error"], answer
+    # Its pod is the thread's, over the thread's copy, told the turn it was made in.
+    assert told == [str(config["turn_after"])] and pool.holds_copy(str(thread.id))
+
+
+def test_every_maker_of_a_sessions_pod_is_one_whose_session_is_known_to_carry_its_turns_name():
+    # A thread's pod is made for a turn, named on the turn's own session object: one read from the store has no
+    # name, and the spec's builder refuses it.  Each call of the builder is listed here with where its session
+    # comes from; a new one fails this until it is placed, so none is left to fail in a thread unseen.
+    root = Path(tool_exec.__file__).parents[1]
+    calls = sorted(
+        f"{path.relative_to(root)}:{line.strip().split('(')[0].split()[-1]}"
+        for path in root.rglob("*.py") for line in path.read_text().splitlines()
+        if "_build_session_sandbox_spec(" in line and "def _build_session_sandbox_spec" not in line
+    )
+    assert calls == sorted([
+        "harness/tool_exec.py:_build_session_sandbox_spec",              # a step's snapshot: the turn's session
+        "harness/tool_exec.py:_build_session_sandbox_spec",              # a step in the pod: the turn's session
+        "harness/loop.py:_build_session_sandbox_spec",                   # a stop's take-back: the turn's session
+        "harness/loop.py:_build_session_sandbox_spec",                   # a stop's put-back: the turn's session
+        "harness/loop_artifact_completion.py:_build_session_sandbox_spec",  # a turn's end, to land: the turn's session
+        "harness/loop_code_commands.py:_build_session_sandbox_spec",     # /code: refused in a thread and under one
+        "tools/builtin/coding_agent.py:_build_session_sandbox_spec",     # run_coding_agent: the turn's config
+    ])
+
+
+async def test_a_threads_pod_asked_for_with_no_turns_name_is_refused_in_words(api):
+    thread = await a_thread(api)
+    with pytest.raises(RuntimeError, match="made for a turn of its thread, and this session carries no turn's name"):
+        await tool_exec._build_session_sandbox_spec(thread, SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id), str(thread.id))
