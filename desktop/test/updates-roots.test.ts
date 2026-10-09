@@ -24,13 +24,15 @@ vi.mock("node:fs", async (original) => {
     const said = told.paths.get(String(args[0]));
     if (!found || !said) return found;
     if (said.once) told.paths.delete(String(args[0]));
-    return Object.assign(found, { uid: said.uid, mode: said.mode === undefined ? found.mode : (found.mode & ~0o777) | said.mode });
+    return Object.assign(found, { uid: said.uid, mode: said.mode === undefined ? found.mode : (found.mode & ~0o7777) | said.mode });
   }) as Look;
   return { ...fs, statSync: owned(fs.statSync), lstatSync: owned(fs.lstatSync) };
 });
 
 const base = servedBase();
 const NOT_ROOTS = "is not the install script's: only root may write it";
+// What root's own reader of each asks, and no other mode (roots_own in release/install.sh).
+const NOT_AS_LEFT = (mode: string) => `is not the install script's: an install leaves a file there, at mode ${mode}`;
 const own = process.getuid!();
 // The path as root's own, at *mode*; or as *uid*'s.
 const roots = (path: string, mode: number, uid = 0) => void told.paths.set(path, { uid, mode });
@@ -45,6 +47,12 @@ describe("what an installed app reads as root's own", () => {
       roots(base.helper, mode, uid);
       expect(() => releaseKeys(base.helper, true), `${mode.toString(8)} ${uid}`).toThrow(`${base.helper} ${NOT_ROOTS}`);
     }
+    // Root's alone to write, and not at the mode an install leaves its helper: the helper refuses its
+    // own list then, and every release with it, so the app offers none.
+    for (const mode of [0o700, 0o555, 0o744, 0o644, 0o4755]) {
+      told.paths.set(base.helper, { uid: 0, mode });
+      expect(() => releaseKeys(base.helper, true), mode.toString(8)).toThrow(`${base.helper} ${NOT_AS_LEFT("755")}`);
+    }
     // A development build's helper is its test's own.
     expect(releaseKeys(base.helper)).toHaveLength(1);
   });
@@ -57,15 +65,29 @@ describe("what an installed app reads as root's own", () => {
       roots(base.record, mode, uid);
       expect(() => installBase(base.record, true), `${mode.toString(8)} ${uid}`).toThrow(`${base.record} ${NOT_ROOTS}`);
     }
+    for (const mode of [0o600, 0o444, 0o640, 0o755, 0o2644]) {
+      told.paths.set(base.record, { uid: 0, mode });
+      expect(() => installBase(base.record, true), mode.toString(8)).toThrow(`${base.record} ${NOT_AS_LEFT("644")}`);
+    }
     expect(installBase(base.record)).toBe(base.url);
   });
 
+  it("takes for either a file alone: a folder of root's at the same mode is not one", () => {
+    mkdirSync(join(base.dir, "folder"));
+    roots(join(base.dir, "folder"), 0o755);
+    expect(() => releaseKeys(join(base.dir, "folder"), true)).toThrow(`${join(base.dir, "folder")} ${NOT_AS_LEFT("755")}`);
+    roots(join(base.dir, "folder"), 0o644);
+    expect(() => installBase(join(base.dir, "folder"), true)).toThrow(`${join(base.dir, "folder")} ${NOT_AS_LEFT("644")}`);
+  });
+
   it("reads neither through a link, wherever it leads: a link to a file of root's is not root's own word", () => {
-    // /etc/passwd is root's, and none but root may write it: by itself it passes as root's own.
-    expect(() => releaseKeys("/etc/passwd", true)).toThrow("/etc/passwd trusts no release key");
+    // /usr/bin/bash and /etc/passwd are root's, at the modes an install leaves its helper and its
+    // record: by itself each passes as root's own.
+    expect(() => releaseKeys("/usr/bin/bash", true)).toThrow("/usr/bin/bash trusts no release key");
+    expect(() => installBase("/etc/passwd", true)).toThrow("/etc/passwd names no web address to download the sandbox from");
     const helper = join(base.dir, "linked-helper");
     const record = join(base.dir, "linked-record");
-    symlinkSync("/etc/passwd", helper);
+    symlinkSync("/usr/bin/bash", helper);
     symlinkSync("/etc/passwd", record);
     expect(() => releaseKeys(helper, true)).toThrow(`${helper} is not the install script's: it is a link`);
     expect(() => installBase(record, true)).toThrow(`${record} is not the install script's: it is a link`);
@@ -91,6 +113,27 @@ describe("what an installed app reads as root's own", () => {
     // Root's, and its group may write it.
     roots(base.helper, 0o775);
     await expect(base.updates({ rootOwned: true }).check()).rejects.toThrow(`${base.helper} ${NOT_ROOTS}`);
+    expect(base.heard).toEqual([]);
+  });
+
+  it("says a newer version is installed for every user only from a mark that is root's own, as the helper takes one", async () => {
+    base.publish("1.2.4");
+    roots(base.record, 0o644);
+    roots(base.helper, 0o755);
+    const mark = join(base.dir, "release.json");
+    writeFileSync(mark, `${JSON.stringify({ version: "1.2.9" })}\n`);
+    // The test's own file, and root's at another mode than an install leaves: neither says what is installed.
+    for (const said of [null, { uid: 0, mode: 0o664 }, { uid: 0, mode: 0o600 }, { uid: own, mode: 0o644 }]) {
+      if (said) told.paths.set(mark, said);
+      const found = base.updates({ rootOwned: true, installed: mark });
+      await found.check();
+      expect(found.state, JSON.stringify(said)).toMatchObject({ state: "available", version: "1.2.4" });
+    }
+    roots(mark, 0o644);
+    base.heard = [];
+    const found = base.updates({ rootOwned: true, installed: mark });
+    await found.check();
+    expect(found.state).toEqual({ state: "installed", version: "1.2.9" });
     expect(base.heard).toEqual([]);
   });
 

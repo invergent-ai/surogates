@@ -9,13 +9,12 @@
 import { spawn } from "node:child_process";
 import { createPublicKey, type KeyObject, verify } from "node:crypto";
 import {
-  closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
-  writeFileSync,
+  closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 import { download, type Fetch, hashOf, sizeOf } from "../download.js";
-import { installBase } from "../vm/image.js";
+import { installBase, rootsOwn } from "../vm/image.js";
 
 export const CHECK_MS = 6 * 60 * 60 * 1000;
 // How a tarball begins: a gzip member's magic number.
@@ -25,7 +24,9 @@ const MANIFEST_MAX = 4096;
 const SIGNATURE_MAX = 64;
 // How long the base may take to answer for either.
 const ASK_MS = 30_000;
-const VERSION = /^(\d+)\.(\d+)\.(\d+)$/;
+// A version: x.y.z in the ten digits, and no part with a zero before it, as the root helper has it:
+// dpkg reads 1.2.03 as 1.2.3, and a version's folder is named as it is written.
+const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 // What the install script leaves an installed app, each root's alone: its record of where it was
 // installed from; the helper pkexec runs, whose list of release keys is the one this computer
 // trusts; and the mark of the version installed for every user now.
@@ -136,13 +137,11 @@ export function newer(a: string, b: string): boolean {
  * The release keys *helper* lists, the ones this computer trusts when it is the helper pkexec
  * runs: each Ed25519 public key in its RELEASE_KEYS list, as release/install.sh writes it, and
  * none from anywhere else in the script. An entry that is no such key is skipped, as the helper
- * skips it. With *rootOwned*, a helper that is a link, wherever it leads, or that another than root
- * may write, is not read: the install script refuses such a helper too.
+ * skips it. With *rootOwned*, a helper that is not root's own as an install leaves it (rootsOwn)
+ * is not read: the helper refuses its own list then, and with it every release.
  */
 export function releaseKeys(helper: string, rootOwned = false): KeyObject[] {
-  const found = rootOwned ? lstatSync(helper) : statSync(helper);
-  if (rootOwned && found.isSymbolicLink()) throw new Error(`${helper} is not the install script's: it is a link`);
-  if (rootOwned && (found.uid !== 0 || (found.mode & 0o022) !== 0)) throw new Error(`${helper} is not the install script's: only root may write it`);
+  if (rootOwned) rootsOwn(helper, 0o755);
   const list = /^[ \t]*RELEASE_KEYS=\(\n([^)]*)\)/m.exec(readFileSync(helper, "utf8"))?.[1] ?? "";
   const keys = (list.match(/-----BEGIN PUBLIC KEY-----\n[A-Za-z0-9+/=\n]+-----END PUBLIC KEY-----/g) ?? []).flatMap((pem) => {
     try {
@@ -157,20 +156,31 @@ export function releaseKeys(helper: string, rootOwned = false): KeyObject[] {
 }
 
 /**
+ * The one JSON object that *bytes* are, as the root helper reads a manifest and a mark (one_object
+ * in release/install.sh): 4096 bytes at most, on one line whose newline is their last byte, and
+ * one JSON document, which is an object. Null where they are not. They are read as UTF-8 or not
+ * at all, so that what counts as 4096 bytes here is never more to the helper.
+ */
+function oneObject(bytes: Buffer): Record<string, unknown> | null {
+  if (bytes.length > MANIFEST_MAX || bytes.indexOf(0x0a) !== bytes.length - 1) return null;
+  try {
+    const named: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes));
+    // JSON's null is null here too.
+    return typeof named === "object" && !Array.isArray(named) ? named as Record<string, unknown> | null : null;
+  } catch {
+    return null; // not UTF-8, or not one JSON document
+  }
+}
+
+/**
  * The release *manifest*, from *url*, names: once one of *keys* signed its exact bytes, in
- * *signature*, and its fields are a release of *channel* for this computer, as the root helper's
- * own check has them. Throws why not.
+ * *signature*, and it is a release of *channel* for this computer, as the root helper's own check
+ * has one (release_of in release/install.sh). The app takes only what the helper will take: what
+ * it took and the helper refused would be offered as an update, and then refused. Throws why not.
  */
 export function signedRelease(url: string, manifest: Buffer, signature: Buffer, keys: KeyObject[], channel: string): Release {
   if (!keys.some((key) => verify(null, manifest, key, signature))) throw new Error(`${url} is not signed by Surogate's release key`);
-  let release: Partial<Release> = {};
-  try {
-    // JSON that is no object, as null is, names nothing.
-    const named: unknown = JSON.parse(manifest.toString("utf8"));
-    if (named !== null && typeof named === "object") release = named as Partial<Release>;
-  } catch {
-    // Not JSON: no release.
-  }
+  const release: Partial<Release> = oneObject(manifest) ?? {};
   // Whole numbers below 10^15, as the helper's own check has them.
   const counted = (value: unknown, least: number) => Number.isSafeInteger(value) && (value as number) >= least && (value as number) < 1e15;
   const { version } = release;
@@ -372,11 +382,14 @@ export class Updates {
     return this.state.state === "installing" || this.state.state === "installed";
   }
 
-  // The version installed for every user now, as its root helper recorded it; null when none can be read.
+  // The version installed for every user now, as its root helper recorded it; null when none can be
+  // read. Its mark is read as the helper reads one: root's own in an installed app, and one object.
   private installedVersion(): string | null {
-    if (!this.options.installed || !existsSync(this.options.installed)) return null;
+    const { installed, rootOwned } = this.options;
+    if (!installed || !existsSync(installed)) return null;
     try {
-      const { version } = JSON.parse(readFileSync(this.options.installed, "utf8")) as { version?: unknown };
+      if (rootOwned) rootsOwn(installed, 0o644);
+      const version = oneObject(readFileSync(installed))?.version;
       return typeof version === "string" && VERSION.test(version) ? version : null;
     } catch {
       return null;

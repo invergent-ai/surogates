@@ -46,7 +46,7 @@ describe("a signed manifest", () => {
 
   it("names a version that is x.y.z in digits, and no other, whatever its url", () => {
     expect(signedRelease("URL", ...signed({}), [keys.publicKey], "stable").version).toBe("1.2.4");
-    for (const named of ["1.2.4-beta", "1.2", "1.2.4.5", "v1.2.4", "../../../etc", "1.2.x", ""]) {
+    for (const named of ["1.2.4-beta", "1.2", "1.2.4.5", "v1.2.4", "../../../etc", "1.2.x", "", "1.2.04", "01.2.4", "1.02.4"]) {
       const offer = signed({ version: named, url: `releases/${named}/surogate-desktop-${named}-linux-x64.tar.gz` });
       expect(() => signedRelease("URL", ...offer, [keys.publicKey], "stable"), named).toThrow(`URL ${NO_RELEASE}`);
     }
@@ -56,6 +56,20 @@ describe("a signed manifest", () => {
     for (const text of ["null\n", "[]\n", "7\n", '"1.2.4"\n', "true\n", "{}\n", "<html>"]) {
       expect(() => signedRelease("URL", ...signed(text), [keys.publicKey], "stable"), text).toThrow(`URL ${NO_RELEASE}`);
     }
+  });
+
+  it("is one line with its newline, of 4096 bytes at most, as its root helper reads one: no other form of the same release is offered", async () => {
+    const [manifest] = signed({});
+    const text = manifest.toString();
+    expect(signedRelease("URL", ...signed(text), [keys.publicKey], "stable").version).toBe("1.2.4");
+    const forms = [text.trimEnd(), text.replace(",", ",\n"), `${text}\n`, `\n${text}`, `${text} `, `${text.trimEnd()}${" ".repeat(4097 - text.length)}\n`];
+    for (const form of forms) expect(() => signedRelease("URL", ...signed(form), [keys.publicKey], "stable"), JSON.stringify(form.slice(-12))).toThrow(`URL ${NO_RELEASE}`);
+    // Through a check: the base's latest.json without its newline is no release, and nothing is downloaded.
+    base.publish("1.2.4");
+    base.offer(Buffer.from(base.served.get("/desktop/latest.json")!.toString().trimEnd()));
+    const found = base.updates();
+    await expect(found.check()).rejects.toThrow(`${base.url}/desktop/latest.json ${NO_RELEASE}`);
+    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json.sig"]);
   });
 });
 
@@ -138,7 +152,10 @@ describe("a check", () => {
   it("looks for an update when the version installed for every user is the one that runs, or its mark cannot be read", async () => {
     base.publish("1.2.4");
     const mark = join(base.dir, "release.json");
-    for (const marked of [`${JSON.stringify({ version: "1.2.3" })}\n`, `${JSON.stringify({ version: "1.2.2" })}\n`, "not a mark\n", "null\n"]) {
+    // A mark is read as the helper reads one: an object on one line, naming a version with no zero before a part.
+    const later = { version: "1.2.9" };
+    for (const marked of [`${JSON.stringify({ version: "1.2.3" })}\n`, `${JSON.stringify({ version: "1.2.2" })}\n`, "not a mark\n", "null\n",
+      JSON.stringify(later), `${JSON.stringify(later, null, 2)}\n`, `[${JSON.stringify(later)}]\n`, `${JSON.stringify({ version: "1.2.09" })}\n`, `${JSON.stringify(later)}${" ".repeat(4096)}\n`]) {
       writeFileSync(mark, marked);
       const found = base.updates({ installed: mark });
       await found.check();

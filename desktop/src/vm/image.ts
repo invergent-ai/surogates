@@ -7,7 +7,7 @@
 // mark and its files' sizes is a whole image, and one without is downloaded again.
 
 import { spawn } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { open, statfs } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -52,18 +52,30 @@ export function readManifest(path: string): ImageManifest {
 }
 
 /**
+ * Throws unless *path* is a file as the install script leaves one, which is what root's own
+ * reader of it asks (roots_own in release/install.sh): root's, with no other who may write it; a
+ * file, and no link, wherever one leads; and at *mode* exactly, 0644 for a record or a mark and
+ * 0755 for the helper. What the app took and root's reader refused would be offered, and then
+ * refused.
+ */
+export function rootsOwn(path: string, mode: number): void {
+  const found = lstatSync(path);
+  if (found.isSymbolicLink()) throw new Error(`${path} is not the install script's: it is a link`);
+  if (found.uid !== 0 || (found.mode & 0o022) !== 0) throw new Error(`${path} is not the install script's: only root may write it`);
+  if (!found.isFile() || (found.mode & 0o7777) !== mode) throw new Error(`${path} is not the install script's: an install leaves a file there, at mode ${mode.toString(8)}`);
+}
+
+/**
  * The base URL in the install record at *path*, which the install script writes:
  * {"base": "https://surogate.ai"}. Throws when there is none to read. *rootOwned*, as an
- * installed app's /etc/surogate/install.json is: a record that is a link, wherever it leads, or
- * that another than root may write is not taken, as it would say where each of this computer's
- * users downloads from.
+ * installed app's /etc/surogate/install.json is: a record that is not root's own as an install
+ * leaves it (rootsOwn) is not taken, as it would say where each of this computer's users
+ * downloads from.
  */
 export function installBase(path: string, rootOwned = false): string {
   let text: string;
   try {
-    const found = rootOwned ? lstatSync(path) : statSync(path);
-    if (rootOwned && found.isSymbolicLink()) throw new Error(`${path} is not the install script's: it is a link`);
-    if (rootOwned && (found.uid !== 0 || (found.mode & 0o022) !== 0)) throw new Error(`${path} is not the install script's: only root may write it`);
+    if (rootOwned) rootsOwn(path, 0o644);
     text = readFileSync(path, "utf8");
   } catch (error) {
     const { code } = error as NodeJS.ErrnoException;
