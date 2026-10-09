@@ -1,9 +1,10 @@
 // The acceptance VMs (spec, Sections 9 and 10): Ubuntu 24.04 and 26.04 cloud images booted under
 // QEMU, with and without nested virtualization, the restriction of unprivileged user namespaces
 // on as Ubuntu ships it. The release this package builds is installed from a server on this
-// computer with the install script, as a person installs it; the app starts with its sandbox, a
-// file tool runs through its chain on the version's bwrap copy, an update is whole on the disk
-// when the power is cut as it ends, and --uninstall removes it. Then an update inside the app: a
+// computer with the install script and a company's CA, as a person installs it; the app starts
+// with its sandbox and trusts that CA, a file tool runs through its chain on the version's bwrap
+// copy, an update is whole on the disk when the power is cut as it ends, and --uninstall removes
+// it, and the app's entry for the CA with it. Then an update inside the app: a
 // version with a bound folder takes the next release through polkit and starts again on it, a
 // user who is no administrator keeps it, and --version rolls it back.
 //
@@ -308,16 +309,22 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
         const { login, env, ssh, serial, tell, stop } = await booted(image, nested);
         try {
           const base = `http://10.0.2.2:${port}`;
-          const installed = await ssh(`curl -fsSL ${base}/desktop/install.sh | bash -s -- --base ${base}`);
+          // A company's CA of this computer's own, which the install keeps; and another's, as only a
+          // development build is handed one.
+          expect((await ssh("for name in company another; do openssl req -x509 -subj /CN=$name -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign "
+            + "-newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout $name.key -out $name.pem -days 2 2>/dev/null || exit 1; done")).status).toBe(0);
+          const installed = await ssh(`curl -fsSL ${base}/desktop/install.sh | bash -s -- --base ${base} --ca-cert company.pem`);
           expect(installed.status, installed.stderr).toBe(0);
           expect(installed.stdout).toContain(`Surogate Desktop: ${VERSION} is installed\n`);
+          expect(installed.stdout).toContain("Surogate Desktop: every user's Surogate, and their Chrome, Edge and Brave, trust the company's certificate authority in /etc/surogate/ca.pem\n");
           expect(installed.stdout.includes("This computer has no hardware virtualization")).toBe(!nested);
           expect((await ssh(`sudo grep -c '^${LABEL}$' /sys/kernel/security/apparmor/profiles`)).stdout).toBe("1\n");
 
           // The app as the launcher starts it, in an X session of its own: Electron's own sandbox
           // takes its user namespaces from the profile, never --no-sandbox.
           // ELECTRON_RUN_AS_NODE as VS Code's terminals export it: the app starts as the app.
-          const app = await ssh("(DBUS_SESSION_BUS_ADDRESS=disabled: ELECTRON_RUN_AS_NODE=1 xvfb-run -a /usr/local/bin/surogate --password-store=basic >app.log 2>&1 &) ; "
+          // SUROGATE_CA_CERT as a development build reads it: the installed app reads the kept file alone.
+          const app = await ssh("(DBUS_SESSION_BUS_ADDRESS=disabled: ELECTRON_RUN_AS_NODE=1 SUROGATE_CA_CERT=$PWD/another.pem xvfb-run -a /usr/local/bin/surogate --password-store=basic >app.log 2>&1 &) ; "
             // Its renderer in its sandbox is waited for, as long as a slow computer takes to start one.
             // Anchored or bracketed patterns, so they do not find this command's own shell.
             + "for wait in $(seq 90); do main=$(pgrep -o -f '^/opt/surogate/versions/[^ ]*/surogate --password-store=basic$'); renderer=$(pgrep -o -f 'surogate [-]-type=renderer'); "
@@ -328,6 +335,11 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
           // The launcher starts current/surogate; Electron names its resolved program, the version's own.
           expect(app.stdout).toContain(`main /opt/surogate/versions/${VERSION}/surogate --password-store=basic\nlabel ${LABEL}\nrenderer sandboxed\nunsandboxed 0\n`);
           expect(app.stdout).not.toContain("No usable sandbox");
+          // The CA the install kept is the one the app trusts, in the database Chromium reads for
+          // this user, under the app's name for it; and no other, whatever its environment named.
+          const entries = "certutil -L -d sql:$HOME/.local/share/pki/nssdb | sed -n 's/^\\(Surogate company CA [0-9a-f]\\{16\\}\\)  *C,, *$/\\1/p'";
+          const trusted = await ssh(`${entries}; echo "Surogate company CA $(openssl x509 -in company.pem -noout -fingerprint -sha256 | cut -d= -f2 | tr -d : | cut -c1-16 | tr A-F a-f)"`);
+          expect(trusted.stdout.trim().split("\n")).toEqual([expect.stringMatching(/^Surogate company CA [0-9a-f]{16}$/), trusted.stdout.trim().split("\n")[0]]);
           await ssh("pkill -f '^/opt/surogate/versions/'; sleep 2");
           // The app's Electron never runs as Node. Its own program, with no launcher before it to
           // clear the variable, is handed a script as a Node would take one: it starts as the app,
@@ -429,6 +441,8 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
           const removed = await ssh(`curl -fsSL ${base}/desktop/install.sh | bash -s -- --uninstall`);
           expect(removed.status, removed.stderr).toBe(0);
           expect((await ssh("test ! -e /opt/surogate && test ! -e /usr/local/bin/surogate && ! sudo grep -q surogate-desktop /sys/kernel/security/apparmor/profiles")).status).toBe(0);
+          // The kept CA went with it, and the app's entry for it from the user's database.
+          expect((await ssh(`test ! -e /etc/surogate && test -f $HOME/.local/share/pki/nssdb/cert9.db && ${entries} | wc -l`)).stdout).toBe("0\n");
         } finally {
           stop();
         }
