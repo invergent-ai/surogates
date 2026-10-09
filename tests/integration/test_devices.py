@@ -1105,16 +1105,34 @@ async def test_a_database_blip_while_recording_does_not_fail_the_operation(
         (TimeoutError("pool timeout"), True),
         # What the driver says of a connection whose backend ended between two of a call's statements.
         (InternalClientError("cannot switch to state 11; another operation (2) is in progress"), True),
+        # Its other faults never go away: asked again, the same answer for ever.
+        (InternalClientError("no encoder for OID 16385"), False),
+        (InternalClientError("Bind: expected a sequence, got NoneType"), False),
         (DBAPIError("SELECT ...", {}, Exception("some other failure")), False),
         (IntegrityError("INSERT ...", {}, Exception("duplicate key")), False),
         (ProgrammingError("SELECT ...", {}, Exception("no such column")), False),
         (OperationConflict("changed"), False),
         (ValueError("bad"), False),
     ],
-    ids=lambda case: type(case).__name__ if not isinstance(case, bool) else str(case),
+    ids=lambda case: f"{type(case).__name__} {str(case)[:12]}" if not isinstance(case, bool) else str(case),
 )
 async def test_only_a_database_out_of_reach_is_worth_waiting_out(error, blip):
     assert operations_module._database_unavailable(error) is blip
+
+
+async def test_waiting_out_the_database_says_what_it_said(session_factory, redis_client, caplog):
+    ops = DeviceOperations(session_factory, redis_client, recheck_interval_s=0.01)
+    said = [InternalClientError("cannot switch to state 11; another operation (2) is in progress")]
+
+    async def call():
+        if said:
+            raise said.pop()
+        return "recorded"
+
+    with caplog.at_level(logging.WARNING, logger="surogates.devices.operations"):
+        assert await ops._while_database_recovers("recording", call) == "recorded"
+    # The message, not only the kind of error: one kind covers faults that are not the database's.
+    assert "InternalClientError: cannot switch to state 11; another operation (2) is in progress" in caplog.text
 
 
 async def test_a_database_error_that_is_not_a_blip_is_not_retried(

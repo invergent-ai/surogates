@@ -124,9 +124,12 @@ def _database_unavailable(exc: Exception) -> bool:
     if isinstance(exc, DBAPIError):
         # A failover's shutdown arrives as the generic DBAPIError, with its connection invalidated.
         return isinstance(exc, (OperationalError, InterfaceError)) or exc.connection_invalidated
-    # InternalClientError: what the driver says of a connection whose backend ended
-    # between two of a call's statements; SQLAlchemy passes it on as it is.
-    return isinstance(exc, (PoolTimeoutError, ConnectionError, TimeoutError, InternalClientError))
+    if isinstance(exc, InternalClientError):
+        # What the driver says of a connection whose backend ended between two of a
+        # call's statements, which SQLAlchemy passes on as it is.  Its other faults
+        # (no encoder for a type, a malformed bind) never go away, and are not this.
+        return str(exc).startswith("cannot switch to state")
+    return isinstance(exc, (PoolTimeoutError, ConnectionError, TimeoutError))
 
 
 def _completing(device_id: UUID, generation: int, operation_id: UUID, digest: str, outcome: dict[str, Any]) -> Any:
@@ -548,7 +551,9 @@ class DeviceOperations:
             except Exception as exc:
                 if not _database_unavailable(exc):
                     raise
-                logger.warning("%s an operation: database unavailable (%s); retrying", what, type(exc).__name__)
+                logger.warning(
+                    "%s an operation: database unavailable (%s: %s); retrying", what, type(exc).__name__, exc,
+                )
                 await asyncio.sleep(self._recheck_interval_s)
 
     async def _within_redis_patience(self, call: Awaitable[_T], *, intervals: float = 1) -> _T:
