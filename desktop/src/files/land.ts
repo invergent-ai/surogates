@@ -45,6 +45,12 @@ const SAGA = /^[A-Za-z0-9][A-Za-z0-9_:.-]{0,127}$/;
 const REVISION = /^[0-9]+:[0-9]+:[0-9]+:-?[0-9]+:-?[0-9]+$/;
 // A folder held, not read: O_PATH, which Node does not name. One this user may pass through but not list is entered all the same.
 const HOLD = 0o10000000 | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+// The largest file a landing writes: the helper copies it while every other operation on the folder waits.
+const MAX_LAND_BYTES = 1024 * 1024 * 1024;
+// The most the files a folder's landings replaced may take while they are kept. A file that would go past it is
+// refused before it is touched, and lands once a landing before it was recorded or put back, which lets go of its own.
+const MAX_KEPT_BYTES = 4 * 1024 * 1024 * 1024;
+const LAND_EFBIG = new Failure({ type: "os", code: "EFBIG", message: `File too large to land in a local folder (over ${MAX_LAND_BYTES / 2 ** 30} GiB)` });
 // What a file that could not take its own name back is called beside the one that holds it.
 const BESIDE = "kept by Surogate";
 
@@ -275,9 +281,11 @@ function sourceOf(theirs: Held | null, name: string, path: string): number {
     if ((error as NodeJS.ErrnoException).code === "ELOOP") throw sandboxError(`Not a path in this folder: '${path}'`);
     throw fromNode(error, path);
   }
-  if (!fstatSync(fd).isFile()) {
+  const opened = fstatSync(fd);
+  if (!opened.isFile() || opened.size > MAX_LAND_BYTES) {
     closeSync(fd);
-    throw sandboxError(`Not a path in this folder: '${path}'`);
+    // From its size, before a byte of it is read or anything is made for it.
+    throw opened.isFile() ? LAND_EFBIG : sandboxError(`Not a path in this folder: '${path}'`);
   }
   return fd;
 }
@@ -293,7 +301,8 @@ function stage(from: number, temp: string, path: string, after: string, mode: nu
     let read = 0;
     for (;;) {
       const count = io(path, () => readSync(from, piece, 0, piece.length, null));
-      if (count === 0) break;
+      // A file that grows as it is read is no longer the turn's: no more of it is copied than the turn's was.
+      if (count === 0 || read > size) break;
       read += count;
       hash.update(piece.subarray(0, count));
       for (let written = 0; written < count;) written += io(path, () => writeSync(to, piece, written, count - written));
@@ -334,15 +343,41 @@ function stepOf(value: unknown): Step | null {
   return { path, was, wrote, mode, made, above: above as Array<[string, number]>, temp, aside, out, back };
 }
 
+// How many bytes each folder's landings keep, by where they keep them: counted once, kept up as a file is kept, and
+// counted again after anything was dropped. One helper holds a folder, so nothing else keeps or drops there.
+const keeping = new Map<string, number>();
+
+function keptBytes(store: string): number {
+  let bytes = keeping.get(store);
+  if (bytes !== undefined) return bytes;
+  bytes = 0;
+  const list = (dir: string): string[] => {
+    try {
+      return readdirSync(dir);
+    } catch {
+      return [];
+    }
+  };
+  for (const saga of list(store)) {
+    for (const name of list(join(store, saga))) {
+      if (/^[0-9]+$/.test(name)) bytes += Number(look(join(store, saga, name))?.size ?? 0n);
+    }
+  }
+  keeping.set(store, bytes);
+  return bytes;
+}
+
 class Landing {
   private readonly folder: string;
   private readonly copy: string;
+  private readonly store: string;
   private readonly kept: string;
 
   constructor(context: Context, saga: string) {
     this.folder = context.folder;
     this.copy = context.landing!.copy;
-    this.kept = join(context.landing!.kept, saga);
+    this.store = context.landing!.kept;
+    this.kept = join(this.store, saga);
   }
 
   private record(step: number): string {
@@ -381,6 +416,7 @@ class Landing {
     remove(this.record(step));
     remove(this.bytes(step));
     this.rmdir(this.kept);
+    keeping.delete(this.store);
   }
 
   private rmdir(dir: string): boolean {
@@ -457,6 +493,12 @@ class Landing {
         throw new Failure({ type: "stale", message: `${path} is still in the thread's copy, so it was not deleted from the folder` });
       }
       if (after !== null) source = sourceOf(theirs, name, path);
+      if (found !== null && keptBytes(this.store) + Number(found.size) > MAX_KEPT_BYTES) {
+        throw new Failure({
+          type: "os", code: "EDQUOT",
+          message: `${path} was not replaced: more than ${MAX_KEPT_BYTES / 2 ** 30} GiB would be kept of the files this folder's landings replaced`,
+        });
+      }
       const pathTo = (count: number) => folders.slice(0, count).join("/");
       const mode = found === null ? null : Number(found.mode & 0o7777n);
       let did: Step = {
@@ -537,6 +579,10 @@ class Landing {
       }
       unlinkSync(from);
     }
+    // The user's file, in the app's data: this user's alone to open there, whatever its mode was in the folder.
+    chmodSync(to, 0o600);
+    const counted = keeping.get(this.store);
+    if (counted !== undefined) keeping.set(this.store, counted + Number(look(to)?.size ?? 0n));
   }
 
   // The file *held*, the one a step replaced, takes *name* in *dir* again, only where nothing holds it: a link,
@@ -549,10 +595,14 @@ class Landing {
       io(did.path, () => renameSync(held, dir.at(name)));
       return true;
     }
+    const kept = held === this.bytes(step);
     try {
+      // A kept file takes its own mode again before it takes its name.
+      if (kept && did.mode !== null) chmodSync(held, did.mode);
       linkSync(held, dir.at(name));
       return true;
     } catch (error) {
+      if (kept) chmodSync(held, 0o600);
       const { code } = error as NodeJS.ErrnoException;
       if (code === "EEXIST") return false;
       if (code !== "EXDEV") throw fromNode(error, did.path);
@@ -709,6 +759,7 @@ class Landing {
 
   forget(): unknown {
     rmSync(this.kept, { recursive: true, force: true });
+    keeping.delete(this.store);
     return {};
   }
 

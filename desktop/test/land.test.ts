@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
-  symlinkSync, utimesSync, writeFileSync,
+  symlinkSync, truncateSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -698,5 +698,64 @@ describe("a landing's step, when it fails or is asked again", () => {
   it("answers a recovery with nothing where no landing was cut short", async () => {
     expect(await ok({ action: "recover" })).toEqual({ restored: [], beside: [], lost: [] });
     expect(existsSync(kept)).toBe(false);
+  });
+});
+
+describe("what a landing keeps, and how much", () => {
+  const GIB = 1024 * 1024 * 1024;
+  // A file of *size* bytes that takes no room: its size is all a bound looks at.
+  const sparse = (path: string, size: number) => {
+    writeFileSync(path, "");
+    truncateSync(path, size);
+  };
+
+  it("refuses a file over a gibibyte before anything is kept or written, and says why", async () => {
+    writeFileSync(join(folder, "video.mp4"), "v1");
+    sparse(join(copy, "video.mp4"), GIB + 1);
+    sparse(join(copy, "new.mp4"), GIB + 1);
+    const seen = await looked("video.mp4");
+    const refusal = { type: "os", code: "EFBIG", message: "File too large to land in a local folder (over 1 GiB)" };
+    expect(await refused(apply(1, "video.mp4", blob("v1"), blob("any"), seen["video.mp4"]!))).toEqual(refusal);
+    expect(await refused(apply(2, "new.mp4", null, blob("any"), "absent"))).toEqual(refusal);
+    expect(readdirSync(folder)).toEqual(["video.mp4"]);
+    expect(readFileSync(join(folder, "video.mp4"), "utf8")).toBe("v1");
+    expect(existsSync(kept)).toBe(false);
+  });
+
+  it("keeps at most 4 GiB of the files a folder's landings replaced: past it a file is refused before it is touched, until a landing is forgotten", async () => {
+    const other = "1b2c3d4e-0000-4000-8000-000000000001";
+    for (const name of ["a.bin", "b.bin", "c.bin"]) sparse(join(folder, name), 1.5 * GIB);
+    const after = turn("a.bin", "the thread's");
+    for (const name of ["b.bin", "c.bin"]) turn(name, "the thread's");
+    const seen = await looked("a.bin", "b.bin", "c.bin");
+    const any = blob("any");
+    await ok(apply(1, "a.bin", any, after, seen["a.bin"]!));
+    // A deletion keeps the file it deletes as a replacement does.
+    rmSync(join(copy, "b.bin"));
+    await ok(apply(2, "b.bin", any, null, seen["b.bin"]!));
+    // Whichever landing asks: the bound is the folder's.
+    const third = { ...apply(1, "c.bin", any, after, seen["c.bin"]!), saga: other };
+    expect(await refused(third)).toEqual({
+      type: "os", code: "EDQUOT", message: "c.bin was not replaced: more than 4 GiB would be kept of the files this folder's landings replaced",
+    });
+    expect(statSync(join(folder, "c.bin")).size).toBe(1.5 * GIB);
+    expect(revisionOf(statSync(join(folder, "c.bin"), { bigint: true }))).toBe(seen["c.bin"]);
+    expect(existsSync(join(kept, other))).toBe(false);
+    expect(leftovers()).toEqual([]);
+    await ok({ action: "forget", saga: SAGA });
+    await ok(third);
+    expect(readFileSync(join(folder, "c.bin"), "utf8")).toBe("the thread's");
+  });
+
+  it("keeps a replaced file where this user alone can open it, and gives it its own mode back with its name", async () => {
+    writeFileSync(join(folder, "Report.docx"), "the report, v1");
+    chmodSync(join(folder, "Report.docx"), 0o664);
+    const after = turn("Report.docx", "the report, by the thread");
+    const seen = await looked("Report.docx");
+    await ok(apply(1, "Report.docx", blob("the report, v1"), after, seen["Report.docx"]!));
+    const modes = Object.fromEntries([kept, join(kept, SAGA), join(kept, SAGA, "1"), join(kept, SAGA, "1.json")].map((path) => [path.slice(kept.length), statSync(path).mode & 0o777]));
+    expect(modes).toEqual({ "": 0o700, [`/${SAGA}`]: 0o700, [`/${SAGA}/1`]: 0o600, [`/${SAGA}/1.json`]: 0o600 });
+    await ok(unapply(1, "Report.docx"));
+    expect(statSync(join(folder, "Report.docx")).mode & 0o777).toBe(0o664);
   });
 });
