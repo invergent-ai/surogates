@@ -824,14 +824,14 @@ class AgentHarness(
     def _model_goes_first(self, session: Session, events: list, command: Any) -> bool:
         """Whether a turn of the model's comes before *command* in the
         log's order: a message of the user's own before it that no request
-        has read, or a turn before it that a dead worker cut off.  The
-        command then waits for that turn's end, as one typed during a turn
-        under way does."""
+        has read, or a turn that a dead worker cut off.  The command then
+        waits for that turn's end, as one typed during a turn under way
+        does."""
         cut_off = _cut_off_at(events)
         unread = _first_plain_message_unread(
             events, is_plain_message=lambda event: self._is_plain_message(session, event),
         )
-        return (cut_off is not None and cut_off < command.id) or (unread is not None and unread < command.id)
+        return cut_off is not None or (unread is not None and unread < command.id)
 
     def _waiting_commands(self, session: Session, events: list) -> list:
         """The messages of the user's in *events* that are commands of the

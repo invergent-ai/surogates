@@ -920,6 +920,19 @@ async def test_a_question_asked_after_compress_reaches_the_model_after_the_compr
     assert (workers.ran, await workers.status(chat)) == (["_handle_compress_command"], "completed")
 
 
+async def test_a_question_asked_after_clear_is_all_the_model_is_asked_about(workers):
+    chat = await workers.chat()
+    await workers.says(chat, "/clear")
+    await workers.says(chat, "And Q1?")
+    for _ in range(2):
+        await workers.wake(chat)
+
+    # The clear takes what was said before it, not the question typed behind it.
+    assert workers.requests == [[
+        {"role": "assistant", "content": "Conversation cleared."}, {"role": "user", "content": "And Q1?"},
+    ]]
+
+
 async def test_a_question_asked_before_a_commands_answer_was_written_is_asked_after_that_answer(workers):
     chat = await workers.chat()
 
