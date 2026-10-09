@@ -10,8 +10,10 @@ import { installedUpdates } from "../src/shell/updates.js";
 
 const asked = vi.hoisted(() => ({
   spawned: [] as unknown[][],
-  // How the next program started ends: its exit code, its signal, and what it says first.
-  ends: { code: 0 as number | null, signal: null as string | null, says: "" },
+  // How the next program started ends: its exit code, its signal, and what it says first. Or, with
+  // *fails*, how it does not start: Node then gives it no output to read, and tells its error
+  // later; or, with *throws*, spawn itself throws.
+  ends: { code: 0 as number | null, signal: null as string | null, says: "", fails: "", throws: "" },
 }));
 
 vi.mock("node:child_process", async (original) => {
@@ -20,6 +22,13 @@ vi.mock("node:child_process", async (original) => {
     ...real,
     spawn: (...args: unknown[]) => {
       asked.spawned.push(args);
+      if (asked.ends.throws) throw new Error(asked.ends.throws);
+      if (asked.ends.fails) {
+        const failed = Object.assign(new EventEmitter(), { stderr: null });
+        const why = asked.ends.fails;
+        setImmediate(() => failed.emit("error", new Error(why)));
+        return failed;
+      }
       const child = Object.assign(new EventEmitter(), { stderr: new EventEmitter() });
       setImmediate(() => {
         if (asked.ends.says) child.stderr.emit("data", Buffer.from(asked.ends.says));
@@ -38,7 +47,7 @@ describe("an installed app's root helper", () => {
     // A cache home as a user may name one: no word of it is a shell's to read.
     const folder = "/home/user/my cache; $(touch /tmp/x) `id` 'q' \"d\"\n--help/surogate/updates/1.2.4";
     const files = { manifest: `${folder}/manifest.json`, signature: `${folder}/manifest.json.sig`, tarball: `${folder}/release.tar.gz` };
-    asked.ends = { code: 0, signal: null, says: "" };
+    asked.ends = { code: 0, signal: null, says: "", fails: "", throws: "" };
     expect(await installed().apply(files)).toEqual({ code: 0, said: "" });
     expect(asked.spawned).toEqual([[
       "/usr/bin/pkexec",
@@ -50,13 +59,21 @@ describe("an installed app's root helper", () => {
 
   it("answers what pkexec answers: its exit code, and the last 4000 characters of what was said", async () => {
     const files = { manifest: "/c/m.json", signature: "/c/m.json.sig", tarball: "/c/r.tar.gz" };
-    asked.ends = { code: 127, signal: null, says: "Error executing command as another user: Not authorized\n" };
+    asked.ends = { code: 127, signal: null, says: "Error executing command as another user: Not authorized\n", fails: "", throws: "" };
     expect(await installed().apply(files)).toEqual({ code: 127, said: "Error executing command as another user: Not authorized" });
     // A helper that says more than anyone would read: the end of it is kept, where its last line is.
-    asked.ends = { code: 1, signal: null, says: `${"x".repeat(10_000)}\nSurogate Desktop: the release's archive could not be unpacked\n` };
+    asked.ends = { code: 1, signal: null, says: `${"x".repeat(10_000)}\nSurogate Desktop: the release's archive could not be unpacked\n`, fails: "", throws: "" };
     const { code, said } = await installed().apply(files);
     expect([code, said.length, said.split("\n").at(-1)]).toEqual([1, 3999, "Surogate Desktop: the release's archive could not be unpacked"]);
-    asked.ends = { code: null, signal: "SIGKILL", says: "" };
+    asked.ends = { code: null, signal: "SIGKILL", says: "", fails: "", throws: "" };
     expect(await installed().apply(files)).toEqual({ code: null, said: "its helper was stopped by SIGKILL" });
+  });
+
+  it("answers why where it cannot be started at all, as for want of file descriptors: with no output to read, and its error told later", async () => {
+    const files = { manifest: "/c/m.json", signature: "/c/m.json.sig", tarball: "/c/r.tar.gz" };
+    asked.ends = { code: null, signal: null, says: "", fails: "spawn /usr/bin/pkexec EMFILE", throws: "" };
+    expect(await installed().apply(files)).toEqual({ code: null, said: "spawn /usr/bin/pkexec EMFILE" });
+    asked.ends = { code: null, signal: null, says: "", fails: "", throws: "spawn EAGAIN" };
+    expect(await installed().apply(files)).toEqual({ code: null, said: "spawn EAGAIN" });
   });
 });

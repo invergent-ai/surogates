@@ -124,14 +124,21 @@ export function updateLine(state: UpdateState | null): UpdateLine | null {
 export function helperRun(command: string[]): (files: Staged) => Promise<Applied> {
   return (files) => new Promise((resolve) => {
     const [program, ...args] = command;
-    const child = spawn(program!, [...args, "--apply", files.manifest, files.signature, files.tarball], {
-      stdio: ["ignore", "ignore", "pipe"], env: { PATH: "/usr/bin:/bin" },
-    });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(program!, [...args, "--apply", files.manifest, files.signature, files.tarball], {
+        stdio: ["ignore", "ignore", "pipe"], env: { PATH: "/usr/bin:/bin" },
+      });
+    } catch (error) {
+      return resolve({ code: null, said: error instanceof Error ? error.message : String(error) });
+    }
+    // Before anything else is asked of it: one that could not be started, as for want of file
+    // descriptors, tells its error later, and has no output to read.
+    child.once("error", (error) => resolve({ code: null, said: error.message }));
     let said = "";
-    child.stderr.on("data", (chunk: Buffer) => {
+    child.stderr?.on("data", (chunk: Buffer) => {
       said = (said + chunk.toString()).slice(-4000);
     });
-    child.once("error", (error) => resolve({ code: null, said: error.message }));
     // One a signal ended has no exit code: how it ended is the last of what is said of it.
     child.once("close", (code, signal) => resolve({ code, said: (code === null ? `${said.trim()}\nits helper was stopped by ${signal}` : said).trim() }));
   });
@@ -334,7 +341,10 @@ export class Updates {
       return this.check();
     }
     this.set({ state: "installing", version });
-    const { code, said } = await this.options.apply(files);
+    // A helper whose run could not even be begun is a failure with its reason: the line is never
+    // left at Installing.
+    const { code, said } = await Promise.resolve().then(() => this.options.apply(files))
+      .catch((error: unknown) => ({ code: null, said: error instanceof Error ? error.message : String(error) }));
     if (code === 0) {
       // Installed is what the installed version's mark says, where there is one to read. The helper
       // ends 0 for whichever release it was handed, and the files may have been changed after the

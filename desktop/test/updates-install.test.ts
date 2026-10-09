@@ -193,6 +193,29 @@ describe("an update the helper says it installed", () => {
   });
 });
 
+describe("a helper that cannot be run", () => {
+  it("ends in a failure that says why, and never in a line left at Installing: its run rejected, or thrown", async () => {
+    base.publish("1.2.4");
+    let run: () => Promise<Applied> = () => Promise.reject(new Error("spawn /usr/bin/pkexec EMFILE"));
+    const logged: string[] = [];
+    const found = base.updates({ apply: () => run(), log: (words) => logged.push(words) });
+    await found.check();
+    const { files } = found.state as { files: Staged };
+    await found.install();
+    expect(found.state).toEqual({ state: "failed", version: "1.2.4", files, why: "spawn /usr/bin/pkexec EMFILE" });
+    run = () => {
+      throw new TypeError("Cannot read properties of undefined (reading 'on')");
+    };
+    await found.install();
+    expect(found.state).toEqual({ state: "failed", version: "1.2.4", files, why: "Cannot read properties of undefined (reading 'on')" });
+    expect(logged).toEqual(["Surogate 1.2.4 was not installed: spawn /usr/bin/pkexec EMFILE", "Surogate 1.2.4 was not installed: Cannot read properties of undefined (reading 'on')"]);
+    // Try again runs it again.
+    run = () => Promise.resolve({ code: 0, said: "" });
+    await found.install();
+    expect(found.state).toEqual({ state: "installed", version: "1.2.4" });
+  });
+});
+
 describe("an install under way", () => {
   it("keeps its line to its helper's end: a check that finds the installed version's mark changed, as the helper's last rename leaves it, says nothing before the helper has ended", async () => {
     base.publish("1.2.4");
