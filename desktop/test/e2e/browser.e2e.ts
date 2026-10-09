@@ -268,7 +268,8 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     // The browser's host writes where the app does.
     let printed = "";
     app!.process().stderr!.on("data", (chunk: Buffer) => (printed += chunk.toString()));
-    const navigating = operation("browser.navigate", { url: `http://127.0.0.1:${canaryPort}/`, wait_until: "load" });
+    // This computer's loopback, under a name no chat's own server has: refused by the proxy, with the browser up.
+    const navigating = operation("browser.navigate", { url: `http://[::ffff:127.0.0.1]:${canaryPort}/`, wait_until: "load" });
     await press(await prompt(app!), "allow_session");
     // The browser is up, and has signed in to its proxy.
     expect((await navigating).error.type).toBe("browser");
