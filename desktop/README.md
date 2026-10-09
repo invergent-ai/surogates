@@ -82,13 +82,23 @@ sandbox, over a pipe, in a profile of the agent's own under `browser-profiles/` 
 root, and sends its every request through a pinning proxy that reaches nothing on this
 computer or its private networks. The browser dies with the host.
 
+One private destination is carried: a server the agent started in a chat's sandbox, at
+`http://localhost:<port>/` (or `127.0.0.1`, or `[::1]`), once that chat's user has allowed
+the port in the desktop's own prompt. The proxy dials nothing on this computer for it: it
+knocks at a socket of the VM manager's, in the VM's runtime folder, which carries the
+connection into that chat's sandbox and no other. A port is one chat's at a time. It goes
+when the chat's browser is taken back in Settings, or the chat is deleted, and what the
+browser had open to it ends then. Plain requests only: a page's WebSocket and https to such
+a port are not carried.
+
 That proxy listens on this computer's loopback, where any program here can connect to it. A
 public site it carries for whoever asks, since that program reaches the site by itself.
 Whatever else it answers, it answers only to the browser it launched: the browser signs in
 to it with a secret made at each launch, given to the browser over its pipe and kept in
 memory alone, on no command line, in no environment and in no file. Without that sign-in the
-answer is 407 and nothing more. Today the only such answer is the one a launch proves its
-proxy with, so a browser that did not take the sign-in is not used. Should a running browser
+answer is 407 and nothing more: so it is for a chat's allowed port, which no other program
+here reaches through the proxy, and for the answer a launch proves its proxy with, so a
+browser that did not take the sign-in is not used. Should a running browser
 stop signing in, it shows its own proxy sign-in prompt for such a request and nothing is
 carried. Measured on Chrome; not yet on Edge, nor with a second user of this computer at the
 proxy's port.

@@ -230,6 +230,26 @@ describe("the browser's prompts", () => {
     expect([ids(content), allowing(content), content.focus, content.cancel]).toEqual([["deny", "allow_session"], ["allow_session"], "deny", "deny"]);
   });
 
+  it("asks about a port of the chat's own servers by its number, says who else reaches it, and offers it for the chat or not at all", () => {
+    const content = approval({ kind: "browser", chat: CHAT, action: "port", detail: "3000" });
+    expect(content.title).toBe("Let acme.surogate.ai's browser open port 3000 of this chat's servers?");
+    expect(content.lead).toBe("acme.surogate.ai wants to open a server it started for this chat, in the chat's sandbox, in its browser on this computer.");
+    expect(content.details).toEqual([{ label: "Address", value: "http://localhost:3000/", code: true, keep: "" }]);
+    expect(content.notes).toEqual([
+      "Its browser is shared by all of acme.surogate.ai's chats: while this is allowed, a page open in any of them can reach this port too.",
+      "A page of another site cannot fetch from it, post to it, frame it or open a socket to it. It can still send a tab there, as a link does.",
+      "It opens this chat's server only, never this computer's own services.",
+    ]);
+    // Kept for the chat or not at all: one page load makes many connections, so there is no allowing one.
+    expect([ids(content), allowing(content), content.focus, content.cancel]).toEqual([["deny", "allow_session"], ["allow_session"], "deny", "deny"]);
+    // A sub-agent's, and a port another chat's servers have in the browser now.
+    const held = approval({ kind: "browser", chat: { ...CHAT, calling: "child" }, action: "port", detail: "5173", held: "other" });
+    expect(held.lead.startsWith("A sub-agent of acme.surogate.ai wants to open a server")).toBe(true);
+    expect(held.notes[0]).toBe("Another chat's server has port 5173 in the browser now. Allowing this gives the port to this chat.");
+    expect(held.notes).toHaveLength(4);
+    expect(held.height).toBeGreaterThan(content.height);
+  });
+
   it("shows what an act would do in the page, whole, with the operation's buttons", () => {
     const script = approval({ kind: "browser", chat: { ...CHAT, calling: "child" }, action: "script", detail: "const a = 1;\nreturn a;", page: "about:blank" });
     expect(script.title).toBe("Run a script in the page?");

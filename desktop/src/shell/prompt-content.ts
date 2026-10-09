@@ -233,7 +233,7 @@ const hostOf = (address: string): string => {
 const MAX_ADDRESS_LINES = 12;
 
 // What each browser operation's prompt says it would do in the page, and what its detail is: its title names where.
-const BROWSER_ACTS: Record<Exclude<BrowserAction, "use" | "open">, { title: string; does: string; label: string }> = {
+const BROWSER_ACTS: Record<Exclude<BrowserAction, "use" | "port" | "open">, { title: string; does: string; label: string }> = {
   script: { title: "Run a script in", does: "wants to run this script in the page open in its browser. A script can read the page and act on the site as you.", label: "Script" },
   click: { title: "Click in", does: "wants to click the page open in its browser, at this place.", label: "Where" },
   down: { title: "Press the mouse in", does: "wants to press the mouse button in the page open in its browser, at this place, and hold it down.", label: "Where" },
@@ -271,6 +271,29 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
       focus: "deny",
       cancel: "deny",
       height: 380,
+    };
+  }
+  if (request.action === "port") {
+    // The browser's one private destination (spec, Section 5): a port of the chat's own servers, for the chat or not at
+    // all, since one page load makes many connections. What it says of who else reaches it is the proxy's rule (browser/proxy.ts).
+    const held = request.held === undefined
+      ? []
+      : [`Another chat's server has port ${request.detail} in the browser now. Allowing this gives the port to this chat.`];
+    return {
+      title: `Let ${chat.agent}'s browser open port ${request.detail} of this chat's servers?`,
+      lead: `${asker(chat)} wants to open a server it started for this chat, in the chat's sandbox, in its browser on this computer.`,
+      details: [code("Address", `http://localhost:${request.detail}/`)],
+      notes: [
+        ...held,
+        `Its browser is shared by all of ${chat.agent}'s chats: while this is allowed, a page open in any of them can reach this port too.`,
+        "A page of another site cannot fetch from it, post to it, frame it or open a socket to it. It can still send a tab there, as a link does.",
+        "It opens this chat's server only, never this computer's own services.",
+      ],
+      choice: null,
+      buttons: [button("deny", "Deny"), button("allow_session", "Allow for this chat", true)],
+      focus: "deny",
+      cancel: "deny",
+      height: 470 + held.length * 50,
     };
   }
   if (request.action === "open") {

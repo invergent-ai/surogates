@@ -31,7 +31,7 @@ from surogates.runtime import SLASH_COMMAND_IDS, SlashCommandConfig
 from surogates.scheduled.materialize import materialize_scheduled_run
 from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session import LeaseNotHeldError
-from surogates.session.events import EventType
+from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.session.provisioning import create_child_session
 from surogates.tenant.context import TenantContext
 from surogates.tools.registry import ToolRegistry
@@ -737,10 +737,12 @@ async def test_a_wake_of_a_finished_chat_looks_for_a_waiting_command_from_its_la
 
     await workers.worker(store=Reads()).wake(chat)
 
-    # The wake has nothing to do.  Beside its user's messages it read the log from the last command
-    # on: commands are answered in the order typed, so none waits unless the last one does.
+    # The wake has nothing to do.  Beside the messages typed into it, its user's and a project
+    # coordinator's follow-ups, it read the log from the last command on: commands are answered in
+    # the order typed, so none waits unless the last one does.
     assert (workers.ran, len(workers.requests)) == (["_handle_loop_command", "_handle_goal_command"], 2)
-    assert [read.get("after") for read in reads if read.get("types") != [EventType.USER_MESSAGE]] == [typed - 1]
+    messages = ([EventType.USER_MESSAGE], list(MESSAGE_TYPES))
+    assert [read.get("after") for read in reads if read.get("types") not in messages] == [typed - 1]
 
 
 async def test_a_command_typed_before_the_last_one_does_not_wait_once_the_last_one_is_answered(workers):
@@ -1661,6 +1663,52 @@ async def test_the_sweeper_spares_a_paused_missions_chat_only_while_no_turn_of_i
     # A worker that dies in a turn of a paused mission's chat is a death still.
     await workers.store.emit_event(chat, EventType.TOOL_CALL, {"tool_call_id": "call_todo", "name": "todo", "arguments": "{}"})
     assert await workers.looks_abandoned(chat)
+
+
+async def test_the_sweeper_takes_a_paused_missions_chat_that_ends_on_a_follow_up_nobody_woke_it_for(workers):
+    chat = await a_coordinator(workers)
+    await pause(workers, chat, "not typed")
+    assert not await workers.looks_abandoned(chat)
+
+    # A project coordinator's follow-up to its thread is a turn to run, as a message typed into it is.
+    await workers.store.emit_event(chat, EventType.COORDINATOR_MESSAGE, {"content": "[From the project's coordinator]\nGo on."})
+    assert await workers.looks_abandoned(chat)
+
+
+@pytest.mark.parametrize("kind, raised, answer, reads", [
+    (
+        EventType.INBOX_ACTION_REQUIRED,
+        {"title": "Log in", "instructions": "Log in to the site.", "context": "", "action_type": "browser", "target": "site"},
+        {"completed": True}, "[user action completed] browser.",
+    ),
+    (
+        EventType.INBOX_GOVERNANCE_GATE,
+        {"tool_name": "send_email", "tool_call_id": "tc-1", "arguments_excerpt": "to=ceo@example.com",
+         "deny_reason": "External recipient", "policy_id": "external-comms-v1"},
+        {"decision": "approve"}, "[governance decision] APPROVE for send_email",
+    ),
+], ids=["an action completed", "a governance decision"])
+async def test_an_inbox_items_answer_gives_its_chat_one_turn_and_its_users_next_message_still_works(workers, kind, raised, answer, reads):
+    chat = await workers.chat()
+    raised_at = await workers.store.emit_event(chat, kind, raised)
+    async with workers.api.app.state.session_factory() as db:
+        item = (await db.execute(text("SELECT id FROM inbox_items WHERE source_event_id = :id"), {"id": raised_at})).scalar_one()
+    answered_it = await workers.api.client.post(f"/v1/inbox/{item}/respond", json=answer, headers=workers.api.auth())
+    assert answered_it.status_code == 200, answered_it.text
+    assert await queued(workers.api, await workers.session(chat))
+    await workers.nobody_is_queued()
+
+    await workers.wake(chat)
+
+    # The route's message names its source in a word, where a channel's names a sender: replay takes both.
+    [conversation] = workers.requests
+    assert conversation[-1]["role"] == "user" and conversation[-1]["content"].startswith(reads)
+    assert await workers.status(chat) == "completed" and not await queued(workers.api, await workers.session(chat))
+    assert EventType.HARNESS_CRASH.value not in await workers.log(chat) and not await workers.looks_abandoned(chat)
+    await workers.says(chat, "Hello again?")
+    await workers.wake(chat)
+    assert [request[-1]["content"] for request in workers.requests[1:]] == ["Hello again?"]
+    assert await workers.status(chat) == "completed"
 
 
 async def test_a_wake_that_goes_on_to_the_model_behind_a_command_leaves_the_cursor_to_that_turn(workers):

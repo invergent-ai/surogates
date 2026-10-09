@@ -42,10 +42,13 @@ from surogates.harness.landing import (
     keep_copy,
     land_turn,
     TURN_ENDS,
+    left_alone,
     pick_up_routine,
     prune_later,
+    redo_files,
     routine_project,
     turn_ended,
+    waiting_on_you,
 )
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams.history import waits_to_land
@@ -1204,6 +1207,10 @@ class ArtifactCompletionMixin:
                 # A landing that never knew its files: the turn's own list names them, none landed.
                 landed = [{**f, "landing": "not_merged"} for f in files or [] if f.get("kind") == "file"]
             files = landed + [a for a in files or [] if a.get("kind") != "file"]
+        elif is_project_thread(session.config) and (alone := await redo_files(self._store, session.id)):
+            # A redo turn that never used its pod left the files it was woken
+            # for as they are: not merged, and nothing waits on you.
+            files = [f for f in files or [] if f.get("ref") not in alone] + [left_alone(p) for p in sorted(alone)]
 
         if not_kept:
             # Another helper, or the thread, changed them first: theirs stays.
@@ -1347,6 +1354,21 @@ class ArtifactCompletionMixin:
             await notify_parent_of_task_event(
                 session_store=self._store, parent_session_id=session.id, event_type=EventType.HISTORY_REDO,
                 payload={"saga": landing["saga"], "files": landing["redo"]}, redis=self._redis,
+            )
+
+        if landing is not None and landing["state"] == "completed":
+            # A file it waited on you over has landed since: that wait is over.
+            landed = {f["ref"] for f in landing["files"] if f.get("landing") == "landed"}
+            if landed:
+                await self._store.land_file_waits(session.id, landed)
+
+        if landing is not None and (landing.get("stuck") or landing["state"] == "escalated"):
+            # It waits on you: a file left out again after its redo, or a
+            # landing it could not put back whole.
+            escalated = landing["state"] == "escalated"
+            paths = [f["ref"] for f in landing["files"] if f.get("kind") == "file"] if escalated else landing["stuck"]
+            await self._store.emit_event(
+                session.id, EventType.INBOX_ACTION_REQUIRED, waiting_on_you(paths, escalated=escalated),
             )
 
         # Advance cursor to the latest event.

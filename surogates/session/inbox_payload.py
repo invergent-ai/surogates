@@ -151,6 +151,11 @@ def _action_required(data: dict[str, Any], session_id: str) -> InboxRow:
             "instructions": instructions,
             "context": context,
             "reason": data.get("reason", ""),
+            # A thread's wait over its files: those it still waits over.
+            **(
+                {"files": [path for path in data.get("files") or [] if isinstance(path, str)], "escalated": bool(data.get("escalated"))}
+                if action_type == "files" else {}
+            ),
         },
         action_ref={
             "type": "open_session",

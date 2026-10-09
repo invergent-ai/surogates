@@ -2,22 +2,61 @@
 // loopback, which the browser is launched with for every request, loopback's too
 // (--proxy-bypass-list=<-loopback>). It looks each host up once, lets through only what
 // leads past this computer and its private networks, and connects to the addresses it
-// judged, so a name cannot lead elsewhere between the two. Nothing is asked: the first
-// release gives the agent's browser no private network at all.
+// judged, so a name cannot lead elsewhere between the two. Nothing is asked here, and the
+// browser has one private destination: a port of a chat's own servers that the chat's user
+// allowed (ports.ts), by one of the loopback's three names. A connection to one never goes
+// to this computer's loopback: it knocks at the VM manager's door (vm/inbound.ts), which
+// carries it into that chat's sandbox.
 //
 // Its port is one any program on this computer can find and connect to. A public site is
 // carried for whoever asks, since that program reaches it by itself. Everything else is its
-// own browser's alone, by a sign-in made for each launch of that browser (signIn).
+// own browser's alone, by a sign-in made for each launch of that browser (signIn): a chat's
+// port first of all. The profile is every chat's, so the proxy cannot tell whose tab asks;
+// what it can read, on a request its own browser signed, is where that browser says the
+// request comes from, and it carries only what comes from a page of a chat's own server, its
+// user or its agent (ownRequest).
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { createServer, type IncomingMessage, request as httpRequest, type Server, type ServerResponse } from "node:http";
+import { createServer, type IncomingHttpHeaders, type IncomingMessage, request as httpRequest, type Server, type ServerResponse } from "node:http";
 import { BlockList, isIPv6, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 
+import { tunnel as knock } from "../guest/listeners.js";
 import { type Dial, destination, dialFirst, reach, type ReachOptions } from "../vm/egress.js";
+import { chatPort, chatPortOf, SANDBOX_PORTS } from "./ports.js";
 
 export interface BrowserProxyOptions extends ReachOptions {
   connect?: Dial; // the connection to a judged address; net.connect by default
+}
+
+// The ports of chats' own servers a browser may open, and how its connections to them are carried:
+// the VM manager's door, and the key its device knocks with there.
+interface Forwards {
+  ports: ReadonlySet<number>;
+  door: string;
+  key: string;
+}
+
+/**
+ * Whether a plain request to a chat's port comes from where the port was allowed for: a page of a
+ * chat's own server, on a port *allowed* now, or its user's or its agent's own navigation. Read from
+ * what the browser itself says of each request, which no page's code can set: Sec-Fetch-Site, then
+ * Origin, else Referer. Believed only of a request that carries the launch's sign-in: any other
+ * program can write these. A page of another site gets one thing through, a link followed or a
+ * redirect, a GET that opens a tab there, as any site can send a tab anywhere; never a fetch, a
+ * frame, a form, a beacon, nor a page loaded ahead of any visit (Sec-Purpose). A request that says
+ * nothing is no browser's, and is refused.
+ */
+export function ownRequest(method: string, headers: IncomingHttpHeaders, allowed: ReadonlySet<number>): boolean {
+  const site = headers["sec-fetch-site"];
+  if (site === "same-origin" || site === "same-site" || site === "none") return true;
+  if (site !== "cross-site") return false;
+  const visit = method === "GET" && headers["sec-fetch-mode"] === "navigate" && headers["sec-fetch-dest"] === "document";
+  if (visit && headers["sec-purpose"] === undefined) return true;
+  // The loopback's other name for a chat's page, which the browser calls another site.
+  const from = headers.origin ?? headers.referer;
+  const page = typeof from === "string" ? chatPortOf(from) : null;
+  return page !== null && allowed.has(page);
 }
 
 // The names the proxy answers itself, <token>.proxy-check.invalid: what a launch asks for, to
@@ -82,8 +121,10 @@ export async function admitted(host: string, port: number, options: ReachOptions
  * the proxy's own names, this computer, a private network, and whatever cannot be placed.
  */
 export async function unsigned(to: { host: string; port: number } | null, options: ReachOptions = {}): Promise<string[] | null> {
+  // A chat's own server is no public site's, whatever a lookup would say of its name.
+  if (!to || chatPort(to.host, to.port) !== null) return null;
   // Its own names lead nowhere (RFC 6761), so they are no public site's.
-  return to && admitted(to.host, to.port, options);
+  return admitted(to.host, to.port, options);
 }
 
 // CONNECT's target, host:port, an IPv6 address in brackets; null for anything else.
@@ -110,6 +151,9 @@ export class BrowserProxy {
   // What the browser of the last launch signs in with, as a digest: the secret itself is given
   // to that launch and kept nowhere here. Null until a launch: nobody is signed in.
   private signed: Buffer | null = null;
+  // What this browser may open of its chats' own servers; and what it carries to each port now, which ends when the port is taken back.
+  private chats: Forwards | null = null;
+  private readonly toChats = new Map<number, Set<Duplex>>();
 
   constructor(private readonly options: BrowserProxyOptions = {}) {
     this.server = createServer((request, response) => void this.forward(request, response));
@@ -131,6 +175,53 @@ export class BrowserProxy {
   private own(request: IncomingMessage): boolean {
     const said = request.headersDistinct["proxy-authorization"];
     return this.signed !== null && said?.length === 1 && timingSafeEqual(digest(said[0] ?? ""), this.signed);
+  }
+
+  /**
+   * The ports of chats' own servers this browser may open from now on, the VM manager's *door*, and the
+   * *key* its device knocks with there. What it carries to a port no longer among them ends now. Never a
+   * port of the sandbox's own proxies, whoever names it.
+   */
+  forwards(ports: readonly number[], door: string, key: string): void {
+    const allowed = new Set(ports.filter((port) => !SANDBOX_PORTS.has(port)));
+    this.chats = { ports: allowed, door, key };
+    for (const [port, carried] of this.toChats) {
+      if (!allowed.has(port)) for (const connection of carried) connection.destroy();
+    }
+  }
+
+  // A connection to *port* of the chat's servers it is forwarded to, through the manager's door, the
+  // loopback's family *first* tried first there; or the status that refuses it: 403 for a port not
+  // allowed and for the door's own refusal, 502 for a port nothing took. Nothing here is dialed.
+  private async toChat(port: number, first: 4 | 6, gone: AbortSignal): Promise<Socket | 403 | 502> {
+    const chats = this.chats;
+    if (!chats?.ports.has(port)) return 403;
+    const opened = await knock(chats.door, `${chats.key} ${port}${first === 6 ? " 6" : ""}`, gone);
+    if ("status" in opened) return opened.status === 403 ? 403 : 502;
+    // Taken back, or its browser gone, while the door answered.
+    if (!this.chats?.ports.has(port) || gone.aborted) {
+      opened.socket.destroy();
+      return 403;
+    }
+    const carried = this.toChats.get(port) ?? new Set<Duplex>();
+    this.toChats.set(port, carried.add(opened.socket));
+    opened.socket.once("close", () => {
+      carried.delete(opened.socket);
+      if (carried.size === 0 && this.toChats.get(port) === carried) this.toChats.delete(port);
+    });
+    return opened.socket;
+  }
+
+  /**
+   * Whether a connection to *port* of a chat's servers is carried now, asked by one made through the door
+   * and let go: "open"; "refused" for a port not allowed here or one the door does not open for this
+   * device; "unreachable" where nothing took it, or there is no door. Never rejects.
+   */
+  async reaches(port: number): Promise<"open" | "refused" | "unreachable"> {
+    const carried = await this.toChat(port, 4, new AbortController().signal).catch(() => 502 as const);
+    if (typeof carried === "number") return carried === 403 ? "refused" : "unreachable";
+    carried.destroy();
+    return "open";
   }
 
   /** Listens on 127.0.0.1, on a port the system picks, and gives that port. */
@@ -225,13 +316,23 @@ export class BrowserProxy {
     if (!addresses && !this.own(request)) return void response.writeHead(407, { "proxy-authenticate": CHALLENGE, "content-length": 0 }).end();
     if (!url) return void response.writeHead(400).end();
     if (this.answered(url.hostname)) return void response.writeHead(204).end();
-    if (!addresses) return void response.writeHead(403).end();
     let socket: Socket;
-    try {
-      socket = await dialFirst(addresses, port, gone.signal, this.options.connect);
-    } catch {
-      if (!response.headersSent) response.writeHead(502).end();
-      return;
+    if (addresses) {
+      try {
+        socket = await dialFirst(addresses, port, gone.signal, this.options.connect);
+      } catch {
+        if (!response.headersSent) response.writeHead(502).end();
+        return;
+      }
+    } else {
+      // Signed in, or it was challenged above. A chat's own server is carried into its sandbox, for a request
+      // of a chat's own page, and never dialed here; whatever else needs the sign-in is carried for nobody.
+      const chat = chatPort(url.hostname, port);
+      const allowed = this.chats?.ports;
+      if (chat === null || !allowed?.has(chat) || !ownRequest(request.method ?? "", request.headers, allowed)) return void response.writeHead(403).end();
+      const carried = await this.toChat(chat, url.hostname === "[::1]" ? 6 : 4, gone.signal);
+      if (typeof carried === "number") return void (response.headersSent || response.writeHead(carried).end());
+      socket = carried;
     }
     this.keep(socket);
     // The browser gone, partway through the answer or before it: the site's connection goes too.
@@ -239,7 +340,8 @@ export class BrowserProxy {
     // ponytail: one connection a request, none kept for the next; a pool if page loads ever show it.
     const upstream = httpRequest(
       {
-        createConnection: () => socket, method: request.method, path: `${url.pathname}${url.search}`,
+        // One from the door comes paused, its first bytes kept.
+        createConnection: () => socket.resume(), method: request.method, path: `${url.pathname}${url.search}`,
         // The target's own host, as RFC 9112 (3.2.2) has a proxy send it, whatever the client's said.
         headers: { ...passed(request.headers), host: url.host }, setHost: false,
       },

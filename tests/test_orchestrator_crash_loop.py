@@ -60,7 +60,8 @@ class FakeStore:
         self.statuses.append((session_id, status))
 
     async def get_events(self, session_id, *, after=None, types=None, limit=None):
-        return self.events_since_trip
+        # By type, as the store reads them.
+        return [event for event in self.events_since_trip if types is None or event.type in [kind.value for kind in types]]
 
 
 def _make_orchestrator(redis, store, harness_factory) -> Orchestrator:
@@ -178,6 +179,25 @@ async def test_real_user_message_clears_breaker() -> None:
     await orchestrator._process(session_id)
 
     assert len(wakes) > 0  # dispatch resumed
+
+
+async def test_a_project_coordinators_follow_up_clears_breaker() -> None:
+    session_id = uuid4()
+    redis = FakeRedis()
+    store = FakeStore()
+    orchestrator, wakes = await _trip_breaker(session_id, redis, store)
+    wakes.clear()
+    store.events_since_trip = [
+        SimpleNamespace(
+            id=200,
+            type=EventType.COORDINATOR_MESSAGE.value,
+            data={"content": "[From the project's coordinator]\nTry a different approach."},
+        ),
+    ]
+
+    await orchestrator._process(session_id)
+
+    assert len(wakes) > 0  # as a message typed into the thread does
 
 
 async def test_user_retry_resume_clears_breaker() -> None:

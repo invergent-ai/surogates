@@ -5,6 +5,8 @@
 
 import type { DatabaseSync } from "node:sqlite";
 
+import { SANDBOX_PORTS } from "../browser/ports.js";
+
 // Work freely (the default), or ask every time.
 export type Mode = "free" | "ask";
 
@@ -44,7 +46,10 @@ export class Bindings {
 
   constructor(private readonly db: DatabaseSync) {}
 
-  /** Hear each root bound, each change of a root's mode, each host allowed for it, and each root's binding forgotten, once it is written; the returned function stops it. */
+  /**
+   * Hear each root bound, each change of a root's mode, each host allowed for it, each port of its own servers allowed
+   * for its browser or taken from it, and each root's binding forgotten, once it is written; the returned function stops it.
+   */
   watch(listener: (root: string) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -68,6 +73,7 @@ export class Bindings {
     try {
       this.db.prepare(`DELETE FROM domains WHERE root = ?`).run(root);
       this.db.prepare(`DELETE FROM browsing WHERE root = ?`).run(root);
+      this.db.prepare(`DELETE FROM browser_ports WHERE root = ?`).run(root);
       forgotten = this.db.prepare(`DELETE FROM bindings WHERE root = ?`).run(root).changes;
       this.db.exec("COMMIT");
     } catch (error) {
@@ -124,9 +130,52 @@ export class Bindings {
     if (changes > 0) this.changed(root);
   }
 
-  /** Take the browser back from a root: its agent's next browser call asks its first use again. One not allowed changes nothing. */
+  /**
+   * Take the browser back from a root: its agent's next browser call asks its first use again, and the ports of its
+   * own servers go with it, first. One not allowed changes nothing.
+   */
   disallowBrowser(root: string): void {
+    const { changes } = this.db.prepare(`DELETE FROM browser_ports WHERE root = ?`).run(root);
     this.db.prepare(`DELETE FROM browsing WHERE root = ?`).run(root);
+    if (changes > 0) this.changed(root);
+  }
+
+  /**
+   * Let the browser open *port* of a bound root's own servers from now on, as its user allowed. One root has a port
+   * at a time, as the browser's one profile cannot tell its chats apart: another root's hold on it goes. An unknown
+   * root changes nothing. Throws for a port of the sandbox's own proxies, which is no chat's server.
+   */
+  allowPort(root: string, port: number): void {
+    if (SANDBOX_PORTS.has(port)) throw new Error(`Port ${port} is the sandbox's own proxy`);
+    const former = this.portOwner(port);
+    if (former === root) return;
+    const { changes } = this.db.prepare(`INSERT OR REPLACE INTO browser_ports (port, root) SELECT ?, root FROM bindings WHERE root = ?`).run(port, root);
+    if (changes === 0) return;
+    if (former !== undefined) this.changed(former);
+    this.changed(root);
+  }
+
+  /** Take *port* back from a root: the browser reaches it no more. One the root does not have changes nothing. */
+  disallowPort(root: string, port: number): void {
+    const { changes } = this.db.prepare(`DELETE FROM browser_ports WHERE root = ? AND port = ?`).run(root, port);
+    if (changes > 0) this.changed(root);
+  }
+
+  /** The ports of a root's own servers the browser may open, lowest first. */
+  ports(root: string): number[] {
+    const rows = this.db.prepare(`SELECT port FROM browser_ports WHERE root = ? ORDER BY port`).all(root) as Array<{ port: number }>;
+    return rows.map((row) => row.port);
+  }
+
+  /** The root whose servers have *port* in the browser, if any. */
+  portOwner(port: number): string | undefined {
+    return (this.db.prepare(`SELECT root FROM browser_ports WHERE port = ?`).get(port) as { root: string } | undefined)?.root;
+  }
+
+  /** Every port the browser may open, with the root whose servers it leads to, lowest first: what its proxy and the sandbox are told. */
+  forwards(): Array<{ port: number; root: string }> {
+    return (this.db.prepare(`SELECT port, root FROM browser_ports ORDER BY port`).all() as Array<{ port: number; root: string }>)
+      .map(({ port, root }) => ({ port, root }));
   }
 
   /** Whether the root's user let its agent use the browser on this computer. */

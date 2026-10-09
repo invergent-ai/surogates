@@ -173,6 +173,21 @@ async def test_a_question_that_expired_waits_until_the_reply(api):
     assert (row["group"], row["status_line"]) == ("idle", "Did the work.")
 
 
+async def test_a_coordinators_follow_up_ends_the_wait_on_a_question_that_expired(api):
+    project = await create(api)
+    master = await master_of(api, project)
+    thread = await start(api, master)
+    await asks(api, thread, "Which year?")
+    await gives_up_asking(api, thread)
+    assert (await summary_of(api, project))["waiting"] == 1
+    # Not the user's message, but the thread works on it as on one: its question waits no more.
+    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Use the 2025 figures.")
+    [row] = await rows(api, project)
+    assert (row["group"], row["reason"]) == ("working", None)
+    summary = await summary_of(api, project)
+    assert (summary["waiting"], summary["working"]) == (0, 1)
+
+
 async def summary_of(api, project: dict) -> dict:
     listed = await api.client.get("/v1/workstreams", headers=api.auth())
     assert listed.status_code == 200, listed.text

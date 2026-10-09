@@ -83,6 +83,7 @@ export class OperationJournal {
           PRIMARY KEY (root, domain)
         );
         CREATE TABLE IF NOT EXISTS browsing (root TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS browser_ports (port INTEGER PRIMARY KEY, root TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS chunks (
           id TEXT NOT NULL,
           seq INTEGER NOT NULL,
